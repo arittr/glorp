@@ -47,7 +47,7 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
     let now = OffsetDateTime::now_utc();
     usage_store
         .insert_event(&NormalizedUsageEvent {
-            provider_surface: "codex".into(),
+            provider_surface: "claude-code".into(),
             period_start: now,
             effective_tokens: 4_200.0,
             ..NormalizedUsageEvent::for_test_at(now, 4_200.0)
@@ -86,17 +86,19 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
     assert!(vm
         .source_breakdown
         .iter()
-        .any(|source| source.name == "codex" && source.effective_tokens == 6_200.0));
-    assert!(vm
+        .any(|source| source.name == "claude-code" && source.effective_tokens == 5_000.0));
+    assert!(!vm
         .source_breakdown
         .iter()
-        .any(|source| source.name == "claude-code" && source.effective_tokens == 800.0));
+        .any(|source| source.name == "codex"));
     assert_ne!(vm.today_effective_tokens, 18_420.0);
     assert!(!vm
         .recent_events
         .iter()
         .any(|event| event.text.contains("watch loop settled")));
-    assert!(vm.helper_status.contains("diagnostic"));
+    assert!(!vm.is_blocked());
+    assert!(vm.helper_status.contains("claude-code"));
+    assert!(vm.helper_status.contains("codex"));
     assert!(vm
         .errors
         .iter()

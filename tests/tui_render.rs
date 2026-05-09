@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEventKind};
 use glorp::tui::app::{
     render_evolution_overlay_for_test, render_frame_for_test, render_hatch_overlay_for_test,
     render_help_overlay_for_test, run_single_watch_tick_for_test, WatchApp, WatchAppConfig,
@@ -110,6 +111,41 @@ fn wide_layout_uses_tokenpet_metadata_today_grid_and_log_rhythm() {
 }
 
 #[test]
+fn wide_layout_keeps_pet_and_stats_top_stacked_like_tokenpet_mockup() {
+    let backend = TestBackend::new(157, 34);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
+        .unwrap();
+    let lines = buffer_lines(terminal.backend().buffer());
+    let first_pet_line = lines
+        .iter()
+        .position(|line| line.contains("/\\_/\\"))
+        .expect("pet art should render");
+    let stats_line = lines
+        .iter()
+        .position(|line| line.contains("stats"))
+        .expect("stats header should render");
+    let last_divider_line = lines
+        .iter()
+        .rposition(|line| line.contains("╎"))
+        .expect("column divider should render");
+
+    assert!(
+        first_pet_line < 12,
+        "pet art should begin near the top of the left column, got row {first_pet_line}"
+    );
+    assert!(
+        stats_line <= first_pet_line + 8,
+        "stats should follow the pet stage without a large vertical gulf; pet row {first_pet_line}, stats row {stats_line}"
+    );
+    assert!(
+        last_divider_line <= stats_line + 8,
+        "column divider should end near the content instead of stretching to the footer; stats row {stats_line}, divider row {last_divider_line}"
+    );
+}
+
+#[test]
 fn event_log_uses_timestamps_rails_sparkline_and_semantic_colors() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -135,6 +171,17 @@ fn event_log_uses_timestamps_rails_sparkline_and_semantic_colors() {
     assert!(has_cell(buf, "▏", p.accent.rgb));
     assert!(has_cell(buf, "▏", p.bad.rgb));
     assert!(has_cell(buf, ":", p.faint.rgb));
+}
+
+#[test]
+fn token_metrics_never_render_negative_zero() {
+    let mut vm = WatchViewModel::fixture();
+    vm.current_bucket_effective_tokens = -0.1;
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(!text.contains("-0"));
 }
 
 #[test]
@@ -255,6 +302,31 @@ fn app_refresh_and_interval_use_polling_path() {
             .count()
             >= 2
     );
+}
+
+#[test]
+fn repeat_key_events_drive_watch_controls_and_release_events_do_not() {
+    let harness = WatchTestHarness::with_usage_delta("claude-code", "2026-05-09T13:42:00Z", 1300.0);
+    let mut app = WatchApp::with_poll_callback(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_millis(1),
+        },
+        Box::new(harness),
+    );
+
+    assert!(!app
+        .handle_key_for_test(KeyCode::Char('r'), KeyEventKind::Repeat)
+        .unwrap());
+    assert_eq!(app.poll_count_for_test(), 1);
+    assert!(app
+        .handle_key_for_test(KeyCode::Char('q'), KeyEventKind::Repeat)
+        .unwrap());
+    assert!(!app
+        .handle_key_for_test(KeyCode::Char('r'), KeyEventKind::Release)
+        .unwrap());
+    assert_eq!(app.poll_count_for_test(), 1);
 }
 
 #[test]

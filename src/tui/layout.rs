@@ -93,7 +93,15 @@ fn render_wide(frame: &mut Frame<'_>, area: Rect, vm: &WatchViewModel, styles: &
         ])
         .split(area);
     render_pet_panel(frame, columns[0], vm, styles);
-    render_divider(frame, columns[1], styles);
+    let divider_height = wide_content_height(area.height, vm).min(columns[1].height);
+    render_divider(
+        frame,
+        Rect {
+            height: divider_height,
+            ..columns[1]
+        },
+        styles,
+    );
     render_activity_panel(frame, columns[2], vm, styles);
 }
 
@@ -195,17 +203,16 @@ fn render_pet_panel(
 
     frame.render_widget(Block::default().style(styles.body), area);
 
-    let stats_count = if area.height >= 18 { 6 } else { 5 };
-    let meta_height = if area.height >= 16 { 5 } else { 3 };
-    let stats_height = stats_count.min(area.height.saturating_sub(meta_height));
-    let stage_height = area.height.saturating_sub(meta_height + stats_height);
+    let (meta_height, stage_height, stats_height) =
+        pet_panel_heights(area.height, vm.pet_art.len());
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(meta_height),
             Constraint::Length(stage_height),
-            Constraint::Min(stats_height),
+            Constraint::Length(stats_height),
+            Constraint::Min(0),
         ])
         .split(area);
 
@@ -285,6 +292,36 @@ fn render_pet_panel(
     }
 
     render_lines(frame, rows[2], stats, styles);
+}
+
+fn pet_panel_heights(area_height: u16, art_len: usize) -> (u16, u16, u16) {
+    let meta_height = if area_height >= 16 { 5 } else { 3 };
+    let desired_stats_height = if area_height >= 20 { 6 } else { 5 };
+    let available_after_meta = area_height.saturating_sub(meta_height);
+    let stats_height = desired_stats_height.min(available_after_meta);
+    let desired_stage_height = (art_len as u16 + 2).clamp(3, 10);
+    let stage_height = desired_stage_height.min(available_after_meta.saturating_sub(stats_height));
+    (meta_height, stage_height, stats_height)
+}
+
+fn wide_content_height(area_height: u16, vm: &WatchViewModel) -> u16 {
+    let (meta, stage, stats) = pet_panel_heights(area_height, vm.pet_art.len());
+    let left_height = meta + stage + stats;
+    let right_height = activity_content_height(vm);
+    left_height.max(right_height)
+}
+
+fn activity_content_height(vm: &WatchViewModel) -> u16 {
+    let today_lines = if vm.is_blocked() {
+        2 + vm.errors.iter().take(2).count()
+    } else {
+        4
+    };
+    (today_lines
+        + 1
+        + vm.source_breakdown.iter().take(3).count()
+        + 1
+        + vm.recent_events.iter().take(5).count()) as u16
 }
 
 fn metadata_line<'a>(
@@ -515,6 +552,7 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn format_tokens(value: f64) -> String {
+    let value = value.max(0.0);
     if value.abs() >= 1_000.0 {
         format!("{:.1}k", value / 1_000.0)
     } else {

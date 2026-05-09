@@ -50,7 +50,6 @@ pub fn run() -> Result<()> {
 pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<WatchViewModel> {
     let usage_store = UsageStore::open(usage_db)?;
     let recent_usage = usage_store.recent_events(500)?;
-    let diagnostics = usage_store.recent_diagnostics(5)?;
     let now = OffsetDateTime::now_utc();
     let species = parse_species(&state.pet.generated_species)
         .unwrap_or_else(|| generate_pet(&state.pet.seed).species);
@@ -68,6 +67,9 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
         },
     );
 
+    let source_breakdown = source_breakdown(&recent_usage, now);
+    let diagnostics = active_diagnostics(&source_breakdown, usage_store.recent_diagnostics(5)?);
+    let helper_status = helper_status(&usage_store, &source_breakdown, &diagnostics)?;
     let recent_events = build_recent_events(state, &recent_usage, &diagnostics);
     let errors = diagnostics
         .iter()
@@ -88,10 +90,10 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
         energy: state.vitals.energy / 100.0,
         today_effective_tokens: today_effective_tokens(&recent_usage, now),
         recent_daily_effective_tokens: recent_daily_effective_tokens(&recent_usage, now),
-        source_breakdown: source_breakdown(&recent_usage),
+        source_breakdown,
         current_bucket_effective_tokens: current_bucket_effective_tokens(&recent_usage, now),
         recent_events,
-        helper_status: helper_status(&usage_store, !errors.is_empty())?,
+        helper_status,
         errors,
         latest_evolution: state.seen_stage_transitions.last().cloned(),
     })
@@ -246,9 +248,13 @@ fn recent_daily_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetDat
         .collect()
 }
 
-fn source_breakdown(events: &[NormalizedUsageEvent]) -> Vec<SourceUsageView> {
+fn source_breakdown(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec<SourceUsageView> {
+    let today = now.date();
     let mut by_source = BTreeMap::new();
-    for event in events {
+    for event in events
+        .iter()
+        .filter(|event| event.period_start.date() == today)
+    {
         *by_source
             .entry(event.provider_surface.clone())
             .or_insert(0.0) += event.effective_tokens;
@@ -259,6 +265,20 @@ fn source_breakdown(events: &[NormalizedUsageEvent]) -> Vec<SourceUsageView> {
             name,
             effective_tokens,
         })
+        .collect()
+}
+
+fn active_diagnostics(
+    sources: &[SourceUsageView],
+    diagnostics: Vec<crate::storage::usage_store::ProviderDiagnostic>,
+) -> Vec<crate::storage::usage_store::ProviderDiagnostic> {
+    let ready_today = sources
+        .iter()
+        .map(|source| source.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    diagnostics
+        .into_iter()
+        .filter(|diagnostic| !ready_today.contains(diagnostic.provider_surface.as_str()))
         .collect()
 }
 
@@ -296,10 +316,42 @@ fn build_recent_events(
     events
 }
 
-fn helper_status(usage_store: &UsageStore, has_diagnostics: bool) -> Result<String> {
-    if has_diagnostics {
+fn helper_status(
+    usage_store: &UsageStore,
+    sources: &[SourceUsageView],
+    diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
+) -> Result<String> {
+    if !sources.is_empty() && !diagnostics.is_empty() {
+        let ready = sources
+            .iter()
+            .map(|source| source.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let diagnostic_sources = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.provider_surface.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("{ready} ready; {diagnostic_sources} diagnostic"));
+    }
+
+    if !diagnostics.is_empty() {
+        let versions = usage_store.provider_versions()?;
+        if !versions.is_empty() {
+            return Ok(format!(
+                "{} ready; usage diagnostic",
+                versions
+                    .iter()
+                    .map(|version| version.provider_surface.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         return Ok("diagnostic from usage helper".into());
     }
+
     let versions = usage_store.provider_versions()?;
     if versions.is_empty() {
         Ok("waiting for usage helper".into())
@@ -320,6 +372,7 @@ fn timestamp_column(timestamp: OffsetDateTime) -> String {
 }
 
 fn format_tokens(value: f64) -> String {
+    let value = value.max(0.0);
     if value.abs() >= 1_000.0 {
         format!("{:.1}k", value / 1_000.0)
     } else {

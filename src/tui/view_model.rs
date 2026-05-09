@@ -107,6 +107,6 @@ impl WatchViewModel {
     }
 
     pub fn is_blocked(&self) -> bool {
-        !self.errors.is_empty()
+        !self.errors.is_empty() && !self.helper_status.contains("ready")
     }
 }

@@ -5,7 +5,7 @@ use std::{
 
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -99,16 +99,8 @@ impl WatchApp {
 
             if event::poll(self.config.animation_tick)? {
                 if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') => break,
-                            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
-                            KeyCode::Esc => self.overlay = None,
-                            KeyCode::Char('r') => {
-                                self.poll_usage()?;
-                            }
-                            _ => {}
-                        }
+                    if self.handle_key(key)? {
+                        break;
                     }
                 }
             }
@@ -121,6 +113,29 @@ impl WatchApp {
         Ok(())
     }
 
+    fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.kind == KeyEventKind::Release {
+            return Ok(false);
+        }
+
+        match key.code {
+            KeyCode::Char('q') => Ok(true),
+            KeyCode::Char('?') => {
+                self.overlay = Some(Overlay::Help);
+                Ok(false)
+            }
+            KeyCode::Esc => {
+                self.overlay = None;
+                Ok(false)
+            }
+            KeyCode::Char('r') => {
+                self.poll_usage()?;
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
     pub fn refresh_for_test(&mut self) -> Result<WatchViewModel> {
         self.poll_usage()
     }
@@ -131,6 +146,11 @@ impl WatchApp {
 
     pub fn poll_count_for_test(&self) -> u64 {
         self.poll_count
+    }
+
+    #[doc(hidden)]
+    pub fn handle_key_for_test(&mut self, code: KeyCode, kind: KeyEventKind) -> Result<bool> {
+        self.handle_key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
     }
 
     fn poll_usage(&mut self) -> Result<WatchViewModel> {
@@ -159,7 +179,7 @@ pub struct TerminalRestoreGuard {
 impl TerminalRestoreGuard {
     pub fn activate() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
+        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
         Ok(Self { active: true })
     }
 }
@@ -168,12 +188,7 @@ impl Drop for TerminalRestoreGuard {
     fn drop(&mut self) {
         if self.active {
             let _ = disable_raw_mode();
-            let _ = execute!(
-                io::stdout(),
-                Show,
-                DisableMouseCapture,
-                LeaveAlternateScreen
-            );
+            let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
             self.active = false;
         }
     }
@@ -265,6 +280,7 @@ fn timestamp_column(timestamp: &str) -> String {
 }
 
 fn format_tokens(value: f64) -> String {
+    let value = value.max(0.0);
     if value.abs() >= 1_000.0 {
         format!("{:.1}k", value / 1_000.0)
     } else {
