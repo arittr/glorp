@@ -75,6 +75,7 @@ pub enum LogKind {
 
 #[derive(Debug, Clone)]
 pub struct SemanticStyles {
+    pub body: Style,
     pub chrome_title: Style,
     pub prompt_user: Style,
     pub prompt_path: Style,
@@ -114,6 +115,7 @@ impl SemanticStyles {
 pub fn semantic_styles() -> SemanticStyles {
     let p = tokenpet_palette();
     SemanticStyles {
+        body: Style::default().fg(p.fg.rgb).bg(p.bg.rgb),
         chrome_title: Style::default().fg(p.dim.rgb).bg(p.surface.rgb),
         prompt_user: Style::default().fg(p.good.rgb),
         prompt_path: Style::default().fg(p.accent.rgb),

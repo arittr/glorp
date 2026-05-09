@@ -42,8 +42,6 @@ impl Default for WatchAppConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Overlay {
     Help,
-    Evolution,
-    Hatch,
 }
 
 pub struct WatchApp {
@@ -95,8 +93,6 @@ impl WatchApp {
                 render_watch_frame(frame, &self.vm);
                 match self.overlay {
                     Some(Overlay::Help) => render_help_overlay(frame),
-                    Some(Overlay::Evolution) => render_evolution_overlay(frame),
-                    Some(Overlay::Hatch) => render_hatch_overlay(frame),
                     None => {}
                 }
             })?;
@@ -107,13 +103,10 @@ impl WatchApp {
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
-                            KeyCode::Char('e') => self.overlay = Some(Overlay::Evolution),
-                            KeyCode::Char('h') => self.overlay = Some(Overlay::Hatch),
                             KeyCode::Esc => self.overlay = None,
                             KeyCode::Char('r') => {
                                 self.poll_usage()?;
                             }
-                            KeyCode::Char('p') => self.add_affection(),
                             _ => {}
                         }
                     }
@@ -144,15 +137,6 @@ impl WatchApp {
         self.vm = self.poller.poll_usage(&self.vm)?;
         self.poll_count += 1;
         Ok(self.vm.clone())
-    }
-
-    fn add_affection(&mut self) {
-        self.vm.happiness = (self.vm.happiness + 0.05).min(1.0);
-        self.vm.recent_events.push(EventView {
-            timestamp: "--:--".into(),
-            kind: LogKind::Help,
-            text: "a quiet pat raised happiness".into(),
-        });
     }
 }
 

@@ -40,6 +40,7 @@ stories:
     title: Watch Mode TUI Shell
     status: complete
     evidence:
+      - cargo test --test watch_integration
       - cargo test --test style_tokens
       - cargo test --test tui_render
       - cargo test
@@ -47,6 +48,7 @@ stories:
     title: Pet Renderer And Animation
     status: complete
     evidence:
+      - cargo test --test acceptance_matrix
       - cargo test --test generation
       - cargo test --test style_tokens
       - cargo test
@@ -86,4 +88,133 @@ final_verification:
     - rg -n "feed|ship|treat|graveyard|revive|death|permadeath|litter|stageOverride|speciesOverride|tweak" src tests npm README.md
   notes:
     - Forbidden-feature audit only found expected prose and negative tests; no forbidden command or state mechanics were present.
+    - Acceptance matrix anchors docs/tokenpet/glorp.html as the current high-fidelity TokenPet style source.
     - Isolated smoke produced a newly hatched pet, pipe-friendly status output, and setup-focused doctor output when helpers were unavailable.
+
+acceptance_audit:
+  worker: 5
+  status: pass_with_risks
+  matrix_test:
+    file: tests/acceptance_matrix.rs
+    covers:
+      - Every story card has build-report evidence.
+      - TokenPet handoff sources are present, including the one-shot glorp.html high-fidelity style mockup.
+      - npm launcher workspace topology matches optional platform package topology.
+      - npm wrapper wires bundled ccusage helper paths while preserving Rust PATH fallback.
+      - CLI surface excludes prototype-only feed/ship/treat/graveyard/revive/litter/tweak commands and death/permadeath states.
+  stories:
+    story-001:
+      status: covered
+      evidence:
+        code:
+          - src/usage/provider.rs defines normalized provider boundary.
+          - src/usage/ccusage.rs shells out to ccusage and ccusage-codex, discovers GLORP_CCUSAGE_BIN/GLORP_CCUSAGE_CODEX_BIN, and falls back to PATH.
+          - src/usage/normalize.rs normalizes source, model, period, token buckets, cost metadata, and confidence without transcript payloads.
+          - src/storage/usage_store.rs persists cursors and recent sanitized events.
+        tests:
+          - tests/usage_provider.rs covers Claude/Codex fixtures, repeated polls, helper failures, malformed JSON, sanitized diagnostics, and transcript-like ignored fields.
+          - tests/acceptance_matrix.rs covers helper wrapper/PATH fallback wiring.
+      gaps: []
+    story-002:
+      status: covered
+      evidence:
+        code:
+          - src/paths.rs defaults to ~/.config/glorp and supports GLORP_CONFIG_DIR.
+          - src/storage/state.rs stores schema, identity, stage, XP, vitals, timestamps, calibration, and event metadata.
+          - src/storage/usage_store.rs stores provider cursors, recent events, daily/source aggregates, provider versions, and lifetime counters.
+        tests:
+          - tests/storage_privacy.rs covers isolated config dirs, schema loading, malformed/unsupported state errors, prompt/response/tool payload privacy, 90-day compaction, and lifetime counters.
+      gaps: []
+    story-003:
+      status: covered
+      evidence:
+        code:
+          - src/commands/init.rs creates or confirmed-reinitializes one pet state.
+          - src/commands/reset.rs requires confirmation before deleting pet state.
+          - src/pet/generation.rs deterministically generates species, names, traits, palette, and animation phase from seed.
+        tests:
+          - tests/cli_smoke.rs covers init, blocked second init, confirmed reinit, reset, rename, and historical calibration with stage-0 XP.
+          - tests/generation.rs covers deterministic seed behavior, six MVP species, species-aware names, and visible trait variation.
+      gaps: []
+    story-004:
+      status: covered
+      evidence:
+        code:
+          - src/game/effective_tokens.rs computes effective tokens from uncached input, output, cache creation, and weighted cache reads.
+          - src/config.rs exposes cache_read_weight configuration.
+        tests:
+          - tests/game_rules.rs covers cache-read weighting, configurable default, cost display isolation, missing buckets, and unknown-provider-safe defaults.
+      gaps: []
+    story-005:
+      status: covered
+      evidence:
+        code:
+          - src/game/calibration.rs derives recent active-day baseline from history.
+          - src/game/evolution.rs defines seven stages, calibrated XP, burst dampening, capped mood/food benefit, and stage-transition events.
+          - src/commands/init.rs records calibration without granting pre-init XP.
+        tests:
+          - tests/game_rules.rs covers pre-init history, relative low/high user progress, extreme bucket caps, and exactly-once stage transition events.
+          - tests/doctor_status.rs covers surfacing a recent evolution event in status.
+      gaps: []
+    story-006:
+      status: covered
+      evidence:
+        code:
+          - src/game/metabolism.rs applies food, rhythm-aware decay, active-hour/weekend weighting, wilted floor, and recoverable moods without death states.
+        tests:
+          - tests/game_rules.rs covers effective-token vital improvements, same-day gaps, overnight/weekend decay, weekend-heavy rhythm learning, historically inactive windows, wilted recovery, and no death transition.
+          - tests/acceptance_matrix.rs guards against Death/Permadeath state names.
+      gaps: []
+    story-007:
+      status: covered
+      evidence:
+        code:
+          - src/commands/watch.rs starts the Rust TUI.
+          - src/tui/app.rs handles q/help/refresh, roughly one-minute usage polling, animation ticks, poll/render separation, and terminal restore guard.
+          - src/tui/layout.rs renders wide side-by-side and compact layouts with pet/vitals/activity/helper/error surfaces.
+        tests:
+          - tests/watch_integration.rs covers real PetState/UsageStore watch view models and refresh polling instead of fixture activity.
+          - tests/tui_render.rs covers wide/compact/small-height rendering, blocked provider state, polling updates, help/evolution/hatch overlays, and refresh/interval polling path.
+          - tests/style_tokens.rs covers TokenPet color roles and semantic styling.
+      gaps:
+        - Terminal cleanup is covered by the restore guard and render harnesses, not a full PTY integration test.
+    story-008:
+      status: covered
+      evidence:
+        code:
+          - src/pet/art.rs contains species/stage silhouettes and species-specific stage labels across seven stages.
+          - src/pet/render.rs renders deterministic seeded ASCII with visible traits, mood expression/posture, blink/breathing/flavor motion, compact cropping, and evolution flash state.
+        tests:
+          - tests/acceptance_matrix.rs anchors the one-shot docs/tokenpet/glorp.html mockup as the current high-fidelity style source.
+          - tests/generation.rs covers same-seed stability, six species, visible same-species variation, species stage labels, compact rendering, mood expression changes, animation flavor, blinking, palette roles, and evolution flash.
+          - tests/tui_render.rs covers compact layout readability around rendered pet panels.
+      gaps: []
+    story-009:
+      status: covered
+      evidence:
+        code:
+          - src/commands/status.rs prints compact pet, stage, recent effective tokens, provider health, diagnostics, and local-log-derived labels.
+          - src/commands/doctor.rs inspects config paths, helper availability, helper versions, command health, recent diagnostics, and setup instructions.
+          - src/lib.rs and src/cli.rs expose only MVP commands.
+        tests:
+          - tests/doctor_status.rs covers pipe-friendly status, missing helpers, helper versions, sanitized diagnostics, repeated provider failures, evolution events, and zero-usage clamping.
+          - tests/cli_smoke.rs and tests/acceptance_matrix.rs assert no normal-mode feed command.
+      gaps: []
+    story-010:
+      status: covered_with_distribution_risks
+      evidence:
+        code:
+          - npm/glorp/package.json exposes the glorp bin, depends on ccusage and @ccusage/codex, and declares platform optionalDependencies.
+          - npm/glorp/bin/glorp.js resolves the native platform package, passes bundled helper env vars, sets GLORP_NODE_BIN, and allows PATH fallback when helper env vars are absent.
+          - npm/platform/*/package.json declare conventional platform packages and binary file paths.
+          - scripts/build-platform-package.mjs validates optional package topology and copies the release binary into the current platform package.
+        tests:
+          - npm/glorp/test/smoke.mjs covers glorp help, doctor, bundled helper env wiring, PATH fallback, missing-helper blocked messaging, and no feed command through a fake native binary.
+          - tests/acceptance_matrix.rs covers npm workspace topology, optional platform package version matching, helper env wiring, and PATH fallback hooks.
+      gaps:
+        - Only the current platform package binary is locally materialized by the current build script run; non-current package artifacts still depend on release automation.
+        - npm pack/install has been verified for the launcher and current platform package, not every platform package on its native OS.
+  top_risks:
+    - Cross-platform npm distribution remains the highest risk because local verification can only prove the current platform artifact and manifest topology.
+    - Terminal cleanup has guard-level coverage but not a true PTY integration test.
+    - The audit relies on file/API-level acceptance checks; it does not replace manual release smoke testing against a published npm install.

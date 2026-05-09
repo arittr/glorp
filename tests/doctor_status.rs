@@ -1,5 +1,5 @@
 use assert_cmd::Command;
-use glorp::storage::state::{write_state_for_test, PetStateFixture};
+use glorp::storage::state::{write_state_for_test, PetState, PetStateFixture};
 use predicates::prelude::*;
 use tempfile::tempdir;
 
@@ -16,12 +16,19 @@ fn status_is_pipe_friendly_when_pet_exists() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
+        .env(
+            "GLORP_CCUSAGE_CODEX_BIN",
+            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
+        )
         .arg("status")
         .assert()
         .success()
         .stdout(predicate::str::contains("mochi"))
+        .stdout(predicate::str::contains("stage progress:"))
         .stdout(predicate::str::contains("effective tokens"))
-        .stdout(predicate::str::contains("provider"))
+        .stdout(predicate::str::contains("local-log-derived"))
+        .stdout(predicate::str::contains("provider health:"))
         .stdout(predicate::str::contains("billing").not());
 }
 
@@ -158,6 +165,9 @@ fn status_includes_recent_evolution_event_when_present() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_CCUSAGE_BIN")
+        .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env("PATH", "/bin")
         .arg("status")
         .assert()
         .success()
@@ -180,7 +190,79 @@ fn status_clamps_zero_usage_display() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "effective tokens: today 0 recent 0 lifetime 0",
+            "effective tokens (estimated): today 0 recent 0 lifetime 0",
         ))
+        .stdout(predicate::str::contains("provider health: blocked"))
         .stdout(predicate::str::contains("-0").not());
+}
+
+#[test]
+fn status_persists_real_usage_delta_into_pet_state() {
+    let dir = tempdir().unwrap();
+    let mut state = PetState::new_for_test("fixture-seed", "mochi");
+    state.stage = "s0".into();
+    state.calibration.daily_effective_tokens = 10_000.0;
+    glorp::storage::state::StateStore::new(dir.path().join("state.json"))
+        .save(&state)
+        .unwrap();
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
+        .env(
+            "GLORP_CCUSAGE_CODEX_BIN",
+            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
+        )
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider: local-log-derived"))
+        .stdout(predicate::str::contains("effective tokens"));
+
+    let state: PetState =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
+            .unwrap();
+    assert!(state.lifetime_effective_tokens > 0.0);
+    assert!(state.xp > 0.0);
+    assert_ne!(state.stage, "s0");
+    assert!(state
+        .recent_events
+        .iter()
+        .any(|event| event.contains("effective tokens")));
+}
+
+#[test]
+fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
+    let dir = tempdir().unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.stage = "s3".into();
+    state.xp = 3.5;
+    state.vitals.fed = 64.0;
+    state.vitals.happiness = 65.0;
+    state.vitals.energy = 66.0;
+    glorp::storage::state::StateStore::new(dir.path().join("state.json"))
+        .save(&state)
+        .unwrap();
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env(
+            "GLORP_CCUSAGE_BIN",
+            "tests/fixtures/helpers/ccusage-fails.mjs",
+        )
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("helper_exit"));
+
+    let saved: PetState =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved.stage, "s3");
+    assert_eq!(saved.xp, 3.5);
+    assert_eq!(saved.vitals.fed, 64.0);
+    assert_eq!(saved.vitals.happiness, 65.0);
+    assert_eq!(saved.vitals.energy, 66.0);
 }

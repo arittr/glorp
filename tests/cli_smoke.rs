@@ -13,7 +13,30 @@ fn help_lists_mvp_commands_and_no_manual_feed() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("reset"))
         .stdout(predicate::str::contains("rename"))
+        .stdout(predicate::str::contains("TUI keys"))
+        .stdout(predicate::str::contains("q"))
+        .stdout(predicate::str::contains("r"))
+        .stdout(predicate::str::contains("?"))
         .stdout(predicate::str::contains("feed").not());
+}
+
+#[test]
+fn init_without_name_presents_generated_name_and_uses_it_noninteractively() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_CCUSAGE_BIN")
+        .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env("PATH", "/bin")
+        .args(["init", "--seed", "mochi-7f3a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("generated name: cog-92"))
+        .stdout(predicate::str::contains("cog-92 has hatched"));
+
+    let state = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+    assert!(state.contains("\"accepted_name\": \"cog-92\""));
 }
 
 #[test]

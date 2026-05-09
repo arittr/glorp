@@ -9,6 +9,7 @@ use crate::{
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
+use std::io::{self, IsTerminal, Write};
 use time::OffsetDateTime;
 
 pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> {
@@ -24,7 +25,8 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
     let seed = seed
         .unwrap_or_else(|| format!("glorp-{}", OffsetDateTime::now_utc().unix_timestamp_nanos()));
     let generated = generate_pet(&seed);
-    let accepted_name = resolve_accepted_name(&generated.generated_name, name.as_deref());
+    println!("generated name: {}", generated.generated_name);
+    let accepted_name = choose_name(&generated.generated_name, name)?;
 
     let mut calibration = CalibrationBaseline::default();
     let mut rhythm = RhythmProfile::default();
@@ -72,4 +74,32 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
     store.save(&state)?;
     println!("{accepted_name} has hatched");
     Ok(())
+}
+
+fn choose_name(generated_name: &str, replacement: Option<String>) -> Result<String> {
+    if replacement.is_some() {
+        return Ok(resolve_accepted_name(
+            generated_name,
+            replacement.as_deref(),
+        ));
+    }
+
+    if !io::stdin().is_terminal() {
+        return Ok(resolve_accepted_name(generated_name, None));
+    }
+
+    print!("Use this name? [Y/n] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim();
+    if answer.is_empty() || answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+        return Ok(generated_name.to_string());
+    }
+
+    print!("Replacement name: ");
+    io::stdout().flush()?;
+    let mut replacement = String::new();
+    io::stdin().read_line(&mut replacement)?;
+    Ok(resolve_accepted_name(generated_name, Some(&replacement)))
 }

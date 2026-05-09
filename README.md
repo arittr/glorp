@@ -27,9 +27,9 @@ When installing from source, make sure `ccusage` and `ccusage-codex` are availab
 
 ## Commands
 
-- `glorp init` creates local state and hatches your first pet.
+- `glorp init` creates local state, presents a generated name, and hatches your first pet.
 - `glorp watch` opens the live terminal pet.
-- `glorp status` prints a compact pet and usage summary.
+- `glorp status` prints a compact pet, stage progress, usage-confidence, and provider-health summary.
 - `glorp rename <name>` renames the current pet without changing generated traits.
 - `glorp reset --yes` clears local Glorp state after confirmation.
 - `glorp doctor` checks config paths, helper availability, parser health, and diagnostics.

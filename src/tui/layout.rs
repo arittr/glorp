@@ -14,6 +14,8 @@ use crate::tui::{
 const COMPACT_WIDTH: u16 = 72;
 const BAR_WIDTH: usize = 20;
 const PET_PANEL_LINES: u16 = 10;
+const BODY_X_PADDING: u16 = 2;
+const BODY_Y_PADDING: u16 = 1;
 
 pub fn render_watch_frame(frame: &mut Frame<'_>, vm: &WatchViewModel) {
     let area = frame.area();
@@ -28,7 +30,7 @@ pub fn render_watch_frame(frame: &mut Frame<'_>, vm: &WatchViewModel) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
@@ -37,10 +39,11 @@ pub fn render_watch_frame(frame: &mut Frame<'_>, vm: &WatchViewModel) {
     render_chrome(frame, chunks[0], vm, &styles);
     render_footer(frame, chunks[2], &styles);
 
+    let body = padded_body(chunks[1]);
     if area.width < COMPACT_WIDTH {
-        render_compact(frame, chunks[1], vm, &styles);
+        render_compact(frame, body, vm, &styles);
     } else {
-        render_wide(frame, chunks[1], vm, &styles);
+        render_wide(frame, body, vm, &styles);
     }
 }
 
@@ -50,7 +53,7 @@ pub fn render_help_overlay(frame: &mut Frame<'_>) {
         "glorp help",
         &[
             "q quit   r refresh   ? help",
-            "p affection pulse",
+            "r refreshes usage and pet state now",
             "usage polls stay calm when helpers are blocked",
         ],
     );
@@ -83,10 +86,37 @@ pub fn render_hatch_overlay(frame: &mut Frame<'_>) {
 fn render_wide(frame: &mut Frame<'_>, area: Rect, vm: &WatchViewModel, styles: &SemanticStyles) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(47), Constraint::Percentage(53)])
+        .constraints([
+            Constraint::Percentage(48),
+            Constraint::Length(1),
+            Constraint::Percentage(52),
+        ])
         .split(area);
     render_pet_panel(frame, columns[0], vm, styles);
-    render_activity_panel(frame, columns[1], vm, styles);
+    render_divider(frame, columns[1], styles);
+    render_activity_panel(frame, columns[2], vm, styles);
+}
+
+fn padded_body(area: Rect) -> Rect {
+    let x_padding = BODY_X_PADDING.min(area.width / 2);
+    let y_padding = BODY_Y_PADDING.min(area.height / 2);
+    Rect {
+        x: area.x + x_padding,
+        y: area.y + y_padding,
+        width: area.width.saturating_sub(x_padding * 2),
+        height: area.height.saturating_sub(y_padding * 2),
+    }
+}
+
+fn render_divider(frame: &mut Frame<'_>, area: Rect, styles: &SemanticStyles) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let lines = (0..area.height)
+        .map(|_| Line::from(Span::styled("╎", styles.section_header)))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).style(styles.body), area);
 }
 
 fn render_compact(frame: &mut Frame<'_>, area: Rect, vm: &WatchViewModel, styles: &SemanticStyles) {
@@ -112,12 +142,31 @@ fn render_chrome(frame: &mut Frame<'_>, area: Rect, vm: &WatchViewModel, styles:
         spans.push(Span::styled("●  ", styles.event_rail_usage));
     }
     spans.push(Span::styled(title, styles.chrome_title));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    frame.render_widget(Block::default().style(styles.chrome_title), area);
     frame.render_widget(
         Paragraph::new(Line::from(spans))
             .style(styles.chrome_title)
             .alignment(Alignment::Center),
-        area,
+        rows[0],
     );
+    if rows.len() > 1 && rows[1].height > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("drew", styles.prompt_user),
+                Span::styled("@claude", styles.label),
+                Span::styled(":", styles.prompt_sep),
+                Span::styled("~", styles.prompt_path),
+                Span::styled("$ ", styles.prompt_sep),
+                Span::styled("glorp watch", styles.primary_text),
+            ]))
+            .style(styles.body),
+            rows[1],
+        );
+    }
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, styles: &SemanticStyles) {
@@ -140,35 +189,76 @@ fn render_pet_panel(
     vm: &WatchViewModel,
     styles: &SemanticStyles,
 ) {
-    let mut lines = vec![
-        section_line("vitals", styles),
-        Line::from(vec![
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    frame.render_widget(Block::default().style(styles.body), area);
+
+    let stats_count = if area.height >= 18 { 6 } else { 5 };
+    let meta_height = if area.height >= 16 { 5 } else { 3 };
+    let stats_height = stats_count.min(area.height.saturating_sub(meta_height));
+    let stage_height = area.height.saturating_sub(meta_height + stats_height);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(meta_height),
+            Constraint::Length(stage_height),
+            Constraint::Min(stats_height),
+        ])
+        .split(area);
+
+    let mut meta = vec![section_line("vitals", styles)];
+    if meta_height >= 5 {
+        meta.push(metadata_line(
+            "name",
+            vm.pet_name.as_str(),
+            styles.prompt_user,
+            styles,
+        ));
+        meta.push(metadata_pair_line(
+            "species",
+            vm.species.clone(),
+            "stage",
+            vm.stage.clone(),
+            styles,
+        ));
+        meta.push(metadata_pair_line(
+            "mood",
+            vm.mood.clone(),
+            "age",
+            format!("{}d", vm.age_days),
+            styles,
+        ));
+        meta.push(dashed_line(styles));
+    } else {
+        meta.push(Line::from(vec![
             Span::styled(vm.pet_name.as_str(), styles.prompt_user),
             Span::styled(" / ", styles.prompt_sep),
             Span::styled(vm.species.as_str(), styles.label),
             Span::styled(" / ", styles.prompt_sep),
             Span::styled(vm.stage.as_str(), styles.prompt_path),
-        ]),
-    ];
-
-    for art in vm.pet_art.iter().take(3) {
-        lines.push(Line::from(Span::styled(art.as_str(), styles.primary_text)));
+        ]));
+        meta.push(Line::from(vec![
+            Span::styled("mood ", styles.label),
+            Span::styled(vm.mood.as_str(), styles.primary_text),
+        ]));
     }
+    render_lines(frame, rows[0], meta, styles);
 
-    lines.push(Line::from(vec![
-        Span::styled("mood ", styles.label),
-        Span::styled(vm.mood.as_str(), styles.primary_text),
-        Span::styled(" age ", styles.label),
-        Span::styled(format!("{}d", vm.age_days), styles.primary_text),
-    ]));
-    lines.push(bar_line("fed", vm.fed, styles.filled_bar_good, styles));
-    lines.push(bar_line(
+    let art_lines = centered_art_lines(rows[1].width, rows[1].height, &vm.pet_art, styles);
+    render_lines(frame, rows[1], art_lines, styles);
+
+    let mut stats = vec![section_line("stats", styles)];
+    stats.push(bar_line("fed", vm.fed, styles.filled_bar_good, styles));
+    stats.push(bar_line(
         "happy",
         vm.happiness,
         styles.filled_bar_accent,
         styles,
     ));
-    lines.push(bar_line(
+    stats.push(bar_line(
         "energy",
         vm.energy,
         styles.filled_bar_good,
@@ -179,9 +269,92 @@ fn render_pet_panel(
     } else {
         vm.xp_current / vm.xp_target
     };
-    lines.push(bar_line("xp", xp, styles.filled_bar_accent, styles));
+    stats.push(bar_line("xp", xp, styles.filled_bar_accent, styles));
+    if area.height >= 20 {
+        stats.push(Line::from(vec![
+            Span::styled("xp ", styles.label),
+            Span::styled(
+                format!(
+                    "{} / {}",
+                    format_tokens(vm.xp_current),
+                    format_tokens(vm.xp_target)
+                ),
+                styles.primary_text,
+            ),
+        ]));
+    }
 
-    render_lines(frame, area, lines, styles);
+    render_lines(frame, rows[2], stats, styles);
+}
+
+fn metadata_line<'a>(
+    label: &'a str,
+    value: &'a str,
+    value_style: ratatui::style::Style,
+    styles: &'a SemanticStyles,
+) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{label:<8}"), styles.label),
+        Span::styled(value, value_style),
+    ])
+}
+
+fn metadata_pair_line<'a>(
+    left_label: &'a str,
+    left_value: String,
+    right_label: &'a str,
+    right_value: String,
+    styles: &'a SemanticStyles,
+) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{left_label:<8}"), styles.label),
+        Span::styled(left_value, styles.primary_text),
+        Span::styled("   ", styles.prompt_sep),
+        Span::styled(format!("{right_label:<6}"), styles.label),
+        Span::styled(right_value, styles.prompt_path),
+    ])
+}
+
+fn today_metric_line<'a>(
+    left_label: &'a str,
+    left_value: String,
+    right_label: &'a str,
+    right_value: String,
+    styles: &'a SemanticStyles,
+) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{left_label:<10}"), styles.label),
+        Span::styled(left_value, styles.primary_text),
+        Span::styled("   ", styles.prompt_sep),
+        Span::styled(format!("{right_label:<7}"), styles.label),
+        Span::styled(right_value, styles.prompt_path),
+    ])
+}
+
+fn centered_art_lines<'a>(
+    width: u16,
+    height: u16,
+    art: &'a [String],
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
+    if height == 0 {
+        return Vec::new();
+    }
+    let visible = art.len().min(height as usize);
+    let top_pad = (height as usize).saturating_sub(visible) / 2;
+    let mut lines = Vec::with_capacity(height as usize);
+    for _ in 0..top_pad {
+        lines.push(Line::from(""));
+    }
+    for art_line in art.iter().take(visible) {
+        let art_width = art_line.chars().count() as u16;
+        let left_pad = width.saturating_sub(art_width) / 2;
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(left_pad as usize)),
+            Span::styled(art_line.as_str(), styles.primary_text),
+        ]));
+    }
+    lines
 }
 
 fn render_activity_panel(
@@ -190,6 +363,7 @@ fn render_activity_panel(
     vm: &WatchViewModel,
     styles: &SemanticStyles,
 ) {
+    frame.render_widget(Block::default().style(styles.body), area);
     let mut lines = vec![section_line("today", styles)];
 
     if vm.is_blocked() {
@@ -205,18 +379,13 @@ fn render_activity_panel(
             )));
         }
     } else {
-        lines.push(Line::from(vec![
-            Span::styled("effective ", styles.label),
-            Span::styled(
-                format_tokens(vm.today_effective_tokens),
-                styles.primary_text,
-            ),
-            Span::styled(" bucket ", styles.label),
-            Span::styled(
-                format_tokens(vm.current_bucket_effective_tokens),
-                styles.prompt_path,
-            ),
-        ]));
+        lines.push(today_metric_line(
+            "effective",
+            format_tokens(vm.today_effective_tokens),
+            "bucket",
+            format_tokens(vm.current_bucket_effective_tokens),
+            styles,
+        ));
         lines.push(sparkline_line(&vm.recent_daily_effective_tokens, styles));
         lines.push(Line::from(vec![
             Span::styled("helper ", styles.label),
@@ -224,6 +393,7 @@ fn render_activity_panel(
         ]));
     }
 
+    lines.push(section_line("sources", styles));
     for source in vm.source_breakdown.iter().take(3) {
         lines.push(Line::from(vec![
             Span::styled(source.name.as_str(), styles.label),
@@ -232,7 +402,7 @@ fn render_activity_panel(
         ]));
     }
 
-    lines.push(section_line("events", styles));
+    lines.push(section_line("log", styles));
     for event in vm.recent_events.iter().rev().take(5).rev() {
         lines.push(event_line(event, styles));
     }
@@ -254,8 +424,12 @@ fn section_line<'a>(title: &'a str, styles: &'a SemanticStyles) -> Line<'a> {
     Line::from(vec![
         Span::styled("─ ", styles.section_header),
         Span::styled(title, styles.section_header),
-        Span::styled(" ─ ─ ─", styles.section_header),
+        Span::styled(" ┄ ┄ ┄", styles.section_header),
     ])
+}
+
+fn dashed_line(styles: &SemanticStyles) -> Line<'_> {
+    Line::from(Span::styled("┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄", styles.section_header))
 }
 
 fn bar_line<'a>(

@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
     name = "glorp",
     version,
     about = "A terminal pet fed by real AI coding token usage",
+    after_help = "TUI keys:\n  q  quit watch mode\n  r  refresh usage\n  ?  toggle help",
     disable_help_subcommand = true
 )]
 pub struct Cli {

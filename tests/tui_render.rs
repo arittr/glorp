@@ -59,6 +59,57 @@ fn wide_layout_has_tokenpet_chrome_panels_and_bars() {
 }
 
 #[test]
+fn wide_layout_centers_full_pet_stage_with_dashed_divider() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_art = vec![
+        "    /\\     ".into(),
+        "   /  \\    ".into(),
+        "  / o.o \\  ".into(),
+        " /  ◇v◇  \\ ".into(),
+        " \\  ✦✦✦  / ".into(),
+        "  \\  ·  /  ".into(),
+        "   \\___/   ".into(),
+        "  ✦ ✧ ✦   ".into(),
+    ];
+
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(text.contains("╎"));
+    assert!(text.contains("✦ ✧ ✦"));
+
+    let stage_line = buffer_lines(terminal.backend().buffer())
+        .into_iter()
+        .find(|line| line.contains("/ o.o \\"))
+        .unwrap();
+    assert!(
+        stage_line.find('/').unwrap_or_default() > 15,
+        "pet art should be visually centered in its stage: {stage_line:?}"
+    );
+}
+
+#[test]
+fn wide_layout_uses_tokenpet_metadata_today_grid_and_log_rhythm() {
+    let backend = TestBackend::new(118, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
+        .unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(text.contains("name"));
+    assert!(text.contains("species"));
+    assert!(text.contains("stage"));
+    assert!(text.contains("mood"));
+    assert!(text.contains("today"));
+    assert!(text.contains("bucket"));
+    assert!(text.contains("sources"));
+    assert!(text.contains("log"));
+    assert!(text.contains("helper"));
+    assert!(text.contains("┄"));
+}
+
+#[test]
 fn event_log_uses_timestamps_rails_sparkline_and_semantic_colors() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();

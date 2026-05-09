@@ -26,6 +26,8 @@ fn palette_matches_tokenpet_handoff_values() {
 fn semantic_styles_preserve_tokenpet_roles() {
     let styles = semantic_styles();
     let p = tokenpet_palette();
+    assert_eq!(styles.body.fg, Some(p.fg.rgb));
+    assert_eq!(styles.body.bg, Some(p.bg.rgb));
     assert_eq!(styles.chrome_title.fg, Some(p.dim.rgb));
     assert_eq!(styles.chrome_title.bg, Some(p.surface.rgb));
     assert_eq!(styles.prompt_user.fg, Some(p.good.rgb));
