@@ -98,12 +98,19 @@ values derived from `period_start`; they should not be replayed as new food.
 
 The write boundary matters. Provider polling must not permanently advance
 food/cursor state in a way that can lose pet progress if saving pet state fails.
-The implementation should use one of these equivalent approaches:
+The default implementation shape should be a durable, idempotent usage-delta
+ledger:
 
-- persist a usage delta ledger first, then apply unapplied ledger rows to pet
-  state and mark them applied only after state save succeeds; or
-- move cursor advancement, usage-event insertion, and pet-state save into a
-  single coordinated transaction/reconciliation boundary.
+- persist the provider delta as an unapplied ledger row;
+- apply unapplied ledger rows to pet state;
+- save pet state;
+- mark rows applied and advance/reconcile cursor state only after the pet-state
+  save succeeds.
+
+An alternate transaction boundary is acceptable only if the pet state and
+provider cursor state are actually in the same durable unit, or if the
+implementation has an explicit recovery path. Do not treat a SQLite write plus a
+separate JSON file save as atomic by convention.
 
 The plan should choose the smallest approach that fits the existing Rust/SQLite
 structure, but it must prove that a simulated state-save failure does not cause
@@ -174,12 +181,17 @@ Initial numeric acceptance for catch-up:
   across at least 6 and at most 12 ten-minute buckets.
 - Each smeared bucket should receive no more than 25% of the calibrated active
   day baseline before burst dampening.
-- One calibrated active day delivered as catch-up should produce roughly one XP
-  day after smearing, with an acceptable test range of 0.75-1.25 XP.
+- One calibrated active day delivered as catch-up should produce 0.75-1.25
+  calibrated XP units after smearing.
 - A 49-active-day simulation at the calibrated daily baseline, delivered as
   daily catch-up rather than minute-by-minute watch polls, should reach stage
-  S6 with total XP in the 45-55 range.
+  S6 with total XP in the 49-55 range.
 - Catch-up smearing must not create duplicate stage-transition events.
+
+If a source delta is smeared into multiple pet-food buckets, the provider delta
+remains one cursor/reconciliation unit. The pet-food buckets may be separate
+ledger rows or structured child rows, but they must reference the original
+provider delta and must not duplicate source totals.
 
 Evolution transitions should still be recorded exactly once. When a transition
 is newly observed by watch mode, the terminal should show a simple live
@@ -362,7 +374,7 @@ these seams:
 | Configured weights | Cache-read-heavy fixture and `cache_read_weight = 0.05` | Provider uses default `0.03` | Stored delta uses configured weight |
 | Version-stable cursor | Same totals, changed helper version | New version can look like new food | No new delta; metadata updates safely |
 | Calibration grouping | Same date, multiple model/source rows | Rows can count as separate active days | One active-day total enters baseline |
-| Catch-up smear | Fixed baseline and one-day catch-up delta | Delta is damped as one giant bucket | 6-12 buckets and 0.75-1.25 total XP |
+| Catch-up smear | Fixed baseline and one-day catch-up delta | Delta is damped as one giant bucket | 6-12 buckets and 0.75-1.25 calibrated XP units |
 | Mixed diagnostics | Claude fixture healthy, Codex helper missing | Global helper state can read blocked or hide detail | Claude feeds; Codex diagnostic remains visible |
 | Live animation | Watch redraws without poll | Art stays static | `render_pet` tick changes displayed art |
 | Compact rendering | Narrow terminal | Wide art is squeezed/cropped accidentally | Compact render variant is used intentionally |
