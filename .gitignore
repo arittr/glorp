@@ -1,0 +1,3 @@
+/target/
+/npm/glorp/test/.tmp-config*/
+/npm/platform/*/bin/
