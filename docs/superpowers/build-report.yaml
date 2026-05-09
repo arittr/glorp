@@ -1,0 +1,89 @@
+stories:
+  story-001:
+    title: Usage Provider Through ccusage
+    status: complete
+    evidence:
+      - cargo test --test usage_provider
+      - cargo test
+  story-002:
+    title: Local Persistence
+    status: complete
+    evidence:
+      - cargo test --test storage_privacy
+      - cargo test
+  story-003:
+    title: Init And Generated Pet
+    status: complete
+    evidence:
+      - cargo test --test generation
+      - cargo test --test cli_smoke
+      - isolated GLORP_CONFIG_DIR smoke covering init/status/doctor
+  story-004:
+    title: Effective Token Model
+    status: complete
+    evidence:
+      - cargo test --test game_rules
+      - cargo test
+  story-005:
+    title: Calibration And Evolution
+    status: complete
+    evidence:
+      - cargo test --test game_rules
+      - cargo test
+  story-006:
+    title: Mood Decay And Wilted State
+    status: complete
+    evidence:
+      - cargo test --test game_rules
+      - cargo test
+  story-007:
+    title: Watch Mode TUI Shell
+    status: complete
+    evidence:
+      - cargo test --test style_tokens
+      - cargo test --test tui_render
+      - cargo test
+  story-008:
+    title: Pet Renderer And Animation
+    status: complete
+    evidence:
+      - cargo test --test generation
+      - cargo test --test style_tokens
+      - cargo test
+  story-009:
+    title: Status Doctor And Friendly Errors
+    status: complete
+    evidence:
+      - cargo test --test doctor_status
+      - isolated GLORP_CONFIG_DIR smoke covering init/status/doctor
+      - cargo test
+  story-010:
+    title: npm Distribution For Rust Glorp
+    status: complete
+    evidence:
+      - cargo build --release
+      - node scripts/build-platform-package.mjs --platform current
+      - npm install --workspaces --include-workspace-root
+      - npm --workspace glorp test
+      - npm pack --workspace glorp --dry-run
+      - npm pack "$(node scripts/build-platform-package.mjs --platform current --print-package-dir)" --dry-run
+
+final_verification:
+  status: pass
+  commands:
+    - cargo fmt --check
+    - node --check npm/glorp/bin/glorp.js
+    - node --check npm/glorp/test/smoke.mjs
+    - node --check scripts/build-platform-package.mjs
+    - cargo clippy --all-targets --all-features -- -D warnings
+    - cargo test
+    - cargo build --release
+    - node scripts/build-platform-package.mjs --platform current
+    - npm install --workspaces --include-workspace-root
+    - npm --workspace glorp test
+    - npm pack --workspace glorp --dry-run
+    - npm pack "$(node scripts/build-platform-package.mjs --platform current --print-package-dir)" --dry-run
+    - rg -n "feed|ship|treat|graveyard|revive|death|permadeath|litter|stageOverride|speciesOverride|tweak" src tests npm README.md
+  notes:
+    - Forbidden-feature audit only found expected prose and negative tests; no forbidden command or state mechanics were present.
+    - Isolated smoke produced a newly hatched pet, pipe-friendly status output, and setup-focused doctor output when helpers were unavailable.

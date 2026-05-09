@@ -1,0 +1,14 @@
+{
+  "name": "@glorp/linux-x64",
+  "version": "0.1.0",
+  "license": "MIT",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/glorp"
+  ]
+}

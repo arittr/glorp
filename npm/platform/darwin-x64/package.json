@@ -1,0 +1,14 @@
+{
+  "name": "@glorp/darwin-x64",
+  "version": "0.1.0",
+  "license": "MIT",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/glorp"
+  ]
+}

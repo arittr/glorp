@@ -2762,8 +2762,7 @@ Create `package.json`:
     "package:smoke": "npm --workspace glorp test"
   },
   "workspaces": [
-    "npm/glorp",
-    "npm/platform/*"
+    "npm/glorp"
   ]
 }
 ```
@@ -2891,6 +2890,7 @@ Create `scripts/build-platform-package.mjs` to copy `target/release/glorp` into 
 
 - Accept `--platform current` and compute `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, or `win32-x64`.
 - When also passed `--print-package-name`, print the matching package name such as `@glorp/darwin-arm64` and exit without copying.
+- When also passed `--print-package-dir`, print the current platform package directory and exit without copying.
 - Copy `target/release/glorp` to `npm/platform/<platform>/bin/glorp` or `target/release/glorp.exe` to `npm/platform/win32-x64/bin/glorp.exe`.
 - Set executable mode `755` for non-Windows package binaries.
 - Fail with a clear message if `cargo build --release` has not produced the binary.
@@ -2907,7 +2907,7 @@ node scripts/build-platform-package.mjs --platform current
 npm install --workspaces --include-workspace-root
 npm --workspace glorp test
 npm pack --workspace glorp --dry-run
-npm pack --workspace "$(node scripts/build-platform-package.mjs --platform current --print-package-name)" --dry-run
+npm pack "$(node scripts/build-platform-package.mjs --platform current --print-package-dir)" --dry-run
 ```
 
 Expected: PASS. `npm pack --dry-run` includes `bin/glorp.js`; the current platform package contains the Rust binary; users do not need Rust at runtime.
@@ -3003,7 +3003,7 @@ stories:
       - node scripts/build-platform-package.mjs --platform current
       - npm --workspace glorp test
       - npm pack --workspace glorp --dry-run
-      - npm pack --workspace "$(node scripts/build-platform-package.mjs --platform current --print-package-name)" --dry-run
+      - npm pack "$(node scripts/build-platform-package.mjs --platform current --print-package-dir)" --dry-run
 ```
 
 - [ ] **Step 3: Run forbidden-feature audit**
@@ -3034,7 +3034,7 @@ node scripts/build-platform-package.mjs --platform current
 npm install --workspaces --include-workspace-root
 npm --workspace glorp test
 npm pack --workspace glorp --dry-run
-npm pack --workspace "$(node scripts/build-platform-package.mjs --platform current --print-package-name)" --dry-run
+npm pack "$(node scripts/build-platform-package.mjs --platform current --print-package-dir)" --dry-run
 ```
 
 Expected: all commands pass.

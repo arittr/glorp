@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "scripts": {
+    "test": "cargo test && npm --workspace glorp test",
+    "build": "cargo build --release",
+    "package:smoke": "npm --workspace glorp test"
+  },
+  "workspaces": [
+    "npm/glorp"
+  ]
+}

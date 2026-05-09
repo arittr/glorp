@@ -1,0 +1,23 @@
+{
+  "daily": [
+    {
+      "date": "2026-05-09",
+      "inputTokens": 700,
+      "outputTokens": 900,
+      "cachedInputTokens": 5000,
+      "reasoningOutputTokens": 125,
+      "totalTokens": 6600,
+      "costUSD": 0.40,
+      "models": {
+        "gpt-5.2-codex": {
+          "inputTokens": 700,
+          "outputTokens": 900,
+          "cachedInputTokens": 5000,
+          "reasoningOutputTokens": 125,
+          "totalTokens": 6600,
+          "isFallback": false
+        }
+      }
+    }
+  ]
+}
