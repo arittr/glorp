@@ -71,17 +71,43 @@ and rendered as the same truth in watch mode. The TUI should not show a feed log
 without corresponding activity, or a globally blocked state when one provider is
 healthy.
 
-The implementation may introduce internal fields or helper types to make this
-explicit. The important product distinction is:
+The implementation should introduce explicit event-time fields to make this
+truth durable and testable. The important product distinction is:
 
 - `period_start`: the coarse source period from `ccusage` or `@ccusage/codex`.
 - `observed_at`: the time Glorp observed a new delta and treated it as food.
-- `bucket_at`: the 10-minute display/metabolism bucket derived from
+- `bucket_at`: the start of the 10-minute display/metabolism bucket derived from
   `observed_at` or from a deliberate catch-up smear.
 
 Daily `ccusage` rows can keep their original source period for history and
 privacy-preserving aggregation, but the current watch bucket should be based on
 when Glorp observed new food, not on midnight from a date-only daily row.
+
+The watch product surface uses pet-food time, not source-period time:
+
+- Watch `today`, current bucket, source breakdown, and recent feed log use
+  `bucket_at`/`observed_at`.
+- Historical source aggregation and parser reconciliation can keep using
+  `period_start` and `period_date`.
+- Log rows render chronologically with the newest visible event nearest the
+  bottom of the log area.
+
+Persistence should migrate old local SQLite databases best-effort. Existing
+usage rows that lack `observed_at` or `bucket_at` should receive conservative
+values derived from `period_start`; they should not be replayed as new food.
+
+The write boundary matters. Provider polling must not permanently advance
+food/cursor state in a way that can lose pet progress if saving pet state fails.
+The implementation should use one of these equivalent approaches:
+
+- persist a usage delta ledger first, then apply unapplied ledger rows to pet
+  state and mark them applied only after state save succeeds; or
+- move cursor advancement, usage-event insertion, and pet-state save into a
+  single coordinated transaction/reconciliation boundary.
+
+The plan should choose the smallest approach that fits the existing Rust/SQLite
+structure, but it must prove that a simulated state-save failure does not cause
+food to disappear forever.
 
 ## Usage Provider And Effective Tokens
 
@@ -98,10 +124,23 @@ can be updated independently.
 
 Effective-token calculation should use the loaded app config. If
 `cache_read_weight` is set in `config.toml`, provider ingestion, status, watch,
-and runtime pet updates should all use that value. Cost remains display-only and
-must not affect food, XP, mood, or evolution.
+and runtime pet updates should all use that value. Stored `effective_tokens`
+are event-time values computed with the config in effect when the delta is
+observed; changing config later does not silently rewrite old pet food history.
+Cost remains display-only and must not affect food, XP, mood, or evolution.
 
-Provider diagnostics should be structured and source-specific:
+Provider diagnostics should be structured and source-specific. The watch view
+model should expose source health rows shaped around this information, not only
+a flattened helper status string:
+
+```text
+source name
+ready | diagnostic | blocked
+today/bucket effective tokens
+optional diagnostic code and actionable message
+```
+
+Required diagnostic behavior:
 
 - `claude-code` healthy + `codex` missing should produce Claude deltas plus a
   Codex diagnostic.
@@ -120,6 +159,7 @@ lifetime counters.
 Calibration should group historical usage by active day before deriving the
 baseline. Multiple provider/model rows on the same day should contribute to one
 active day total, not distort the median or active-day count as separate days.
+Grouping happens before recent-day limiting and median/percentile calculation.
 
 Catch-up usage should be reconciled coarsely and smeared into display/metabolism
 buckets. Opening Glorp after ordinary time away should not turn a normal active
@@ -128,9 +168,26 @@ not need to reconstruct exact 10-minute history; it only needs to preserve the
 intended companion-scale arc and make the live TUI honest about newly observed
 food.
 
+Initial numeric acceptance for catch-up:
+
+- A single newly observed delta up to one calibrated active day should be split
+  across at least 6 and at most 12 ten-minute buckets.
+- Each smeared bucket should receive no more than 25% of the calibrated active
+  day baseline before burst dampening.
+- One calibrated active day delivered as catch-up should produce roughly one XP
+  day after smearing, with an acceptable test range of 0.75-1.25 XP.
+- A 49-active-day simulation at the calibrated daily baseline, delivered as
+  daily catch-up rather than minute-by-minute watch polls, should reach stage
+  S6 with total XP in the 45-55 range.
+- Catch-up smearing must not create duplicate stage-transition events.
+
 Evolution transitions should still be recorded exactly once. When a transition
 is newly observed by watch mode, the terminal should show a simple live
-evolution moment and then settle into the new stage art.
+evolution moment and then settle into the new stage art. A transition is
+"newly observed" by watch when it appears in the latest successfully applied pet
+state and has not yet been acknowledged by the running watch app. The moment can
+be transient in memory for MVP; it does not need a new persistent
+acknowledgement field unless that is the smallest reliable implementation.
 
 ## Watch TUI Behavior
 
@@ -140,7 +197,8 @@ pet-first.
 Required behavior:
 
 - The app redraw loop should advance animation frames independently of usage
-  polling.
+  polling. Each redraw should derive or increment an animation tick used by
+  `render_pet`; provider polling must not be required for pet-art changes.
 - Manual refresh should poll immediately and should reset or debounce the next
   interval poll so users do not get a back-to-back helper call.
 - Refresh/poll failures should update helper diagnostics without destroying the
@@ -149,11 +207,15 @@ Required behavior:
   or the copy should explicitly say `Esc` closes it. The preferred behavior is
   `?` toggles and `Esc` closes.
 - Compact layout should request compact pet rendering instead of squeezing wide
-  art into a small frame.
+  art into a small frame. The TUI must not cache only non-compact art; it should
+  either render from pet identity/state on demand or carry explicit wide and
+  compact render variants.
 - Recent log ordering should show the newest relevant feed and diagnostic
   events.
 - Mixed helper states should remain visible in the main surface. Actionable
   diagnostics should not disappear just because another source is healthy.
+  `claude-code ready` plus `codex missing_helper` should be visible as two
+  source-health rows without making the whole pet globally blocked.
 
 The current key surface remains:
 
@@ -175,13 +237,14 @@ Required visual direction:
 - Warm black background, dark surface chrome, parchment foreground, faint rules,
   amber accent, moss-green positive state, and coral diagnostic/error state.
 - Pet-forward composition. In wide mode, the left panel should lead with the pet
-  and stage presence, then identity/vitals; it should not feel like a stats card
-  with a small mascot attached.
+  and stage presence, then identity metadata immediately under it, then vitals;
+  it should not feel like a stats card with a small mascot attached.
 - Dense but readable stat rows with labels, 20-cell bars, and values or
   percentages where space allows.
 - Seeded pet color roles should reach the TUI. Body, eyes, mouth, accent, and
   pattern roles can be approximated with terminal colors, but should not be
-  discarded into one foreground color.
+  discarded into one foreground color. Existing `StyledSegment` roles from the
+  renderer should become Ratatui spans or equivalent role-aware styled output.
 - Source rows and event rows should use rails and semantic color to distinguish
   healthy usage, diagnostics, evolution, and normal messages.
 - The right panel should make hierarchy clear: today/current bucket, 7-day
@@ -196,7 +259,10 @@ Required visual direction:
 
 ## Story Coverage
 
-This spec repairs and tightens Stories 001-009.
+This spec repairs and tightens the parts of Stories 001-009 that affect the
+vertical watch truth path. Status, doctor, init, reset, and rename should change
+only where they share provider diagnostics, storage correctness, or MVP
+correctness with that path.
 
 - Story 001: Provider deltas, diagnostics, helper discovery, and cursor diffing
   should remain real and idempotent, including helper version changes.
@@ -220,6 +286,21 @@ This spec repairs and tightens Stories 001-009.
 Story 010 is explicitly excluded from implementation scope, though the build
 report may be corrected if it currently overclaims core or packaging completion.
 
+## Implementation Planning Boundaries
+
+This spec should become two implementation plans rather than one large batch:
+
+1. **Data Truth Pipeline:** provider diffing, config weights, event-time storage,
+   write boundary, calibration grouping, catch-up smearing, mixed diagnostics,
+   and build-report correction.
+2. **Watch Presentation And Interaction:** live renderer integration,
+   role-colored pet spans, pet-first layout, compact render variants, help
+   behavior, refresh debounce, source health rows, log ordering, and evolution
+   moments.
+
+The second plan depends on the first plan's event-time and source-health model.
+Packaging remains outside both plans.
+
 ## Testing Strategy
 
 Tests should be written against the story contracts, not merely against file
@@ -231,6 +312,8 @@ Provider and runtime tests:
   should produce real provider deltas using that configured weight.
 - Repeated polls with unchanged totals should not double-feed, even if provider
   or parser version metadata changes.
+- A provider poll followed by a simulated pet-state save failure should not
+  permanently lose food after the next successful reconciliation.
 - A `claude-code` healthy plus `codex` missing fixture should feed from Claude
   and report Codex as a source-local diagnostic.
 - Historical calibration with multiple rows on the same date should group those
@@ -239,6 +322,8 @@ Provider and runtime tests:
   stage progress, food, or pet lifetime counters.
 - Catch-up simulation over active baseline days should progress at the intended
   companion pace instead of being crushed as one burst.
+- SQLite migration tests should prove older databases without `observed_at` and
+  `bucket_at` remain readable and do not replay old rows as new food.
 
 Watch/TUI tests:
 
@@ -265,6 +350,24 @@ cargo test
 
 Packaging commands are not completion gates for this spec.
 
+## TDD Task Matrix
+
+The implementation plans should include concrete failing tests for at least
+these seams:
+
+| Test area | Fixture or setup | Expected failing behavior today | Final assertion |
+| --- | --- | --- | --- |
+| Event-time storage | Date-only daily row observed at fixed `now` | Bucket reads `0` because `period_start` is midnight | Watch today/current bucket/source/log use `bucket_at` |
+| Write boundary | Provider delta plus injected state-save failure | Cursor/event can advance while pet misses food | Next successful run applies the unapplied food once |
+| Configured weights | Cache-read-heavy fixture and `cache_read_weight = 0.05` | Provider uses default `0.03` | Stored delta uses configured weight |
+| Version-stable cursor | Same totals, changed helper version | New version can look like new food | No new delta; metadata updates safely |
+| Calibration grouping | Same date, multiple model/source rows | Rows can count as separate active days | One active-day total enters baseline |
+| Catch-up smear | Fixed baseline and one-day catch-up delta | Delta is damped as one giant bucket | 6-12 buckets and 0.75-1.25 total XP |
+| Mixed diagnostics | Claude fixture healthy, Codex helper missing | Global helper state can read blocked or hide detail | Claude feeds; Codex diagnostic remains visible |
+| Live animation | Watch redraws without poll | Art stays static | `render_pet` tick changes displayed art |
+| Compact rendering | Narrow terminal | Wide art is squeezed/cropped accidentally | Compact render variant is used intentionally |
+| Evolution moment | Stage transition during watch | `latest_evolution` is ignored | A transient terminal evolution moment renders once |
+
 ## Acceptance Criteria
 
 - `cargo test` includes failing-before/failing-after coverage for the usage
@@ -280,4 +383,3 @@ Packaging commands are not completion gates for this spec.
 - No prototype-only controls or sprite/image assets are introduced.
 - Story 010 packaging/release gaps are not solved in this pass and are not used
   as blockers for core MVP completion.
-
