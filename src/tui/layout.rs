@@ -8,9 +8,13 @@ use ratatui::{
 
 use crate::pet::render::PaletteRoleName;
 use crate::tui::{
-    style::{semantic_styles, tokenpet_palette, LogKind, SemanticStyles},
+    style::{
+        semantic_styles, tokenpet_palette, BarRamp, ColorCapability, LogKind, SemanticStyles,
+        BAR_RAMP_ACCENT, BAR_RAMP_GOOD,
+    },
     view_model::{EventView, SourceStatus, WatchViewModel},
 };
+use crate::tui::style::ramp_index;
 
 const BAR_WIDTH: usize = 20;
 const BODY_X_PADDING: u16 = 2;
@@ -247,25 +251,27 @@ fn render_pet_panel(
     render_lines(frame, rows[1], meta, styles);
 
     let mut stats = vec![Line::from(section_line("stats", rows[2].width as usize, styles))];
-    stats.push(bar_line("fed", vm.fed, styles.filled_bar_good, styles));
-    stats.push(bar_line(
+    stats.push(Line::from(bar_line_spans("fed", vm.fed, BAR_RAMP_GOOD, ColorCapability::Truecolor, styles)));
+    stats.push(Line::from(bar_line_spans(
         "happy",
         vm.happiness,
-        styles.filled_bar_accent,
+        BAR_RAMP_ACCENT,
+        ColorCapability::Truecolor,
         styles,
-    ));
-    stats.push(bar_line(
+    )));
+    stats.push(Line::from(bar_line_spans(
         "energy",
         vm.energy,
-        styles.filled_bar_good,
+        BAR_RAMP_GOOD,
+        ColorCapability::Truecolor,
         styles,
-    ));
+    )));
     let xp = if vm.xp_target <= 0.0 {
         0.0
     } else {
         (vm.xp_current / vm.xp_target).min(1.0)
     };
-    stats.push(bar_line("xp", xp, styles.filled_bar_accent, styles));
+    stats.push(Line::from(bar_line_spans("xp", xp, BAR_RAMP_ACCENT, ColorCapability::Truecolor, styles)));
     if area.height >= 20 {
         let xp_text = if vm.xp_target > 0.0 && vm.xp_current >= vm.xp_target {
             "max".to_string()
@@ -540,19 +546,40 @@ fn section_line<'a>(label: &'a str, target_width: usize, styles: &'a SemanticSty
     ]
 }
 
-fn bar_line<'a>(
+fn bar_line_spans<'a>(
     label: &'a str,
-    ratio: f64,
-    filled_style: ratatui::style::Style,
+    fill_fraction: f64,
+    ramp: BarRamp,
+    capability: ColorCapability,
     styles: &'a SemanticStyles,
-) -> Line<'a> {
-    let filled = (ratio.clamp(0.0, 1.0) * BAR_WIDTH as f64).round() as usize;
-    let empty = BAR_WIDTH.saturating_sub(filled);
-    Line::from(vec![
-        Span::styled(format!("{label:<6}"), styles.label),
-        Span::styled("█".repeat(filled), filled_style),
-        Span::styled("░".repeat(empty), styles.empty_bar),
-    ])
+) -> Vec<Span<'a>> {
+    const BAR_CELLS: usize = 12;
+    let clamped = fill_fraction.clamp(0.0, 1.0);
+    let n_filled = (clamped * BAR_CELLS as f64).round() as usize;
+    let n_filled = n_filled.min(BAR_CELLS);
+    let n_empty = BAR_CELLS - n_filled;
+    let value_pct = (clamped * 100.0).round() as u32;
+
+    let mut spans: Vec<Span<'a>> = Vec::with_capacity(BAR_CELLS + 6);
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(format!("{label:<6}"), styles.label));
+    spans.push(Span::raw(" "));
+    for i in 0..n_filled {
+        let style = match capability {
+            ColorCapability::Truecolor => {
+                let idx = ramp_index(i, n_filled);
+                Style::default().fg(ramp.stops[idx])
+            }
+            ColorCapability::Flat => Style::default().fg(ramp.stops[2]),
+        };
+        spans.push(Span::styled("█", style));
+    }
+    if n_empty > 0 {
+        spans.push(Span::styled("░".repeat(n_empty), styles.empty_bar));
+    }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(format!("{value_pct}"), styles.primary_text));
+    spans
 }
 
 fn event_line<'a>(event: &'a EventView, styles: &'a SemanticStyles) -> Line<'a> {
@@ -700,5 +727,46 @@ mod body_row_tests {
         let line = body_row(inner, 10, &styles);
         let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         assert_eq!(total, 12);
+    }
+}
+
+#[cfg(test)]
+mod bar_line_tests {
+    use super::*;
+    use crate::tui::style::{BAR_RAMP_GOOD, ColorCapability};
+
+    #[test]
+    fn bar_line_zero_fill_renders_twelve_faint() {
+        let styles = semantic_styles();
+        let spans = bar_line_spans("fed", 0.0, BAR_RAMP_GOOD, ColorCapability::Truecolor, &styles);
+        let bar_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let fill_count = bar_text.chars().filter(|c| *c == '░').count();
+        assert_eq!(fill_count, 12);
+        let solid_count = bar_text.chars().filter(|c| *c == '█').count();
+        assert_eq!(solid_count, 0);
+    }
+
+    #[test]
+    fn bar_line_full_fill_renders_twelve_solid() {
+        let styles = semantic_styles();
+        let spans = bar_line_spans("fed", 1.0, BAR_RAMP_GOOD, ColorCapability::Truecolor, &styles);
+        let bar_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let solid_count = bar_text.chars().filter(|c| *c == '█').count();
+        assert_eq!(solid_count, 12);
+    }
+
+    #[test]
+    fn bar_line_flat_capability_uses_solid_color() {
+        let styles = semantic_styles();
+        let spans = bar_line_spans("fed", 0.5, BAR_RAMP_GOOD, ColorCapability::Flat, &styles);
+        let filled: Vec<_> = spans
+            .iter()
+            .filter(|s| s.content.contains('█'))
+            .map(|s| s.style)
+            .collect();
+        let first = filled.first().copied().unwrap();
+        for s in &filled {
+            assert_eq!(*s, first);
+        }
     }
 }
