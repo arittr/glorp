@@ -51,6 +51,8 @@ enum PollRequest {
     Shutdown,
 }
 
+const EVOLUTION_OVERLAY_HOLD: Duration = Duration::from_secs(3);
+
 pub struct WatchApp {
     vm: WatchViewModel,
     config: WatchAppConfig,
@@ -62,6 +64,8 @@ pub struct WatchApp {
     poll_count: u64,
     animation_frame: u64,
     last_poll: Option<Instant>,
+    last_acknowledged_evolution: Option<String>,
+    evolution_overlay_started_at: Option<Instant>,
 }
 
 impl WatchApp {
@@ -106,6 +110,8 @@ impl WatchApp {
             poll_count: 0,
             animation_frame: 0,
             last_poll: None,
+            last_acknowledged_evolution: None,
+            evolution_overlay_started_at: None,
         }
     }
 
@@ -131,7 +137,8 @@ impl WatchApp {
             // visible this frame.
             self.try_collect_poll_result()?;
 
-            let render_evolution = self.vm.should_render_evolution_moment();
+            let render_evolution = self.update_evolution_overlay();
+            let stage_label = self.vm.stage.clone();
             terminal.draw(|frame| {
                 render_watch_frame(frame, &self.vm);
                 match self.overlay {
@@ -139,12 +146,9 @@ impl WatchApp {
                     None => {}
                 }
                 if render_evolution {
-                    render_evolution_overlay(frame);
+                    render_evolution_overlay(frame, Some(stage_label.as_str()));
                 }
             })?;
-            if render_evolution {
-                self.vm.acknowledge_latest_evolution();
-            }
 
             if event::poll(self.config.animation_tick)? {
                 if let Event::Key(key) = event::read()? {
@@ -170,6 +174,35 @@ impl WatchApp {
         self.animation_frame = self.animation_frame.wrapping_add(1);
         let _ =
             crate::commands::watch::rerender_pet_for_view_model(&mut self.vm, self.animation_frame);
+    }
+
+    /// Returns whether the evolution overlay should render this frame.
+    /// Tracks acknowledgement on the WatchApp (not the vm) so that worker
+    /// poll completions which replace `self.vm` wholesale don't reset the
+    /// acknowledged-evolution state and re-fire the overlay every poll.
+    /// Holds the overlay visible for `EVOLUTION_OVERLAY_HOLD` so users can
+    /// actually read it.
+    fn update_evolution_overlay(&mut self) -> bool {
+        let pending = match &self.vm.latest_evolution {
+            Some(evo) if Some(evo) != self.last_acknowledged_evolution.as_ref() => Some(evo),
+            _ => None,
+        };
+        match (pending, self.evolution_overlay_started_at) {
+            (Some(_), None) => {
+                self.evolution_overlay_started_at = Some(Instant::now());
+                true
+            }
+            (Some(_), Some(start)) if start.elapsed() < EVOLUTION_OVERLAY_HOLD => true,
+            (Some(_), Some(_)) => {
+                self.last_acknowledged_evolution = self.vm.latest_evolution.clone();
+                self.evolution_overlay_started_at = None;
+                false
+            }
+            (None, _) => {
+                self.evolution_overlay_started_at = None;
+                false
+            }
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -416,8 +449,9 @@ pub fn render_help_overlay_for_test(frame: &mut ratatui::Frame<'_>) {
 }
 
 pub fn render_evolution_overlay_for_test(frame: &mut ratatui::Frame<'_>) {
-    render_watch_frame(frame, &WatchViewModel::fixture());
-    render_evolution_overlay(frame);
+    let vm = WatchViewModel::fixture();
+    render_watch_frame(frame, &vm);
+    render_evolution_overlay(frame, Some(vm.stage.as_str()));
 }
 
 pub fn render_hatch_overlay_for_test(frame: &mut ratatui::Frame<'_>) {

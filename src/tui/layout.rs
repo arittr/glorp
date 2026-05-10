@@ -54,12 +54,16 @@ pub fn render_help_overlay(frame: &mut Frame<'_>) {
     );
 }
 
-pub fn render_evolution_overlay(frame: &mut Frame<'_>) {
+pub fn render_evolution_overlay(frame: &mut Frame<'_>, stage_label: Option<&str>) {
+    let label_line = match stage_label {
+        Some(label) if !label.is_empty() => format!("evolved into {label}"),
+        _ => "your pet is changing shape".to_string(),
+    };
     render_overlay(
         frame,
         "glorp evolution",
         &[
-            "your pet is changing shape",
+            label_line.as_str(),
             "new stage art appears after the next settled tick",
             "keep feeding it real work",
         ],
