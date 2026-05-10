@@ -252,6 +252,10 @@ fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
             "GLORP_CCUSAGE_BIN",
             "tests/fixtures/helpers/ccusage-fails.mjs",
         )
+        .env(
+            "GLORP_CCUSAGE_CODEX_BIN",
+            "tests/fixtures/helpers/ccusage-fails.mjs",
+        )
         .arg("status")
         .assert()
         .success()
