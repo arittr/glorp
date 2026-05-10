@@ -563,7 +563,11 @@ fn render_wide(
     styles: &SemanticStyles,
 ) {
     let terminal_width = area.width as usize;
-    let frame_inner_width = terminal_width.saturating_sub(2);
+    // Clamp the rounded frame to FRAME_BODY_WIDTH (mockup target). Any extra
+    // terminal width sits outside the frame as bare background, with the
+    // frame itself centered horizontally — matches the hybrid-v4 mockup.
+    let target_outer = FRAME_BODY_WIDTH.min(terminal_width);
+    let frame_inner_width = target_outer.saturating_sub(2);
     let pad_style = styles.body;
 
     // Allocate body height: total minus the two chrome rows.
@@ -671,7 +675,18 @@ fn render_wide(
     };
     let lines = box_with_chrome(body, frame_inner_width, title, footer, chrome);
 
-    frame.render_widget(Paragraph::new(lines).style(styles.body), area);
+    // Paint the surrounding terminal background so the frame sits on top of
+    // body color rather than chrome leaking past the rounded box.
+    frame.render_widget(Block::default().style(styles.body), area);
+    let frame_outer = target_outer as u16;
+    let frame_x = area.x + area.width.saturating_sub(frame_outer) / 2;
+    let frame_rect = Rect {
+        x: frame_x,
+        y: area.y,
+        width: frame_outer,
+        height: area.height,
+    };
+    frame.render_widget(Paragraph::new(lines).style(styles.body), frame_rect);
 }
 
 /// Splits a row of spans into two row-vectors at the given visible char
@@ -1026,18 +1041,45 @@ mod render_wide_tests {
     }
 
     #[test]
-    fn render_wide_draws_frame_at_100_cols() {
+    fn render_wide_centers_78_col_frame_when_terminal_is_wider() {
+        // At 100 cols, the frame stays at 78 cols and floats in the middle:
+        // 11 cells of bare body, then the frame, then 11 cells of bare body.
         let buf = render_buffer(100, 30);
-        let row0 = row_string(&buf, 0);
-        assert!(row0.starts_with("┏━"));
-        assert!(row0.ends_with('┓'));
+        let frame_x_left = (100 - FRAME_BODY_WIDTH) / 2;
+        let frame_x_right = frame_x_left + FRAME_BODY_WIDTH - 1;
+        assert_eq!(
+            buf[(frame_x_left as u16, 0u16)].symbol(),
+            "┏",
+            "frame top-left should be at column {frame_x_left}",
+        );
+        assert_eq!(buf[(frame_x_right as u16, 0u16)].symbol(), "┓");
+        assert_eq!(buf[(frame_x_left as u16, 29u16)].symbol(), "┗");
+        assert_eq!(buf[(frame_x_right as u16, 29u16)].symbol(), "┛");
         for y in 1..29 {
-            assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail broken");
-            assert_eq!(buf[(99u16, y)].symbol(), "┃", "row {y} right rail broken");
+            assert_eq!(
+                buf[(frame_x_left as u16, y)].symbol(),
+                "┃",
+                "row {y} left rail broken",
+            );
+            assert_eq!(
+                buf[(frame_x_right as u16, y)].symbol(),
+                "┃",
+                "row {y} right rail broken",
+            );
         }
-        let row_last = row_string(&buf, 29);
-        assert!(row_last.starts_with("┗━"));
-        assert!(row_last.ends_with('┛'));
+        // The columns outside the frame are bare body (spaces).
+        for y in 0..30 {
+            assert_eq!(
+                buf[(0u16, y)].symbol(),
+                " ",
+                "row {y} far-left should be empty"
+            );
+            assert_eq!(
+                buf[(99u16, y)].symbol(),
+                " ",
+                "row {y} far-right should be empty"
+            );
+        }
     }
 
     #[test]
