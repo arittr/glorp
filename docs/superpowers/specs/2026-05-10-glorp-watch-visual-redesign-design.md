@@ -53,9 +53,13 @@ pad_left(2) + pet_col(26) + gap(2) + data_col(43) + pad_right(3) = 76
 
 The pet column holds, top to bottom: a blank breath row, environmental flourish row(s), the pet art (currently 8×11, with room for ~9×24 once the art initiative ships), an optional ground row, a blank, a `─ vitals ─` rule, and four gradient bars (fed, happy, energy, xp). The data column holds: `─ today ─` with four data rows, blank, `─ 7-day ─` with the sparkline, blank, `─ feed ─` with up to three event entries, blank, `─ helpers ─` with one status row.
 
-The frame top row is `┏━ glorp · <name> the <species> · <age> · <mood> ━…━┓`, with the `━` fill computed so the total width is exactly 78. The frame bottom row is `┗━ q quit · r refresh · ? help ━…━┛`. Mood, name, species, and age move from the old vitals meta block into the title — the meta block in the pet panel goes away.
+The frame top row is `┏━ glorp · <name> the <species> · <age> · <mood> ━…━┓`, with the `━` fill computed so the total width is exactly the current terminal width (or 78 cols, whichever applies). The frame bottom row is `┗━ q quit · r refresh · ? help ━…━┛`. Mood, name, species, and age move from the old vitals meta block into the title — the meta block in the pet panel goes away.
+
+If the title segment would overflow the available frame width (at the wide/compact threshold with a long pet name, for example), truncate the title from the right with a single `…` so the closing `┓` stays visible. Reserve at least 4 fill `━` characters between the title and the closing corner so the frame never collapses to zero fill.
 
 Compact mode triggers below 80 columns. The constant currently called `COMPACT_WIDTH` moves from 72 to 80. In compact mode the outer frame is dropped (frame chrome at narrow widths fights the data for space). Sections stack vertically using the same `─ label ─` rules: pet, vitals, today, 7-day, feed, helpers. Bars and ramps work the same in both modes.
+
+In compact mode, the footer (`q quit · r refresh · ? help`) is rendered as a plain unframed line at the bottom of the layout, not as part of any bottom rule.
 
 The wide mode requires roughly 18 content rows plus two frame rows. If terminal height is below that, fall back to compact mode (the existing height-based degradation in the pet panel applies as today).
 
@@ -70,7 +74,7 @@ Two ramps are defined:
 
 The middle stop in each ramp is the existing `good` / `accent` color from `tokenpet_palette()`. The ramps extend the palette rather than replace it.
 
-For a bar with `N` filled cells, cell `i` uses ramp index `round(i * 4 / max(N-1, 1))`. A single-cell fill uses the middle stop. A bar at 0% renders 12 faint `░` characters. A bar at 100% renders 12 ramp-graded `█` characters from `r0` to `r4`.
+For a bar with `N` filled cells where `N >= 2`, cell `i` uses ramp index `round(i * 4 / (N - 1))`. A single-cell fill (`N == 1`) special-cases to the middle stop (index 2). A bar at 0% renders 12 faint `░` characters and never indexes into the ramp. A bar at 100% renders 12 ramp-graded `█` characters from `r0` to `r4`. Bar cell count and ramps are identical in wide and compact modes — the visual stays consistent across widths.
 
 The bar line format is `  <label>  <bar(12)>  <value>` with a 6-character left-aligned label so `fed`, `happy`, `energy`, and `xp` all share a column. The value is the integer percent, no `%` suffix (values are 0–100 by definition).
 
