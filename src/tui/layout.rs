@@ -423,9 +423,18 @@ fn render_feed_panel_lines<'a>(
     vm: &'a WatchViewModel,
     styles: &'a SemanticStyles,
 ) -> Vec<Line<'a>> {
+    render_feed_panel_lines_capped(width, vm, 3, styles)
+}
+
+fn render_feed_panel_lines_capped<'a>(
+    width: usize,
+    vm: &'a WatchViewModel,
+    max_entries: usize,
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
     let mut out = Vec::new();
     out.push(Line::from(section_line("feed", width, styles)));
-    for event in vm.recent_events.iter().take(3) {
+    for event in vm.recent_events.iter().take(max_entries) {
         let mut spans: Vec<Span<'a>> = Vec::new();
         spans.push(Span::raw("  "));
         spans.push(Span::styled(event.timestamp.clone(), styles.timestamp));
@@ -842,16 +851,60 @@ fn render_wide(
     let pad_left = base_pad_left + extra / 2;
     let pad_right = base_pad_right + extra - extra / 2;
 
-    let pet_lines = render_pet_panel_lines(pet_col, vm, capability, styles);
+    let body_height = area.height.saturating_sub(2) as usize;
+
+    // Build the data column. Feed grows first, then any remaining residual
+    // is distributed as extra blank lines between sections so the body fills
+    // the frame without leaving a cavity at the bottom.
+    let today_lines = render_today_panel_lines(data_col, vm, styles);
+    let spark_lines = render_sparkline_lines(data_col, &vm.recent_daily_effective_tokens, capability, styles);
+    let helpers_lines = render_helpers_panel_lines(data_col, vm, styles);
+    // Fixed overhead with single-blank separators:
+    //   top_blank + today + blank + spark + blank + feed_rule + blank + helpers + bottom_blank
+    let single_gap_overhead = 1 + today_lines.len() + 1 + spark_lines.len() + 1 + 1 + 1 + helpers_lines.len() + 1;
+    let event_count = vm.recent_events.len();
+    let max_feed_entries = body_height
+        .saturating_sub(single_gap_overhead)
+        .max(2)
+        .min(event_count.max(2));
+    let feed_lines = render_feed_panel_lines_capped(data_col, vm, max_feed_entries, styles);
+
+    // Now compute remaining residual after feed has grown. Distribute it as
+    // extra blank lines across 5 separator slots (top, between today/spark,
+    // spark/feed, feed/helpers, bottom).
+    let consumed = today_lines.len() + spark_lines.len() + feed_lines.len() + helpers_lines.len() + 5;
+    let residual = body_height.saturating_sub(consumed);
+    let slots = 5;
+    let extra_per_slot = residual / slots;
+    let extra_remainder = residual % slots;
+    let blank_run = |n: usize| -> Vec<Line<'_>> {
+        (0..n).map(|_| Line::from(Span::raw(""))).collect()
+    };
+    let slot_size = |slot_index: usize| -> usize {
+        1 + extra_per_slot + if slot_index < extra_remainder { 1 } else { 0 }
+    };
+
     let mut data_lines: Vec<Line> = Vec::new();
-    data_lines.push(Line::from(Span::raw("")));
-    data_lines.extend(render_today_panel_lines(data_col, vm, styles));
-    data_lines.push(Line::from(Span::raw("")));
-    data_lines.extend(render_sparkline_lines(data_col, &vm.recent_daily_effective_tokens, capability, styles));
-    data_lines.push(Line::from(Span::raw("")));
-    data_lines.extend(render_feed_panel_lines(data_col, vm, styles));
-    data_lines.push(Line::from(Span::raw("")));
-    data_lines.extend(render_helpers_panel_lines(data_col, vm, styles));
+    data_lines.extend(blank_run(slot_size(0)));
+    data_lines.extend(today_lines);
+    data_lines.extend(blank_run(slot_size(1)));
+    data_lines.extend(spark_lines);
+    data_lines.extend(blank_run(slot_size(2)));
+    data_lines.extend(feed_lines);
+    data_lines.extend(blank_run(slot_size(3)));
+    data_lines.extend(helpers_lines);
+    data_lines.extend(blank_run(slot_size(4)));
+
+    // Pet column: vertically center the pet+vitals block within available height.
+    let raw_pet_lines = render_pet_panel_lines(pet_col, vm, capability, styles);
+    let pet_lines: Vec<Line> = if raw_pet_lines.len() < body_height {
+        let pad_top = (body_height - raw_pet_lines.len()) / 2;
+        let mut padded: Vec<Line> = (0..pad_top).map(|_| Line::from(Span::raw(""))).collect();
+        padded.extend(raw_pet_lines);
+        padded
+    } else {
+        raw_pet_lines
+    };
 
     let age_label = format!("{}d", vm.age_days);
     let mut framed: Vec<Line> = Vec::new();
@@ -863,7 +916,6 @@ fn render_wide(
         &vm.mood,
         styles,
     ));
-    let body_height = area.height.saturating_sub(2) as usize;
     let max_rows = pet_lines.len().max(data_lines.len()).max(body_height);
     for row_index in 0..max_rows {
         let pet_line = pet_lines.get(row_index);
