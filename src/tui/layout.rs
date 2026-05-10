@@ -23,17 +23,23 @@ use crate::tui::{
 /// Order is the render order for the today panel and helpers row.
 const EXPECTED_SOURCES: &[(&str, &str)] = &[("claude-code", "claude"), ("codex", "codex")];
 
-/// Fixed-width layout constants matching the hybrid-v4 mockup.
-/// Geometry: `┃` + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL + RIGHT_PAD + `┃`
-/// equals 78 visible cells total.
-const FRAME_BODY_WIDTH: usize = 78;
-const LEFT_PAD: usize = 2;
-const RIGHT_PAD: usize = 3;
-const GUTTER: usize = 2;
-const LEFT_COL: usize = 26;
-const RIGHT_COL: usize = 43;
+/// Layout constants for the watch frame.
+/// Geometry: `┃` + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL + RIGHT_PAD + `┃`.
+/// LEFT_COL is fixed so the pet doesn't stretch with the window; RIGHT_COL
+/// flexes between RIGHT_COL_MIN and RIGHT_COL_MAX. Surplus width past the
+/// max becomes outer padding so the content stays comfortably centered.
+const LEFT_PAD: usize = 4;
+const RIGHT_PAD: usize = 4;
+const GUTTER: usize = 4;
+const LEFT_COL: usize = 40;
+const RIGHT_COL: usize = 50;
+const RIGHT_COL_MAX: usize = 70;
 
-const COMPACT_THRESHOLD: usize = FRAME_BODY_WIDTH;
+/// Smallest terminal width that uses the wide composition. Below this we
+/// fall back to compact mode. Also the natural "tight" width of the wide
+/// layout — where no outer padding is needed and right column sits at its
+/// minimum.
+const COMPACT_THRESHOLD: usize = LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL + RIGHT_PAD + 2;
 
 pub fn render_help_overlay(frame: &mut Frame<'_>) {
     render_overlay(
@@ -563,13 +569,18 @@ fn render_wide(
     styles: &SemanticStyles,
 ) {
     let terminal_width = area.width as usize;
-    // Frame fills the terminal; right column flexes to use any width above
-    // the 78-cell baseline. Pet, vitals, and helpers stay at their natural
-    // widths; only the data column on the right grows.
+    // Frame fills the terminal. Right column flexes between RIGHT_COL and
+    // RIGHT_COL_MAX as the terminal grows; pet column stays fixed.
+    // Surplus width past the max gets distributed as outer padding so the
+    // content stays comfortably centered instead of stretching.
     let frame_inner_width = terminal_width.saturating_sub(2);
-    let right_col = frame_inner_width
-        .saturating_sub(LEFT_PAD + LEFT_COL + GUTTER + RIGHT_PAD)
-        .max(RIGHT_COL);
+    let right_col_available =
+        frame_inner_width.saturating_sub(LEFT_PAD + LEFT_COL + GUTTER + RIGHT_PAD);
+    let right_col = right_col_available.clamp(RIGHT_COL, RIGHT_COL_MAX);
+    let content_used = LEFT_PAD + LEFT_COL + GUTTER + right_col + RIGHT_PAD;
+    let extra = frame_inner_width.saturating_sub(content_used);
+    let pad_left = LEFT_PAD + extra / 2;
+    let pad_right = RIGHT_PAD + extra - extra / 2;
     let pad_style = styles.body;
 
     // Allocate body height: total minus the two chrome rows.
@@ -640,7 +651,7 @@ fn render_wide(
         .into_iter()
         .map(|row| {
             let mut spans: Vec<Span> = Vec::with_capacity(row.len() + 3);
-            spans.push(Span::raw(" ".repeat(LEFT_PAD)));
+            spans.push(Span::raw(" ".repeat(pad_left)));
             // Insert the gutter between the two columns. Because pad_rows
             // already padded each column to its target width, the join
             // produced [LEFT_COL chars][right_col chars]. Split on LEFT_COL
@@ -649,7 +660,7 @@ fn render_wide(
             spans.extend(left_part);
             spans.push(Span::raw(" ".repeat(GUTTER)));
             spans.extend(right_part);
-            spans.push(Span::raw(" ".repeat(RIGHT_PAD)));
+            spans.push(Span::raw(" ".repeat(pad_right)));
             spans
         })
         .collect();
@@ -1007,10 +1018,11 @@ mod render_wide_tests {
     }
 
     #[test]
-    fn render_wide_draws_rounded_frame_at_78_cols() {
-        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
+    fn render_wide_draws_rounded_frame_at_natural_width() {
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
         let top = row_string(&buf, 0);
         let bottom = row_string(&buf, 29);
+        let right_rail = (COMPACT_THRESHOLD - 1) as u16;
         assert!(
             top.starts_with("┏━"),
             "top row should start with ┏━, got {top:?}"
@@ -1020,35 +1032,40 @@ mod render_wide_tests {
         assert!(bottom.ends_with('┛'));
         for y in 1..29 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail");
-            assert_eq!(buf[(77u16, y)].symbol(), "┃", "row {y} right rail");
+            assert_eq!(buf[(right_rail, y)].symbol(), "┃", "row {y} right rail");
         }
     }
 
     #[test]
     fn render_wide_flexes_frame_to_fill_terminal() {
-        // Frame fills the terminal at any width above the 78-col baseline;
-        // the right column flexes to use the surplus. Pet column stays
-        // fixed so the pet doesn't stretch.
-        let buf = render_buffer(100, 30);
+        // Frame fills the terminal above COMPACT_THRESHOLD; right column
+        // flexes to RIGHT_COL_MAX; any further surplus is outer padding.
+        let test_width: u16 = 140;
+        let buf = render_buffer(test_width, 30);
+        let right_rail = test_width - 1;
         assert_eq!(buf[(0u16, 0u16)].symbol(), "┏");
-        assert_eq!(buf[(99u16, 0u16)].symbol(), "┓");
+        assert_eq!(buf[(right_rail, 0u16)].symbol(), "┓");
         assert_eq!(buf[(0u16, 29u16)].symbol(), "┗");
-        assert_eq!(buf[(99u16, 29u16)].symbol(), "┛");
+        assert_eq!(buf[(right_rail, 29u16)].symbol(), "┛");
         for y in 1..29 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail broken");
-            assert_eq!(buf[(99u16, y)].symbol(), "┃", "row {y} right rail broken");
+            assert_eq!(
+                buf[(right_rail, y)].symbol(),
+                "┃",
+                "row {y} right rail broken"
+            );
         }
     }
 
     #[test]
     fn every_body_row_fills_terminal_width_exactly() {
-        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
         for y in 0..30 {
             let row = row_string(&buf, y);
             assert_eq!(
                 row.chars().count(),
-                FRAME_BODY_WIDTH,
-                "row {y} should be exactly {FRAME_BODY_WIDTH} cells; got {row:?}",
+                COMPACT_THRESHOLD,
+                "row {y} should be exactly {COMPACT_THRESHOLD} cells; got {row:?}",
             );
         }
     }
@@ -1056,9 +1073,11 @@ mod render_wide_tests {
     #[test]
     fn section_dividers_all_end_at_same_right_column() {
         // The right column section dividers (today, 7-day, feed, helpers)
-        // should each end at the right edge of the right column (col 73)
-        // in the 78-col frame. Inspect each dash run.
-        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
+        // should each end at the right edge of the right column, with the
+        // outer right pad as space before the rail.
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
+        // Right column ends at: 1 (left rail) + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL - 1
+        let right_col_end = (1 + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL - 1) as u16;
         let mut divider_rows: Vec<u16> = Vec::new();
         for y in 0..30u16 {
             let row = row_string(&buf, y);
@@ -1075,15 +1094,13 @@ mod render_wide_tests {
             "expected today/7-day/feed/helpers dividers, found at rows {divider_rows:?}",
         );
         for y in divider_rows {
-            // The last '─' in the right column must sit at column 73.
             assert_eq!(
-                buf[(73u16, y)].symbol(),
+                buf[(right_col_end, y)].symbol(),
                 "─",
-                "row {y} last dash should be at column 73",
+                "row {y} last dash should be at column {right_col_end}",
             );
-            // And col 74 must be a space (the outer-pad gap before the rail).
             assert_eq!(
-                buf[(74u16, y)].symbol(),
+                buf[(right_col_end + 1, y)].symbol(),
                 " ",
                 "row {y} should have padding after the right column ends",
             );
@@ -1092,15 +1109,19 @@ mod render_wide_tests {
 
     #[test]
     fn pet_art_fits_inside_left_column_without_overflow() {
-        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
-        // Cells at the gutter (col 29 and 30) should be blank space when
-        // the pet column's pet art would otherwise spill past col 28.
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
+        // Cells at the gutter (between LEFT_COL end and GUTTER start) should
+        // be blank space or a divider dash — never pet content overflowing.
+        let gutter_start = (1 + LEFT_PAD + LEFT_COL) as u16;
         for y in 1..29 {
-            let gutter = buf[(29u16, y)].symbol();
-            assert!(
-                gutter == " " || gutter == "─",
-                "row {y} gutter cell should be space/dash; got {gutter:?}",
-            );
+            for offset in 0..(GUTTER as u16) {
+                let gutter = buf[(gutter_start + offset, y)].symbol();
+                assert!(
+                    gutter == " " || gutter == "─",
+                    "row {y} gutter cell at col {} should be space/dash; got {gutter:?}",
+                    gutter_start + offset,
+                );
+            }
         }
     }
 }
