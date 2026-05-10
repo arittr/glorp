@@ -725,6 +725,21 @@ fn render_frame_top_line<'a>(
     Line::from(spans)
 }
 
+fn render_frame_bottom_line<'a>(width: usize, styles: &'a SemanticStyles) -> Line<'a> {
+    let frame_style = Style::default().fg(tokenpet_palette().accent.rgb);
+    let footer_text = "q quit · r refresh · ? help";
+    let footer_visible = footer_text.chars().count();
+    let n_fill = width.saturating_sub(5 + footer_visible);
+    let spans = vec![
+        Span::styled("┗━ ", frame_style),
+        Span::styled(footer_text.to_string(), styles.label),
+        Span::styled(" ".to_string(), styles.label),
+        Span::styled("━".repeat(n_fill), frame_style),
+        Span::styled("┛", frame_style),
+    ];
+    Line::from(spans)
+}
+
 fn format_xp(value: f64) -> String {
     let value = value.max(0.0);
     if value >= 10.0 {
@@ -733,6 +748,23 @@ fn format_xp(value: f64) -> String {
         format!("{value:.1}")
     } else {
         format!("{value:.2}")
+    }
+}
+
+#[cfg(test)]
+mod frame_bottom_tests {
+    use super::*;
+
+    #[test]
+    fn frame_bottom_pads_to_target_width() {
+        let styles = semantic_styles();
+        let line = render_frame_bottom_line(78, &styles);
+        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(total, 78);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert!(text.starts_with("┗━"));
+        assert!(text.ends_with("┛"));
+        assert!(text.contains("q quit"));
     }
 }
 
