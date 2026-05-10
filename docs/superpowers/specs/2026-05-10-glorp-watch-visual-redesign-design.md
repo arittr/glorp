@@ -53,15 +53,17 @@ Inside the 76-column body (`┃` + 76 + `┃`), the wide-mode grid is:
 pad_left(2) + pet_col(26) + gap(2) + data_col(43) + pad_right(3) = 76
 ```
 
-Each body row is rendered as a single full-width `Line` containing the leading `┃`, the inner content padded to exactly 76 cells, and the trailing `┃`. The renderer does not rely on `Paragraph` to pad short lines — it pads explicitly so the side `┃` columns connect cleanly top to bottom regardless of the inner content's natural width. Section-rule rows (`─ vitals ─…`, `─ today ─…`, etc.) go through the same body-row builder so they also carry the `┃` ends; rules are not rendered in isolation.
+Each body row is rendered as a single full-width `Line` containing the leading `┃`, the inner content padded to exactly 76 cells, and the trailing `┃`. The renderer does not rely on `Paragraph` to pad short lines — it pads explicitly so the side `┃` columns connect cleanly top to bottom regardless of the inner content's natural width.
 
-The pet column holds, top to bottom: a blank breath row, environmental flourish row(s), the pet art (currently 8×11), an optional ground row, a blank, a `─ vitals ─` rule, and four gradient bars (fed, happy, energy, xp). Until the bigger pet-art templates land, the 26-column panel is filled with deliberate environmental composition (sparse `·` flourishes above, a `,,,,,,,,,,,,,,,` ground line below) so the column does not read as empty space around the small pet.
+The body-row builder takes a `Vec<Span>` of inner content (not a pre-built `Line`), measures the visible width, pads with blank `Span`s to 76 cells, and prepends/appends the framing `┃` `Span`s. Section-rule rows (`─ vitals ─…`, `─ today ─…`, etc.) go through the same builder: `section_line()` is refactored to return its inner spans as `Vec<Span>` rather than a finished `Line`, and the body-row builder wraps them. Rules are never rendered in isolation, and the body-row builder is the single source of truth for `┃` placement.
 
-The 8-column pet art is centered horizontally inside the 26-column panel: 9 columns of left-pad, 8 columns of art, 9 columns of right-pad on each art row. The pad cells are blank (no fill), keeping the art floating without visual noise. When the larger pet-art templates ship, the same 26-column panel hosts a wider canvas with smaller centered margins.
+The pet column holds, top to bottom: a blank breath row, environmental flourish row(s), the pet art (currently 11×8 — 11 wide, 8 tall), an optional ground row, a blank, a `─ vitals ─` rule, and four gradient bars (fed, happy, energy, xp). Until the bigger pet-art templates land, the 26-column panel is filled with deliberate environmental composition (sparse `·` flourishes above, a `,,,,,,,,,,,,,,,` ground line below) so the column does not read as empty space around the small pet.
+
+The current pet art is 11 columns wide × 8 rows tall (per `src/pet/art.rs` templates). It is centered horizontally inside the 26-column panel: 7 columns of left-pad, 11 columns of art, 8 columns of right-pad (the extra column on the right is a deliberate, minor asymmetry — splitting evenly is impossible with even/odd width parity). The pad cells are blank (no fill), keeping the art floating without visual noise. When larger pet-art templates ship, the same 26-column panel hosts a wider canvas with smaller centered margins.
 
 The data column holds: `─ today ─` with four data rows, blank, `─ 7-day ─` with the sparkline, blank, `─ feed ─` with up to three event entries, blank, `─ helpers ─` with one status row.
 
-The frame top row is `┏━ glorp · <name> the <species> · <age> · <mood> ━…━┓`, with the `━` fill computed so the total width matches the rendered frame width. Pet name length is bounded at the rename UX site (already a small string), so explicit overflow handling in the renderer is unnecessary.
+The frame top row is `┏━ glorp · <name> the <species> · <age> · <mood> ━…━┓`, with the `━` fill computed so the total width matches the rendered frame width. The renderer truncates the pet name to 16 characters with a trailing `…` if the title would overflow available frame width. There is no length cap at the rename UX today, so the truncation lives in the renderer rather than relying on an absent invariant.
 
 The frame bottom row is `┗━ q quit · r refresh · ? help ━…━┛`. Mood, name, species, and age move from the old vitals meta block into the title — the meta block in the pet panel goes away.
 
@@ -75,7 +77,7 @@ Compact mode triggers below 80 columns; the constant is `COMPACT_THRESHOLD = 80`
 
 In compact mode the outer frame is dropped entirely. Sections stack vertically using the same `─ label ─` rules: pet, vitals, today, 7-day, feed, helpers. The footer (`q quit · r refresh · ? help`) renders as a plain unframed line at the bottom of the layout.
 
-Compact mode's preferred row budget is roughly 22 rows (pet 10 + vitals 4 + today 5 + 7-day 2 + feed 4 + helpers 2 + section gaps + footer). When terminal height is below that, sections drop in this priority: helpers first, then 7-day, then feed entries down to 1, then today rows down to 2 (`tokens` and `last 10m` only), then vitals labels become single-line. Below ~10 rows, render only the pet art and a one-line vitals summary; the renderer should not panic at any height ≥ 1.
+Compact mode's preferred row budget is roughly 22 rows (pet 10 + vitals 4 + today 5 + 7-day 2 + feed 4 + helpers 2 + section gaps + footer). When terminal height is below that, the renderer computes which sections fit *before* building the ratatui constraints vector — sections are added to the layout in priority order until vertical room is exhausted. Drop priority (last to first): helpers, then 7-day, then feed entries down to 1, then today rows down to 2 (`tokens` and `last 10m` only), then vitals labels collapse to a single summary line. Below ~10 rows, render only the pet art and a one-line vitals summary in the format `fed N · happy N · energy N · xp N` (no bars, just numbers). At height 1, render only the vitals summary (pet art is dropped). The renderer must not panic at any height ≥ 1.
 
 ### Per-section heights
 
@@ -87,7 +89,7 @@ Wide mode body needs roughly 18 content rows plus 2 frame rows. Three sections a
 - pet panel: min 10, preferred 12, max 14 rows (pet art + vitals; flexes with art size)
 - feed: min 2, preferred 4, max 8 rows (rule + 1–7 entries)
 
-Extra vertical room is absorbed by feed first (more entries shown), then by pet panel (more breathing room). Section ordering uses ratatui `Constraint::Length` for fixed sections, `Constraint::Min(min)` for the flexing pet panel and feed, with the trailing residual going to feed.
+Extra vertical room is absorbed by feed first (more entries shown), then by pet panel (more breathing room). Section ordering uses `Constraint::Length` for fixed sections (today, 7-day, helpers), `Constraint::Max(14)` for the pet panel so it caps at its preferred max, and `Constraint::Min(2)` for feed so all residual flows there once pet has reached its cap. ratatui distributes proportionally between unbounded `Min` constraints; capping pet with `Max` is what produces feed-first absorption.
 
 When the terminal is too short for the wide-mode minimum (≈20 rows), the renderer falls back to compact mode regardless of width. Compact's own height-degradation rules (above) take over.
 
@@ -104,7 +106,7 @@ The middle stop in each ramp is the existing `good` / `accent` color from `token
 
 `BarRamp` is passed to `bar_line()` by value. `SemanticStyles` is not extended with `bar_ramp_*` fields — the ramps are data, not styles, and are owned by the bar-rendering call sites.
 
-For a bar with `N` filled cells where `N >= 2`, cell `i` uses ramp index `round((i as f64) * 4.0 / ((N - 1) as f64)) as usize` — the multiply and divide are computed in `f64` so the curve doesn't degrade to integer-division steps. A single-cell fill (`N == 1`) uses ramp index 0 (darkest stop) to communicate "barely filled." A bar at 0% renders 12 faint `░` characters and never indexes into the ramp. A bar at 100% renders 12 ramp-graded `█` characters from `r0` to `r4`.
+For a bar with `N` filled cells where `N >= 2`, cell `i` uses ramp index `(round((i as f64) * 4.0 / ((N - 1) as f64)) as usize).min(4)` — the multiply and divide are in `f64` so the curve doesn't degrade to integer-division steps; the `.min(4)` is a defensive cap against floating drift. A single-cell fill (`N == 1`) uses ramp index 0 (darkest stop). A bar at 0% renders 12 faint `░` characters and never indexes into the ramp. A bar at 100% renders 12 ramp-graded `█` characters from `r0` to `r4`.
 
 The bar line format is `  <label>  <bar(12)>  <value>` with a 6-character left-aligned label so `fed`, `happy`, `energy`, and `xp` all share a column. The value is the integer percent, no `%` suffix (values are 0–100 by definition).
 
@@ -117,7 +119,7 @@ The bar ramp design assumes truecolor (24-bit RGB) terminal output. ratatui 0.29
 
 A middle 256-color tier was considered and rejected: it requires hand-tuning a separate ramp, capability tests for a tier most users on tmux-without-`Tc` would tolerate flat anyway, and it does not appreciably improve the experience over solid fill.
 
-Capability detection runs once at startup. The detected `ColorCapability` value is stored on the `WatchApp` (or equivalent renderer state) and threaded into render calls. It is **not** stored as a module-static `OnceCell` — that would make unit tests pollute each other when they want to exercise different capability variants. Capability does not change per-frame and does not need to react to `SIGWINCH`.
+Capability detection runs once at startup. A new `color_capability: ColorCapability` field is added to `WatchAppConfig` (snapshotted from environment at construction). `render_watch_frame()`'s signature gains a `capability: ColorCapability` parameter (or takes `&WatchAppConfig`); the value is threaded down to bar/sparkline rendering. It is **not** stored as a module-static `OnceCell` — that would make unit tests pollute each other when they want to exercise different capability variants. Capability does not change per-frame and does not need to react to `SIGWINCH`.
 
 The 7-day sparkline (also gradient-colored) follows the same capability fallback chain.
 
@@ -134,7 +136,7 @@ The today panel is rebuilt token-only. Commits, PRs, diff lines, and any other s
 ```
 
 - `tokens` is `WatchViewModel.today_effective_tokens` formatted with thousand separators. No delta-vs-yesterday annotation — a date-bounded yesterday total is not currently available from `UsageStore`, and adding that query is out of scope. If the data layer later exposes a `total_for_date(date)` query, a delta annotation can be added without changing the layout.
-- `claude` and `codex` are the corresponding entries in `WatchViewModel.source_breakdown`, with the share-of-today percent computed at render time. If a source is absent from `source_breakdown` today, render `—` in `dim` for the value and percent.
+- `claude` and `codex` are the corresponding entries in `WatchViewModel.source_breakdown`, with the share-of-today percent computed at render time. The renderer carries a hardcoded ordered list of expected surfaces — `[("claude-code", "claude"), ("codex", "codex")]` — defined as a constant in `layout.rs`. The today panel always renders one row per expected surface; if a surface is absent from `source_breakdown`, render `—` in `dim` for the value and percent. Both this list and the same mapping are reused by the helpers row.
 - `last 10m` is `WatchViewModel.current_bucket_effective_tokens`, which is computed today as a trailing 10-minute sum (events in the last 600 seconds). The label "last 10m" reflects the trailing-window semantics. This redesign owns the trailing-vs-aligned choice; it is not deferred to other work.
 
 If a third source surface ever appears in `source_breakdown`, it is logged via `glorp doctor` but not rendered in the today panel for this PR. The today panel has four fixed rows; named sources beyond claude and codex are out of scope.
@@ -158,9 +160,9 @@ Each cell is colored by age using the **green** ramp from the bar palette: oldes
 
 `WatchViewModel.recent_daily_effective_tokens` is currently computed by walking `usage_store.recent_events(500)` and bucketing by date. The 500-event cap silently undercounts history for heavy users (≥ ~170 events/day). This redesign replaces the walk with a direct aggregation query.
 
-`UsageStore` gains one new read-only method: `seven_day_token_history(now_local_date: time::Date) -> Vec<f64>` that returns exactly seven values, one per calendar date in the window `[now_local_date - 6, now_local_date]`, oldest first. Days with no recorded usage produce `0.0` (matching the existing field's shape; the sparkline already renders zero as `·` in `faint`).
+`UsageStore` gains one new read-only method: `seven_day_token_history(now_utc_date: time::Date) -> Vec<f64>` that returns exactly seven values, one per calendar date in the window `[now_utc_date - 6, now_utc_date]`, oldest first. Days with no recorded usage produce `0.0` (matching the existing field's shape; the sparkline already renders zero as `·` in `faint`).
 
-The query reads from `usage_events` grouped by `period_start::date`, not from `daily_aggregates` — `daily_aggregates` is populated only by `compact_before(cutoff)`, which has no caller in the repo today, so recent days live in `usage_events`. The query mirrors the date-bucketing rule used by `today_effective_tokens()`. The caller in `commands/watch.rs` is responsible for converting `now: OffsetDateTime` to a local `time::Date` consistently with how usage events were recorded — keeping date math in one place avoids DST drift.
+The query groups `usage_events` by the existing `period_date` column, which is populated at insert time as `period_start.date().to_string()` — pure UTC, matching `today_effective_tokens()`'s `WHERE period_date = ?1` pattern. The query reads from `usage_events`, not `daily_aggregates`: `daily_aggregates` is only populated by `compact_before(cutoff)`, which has no caller in the repo today, so recent days live in `usage_events`. Pure-UTC bucketing is a deliberate choice — the entire codebase records and reads dates in UTC; introducing local-tz handling here would require the `time` crate's `local-offset` feature and additional soundness work, all of which is out of scope. The caller passes `OffsetDateTime::now_utc().date()`.
 
 The `recent_events(500)` walk for the sparkline goes away. No schema change.
 
@@ -175,17 +177,17 @@ The feed section keeps the existing `EventView` data — token deltas, evolution
   14:02  +18k tokens   codex
 ```
 
-Up to three most recent events, sorted by timestamp descending (newest at the top). The constructor in `commands/watch.rs` currently appends events by category (state, then usage, then diagnostics); the renderer sorts by timestamp before truncating to three. Time in `faint`. Token deltas render as `+Nk tokens` or `+Nm tokens` in `good`, with the source name in `dim`. Evolution events render the literal word `evolution` in `accent` with the target stage in `dim`. Diagnostic and helper failures render the short message in `bad`.
+Up to three most recent events, displayed in the order produced by the watch loop's `build_recent_events()` (state events, then usage events, then diagnostics). `EventView.timestamp` is a `String` formatted as `"HH:MM"` with no date component, so reliable chronological sorting in the renderer is not possible — keeping the existing constructor ordering avoids a fragile time-string sort that would break across midnight. If chronological ordering becomes important later, the upstream constructor is the place to fix it. Time in `faint`. Token deltas render as `+Nk tokens` or `+Nm tokens` in `good`, with the source name in `dim`. Evolution events render the literal word `evolution` in `accent` with the target stage in `dim`. Diagnostic and helper failures render the short message in `bad`.
 
 Token formatting condenses to `Nk` and `Nm` with one decimal place when magnitude is below 10 of the unit.
 
 ## Helpers Status
 
-The helpers section is one ruled row showing `source_health.status` for each provider helper:
+The helpers section is one ruled row showing `source_health.status` for each provider helper, using the same display-name list as the today panel (`claude-code → claude`, `codex → codex`):
 
 ```
 ─ helpers ─────────────────────────────────
-  ccusage  ✓     codex  ✓
+  claude  ✓     codex  ✓
 ```
 
 Status glyphs follow the existing `SourceStatus` enum directly:
@@ -229,7 +231,7 @@ Other failure modes (helper blocked, source degraded, partial outage) are handle
 
 `src/tui/view_model.rs`: no changes. The fields needed already exist.
 
-`src/tui/app.rs`: no changes beyond whatever wiring follows from the layout rewrite.
+`src/tui/app.rs`: add `color_capability: ColorCapability` to `WatchAppConfig`, populated at construction from `style::detect_color_capability()`. Update `render_watch_frame()`'s signature to accept the capability (passed through from the app loop). Other event-loop and key-handling logic is unchanged.
 
 `src/commands/watch.rs`: change one call site so the sparkline reads from the new `seven_day_token_history()` query rather than walking `recent_events(500)`.
 
@@ -275,6 +277,6 @@ This redesign does not test pet art quality. The 8×11 templates carry over unch
 ## References
 
 - Parent product spec: `docs/superpowers/specs/2026-05-08-glorp-design.md`
-- Repair spec (this work depends on Plan 1): `docs/superpowers/specs/2026-05-09-glorp-core-mvp-repair-design.md`
+- Repair spec (related, not blocking): `docs/superpowers/specs/2026-05-09-glorp-core-mvp-repair-design.md`
 - Original handoff: `docs/tokenpet/README.md`
 - Verified mockup: `.superpowers/brainstorm/31764-1778396947/content/hybrid-v4.html`
