@@ -812,15 +812,15 @@ pub fn render_watch_frame_with_capability(
     }
     let styles = semantic_styles();
     if (area.width as usize) < COMPACT_THRESHOLD {
-        render_compact_new(frame, area, vm, capability, &styles);
+        render_compact(frame, area, vm, capability, &styles);
     } else {
-        render_wide_new(frame, area, vm, capability, &styles);
+        render_wide(frame, area, vm, capability, &styles);
     }
 }
 
 const COMPACT_THRESHOLD: usize = 80;
 
-fn render_wide_new(
+fn render_wide(
     frame: &mut Frame<'_>,
     area: Rect,
     vm: &WatchViewModel,
@@ -889,7 +889,7 @@ fn render_wide_new(
     frame.render_widget(Paragraph::new(framed).style(styles.body), area);
 }
 
-fn render_compact_new(
+fn render_compact(
     frame: &mut Frame<'_>,
     area: Rect,
     vm: &WatchViewModel,
