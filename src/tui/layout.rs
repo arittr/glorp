@@ -1351,13 +1351,108 @@ fn render_wide_new(
 fn render_compact_new(
     frame: &mut Frame<'_>,
     area: Rect,
-    _vm: &WatchViewModel,
-    _capability: ColorCapability,
+    vm: &WatchViewModel,
+    capability: ColorCapability,
     styles: &SemanticStyles,
 ) {
-    // Placeholder until Task 16 fills this in. For now, render an empty body
-    // so the entry point compiles.
-    frame.render_widget(Paragraph::new(vec![Line::from("compact placeholder")]).style(styles.body), area);
+    let width = area.width as usize;
+    let height = area.height as usize;
+
+    if height == 0 {
+        return;
+    }
+
+    if height < 10 {
+        let summary = format!(
+            "fed {} · happy {} · energy {} · xp {}",
+            (vm.fed * 100.0).round() as u32,
+            (vm.happiness * 100.0).round() as u32,
+            (vm.energy * 100.0).round() as u32,
+            if vm.xp_target > 0.0 {
+                ((vm.xp_current / vm.xp_target).clamp(0.0, 1.0) * 100.0).round() as u32
+            } else {
+                0
+            },
+        );
+        let lines = vec![Line::from(Span::styled(summary, styles.primary_text))];
+        frame.render_widget(Paragraph::new(lines).style(styles.body), area);
+        return;
+    }
+
+    let pet = render_pet_panel_lines(width, vm, capability, styles);
+    let today = render_today_panel_lines(width, vm, styles);
+    let spark = render_sparkline_lines(width, &vm.recent_daily_effective_tokens, capability, styles);
+    let feed = render_feed_panel_lines(width, vm, styles);
+    let helpers = render_helpers_panel_lines(width, vm, styles);
+
+    let footer = Line::from(vec![
+        Span::styled("q", styles.label),
+        Span::styled(" quit  ", styles.label),
+        Span::styled("r", styles.label),
+        Span::styled(" refresh  ", styles.label),
+        Span::styled("?", styles.label),
+        Span::styled(" help", styles.label),
+    ]);
+
+    let mut all: Vec<Line> = Vec::new();
+    let groups: Vec<Vec<Line>> = vec![pet, today, spark, feed, helpers];
+    for group in groups {
+        if all.len() + group.len() + 1 > height.saturating_sub(1) {
+            break;
+        }
+        all.extend(group);
+        all.push(Line::from(Span::raw("")));
+    }
+    if all.len() < height {
+        all.push(footer);
+    } else if !all.is_empty() {
+        let last_idx = all.len() - 1;
+        all[last_idx] = footer;
+    }
+
+    frame.render_widget(Paragraph::new(all).style(styles.body), area);
+}
+
+#[cfg(test)]
+mod render_compact_tests {
+    use super::*;
+    use crate::tui::style::ColorCapability;
+    use crate::tui::view_model::WatchViewModel;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn render_compact_does_not_draw_frame() {
+        let backend = TestBackend::new(60, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let vm = WatchViewModel::fixture();
+        terminal
+            .draw(|f| render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row0: String = (0..60).map(|x| buffer[(x, 0)].symbol().to_string()).collect();
+        assert!(!row0.contains("┏"));
+        assert!(!row0.contains("┗"));
+    }
+
+    #[test]
+    fn render_compact_drops_helpers_under_height_pressure() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let vm = WatchViewModel::fixture();
+        terminal
+            .draw(|f| render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut all = String::new();
+        for y in 0..12 {
+            for x in 0..60 {
+                all.push_str(buffer[(x, y)].symbol());
+            }
+            all.push('\n');
+        }
+        assert!(!all.contains("helpers"));
+    }
 }
 
 #[cfg(test)]
