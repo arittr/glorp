@@ -692,6 +692,39 @@ fn body_row<'a>(inner: Vec<Span<'a>>, inner_width: usize, styles: &'a SemanticSt
     Line::from(spans)
 }
 
+const NAME_MAX: usize = 16;
+
+fn render_frame_top_line<'a>(
+    width: usize,
+    pet_name: &'a str,
+    species: &'a str,
+    age: &'a str,
+    mood: &'a str,
+    styles: &'a SemanticStyles,
+) -> Line<'a> {
+    let frame_style = Style::default().fg(tokenpet_palette().accent.rgb);
+    let mood_style = Style::default().fg(tokenpet_palette().good.rgb);
+    let display_name: String = if pet_name.chars().count() > NAME_MAX {
+        let truncated: String = pet_name.chars().take(NAME_MAX - 1).collect();
+        format!("{truncated}…")
+    } else {
+        pet_name.to_string()
+    };
+    let title_text = format!("glorp · {display_name} the {species} · {age} · {mood}");
+    let title_visible = title_text.chars().count();
+    let n_fill = width.saturating_sub(5 + title_visible);
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::styled("┏━ ", frame_style));
+    let prefix_end = title_text.len() - mood.len();
+    let prefix = &title_text[..prefix_end];
+    spans.push(Span::styled(prefix.to_string(), styles.label));
+    spans.push(Span::styled(mood.to_string(), mood_style));
+    spans.push(Span::styled(" ".to_string(), styles.label));
+    spans.push(Span::styled("━".repeat(n_fill), frame_style));
+    spans.push(Span::styled("┓", frame_style));
+    Line::from(spans)
+}
+
 fn format_xp(value: f64) -> String {
     let value = value.max(0.0);
     if value >= 10.0 {
@@ -700,6 +733,30 @@ fn format_xp(value: f64) -> String {
         format!("{value:.1}")
     } else {
         format!("{value:.2}")
+    }
+}
+
+#[cfg(test)]
+mod frame_top_tests {
+    use super::*;
+
+    #[test]
+    fn frame_top_pads_to_target_width() {
+        let styles = semantic_styles();
+        let line = render_frame_top_line(78, "mochi", "fuzz", "12d 4h", "content", &styles);
+        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(total, 78);
+    }
+
+    #[test]
+    fn frame_top_truncates_long_pet_name() {
+        let styles = semantic_styles();
+        let very_long = "thisnameiswaytoolongforthetitle";
+        let line = render_frame_top_line(78, very_long, "fuzz", "12d 4h", "content", &styles);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert!(text.contains("…"));
+        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(total, 78);
     }
 }
 
