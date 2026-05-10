@@ -380,7 +380,8 @@ fn format_signed_tokens_short(n: f64) -> String {
     } else {
         format!("{}", abs.round() as i64)
     };
-    if n < 0.0 {
+    // Avoid rendering "-0" when the rounded absolute value is zero.
+    if n < 0.0 && unit != "0" {
         format!("-{unit}")
     } else {
         format!("+{unit}")
