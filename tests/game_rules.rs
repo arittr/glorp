@@ -1,5 +1,6 @@
 use glorp::config::AppConfig;
 use glorp::game::calibration::{CalibrationBaseline, DailyUsage};
+use glorp::game::catchup::smear_catchup_delta;
 use glorp::game::effective_tokens::{EffectiveTokenWeights, TokenBuckets};
 use glorp::game::evolution::{apply_xp_delta, stage_for_xp, Stage};
 use glorp::game::metabolism::{apply_decay, apply_food, Mood, RhythmProfile, Vitals};
@@ -345,4 +346,33 @@ fn there_is_no_death_transition() {
     );
     assert_eq!(out.mood, Mood::Wilted);
     assert!(!format!("{out:?}").to_lowercase().contains("death"));
+}
+
+#[test]
+fn one_active_day_catchup_splits_into_six_to_twelve_buckets() {
+    let baseline = CalibrationBaseline {
+        daily_effective_tokens: 100_000.0,
+    };
+    let buckets = smear_catchup_delta(100_000.0, baseline);
+    assert!((6..=12).contains(&buckets.len()));
+    assert!(buckets.iter().all(|bucket| *bucket <= 25_000.0));
+    let xp = buckets
+        .iter()
+        .fold(0.0, |xp, bucket| apply_xp_delta(xp, *bucket, baseline).xp);
+    assert!((0.75..=1.25).contains(&xp));
+}
+
+#[test]
+fn forty_nine_daily_catchups_reach_s6_without_duplicate_transition_pressure() {
+    let baseline = CalibrationBaseline {
+        daily_effective_tokens: 100_000.0,
+    };
+    let mut xp = 0.0;
+    for _ in 0..49 {
+        for bucket in smear_catchup_delta(100_000.0, baseline) {
+            xp = apply_xp_delta(xp, bucket, baseline).xp;
+        }
+    }
+    assert_eq!(stage_for_xp(xp), Stage::S6);
+    assert!((49.0..=55.0).contains(&xp));
 }

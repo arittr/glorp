@@ -1,9 +1,7 @@
 use crate::error::{GlorpError, Result};
 use crate::game::effective_tokens::EffectiveTokenWeights;
-use crate::game::runtime::floor_to_ten_minute_bucket;
 use crate::storage::usage_store::{
-    NormalizedUsageEvent, ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic,
-    UsageStore,
+    ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
 };
 use crate::usage::normalize::{normalize_usage_json, NormalizedUsageRecord, RawTokenTotals};
 use crate::usage::provider::{
@@ -291,35 +289,11 @@ impl CcusageCommandProvider {
                 provider_version: version.clone(),
                 parser_version: version.clone(),
             };
-            // Stage the row in the unapplied ledger first so a downstream cursor advance
-            // never outpaces the row that represents the food it earned. If insert fails,
-            // the cursor stays put and the next poll re-emits the same delta. After mark,
-            // the cursor matches the row's provider_cursor_value.
-            store.insert_unapplied_event(
-                &NormalizedUsageEvent {
-                    provider_surface: record.provider_surface.clone(),
-                    provider_version: version.clone(),
-                    parser_version: version.clone(),
-                    command: command_name.to_string(),
-                    source_surface: "daily".to_string(),
-                    period_start: parsed_period_start,
-                    observed_at,
-                    bucket_at: floor_to_ten_minute_bucket(observed_at),
-                    model: record.model.clone(),
-                    input_tokens: delta_totals.uncached_input as f64,
-                    output_tokens: delta_totals.output as f64,
-                    cache_creation_tokens: delta_totals.cache_creation as f64,
-                    cache_read_tokens: delta_totals.cache_read as f64,
-                    reasoning_output_tokens: delta_totals.reasoning_output as f64,
-                    effective_tokens,
-                    cost_usd: record.display_cost_usd,
-                    confidence: CONFIDENCE.to_string(),
-                },
-                &cursor_update,
-            )?;
             // Advance the cursor so subsequent polls do not re-emit the same delta.
-            // If apply or save fails, the staged row remains unapplied and the next
-            // successful run reapplies it via apply_unapplied_usage.
+            // The command path stages the delta into the unapplied ledger via
+            // `stage_usage_poll_deltas` (which smears across buckets) before applying
+            // and saving pet state. If apply or save fails, the unapplied rows remain
+            // and the next successful run reapplies them via `apply_unapplied_usage`.
             write_cursor(
                 store,
                 provider_surface,

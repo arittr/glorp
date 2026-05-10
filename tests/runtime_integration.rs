@@ -32,9 +32,11 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
     apply_usage_poll(&mut state, &mut usage_store, &poll2, now).unwrap();
 
+    // Two polls of one calibrated active day each smear into ledger buckets,
+    // crossing both s0->s1 and s1->s2. Each transition records once.
     assert_eq!(state.lifetime_effective_tokens, 200_000.0);
-    assert_eq!(state.stage, "s1");
-    assert!(state.xp > 0.25);
+    assert_eq!(state.stage, "s2");
+    assert!(state.xp > 1.0);
     assert!(state.vitals.fed > 40.0);
     assert_eq!(state.last_usage_poll_at, Some(now));
     assert_eq!(state.last_updated_at, now);
@@ -46,7 +48,15 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
             .count(),
         1
     );
-    assert_eq!(state.seen_stage_transitions, vec!["s0->s1"]);
+    assert_eq!(
+        state
+            .recent_events
+            .iter()
+            .filter(|event| event.contains("evolved from s1 to s2"))
+            .count(),
+        1
+    );
+    assert_eq!(state.seen_stage_transitions, vec!["s0->s1", "s1->s2"]);
 }
 
 #[test]
@@ -134,6 +144,56 @@ fn empty_poll() -> UsagePollResult {
         diagnostics: Vec::new(),
         total_effective_tokens: 0.0,
     }
+}
+
+#[test]
+fn catchup_application_records_each_stage_transition_once() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+
+    for day in 0..49 {
+        let observed_at = now + Duration::days(day);
+        let buckets = glorp::game::catchup::smear_catchup_delta(100_000.0, state.calibration);
+        let bucket_count = buckets.len();
+        for (bucket_index, effective_tokens) in buckets.into_iter().enumerate() {
+            let bucket_at = observed_at
+                - Duration::minutes(bucket_count.saturating_sub(bucket_index + 1) as i64 * 10);
+            usage_store
+                .insert_unapplied_event_bucket(
+                    &NormalizedUsageEvent {
+                        observed_at,
+                        bucket_at,
+                        effective_tokens,
+                        ..NormalizedUsageEvent::for_test_at(observed_at, effective_tokens)
+                    },
+                    &ProviderCursorUpdate {
+                        provider_surface: "claude-code".into(),
+                        cursor_key: format!("cursor-{day}"),
+                        cursor_value: format!("value-{day}"),
+                        provider_version: "test-provider".into(),
+                        parser_version: "test-parser".into(),
+                    },
+                    bucket_index,
+                    bucket_count,
+                )
+                .unwrap();
+        }
+    }
+
+    let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+    usage_store
+        .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+        .unwrap();
+
+    assert_eq!(state.stage, "s6");
+    assert_eq!(state.seen_stage_transitions.len(), 6);
+    assert_eq!(
+        state.seen_stage_transitions,
+        vec!["s0->s1", "s1->s2", "s2->s3", "s3->s4", "s4->s5", "s5->s6"]
+    );
 }
 
 #[test]

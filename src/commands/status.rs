@@ -1,6 +1,6 @@
 use crate::{
     error::{GlorpError, Result},
-    game::runtime::apply_unapplied_usage,
+    game::runtime::{apply_unapplied_usage, stage_usage_poll_deltas},
     paths::AppPaths,
     storage::{state::StateStore, usage_store::UsageStore},
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
@@ -30,6 +30,8 @@ pub fn run() -> Result<()> {
             Ok(result) => {
                 if !result.deltas.is_empty() || result.diagnostics.is_empty() {
                     let now = OffsetDateTime::now_utc();
+                    // Stage smeared ledger rows for new provider deltas before applying.
+                    stage_usage_poll_deltas(&mut usage_store, &result, state.calibration, now)?;
                     let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
                     store.save(&state)?;
                     // Mark after save: a failure here drifts state.lifetime ahead of the

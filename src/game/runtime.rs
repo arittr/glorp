@@ -3,6 +3,7 @@ use time::{Duration, OffsetDateTime};
 use crate::{
     error::Result,
     game::{
+        calibration::CalibrationBaseline,
         evolution::{apply_xp_delta, Stage, StageTransition},
         metabolism::{apply_decay, apply_food, MetabolismResult},
     },
@@ -10,7 +11,7 @@ use crate::{
         state::{PetState, Vitals as StoredVitals},
         usage_store::{NormalizedUsageEvent, UsageStore},
     },
-    usage::provider::UsagePollResult,
+    usage::provider::{UsageDelta, UsagePollResult},
 };
 
 const USAGE_RETENTION_DAYS: i64 = 90;
@@ -25,31 +26,54 @@ pub struct RuntimeUpdate {
 pub fn stage_usage_poll_deltas(
     usage_store: &mut UsageStore,
     poll: &UsagePollResult,
+    baseline: CalibrationBaseline,
+    now: OffsetDateTime,
 ) -> Result<Vec<i64>> {
     let mut ids = Vec::new();
+    let current_bucket = floor_to_ten_minute_bucket(now);
     for delta in &poll.deltas {
-        let event = NormalizedUsageEvent {
-            provider_surface: delta.provider_surface.clone(),
-            provider_version: delta.cursor_update.provider_version.clone(),
-            parser_version: delta.cursor_update.parser_version.clone(),
-            command: delta.command.clone(),
-            source_surface: "daily".to_string(),
-            period_start: delta.period_start,
-            observed_at: delta.observed_at,
-            bucket_at: floor_to_ten_minute_bucket(delta.observed_at),
-            model: delta.model.clone(),
-            input_tokens: 0.0,
-            output_tokens: 0.0,
-            cache_creation_tokens: 0.0,
-            cache_read_tokens: 0.0,
-            reasoning_output_tokens: 0.0,
-            effective_tokens: delta.effective_tokens,
-            cost_usd: None,
-            confidence: delta.confidence.clone(),
-        };
-        ids.push(usage_store.insert_unapplied_event(&event, &delta.cursor_update)?);
+        let buckets = crate::game::catchup::smear_catchup_delta(delta.effective_tokens, baseline);
+        let bucket_count = buckets.len();
+        for (bucket_index, effective_tokens) in buckets.into_iter().enumerate() {
+            let bucket_offset = bucket_count.saturating_sub(bucket_index + 1) as i64;
+            let bucket_at = current_bucket - Duration::minutes(bucket_offset * 10);
+            let event = NormalizedUsageEvent {
+                observed_at: now,
+                bucket_at,
+                effective_tokens,
+                ..event_for_delta(delta, now)?
+            };
+            ids.push(usage_store.insert_unapplied_event_bucket(
+                &event,
+                &delta.cursor_update,
+                bucket_index,
+                bucket_count,
+            )?);
+        }
     }
     Ok(ids)
+}
+
+fn event_for_delta(delta: &UsageDelta, now: OffsetDateTime) -> Result<NormalizedUsageEvent> {
+    Ok(NormalizedUsageEvent {
+        provider_surface: delta.provider_surface.clone(),
+        provider_version: delta.cursor_update.provider_version.clone(),
+        parser_version: delta.cursor_update.parser_version.clone(),
+        command: delta.command.clone(),
+        source_surface: "daily".to_string(),
+        period_start: delta.period_start,
+        observed_at: now,
+        bucket_at: now,
+        model: delta.model.clone(),
+        input_tokens: 0.0,
+        output_tokens: 0.0,
+        cache_creation_tokens: 0.0,
+        cache_read_tokens: 0.0,
+        reasoning_output_tokens: 0.0,
+        effective_tokens: 0.0,
+        cost_usd: None,
+        confidence: delta.confidence.clone(),
+    })
 }
 
 pub fn apply_unapplied_usage(
@@ -98,7 +122,7 @@ pub fn apply_usage_poll(
     poll: &UsagePollResult,
     now: OffsetDateTime,
 ) -> Result<RuntimeUpdate> {
-    stage_usage_poll_deltas(usage_store, poll)?;
+    stage_usage_poll_deltas(usage_store, poll, state.calibration, now)?;
     let update = apply_unapplied_usage(state, usage_store, now)?;
     usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
     Ok(update)

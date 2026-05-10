@@ -3,7 +3,7 @@ use crate::{
     game::{
         evolution::Stage,
         metabolism::{apply_food, Mood, Vitals as GameVitals},
-        runtime::apply_unapplied_usage,
+        runtime::{apply_unapplied_usage, stage_usage_poll_deltas},
     },
     paths::AppPaths,
     pet::{
@@ -156,6 +156,8 @@ fn poll_usage_and_apply(
         CcusageCommandProvider::from_environment_with_weights(weights).poll(&mut usage_store)?;
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
         let now = OffsetDateTime::now_utc();
+        // Stage smeared ledger rows for new provider deltas before applying.
+        stage_usage_poll_deltas(&mut usage_store, &result, state.calibration, now)?;
         let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
         state_store.save(&state)?;
         // Mark after save: a failure here drifts state.lifetime ahead of the

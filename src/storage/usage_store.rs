@@ -165,10 +165,22 @@ impl UsageStore {
         event: &NormalizedUsageEvent,
         cursor_update: &ProviderCursorUpdate,
     ) -> crate::error::Result<i64> {
+        self.insert_unapplied_event_bucket(event, cursor_update, 0, 1)
+    }
+
+    pub fn insert_unapplied_event_bucket(
+        &mut self,
+        event: &NormalizedUsageEvent,
+        cursor_update: &ProviderCursorUpdate,
+        bucket_index: usize,
+        bucket_count: usize,
+    ) -> crate::error::Result<i64> {
         let provider_delta_id = format!(
             "{}|{}|{}",
             cursor_update.provider_surface, cursor_update.cursor_key, cursor_update.cursor_value
         );
+        let bucket_index_i64 = bucket_index as i64;
+        let bucket_count_i64 = bucket_count as i64;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR IGNORE INTO usage_events (
@@ -199,7 +211,7 @@ impl UsageStore {
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                ?19, 0, 1, NULL, ?20, ?21
+                ?19, ?20, ?21, NULL, ?22, ?23
             )",
             params![
                 event.provider_surface,
@@ -221,6 +233,8 @@ impl UsageStore {
                 event.cost_usd,
                 event.confidence,
                 provider_delta_id,
+                bucket_index_i64,
+                bucket_count_i64,
                 cursor_update.cursor_key,
                 cursor_update.cursor_value,
             ],
@@ -228,7 +242,7 @@ impl UsageStore {
         let id: i64 = tx.query_row(
             "SELECT id FROM usage_events
              WHERE provider_delta_id = ?1 AND bucket_index = ?2",
-            params![provider_delta_id, 0_i64],
+            params![provider_delta_id, bucket_index_i64],
             |row| row.get(0),
         )?;
         tx.commit()?;
@@ -503,7 +517,7 @@ impl UsageStore {
                 provider_cursor_value
              FROM usage_events
              WHERE applied_at IS NULL
-             ORDER BY observed_at ASC, id ASC
+             ORDER BY bucket_at ASC, id ASC
              LIMIT ?1",
         )?;
         let rows = stmt
