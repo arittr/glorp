@@ -2,3 +2,5 @@
 /node_modules/
 /npm/glorp/test/.tmp-config*/
 /npm/platform/*/bin/
+**/.DS_Store
+/.superpowers/**/state/
