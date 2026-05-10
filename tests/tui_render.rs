@@ -520,3 +520,22 @@ fn compact_layout_uses_compact_pet_art_width() {
         .iter()
         .all(|line| line.chars().count() <= 18));
 }
+
+#[test]
+fn manual_refresh_resets_interval_timer_for_test() {
+    let harness = WatchTestHarness::with_usage_delta("claude-code", "2026-05-09T13:42:00Z", 1300.0);
+    let mut app = WatchApp::with_poll_callback(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+        },
+        Box::new(harness),
+    );
+
+    app.handle_key_for_test(KeyCode::Char('r'), KeyEventKind::Press)
+        .unwrap();
+    assert_eq!(app.poll_count_for_test(), 1);
+    assert!(!app.interval_due_for_test(Duration::from_secs(1)));
+    assert!(app.interval_due_for_test(Duration::from_secs(61)));
+}

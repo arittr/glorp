@@ -53,6 +53,7 @@ pub struct WatchApp {
     animation_frame: u64,
     last_terminal_width: u16,
     last_compact_for_test: bool,
+    last_poll: Option<Instant>,
 }
 
 impl WatchApp {
@@ -78,6 +79,7 @@ impl WatchApp {
             animation_frame: 0,
             last_terminal_width: 0,
             last_compact_for_test: false,
+            last_poll: None,
         }
     }
 
@@ -93,10 +95,13 @@ impl WatchApp {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
-        let mut last_poll = Instant::now();
+        if self.last_poll.is_none() {
+            self.last_poll = Some(Instant::now());
+        }
         loop {
             self.advance_animation_frame();
 
+            let render_evolution = self.vm.should_render_evolution_moment();
             let mut frame_width: u16 = 0;
             terminal.draw(|frame| {
                 frame_width = frame.area().width;
@@ -105,8 +110,14 @@ impl WatchApp {
                     Some(Overlay::Help) => render_help_overlay(frame),
                     None => {}
                 }
+                if render_evolution {
+                    render_evolution_overlay(frame);
+                }
             })?;
             self.last_terminal_width = frame_width;
+            if render_evolution {
+                self.vm.acknowledge_latest_evolution();
+            }
 
             if event::poll(self.config.animation_tick)? {
                 if let Event::Key(key) = event::read()? {
@@ -116,9 +127,13 @@ impl WatchApp {
                 }
             }
 
-            if last_poll.elapsed() >= self.config.usage_poll_interval {
+            if self
+                .last_poll
+                .map(|instant| instant.elapsed() >= self.config.usage_poll_interval)
+                .unwrap_or(true)
+            {
                 self.poll_usage()?;
-                last_poll = Instant::now();
+                self.last_poll = Some(Instant::now());
             }
         }
         Ok(())
@@ -154,6 +169,7 @@ impl WatchApp {
             }
             KeyCode::Char('r') => {
                 self.poll_usage()?;
+                self.last_poll = Some(Instant::now());
                 Ok(false)
             }
             _ => Ok(false),
@@ -174,6 +190,10 @@ impl WatchApp {
 
     pub fn poll_count_for_test(&self) -> u64 {
         self.poll_count
+    }
+
+    pub fn interval_due_for_test(&self, elapsed_since_last_poll: Duration) -> bool {
+        elapsed_since_last_poll >= self.config.usage_poll_interval
     }
 
     pub fn advance_animation_for_test(&mut self) {
