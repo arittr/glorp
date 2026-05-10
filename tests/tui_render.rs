@@ -353,3 +353,21 @@ fn help_evolution_and_hatch_overlays_use_tokenpet_surface_and_accent() {
     assert_overlay(render_evolution_overlay_for_test, p.accent.rgb);
     assert_overlay(render_hatch_overlay_for_test, p.accent.rgb);
 }
+
+#[test]
+fn animation_tick_rerenders_pet_art_without_polling_usage() {
+    let mut app = WatchApp::with_config(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(999),
+        },
+    );
+
+    let before = app.view_model_for_test().pet_art.clone();
+    app.advance_animation_for_test();
+    let after = app.view_model_for_test().pet_art.clone();
+
+    assert_ne!(before, after);
+    assert_eq!(app.poll_count_for_test(), 0);
+}

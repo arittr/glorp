@@ -18,7 +18,10 @@ use crate::{
     tui::{
         app::{WatchApp, WatchUsagePoller},
         style::LogKind,
-        view_model::{EventView, SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel},
+        view_model::{
+            EventView, PetRenderModel, SourceHealthView, SourceStatus, SourceUsageView,
+            WatchViewModel,
+        },
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
@@ -82,6 +85,13 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
 
     Ok(WatchViewModel {
         pet_art: rendered.lines,
+        pet_spans: rendered.spans,
+        pet_render: PetRenderModel {
+            seed: state.pet.seed.clone(),
+            generated_species: state.pet.generated_species.clone(),
+            stage: state.stage.clone(),
+            mood: mood_label(mood).to_string(),
+        },
         pet_name: state.pet.accepted_name.clone(),
         species: species.as_str().to_string(),
         stage: stage_label(species, stage).to_string(),
@@ -216,6 +226,42 @@ fn mood_label(mood: Mood) -> &'static str {
         Mood::Sleepy => "sleepy",
         Mood::Wilted => "wilted",
     }
+}
+
+fn parse_mood(value: &str) -> Mood {
+    match value {
+        "happy" => Mood::Happy,
+        "hungry" => Mood::Hungry,
+        "sad" => Mood::Sad,
+        "sleepy" => Mood::Sleepy,
+        "wilted" => Mood::Wilted,
+        _ => Mood::Content,
+    }
+}
+
+pub fn rerender_pet_for_view_model(
+    vm: &mut WatchViewModel,
+    tick: u64,
+    compact: bool,
+) -> Result<()> {
+    let species = parse_species(&vm.pet_render.generated_species)
+        .unwrap_or_else(|| generate_pet(&vm.pet_render.seed).species);
+    let stage = parse_stage(&vm.pet_render.stage);
+    let mood = parse_mood(&vm.pet_render.mood);
+    let generated = generate_pet(&vm.pet_render.seed).with_species_for_test(species);
+    let rendered = render_pet(
+        &generated,
+        stage,
+        mood,
+        AnimationFrame {
+            tick,
+            compact,
+            blink_suppression_ticks: 0,
+        },
+    );
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+    Ok(())
 }
 
 fn next_stage_xp_target(stage: Stage) -> f64 {

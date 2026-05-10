@@ -3,6 +3,8 @@ use crate::tui::style::LogKind;
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatchViewModel {
     pub pet_art: Vec<String>,
+    pub pet_spans: Vec<crate::pet::render::StyledSegment>,
+    pub pet_render: PetRenderModel,
     pub pet_name: String,
     pub species: String,
     pub stage: String,
@@ -22,6 +24,14 @@ pub struct WatchViewModel {
     pub helper_status: String,
     pub errors: Vec<String>,
     pub latest_evolution: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PetRenderModel {
+    pub seed: String,
+    pub generated_species: String,
+    pub stage: String,
+    pub mood: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +68,13 @@ impl WatchViewModel {
     pub fn fixture() -> Self {
         Self {
             pet_art: vec!["  /\\_/\\  ".into(), " ( o.o ) ".into(), "  > ^ <  ".into()],
+            pet_spans: Vec::new(),
+            pet_render: PetRenderModel {
+                seed: "fixture-seed".into(),
+                generated_species: "fuzz".into(),
+                stage: "s0".into(),
+                mood: "content".into(),
+            },
             pet_name: "miso".into(),
             species: "terminal sprout".into(),
             stage: "hatchling".into(),

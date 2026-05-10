@@ -50,6 +50,9 @@ pub struct WatchApp {
     overlay: Option<Overlay>,
     poller: Box<dyn WatchUsagePoller>,
     poll_count: u64,
+    animation_frame: u64,
+    last_terminal_width: u16,
+    last_compact_for_test: bool,
 }
 
 impl WatchApp {
@@ -72,6 +75,9 @@ impl WatchApp {
             overlay: None,
             poller,
             poll_count: 0,
+            animation_frame: 0,
+            last_terminal_width: 0,
+            last_compact_for_test: false,
         }
     }
 
@@ -89,13 +95,18 @@ impl WatchApp {
     ) -> Result<()> {
         let mut last_poll = Instant::now();
         loop {
+            self.advance_animation_frame();
+
+            let mut frame_width: u16 = 0;
             terminal.draw(|frame| {
+                frame_width = frame.area().width;
                 render_watch_frame(frame, &self.vm);
                 match self.overlay {
                     Some(Overlay::Help) => render_help_overlay(frame),
                     None => {}
                 }
             })?;
+            self.last_terminal_width = frame_width;
 
             if event::poll(self.config.animation_tick)? {
                 if let Event::Key(key) = event::read()? {
@@ -111,6 +122,16 @@ impl WatchApp {
             }
         }
         Ok(())
+    }
+
+    fn advance_animation_frame(&mut self) {
+        self.animation_frame = self.animation_frame.wrapping_add(1);
+        let compact = self.last_terminal_width > 0 && self.last_terminal_width < 72;
+        let _ = crate::commands::watch::rerender_pet_for_view_model(
+            &mut self.vm,
+            self.animation_frame,
+            compact,
+        );
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -146,6 +167,23 @@ impl WatchApp {
 
     pub fn poll_count_for_test(&self) -> u64 {
         self.poll_count
+    }
+
+    pub fn advance_animation_for_test(&mut self) {
+        self.animation_frame = self.animation_frame.wrapping_add(1);
+        let _ = crate::commands::watch::rerender_pet_for_view_model(
+            &mut self.vm,
+            self.animation_frame,
+            self.last_compact_for_test,
+        );
+    }
+
+    pub fn view_model_for_test(&self) -> &WatchViewModel {
+        &self.vm
+    }
+
+    pub fn set_compact_for_test(&mut self, compact: bool) {
+        self.last_compact_for_test = compact;
     }
 
     #[doc(hidden)]
