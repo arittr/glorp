@@ -2,8 +2,9 @@ use glorp::config::AppConfig;
 use glorp::paths::AppPaths;
 use glorp::storage::state::{PetState, StateStore, Vitals};
 use glorp::storage::usage_store::{NormalizedUsageEvent, UsageStore};
+use rusqlite::Connection;
 use tempfile::tempdir;
-use time::{Duration, OffsetDateTime};
+use time::{macros::datetime, Duration, OffsetDateTime};
 
 #[test]
 fn state_files_stay_inside_config_override() {
@@ -113,6 +114,78 @@ fn normalized_usage_storage_never_persists_transcript_payloads() {
     assert!(!text.contains("prompt text must not persist"));
     assert!(!text.contains("response text must not persist"));
     assert!(!text.contains("tool payload must not persist"));
+}
+
+#[test]
+fn usage_events_store_observed_and_bucket_times_separately_from_period_start() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_config_dir(dir.path().to_path_buf());
+    let mut store = UsageStore::open(&paths.usage_db).unwrap();
+    let period_start = datetime!(2026-05-09 00:00 UTC);
+    let observed_at = datetime!(2026-05-09 19:17 UTC);
+    let bucket_at = datetime!(2026-05-09 19:10 UTC);
+
+    store
+        .insert_event(&NormalizedUsageEvent {
+            observed_at,
+            bucket_at,
+            ..NormalizedUsageEvent::for_test_at(period_start, 420.0)
+        })
+        .unwrap();
+
+    let events = store.recent_events(1).unwrap();
+    assert_eq!(events[0].period_start, period_start);
+    assert_eq!(events[0].observed_at, observed_at);
+    assert_eq!(events[0].bucket_at, bucket_at);
+}
+
+#[test]
+fn old_usage_rows_migrate_with_conservative_event_times() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("usage.sqlite");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_surface TEXT NOT NULL,
+                provider_version TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                command TEXT NOT NULL,
+                source_surface TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_date TEXT NOT NULL,
+                model TEXT,
+                input_tokens REAL NOT NULL,
+                output_tokens REAL NOT NULL,
+                cache_creation_tokens REAL NOT NULL,
+                cache_read_tokens REAL NOT NULL,
+                reasoning_output_tokens REAL NOT NULL,
+                effective_tokens REAL NOT NULL,
+                cost_usd REAL,
+                confidence TEXT NOT NULL
+            );
+            INSERT INTO usage_events (
+                provider_surface, provider_version, parser_version, command,
+                source_surface, period_start, period_date, model,
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                reasoning_output_tokens, effective_tokens, cost_usd, confidence
+            ) VALUES (
+                'claude-code', '18.0.11', '18.0.11', 'ccusage',
+                'daily', '2026-05-08T00:00:00Z', '2026-05-08', 'claude-opus-4',
+                1, 2, 3, 4, 0, 6, NULL, 'local-log-derived'
+            );
+            ",
+        )
+        .unwrap();
+    }
+
+    let store = UsageStore::open(&db).unwrap();
+    let events = store.recent_events(5).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].observed_at, datetime!(2026-05-08 00:00 UTC));
+    assert_eq!(events[0].bucket_at, datetime!(2026-05-08 00:00 UTC));
 }
 
 #[test]

@@ -11,6 +11,8 @@ pub struct NormalizedUsageEvent {
     pub command: String,
     pub source_surface: String,
     pub period_start: OffsetDateTime,
+    pub observed_at: OffsetDateTime,
+    pub bucket_at: OffsetDateTime,
     pub model: Option<String>,
     pub input_tokens: f64,
     pub output_tokens: f64,
@@ -50,6 +52,8 @@ impl NormalizedUsageEvent {
             command: "ccusage daily --json --offline".to_string(),
             source_surface: "daily".to_string(),
             period_start,
+            observed_at: period_start,
+            bucket_at: period_start,
             model: Some("test-model".to_string()),
             input_tokens: effective_tokens,
             output_tokens: 0.0,
@@ -96,6 +100,8 @@ impl UsageStore {
                 command,
                 source_surface,
                 period_start,
+                observed_at,
+                bucket_at,
                 period_date,
                 model,
                 input_tokens,
@@ -106,7 +112,10 @@ impl UsageStore {
                 effective_tokens,
                 cost_usd,
                 confidence
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+            )",
             params![
                 event.provider_surface,
                 event.provider_version,
@@ -114,6 +123,8 @@ impl UsageStore {
                 event.command,
                 event.source_surface,
                 format_time(event.period_start)?,
+                format_time(event.observed_at)?,
+                format_time(event.bucket_at)?,
                 event.period_start.date().to_string(),
                 event.model,
                 event.input_tokens,
@@ -291,6 +302,8 @@ impl UsageStore {
                 command,
                 source_surface,
                 period_start,
+                observed_at,
+                bucket_at,
                 model,
                 input_tokens,
                 output_tokens,
@@ -301,12 +314,14 @@ impl UsageStore {
                 cost_usd,
                 confidence
              FROM usage_events
-             ORDER BY period_start DESC, id DESC
+             ORDER BY observed_at DESC, id DESC
              LIMIT ?1",
         )?;
         let events = stmt
             .query_map(params![limit], |row| {
                 let period_start: String = row.get(5)?;
+                let observed_at: String = row.get(6)?;
+                let bucket_at: String = row.get(7)?;
                 Ok(NormalizedUsageEvent {
                     provider_surface: row.get(0)?,
                     provider_version: row.get(1)?,
@@ -314,15 +329,17 @@ impl UsageStore {
                     command: row.get(3)?,
                     source_surface: row.get(4)?,
                     period_start: parse_time_for_sql(&period_start)?,
-                    model: row.get(6)?,
-                    input_tokens: row.get(7)?,
-                    output_tokens: row.get(8)?,
-                    cache_creation_tokens: row.get(9)?,
-                    cache_read_tokens: row.get(10)?,
-                    reasoning_output_tokens: row.get(11)?,
-                    effective_tokens: row.get(12)?,
-                    cost_usd: row.get(13)?,
-                    confidence: row.get(14)?,
+                    observed_at: parse_time_for_sql(&observed_at)?,
+                    bucket_at: parse_time_for_sql(&bucket_at)?,
+                    model: row.get(8)?,
+                    input_tokens: row.get(9)?,
+                    output_tokens: row.get(10)?,
+                    cache_creation_tokens: row.get(11)?,
+                    cache_read_tokens: row.get(12)?,
+                    reasoning_output_tokens: row.get(13)?,
+                    effective_tokens: row.get(14)?,
+                    cost_usd: row.get(15)?,
+                    confidence: row.get(16)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -405,6 +422,8 @@ impl UsageStore {
                 command TEXT NOT NULL,
                 source_surface TEXT NOT NULL,
                 period_start TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                bucket_at TEXT NOT NULL,
                 period_date TEXT NOT NULL,
                 model TEXT,
                 input_tokens REAL NOT NULL,
@@ -451,8 +470,50 @@ impl UsageStore {
             );
             ",
         )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "observed_at",
+            "ALTER TABLE usage_events ADD COLUMN observed_at TEXT;",
+            "UPDATE usage_events SET observed_at = period_start WHERE observed_at IS NULL;",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "bucket_at",
+            "ALTER TABLE usage_events ADD COLUMN bucket_at TEXT;",
+            "UPDATE usage_events SET bucket_at = period_start WHERE bucket_at IS NULL;",
+        )?;
+        self.conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_usage_events_observed_at
+                ON usage_events(observed_at);
+            ",
+        )?;
         Ok(())
     }
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> crate::error::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_usage_event_column(
+    conn: &Connection,
+    name: &str,
+    definition: &str,
+    backfill_sql: &str,
+) -> crate::error::Result<()> {
+    if !column_exists(conn, "usage_events", name)? {
+        conn.execute_batch(definition)?;
+        conn.execute_batch(backfill_sql)?;
+    }
+    Ok(())
 }
 
 fn add_lifetime_counter(

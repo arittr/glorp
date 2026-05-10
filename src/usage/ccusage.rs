@@ -132,6 +132,7 @@ impl CcusageCommandProvider {
         let mut deltas = Vec::new();
         let mut diagnostics = Vec::new();
         let weights = EffectiveTokenWeights::default();
+        let observed_at = OffsetDateTime::now_utc();
         for record in records {
             let key = ProviderCursorKey {
                 provider_surface: record.provider_surface.clone(),
@@ -200,6 +201,8 @@ impl CcusageCommandProvider {
                 command: command_name.to_string(),
                 source_surface: "daily".to_string(),
                 period_start: parse_period_start(&record.period_start)?,
+                observed_at,
+                bucket_at: observed_at,
                 model: record.model.clone(),
                 input_tokens: delta_totals.uncached_input as f64,
                 output_tokens: delta_totals.output as f64,
