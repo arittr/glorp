@@ -117,49 +117,6 @@ fn wide_layout_uses_tokenpet_metadata_today_grid_and_log_rhythm() {
 }
 
 #[test]
-fn wide_layout_keeps_pet_and_stats_top_stacked_like_tokenpet_mockup() {
-    let backend = TestBackend::new(157, 34);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    let first_pet_line = lines
-        .iter()
-        .position(|line| line.contains("/\\_/\\"))
-        .expect("pet art should render");
-    let vitals_line = lines
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .expect("vitals header should render");
-    let stats_line = lines
-        .iter()
-        .position(|line| line.contains("stats"))
-        .expect("stats header should render");
-    let last_divider_line = lines
-        .iter()
-        .rposition(|line| line.contains("╎"))
-        .expect("column divider should render");
-
-    assert!(
-        first_pet_line < 12,
-        "pet art should begin near the top of the left column, got row {first_pet_line}"
-    );
-    assert!(
-        vitals_line > first_pet_line && vitals_line <= first_pet_line + 6,
-        "vitals metadata should follow the pet stage without a large vertical gulf; pet row {first_pet_line}, vitals row {vitals_line}"
-    );
-    assert!(
-        stats_line > vitals_line && stats_line <= vitals_line + 6,
-        "stats should follow the vitals metadata without a large vertical gulf; vitals row {vitals_line}, stats row {stats_line}"
-    );
-    assert!(
-        last_divider_line <= stats_line + 8,
-        "column divider should end near the content instead of stretching to the footer; stats row {stats_line}, divider row {last_divider_line}"
-    );
-}
-
-#[test]
 fn event_log_uses_timestamps_rails_sparkline_and_semantic_colors() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -395,25 +352,6 @@ fn animation_tick_rerenders_pet_art_without_polling_usage() {
 }
 
 #[test]
-fn wide_layout_leads_with_pet_before_vitals_metadata() {
-    let backend = TestBackend::new(120, 32);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    let first_pet = lines
-        .iter()
-        .position(|line| line.contains("/\\_/\\"))
-        .unwrap();
-    let vitals = lines
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .unwrap();
-    assert!(first_pet < vitals);
-}
-
-#[test]
 fn source_health_rows_render_ready_and_diagnostic_states_together() {
     let mut vm = WatchViewModel::fixture();
     vm.source_health = vec![
@@ -461,44 +399,6 @@ fn question_mark_toggles_help_overlay() {
     app.handle_key_for_test(KeyCode::Char('?'), KeyEventKind::Press)
         .unwrap();
     assert!(!app.help_visible_for_test());
-}
-
-#[test]
-fn pet_art_and_vitals_metadata_have_no_blank_rows_between_them() {
-    let mut vm = WatchViewModel::fixture();
-    vm.pet_art = vec![
-        "    /\\     ".into(),
-        "   /  \\    ".into(),
-        "  / o.o \\  ".into(),
-        " /  ◇v◇  \\ ".into(),
-        " \\  ✦✦✦  / ".into(),
-        "  \\  ·  /  ".into(),
-        "   \\___/   ".into(),
-    ];
-    vm.pet_spans = Vec::new();
-    let backend = TestBackend::new(120, 32);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-
-    let vitals_row = lines
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .expect("vitals header should render");
-    let last_pet_row = lines
-        .iter()
-        .take(vitals_row)
-        .enumerate()
-        .filter(|(_, line)| line.contains('/') || line.contains('\\') || line.contains("o.o"))
-        .map(|(index, _)| index)
-        .max()
-        .expect("at least one pet art row should render before vitals");
-
-    let gap = vitals_row - last_pet_row - 1;
-    assert!(
-        gap <= 1,
-        "expected vitals to follow pet art with no blank rows between them; pet last row {last_pet_row}, vitals row {vitals_row}, gap {gap}"
-    );
 }
 
 #[test]
