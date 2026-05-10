@@ -4,7 +4,7 @@ use crate::{
     error::Result,
     game::{
         calibration::CalibrationBaseline,
-        evolution::{apply_xp_delta, Stage, StageTransition},
+        evolution::{apply_xp_delta, stage_for_xp, Stage, StageTransition},
         metabolism::{apply_decay, apply_food, MetabolismResult},
     },
     storage::{
@@ -85,6 +85,7 @@ pub fn apply_unapplied_usage(
     usage_store: &mut UsageStore,
     now: OffsetDateTime,
 ) -> Result<RuntimeUpdate> {
+    reconcile_stage_with_xp(state);
     let rows = usage_store.unapplied_events(500)?;
     let recent_effective_tokens = rows
         .iter()
@@ -213,6 +214,50 @@ fn stage_name(stage: Stage) -> &'static str {
         Stage::S4 => "s4",
         Stage::S5 => "s5",
         Stage::S6 => "s6",
+    }
+}
+
+fn parse_stage_name(value: &str) -> Stage {
+    match value {
+        "s1" => Stage::S1,
+        "s2" => Stage::S2,
+        "s3" => Stage::S3,
+        "s4" => Stage::S4,
+        "s5" => Stage::S5,
+        "s6" => Stage::S6,
+        _ => Stage::S0,
+    }
+}
+
+// If saved state.xp now maps to a higher stage than state.stage records — for
+// example after a threshold curve change between runs — emit the missing
+// transitions so the pet catches up before new food gets applied.
+fn reconcile_stage_with_xp(state: &mut PetState) {
+    let saved = parse_stage_name(&state.stage) as usize;
+    let current = stage_for_xp(state.xp) as usize;
+    if current <= saved {
+        return;
+    }
+    for index in (saved + 1)..=current {
+        record_stage_transition(
+            state,
+            StageTransition {
+                from: stage_from_index(index - 1),
+                to: stage_from_index(index),
+            },
+        );
+    }
+}
+
+fn stage_from_index(index: usize) -> Stage {
+    match index {
+        0 => Stage::S0,
+        1 => Stage::S1,
+        2 => Stage::S2,
+        3 => Stage::S3,
+        4 => Stage::S4,
+        5 => Stage::S5,
+        _ => Stage::S6,
     }
 }
 

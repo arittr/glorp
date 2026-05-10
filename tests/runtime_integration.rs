@@ -85,6 +85,26 @@ fn no_delta_poll_applies_rhythm_decay_without_granting_xp() {
 }
 
 #[test]
+fn apply_reconciles_saved_stage_when_xp_outranks_it() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    // Simulate state from before a threshold change: xp passes the new s1 and
+    // s2 thresholds (0.04 and 0.25) but stage was last saved as "s0".
+    state.xp = 0.30;
+    state.stage = "s0".into();
+    state.seen_stage_transitions = Vec::new();
+
+    apply_usage_poll(&mut state, &mut usage_store, &empty_poll(), now).unwrap();
+
+    assert_eq!(state.stage, "s2");
+    assert_eq!(state.seen_stage_transitions, vec!["s0->s1", "s1->s2"]);
+}
+
+#[test]
 fn runtime_compacts_old_usage_events_after_poll() {
     let dir = tempdir().unwrap();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
