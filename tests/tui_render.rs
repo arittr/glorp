@@ -1,10 +1,11 @@
 use crossterm::event::{KeyCode, KeyEventKind};
+use glorp::pet::render::{PaletteRoleName, StyledSegment};
 use glorp::tui::app::{
     render_evolution_overlay_for_test, render_frame_for_test, render_hatch_overlay_for_test,
     render_help_overlay_for_test, run_single_watch_tick_for_test, WatchApp, WatchAppConfig,
     WatchTestHarness, WatchViewModel,
 };
-use glorp::tui::style::tokenpet_palette;
+use glorp::tui::style::{semantic_styles, tokenpet_palette};
 use glorp::tui::view_model::{SourceHealthView, SourceStatus};
 use ratatui::{
     backend::TestBackend, buffer::Buffer, layout::Position, style::Color, Frame, Terminal,
@@ -352,6 +353,42 @@ fn help_evolution_and_hatch_overlays_use_tokenpet_surface_and_accent() {
     assert_overlay(render_help_overlay_for_test, p.accent.rgb);
     assert_overlay(render_evolution_overlay_for_test, p.accent.rgb);
     assert_overlay(render_hatch_overlay_for_test, p.accent.rgb);
+}
+
+#[test]
+fn pet_renderer_roles_reach_tui_cells() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_art = vec![" {eye}{body}{accent}".into()];
+    vm.pet_spans = vec![
+        StyledSegment {
+            line: 0,
+            start: 1,
+            end: 2,
+            role: PaletteRoleName::Eye,
+        },
+        StyledSegment {
+            line: 0,
+            start: 2,
+            end: 3,
+            role: PaletteRoleName::Body,
+        },
+        StyledSegment {
+            line: 0,
+            start: 3,
+            end: 4,
+            role: PaletteRoleName::Accent,
+        },
+    ];
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let buf = terminal.backend().buffer();
+    let styles = semantic_styles();
+
+    assert!(has_cell(buf, "{", styles.pet_eye.fg.unwrap()));
+    assert!(has_cell(buf, "e", styles.pet_body.fg.unwrap()));
+    assert!(has_cell(buf, "y", styles.pet_accent.fg.unwrap()));
 }
 
 #[test]

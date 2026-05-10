@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::pet::render::PaletteRoleName;
 use crate::tui::{
     style::{semantic_styles, tokenpet_palette, LogKind, SemanticStyles},
     view_model::{EventView, WatchViewModel},
@@ -254,7 +255,7 @@ fn render_pet_panel(
     }
     render_lines(frame, rows[0], meta, styles);
 
-    let art_lines = centered_art_lines(rows[1].width, rows[1].height, &vm.pet_art, styles);
+    let art_lines = centered_art_lines(rows[1].width, rows[1].height, vm, styles);
     render_lines(frame, rows[1], art_lines, styles);
 
     let mut stats = vec![section_line("stats", styles)];
@@ -371,27 +372,103 @@ fn today_metric_line<'a>(
 fn centered_art_lines<'a>(
     width: u16,
     height: u16,
-    art: &'a [String],
+    vm: &'a WatchViewModel,
     styles: &'a SemanticStyles,
 ) -> Vec<Line<'a>> {
     if height == 0 {
         return Vec::new();
     }
+    let art = &vm.pet_art;
     let visible = art.len().min(height as usize);
     let top_pad = (height as usize).saturating_sub(visible) / 2;
     let mut lines = Vec::with_capacity(height as usize);
     for _ in 0..top_pad {
         lines.push(Line::from(""));
     }
-    for art_line in art.iter().take(visible) {
+    for (line_index, art_line) in art.iter().take(visible).enumerate() {
         let art_width = art_line.chars().count() as u16;
         let left_pad = width.saturating_sub(art_width) / 2;
-        lines.push(Line::from(vec![
-            Span::raw(" ".repeat(left_pad as usize)),
-            Span::styled(art_line.as_str(), styles.primary_text),
-        ]));
+        let mut spans: Vec<Span<'a>> = Vec::new();
+        spans.push(Span::raw(" ".repeat(left_pad as usize)));
+        spans.extend(role_spans_for_line(
+            art_line,
+            line_index,
+            &vm.pet_spans,
+            styles,
+        ));
+        lines.push(Line::from(spans));
     }
     lines
+}
+
+fn role_spans_for_line<'a>(
+    art_line: &'a str,
+    line_index: usize,
+    pet_spans: &'a [crate::pet::render::StyledSegment],
+    styles: &'a SemanticStyles,
+) -> Vec<Span<'a>> {
+    let total_chars = art_line.chars().count();
+    if total_chars == 0 {
+        return Vec::new();
+    }
+
+    let mut segments: Vec<&crate::pet::render::StyledSegment> = pet_spans
+        .iter()
+        .filter(|span| span.line == line_index && span.start < span.end && span.start < total_chars)
+        .collect();
+    segments.sort_by_key(|span| span.start);
+
+    if segments.is_empty() {
+        return vec![Span::styled(art_line, styles.pet_body)];
+    }
+
+    let char_indices = char_byte_indices(art_line);
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut cursor = 0usize;
+
+    for segment in segments {
+        let start = segment.start.max(cursor).min(total_chars);
+        let end = segment.end.min(total_chars);
+        if end <= cursor {
+            continue;
+        }
+        if start > cursor {
+            let body = char_slice(art_line, &char_indices, cursor, start);
+            spans.push(Span::styled(body, styles.pet_body));
+        }
+        let value = char_slice(art_line, &char_indices, start, end);
+        spans.push(Span::styled(value, role_style(segment.role, styles)));
+        cursor = end;
+    }
+
+    if cursor < total_chars {
+        let tail = char_slice(art_line, &char_indices, cursor, total_chars);
+        spans.push(Span::styled(tail, styles.pet_body));
+    }
+
+    spans
+}
+
+fn char_byte_indices(line: &str) -> Vec<usize> {
+    let mut indices: Vec<usize> = line.char_indices().map(|(byte, _)| byte).collect();
+    indices.push(line.len());
+    indices
+}
+
+fn char_slice<'a>(line: &'a str, indices: &[usize], start_char: usize, end_char: usize) -> &'a str {
+    let start = indices[start_char];
+    let end = indices[end_char];
+    &line[start..end]
+}
+
+fn role_style(role: PaletteRoleName, styles: &SemanticStyles) -> Style {
+    match role {
+        PaletteRoleName::Body => styles.pet_body,
+        PaletteRoleName::Eye => styles.pet_eye,
+        PaletteRoleName::Mouth => styles.pet_mouth,
+        PaletteRoleName::Accent => styles.pet_accent,
+        PaletteRoleName::Pattern => styles.pet_pattern,
+    }
 }
 
 fn render_activity_panel(

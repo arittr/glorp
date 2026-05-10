@@ -95,6 +95,11 @@ pub struct SemanticStyles {
     pub overlay_border: Style,
     pub overlay_surface: Style,
     pub blocked: Style,
+    pub pet_body: Style,
+    pub pet_eye: Style,
+    pub pet_mouth: Style,
+    pub pet_accent: Style,
+    pub pet_pattern: Style,
 }
 
 impl SemanticStyles {
@@ -137,5 +142,10 @@ pub fn semantic_styles() -> SemanticStyles {
         overlay_border: Style::default().fg(p.accent.rgb).bg(p.bg.rgb),
         overlay_surface: Style::default().fg(p.fg.rgb).bg(p.surface.rgb),
         blocked: Style::default().fg(p.bad.rgb).add_modifier(Modifier::BOLD),
+        pet_body: Style::default().fg(p.fg.rgb),
+        pet_eye: Style::default().fg(p.good.rgb).add_modifier(Modifier::BOLD),
+        pet_mouth: Style::default().fg(p.dim.rgb),
+        pet_accent: Style::default().fg(p.accent.rgb),
+        pet_pattern: Style::default().fg(p.faint.rgb),
     }
 }
