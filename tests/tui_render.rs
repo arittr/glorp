@@ -63,7 +63,7 @@ fn has_cell(buf: &Buffer, symbol: &str, fg: Color) -> bool {
 
 #[test]
 fn wide_layout_has_tokenpet_chrome_panels_and_bars() {
-    let backend = TestBackend::new(100, 30);
+    let backend = TestBackend::new(140, 30);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
@@ -204,7 +204,7 @@ fn blocked_provider_state_renders_calm_setup_view() {
         diagnostic_code: None,
         diagnostic_message: None,
     }];
-    let backend = TestBackend::new(80, 24);
+    let backend = TestBackend::new(140, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
@@ -384,7 +384,7 @@ fn source_health_rows_render_ready_and_diagnostic_states_together() {
         },
     ];
 
-    let backend = TestBackend::new(100, 28);
+    let backend = TestBackend::new(140, 28);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
@@ -644,15 +644,16 @@ fn shutdown_drops_worker_thread_cleanly() {
     drop(app);
 }
 
-/// hybrid-v4 layout geometry: 78-cell rounded frame, two columns inside,
-/// every body row padded to the terminal width and dividers fully filling
-/// their column. These invariants come from the design mockup at
-/// `.superpowers/brainstorm/31764-1778396947/content/hybrid-v4.html`.
-const HYBRID_V4_WIDTH: u16 = 78;
+/// Standard wide-mode terminal width for layout invariants:
+/// rounded outer frame, two columns inside, every body row padded to the
+/// terminal width and section dividers fully filling the right column.
+/// Anchored well above `COMPACT_THRESHOLD` so the wide composition is the
+/// path under test.
+const WIDE_TEST_WIDTH: u16 = 140;
 
 #[test]
-fn hybrid_v4_every_row_fills_full_terminal_width() {
-    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+fn wide_layout_every_row_fills_full_terminal_width() {
+    let backend = TestBackend::new(WIDE_TEST_WIDTH, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
@@ -662,15 +663,15 @@ fn hybrid_v4_every_row_fills_full_terminal_width() {
     for (y, row) in rows.iter().enumerate() {
         assert_eq!(
             row.chars().count(),
-            HYBRID_V4_WIDTH as usize,
-            "row {y} should be exactly {HYBRID_V4_WIDTH} cells; got {row:?}",
+            WIDE_TEST_WIDTH as usize,
+            "row {y} should be exactly {WIDE_TEST_WIDTH} cells; got {row:?}",
         );
     }
 }
 
 #[test]
-fn hybrid_v4_outer_frame_uses_rounded_box_drawing() {
-    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+fn wide_layout_outer_frame_uses_rounded_box_drawing() {
+    let backend = TestBackend::new(WIDE_TEST_WIDTH, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
@@ -694,8 +695,8 @@ fn hybrid_v4_outer_frame_uses_rounded_box_drawing() {
 }
 
 #[test]
-fn hybrid_v4_section_dividers_all_end_at_column_73() {
-    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+fn wide_layout_section_dividers_all_end_at_same_right_column() {
+    let backend = TestBackend::new(WIDE_TEST_WIDTH, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
@@ -703,31 +704,46 @@ fn hybrid_v4_section_dividers_all_end_at_column_73() {
     let buf = terminal.backend().buffer();
     let rows = buffer_rows(buf);
     let labels = [" today ", " 7-day ", " feed ", " helpers "];
-    let mut found = 0usize;
+
+    // Collect divider rows and the rightmost column where a `─` appears in
+    // each. All dividers should end at the same column — the right edge of
+    // the right column — with the cell after it being outer pad space.
+    let mut divider_ends: Vec<usize> = Vec::new();
     for row in &rows {
-        if labels.iter().any(|label| row.contains(label)) {
-            // Find the right-edge of the dash run in the right column.
-            // It should end at exactly column 73.
-            let chars: Vec<char> = row.chars().collect();
-            assert_eq!(
-                chars[73], '─',
-                "right column divider should end at col 73: {row:?}"
-            );
-            assert_eq!(
-                chars[74], ' ',
-                "col 74 should be outer pad after the right column"
-            );
-            found += 1;
+        if !labels.iter().any(|label| row.contains(label)) {
+            continue;
         }
+        let chars: Vec<char> = row.chars().collect();
+        let rightmost_dash = chars
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, c)| **c == '─')
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| panic!("divider row had no `─`: {row:?}"));
+        divider_ends.push(rightmost_dash);
+        assert_eq!(
+            chars[rightmost_dash + 1],
+            ' ',
+            "cell after the last `─` should be outer pad space: {row:?}"
+        );
     }
     assert!(
-        found >= 3,
-        "expected at least three section dividers, found {found}"
+        divider_ends.len() >= 3,
+        "expected at least three section dividers, found {}",
+        divider_ends.len(),
     );
+    let first = divider_ends[0];
+    for end in &divider_ends {
+        assert_eq!(
+            *end, first,
+            "all section dividers should end at the same column; got {divider_ends:?}",
+        );
+    }
 }
 
 #[test]
-fn hybrid_v4_pet_art_fits_inside_left_column() {
+fn wide_layout_pet_art_fits_inside_left_column() {
     let mut vm = WatchViewModel::fixture();
     vm.pet_art = vec![
         "    /\\     ".into(),
@@ -739,21 +755,39 @@ fn hybrid_v4_pet_art_fits_inside_left_column() {
         "   \\___/   ".into(),
     ];
 
-    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+    let backend = TestBackend::new(WIDE_TEST_WIDTH, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let buf = terminal.backend().buffer();
     let rows = buffer_rows(buf);
-    // The gutter sits at columns 29 and 30 — between the left column
-    // (cols 3-28) and the right column (cols 31-73). Both gutter cells
-    // must be blank space on every body row so pet art never bleeds
-    // across into the data column.
+
+    // Locate the right column's leftmost edge: on a divider row like
+    // `─ today ─...`, the first `─` marks the right column start. The
+    // four cells immediately before it are the gutter — pet art must
+    // never bleed into them on any body row.
+    let right_col_start = rows
+        .iter()
+        .find_map(|row| {
+            row.contains(" today ").then(|| {
+                row.chars()
+                    .enumerate()
+                    .find(|(_, c)| *c == '─')
+                    .map(|(i, _)| i)
+                    .expect("today divider should contain `─`")
+            })
+        })
+        .expect("expected a today divider row");
+    let gutter_start = right_col_start - 4;
+
     for (y, row) in rows.iter().enumerate().take(23).skip(1) {
         let chars: Vec<char> = row.chars().collect();
-        assert!(
-            chars[29] == ' ' || chars[29] == '─',
-            "row {y} col 29 should be space or dash; got {:?}",
-            chars[29],
-        );
+        for offset in 0..4 {
+            let col = gutter_start + offset;
+            assert!(
+                chars[col] == ' ' || chars[col] == '─',
+                "row {y} gutter col {col} should be space or dash; got {:?}",
+                chars[col],
+            );
+        }
     }
 }
