@@ -633,6 +633,38 @@ fn format_tokens(value: f64) -> String {
     }
 }
 
+fn body_row<'a>(inner: Vec<Span<'a>>, inner_width: usize, styles: &'a SemanticStyles) -> Line<'a> {
+    let visible: usize = inner.iter().map(|s| s.content.chars().count()).sum();
+    let frame_style = Style::default().fg(tokenpet_palette().accent.rgb);
+    let mut spans: Vec<Span<'a>> = Vec::with_capacity(inner.len() + 3);
+    spans.push(Span::styled("┃", frame_style));
+    if visible <= inner_width {
+        spans.extend(inner);
+        let pad = inner_width - visible;
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), styles.body));
+        }
+    } else {
+        // Truncate cell-by-cell to fit; last visible char may be cut on a
+        // multi-char span boundary. Scan spans and accumulate up to inner_width.
+        let mut remaining = inner_width;
+        for span in inner {
+            let span_len = span.content.chars().count();
+            if span_len <= remaining {
+                spans.push(span);
+                remaining -= span_len;
+            } else {
+                let truncated: String = span.content.chars().take(remaining).collect();
+                spans.push(Span::styled(truncated, span.style));
+                remaining = 0;
+                break;
+            }
+        }
+    }
+    spans.push(Span::styled("┃", frame_style));
+    Line::from(spans)
+}
+
 fn format_xp(value: f64) -> String {
     let value = value.max(0.0);
     if value >= 10.0 {
@@ -641,5 +673,32 @@ fn format_xp(value: f64) -> String {
         format!("{value:.1}")
     } else {
         format!("{value:.2}")
+    }
+}
+
+#[cfg(test)]
+mod body_row_tests {
+    use super::*;
+
+    #[test]
+    fn body_row_pads_short_content_to_inner_width() {
+        let styles = semantic_styles();
+        let inner: Vec<Span> = vec![Span::raw("hi")];
+        let line = body_row(inner, 10, &styles);
+        // Visible width: ┃ + 10 + ┃ = 12.
+        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(total, 12);
+        // First and last spans must be ┃.
+        assert_eq!(line.spans.first().unwrap().content.as_ref(), "┃");
+        assert_eq!(line.spans.last().unwrap().content.as_ref(), "┃");
+    }
+
+    #[test]
+    fn body_row_truncates_overflowing_content() {
+        let styles = semantic_styles();
+        let inner: Vec<Span> = vec![Span::raw("xxxxxxxxxxxxxxxx")]; // 16 chars
+        let line = body_row(inner, 10, &styles);
+        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(total, 12);
     }
 }
