@@ -209,7 +209,7 @@ fn render_pet_panel(
     let art_lines = centered_art_lines(rows[0].width, rows[0].height, vm, styles);
     render_lines(frame, rows[0], art_lines, styles);
 
-    let mut meta = vec![section_line("vitals", styles)];
+    let mut meta = vec![Line::from(section_line("vitals", rows[1].width as usize, styles))];
     if meta_height >= 4 {
         meta.push(metadata_line(
             "name",
@@ -246,7 +246,7 @@ fn render_pet_panel(
     }
     render_lines(frame, rows[1], meta, styles);
 
-    let mut stats = vec![section_line("stats", styles)];
+    let mut stats = vec![Line::from(section_line("stats", rows[2].width as usize, styles))];
     stats.push(bar_line("fed", vm.fed, styles.filled_bar_good, styles));
     stats.push(bar_line(
         "happy",
@@ -461,7 +461,7 @@ fn render_activity_panel(
     styles: &SemanticStyles,
 ) {
     frame.render_widget(Block::default().style(styles.body), area);
-    let mut lines = vec![section_line("today", styles)];
+    let mut lines = vec![Line::from(section_line("today", area.width as usize, styles))];
 
     if vm.is_blocked() {
         lines.push(Line::from(Span::styled("blocked", styles.blocked)));
@@ -482,7 +482,7 @@ fn render_activity_panel(
         lines.push(sparkline_line(&vm.recent_daily_effective_tokens, styles));
     }
 
-    lines.push(section_line("sources", styles));
+    lines.push(Line::from(section_line("sources", area.width as usize, styles)));
     for source in vm.source_health.iter().take(4) {
         let status_style = match source.status {
             SourceStatus::Ready => styles.event_rail_usage,
@@ -508,7 +508,7 @@ fn render_activity_panel(
         ]));
     }
 
-    lines.push(section_line("log", styles));
+    lines.push(Line::from(section_line("log", area.width as usize, styles)));
     for event in vm.recent_events.iter().rev().take(5).rev() {
         lines.push(event_line(event, styles));
     }
@@ -526,12 +526,18 @@ fn render_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line<'_>>, styles:
     );
 }
 
-fn section_line<'a>(title: &'a str, styles: &'a SemanticStyles) -> Line<'a> {
-    Line::from(vec![
-        Span::styled("─ ", styles.section_header),
-        Span::styled(title, styles.section_header),
-        Span::styled(" ┄ ┄ ┄", styles.section_header),
-    ])
+fn section_line<'a>(label: &'a str, target_width: usize, styles: &'a SemanticStyles) -> Vec<Span<'a>> {
+    let label_text = format!(" {label} ");
+    let label_visible = label_text.chars().count();
+    let dash_total = target_width.saturating_sub(label_visible + 1); // +1 for leading dash
+    let leading = "─";
+    let trailing_count = dash_total;
+    let trailing: String = std::iter::repeat('─').take(trailing_count).collect();
+    vec![
+        Span::styled(leading, styles.section_header),
+        Span::styled(label_text, styles.label),
+        Span::styled(trailing, styles.section_header),
+    ]
 }
 
 fn bar_line<'a>(
