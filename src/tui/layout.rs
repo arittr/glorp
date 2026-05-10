@@ -831,9 +831,16 @@ fn render_wide(
     let inner_width = width.saturating_sub(2);
     let pet_col = 26;
     let gap = 2;
-    let pad_left = 2;
-    let pad_right = 3;
-    let data_col = inner_width.saturating_sub(pet_col + gap + pad_left + pad_right);
+    let data_col = 43;
+    let base_pad_left = 2;
+    let base_pad_right = 3;
+    let baseline = pet_col + gap + data_col + base_pad_left + base_pad_right;
+    // Center content when the terminal is wider than the baseline (78-col frame).
+    // Surplus splits equally between left and right outer pads so the pet+data
+    // block sits in the middle of the frame instead of clinging to the left edge.
+    let extra = inner_width.saturating_sub(baseline);
+    let pad_left = base_pad_left + extra / 2;
+    let pad_right = base_pad_right + extra - extra / 2;
 
     let pet_lines = render_pet_panel_lines(pet_col, vm, capability, styles);
     let mut data_lines: Vec<Line> = Vec::new();
