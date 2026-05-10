@@ -943,6 +943,82 @@ mod body_row_tests {
     }
 }
 
+fn render_sparkline_lines<'a>(
+    width: usize,
+    history: &[f64],
+    capability: ColorCapability,
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
+    let mut out = Vec::new();
+    out.push(Line::from(section_line("7-day", width, styles)));
+
+    let glyphs: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let mut last_seven: Vec<f64> = history.iter().copied().rev().take(7).collect();
+    last_seven.reverse();
+    while last_seven.len() < 7 {
+        last_seven.insert(0, 0.0);
+    }
+    let max = last_seven.iter().cloned().fold(0.0_f64, f64::max);
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::raw("       "));
+    for (i, value) in last_seven.iter().enumerate() {
+        let glyph = if *value <= 0.0 {
+            '·'
+        } else if max <= 0.0 {
+            '·'
+        } else {
+            let level = ((value / max) * (glyphs.len() as f64 - 1.0)).round() as usize;
+            glyphs[level.min(glyphs.len() - 1)]
+        };
+        let style = match capability {
+            ColorCapability::Truecolor => {
+                let idx = ramp_index(i, 7);
+                Style::default().fg(BAR_RAMP_GOOD.stops[idx])
+            }
+            ColorCapability::Flat => Style::default().fg(tokenpet_palette().good.rgb),
+        };
+        let style = if glyph == '·' {
+            styles.empty_bar
+        } else {
+            style
+        };
+        spans.push(Span::styled(glyph.to_string(), style));
+        if i < 6 {
+            spans.push(Span::raw("   "));
+        }
+    }
+    out.push(Line::from(spans));
+    out
+}
+
+#[cfg(test)]
+mod sparkline_tests {
+    use super::*;
+    use crate::tui::style::ColorCapability;
+
+    #[test]
+    fn sparkline_row_returns_two_lines() {
+        let styles = semantic_styles();
+        let history = vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0];
+        let lines = render_sparkline_lines(43, &history, ColorCapability::Truecolor, &styles);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn sparkline_zeroes_render_dot() {
+        let styles = semantic_styles();
+        let history = vec![0.0; 7];
+        let lines = render_sparkline_lines(43, &history, ColorCapability::Truecolor, &styles);
+        let text: String = lines[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains('·'));
+        assert!(!text.contains('█'));
+    }
+}
+
 #[cfg(test)]
 mod bar_line_tests {
     use super::*;
