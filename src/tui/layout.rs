@@ -846,6 +846,24 @@ fn format_xp(value: f64) -> String {
     }
 }
 
+fn render_feed_panel_lines<'a>(
+    width: usize,
+    vm: &'a WatchViewModel,
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
+    let mut out = Vec::new();
+    out.push(Line::from(section_line("feed", width, styles)));
+    for event in vm.recent_events.iter().take(3) {
+        let mut spans: Vec<Span<'a>> = Vec::new();
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(event.timestamp.clone(), styles.timestamp));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(event.text.clone(), styles.log(event.kind)));
+        out.push(Line::from(spans));
+    }
+    out
+}
+
 #[cfg(test)]
 mod today_panel_tests {
     use super::*;
@@ -1016,6 +1034,20 @@ mod sparkline_tests {
             .collect::<String>();
         assert!(text.contains('·'));
         assert!(!text.contains('█'));
+    }
+}
+
+#[cfg(test)]
+mod feed_panel_tests {
+    use super::*;
+    use crate::tui::view_model::WatchViewModel;
+
+    #[test]
+    fn feed_panel_returns_rule_plus_up_to_three_entries() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture_with_events();
+        let lines = render_feed_panel_lines(43, &vm, &styles);
+        assert!(lines.len() >= 1 && lines.len() <= 4);
     }
 }
 
