@@ -266,11 +266,7 @@ fn render_pet_panel(
         let xp_text = if vm.xp_target > 0.0 && vm.xp_current >= vm.xp_target {
             "max".to_string()
         } else {
-            format!(
-                "{} / {}",
-                format_tokens(vm.xp_current),
-                format_tokens(vm.xp_target)
-            )
+            format!("{} / {}", format_xp(vm.xp_current), format_xp(vm.xp_target))
         };
         stats.push(Line::from(vec![
             Span::styled("xp ", styles.label),
@@ -624,5 +620,16 @@ fn format_tokens(value: f64) -> String {
         format!("{:.1}k", value / 1_000.0)
     } else {
         format!("{value:.0}")
+    }
+}
+
+fn format_xp(value: f64) -> String {
+    let value = value.max(0.0);
+    if value >= 10.0 {
+        format!("{value:.0}")
+    } else if value >= 1.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
     }
 }

@@ -34,7 +34,7 @@ impl Default for WatchAppConfig {
     fn default() -> Self {
         Self {
             animation_tick: Duration::from_millis(250),
-            usage_poll_interval: Duration::from_secs(60),
+            usage_poll_interval: Duration::from_secs(10),
         }
     }
 }
