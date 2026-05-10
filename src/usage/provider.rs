@@ -1,6 +1,7 @@
 use crate::error::Result;
-use crate::storage::usage_store::UsageStore;
+use crate::storage::usage_store::{ProviderCursorUpdate, UsageStore};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone)]
 pub struct UsagePollResult {
@@ -14,8 +15,10 @@ pub struct UsageDelta {
     pub provider_surface: String,
     pub effective_tokens: f64,
     pub confidence: String,
-    pub period_start: String,
+    pub period_start: OffsetDateTime,
+    pub observed_at: OffsetDateTime,
     pub model: Option<String>,
+    pub cursor_update: ProviderCursorUpdate,
 }
 
 #[derive(Debug, Clone)]

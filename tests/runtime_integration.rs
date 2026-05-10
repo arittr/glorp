@@ -1,13 +1,16 @@
 use glorp::{
-    game::runtime::apply_usage_poll,
+    game::runtime::{apply_unapplied_usage, apply_usage_poll},
     storage::{
         state::{PetState, Vitals},
-        usage_store::{NormalizedUsageEvent, UsageStore},
+        usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore},
     },
     usage::provider::{UsageDelta, UsagePollResult},
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 use time::{macros::datetime, Duration};
+
+static POLL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn provider_delta_updates_pet_state_and_records_evolution_once() {
@@ -23,8 +26,11 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
     let poll = poll_with_delta(100_000.0, now);
 
+    // Two polls with distinct cursor_values represent successive bumps in provider totals.
+    // The unapplied ledger's idempotency would collapse identical polls into one row.
+    let poll2 = poll_with_delta(100_000.0, now);
     apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
-    apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
+    apply_usage_poll(&mut state, &mut usage_store, &poll2, now).unwrap();
 
     assert_eq!(state.lifetime_effective_tokens, 200_000.0);
     assert_eq!(state.stage, "s1");
@@ -94,13 +100,27 @@ fn runtime_compacts_old_usage_events_after_poll() {
 }
 
 fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePollResult {
+    // Each call yields a distinct cursor_value so the unapplied ledger's idempotency
+    // (keyed on provider_surface|cursor_key|cursor_value) treats each call as a new poll.
+    let counter = POLL_COUNTER.fetch_add(1, Ordering::Relaxed);
     UsagePollResult {
         deltas: vec![UsageDelta {
             provider_surface: "claude-code".to_string(),
             effective_tokens,
             confidence: "local-log-derived".to_string(),
-            period_start: now.to_string(),
+            period_start: now,
+            observed_at: now,
             model: Some("test-model".to_string()),
+            cursor_update: ProviderCursorUpdate {
+                provider_surface: "claude-code".to_string(),
+                cursor_key: format!("test-cursor-{}", now.unix_timestamp()),
+                cursor_value: format!(
+                    r#"{{"uncached_input":{},"output":0,"cache_creation":0,"cache_read":0,"reasoning_output":0,"_counter":{}}}"#,
+                    effective_tokens as u64, counter
+                ),
+                provider_version: "test-provider".to_string(),
+                parser_version: "test-parser".to_string(),
+            },
         }],
         diagnostics: Vec::new(),
         total_effective_tokens: effective_tokens,
@@ -113,4 +133,46 @@ fn empty_poll() -> UsagePollResult {
         diagnostics: Vec::new(),
         total_effective_tokens: 0.0,
     }
+}
+
+#[test]
+fn unapplied_usage_survives_state_save_failure_and_applies_once_next_run() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    let event = NormalizedUsageEvent {
+        observed_at: now,
+        bucket_at: now,
+        ..NormalizedUsageEvent::for_test_at(now, 100_000.0)
+    };
+    let cursor = ProviderCursorUpdate {
+        provider_surface: "claude-code".into(),
+        cursor_key: "test-cursor".into(),
+        cursor_value: r#"{"uncached_input":100000,"output":0,"cache_creation":0,"cache_read":0,"reasoning_output":0}"#.into(),
+        provider_version: "test-provider".into(),
+        parser_version: "test-parser".into(),
+    };
+    let inserted_id = usage_store.insert_unapplied_event(&event, &cursor).unwrap();
+
+    let mut failed_state = PetState::new_for_test("mochi-7f3a", "mochi");
+    failed_state.calibration.daily_effective_tokens = 100_000.0;
+    let failed_update = apply_unapplied_usage(&mut failed_state, &mut usage_store, now).unwrap();
+    assert_eq!(failed_update.applied_event_ids, vec![inserted_id]);
+
+    let mut retried_state = PetState::new_for_test("mochi-7f3a", "mochi");
+    retried_state.calibration.daily_effective_tokens = 100_000.0;
+    let retry_update = apply_unapplied_usage(&mut retried_state, &mut usage_store, now).unwrap();
+    usage_store
+        .mark_events_applied_and_advance_cursors(&retry_update.applied_event_ids, now)
+        .unwrap();
+
+    assert_eq!(retried_state.lifetime_effective_tokens, 100_000.0);
+    assert_eq!(usage_store.unapplied_events(10).unwrap().len(), 0);
+    assert_eq!(
+        usage_store
+            .provider_cursor("claude-code", "test-cursor")
+            .unwrap()
+            .unwrap(),
+        cursor.cursor_value
+    );
 }

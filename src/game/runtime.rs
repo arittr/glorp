@@ -8,7 +8,7 @@ use crate::{
     },
     storage::{
         state::{PetState, Vitals as StoredVitals},
-        usage_store::UsageStore,
+        usage_store::{NormalizedUsageEvent, UsageStore},
     },
     usage::provider::UsagePollResult,
 };
@@ -16,25 +16,57 @@ use crate::{
 const USAGE_RETENTION_DAYS: i64 = 90;
 const RECENT_EVENT_LIMIT: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeUpdate {
     pub recent_effective_tokens: f64,
+    pub applied_event_ids: Vec<i64>,
 }
 
-pub fn apply_usage_poll(
-    state: &mut PetState,
+pub fn stage_usage_poll_deltas(
     usage_store: &mut UsageStore,
     poll: &UsagePollResult,
+) -> Result<Vec<i64>> {
+    let mut ids = Vec::new();
+    for delta in &poll.deltas {
+        let event = NormalizedUsageEvent {
+            provider_surface: delta.provider_surface.clone(),
+            provider_version: delta.cursor_update.provider_version.clone(),
+            parser_version: delta.cursor_update.parser_version.clone(),
+            command: "ccusage".to_string(),
+            source_surface: "daily".to_string(),
+            period_start: delta.period_start,
+            observed_at: delta.observed_at,
+            bucket_at: floor_to_ten_minute_bucket(delta.observed_at),
+            model: delta.model.clone(),
+            input_tokens: 0.0,
+            output_tokens: 0.0,
+            cache_creation_tokens: 0.0,
+            cache_read_tokens: 0.0,
+            reasoning_output_tokens: 0.0,
+            effective_tokens: delta.effective_tokens,
+            cost_usd: None,
+            confidence: delta.confidence.clone(),
+        };
+        ids.push(usage_store.insert_unapplied_event(&event, &delta.cursor_update)?);
+    }
+    Ok(ids)
+}
+
+pub fn apply_unapplied_usage(
+    state: &mut PetState,
+    usage_store: &mut UsageStore,
     now: OffsetDateTime,
 ) -> Result<RuntimeUpdate> {
-    let recent_effective_tokens = poll
-        .deltas
+    let rows = usage_store.unapplied_events(500)?;
+    let recent_effective_tokens = rows
         .iter()
-        .map(|delta| delta.effective_tokens.max(0.0))
+        .map(|row| row.event.effective_tokens.max(0.0))
         .sum::<f64>();
 
     if recent_effective_tokens > 0.0 {
-        apply_effective_delta(state, recent_effective_tokens);
+        for row in &rows {
+            apply_effective_delta(state, row.event.effective_tokens.max(0.0));
+        }
         state.recent_events.push(format!(
             "gained {} effective tokens",
             format_tokens(recent_effective_tokens)
@@ -50,7 +82,33 @@ pub fn apply_usage_poll(
 
     Ok(RuntimeUpdate {
         recent_effective_tokens,
+        applied_event_ids: rows.into_iter().map(|row| row.id).collect(),
     })
+}
+
+/// Compatibility wrapper for tests and any caller that already has a
+/// `UsagePollResult` in hand. New command paths should drive the
+/// stage-then-save-then-mark sequence directly.
+pub fn apply_usage_poll(
+    state: &mut PetState,
+    usage_store: &mut UsageStore,
+    poll: &UsagePollResult,
+    now: OffsetDateTime,
+) -> Result<RuntimeUpdate> {
+    stage_usage_poll_deltas(usage_store, poll)?;
+    let update = apply_unapplied_usage(state, usage_store, now)?;
+    usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
+    Ok(update)
+}
+
+pub fn floor_to_ten_minute_bucket(timestamp: OffsetDateTime) -> OffsetDateTime {
+    let minute = timestamp.minute();
+    let bucketed_minute = (minute / 10) * 10;
+    timestamp
+        .replace_minute(bucketed_minute)
+        .and_then(|t| t.replace_second(0))
+        .and_then(|t| t.replace_nanosecond(0))
+        .unwrap_or(timestamp)
 }
 
 fn apply_effective_delta(state: &mut PetState, effective_tokens: f64) {

@@ -3,7 +3,7 @@ use crate::{
     game::{
         evolution::Stage,
         metabolism::{apply_food, Mood, Vitals as GameVitals},
-        runtime::apply_usage_poll,
+        runtime::apply_unapplied_usage,
     },
     paths::AppPaths,
     pet::{
@@ -155,13 +155,10 @@ fn poll_usage_and_apply(
     let result =
         CcusageCommandProvider::from_environment_with_weights(weights).poll(&mut usage_store)?;
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
-        apply_usage_poll(
-            &mut state,
-            &mut usage_store,
-            &result,
-            OffsetDateTime::now_utc(),
-        )?;
+        let now = OffsetDateTime::now_utc();
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
         state_store.save(&state)?;
+        usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
     }
     Ok(Some(state))
 }

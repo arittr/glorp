@@ -25,6 +25,22 @@ pub struct NormalizedUsageEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCursorUpdate {
+    pub provider_surface: String,
+    pub cursor_key: String,
+    pub cursor_value: String,
+    pub provider_version: String,
+    pub parser_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageLedgerRow {
+    pub id: i64,
+    pub event: NormalizedUsageEvent,
+    pub cursor_update: ProviderCursorUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDiagnostic {
     pub provider_surface: String,
     pub code: String,
@@ -111,10 +127,11 @@ impl UsageStore {
                 reasoning_output_tokens,
                 effective_tokens,
                 cost_usd,
-                confidence
+                confidence,
+                applied_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
             )",
             params![
                 event.provider_surface,
@@ -135,11 +152,87 @@ impl UsageStore {
                 event.effective_tokens,
                 event.cost_usd,
                 event.confidence,
+                format_time(event.observed_at)?,
             ],
         )?;
         add_lifetime_counter(&tx, event.effective_tokens)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn insert_unapplied_event(
+        &mut self,
+        event: &NormalizedUsageEvent,
+        cursor_update: &ProviderCursorUpdate,
+    ) -> crate::error::Result<i64> {
+        let provider_delta_id = format!(
+            "{}|{}|{}",
+            cursor_update.provider_surface, cursor_update.cursor_key, cursor_update.cursor_value
+        );
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO usage_events (
+                provider_surface,
+                provider_version,
+                parser_version,
+                command,
+                source_surface,
+                period_start,
+                observed_at,
+                bucket_at,
+                period_date,
+                model,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                reasoning_output_tokens,
+                effective_tokens,
+                cost_usd,
+                confidence,
+                provider_delta_id,
+                bucket_index,
+                bucket_count,
+                applied_at,
+                provider_cursor_key,
+                provider_cursor_value
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                ?19, 0, 1, NULL, ?20, ?21
+            )",
+            params![
+                event.provider_surface,
+                event.provider_version,
+                event.parser_version,
+                event.command,
+                event.source_surface,
+                format_time(event.period_start)?,
+                format_time(event.observed_at)?,
+                format_time(event.bucket_at)?,
+                event.period_start.date().to_string(),
+                event.model,
+                event.input_tokens,
+                event.output_tokens,
+                event.cache_creation_tokens,
+                event.cache_read_tokens,
+                event.reasoning_output_tokens,
+                event.effective_tokens,
+                event.cost_usd,
+                event.confidence,
+                provider_delta_id,
+                cursor_update.cursor_key,
+                cursor_update.cursor_value,
+            ],
+        )?;
+        let id: i64 = tx.query_row(
+            "SELECT id FROM usage_events
+             WHERE provider_delta_id = ?1 AND bucket_index = ?2",
+            params![provider_delta_id, 0_i64],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn compact_before(&mut self, cutoff: OffsetDateTime) -> crate::error::Result<()> {
@@ -171,7 +264,7 @@ impl UsageStore {
                 SUM(COALESCE(cost_usd, 0.0)),
                 COUNT(*)
             FROM usage_events
-            WHERE period_start < ?1
+            WHERE period_start < ?1 AND applied_at IS NOT NULL
             GROUP BY provider_surface, period_date, source_surface
             ON CONFLICT(provider_surface, period_date, source_surface) DO UPDATE SET
                 input_tokens = daily_aggregates.input_tokens + excluded.input_tokens,
@@ -185,7 +278,7 @@ impl UsageStore {
             params![format_time(cutoff)?],
         )?;
         tx.execute(
-            "DELETE FROM usage_events WHERE period_start < ?1",
+            "DELETE FROM usage_events WHERE period_start < ?1 AND applied_at IS NOT NULL",
             params![format_time(cutoff)?],
         )?;
         tx.commit()?;
@@ -346,6 +439,186 @@ impl UsageStore {
         Ok(events)
     }
 
+    pub fn unapplied_events(&self, limit: u32) -> crate::error::Result<Vec<UsageLedgerRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                id,
+                provider_surface,
+                provider_version,
+                parser_version,
+                command,
+                source_surface,
+                period_start,
+                observed_at,
+                bucket_at,
+                model,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                reasoning_output_tokens,
+                effective_tokens,
+                cost_usd,
+                confidence,
+                provider_cursor_key,
+                provider_cursor_value
+             FROM usage_events
+             WHERE applied_at IS NULL
+             ORDER BY observed_at ASC, id ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                let period_start: String = row.get(6)?;
+                let observed_at: String = row.get(7)?;
+                let bucket_at: String = row.get(8)?;
+                let provider_surface: String = row.get(1)?;
+                let provider_version: String = row.get(2)?;
+                let parser_version: String = row.get(3)?;
+                let cursor_key: Option<String> = row.get(18)?;
+                let cursor_value: Option<String> = row.get(19)?;
+                let event = NormalizedUsageEvent {
+                    provider_surface: provider_surface.clone(),
+                    provider_version: provider_version.clone(),
+                    parser_version: parser_version.clone(),
+                    command: row.get(4)?,
+                    source_surface: row.get(5)?,
+                    period_start: parse_time_for_sql(&period_start)?,
+                    observed_at: parse_time_for_sql(&observed_at)?,
+                    bucket_at: parse_time_for_sql(&bucket_at)?,
+                    model: row.get(9)?,
+                    input_tokens: row.get(10)?,
+                    output_tokens: row.get(11)?,
+                    cache_creation_tokens: row.get(12)?,
+                    cache_read_tokens: row.get(13)?,
+                    reasoning_output_tokens: row.get(14)?,
+                    effective_tokens: row.get(15)?,
+                    cost_usd: row.get(16)?,
+                    confidence: row.get(17)?,
+                };
+                let cursor_update = ProviderCursorUpdate {
+                    provider_surface,
+                    cursor_key: cursor_key.unwrap_or_default(),
+                    cursor_value: cursor_value.unwrap_or_default(),
+                    provider_version,
+                    parser_version,
+                };
+                Ok(UsageLedgerRow {
+                    id: row.get(0)?,
+                    event,
+                    cursor_update,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn mark_events_applied_and_advance_cursors(
+        &mut self,
+        event_ids: &[i64],
+        applied_at: OffsetDateTime,
+    ) -> crate::error::Result<()> {
+        if event_ids.is_empty() {
+            return Ok(());
+        }
+        let applied_at_text = format_time(applied_at)?;
+        let tx = self.conn.transaction()?;
+        let placeholders = event_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        // Load only rows that are currently unapplied; advancing cursors and
+        // counters for already-applied rows would double-count.
+        let mut pending_updates: Vec<ProviderCursorUpdate> = Vec::new();
+        let mut pending_effective_tokens: Vec<f64> = Vec::new();
+        {
+            let select_sql = format!(
+                "SELECT
+                    provider_surface,
+                    provider_version,
+                    parser_version,
+                    provider_cursor_key,
+                    provider_cursor_value,
+                    effective_tokens
+                 FROM usage_events
+                 WHERE id IN ({placeholders}) AND applied_at IS NULL"
+            );
+            let mut stmt = tx.prepare(&select_sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(event_ids.iter().copied()),
+                |row| {
+                    let cursor_key: Option<String> = row.get(3)?;
+                    let cursor_value: Option<String> = row.get(4)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        cursor_key,
+                        cursor_value,
+                        row.get::<_, f64>(5)?,
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (provider_surface, provider_version, parser_version, key, value, effective) =
+                    row?;
+                pending_effective_tokens.push(effective);
+                if let (Some(cursor_key), Some(cursor_value)) = (key, value) {
+                    pending_updates.push(ProviderCursorUpdate {
+                        provider_surface,
+                        cursor_key,
+                        cursor_value,
+                        provider_version,
+                        parser_version,
+                    });
+                }
+            }
+        }
+        let update_sql = format!(
+            "UPDATE usage_events
+             SET applied_at = ?
+             WHERE id IN ({placeholders}) AND applied_at IS NULL"
+        );
+        let mut update_params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(applied_at_text.clone())];
+        for id in event_ids {
+            update_params.push(Box::new(*id));
+        }
+        tx.execute(
+            &update_sql,
+            rusqlite::params_from_iter(update_params.iter().map(|b| b.as_ref())),
+        )?;
+        for update in &pending_updates {
+            tx.execute(
+                "INSERT INTO provider_cursors (
+                    provider_surface,
+                    cursor_key,
+                    cursor_value,
+                    provider_version,
+                    parser_version,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(provider_surface, cursor_key) DO UPDATE SET
+                    cursor_value = excluded.cursor_value,
+                    provider_version = excluded.provider_version,
+                    parser_version = excluded.parser_version,
+                    updated_at = excluded.updated_at",
+                params![
+                    update.provider_surface,
+                    update.cursor_key,
+                    update.cursor_value,
+                    update.provider_version,
+                    update.parser_version,
+                    applied_at_text,
+                ],
+            )?;
+        }
+        for effective in pending_effective_tokens {
+            if effective != 0.0 {
+                add_lifetime_counter(&tx, effective)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn recent_diagnostics(&self, limit: u32) -> crate::error::Result<Vec<ProviderDiagnostic>> {
         let mut stmt = self.conn.prepare(
             "SELECT provider_surface, code, message, recorded_at
@@ -433,7 +706,13 @@ impl UsageStore {
                 reasoning_output_tokens REAL NOT NULL,
                 effective_tokens REAL NOT NULL,
                 cost_usd REAL,
-                confidence TEXT NOT NULL
+                confidence TEXT NOT NULL,
+                provider_delta_id TEXT,
+                bucket_index INTEGER NOT NULL DEFAULT 0,
+                bucket_count INTEGER NOT NULL DEFAULT 1,
+                applied_at TEXT,
+                provider_cursor_key TEXT,
+                provider_cursor_value TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_usage_events_period_start
@@ -482,10 +761,51 @@ impl UsageStore {
             "ALTER TABLE usage_events ADD COLUMN bucket_at TEXT;",
             "UPDATE usage_events SET bucket_at = period_start WHERE bucket_at IS NULL;",
         )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "provider_delta_id",
+            "ALTER TABLE usage_events ADD COLUMN provider_delta_id TEXT;",
+            "",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "bucket_index",
+            "ALTER TABLE usage_events ADD COLUMN bucket_index INTEGER NOT NULL DEFAULT 0;",
+            "",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "bucket_count",
+            "ALTER TABLE usage_events ADD COLUMN bucket_count INTEGER NOT NULL DEFAULT 1;",
+            "",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "applied_at",
+            "ALTER TABLE usage_events ADD COLUMN applied_at TEXT;",
+            "UPDATE usage_events SET applied_at = observed_at WHERE applied_at IS NULL;",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "provider_cursor_key",
+            "ALTER TABLE usage_events ADD COLUMN provider_cursor_key TEXT;",
+            "",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "provider_cursor_value",
+            "ALTER TABLE usage_events ADD COLUMN provider_cursor_value TEXT;",
+            "",
+        )?;
         self.conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_usage_events_observed_at
                 ON usage_events(observed_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_provider_delta_bucket
+                ON usage_events(provider_delta_id, bucket_index)
+                WHERE provider_delta_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_usage_events_applied_at
+                ON usage_events(applied_at);
             ",
         )?;
         Ok(())
@@ -511,7 +831,9 @@ fn ensure_usage_event_column(
 ) -> crate::error::Result<()> {
     if !column_exists(conn, "usage_events", name)? {
         conn.execute_batch(definition)?;
-        conn.execute_batch(backfill_sql)?;
+        if !backfill_sql.is_empty() {
+            conn.execute_batch(backfill_sql)?;
+        }
     }
     Ok(())
 }

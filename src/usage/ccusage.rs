@@ -1,7 +1,9 @@
 use crate::error::{GlorpError, Result};
 use crate::game::effective_tokens::EffectiveTokenWeights;
+use crate::game::runtime::floor_to_ten_minute_bucket;
 use crate::storage::usage_store::{
-    NormalizedUsageEvent, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
+    NormalizedUsageEvent, ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic,
+    UsageStore,
 };
 use crate::usage::normalize::{normalize_usage_json, RawTokenTotals};
 use crate::usage::provider::{
@@ -230,6 +232,7 @@ impl CcusageCommandProvider {
                 );
                 persist_diagnostic(store, &diagnostic)?;
                 diagnostics.push(diagnostic);
+                // cursor_total_decreased is a hard reset (not a normal advance).
                 write_cursor(
                     store,
                     provider_surface,
@@ -240,6 +243,57 @@ impl CcusageCommandProvider {
                 continue;
             };
 
+            if !delta_totals.has_positive_effective_bucket() {
+                // Empty delta: advance the cursor so subsequent polls do not re-read the
+                // same totals. Nothing to feed the pet, no row to stage.
+                write_cursor(
+                    store,
+                    provider_surface,
+                    &cursor_key,
+                    record.raw_totals,
+                    &version,
+                )?;
+                continue;
+            }
+
+            let effective_tokens = delta_totals.effective_tokens(weights);
+            let cursor_value = serde_json::to_string(&record.raw_totals)?;
+            let cursor_update = ProviderCursorUpdate {
+                provider_surface: provider_surface.to_string(),
+                cursor_key: cursor_key.clone(),
+                cursor_value,
+                provider_version: version.clone(),
+                parser_version: version.clone(),
+            };
+            // Stage the row in the unapplied ledger first so a downstream cursor advance
+            // never outpaces the row that represents the food it earned. If insert fails,
+            // the cursor stays put and the next poll re-emits the same delta. After mark,
+            // the cursor matches the row's provider_cursor_value.
+            store.insert_unapplied_event(
+                &NormalizedUsageEvent {
+                    provider_surface: record.provider_surface.clone(),
+                    provider_version: version.clone(),
+                    parser_version: version.clone(),
+                    command: command_name.to_string(),
+                    source_surface: "daily".to_string(),
+                    period_start: parsed_period_start,
+                    observed_at,
+                    bucket_at: floor_to_ten_minute_bucket(observed_at),
+                    model: record.model.clone(),
+                    input_tokens: delta_totals.uncached_input as f64,
+                    output_tokens: delta_totals.output as f64,
+                    cache_creation_tokens: delta_totals.cache_creation as f64,
+                    cache_read_tokens: delta_totals.cache_read as f64,
+                    reasoning_output_tokens: delta_totals.reasoning_output as f64,
+                    effective_tokens,
+                    cost_usd: record.display_cost_usd,
+                    confidence: CONFIDENCE.to_string(),
+                },
+                &cursor_update,
+            )?;
+            // Advance the cursor so subsequent polls do not re-emit the same delta.
+            // If apply or save fails, the staged row remains unapplied and the next
+            // successful run reapplies it via apply_unapplied_usage.
             write_cursor(
                 store,
                 provider_surface,
@@ -247,36 +301,14 @@ impl CcusageCommandProvider {
                 record.raw_totals,
                 &version,
             )?;
-            if !delta_totals.has_positive_effective_bucket() {
-                continue;
-            }
-
-            let effective_tokens = delta_totals.effective_tokens(weights);
-            store.insert_event(&NormalizedUsageEvent {
-                provider_surface: record.provider_surface.clone(),
-                provider_version: version.clone(),
-                parser_version: version.clone(),
-                command: command_name.to_string(),
-                source_surface: "daily".to_string(),
-                period_start: parsed_period_start,
-                observed_at,
-                bucket_at: observed_at,
-                model: record.model.clone(),
-                input_tokens: delta_totals.uncached_input as f64,
-                output_tokens: delta_totals.output as f64,
-                cache_creation_tokens: delta_totals.cache_creation as f64,
-                cache_read_tokens: delta_totals.cache_read as f64,
-                reasoning_output_tokens: delta_totals.reasoning_output as f64,
-                effective_tokens,
-                cost_usd: record.display_cost_usd,
-                confidence: CONFIDENCE.to_string(),
-            })?;
             deltas.push(UsageDelta {
                 provider_surface: record.provider_surface,
                 effective_tokens,
                 confidence: CONFIDENCE.to_string(),
-                period_start: record.period_start,
+                period_start: parsed_period_start,
+                observed_at,
                 model: record.model,
+                cursor_update,
             });
         }
 

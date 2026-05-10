@@ -1,6 +1,6 @@
 use crate::{
     error::{GlorpError, Result},
-    game::runtime::apply_usage_poll,
+    game::runtime::apply_unapplied_usage,
     paths::AppPaths,
     storage::{state::StateStore, usage_store::UsageStore},
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
@@ -29,13 +29,11 @@ pub fn run() -> Result<()> {
         {
             Ok(result) => {
                 if !result.deltas.is_empty() || result.diagnostics.is_empty() {
-                    let update = apply_usage_poll(
-                        &mut state,
-                        &mut usage_store,
-                        &result,
-                        OffsetDateTime::now_utc(),
-                    )?;
+                    let now = OffsetDateTime::now_utc();
+                    let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
                     store.save(&state)?;
+                    usage_store
+                        .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
                     recent_effective = update.recent_effective_tokens;
                 }
                 today_effective = usage_store.today_effective_tokens().unwrap_or(0.0);
