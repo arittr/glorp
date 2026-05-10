@@ -11,7 +11,7 @@ use crate::usage::provider::{
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use time::{Date, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 const CLAUDE_SURFACE: &str = "claude-code";
 const CODEX_SURFACE: &str = "codex";
@@ -692,10 +692,84 @@ fn parse_period_start(period_start: &str) -> Result<OffsetDateTime> {
     {
         return Ok(value);
     }
-    let date = Date::parse(
+    if let Ok(date) = Date::parse(
         period_start,
         time::macros::format_description!("[year]-[month]-[day]"),
-    )
-    .map_err(|err| GlorpError::Message(format!("invalid usage period_start: {err}")))?;
-    Ok(PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_offset(UtcOffset::UTC))
+    ) {
+        return Ok(PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_offset(UtcOffset::UTC));
+    }
+    if let Some(date) = parse_short_month_date(period_start) {
+        return Ok(PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_offset(UtcOffset::UTC));
+    }
+    Err(GlorpError::Message(format!(
+        "invalid usage period_start: {period_start}"
+    )))
+}
+
+/// Parse the human-readable date format the ccusage-codex helper emits, e.g. "Mar 23, 2026".
+fn parse_short_month_date(s: &str) -> Option<Date> {
+    let (day_month, year_str) = s.split_once(',')?;
+    let year: i32 = year_str.trim().parse().ok()?;
+    let (month_str, day_str) = day_month.trim().split_once(' ')?;
+    let day: u8 = day_str.trim().parse().ok()?;
+    let month = match month_str {
+        "Jan" => Month::January,
+        "Feb" => Month::February,
+        "Mar" => Month::March,
+        "Apr" => Month::April,
+        "May" => Month::May,
+        "Jun" => Month::June,
+        "Jul" => Month::July,
+        "Aug" => Month::August,
+        "Sep" => Month::September,
+        "Oct" => Month::October,
+        "Nov" => Month::November,
+        "Dec" => Month::December,
+        _ => return None,
+    };
+    Date::from_calendar_date(year, month, day).ok()
+}
+
+#[cfg(test)]
+mod parse_period_start_tests {
+    use super::*;
+
+    #[test]
+    fn rfc3339_format_is_accepted() {
+        let parsed = parse_period_start("2026-03-23T14:00:00Z").unwrap();
+        assert_eq!(parsed.year(), 2026);
+        assert_eq!(parsed.month(), Month::March);
+        assert_eq!(parsed.day(), 23);
+    }
+
+    #[test]
+    fn iso_date_only_is_accepted() {
+        let parsed = parse_period_start("2026-03-23").unwrap();
+        assert_eq!(parsed.year(), 2026);
+        assert_eq!(parsed.month(), Month::March);
+        assert_eq!(parsed.day(), 23);
+        assert_eq!(parsed.hour(), 0);
+    }
+
+    #[test]
+    fn codex_short_month_format_is_accepted() {
+        let parsed = parse_period_start("Mar 23, 2026").unwrap();
+        assert_eq!(parsed.year(), 2026);
+        assert_eq!(parsed.month(), Month::March);
+        assert_eq!(parsed.day(), 23);
+    }
+
+    #[test]
+    fn codex_short_month_handles_single_digit_day() {
+        let parsed = parse_period_start("Apr 5, 2026").unwrap();
+        assert_eq!(parsed.month(), Month::April);
+        assert_eq!(parsed.day(), 5);
+    }
+
+    #[test]
+    fn unknown_format_returns_error() {
+        assert!(parse_period_start("not a date").is_err());
+        assert!(parse_period_start("2026/03/23").is_err());
+        assert!(parse_period_start("Marz 23, 2026").is_err());
+    }
 }
