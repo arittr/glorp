@@ -199,7 +199,7 @@ fn render_overlay(frame: &mut Frame<'_>, title: &str, copy: &[&str]) {
             .alignment(Alignment::Center)
             .block(
                 Block::default()
-                    .title(Span::styled(title.to_string(), styles.prompt_path))
+                    .title(Span::styled(title.to_string(), styles.label))
                     .borders(Borders::ALL)
                     .border_style(styles.overlay_border)
                     .style(styles.overlay_surface),
