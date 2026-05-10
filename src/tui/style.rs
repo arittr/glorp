@@ -253,7 +253,9 @@ mod color_capability_tests {
     use super::*;
 
     fn lookup(map: &[(&str, &str)], key: &str) -> Option<String> {
-        map.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string())
+        map.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| (*v).to_string())
     }
 
     #[test]

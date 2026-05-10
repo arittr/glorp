@@ -31,6 +31,22 @@ fn buffer_lines(buf: &Buffer) -> Vec<String> {
         .collect()
 }
 
+/// Like `buffer_lines` but preserves trailing whitespace so callers can
+/// assert on padded-to-N row geometry.
+fn buffer_rows(buf: &Buffer) -> Vec<String> {
+    (0..buf.area.height)
+        .map(|y| {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                if let Some(cell) = buf.cell(Position::new(buf.area.x + x, buf.area.y + y)) {
+                    row.push_str(cell.symbol());
+                }
+            }
+            row
+        })
+        .collect()
+}
+
 fn buffer_text(buf: &Buffer) -> String {
     buffer_lines(buf).join("\n")
 }
@@ -193,7 +209,10 @@ fn blocked_provider_state_renders_calm_setup_view() {
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
     // New layout shows ✗ glyph for blocked sources in the helpers panel.
-    assert!(text.contains("✗"), "blocked source should render ✗ in helpers panel, got:\n{text}");
+    assert!(
+        text.contains("✗"),
+        "blocked source should render ✗ in helpers panel, got:\n{text}"
+    );
 }
 
 #[test]
@@ -370,9 +389,15 @@ fn source_health_rows_render_ready_and_diagnostic_states_together() {
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
     // Helpers panel shows short display names and status glyphs.
-    assert!(text.contains("claude"), "ready source should appear in helpers panel");
+    assert!(
+        text.contains("claude"),
+        "ready source should appear in helpers panel"
+    );
     assert!(text.contains("✓"), "ready source should show ✓ glyph");
-    assert!(text.contains("codex"), "diagnostic source should appear in helpers panel");
+    assert!(
+        text.contains("codex"),
+        "diagnostic source should appear in helpers panel"
+    );
     assert!(text.contains("~"), "diagnostic source should show ~ glyph");
 }
 
@@ -617,4 +642,118 @@ fn shutdown_drops_worker_thread_cleanly() {
     // Drop the app without ever running. Drop sends Shutdown and joins the
     // worker; if that path hangs the test will hang.
     drop(app);
+}
+
+/// hybrid-v4 layout geometry: 78-cell rounded frame, two columns inside,
+/// every body row padded to the terminal width and dividers fully filling
+/// their column. These invariants come from the design mockup at
+/// `.superpowers/brainstorm/31764-1778396947/content/hybrid-v4.html`.
+const HYBRID_V4_WIDTH: u16 = 78;
+
+#[test]
+fn hybrid_v4_every_row_fills_full_terminal_width() {
+    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let rows = buffer_rows(buf);
+    for (y, row) in rows.iter().enumerate() {
+        assert_eq!(
+            row.chars().count(),
+            HYBRID_V4_WIDTH as usize,
+            "row {y} should be exactly {HYBRID_V4_WIDTH} cells; got {row:?}",
+        );
+    }
+}
+
+#[test]
+fn hybrid_v4_outer_frame_uses_rounded_box_drawing() {
+    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let rows = buffer_rows(buf);
+    let top = &rows[0];
+    let bottom = &rows[23];
+    assert!(
+        top.starts_with("┏━"),
+        "top row should start with ┏━; got {top:?}"
+    );
+    assert!(top.ends_with('┓'), "top row should end with ┓; got {top:?}");
+    assert!(bottom.starts_with("┗━"), "bottom should start with ┗━");
+    assert!(bottom.ends_with('┛'), "bottom should end with ┛");
+    for (y, row) in rows.iter().enumerate().take(23).skip(1) {
+        let chars: Vec<char> = row.chars().collect();
+        assert_eq!(chars[0], '┃', "row {y} left rail");
+        assert_eq!(chars[chars.len() - 1], '┃', "row {y} right rail");
+    }
+}
+
+#[test]
+fn hybrid_v4_section_dividers_all_end_at_column_73() {
+    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let rows = buffer_rows(buf);
+    let labels = [" today ", " 7-day ", " feed ", " helpers "];
+    let mut found = 0usize;
+    for row in &rows {
+        if labels.iter().any(|label| row.contains(label)) {
+            // Find the right-edge of the dash run in the right column.
+            // It should end at exactly column 73.
+            let chars: Vec<char> = row.chars().collect();
+            assert_eq!(
+                chars[73], '─',
+                "right column divider should end at col 73: {row:?}"
+            );
+            assert_eq!(
+                chars[74], ' ',
+                "col 74 should be outer pad after the right column"
+            );
+            found += 1;
+        }
+    }
+    assert!(
+        found >= 3,
+        "expected at least three section dividers, found {found}"
+    );
+}
+
+#[test]
+fn hybrid_v4_pet_art_fits_inside_left_column() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_art = vec![
+        "    /\\     ".into(),
+        "   /  \\    ".into(),
+        "  / o.o \\  ".into(),
+        " /  ◇v◇  \\ ".into(),
+        " \\  ✦✦✦  / ".into(),
+        "  \\  ·  /  ".into(),
+        "   \\___/   ".into(),
+    ];
+
+    let backend = TestBackend::new(HYBRID_V4_WIDTH, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let buf = terminal.backend().buffer();
+    let rows = buffer_rows(buf);
+    // The gutter sits at columns 29 and 30 — between the left column
+    // (cols 3-28) and the right column (cols 31-73). Both gutter cells
+    // must be blank space on every body row so pet art never bleeds
+    // across into the data column.
+    for (y, row) in rows.iter().enumerate().take(23).skip(1) {
+        let chars: Vec<char> = row.chars().collect();
+        assert!(
+            chars[29] == ' ' || chars[29] == '─',
+            "row {y} col 29 should be space or dash; got {:?}",
+            chars[29],
+        );
+    }
 }

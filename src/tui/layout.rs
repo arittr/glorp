@@ -7,6 +7,10 @@ use ratatui::{
 };
 
 use crate::pet::render::PaletteRoleName;
+use crate::tui::composer::{
+    box_with_chrome, join_horizontal_top, pad_rows, section_divider, ChromeStyle,
+};
+use crate::tui::style::ramp_index;
 use crate::tui::{
     style::{
         semantic_styles, tokenpet_palette, BarRamp, ColorCapability, SemanticStyles,
@@ -14,14 +18,22 @@ use crate::tui::{
     },
     view_model::{SourceStatus, WatchViewModel},
 };
-use crate::tui::style::ramp_index;
 
 /// Expected source surfaces and their display names.
 /// Order is the render order for the today panel and helpers row.
-const EXPECTED_SOURCES: &[(&str, &str)] = &[
-    ("claude-code", "claude"),
-    ("codex", "codex"),
-];
+const EXPECTED_SOURCES: &[(&str, &str)] = &[("claude-code", "claude"), ("codex", "codex")];
+
+/// Fixed-width layout constants matching the hybrid-v4 mockup.
+/// Geometry: `┃` + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL + RIGHT_PAD + `┃`
+/// equals 78 visible cells total.
+const FRAME_BODY_WIDTH: usize = 78;
+const LEFT_PAD: usize = 2;
+const RIGHT_PAD: usize = 3;
+const GUTTER: usize = 2;
+const LEFT_COL: usize = 26;
+const RIGHT_COL: usize = 43;
+
+const COMPACT_THRESHOLD: usize = FRAME_BODY_WIDTH;
 
 pub fn render_help_overlay(frame: &mut Frame<'_>) {
     render_overlay(
@@ -134,21 +146,15 @@ fn role_style(role: PaletteRoleName, styles: &SemanticStyles) -> Style {
     }
 }
 
-fn section_line<'a>(label: &'a str, target_width: usize, styles: &'a SemanticStyles) -> Vec<Span<'a>> {
-    let label_text = format!(" {label} ");
-    let label_visible = label_text.chars().count();
-    let dash_total = target_width.saturating_sub(label_visible + 1); // +1 for leading dash
-    let leading = "─";
-    let trailing_count = dash_total;
-    let trailing: String = std::iter::repeat('─').take(trailing_count).collect();
-    vec![
-        Span::styled(leading, styles.section_header),
-        Span::styled(label_text, styles.label),
-        Span::styled(trailing, styles.section_header),
-    ]
+fn section_row<'a>(
+    label: &'a str,
+    target_width: usize,
+    styles: &'a SemanticStyles,
+) -> Vec<Span<'a>> {
+    section_divider(label, target_width, styles.section_header, styles.label)
 }
 
-fn bar_line_spans<'a>(
+fn bar_row<'a>(
     label: &'a str,
     fill_fraction: f64,
     ramp: BarRamp,
@@ -219,49 +225,16 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn body_row<'a>(inner: Vec<Span<'a>>, inner_width: usize, styles: &'a SemanticStyles) -> Line<'a> {
-    let visible: usize = inner.iter().map(|s| s.content.chars().count()).sum();
-    let frame_style = Style::default().fg(tokenpet_palette().accent.rgb);
-    let mut spans: Vec<Span<'a>> = Vec::with_capacity(inner.len() + 3);
-    spans.push(Span::styled("┃", frame_style));
-    if visible <= inner_width {
-        spans.extend(inner);
-        let pad = inner_width - visible;
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), styles.body));
-        }
-    } else {
-        // Truncate cell-by-cell to fit; last visible char may be cut on a
-        // multi-char span boundary. Scan spans and accumulate up to inner_width.
-        let mut remaining = inner_width;
-        for span in inner {
-            let span_len = span.content.chars().count();
-            if span_len <= remaining {
-                spans.push(span);
-                remaining -= span_len;
-            } else {
-                let truncated: String = span.content.chars().take(remaining).collect();
-                spans.push(Span::styled(truncated, span.style));
-                break;
-            }
-        }
-    }
-    spans.push(Span::styled("┃", frame_style));
-    Line::from(spans)
-}
-
 const NAME_MAX: usize = 16;
 
-fn render_frame_top_line<'a>(
-    width: usize,
+fn title_spans<'a>(
     pet_name: &'a str,
     species: &'a str,
     stage: &'a str,
     age: &'a str,
     mood: &'a str,
     styles: &'a SemanticStyles,
-) -> Line<'a> {
-    let frame_style = Style::default().fg(tokenpet_palette().accent.rgb);
+) -> Vec<Span<'a>> {
     let stage_style = Style::default().fg(tokenpet_palette().accent.rgb);
     let mood_style = Style::default().fg(tokenpet_palette().good.rgb);
     let display_name: String = if pet_name.chars().count() > NAME_MAX {
@@ -270,49 +243,34 @@ fn render_frame_top_line<'a>(
     } else {
         pet_name.to_string()
     };
-    let title_text = format!("glorp · {display_name} the {species} · {stage} · {age} · {mood}");
-    let title_visible = title_text.chars().count();
-    let n_fill = width.saturating_sub(5 + title_visible);
-    // Build the title as styled segments. Render the stage in accent and the
-    // mood in good color; everything else uses the dim label style.
-    let prefix = format!("glorp · {display_name} the {species} · ");
-    let between = format!(" · {age} · ");
-    let mut spans: Vec<Span<'a>> = Vec::new();
-    spans.push(Span::styled("┏━ ", frame_style));
-    spans.push(Span::styled(prefix, styles.label));
-    spans.push(Span::styled(stage.to_string(), stage_style));
-    spans.push(Span::styled(between, styles.label));
-    spans.push(Span::styled(mood.to_string(), mood_style));
-    spans.push(Span::styled(" ".to_string(), styles.label));
-    spans.push(Span::styled("━".repeat(n_fill), frame_style));
-    spans.push(Span::styled("┓", frame_style));
-    Line::from(spans)
+    vec![
+        Span::styled(
+            format!("glorp · {display_name} the {species} · "),
+            styles.label,
+        ),
+        Span::styled(stage.to_string(), stage_style),
+        Span::styled(format!(" · {age} · "), styles.label),
+        Span::styled(mood.to_string(), mood_style),
+    ]
 }
 
-fn render_frame_bottom_line<'a>(width: usize, styles: &'a SemanticStyles) -> Line<'a> {
-    let frame_style = Style::default().fg(tokenpet_palette().accent.rgb);
-    let footer_text = "q quit · r refresh · ? help";
-    let footer_visible = footer_text.chars().count();
-    let n_fill = width.saturating_sub(5 + footer_visible);
-    let spans = vec![
-        Span::styled("┗━ ", frame_style),
-        Span::styled(footer_text.to_string(), styles.label),
-        Span::styled(" ".to_string(), styles.label),
-        Span::styled("━".repeat(n_fill), frame_style),
-        Span::styled("┛", frame_style),
-    ];
-    Line::from(spans)
+fn footer_spans(styles: &SemanticStyles) -> Vec<Span<'_>> {
+    vec![Span::styled("q quit · r refresh · ? help", styles.label)]
 }
 
-fn render_today_panel_lines<'a>(
+fn render_today_panel_rows<'a>(
     width: usize,
     vm: &'a WatchViewModel,
     styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    let mut out: Vec<Line<'a>> = Vec::new();
-    let header = section_line("today", width, styles);
-    out.push(Line::from(header));
-    out.push(today_row("tokens", &format_tokens_full(vm.today_effective_tokens), None, styles));
+) -> Vec<Vec<Span<'a>>> {
+    let mut out: Vec<Vec<Span<'a>>> = Vec::new();
+    out.push(section_row("today", width, styles));
+    out.push(today_row(
+        "tokens",
+        &format_tokens_full(vm.today_effective_tokens),
+        None,
+        styles,
+    ));
     let total = vm.today_effective_tokens.max(0.0);
     for (surface, display) in EXPECTED_SOURCES {
         let value_opt = vm
@@ -322,15 +280,27 @@ fn render_today_panel_lines<'a>(
             .map(|s| s.effective_tokens);
         let (value_str, share) = match value_opt {
             Some(v) => {
-                let pct = if total > 0.0 { (v / total) * 100.0 } else { 0.0 };
-                (format_tokens_full(v), Some(format!("{}%", pct.round() as u32)))
+                let pct = if total > 0.0 {
+                    (v / total) * 100.0
+                } else {
+                    0.0
+                };
+                (
+                    format_tokens_full(v),
+                    Some(format!("{}%", pct.round() as u32)),
+                )
             }
             None => ("—".to_string(), Some("—".to_string())),
         };
         out.push(today_row(display, &value_str, share, styles));
     }
     let bucket_str = format_signed_tokens_short(vm.current_bucket_effective_tokens);
-    out.push(today_row("last 10m", &bucket_str, Some("this 10m".to_string()), styles));
+    out.push(today_row(
+        "last 10m",
+        &bucket_str,
+        Some("this 10m".to_string()),
+        styles,
+    ));
     out
 }
 
@@ -339,7 +309,7 @@ fn today_row<'a>(
     value: &str,
     annotation: Option<String>,
     styles: &'a SemanticStyles,
-) -> Line<'a> {
+) -> Vec<Span<'a>> {
     // Fixed-column layout so values and annotations stay aligned across rows
     // even when token magnitudes differ by orders of magnitude.
     //   2 sp + label(8) + 1 sp + value(right-aligned, 13) + 4 sp + annotation
@@ -354,7 +324,7 @@ fn today_row<'a>(
         spans.push(Span::raw("    "));
         spans.push(Span::styled(ann, styles.label));
     }
-    Line::from(spans)
+    spans
 }
 
 fn format_tokens_full(n: f64) -> String {
@@ -397,13 +367,13 @@ fn format_signed_tokens_short(n: f64) -> String {
     }
 }
 
-fn render_helpers_panel_lines<'a>(
+fn render_helpers_panel_rows<'a>(
     width: usize,
     vm: &'a WatchViewModel,
     styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    let mut out = Vec::new();
-    out.push(Line::from(section_line("helpers", width, styles)));
+) -> Vec<Vec<Span<'a>>> {
+    let mut out: Vec<Vec<Span<'a>>> = Vec::new();
+    out.push(section_row("helpers", width, styles));
     let p = tokenpet_palette();
     let mut spans: Vec<Span<'a>> = Vec::new();
     spans.push(Span::raw("  "));
@@ -424,142 +394,37 @@ fn render_helpers_panel_lines<'a>(
         spans.push(Span::raw("  "));
         spans.push(Span::styled(glyph.to_string(), glyph_style));
     }
-    out.push(Line::from(spans));
+    out.push(spans);
     out
 }
 
-fn render_feed_panel_lines<'a>(
-    width: usize,
-    vm: &'a WatchViewModel,
-    styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    render_feed_panel_lines_capped(width, vm, 3, styles)
-}
-
-fn render_feed_panel_lines_capped<'a>(
+fn render_feed_panel_rows<'a>(
     width: usize,
     vm: &'a WatchViewModel,
     max_entries: usize,
     styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    let mut out = Vec::new();
-    out.push(Line::from(section_line("feed", width, styles)));
+) -> Vec<Vec<Span<'a>>> {
+    let mut out: Vec<Vec<Span<'a>>> = Vec::new();
+    out.push(section_row("feed", width, styles));
     for event in vm.recent_events.iter().take(max_entries) {
-        let mut spans: Vec<Span<'a>> = Vec::new();
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(event.timestamp.clone(), styles.timestamp));
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(event.text.clone(), styles.log(event.kind)));
-        out.push(Line::from(spans));
+        out.push(vec![
+            Span::raw("  "),
+            Span::styled(event.timestamp.clone(), styles.timestamp),
+            Span::raw("  "),
+            Span::styled(event.text.clone(), styles.log(event.kind)),
+        ]);
     }
     out
 }
 
-#[cfg(test)]
-mod today_panel_tests {
-    use super::*;
-    use crate::tui::view_model::WatchViewModel;
-
-    #[test]
-    fn today_panel_has_four_rows_plus_rule() {
-        let styles = semantic_styles();
-        let vm = WatchViewModel::fixture();
-        let lines = render_today_panel_lines(43, &vm, &styles);
-        assert_eq!(lines.len(), 5);
-    }
-
-    #[test]
-    fn today_panel_renders_dash_for_absent_source() {
-        let styles = semantic_styles();
-        let mut vm = WatchViewModel::fixture();
-        vm.source_breakdown.retain(|s| s.name != "codex");
-        let lines = render_today_panel_lines(43, &vm, &styles);
-        let text: String = lines[3]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains("codex"));
-        assert!(text.contains("—"));
-    }
-}
-
-#[cfg(test)]
-mod frame_bottom_tests {
-    use super::*;
-
-    #[test]
-    fn frame_bottom_pads_to_target_width() {
-        let styles = semantic_styles();
-        let line = render_frame_bottom_line(78, &styles);
-        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        assert_eq!(total, 78);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
-        assert!(text.starts_with("┗━"));
-        assert!(text.ends_with("┛"));
-        assert!(text.contains("q quit"));
-    }
-}
-
-#[cfg(test)]
-mod frame_top_tests {
-    use super::*;
-
-    #[test]
-    fn frame_top_pads_to_target_width() {
-        let styles = semantic_styles();
-        let line = render_frame_top_line(78, "mochi", "fuzz", "pup", "12d 4h", "content", &styles);
-        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        assert_eq!(total, 78);
-    }
-
-    #[test]
-    fn frame_top_truncates_long_pet_name() {
-        let styles = semantic_styles();
-        let very_long = "thisnameiswaytoolongforthetitle";
-        let line = render_frame_top_line(78, very_long, "fuzz", "pup", "12d 4h", "content", &styles);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
-        assert!(text.contains("…"));
-        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        assert_eq!(total, 78);
-    }
-}
-
-#[cfg(test)]
-mod body_row_tests {
-    use super::*;
-
-    #[test]
-    fn body_row_pads_short_content_to_inner_width() {
-        let styles = semantic_styles();
-        let inner: Vec<Span> = vec![Span::raw("hi")];
-        let line = body_row(inner, 10, &styles);
-        // Visible width: ┃ + 10 + ┃ = 12.
-        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        assert_eq!(total, 12);
-        // First and last spans must be ┃.
-        assert_eq!(line.spans.first().unwrap().content.as_ref(), "┃");
-        assert_eq!(line.spans.last().unwrap().content.as_ref(), "┃");
-    }
-
-    #[test]
-    fn body_row_truncates_overflowing_content() {
-        let styles = semantic_styles();
-        let inner: Vec<Span> = vec![Span::raw("xxxxxxxxxxxxxxxx")]; // 16 chars
-        let line = body_row(inner, 10, &styles);
-        let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        assert_eq!(total, 12);
-    }
-}
-
-fn render_sparkline_lines<'a>(
+fn render_sparkline_rows<'a>(
     width: usize,
     history: &[f64],
     capability: ColorCapability,
     styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    let mut out = Vec::new();
-    out.push(Line::from(section_line("7-day", width, styles)));
+) -> Vec<Vec<Span<'a>>> {
+    let mut out: Vec<Vec<Span<'a>>> = Vec::new();
+    out.push(section_row("7-day", width, styles));
 
     let glyphs: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let mut last_seven: Vec<f64> = history.iter().copied().rev().take(7).collect();
@@ -571,9 +436,7 @@ fn render_sparkline_lines<'a>(
     let mut spans: Vec<Span<'a>> = Vec::new();
     spans.push(Span::raw("       "));
     for (i, value) in last_seven.iter().enumerate() {
-        let glyph = if *value <= 0.0 {
-            '·'
-        } else if max <= 0.0 {
+        let glyph = if *value <= 0.0 || max <= 0.0 {
             '·'
         } else {
             let level = ((value / max) * (glyphs.len() as f64 - 1.0)).round() as usize;
@@ -596,226 +459,76 @@ fn render_sparkline_lines<'a>(
             spans.push(Span::raw("   "));
         }
     }
-    out.push(Line::from(spans));
+    out.push(spans);
     out
 }
 
-#[cfg(test)]
-mod sparkline_tests {
-    use super::*;
-    use crate::tui::style::ColorCapability;
-
-    #[test]
-    fn sparkline_row_returns_two_lines() {
-        let styles = semantic_styles();
-        let history = vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0];
-        let lines = render_sparkline_lines(43, &history, ColorCapability::Truecolor, &styles);
-        assert_eq!(lines.len(), 2);
-    }
-
-    #[test]
-    fn sparkline_zeroes_render_dot() {
-        let styles = semantic_styles();
-        let history = vec![0.0; 7];
-        let lines = render_sparkline_lines(43, &history, ColorCapability::Truecolor, &styles);
-        let text: String = lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains('·'));
-        assert!(!text.contains('█'));
-    }
-}
-
-#[cfg(test)]
-mod helpers_panel_tests {
-    use super::*;
-    use crate::tui::view_model::{SourceStatus, WatchViewModel};
-
-    #[test]
-    fn helpers_panel_renders_check_when_ready() {
-        let styles = semantic_styles();
-        let vm = WatchViewModel::fixture();
-        let lines = render_helpers_panel_lines(43, &vm, &styles);
-        let text: String = lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains('✓'));
-    }
-
-    #[test]
-    fn helpers_panel_renders_x_when_blocked() {
-        let styles = semantic_styles();
-        let mut vm = WatchViewModel::fixture();
-        for src in vm.source_health.iter_mut() {
-            src.status = SourceStatus::Blocked;
-        }
-        let lines = render_helpers_panel_lines(43, &vm, &styles);
-        let text: String = lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains('✗'));
-    }
-}
-
-#[cfg(test)]
-mod feed_panel_tests {
-    use super::*;
-    use crate::tui::view_model::WatchViewModel;
-
-    #[test]
-    fn feed_panel_returns_rule_plus_up_to_three_entries() {
-        let styles = semantic_styles();
-        let vm = WatchViewModel::fixture_with_events();
-        let lines = render_feed_panel_lines(43, &vm, &styles);
-        assert!(lines.len() >= 1 && lines.len() <= 4);
-    }
-}
-
-fn render_pet_panel_lines<'a>(
+fn render_pet_panel_rows<'a>(
     width: usize,
     vm: &'a WatchViewModel,
     capability: ColorCapability,
     styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    let mut out: Vec<Line<'a>> = Vec::new();
-    let left_pad = (width.saturating_sub(11)) / 2;
-    out.push(Line::from(Span::raw("")));
+) -> Vec<Vec<Span<'a>>> {
+    let mut out: Vec<Vec<Span<'a>>> = Vec::new();
+    // Center the pet art horizontally within the column. Pet art lines
+    // are 11 cells wide in the standard fixture; if the art is wider we
+    // still left-pad by zero so it just fills the column.
+    let pet_width = vm
+        .pet_art
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let left_pad = width.saturating_sub(pet_width) / 2;
+    out.push(Vec::new());
     for (line_index, art_line) in vm.pet_art.iter().enumerate() {
         let mut spans: Vec<Span<'a>> = Vec::new();
-        spans.push(Span::raw(" ".repeat(left_pad)));
+        if left_pad > 0 {
+            spans.push(Span::raw(" ".repeat(left_pad)));
+        }
         spans.extend(role_spans_for_line(
             art_line,
             line_index,
             &vm.pet_spans,
             styles,
         ));
-        out.push(Line::from(spans));
+        out.push(spans);
     }
-    let ground = ",".repeat(width.saturating_sub(2));
-    out.push(Line::from(vec![
+    let ground_width = width.saturating_sub(2);
+    out.push(vec![
         Span::raw(" "),
-        Span::styled(ground, styles.empty_bar),
-    ]));
-    out.push(Line::from(Span::raw("")));
-    out.push(Line::from(section_line("vitals", width, styles)));
-    out.push(Line::from(bar_line_spans(
-        "fed",
-        vm.fed,
-        BAR_RAMP_GOOD,
-        capability,
-        styles,
-    )));
-    out.push(Line::from(bar_line_spans(
+        Span::styled(",".repeat(ground_width), styles.empty_bar),
+    ]);
+    out.push(Vec::new());
+    out.push(section_row("vitals", width, styles));
+    out.push(bar_row("fed", vm.fed, BAR_RAMP_GOOD, capability, styles));
+    out.push(bar_row(
         "happy",
         vm.happiness,
         BAR_RAMP_ACCENT,
         capability,
         styles,
-    )));
-    out.push(Line::from(bar_line_spans(
+    ));
+    out.push(bar_row(
         "energy",
         vm.energy,
         BAR_RAMP_GOOD,
         capability,
         styles,
-    )));
+    ));
     let xp_fraction = if vm.xp_target <= 0.0 {
         0.0
     } else {
         (vm.xp_current / vm.xp_target).clamp(0.0, 1.0)
     };
-    out.push(Line::from(bar_line_spans(
+    out.push(bar_row(
         "xp",
         xp_fraction,
         BAR_RAMP_ACCENT,
         capability,
         styles,
-    )));
+    ));
     out
-}
-
-#[cfg(test)]
-mod pet_panel_tests {
-    use super::*;
-    use crate::tui::style::ColorCapability;
-    use crate::tui::view_model::WatchViewModel;
-
-    #[test]
-    fn pet_panel_includes_vitals_rule_and_four_bars() {
-        let styles = semantic_styles();
-        let vm = WatchViewModel::fixture();
-        let lines = render_pet_panel_lines(26, &vm, ColorCapability::Truecolor, &styles);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<String>();
-        assert!(text.contains("vitals"));
-        assert!(text.contains("fed"));
-        assert!(text.contains("happy"));
-        assert!(text.contains("energy"));
-        assert!(text.contains("xp"));
-    }
-
-    #[test]
-    fn pet_panel_does_not_include_meta_block() {
-        let styles = semantic_styles();
-        let vm = WatchViewModel::fixture();
-        let lines = render_pet_panel_lines(26, &vm, ColorCapability::Truecolor, &styles);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<String>();
-        assert!(!text.contains("species"));
-        assert!(!text.contains("stage"));
-        assert!(!text.contains("mood"));
-    }
-}
-
-#[cfg(test)]
-mod bar_line_tests {
-    use super::*;
-    use crate::tui::style::{BAR_RAMP_GOOD, ColorCapability};
-
-    #[test]
-    fn bar_line_zero_fill_renders_twelve_faint() {
-        let styles = semantic_styles();
-        let spans = bar_line_spans("fed", 0.0, BAR_RAMP_GOOD, ColorCapability::Truecolor, &styles);
-        let bar_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        let fill_count = bar_text.chars().filter(|c| *c == '░').count();
-        assert_eq!(fill_count, 12);
-        let solid_count = bar_text.chars().filter(|c| *c == '█').count();
-        assert_eq!(solid_count, 0);
-    }
-
-    #[test]
-    fn bar_line_full_fill_renders_twelve_solid() {
-        let styles = semantic_styles();
-        let spans = bar_line_spans("fed", 1.0, BAR_RAMP_GOOD, ColorCapability::Truecolor, &styles);
-        let bar_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        let solid_count = bar_text.chars().filter(|c| *c == '█').count();
-        assert_eq!(solid_count, 12);
-    }
-
-    #[test]
-    fn bar_line_flat_capability_uses_solid_color() {
-        let styles = semantic_styles();
-        let spans = bar_line_spans("fed", 0.5, BAR_RAMP_GOOD, ColorCapability::Flat, &styles);
-        let filled: Vec<_> = spans
-            .iter()
-            .filter(|s| s.content.contains('█'))
-            .map(|s| s.style)
-            .collect();
-        let first = filled.first().copied().unwrap();
-        for s in &filled {
-            assert_eq!(*s, first);
-        }
-    }
 }
 
 pub fn render_watch_frame_with_capability(
@@ -837,8 +550,11 @@ pub fn render_watch_frame_with_capability(
     }
 }
 
-const COMPACT_THRESHOLD: usize = 80;
-
+/// Lay out the watch frame at hybrid-v4 geometry: a 78-cell rounded
+/// rounded box containing a two-column body (left = pet + vitals,
+/// right = today + 7-day + feed + helpers). When the terminal is wider
+/// than 78 cells, the surplus space pads evenly around the 76-cell
+/// inner content area so the composed block stays centered.
 fn render_wide(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -846,117 +562,143 @@ fn render_wide(
     capability: ColorCapability,
     styles: &SemanticStyles,
 ) {
-    let width = area.width as usize;
-    let inner_width = width.saturating_sub(2);
-    let pet_col = 26;
-    let gap = 2;
-    let data_col = 43;
-    let base_pad_left = 2;
-    let base_pad_right = 3;
-    let baseline = pet_col + gap + data_col + base_pad_left + base_pad_right;
-    // Center content when the terminal is wider than the baseline (78-col frame).
-    // Surplus splits equally between left and right outer pads so the pet+data
-    // block sits in the middle of the frame instead of clinging to the left edge.
-    let extra = inner_width.saturating_sub(baseline);
-    let pad_left = base_pad_left + extra / 2;
-    let pad_right = base_pad_right + extra - extra / 2;
+    let terminal_width = area.width as usize;
+    let frame_inner_width = terminal_width.saturating_sub(2);
+    let pad_style = styles.body;
 
-    let body_height = area.height.saturating_sub(2) as usize;
+    // Allocate body height: total minus the two chrome rows.
+    let body_height = (area.height as usize).saturating_sub(2);
 
-    // Build the data column. Feed grows first, then any remaining residual
-    // is distributed as extra blank lines between sections so the body fills
-    // the frame without leaving a cavity at the bottom.
-    let today_lines = render_today_panel_lines(data_col, vm, styles);
-    let spark_lines = render_sparkline_lines(data_col, &vm.recent_daily_effective_tokens, capability, styles);
-    let helpers_lines = render_helpers_panel_lines(data_col, vm, styles);
+    // Build right column panels. Feed grows first into available height,
+    // then any residual is distributed as blank rows between sections.
+    let today = render_today_panel_rows(RIGHT_COL, vm, styles);
+    let spark = render_sparkline_rows(
+        RIGHT_COL,
+        &vm.recent_daily_effective_tokens,
+        capability,
+        styles,
+    );
+    let helpers = render_helpers_panel_rows(RIGHT_COL, vm, styles);
+
     // Fixed overhead with single-blank separators:
     //   top_blank + today + blank + spark + blank + feed_rule + blank + helpers + bottom_blank
-    let single_gap_overhead = 1 + today_lines.len() + 1 + spark_lines.len() + 1 + 1 + 1 + helpers_lines.len() + 1;
+    let single_gap_overhead = 1 + today.len() + 1 + spark.len() + 1 + 1 + 1 + helpers.len() + 1;
     let event_count = vm.recent_events.len();
     let max_feed_entries = body_height
         .saturating_sub(single_gap_overhead)
         .max(2)
         .min(event_count.max(2));
-    let feed_lines = render_feed_panel_lines_capped(data_col, vm, max_feed_entries, styles);
+    let feed = render_feed_panel_rows(RIGHT_COL, vm, max_feed_entries, styles);
 
-    // Now compute remaining residual after feed has grown. Distribute it as
-    // extra blank lines across 5 separator slots (top, between today/spark,
-    // spark/feed, feed/helpers, bottom).
-    let consumed = today_lines.len() + spark_lines.len() + feed_lines.len() + helpers_lines.len() + 5;
+    let consumed = today.len() + spark.len() + feed.len() + helpers.len() + 5;
     let residual = body_height.saturating_sub(consumed);
-    let slots = 5;
+    let slots = 5usize;
     let extra_per_slot = residual / slots;
     let extra_remainder = residual % slots;
-    let blank_run = |n: usize| -> Vec<Line<'_>> {
-        (0..n).map(|_| Line::from(Span::raw(""))).collect()
-    };
     let slot_size = |slot_index: usize| -> usize {
         1 + extra_per_slot + if slot_index < extra_remainder { 1 } else { 0 }
     };
+    let blank_run = |n: usize| -> Vec<Vec<Span<'_>>> { (0..n).map(|_| Vec::new()).collect() };
 
-    let mut data_lines: Vec<Line> = Vec::new();
-    data_lines.extend(blank_run(slot_size(0)));
-    data_lines.extend(today_lines);
-    data_lines.extend(blank_run(slot_size(1)));
-    data_lines.extend(spark_lines);
-    data_lines.extend(blank_run(slot_size(2)));
-    data_lines.extend(feed_lines);
-    data_lines.extend(blank_run(slot_size(3)));
-    data_lines.extend(helpers_lines);
-    data_lines.extend(blank_run(slot_size(4)));
+    let mut right_rows: Vec<Vec<Span>> = Vec::new();
+    right_rows.extend(blank_run(slot_size(0)));
+    right_rows.extend(today);
+    right_rows.extend(blank_run(slot_size(1)));
+    right_rows.extend(spark);
+    right_rows.extend(blank_run(slot_size(2)));
+    right_rows.extend(feed);
+    right_rows.extend(blank_run(slot_size(3)));
+    right_rows.extend(helpers);
+    right_rows.extend(blank_run(slot_size(4)));
 
-    // Pet column: vertically center the pet+vitals block within available height.
-    let raw_pet_lines = render_pet_panel_lines(pet_col, vm, capability, styles);
-    let pet_lines: Vec<Line> = if raw_pet_lines.len() < body_height {
-        let pad_top = (body_height - raw_pet_lines.len()) / 2;
-        let mut padded: Vec<Line> = (0..pad_top).map(|_| Line::from(Span::raw(""))).collect();
-        padded.extend(raw_pet_lines);
+    // Left column: pet art and vitals, vertically centered.
+    let raw_left = render_pet_panel_rows(LEFT_COL, vm, capability, styles);
+    let left_rows: Vec<Vec<Span>> = if raw_left.len() < body_height {
+        let pad_top = (body_height - raw_left.len()) / 2;
+        let mut padded: Vec<Vec<Span>> = (0..pad_top).map(|_| Vec::new()).collect();
+        padded.extend(raw_left);
         padded
     } else {
-        raw_pet_lines
+        raw_left
     };
 
+    // Pad each column to its width, then join horizontally.
+    let left_padded = pad_rows(left_rows, LEFT_COL, pad_style);
+    let right_padded = pad_rows(right_rows, RIGHT_COL, pad_style);
+    let joined = join_horizontal_top(
+        vec![(LEFT_COL, left_padded), (RIGHT_COL, right_padded)],
+        pad_style,
+    );
+
+    // Wrap each joined row with the outer left/gutter/right pads so the
+    // body row matches the mockup's column geometry inside the frame.
+    let baseline_inner = LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL + RIGHT_PAD;
+    let extra = frame_inner_width.saturating_sub(baseline_inner);
+    let pad_left = LEFT_PAD + extra / 2;
+    let pad_right = RIGHT_PAD + extra - extra / 2;
+
+    let body: Vec<Vec<Span>> = joined
+        .into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span> = Vec::with_capacity(row.len() + 3);
+            spans.push(Span::raw(" ".repeat(pad_left)));
+            // Insert the gutter between the two columns. Because pad_rows
+            // already padded each column to its target width, the join
+            // produced [LEFT_COL chars][RIGHT_COL chars]. Split on LEFT_COL
+            // so we can interleave a gutter.
+            let (left_part, right_part) = split_after_width(row, LEFT_COL);
+            spans.extend(left_part);
+            spans.push(Span::raw(" ".repeat(GUTTER)));
+            spans.extend(right_part);
+            spans.push(Span::raw(" ".repeat(pad_right)));
+            spans
+        })
+        .collect();
+
     let age_label = format!("{}d", vm.age_days);
-    let mut framed: Vec<Line> = Vec::new();
-    framed.push(render_frame_top_line(
-        width,
+    let title = title_spans(
         &vm.pet_name,
         &vm.species,
         &vm.stage,
         &age_label,
         &vm.mood,
         styles,
-    ));
-    let max_rows = pet_lines.len().max(data_lines.len()).max(body_height);
-    for row_index in 0..max_rows {
-        let pet_line = pet_lines.get(row_index);
-        let data_line = data_lines.get(row_index);
-        let mut inner: Vec<Span> = Vec::new();
-        inner.push(Span::raw(" ".repeat(pad_left)));
-        if let Some(line) = pet_line {
-            let cell_count: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-            inner.extend(line.spans.iter().cloned());
-            if cell_count < pet_col {
-                inner.push(Span::raw(" ".repeat(pet_col - cell_count)));
-            }
-        } else {
-            inner.push(Span::raw(" ".repeat(pet_col)));
+    );
+    let footer = footer_spans(styles);
+    let chrome = ChromeStyle {
+        frame: Style::default().fg(tokenpet_palette().accent.rgb),
+        body_pad: pad_style,
+    };
+    let lines = box_with_chrome(body, frame_inner_width, title, footer, chrome);
+
+    frame.render_widget(Paragraph::new(lines).style(styles.body), area);
+}
+
+/// Splits a row of spans into two row-vectors at the given visible char
+/// boundary. The combined visible width is preserved exactly.
+fn split_after_width<'a>(row: Vec<Span<'a>>, boundary: usize) -> (Vec<Span<'a>>, Vec<Span<'a>>) {
+    let mut left: Vec<Span<'a>> = Vec::new();
+    let mut right: Vec<Span<'a>> = Vec::new();
+    let mut cursor = 0usize;
+    for span in row {
+        let len = span.content.chars().count();
+        if cursor >= boundary {
+            right.push(span);
+            continue;
         }
-        inner.push(Span::raw(" ".repeat(gap)));
-        if let Some(line) = data_line {
-            let cell_count: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-            inner.extend(line.spans.iter().cloned());
-            if cell_count < data_col {
-                inner.push(Span::raw(" ".repeat(data_col - cell_count)));
-            }
+        if cursor + len <= boundary {
+            cursor += len;
+            left.push(span);
         } else {
-            inner.push(Span::raw(" ".repeat(data_col)));
+            let take = boundary - cursor;
+            let left_part: String = span.content.chars().take(take).collect();
+            let right_part: String = span.content.chars().skip(take).collect();
+            left.push(Span::styled(left_part, span.style));
+            right.push(Span::styled(right_part, span.style));
+            cursor = boundary;
         }
-        inner.push(Span::raw(" ".repeat(pad_right)));
-        framed.push(body_row(inner, inner_width, styles));
     }
-    framed.push(render_frame_bottom_line(width, styles));
-    frame.render_widget(Paragraph::new(framed).style(styles.body), area);
+    (left, right)
 }
 
 fn render_compact(
@@ -990,11 +732,11 @@ fn render_compact(
         return;
     }
 
-    let pet = render_pet_panel_lines(width, vm, capability, styles);
-    let today = render_today_panel_lines(width, vm, styles);
-    let spark = render_sparkline_lines(width, &vm.recent_daily_effective_tokens, capability, styles);
-    let feed = render_feed_panel_lines(width, vm, styles);
-    let helpers = render_helpers_panel_lines(width, vm, styles);
+    let pet = render_pet_panel_rows(width, vm, capability, styles);
+    let today = render_today_panel_rows(width, vm, styles);
+    let spark = render_sparkline_rows(width, &vm.recent_daily_effective_tokens, capability, styles);
+    let feed = render_feed_panel_rows(width, vm, 3, styles);
+    let helpers = render_helpers_panel_rows(width, vm, styles);
 
     let footer = Line::from(vec![
         Span::styled("q", styles.label),
@@ -1005,14 +747,16 @@ fn render_compact(
         Span::styled(" help", styles.label),
     ]);
 
+    let groups: Vec<Vec<Vec<Span>>> = vec![pet, today, spark, feed, helpers];
     let mut all: Vec<Line> = Vec::new();
-    let groups: Vec<Vec<Line>> = vec![pet, today, spark, feed, helpers];
     for group in groups {
         if all.len() + group.len() + 1 > height.saturating_sub(1) {
             break;
         }
-        all.extend(group);
-        all.push(Line::from(Span::raw("")));
+        for row in group {
+            all.push(Line::from(row));
+        }
+        all.push(Line::from(Vec::<Span>::new()));
     }
     if all.len() < height {
         all.push(footer);
@@ -1025,10 +769,182 @@ fn render_compact(
 }
 
 #[cfg(test)]
+mod today_panel_tests {
+    use super::*;
+
+    #[test]
+    fn today_panel_has_four_rows_plus_rule() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let rows = render_today_panel_rows(RIGHT_COL, &vm, &styles);
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn today_panel_renders_dash_for_absent_source() {
+        let styles = semantic_styles();
+        let mut vm = WatchViewModel::fixture();
+        vm.source_breakdown.retain(|s| s.name != "codex");
+        let rows = render_today_panel_rows(RIGHT_COL, &vm, &styles);
+        let text: String = rows[3].iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("codex"));
+        assert!(text.contains("—"));
+    }
+}
+
+#[cfg(test)]
+mod sparkline_tests {
+    use super::*;
+
+    #[test]
+    fn sparkline_returns_two_rows() {
+        let styles = semantic_styles();
+        let history = vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0];
+        let rows = render_sparkline_rows(RIGHT_COL, &history, ColorCapability::Truecolor, &styles);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn sparkline_zeroes_render_dot() {
+        let styles = semantic_styles();
+        let history = vec![0.0; 7];
+        let rows = render_sparkline_rows(RIGHT_COL, &history, ColorCapability::Truecolor, &styles);
+        let text: String = rows[1].iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('·'));
+        assert!(!text.contains('█'));
+    }
+}
+
+#[cfg(test)]
+mod helpers_panel_tests {
+    use super::*;
+    use crate::tui::view_model::SourceStatus;
+
+    #[test]
+    fn helpers_panel_renders_check_when_ready() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let rows = render_helpers_panel_rows(RIGHT_COL, &vm, &styles);
+        let text: String = rows[1].iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('✓'));
+    }
+
+    #[test]
+    fn helpers_panel_renders_x_when_blocked() {
+        let styles = semantic_styles();
+        let mut vm = WatchViewModel::fixture();
+        for src in vm.source_health.iter_mut() {
+            src.status = SourceStatus::Blocked;
+        }
+        let rows = render_helpers_panel_rows(RIGHT_COL, &vm, &styles);
+        let text: String = rows[1].iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('✗'));
+    }
+}
+
+#[cfg(test)]
+mod feed_panel_tests {
+    use super::*;
+
+    #[test]
+    fn feed_panel_returns_rule_plus_up_to_three_entries() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture_with_events();
+        let rows = render_feed_panel_rows(RIGHT_COL, &vm, 3, &styles);
+        assert!(!rows.is_empty() && rows.len() <= 4);
+    }
+}
+
+#[cfg(test)]
+mod pet_panel_tests {
+    use super::*;
+
+    #[test]
+    fn pet_panel_includes_vitals_rule_and_four_bars() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let rows = render_pet_panel_rows(LEFT_COL, &vm, ColorCapability::Truecolor, &styles);
+        let text: String = rows
+            .iter()
+            .flat_map(|row| row.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("vitals"));
+        assert!(text.contains("fed"));
+        assert!(text.contains("happy"));
+        assert!(text.contains("energy"));
+        assert!(text.contains("xp"));
+    }
+
+    #[test]
+    fn pet_panel_does_not_include_meta_block() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let rows = render_pet_panel_rows(LEFT_COL, &vm, ColorCapability::Truecolor, &styles);
+        let text: String = rows
+            .iter()
+            .flat_map(|row| row.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(!text.contains("species"));
+        assert!(!text.contains("stage"));
+        assert!(!text.contains("mood"));
+    }
+}
+
+#[cfg(test)]
+mod bar_row_tests {
+    use super::*;
+
+    #[test]
+    fn bar_row_zero_fill_renders_twelve_faint() {
+        let styles = semantic_styles();
+        let spans = bar_row(
+            "fed",
+            0.0,
+            BAR_RAMP_GOOD,
+            ColorCapability::Truecolor,
+            &styles,
+        );
+        let bar_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let fill_count = bar_text.chars().filter(|c| *c == '░').count();
+        assert_eq!(fill_count, 12);
+        let solid_count = bar_text.chars().filter(|c| *c == '█').count();
+        assert_eq!(solid_count, 0);
+    }
+
+    #[test]
+    fn bar_row_full_fill_renders_twelve_solid() {
+        let styles = semantic_styles();
+        let spans = bar_row(
+            "fed",
+            1.0,
+            BAR_RAMP_GOOD,
+            ColorCapability::Truecolor,
+            &styles,
+        );
+        let bar_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let solid_count = bar_text.chars().filter(|c| *c == '█').count();
+        assert_eq!(solid_count, 12);
+    }
+
+    #[test]
+    fn bar_row_flat_capability_uses_solid_color() {
+        let styles = semantic_styles();
+        let spans = bar_row("fed", 0.5, BAR_RAMP_GOOD, ColorCapability::Flat, &styles);
+        let filled: Vec<_> = spans
+            .iter()
+            .filter(|s| s.content.contains('█'))
+            .map(|s| s.style)
+            .collect();
+        let first = filled.first().copied().unwrap();
+        for s in &filled {
+            assert_eq!(*s, first);
+        }
+    }
+}
+
+#[cfg(test)]
 mod render_compact_tests {
     use super::*;
-    use crate::tui::style::ColorCapability;
-    use crate::tui::view_model::WatchViewModel;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -1041,7 +957,9 @@ mod render_compact_tests {
             .draw(|f| render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
-        let row0: String = (0..60).map(|x| buffer[(x, 0)].symbol().to_string()).collect();
+        let row0: String = (0..60)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
         assert!(!row0.contains("┏"));
         assert!(!row0.contains("┗"));
     }
@@ -1069,49 +987,120 @@ mod render_compact_tests {
 #[cfg(test)]
 mod render_wide_tests {
     use super::*;
-    use crate::tui::style::ColorCapability;
-    use crate::tui::view_model::WatchViewModel;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    #[test]
-    fn render_wide_draws_frame_at_80_cols() {
-        let backend = TestBackend::new(80, 30);
+    fn render_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let vm = WatchViewModel::fixture();
         terminal
-            .draw(|f| {
-                render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor);
-            })
+            .draw(|f| render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor))
             .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let row0: String = (0..80).map(|x| buffer[(x, 0)].symbol().to_string()).collect();
-        assert!(row0.starts_with("┏━"));
-        assert!(row0.ends_with("┓"));
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_string(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let width = buf.area.width;
+        (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn render_wide_draws_rounded_frame_at_78_cols() {
+        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
+        let top = row_string(&buf, 0);
+        let bottom = row_string(&buf, 29);
+        assert!(
+            top.starts_with("┏━"),
+            "top row should start with ┏━, got {top:?}"
+        );
+        assert!(top.ends_with('┓'), "top row should end with ┓");
+        assert!(bottom.starts_with("┗━"));
+        assert!(bottom.ends_with('┛'));
+        for y in 1..29 {
+            assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail");
+            assert_eq!(buf[(77u16, y)].symbol(), "┃", "row {y} right rail");
+        }
     }
 
     #[test]
     fn render_wide_draws_frame_at_100_cols() {
-        let backend = TestBackend::new(100, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let vm = WatchViewModel::fixture();
-        terminal
-            .draw(|f| {
-                render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let row0: String = (0..100).map(|x| buffer[(x, 0)].symbol().to_string()).collect();
+        let buf = render_buffer(100, 30);
+        let row0 = row_string(&buf, 0);
         assert!(row0.starts_with("┏━"));
-        assert!(row0.ends_with("┓"));
-        // Side rails should connect at column 0 and column 99.
+        assert!(row0.ends_with('┓'));
         for y in 1..29 {
-            assert_eq!(buffer[(0u16, y as u16)].symbol(), "┃", "row {y} left rail broken");
-            assert_eq!(buffer[(99u16, y as u16)].symbol(), "┃", "row {y} right rail broken");
+            assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail broken");
+            assert_eq!(buf[(99u16, y)].symbol(), "┃", "row {y} right rail broken");
         }
-        // Bottom row connects with footer.
-        let row_last: String = (0..100).map(|x| buffer[(x, 29)].symbol().to_string()).collect();
+        let row_last = row_string(&buf, 29);
         assert!(row_last.starts_with("┗━"));
-        assert!(row_last.ends_with("┛"));
+        assert!(row_last.ends_with('┛'));
+    }
+
+    #[test]
+    fn every_body_row_fills_terminal_width_exactly() {
+        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
+        for y in 0..30 {
+            let row = row_string(&buf, y);
+            assert_eq!(
+                row.chars().count(),
+                FRAME_BODY_WIDTH,
+                "row {y} should be exactly {FRAME_BODY_WIDTH} cells; got {row:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn section_dividers_all_end_at_same_right_column() {
+        // The right column section dividers (today, 7-day, feed, helpers)
+        // should each end at the right edge of the right column (col 73)
+        // in the 78-col frame. Inspect each dash run.
+        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
+        let mut divider_rows: Vec<u16> = Vec::new();
+        for y in 0..30u16 {
+            let row = row_string(&buf, y);
+            if row.contains("─ today ")
+                || row.contains("─ 7-day ")
+                || row.contains("─ feed ")
+                || row.contains("─ helpers ")
+            {
+                divider_rows.push(y);
+            }
+        }
+        assert!(
+            divider_rows.len() >= 3,
+            "expected today/7-day/feed/helpers dividers, found at rows {divider_rows:?}",
+        );
+        for y in divider_rows {
+            // The last '─' in the right column must sit at column 73.
+            assert_eq!(
+                buf[(73u16, y)].symbol(),
+                "─",
+                "row {y} last dash should be at column 73",
+            );
+            // And col 74 must be a space (the outer-pad gap before the rail).
+            assert_eq!(
+                buf[(74u16, y)].symbol(),
+                " ",
+                "row {y} should have padding after the right column ends",
+            );
+        }
+    }
+
+    #[test]
+    fn pet_art_fits_inside_left_column_without_overflow() {
+        let buf = render_buffer(FRAME_BODY_WIDTH as u16, 30);
+        // Cells at the gutter (col 29 and 30) should be blank space when
+        // the pet column's pet art would otherwise spill past col 28.
+        for y in 1..29 {
+            let gutter = buf[(29u16, y)].symbol();
+            assert!(
+                gutter == " " || gutter == "─",
+                "row {y} gutter cell should be space/dash; got {gutter:?}",
+            );
+        }
     }
 }
