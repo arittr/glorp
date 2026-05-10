@@ -106,6 +106,7 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
     UsagePollResult {
         deltas: vec![UsageDelta {
             provider_surface: "claude-code".to_string(),
+            command: "ccusage".to_string(),
             effective_tokens,
             confidence: "local-log-derived".to_string(),
             period_start: now,

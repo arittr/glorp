@@ -13,6 +13,7 @@ pub struct UsagePollResult {
 #[derive(Debug, Clone)]
 pub struct UsageDelta {
     pub provider_surface: String,
+    pub command: String,
     pub effective_tokens: f64,
     pub confidence: String,
     pub period_start: OffsetDateTime,

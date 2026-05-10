@@ -158,6 +158,8 @@ fn poll_usage_and_apply(
         let now = OffsetDateTime::now_utc();
         let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
         state_store.save(&state)?;
+        // Mark after save: a failure here drifts state.lifetime ahead of the
+        // usage store; the next successful run reconciles via the ledger.
         usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
     }
     Ok(Some(state))

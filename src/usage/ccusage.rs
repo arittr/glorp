@@ -303,6 +303,7 @@ impl CcusageCommandProvider {
             )?;
             deltas.push(UsageDelta {
                 provider_surface: record.provider_surface,
+                command: command_name.to_string(),
                 effective_tokens,
                 confidence: CONFIDENCE.to_string(),
                 period_start: parsed_period_start,

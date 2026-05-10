@@ -32,7 +32,7 @@ pub fn stage_usage_poll_deltas(
             provider_surface: delta.provider_surface.clone(),
             provider_version: delta.cursor_update.provider_version.clone(),
             parser_version: delta.cursor_update.parser_version.clone(),
-            command: "ccusage".to_string(),
+            command: delta.command.clone(),
             source_surface: "daily".to_string(),
             period_start: delta.period_start,
             observed_at: delta.observed_at,
@@ -86,9 +86,12 @@ pub fn apply_unapplied_usage(
     })
 }
 
-/// Compatibility wrapper for tests and any caller that already has a
-/// `UsagePollResult` in hand. New command paths should drive the
-/// stage-then-save-then-mark sequence directly.
+#[doc(hidden)]
+/// Test-only convenience that stages, applies, and marks in one call.
+/// Production must split the sequence on `state_store.save` — call
+/// `stage_usage_poll_deltas` then `state_store.save` then
+/// `mark_events_applied_and_advance_cursors` directly so a save failure
+/// cannot strand the ledger and lose food.
 pub fn apply_usage_poll(
     state: &mut PetState,
     usage_store: &mut UsageStore,
