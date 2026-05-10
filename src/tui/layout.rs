@@ -20,6 +20,13 @@ const BAR_WIDTH: usize = 20;
 const BODY_X_PADDING: u16 = 2;
 const BODY_Y_PADDING: u16 = 1;
 
+/// Expected source surfaces and their display names.
+/// Order is the render order for the today panel and helpers row.
+const EXPECTED_SOURCES: &[(&str, &str)] = &[
+    ("claude-code", "claude"),
+    ("codex", "codex"),
+];
+
 pub fn render_watch_frame(frame: &mut Frame<'_>, vm: &WatchViewModel) {
     let area = frame.area();
     let p = tokenpet_palette();
@@ -740,6 +747,94 @@ fn render_frame_bottom_line<'a>(width: usize, styles: &'a SemanticStyles) -> Lin
     Line::from(spans)
 }
 
+fn render_today_panel_lines<'a>(
+    width: usize,
+    vm: &'a WatchViewModel,
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
+    let mut out: Vec<Line<'a>> = Vec::new();
+    let header = section_line("today", width, styles);
+    out.push(Line::from(header));
+    out.push(today_row("tokens", &format_tokens_full(vm.today_effective_tokens), None, styles));
+    let total = vm.today_effective_tokens.max(0.0);
+    for (surface, display) in EXPECTED_SOURCES {
+        let value_opt = vm
+            .source_breakdown
+            .iter()
+            .find(|s| s.name == *surface)
+            .map(|s| s.effective_tokens);
+        let (value_str, share) = match value_opt {
+            Some(v) => {
+                let pct = if total > 0.0 { (v / total) * 100.0 } else { 0.0 };
+                (format_tokens_full(v), Some(format!("{}%", pct.round() as u32)))
+            }
+            None => ("—".to_string(), Some("—".to_string())),
+        };
+        out.push(today_row(display, &value_str, share, styles));
+    }
+    let bucket_str = format_signed_tokens_short(vm.current_bucket_effective_tokens);
+    out.push(today_row("last 10m", &bucket_str, Some("this 10m".to_string()), styles));
+    out
+}
+
+fn today_row<'a>(
+    label: &'a str,
+    value: &str,
+    annotation: Option<String>,
+    styles: &'a SemanticStyles,
+) -> Line<'a> {
+    let value_owned = value.to_string();
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(format!("{label:<8}"), styles.label));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(value_owned, styles.primary_text));
+    if let Some(ann) = annotation {
+        spans.push(Span::raw("       "));
+        spans.push(Span::styled(ann, styles.label));
+    }
+    Line::from(spans)
+}
+
+fn format_tokens_full(n: f64) -> String {
+    let n = n.round() as i64;
+    if n.abs() >= 1_000 {
+        let mut s = String::new();
+        let neg = n < 0;
+        let mut abs = n.unsigned_abs() as i64;
+        let mut groups: Vec<String> = Vec::new();
+        while abs >= 1000 {
+            groups.push(format!("{:03}", abs % 1000));
+            abs /= 1000;
+        }
+        groups.push(abs.to_string());
+        groups.reverse();
+        if neg {
+            s.push('-');
+        }
+        s.push_str(&groups.join(","));
+        s
+    } else {
+        n.to_string()
+    }
+}
+
+fn format_signed_tokens_short(n: f64) -> String {
+    let abs = n.abs();
+    let unit = if abs >= 1_000_000.0 {
+        format!("{:.1}m", abs / 1_000_000.0)
+    } else if abs >= 1_000.0 {
+        format!("{:.1}k", abs / 1_000.0)
+    } else {
+        format!("{}", abs.round() as i64)
+    };
+    if n < 0.0 {
+        format!("-{unit}")
+    } else {
+        format!("+{unit}")
+    }
+}
+
 fn format_xp(value: f64) -> String {
     let value = value.max(0.0);
     if value >= 10.0 {
@@ -748,6 +843,35 @@ fn format_xp(value: f64) -> String {
         format!("{value:.1}")
     } else {
         format!("{value:.2}")
+    }
+}
+
+#[cfg(test)]
+mod today_panel_tests {
+    use super::*;
+    use crate::tui::view_model::WatchViewModel;
+
+    #[test]
+    fn today_panel_has_four_rows_plus_rule() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let lines = render_today_panel_lines(43, &vm, &styles);
+        assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn today_panel_renders_dash_for_absent_source() {
+        let styles = semantic_styles();
+        let mut vm = WatchViewModel::fixture();
+        vm.source_breakdown.retain(|s| s.name != "codex");
+        let lines = render_today_panel_lines(43, &vm, &styles);
+        let text: String = lines[3]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("codex"));
+        assert!(text.contains("—"));
     }
 }
 
