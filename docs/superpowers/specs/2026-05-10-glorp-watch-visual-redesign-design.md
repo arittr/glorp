@@ -235,7 +235,7 @@ Other failure modes (helper blocked, source degraded, partial outage) are handle
 
 `src/commands/watch.rs`: change one call site so the sparkline reads from the new `seven_day_token_history()` query rather than walking `recent_events(500)`.
 
-`src/storage/usage_store.rs`: add `seven_day_token_history(now_local_date: time::Date) -> Result<Vec<f64>>`. Read-only, queries `usage_events` grouped by `period_start::date`. Returns exactly seven values, oldest first; days with no events produce `0.0`.
+`src/storage/usage_store.rs`: add `seven_day_token_history(now_utc_date: time::Date) -> Result<Vec<f64>>`. Read-only, queries `usage_events` grouped by the existing `period_date` column (UTC, matching `today_effective_tokens()`). Returns exactly seven values, oldest first; days with no events produce `0.0`.
 
 ## Error Handling
 
