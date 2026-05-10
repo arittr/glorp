@@ -563,11 +563,13 @@ fn render_wide(
     styles: &SemanticStyles,
 ) {
     let terminal_width = area.width as usize;
-    // Clamp the rounded frame to FRAME_BODY_WIDTH (mockup target). Any extra
-    // terminal width sits outside the frame as bare background, with the
-    // frame itself centered horizontally — matches the hybrid-v4 mockup.
-    let target_outer = FRAME_BODY_WIDTH.min(terminal_width);
-    let frame_inner_width = target_outer.saturating_sub(2);
+    // Frame fills the terminal; right column flexes to use any width above
+    // the 78-cell baseline. Pet, vitals, and helpers stay at their natural
+    // widths; only the data column on the right grows.
+    let frame_inner_width = terminal_width.saturating_sub(2);
+    let right_col = frame_inner_width
+        .saturating_sub(LEFT_PAD + LEFT_COL + GUTTER + RIGHT_PAD)
+        .max(RIGHT_COL);
     let pad_style = styles.body;
 
     // Allocate body height: total minus the two chrome rows.
@@ -575,14 +577,14 @@ fn render_wide(
 
     // Build right column panels. Feed grows first into available height,
     // then any residual is distributed as blank rows between sections.
-    let today = render_today_panel_rows(RIGHT_COL, vm, styles);
+    let today = render_today_panel_rows(right_col, vm, styles);
     let spark = render_sparkline_rows(
-        RIGHT_COL,
+        right_col,
         &vm.recent_daily_effective_tokens,
         capability,
         styles,
     );
-    let helpers = render_helpers_panel_rows(RIGHT_COL, vm, styles);
+    let helpers = render_helpers_panel_rows(right_col, vm, styles);
 
     // Fixed overhead with single-blank separators:
     //   top_blank + today + blank + spark + blank + feed_rule + blank + helpers + bottom_blank
@@ -592,7 +594,7 @@ fn render_wide(
         .saturating_sub(single_gap_overhead)
         .max(2)
         .min(event_count.max(2));
-    let feed = render_feed_panel_rows(RIGHT_COL, vm, max_feed_entries, styles);
+    let feed = render_feed_panel_rows(right_col, vm, max_feed_entries, styles);
 
     let consumed = today.len() + spark.len() + feed.len() + helpers.len() + 5;
     let residual = body_height.saturating_sub(consumed);
@@ -628,33 +630,26 @@ fn render_wide(
 
     // Pad each column to its width, then join horizontally.
     let left_padded = pad_rows(left_rows, LEFT_COL, pad_style);
-    let right_padded = pad_rows(right_rows, RIGHT_COL, pad_style);
+    let right_padded = pad_rows(right_rows, right_col, pad_style);
     let joined = join_horizontal_top(
-        vec![(LEFT_COL, left_padded), (RIGHT_COL, right_padded)],
+        vec![(LEFT_COL, left_padded), (right_col, right_padded)],
         pad_style,
     );
-
-    // Wrap each joined row with the outer left/gutter/right pads so the
-    // body row matches the mockup's column geometry inside the frame.
-    let baseline_inner = LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL + RIGHT_PAD;
-    let extra = frame_inner_width.saturating_sub(baseline_inner);
-    let pad_left = LEFT_PAD + extra / 2;
-    let pad_right = RIGHT_PAD + extra - extra / 2;
 
     let body: Vec<Vec<Span>> = joined
         .into_iter()
         .map(|row| {
             let mut spans: Vec<Span> = Vec::with_capacity(row.len() + 3);
-            spans.push(Span::raw(" ".repeat(pad_left)));
+            spans.push(Span::raw(" ".repeat(LEFT_PAD)));
             // Insert the gutter between the two columns. Because pad_rows
             // already padded each column to its target width, the join
-            // produced [LEFT_COL chars][RIGHT_COL chars]. Split on LEFT_COL
+            // produced [LEFT_COL chars][right_col chars]. Split on LEFT_COL
             // so we can interleave a gutter.
             let (left_part, right_part) = split_after_width(row, LEFT_COL);
             spans.extend(left_part);
             spans.push(Span::raw(" ".repeat(GUTTER)));
             spans.extend(right_part);
-            spans.push(Span::raw(" ".repeat(pad_right)));
+            spans.push(Span::raw(" ".repeat(RIGHT_PAD)));
             spans
         })
         .collect();
@@ -675,18 +670,7 @@ fn render_wide(
     };
     let lines = box_with_chrome(body, frame_inner_width, title, footer, chrome);
 
-    // Paint the surrounding terminal background so the frame sits on top of
-    // body color rather than chrome leaking past the rounded box.
-    frame.render_widget(Block::default().style(styles.body), area);
-    let frame_outer = target_outer as u16;
-    let frame_x = area.x + area.width.saturating_sub(frame_outer) / 2;
-    let frame_rect = Rect {
-        x: frame_x,
-        y: area.y,
-        width: frame_outer,
-        height: area.height,
-    };
-    frame.render_widget(Paragraph::new(lines).style(styles.body), frame_rect);
+    frame.render_widget(Paragraph::new(lines).style(styles.body), area);
 }
 
 /// Splits a row of spans into two row-vectors at the given visible char
@@ -1041,44 +1025,18 @@ mod render_wide_tests {
     }
 
     #[test]
-    fn render_wide_centers_78_col_frame_when_terminal_is_wider() {
-        // At 100 cols, the frame stays at 78 cols and floats in the middle:
-        // 11 cells of bare body, then the frame, then 11 cells of bare body.
+    fn render_wide_flexes_frame_to_fill_terminal() {
+        // Frame fills the terminal at any width above the 78-col baseline;
+        // the right column flexes to use the surplus. Pet column stays
+        // fixed so the pet doesn't stretch.
         let buf = render_buffer(100, 30);
-        let frame_x_left = (100 - FRAME_BODY_WIDTH) / 2;
-        let frame_x_right = frame_x_left + FRAME_BODY_WIDTH - 1;
-        assert_eq!(
-            buf[(frame_x_left as u16, 0u16)].symbol(),
-            "┏",
-            "frame top-left should be at column {frame_x_left}",
-        );
-        assert_eq!(buf[(frame_x_right as u16, 0u16)].symbol(), "┓");
-        assert_eq!(buf[(frame_x_left as u16, 29u16)].symbol(), "┗");
-        assert_eq!(buf[(frame_x_right as u16, 29u16)].symbol(), "┛");
+        assert_eq!(buf[(0u16, 0u16)].symbol(), "┏");
+        assert_eq!(buf[(99u16, 0u16)].symbol(), "┓");
+        assert_eq!(buf[(0u16, 29u16)].symbol(), "┗");
+        assert_eq!(buf[(99u16, 29u16)].symbol(), "┛");
         for y in 1..29 {
-            assert_eq!(
-                buf[(frame_x_left as u16, y)].symbol(),
-                "┃",
-                "row {y} left rail broken",
-            );
-            assert_eq!(
-                buf[(frame_x_right as u16, y)].symbol(),
-                "┃",
-                "row {y} right rail broken",
-            );
-        }
-        // The columns outside the frame are bare body (spaces).
-        for y in 0..30 {
-            assert_eq!(
-                buf[(0u16, y)].symbol(),
-                " ",
-                "row {y} far-left should be empty"
-            );
-            assert_eq!(
-                buf[(99u16, y)].symbol(),
-                " ",
-                "row {y} far-right should be empty"
-            );
+            assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail broken");
+            assert_eq!(buf[(99u16, y)].symbol(), "┃", "row {y} right rail broken");
         }
     }
 
