@@ -1117,6 +1117,106 @@ mod feed_panel_tests {
     }
 }
 
+fn render_pet_panel_lines<'a>(
+    width: usize,
+    vm: &'a WatchViewModel,
+    capability: ColorCapability,
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
+    let mut out: Vec<Line<'a>> = Vec::new();
+    let left_pad = (width.saturating_sub(11)) / 2;
+    out.push(Line::from(Span::raw("")));
+    for (line_index, art_line) in vm.pet_art.iter().enumerate() {
+        let mut spans: Vec<Span<'a>> = Vec::new();
+        spans.push(Span::raw(" ".repeat(left_pad)));
+        spans.extend(role_spans_for_line(
+            art_line,
+            line_index,
+            &vm.pet_spans,
+            styles,
+        ));
+        out.push(Line::from(spans));
+    }
+    let ground = ",".repeat(width.saturating_sub(2));
+    out.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(ground, styles.empty_bar),
+    ]));
+    out.push(Line::from(Span::raw("")));
+    out.push(Line::from(section_line("vitals", width, styles)));
+    out.push(Line::from(bar_line_spans(
+        "fed",
+        vm.fed,
+        BAR_RAMP_GOOD,
+        capability,
+        styles,
+    )));
+    out.push(Line::from(bar_line_spans(
+        "happy",
+        vm.happiness,
+        BAR_RAMP_ACCENT,
+        capability,
+        styles,
+    )));
+    out.push(Line::from(bar_line_spans(
+        "energy",
+        vm.energy,
+        BAR_RAMP_GOOD,
+        capability,
+        styles,
+    )));
+    let xp_fraction = if vm.xp_target <= 0.0 {
+        0.0
+    } else {
+        (vm.xp_current / vm.xp_target).clamp(0.0, 1.0)
+    };
+    out.push(Line::from(bar_line_spans(
+        "xp",
+        xp_fraction,
+        BAR_RAMP_ACCENT,
+        capability,
+        styles,
+    )));
+    out
+}
+
+#[cfg(test)]
+mod pet_panel_tests {
+    use super::*;
+    use crate::tui::style::ColorCapability;
+    use crate::tui::view_model::WatchViewModel;
+
+    #[test]
+    fn pet_panel_includes_vitals_rule_and_four_bars() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let lines = render_pet_panel_lines(26, &vm, ColorCapability::Truecolor, &styles);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(text.contains("vitals"));
+        assert!(text.contains("fed"));
+        assert!(text.contains("happy"));
+        assert!(text.contains("energy"));
+        assert!(text.contains("xp"));
+    }
+
+    #[test]
+    fn pet_panel_does_not_include_meta_block() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let lines = render_pet_panel_lines(26, &vm, ColorCapability::Truecolor, &styles);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(!text.contains("species"));
+        assert!(!text.contains("stage"));
+        assert!(!text.contains("mood"));
+    }
+}
+
 #[cfg(test)]
 mod bar_line_tests {
     use super::*;
