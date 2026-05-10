@@ -1,5 +1,7 @@
 use std::{
     io::{self, Stdout},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -12,7 +14,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
-    error::Result,
+    error::{GlorpError, Result},
     tui::{
         layout::{
             render_evolution_overlay, render_hatch_overlay, render_help_overlay, render_watch_frame,
@@ -44,11 +46,19 @@ enum Overlay {
     Help,
 }
 
+enum PollRequest {
+    Poll(Box<WatchViewModel>),
+    Shutdown,
+}
+
 pub struct WatchApp {
     vm: WatchViewModel,
     config: WatchAppConfig,
     overlay: Option<Overlay>,
-    poller: Box<dyn WatchUsagePoller>,
+    request_tx: Sender<PollRequest>,
+    result_rx: Receiver<Result<WatchViewModel>>,
+    worker: Option<JoinHandle<()>>,
+    in_flight: bool,
     poll_count: u64,
     animation_frame: u64,
     last_poll: Option<Instant>,
@@ -66,13 +76,33 @@ impl WatchApp {
     pub fn with_poll_callback(
         vm: WatchViewModel,
         config: WatchAppConfig,
-        poller: Box<dyn WatchUsagePoller>,
+        mut poller: Box<dyn WatchUsagePoller>,
     ) -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<PollRequest>();
+        let (result_tx, result_rx) = mpsc::channel::<Result<WatchViewModel>>();
+        let worker = thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                match request {
+                    PollRequest::Poll(current) => {
+                        let result = poller.poll_usage(current.as_ref());
+                        // If the receiver has been dropped, the app is shutting
+                        // down and we just exit; nothing else cares.
+                        if result_tx.send(result).is_err() {
+                            break;
+                        }
+                    }
+                    PollRequest::Shutdown => break,
+                }
+            }
+        });
         Self {
             vm,
             config,
             overlay: None,
-            poller,
+            request_tx,
+            result_rx,
+            worker: Some(worker),
+            in_flight: false,
             poll_count: 0,
             animation_frame: 0,
             last_poll: None,
@@ -96,6 +126,10 @@ impl WatchApp {
         }
         loop {
             self.advance_animation_frame();
+
+            // Drain any completed poll result before drawing so the new vm is
+            // visible this frame.
+            self.try_collect_poll_result()?;
 
             let render_evolution = self.vm.should_render_evolution_moment();
             terminal.draw(|frame| {
@@ -125,7 +159,7 @@ impl WatchApp {
                 .map(|instant| instant.elapsed() >= self.config.usage_poll_interval)
                 .unwrap_or(true)
             {
-                self.poll_usage()?;
+                self.kick_off_poll()?;
                 self.last_poll = Some(Instant::now());
             }
         }
@@ -157,11 +191,42 @@ impl WatchApp {
                 Ok(false)
             }
             KeyCode::Char('r') => {
-                self.poll_usage()?;
+                self.kick_off_poll()?;
                 self.last_poll = Some(Instant::now());
                 Ok(false)
             }
             _ => Ok(false),
+        }
+    }
+
+    /// Send a poll request to the worker if one is not already in flight.
+    /// Polls are deduped: while a poll is outstanding, additional kickoffs
+    /// are silently ignored. The interval timer keeps ticking; the next
+    /// eligible poll happens after the current one completes.
+    fn kick_off_poll(&mut self) -> Result<()> {
+        if self.in_flight {
+            return Ok(());
+        }
+        self.request_tx
+            .send(PollRequest::Poll(Box::new(self.vm.clone())))
+            .map_err(|err| GlorpError::Message(format!("watch poll worker hung up: {err}")))?;
+        self.in_flight = true;
+        Ok(())
+    }
+
+    /// Non-blocking collection of any completed poll result.
+    fn try_collect_poll_result(&mut self) -> Result<()> {
+        match self.result_rx.try_recv() {
+            Ok(result) => {
+                self.vm = result?;
+                self.poll_count += 1;
+                self.in_flight = false;
+                Ok(())
+            }
+            Err(TryRecvError::Empty) => Ok(()),
+            Err(TryRecvError::Disconnected) => {
+                Err(GlorpError::Message("watch poll worker disconnected".into()))
+            }
         }
     }
 
@@ -170,11 +235,13 @@ impl WatchApp {
     }
 
     pub fn refresh_for_test(&mut self) -> Result<WatchViewModel> {
-        self.poll_usage()
+        self.kick_off_poll()?;
+        self.await_pending_poll_for_test()?;
+        Ok(self.vm.clone())
     }
 
     pub fn interval_poll_for_test(&mut self) -> Result<WatchViewModel> {
-        self.poll_usage()
+        self.refresh_for_test()
     }
 
     pub fn poll_count_for_test(&self) -> u64 {
@@ -195,19 +262,60 @@ impl WatchApp {
         &self.vm
     }
 
-    #[doc(hidden)]
-    pub fn handle_key_for_test(&mut self, code: KeyCode, kind: KeyEventKind) -> Result<bool> {
-        self.handle_key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
+    pub fn in_flight_for_test(&self) -> bool {
+        self.in_flight
     }
 
-    fn poll_usage(&mut self) -> Result<WatchViewModel> {
-        self.vm = self.poller.poll_usage(&self.vm)?;
+    /// Send a poll request without blocking. Returns whether a request was
+    /// actually sent (false if a poll was already in flight). Mirrors the
+    /// production interval/refresh kickoff path.
+    pub fn kick_off_poll_for_test(&mut self) -> Result<bool> {
+        let was_in_flight = self.in_flight;
+        self.kick_off_poll()?;
+        Ok(!was_in_flight)
+    }
+
+    /// Block until any in-flight poll result lands. Tests rely on this to
+    /// drive the worker synchronously even though production keeps the
+    /// main loop non-blocking.
+    pub fn await_pending_poll_for_test(&mut self) -> Result<()> {
+        if !self.in_flight {
+            return Ok(());
+        }
+        let result = self
+            .result_rx
+            .recv()
+            .map_err(|err| GlorpError::Message(format!("watch poll worker hung up: {err}")))?;
+        self.vm = result?;
         self.poll_count += 1;
-        Ok(self.vm.clone())
+        self.in_flight = false;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn handle_key_for_test(&mut self, code: KeyCode, kind: KeyEventKind) -> Result<bool> {
+        let result = self.handle_key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))?;
+        // Mirror the previous synchronous semantics: tests expect that after a
+        // manual refresh keypress the new view model is already visible.
+        if matches!(code, KeyCode::Char('r')) && kind != KeyEventKind::Release {
+            self.await_pending_poll_for_test()?;
+        }
+        Ok(result)
     }
 }
 
-pub trait WatchUsagePoller {
+impl Drop for WatchApp {
+    fn drop(&mut self) {
+        // Best-effort: if the worker is gone the send fails harmlessly. We
+        // still join so the thread does not outlive the app.
+        let _ = self.request_tx.send(PollRequest::Shutdown);
+        if let Some(handle) = self.worker.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub trait WatchUsagePoller: Send {
     fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel>;
 }
 

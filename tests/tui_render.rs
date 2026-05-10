@@ -1,14 +1,19 @@
 use crossterm::event::{KeyCode, KeyEventKind};
+use glorp::error::Result;
 use glorp::pet::render::{PaletteRoleName, StyledSegment};
 use glorp::tui::app::{
     render_evolution_overlay_for_test, render_frame_for_test, render_hatch_overlay_for_test,
     render_help_overlay_for_test, run_single_watch_tick_for_test, WatchApp, WatchAppConfig,
-    WatchTestHarness, WatchViewModel,
+    WatchTestHarness, WatchUsagePoller, WatchViewModel,
 };
 use glorp::tui::style::{semantic_styles, tokenpet_palette};
 use glorp::tui::view_model::{SourceHealthView, SourceStatus};
 use ratatui::{
     backend::TestBackend, buffer::Buffer, layout::Position, style::Color, Frame, Terminal,
+};
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc, Barrier,
 };
 use std::time::Duration;
 
@@ -566,4 +571,152 @@ fn manual_refresh_resets_interval_timer_for_test() {
     assert_eq!(app.poll_count_for_test(), 1);
     assert!(!app.interval_due_for_test(Duration::from_secs(1)));
     assert!(app.interval_due_for_test(Duration::from_secs(61)));
+}
+
+/// Test poller that blocks at the start of `poll_usage` until a barrier is
+/// released. Lets tests observe the in-flight window and assert that the
+/// main thread keeps doing work while a poll is outstanding.
+struct BlockingTestPoller {
+    start: Arc<Barrier>,
+    release: Arc<Barrier>,
+    calls: Arc<AtomicU32>,
+}
+
+impl WatchUsagePoller for BlockingTestPoller {
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        // Signal that we entered the poll, then block until the test releases us.
+        self.start.wait();
+        self.release.wait();
+        Ok(current.clone())
+    }
+}
+
+#[test]
+fn animation_advances_while_poll_is_in_flight() {
+    let start = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let calls = Arc::new(AtomicU32::new(0));
+    let poller = BlockingTestPoller {
+        start: Arc::clone(&start),
+        release: Arc::clone(&release),
+        calls: Arc::clone(&calls),
+    };
+
+    let mut app = WatchApp::with_poll_callback(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+        },
+        Box::new(poller),
+    );
+
+    // Kick off the poll without blocking. The worker thread will park inside
+    // BlockingTestPoller::poll_usage once it enters; we then drive the
+    // animation locally to prove the main loop is not blocked behind the poll.
+    let started = app.kick_off_poll_for_test().unwrap();
+    assert!(started, "first kickoff should send a request");
+    assert!(app.in_flight_for_test(), "poll should be in flight");
+
+    // Wait until the worker thread is actually inside the poll body so the
+    // in-flight window is observable.
+    start.wait();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "exactly one poll should be running"
+    );
+
+    let frame_before = app.view_model_for_test().pet_art.clone();
+    for _ in 0..5 {
+        app.advance_animation_for_test();
+    }
+    let frame_after = app.view_model_for_test().pet_art.clone();
+    assert_ne!(
+        frame_before, frame_after,
+        "animation must advance while a poll is parked"
+    );
+    assert_eq!(
+        app.poll_count_for_test(),
+        0,
+        "poll_count should still be 0 while the poll is parked"
+    );
+
+    // Release the worker; finish the poll and verify the result lands.
+    release.wait();
+    app.await_pending_poll_for_test().unwrap();
+    assert_eq!(
+        app.poll_count_for_test(),
+        1,
+        "poll_count increments after the worker returns a result"
+    );
+    assert!(
+        !app.in_flight_for_test(),
+        "in-flight flag should clear after the result lands"
+    );
+}
+
+#[test]
+fn duplicate_poll_requests_while_in_flight_are_deduped() {
+    let start = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let calls = Arc::new(AtomicU32::new(0));
+    let poller = BlockingTestPoller {
+        start: Arc::clone(&start),
+        release: Arc::clone(&release),
+        calls: Arc::clone(&calls),
+    };
+
+    let mut app = WatchApp::with_poll_callback(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+        },
+        Box::new(poller),
+    );
+
+    let first = app.kick_off_poll_for_test().unwrap();
+    assert!(first, "first kickoff sends a request");
+
+    // Wait until the worker is parked inside poll_usage.
+    start.wait();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Issue several more kickoffs while the first is in flight; each must be
+    // a no-op because dedup is gated on `in_flight`.
+    for _ in 0..3 {
+        let extra = app.kick_off_poll_for_test().unwrap();
+        assert!(
+            !extra,
+            "additional kickoffs while a poll is in flight must be no-ops"
+        );
+    }
+
+    // Release the parked poll. Only one poll should have ever run.
+    release.wait();
+    app.await_pending_poll_for_test().unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "only one poll ran despite multiple kickoffs"
+    );
+    assert_eq!(app.poll_count_for_test(), 1);
+}
+
+#[test]
+fn shutdown_drops_worker_thread_cleanly() {
+    let harness = WatchTestHarness::with_usage_delta("claude-code", "2026-05-09T13:42:00Z", 1300.0);
+    let app = WatchApp::with_poll_callback(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+        },
+        Box::new(harness),
+    );
+    // Drop the app without ever running. Drop sends Shutdown and joins the
+    // worker; if that path hangs the test will hang.
+    drop(app);
 }
