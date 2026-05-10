@@ -29,7 +29,7 @@ pub struct ProviderDiagnostic {
 pub struct ProviderCursorKey {
     pub provider_surface: String,
     pub command: String,
-    pub parser_version: String,
+    pub source_surface: String,
     pub period_start: String,
     pub model: Option<String>,
 }

@@ -39,15 +39,28 @@ pub struct HelperDiscovery {
 #[derive(Debug, Clone)]
 pub struct CcusageCommandProvider {
     helpers: HelperPaths,
+    weights: EffectiveTokenWeights,
 }
 
 impl CcusageCommandProvider {
     pub fn new(helpers: HelperPaths) -> Self {
-        Self { helpers }
+        Self {
+            helpers,
+            weights: EffectiveTokenWeights::default(),
+        }
+    }
+
+    pub fn with_weights(mut self, weights: EffectiveTokenWeights) -> Self {
+        self.weights = weights;
+        self
     }
 
     pub fn from_environment() -> Self {
         Self::new(HelperDiscovery::discover().into())
+    }
+
+    pub fn from_environment_with_weights(weights: EffectiveTokenWeights) -> Self {
+        Self::new(HelperDiscovery::discover().into()).with_weights(weights)
     }
 
     fn poll_helper(
@@ -131,21 +144,73 @@ impl CcusageCommandProvider {
 
         let mut deltas = Vec::new();
         let mut diagnostics = Vec::new();
-        let weights = EffectiveTokenWeights::default();
+        let weights = self.weights;
         let observed_at = OffsetDateTime::now_utc();
         for record in records {
+            let parsed_period_start = match parse_period_start(&record.period_start) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    let diagnostic = diagnostic(
+                        provider_surface,
+                        "invalid_period_start",
+                        &format!("{provider_surface} returned invalid_period_start"),
+                    );
+                    persist_diagnostic(store, &diagnostic)?;
+                    diagnostics.push(diagnostic);
+                    continue;
+                }
+            };
+
             let key = ProviderCursorKey {
                 provider_surface: record.provider_surface.clone(),
                 command: command_name.to_string(),
-                parser_version: version.clone(),
+                source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
                 model: record.model.clone(),
             };
 
             let cursor_key = cursor_key(&key)?;
-            let previous = match store.provider_cursor(provider_surface, &cursor_key) {
-                Ok(Some(previous)) => match serde_json::from_str::<RawTokenTotals>(&previous) {
-                    Ok(previous) => previous,
+            let previous_raw = match store.provider_cursor(provider_surface, &cursor_key) {
+                Ok(Some(value)) => Some(value),
+                Ok(None) => match read_legacy_cursor_value(
+                    store,
+                    provider_surface,
+                    command_name,
+                    &record.period_start,
+                    record.model.clone(),
+                    &version,
+                ) {
+                    Ok(Some(value)) => {
+                        store.set_provider_cursor(
+                            provider_surface,
+                            &cursor_key,
+                            &value,
+                            &version,
+                            &version,
+                        )?;
+                        Some(value)
+                    }
+                    Ok(None) => None,
+                    Err(_) => {
+                        let diagnostic =
+                            diagnostic(provider_surface, "cursor_corruption", "cursor_corruption");
+                        persist_diagnostic(store, &diagnostic)?;
+                        diagnostics.push(diagnostic);
+                        None
+                    }
+                },
+                Err(_) => {
+                    let diagnostic =
+                        diagnostic(provider_surface, "cursor_corruption", "cursor_corruption");
+                    persist_diagnostic(store, &diagnostic)?;
+                    diagnostics.push(diagnostic);
+                    None
+                }
+            };
+
+            let previous = match previous_raw {
+                Some(value) => match serde_json::from_str::<RawTokenTotals>(&value) {
+                    Ok(parsed) => parsed,
                     Err(_) => {
                         let diagnostic =
                             diagnostic(provider_surface, "cursor_corruption", "cursor_corruption");
@@ -154,14 +219,7 @@ impl CcusageCommandProvider {
                         RawTokenTotals::default()
                     }
                 },
-                Ok(None) => RawTokenTotals::default(),
-                Err(_) => {
-                    let diagnostic =
-                        diagnostic(provider_surface, "cursor_corruption", "cursor_corruption");
-                    persist_diagnostic(store, &diagnostic)?;
-                    diagnostics.push(diagnostic);
-                    RawTokenTotals::default()
-                }
+                None => RawTokenTotals::default(),
             };
 
             let Some(delta_totals) = record.raw_totals.positive_delta_since(previous) else {
@@ -200,7 +258,7 @@ impl CcusageCommandProvider {
                 parser_version: version.clone(),
                 command: command_name.to_string(),
                 source_surface: "daily".to_string(),
-                period_start: parse_period_start(&record.period_start)?,
+                period_start: parsed_period_start,
                 observed_at,
                 bucket_at: observed_at,
                 model: record.model.clone(),
@@ -428,6 +486,49 @@ fn persist_diagnostic(store: &mut UsageStore, diagnostic: &ProviderDiagnostic) -
 
 fn cursor_key(key: &ProviderCursorKey) -> Result<String> {
     serde_json::to_string(key).map_err(GlorpError::from)
+}
+
+fn legacy_cursor_key_with_parser_version(
+    provider_surface: &str,
+    command: &str,
+    parser_version: &str,
+    period_start: &str,
+    model: Option<String>,
+) -> Result<String> {
+    #[derive(serde::Serialize)]
+    struct LegacyKey {
+        provider_surface: String,
+        command: String,
+        parser_version: String,
+        period_start: String,
+        model: Option<String>,
+    }
+    serde_json::to_string(&LegacyKey {
+        provider_surface: provider_surface.to_string(),
+        command: command.to_string(),
+        parser_version: parser_version.to_string(),
+        period_start: period_start.to_string(),
+        model,
+    })
+    .map_err(GlorpError::from)
+}
+
+fn read_legacy_cursor_value(
+    store: &UsageStore,
+    provider_surface: &str,
+    command: &str,
+    period_start: &str,
+    model: Option<String>,
+    version: &str,
+) -> Result<Option<String>> {
+    let legacy_key = legacy_cursor_key_with_parser_version(
+        provider_surface,
+        command,
+        version,
+        period_start,
+        model,
+    )?;
+    store.provider_cursor(provider_surface, &legacy_key)
 }
 
 fn write_cursor(

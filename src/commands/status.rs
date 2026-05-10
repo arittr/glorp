@@ -23,7 +23,10 @@ pub fn run() -> Result<()> {
     let mut today_effective = 0.0;
     let mut diagnostic_line = None;
     if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
-        match CcusageCommandProvider::from_environment().poll(&mut usage_store) {
+        let config = crate::config::AppConfig::load_or_default(&paths.config_file)?;
+        let weights = crate::game::effective_tokens::EffectiveTokenWeights::from_config(config);
+        match CcusageCommandProvider::from_environment_with_weights(weights).poll(&mut usage_store)
+        {
             Ok(result) => {
                 if !result.deltas.is_empty() || result.diagnostics.is_empty() {
                     let update = apply_usage_poll(

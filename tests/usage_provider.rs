@@ -1,3 +1,4 @@
+use glorp::game::effective_tokens::EffectiveTokenWeights;
 use glorp::storage::usage_store::UsageStore;
 use glorp::usage::ccusage::{CcusageCommandProvider, HelperDiscovery, HelperPaths};
 use glorp::usage::provider::UsageProvider;
@@ -188,4 +189,46 @@ fn helper_discovery_prefers_env_then_path_without_reading_real_logs() {
     )
     .unwrap();
     assert_eq!(discovered.claude.unwrap(), env_path);
+}
+
+#[test]
+fn provider_uses_configured_cache_read_weight_for_real_deltas() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = CcusageCommandProvider::new(HelperPaths {
+        claude: Some(fixture("ccusage-ok.mjs")),
+        codex: None,
+        node: None,
+    })
+    .with_weights(EffectiveTokenWeights {
+        cache_read_weight: 0.05,
+    });
+
+    provider.poll(&mut store).unwrap();
+    let next_provider = CcusageCommandProvider::new(HelperPaths {
+        claude: Some(fixture("ccusage-next.mjs")),
+        codex: None,
+        node: None,
+    })
+    .with_weights(EffectiveTokenWeights {
+        cache_read_weight: 0.05,
+    });
+
+    let second = next_provider.poll(&mut store).unwrap();
+    assert_eq!(second.total_effective_tokens, 1500.0);
+}
+
+#[test]
+fn helper_version_change_does_not_create_new_food_for_same_totals() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let first = provider(Some("ccusage-ok.mjs"), None)
+        .poll(&mut store)
+        .unwrap();
+    assert!(first.total_effective_tokens > 0.0);
+
+    let second = provider(Some("ccusage-ok-v2.mjs"), None)
+        .poll(&mut store)
+        .unwrap();
+    assert_eq!(second.total_effective_tokens, 0.0);
 }

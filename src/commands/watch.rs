@@ -34,7 +34,8 @@ pub fn run() -> Result<()> {
         ));
     };
 
-    let state = poll_usage_and_apply(&state_store, &paths.usage_db)?.unwrap_or(state);
+    let state =
+        poll_usage_and_apply(&state_store, &paths.usage_db, &paths.config_file)?.unwrap_or(state);
     let vm = build_watch_view_model(&state, &paths.usage_db)?;
     WatchApp::with_poll_callback(
         vm,
@@ -42,6 +43,7 @@ pub fn run() -> Result<()> {
         Box::new(RealWatchPoller {
             state_file: paths.state_file,
             usage_db: paths.usage_db,
+            config_file: paths.config_file,
         }),
     )
     .run()
@@ -110,12 +112,13 @@ pub fn build_watch_view_model_for_test(
 struct RealWatchPoller {
     state_file: std::path::PathBuf,
     usage_db: std::path::PathBuf,
+    config_file: std::path::PathBuf,
 }
 
 impl WatchUsagePoller for RealWatchPoller {
     fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
         let state_store = StateStore::new(self.state_file.clone());
-        let state = match poll_usage_and_apply(&state_store, &self.usage_db) {
+        let state = match poll_usage_and_apply(&state_store, &self.usage_db, &self.config_file) {
             Ok(Some(state)) => state,
             Ok(None) => {
                 return Err(GlorpError::Message(
@@ -138,12 +141,19 @@ impl WatchUsagePoller for RealWatchPoller {
     }
 }
 
-fn poll_usage_and_apply(state_store: &StateStore, usage_db: &Path) -> Result<Option<PetState>> {
+fn poll_usage_and_apply(
+    state_store: &StateStore,
+    usage_db: &Path,
+    config_file: &Path,
+) -> Result<Option<PetState>> {
     let Some(mut state) = state_store.load()? else {
         return Ok(None);
     };
     let mut usage_store = UsageStore::open(usage_db)?;
-    let result = CcusageCommandProvider::from_environment().poll(&mut usage_store)?;
+    let config = crate::config::AppConfig::load_or_default(config_file)?;
+    let weights = crate::game::effective_tokens::EffectiveTokenWeights::from_config(config);
+    let result =
+        CcusageCommandProvider::from_environment_with_weights(weights).poll(&mut usage_store)?;
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
         apply_usage_poll(
             &mut state,
