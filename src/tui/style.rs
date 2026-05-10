@@ -178,6 +178,86 @@ pub fn semantic_styles() -> SemanticStyles {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct BarRamp {
+    pub stops: [Color; 5],
+}
+
+pub const BAR_RAMP_GOOD: BarRamp = BarRamp {
+    stops: [
+        Color::Rgb(0x3d, 0x69, 0x48),
+        Color::Rgb(0x5a, 0x84, 0x62),
+        Color::Rgb(0x82, 0xbc, 0x83),
+        Color::Rgb(0xa8, 0xd6, 0x90),
+        Color::Rgb(0xd2, 0xee, 0xa2),
+    ],
+};
+
+pub const BAR_RAMP_ACCENT: BarRamp = BarRamp {
+    stops: [
+        Color::Rgb(0x6e, 0x45, 0x16),
+        Color::Rgb(0xb8, 0x7a, 0x2c),
+        Color::Rgb(0xf0, 0xa6, 0x46),
+        Color::Rgb(0xff, 0xc6, 0x6e),
+        Color::Rgb(0xff, 0xe0, 0xa8),
+    ],
+};
+
+pub fn ramp_index(i: usize, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    if n == 1 {
+        return 0;
+    }
+    let raw = ((i as f64) * 4.0 / ((n - 1) as f64)).round() as usize;
+    raw.min(4)
+}
+
+#[cfg(test)]
+mod bar_ramp_tests {
+    use super::*;
+
+    #[test]
+    fn ramp_index_zero_fill_never_called() {
+        // Sanity: callers should never call ramp_index for N=0.
+        // We only test the function for N >= 1.
+    }
+
+    #[test]
+    fn ramp_index_single_cell_returns_zero() {
+        assert_eq!(ramp_index(0, 1), 0);
+    }
+
+    #[test]
+    fn ramp_index_full_bar_spans_entire_ramp() {
+        let total = 12;
+        assert_eq!(ramp_index(0, total), 0);
+        assert_eq!(ramp_index(total - 1, total), 4);
+    }
+
+    #[test]
+    fn ramp_index_clamps_to_four() {
+        // Pathological input: i > N-1 should never come from the renderer,
+        // but `.min(4)` is the guard.
+        assert!(ramp_index(20, 12) <= 4);
+    }
+
+    #[test]
+    fn green_ramp_middle_stop_matches_palette_good() {
+        let ramp = BAR_RAMP_GOOD;
+        let palette_good = tokenpet_palette().good.rgb;
+        assert_eq!(ramp.stops[2], palette_good);
+    }
+
+    #[test]
+    fn amber_ramp_middle_stop_matches_palette_accent() {
+        let ramp = BAR_RAMP_ACCENT;
+        let palette_accent = tokenpet_palette().accent.rgb;
+        assert_eq!(ramp.stops[2], palette_accent);
+    }
+}
+
 #[cfg(test)]
 mod color_capability_tests {
     use super::*;
