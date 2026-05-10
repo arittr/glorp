@@ -1019,4 +1019,29 @@ mod render_wide_tests {
         assert!(row0.starts_with("┏━"));
         assert!(row0.ends_with("┓"));
     }
+
+    #[test]
+    fn render_wide_draws_frame_at_100_cols() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let vm = WatchViewModel::fixture();
+        terminal
+            .draw(|f| {
+                render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row0: String = (0..100).map(|x| buffer[(x, 0)].symbol().to_string()).collect();
+        assert!(row0.starts_with("┏━"));
+        assert!(row0.ends_with("┓"));
+        // Side rails should connect at column 0 and column 99.
+        for y in 1..29 {
+            assert_eq!(buffer[(0u16, y as u16)].symbol(), "┃", "row {y} left rail broken");
+            assert_eq!(buffer[(99u16, y as u16)].symbol(), "┃", "row {y} right rail broken");
+        }
+        // Bottom row connects with footer.
+        let row_last: String = (0..100).map(|x| buffer[(x, 29)].symbol().to_string()).collect();
+        assert!(row_last.starts_with("┗━"));
+        assert!(row_last.ends_with("┛"));
+    }
 }
