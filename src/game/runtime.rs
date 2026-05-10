@@ -76,6 +76,7 @@ fn event_for_delta(delta: &UsageDelta, now: OffsetDateTime) -> NormalizedUsageEv
         effective_tokens: 0.0,
         cost_usd: None,
         confidence: delta.confidence.clone(),
+        provider_delta_id: None,
     }
 }
 

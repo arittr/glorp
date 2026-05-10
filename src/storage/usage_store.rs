@@ -22,6 +22,7 @@ pub struct NormalizedUsageEvent {
     pub effective_tokens: f64,
     pub cost_usd: Option<f64>,
     pub confidence: String,
+    pub provider_delta_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +80,7 @@ impl NormalizedUsageEvent {
             effective_tokens,
             cost_usd: None,
             confidence: "local-log-derived".to_string(),
+            provider_delta_id: None,
         }
     }
 
@@ -458,7 +460,8 @@ impl UsageStore {
                 reasoning_output_tokens,
                 effective_tokens,
                 cost_usd,
-                confidence
+                confidence,
+                provider_delta_id
              FROM usage_events
              ORDER BY observed_at DESC, id DESC
              LIMIT ?1",
@@ -486,6 +489,7 @@ impl UsageStore {
                     effective_tokens: row.get(14)?,
                     cost_usd: row.get(15)?,
                     confidence: row.get(16)?,
+                    provider_delta_id: row.get(17)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -514,7 +518,8 @@ impl UsageStore {
                 cost_usd,
                 confidence,
                 provider_cursor_key,
-                provider_cursor_value
+                provider_cursor_value,
+                provider_delta_id
              FROM usage_events
              WHERE applied_at IS NULL
              ORDER BY bucket_at ASC, id ASC
@@ -548,6 +553,7 @@ impl UsageStore {
                     effective_tokens: row.get(15)?,
                     cost_usd: row.get(16)?,
                     confidence: row.get(17)?,
+                    provider_delta_id: row.get(20)?,
                 };
                 let cursor_update = ProviderCursorUpdate {
                     provider_surface,

@@ -406,25 +406,105 @@ fn build_recent_events(
             text: event.clone(),
         });
     }
-    for event in usage_events.iter().rev().take(4).rev() {
-        events.push(EventView {
-            timestamp: timestamp_column(event.observed_at),
-            kind: LogKind::Usage,
-            text: format!(
-                "{} added {} effective tokens",
-                event.provider_surface,
-                format_tokens(event.effective_tokens)
-            ),
-        });
+    for usage_event in aggregated_recent_usage(usage_events, 4) {
+        events.push(usage_event);
     }
-    for diagnostic in diagnostics.iter().rev().take(2).rev() {
-        events.push(EventView {
+    for diagnostic_event in deduped_recent_diagnostics(diagnostics, 2) {
+        events.push(diagnostic_event);
+    }
+    events
+}
+
+/// Group rows that share a `provider_delta_id` so a single smeared real
+/// delta surfaces as one log entry. Rows with no `provider_delta_id`
+/// stay ungrouped, one entry per row.
+fn aggregated_recent_usage(usage_events: &[NormalizedUsageEvent], take: usize) -> Vec<EventView> {
+    #[derive(Default)]
+    struct Group {
+        observed_at: Option<OffsetDateTime>,
+        provider_surface: String,
+        effective_tokens: f64,
+    }
+
+    // Walk newest-first; `recent_events` returns rows ordered DESC by
+    // observed_at, but be defensive and record the latest seen per group.
+    let mut groups: Vec<Group> = Vec::new();
+    let mut group_index_by_id: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for event in usage_events {
+        if let Some(delta_id) = event.provider_delta_id.as_deref() {
+            if let Some(&index) = group_index_by_id.get(delta_id) {
+                let group = &mut groups[index];
+                group.effective_tokens += event.effective_tokens;
+                if group
+                    .observed_at
+                    .map(|current| current < event.observed_at)
+                    .unwrap_or(true)
+                {
+                    group.observed_at = Some(event.observed_at);
+                }
+            } else {
+                group_index_by_id.insert(delta_id.to_string(), groups.len());
+                groups.push(Group {
+                    observed_at: Some(event.observed_at),
+                    provider_surface: event.provider_surface.clone(),
+                    effective_tokens: event.effective_tokens,
+                });
+            }
+        } else {
+            groups.push(Group {
+                observed_at: Some(event.observed_at),
+                provider_surface: event.provider_surface.clone(),
+                effective_tokens: event.effective_tokens,
+            });
+        }
+    }
+
+    groups
+        .into_iter()
+        .take(take)
+        .rev()
+        .filter_map(|group| {
+            let observed_at = group.observed_at?;
+            Some(EventView {
+                timestamp: timestamp_column(observed_at),
+                kind: LogKind::Usage,
+                text: format!(
+                    "{} added {} effective tokens",
+                    group.provider_surface,
+                    format_tokens(group.effective_tokens)
+                ),
+            })
+        })
+        .collect()
+}
+
+/// Keep one entry per `(provider_surface, code)`, newest first, so a poll
+/// loop emitting the same diagnostic does not flood the log.
+fn deduped_recent_diagnostics(
+    diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
+    take: usize,
+) -> Vec<EventView> {
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut keep: Vec<&crate::storage::usage_store::ProviderDiagnostic> = Vec::new();
+    for diagnostic in diagnostics {
+        let key = (diagnostic.provider_surface.clone(), diagnostic.code.clone());
+        if seen.insert(key) {
+            keep.push(diagnostic);
+            if keep.len() == take {
+                break;
+            }
+        }
+    }
+    keep.into_iter()
+        .rev()
+        .map(|diagnostic| EventView {
             timestamp: timestamp_column(diagnostic.recorded_at),
             kind: LogKind::Diagnostic,
             text: format!("{}: {}", diagnostic.provider_surface, diagnostic.code),
-        });
-    }
-    events
+        })
+        .collect()
 }
 
 fn helper_status(
@@ -484,7 +564,9 @@ fn timestamp_column(timestamp: OffsetDateTime) -> String {
 
 fn format_tokens(value: f64) -> String {
     let value = value.max(0.0);
-    if value.abs() >= 1_000.0 {
+    if value >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
         format!("{:.1}k", value / 1_000.0)
     } else {
         format!("{value:.0}")

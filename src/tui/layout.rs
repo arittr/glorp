@@ -221,7 +221,7 @@ fn render_pet_panel(
     render_lines(frame, rows[0], art_lines, styles);
 
     let mut meta = vec![section_line("vitals", styles)];
-    if meta_height >= 5 {
+    if meta_height >= 4 {
         meta.push(metadata_line(
             "name",
             vm.pet_name.as_str(),
@@ -242,7 +242,6 @@ fn render_pet_panel(
             format!("{}d", vm.age_days),
             styles,
         ));
-        meta.push(dashed_line(styles));
     } else {
         meta.push(Line::from(vec![
             Span::styled(vm.pet_name.as_str(), styles.prompt_user),
@@ -275,20 +274,22 @@ fn render_pet_panel(
     let xp = if vm.xp_target <= 0.0 {
         0.0
     } else {
-        vm.xp_current / vm.xp_target
+        (vm.xp_current / vm.xp_target).min(1.0)
     };
     stats.push(bar_line("xp", xp, styles.filled_bar_accent, styles));
     if area.height >= 20 {
+        let xp_text = if vm.xp_target > 0.0 && vm.xp_current >= vm.xp_target {
+            "max".to_string()
+        } else {
+            format!(
+                "{} / {}",
+                format_tokens(vm.xp_current),
+                format_tokens(vm.xp_target)
+            )
+        };
         stats.push(Line::from(vec![
             Span::styled("xp ", styles.label),
-            Span::styled(
-                format!(
-                    "{} / {}",
-                    format_tokens(vm.xp_current),
-                    format_tokens(vm.xp_target)
-                ),
-                styles.primary_text,
-            ),
+            Span::styled(xp_text, styles.primary_text),
         ]));
     }
 
@@ -296,11 +297,11 @@ fn render_pet_panel(
 }
 
 fn pet_panel_heights(area_height: u16, art_len: usize) -> (u16, u16, u16) {
-    let meta_height = if area_height >= 16 { 5 } else { 3 };
+    let meta_height = if area_height >= 16 { 4 } else { 3 };
     let desired_stats_height = if area_height >= 20 { 6 } else { 5 };
     let available_after_meta = area_height.saturating_sub(meta_height);
     let stats_height = desired_stats_height.min(available_after_meta);
-    let desired_stage_height = (art_len as u16 + 2).clamp(3, 10);
+    let desired_stage_height = (art_len as u16).clamp(3, 10);
     let stage_height = desired_stage_height.min(available_after_meta.saturating_sub(stats_height));
     (meta_height, stage_height, stats_height)
 }
@@ -380,11 +381,7 @@ fn centered_art_lines<'a>(
     }
     let art = &vm.pet_art;
     let visible = art.len().min(height as usize);
-    let top_pad = (height as usize).saturating_sub(visible) / 2;
     let mut lines = Vec::with_capacity(height as usize);
-    for _ in 0..top_pad {
-        lines.push(Line::from(""));
-    }
     for (line_index, art_line) in art.iter().take(visible).enumerate() {
         let art_width = art_line.chars().count() as u16;
         let left_pad = width.saturating_sub(art_width) / 2;
@@ -481,11 +478,7 @@ fn render_activity_panel(
     let mut lines = vec![section_line("today", styles)];
 
     if vm.is_blocked() {
-        lines.push(Line::from(vec![
-            Span::styled("blocked", styles.blocked),
-            Span::styled(" / ", styles.prompt_sep),
-            Span::styled(vm.helper_status.as_str(), styles.primary_text),
-        ]));
+        lines.push(Line::from(Span::styled("blocked", styles.blocked)));
         for error in vm.errors.iter().take(2) {
             lines.push(Line::from(Span::styled(
                 error.as_str(),
@@ -501,10 +494,6 @@ fn render_activity_panel(
             styles,
         ));
         lines.push(sparkline_line(&vm.recent_daily_effective_tokens, styles));
-        lines.push(Line::from(vec![
-            Span::styled("helper ", styles.label),
-            Span::styled(vm.helper_status.as_str(), styles.primary_text),
-        ]));
     }
 
     lines.push(section_line("sources", styles));
@@ -557,10 +546,6 @@ fn section_line<'a>(title: &'a str, styles: &'a SemanticStyles) -> Line<'a> {
         Span::styled(title, styles.section_header),
         Span::styled(" ┄ ┄ ┄", styles.section_header),
     ])
-}
-
-fn dashed_line(styles: &SemanticStyles) -> Line<'_> {
-    Line::from(Span::styled("┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄", styles.section_header))
 }
 
 fn bar_line<'a>(
@@ -647,7 +632,9 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 
 fn format_tokens(value: f64) -> String {
     let value = value.max(0.0);
-    if value.abs() >= 1_000.0 {
+    if value >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
         format!("{:.1}k", value / 1_000.0)
     } else {
         format!("{value:.0}")

@@ -2,9 +2,9 @@ use glorp::{
     commands::watch::build_watch_view_model_for_test,
     storage::{
         state::PetState,
-        usage_store::{NormalizedUsageEvent, ProviderDiagnostic, UsageStore},
+        usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, ProviderDiagnostic, UsageStore},
     },
-    tui::view_model::SourceStatus,
+    tui::{style::LogKind, view_model::SourceStatus},
 };
 use tempfile::tempdir;
 use time::{macros::datetime, Duration, OffsetDateTime};
@@ -185,6 +185,95 @@ fn latest_evolution_renders_once_for_running_watch() {
     assert!(!vm.acknowledged_evolution_for_test("s0->s1"));
     vm.acknowledge_latest_evolution_for_test();
     assert!(vm.acknowledged_evolution_for_test("s0->s1"));
+}
+
+#[test]
+fn log_aggregates_smeared_buckets_into_one_event() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage_store = UsageStore::open(&usage_db).unwrap();
+    let observed_at = OffsetDateTime::now_utc();
+    let bucket_count = 8usize;
+    let cursor = ProviderCursorUpdate {
+        provider_surface: "claude-code".into(),
+        cursor_key: "test-cursor".into(),
+        cursor_value: "test-value".into(),
+        provider_version: "test-provider".into(),
+        parser_version: "test-parser".into(),
+    };
+    for bucket_index in 0..bucket_count {
+        let bucket_at = observed_at
+            - Duration::minutes(bucket_count.saturating_sub(bucket_index + 1) as i64 * 10);
+        usage_store
+            .insert_unapplied_event_bucket(
+                &NormalizedUsageEvent {
+                    observed_at,
+                    bucket_at,
+                    effective_tokens: 25_000.0,
+                    ..NormalizedUsageEvent::for_test_at(observed_at, 25_000.0)
+                },
+                &cursor,
+                bucket_index,
+                bucket_count,
+            )
+            .unwrap();
+    }
+
+    let vm = build_watch_view_model_for_test(&mech_state(), &usage_db).unwrap();
+    let aggregated: Vec<_> = vm
+        .recent_events
+        .iter()
+        .filter(|event| {
+            matches!(event.kind, LogKind::Usage) && event.text.contains("claude-code added")
+        })
+        .collect();
+    assert_eq!(
+        aggregated.len(),
+        1,
+        "expected one aggregated usage entry per provider delta, got: {:#?}",
+        aggregated
+    );
+    assert!(
+        aggregated[0].text.contains("200.0k"),
+        "summed effective tokens should be 8 * 25_000 = 200_000, got: {:?}",
+        aggregated[0].text
+    );
+}
+
+#[test]
+fn diagnostic_log_dedupes_by_surface_and_code() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let usage_store = UsageStore::open(&usage_db).unwrap();
+    let now = OffsetDateTime::now_utc();
+    for offset_seconds in 0..5 {
+        usage_store
+            .insert_diagnostic(&ProviderDiagnostic {
+                provider_surface: "codex".into(),
+                code: "invalid_period_start".into(),
+                message: format!("repeat #{offset_seconds}"),
+                recorded_at: now - Duration::seconds(offset_seconds),
+            })
+            .unwrap();
+    }
+
+    let vm = build_watch_view_model_for_test(&mech_state(), &usage_db).unwrap();
+    let diagnostics: Vec<_> = vm
+        .recent_events
+        .iter()
+        .filter(|event| matches!(event.kind, LogKind::Diagnostic))
+        .collect();
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected one deduped diagnostic entry per (surface, code), got: {:#?}",
+        diagnostics
+    );
+    assert!(
+        diagnostics[0].text.contains("invalid_period_start"),
+        "diagnostic entry should preserve the code text, got: {:?}",
+        diagnostics[0].text
+    );
 }
 
 fn mech_state() -> PetState {

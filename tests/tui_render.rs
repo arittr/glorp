@@ -53,7 +53,7 @@ fn wide_layout_has_tokenpet_chrome_panels_and_bars() {
     assert!(text.contains("glorp --"));
     assert!(text.contains("─ vitals"));
     assert!(text.contains("today"));
-    assert!(text.contains("helper"));
+    assert!(text.contains("sources"));
     assert!(text.contains("●"));
     assert!(text.contains("█"));
     assert!(text.contains("░"));
@@ -108,7 +108,6 @@ fn wide_layout_uses_tokenpet_metadata_today_grid_and_log_rhythm() {
     assert!(text.contains("bucket"));
     assert!(text.contains("sources"));
     assert!(text.contains("log"));
-    assert!(text.contains("helper"));
     assert!(text.contains("┄"));
 }
 
@@ -287,7 +286,7 @@ fn blocked_provider_state_renders_calm_setup_view() {
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
     assert!(text.contains("blocked"));
-    assert!(text.contains("missing ccusage helper"));
+    assert!(text.contains("install ccusage"));
 }
 
 #[test]
@@ -519,6 +518,97 @@ fn compact_layout_uses_compact_pet_art_width() {
         .pet_art
         .iter()
         .all(|line| line.chars().count() <= 18));
+}
+
+#[test]
+fn pet_art_and_vitals_metadata_have_no_blank_rows_between_them() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_art = vec![
+        "    /\\     ".into(),
+        "   /  \\    ".into(),
+        "  / o.o \\  ".into(),
+        " /  ◇v◇  \\ ".into(),
+        " \\  ✦✦✦  / ".into(),
+        "  \\  ·  /  ".into(),
+        "   \\___/   ".into(),
+    ];
+    vm.pet_spans = Vec::new();
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let lines = buffer_lines(terminal.backend().buffer());
+
+    let vitals_row = lines
+        .iter()
+        .position(|line| line.contains("vitals"))
+        .expect("vitals header should render");
+    let last_pet_row = lines
+        .iter()
+        .take(vitals_row)
+        .enumerate()
+        .filter(|(_, line)| line.contains('/') || line.contains('\\') || line.contains("o.o"))
+        .map(|(index, _)| index)
+        .max()
+        .expect("at least one pet art row should render before vitals");
+
+    let gap = vitals_row - last_pet_row - 1;
+    assert!(
+        gap <= 1,
+        "expected vitals to follow pet art with no blank rows between them; pet last row {last_pet_row}, vitals row {vitals_row}, gap {gap}"
+    );
+}
+
+#[test]
+fn xp_display_caps_at_max_when_xp_overshoots_target() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.stage = "s6".into();
+    vm.stage = "s6".into();
+    vm.xp_current = 113.0;
+    vm.xp_target = 49.0;
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(
+        text.contains("xp max"),
+        "expected xp stats to render 'max' when current overshoots target, got:\n{text}"
+    );
+    assert!(
+        !text.contains("113 / 49"),
+        "should not render raw '113 / 49' once xp is capped at max"
+    );
+}
+
+#[test]
+fn helper_status_string_is_not_rendered_in_layout() {
+    let mut vm = WatchViewModel::fixture();
+    vm.helper_status = "ZZZSENTINEL".into();
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(
+        !text.contains("ZZZSENTINEL"),
+        "helper_status string should no longer be drawn in the right panel"
+    );
+}
+
+#[test]
+fn format_tokens_uses_m_suffix_past_one_million() {
+    let mut vm = WatchViewModel::fixture();
+    vm.today_effective_tokens = 66_631_100.0;
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(
+        text.contains("66.6M"),
+        "values past one million should render with an M suffix, got:\n{text}"
+    );
+    assert!(
+        !text.contains("66631.1k"),
+        "values past one million should not render with stale k suffix"
+    );
 }
 
 #[test]
