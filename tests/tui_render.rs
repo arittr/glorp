@@ -194,52 +194,8 @@ fn token_metrics_never_render_negative_zero() {
 }
 
 #[test]
-fn compact_boundary_is_exact_at_72_columns() {
-    let mut at_72 = Terminal::new(TestBackend::new(72, 24)).unwrap();
-    at_72
-        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
-        .unwrap();
-    let lines_72 = buffer_lines(at_72.backend().buffer());
-    assert!(
-        lines_72.iter().any(|line| line.contains("╎")),
-        "72-col layout should show the column divider in wide mode"
-    );
-    let today_72 = lines_72
-        .iter()
-        .position(|line| line.contains("today"))
-        .unwrap();
-    let vitals_72 = lines_72
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .unwrap();
-    assert!(
-        today_72 < vitals_72,
-        "in wide mode the right-column today header should sit above the left-column vitals header that now follows the pet art"
-    );
-
-    let mut at_71 = Terminal::new(TestBackend::new(71, 24)).unwrap();
-    at_71
-        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
-        .unwrap();
-    let lines_71 = buffer_lines(at_71.backend().buffer());
-    assert!(
-        !lines_71.iter().any(|line| line.contains("╎")),
-        "71-col layout should not draw a column divider in compact mode"
-    );
-    let vitals_line = lines_71
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .unwrap();
-    let today_line = lines_71
-        .iter()
-        .position(|line| line.contains("today"))
-        .unwrap();
-    assert!(today_line > vitals_line);
-}
-
-#[test]
-fn compact_layout_keeps_required_vitals_visible() {
-    let backend = TestBackend::new(48, 18);
+fn narrow_layout_keeps_required_vitals_visible() {
+    let backend = TestBackend::new(80, 28);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
@@ -500,24 +456,6 @@ fn question_mark_toggles_help_overlay() {
     app.handle_key_for_test(KeyCode::Char('?'), KeyEventKind::Press)
         .unwrap();
     assert!(!app.help_visible_for_test());
-}
-
-#[test]
-fn compact_layout_uses_compact_pet_art_width() {
-    let mut app = WatchApp::with_config(
-        WatchViewModel::fixture(),
-        WatchAppConfig {
-            animation_tick: Duration::from_millis(1),
-            usage_poll_interval: Duration::from_secs(60),
-        },
-    );
-    app.set_compact_for_test(true);
-    app.advance_animation_for_test();
-    assert!(app
-        .view_model_for_test()
-        .pet_art
-        .iter()
-        .all(|line| line.chars().count() <= 18));
 }
 
 #[test]

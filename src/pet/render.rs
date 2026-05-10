@@ -1,12 +1,11 @@
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
-use crate::pet::art::{stage_key, stage_label, template_for};
+use crate::pet::art::{stage_key, template_lines};
 use crate::pet::generation::{GeneratedPet, Species};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationFrame {
     pub tick: u64,
-    pub compact: bool,
     pub blink_suppression_ticks: u8,
 }
 
@@ -44,6 +43,7 @@ pub enum PaletteRoleName {
     Mouth,
     Accent,
     Pattern,
+    Particle,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +71,14 @@ pub struct AnimationProfile {
     pub blink_jitter: u8,
 }
 
+const ART_WIDTH: usize = 11;
+const FRAME_WIDTH: usize = 13;
+const FRAME_HEIGHT: usize = 10;
+
+const GLITCH_NOISE: &[char] = &[
+    '\u{2592}', '\u{2591}', '\u{2593}', '\u{2580}', '\u{2584}', '\u{258c}', '\u{2590}',
+];
+
 pub fn render_pet(
     pet: &GeneratedPet,
     stage: Stage,
@@ -81,58 +89,37 @@ pub fn render_pet(
     let profile = species_animation_profile(pet.species);
     let blinking = should_blink(pet, mood, frame, profile);
     let expression = expression_for(pet, mood, blinking);
-    let raw = template_for(
+    let raw = template_lines(
         pet.species,
         stage_key,
         pet.traits.morph_index,
-        frame.compact,
+        pet.traits.morph_pup_index,
     );
-    let breath_mark = breath_mark(pet, frame.tick, profile);
-    let flavor = flavor_line(pet, frame.tick);
-    let mut rendered = raw
+    let rendered = raw
         .iter()
         .enumerate()
         .map(|(line_index, line)| render_template_line(line, line_index, pet, &expression))
         .collect::<Vec<_>>();
     let mut lines = rendered
-        .iter_mut()
-        .map(|line| std::mem::take(&mut line.text))
+        .iter()
+        .map(|line| line.text.clone())
         .collect::<Vec<_>>();
     let mut spans = rendered
         .into_iter()
         .flat_map(|line| line.spans)
         .collect::<Vec<_>>();
 
-    if !frame.compact {
-        let line_index = lines.len();
-        lines.push(format!(
-            "{breath_mark} {} {}",
-            stage_label(pet.species, stage),
-            flavor
-        ));
-        if let Some(line) = lines.last() {
-            let end = line.chars().count();
-            if end > 0 {
-                spans.push(StyledSegment {
-                    line: line_index,
-                    start: 0,
-                    end,
-                    role: PaletteRoleName::Body,
-                });
-            }
-        }
-    } else {
-        let cropped = lines
-            .into_iter()
-            .enumerate()
-            .map(|(line_index, line)| crop_line_and_spans(line, &mut spans, line_index, 18))
-            .collect();
-        lines = cropped;
+    // Glitch corruption: rare per-tick body cell swap.
+    if pet.species == Species::Glitch {
+        apply_glitch_corruption(&mut lines, &mut spans, frame.tick);
     }
 
+    // Wrap pet art in a 13x10 frame and overlay particles.
+    let (framed_lines, framed_spans) = frame_with_particles(lines, spans, pet.species, frame.tick);
+
     RenderedPet {
-        lines,
-        spans,
+        lines: framed_lines,
+        spans: framed_spans,
         event_lines: Vec::new(),
     }
 }
@@ -238,23 +225,23 @@ fn expression_for(pet: &GeneratedPet, mood: Mood, blinking: bool) -> Expression 
 
     match mood {
         Mood::Happy => Expression {
-            eyes: "^ ^".to_string(),
-            mouth: "u".to_string(),
+            eyes: "^.^".to_string(),
+            mouth: "\u{03c9}".to_string(),
         },
         Mood::Content => Expression {
             eyes: pet.traits.eyes.clone(),
             mouth: pet.traits.mouth.clone(),
         },
         Mood::Hungry => Expression {
-            eyes: "o o".to_string(),
+            eyes: "u.u".to_string(),
             mouth: "o".to_string(),
         },
         Mood::Sad => Expression {
-            eyes: ". .".to_string(),
-            mouth: "_".to_string(),
+            eyes: "T.T".to_string(),
+            mouth: "\u{fe35}".to_string(),
         },
         Mood::Sleepy => Expression {
-            eyes: "u u".to_string(),
+            eyes: "-.-".to_string(),
             mouth: "-".to_string(),
         },
         Mood::Wilted => Expression {
@@ -280,35 +267,6 @@ fn should_blink(
     let cadence =
         u64::from(profile.blink_average) + (u64::from(pet.animation_phase.blink) % jitter);
     (frame.tick + u64::from(pet.animation_phase.blink)).is_multiple_of(cadence)
-}
-
-fn breath_mark(pet: &GeneratedPet, tick: u64, profile: AnimationProfile) -> &'static str {
-    let phase = (tick + u64::from(pet.animation_phase.breath)) % u64::from(profile.breath_period);
-    if phase < u64::from(profile.breath_hold) {
-        "."
-    } else if tick.is_multiple_of(2) {
-        " "
-    } else {
-        "'"
-    }
-}
-
-fn flavor_line(pet: &GeneratedPet, tick: u64) -> String {
-    let phase = (tick + u64::from(pet.animation_phase.flavor)) % 7;
-    match pet.species {
-        Species::Fuzz => format!("tail{}", if phase.is_multiple_of(2) { "\\" } else { "/" }),
-        Species::Blob => format!("drip{}", if phase == 0 { "." } else { " " }),
-        Species::Ghost => format!("wisp{}", if phase < 3 { "~" } else { " " }),
-        Species::Glitch => {
-            if phase == 0 {
-                "err#".to_string()
-            } else {
-                "err ".to_string()
-            }
-        }
-        Species::Crystal => format!("spark{}", if phase == 0 { "*" } else { " " }),
-        Species::Mech => format!("led{}", if phase < 2 { "*" } else { "." }),
-    }
 }
 
 struct RenderedTemplateLine {
@@ -404,23 +362,265 @@ fn push_segment(
     *cursor += width;
 }
 
-fn crop_line_and_spans(
-    line: String,
-    spans: &mut Vec<StyledSegment>,
-    line_index: usize,
-    max_width: usize,
-) -> String {
-    spans.retain_mut(|span| {
-        if span.line != line_index {
-            return true;
-        }
-        if span.start >= max_width {
-            return false;
-        }
-        span.end = span.end.min(max_width);
-        span.start < span.end
+fn apply_glitch_corruption(lines: &mut [String], spans: &mut [StyledSegment], tick: u64) {
+    if !tick.is_multiple_of(37) {
+        return;
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let row = ((tick * 7) as usize) % lines.len();
+    let line = &lines[row];
+    let total_chars = line.chars().count();
+    if total_chars == 0 {
+        return;
+    }
+    let col = ((tick * 11) as usize) % total_chars;
+    let target_char = line.chars().nth(col).unwrap_or(' ');
+    if target_char == ' ' {
+        return;
+    }
+    // Skip if the cell belongs to anything other than a body span.
+    let in_body = spans.iter().any(|span| {
+        span.line == row
+            && span.role == PaletteRoleName::Body
+            && col >= span.start
+            && col < span.end
     });
-    line.chars().take(max_width).collect()
+    if !in_body {
+        return;
+    }
+
+    let noise = GLITCH_NOISE[((tick * 3) as usize) % GLITCH_NOISE.len()];
+    replace_char_in_line(&mut lines[row], col, noise);
+}
+
+fn replace_char_in_line(line: &mut String, char_index: usize, replacement: char) {
+    let mut indices = line.char_indices();
+    let target = indices.nth(char_index);
+    if let Some((start_byte, ch)) = target {
+        let end_byte = start_byte + ch.len_utf8();
+        let mut replacement_buf = [0u8; 4];
+        let replacement_str = replacement.encode_utf8(&mut replacement_buf);
+        line.replace_range(start_byte..end_byte, replacement_str);
+    }
+}
+
+fn frame_with_particles(
+    art_lines: Vec<String>,
+    art_spans: Vec<StyledSegment>,
+    species: Species,
+    tick: u64,
+) -> (Vec<String>, Vec<StyledSegment>) {
+    // Build a 13x10 grid of chars initialized with spaces, then overlay
+    // the 11x8 art at rows 1..=8, cols 1..=11.
+    let mut grid: Vec<Vec<char>> = (0..FRAME_HEIGHT).map(|_| vec![' '; FRAME_WIDTH]).collect();
+
+    for (row_index, line) in art_lines.iter().enumerate().take(8) {
+        let target_row = row_index + 1;
+        for (col_index, ch) in line.chars().take(ART_WIDTH).enumerate() {
+            grid[target_row][col_index + 1] = ch;
+        }
+    }
+
+    // Translate art spans to framed-grid spans (line +1, start/end +1).
+    let mut framed_spans: Vec<StyledSegment> = art_spans
+        .into_iter()
+        .map(|span| StyledSegment {
+            line: span.line + 1,
+            start: span.start + 1,
+            end: span.end + 1,
+            role: span.role,
+        })
+        .collect();
+
+    // Overlay particles for this tick.
+    for particle in particles_for_species(species, tick) {
+        if particle.row < FRAME_HEIGHT && particle.col < FRAME_WIDTH {
+            grid[particle.row][particle.col] = particle.glyph;
+            framed_spans.push(StyledSegment {
+                line: particle.row,
+                start: particle.col,
+                end: particle.col + 1,
+                role: PaletteRoleName::Particle,
+            });
+        }
+    }
+
+    let lines: Vec<String> = grid
+        .into_iter()
+        .map(|row| row.into_iter().collect::<String>())
+        .collect();
+    (lines, framed_spans)
+}
+
+struct Particle {
+    row: usize,
+    col: usize,
+    glyph: char,
+}
+
+fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
+    let mut particles = Vec::new();
+    match species {
+        Species::Fuzz => {
+            // Tail flick: row 9 col 6, '~' when tick % 23 < 3.
+            if tick % 23 < 3 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 6,
+                    glyph: '~',
+                });
+            }
+        }
+        Species::Blob => {
+            if tick % 19 < 3 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 4,
+                    glyph: '.',
+                });
+            }
+            if tick % 23 < 4 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 6,
+                    glyph: '\u{b0}',
+                });
+            }
+            if tick % 17 < 2 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 8,
+                    glyph: '.',
+                });
+            }
+        }
+        Species::Ghost => {
+            if tick % 13 < 3 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 5,
+                    glyph: '~',
+                });
+            }
+            if tick % 19 < 4 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 7,
+                    glyph: '\u{b7}',
+                });
+            }
+            if tick % 21 < 2 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 3,
+                    glyph: '\'',
+                });
+            }
+            if tick % 17 < 3 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 9,
+                    glyph: '.',
+                });
+            }
+        }
+        Species::Glitch => {
+            // Scan line: only at tick % 41 == 0, draw a single cell.
+            if tick.is_multiple_of(41) {
+                let row = ((tick / 41) as usize) % FRAME_HEIGHT;
+                let col = ((tick / 41) as usize) % FRAME_WIDTH;
+                particles.push(Particle {
+                    row,
+                    col,
+                    glyph: '\u{2592}',
+                });
+            }
+            if tick % 11 < 2 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 2,
+                    glyph: '\u{2592}',
+                });
+            }
+            if tick % 13 < 2 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 4,
+                    glyph: '\u{2591}',
+                });
+            }
+            if tick % 17 < 2 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 10,
+                    glyph: '\u{2593}',
+                });
+            }
+        }
+        Species::Crystal => {
+            if tick % 23 < 3 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 1,
+                    glyph: '\u{2727}',
+                });
+            }
+            if tick % 19 < 3 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 11,
+                    glyph: '\u{2726}',
+                });
+            }
+            if tick % 21 < 3 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 1,
+                    glyph: '\u{2727}',
+                });
+            }
+            if tick % 17 < 2 {
+                particles.push(Particle {
+                    row: 9,
+                    col: 11,
+                    glyph: '\u{b7}',
+                });
+            }
+            if tick % 27 < 3 {
+                particles.push(Particle {
+                    row: 5,
+                    col: 0,
+                    glyph: '\u{2727}',
+                });
+            }
+        }
+        Species::Mech => {
+            // LED at row 0 col 6: '●' when tick % 4 < 2 else '○'.
+            let led_glyph = if tick % 4 < 2 { '\u{25cf}' } else { '\u{25cb}' };
+            particles.push(Particle {
+                row: 0,
+                col: 6,
+                glyph: led_glyph,
+            });
+            if tick % 9 < 3 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 4,
+                    glyph: '~',
+                });
+            }
+            if tick % 11 < 3 {
+                particles.push(Particle {
+                    row: 0,
+                    col: 8,
+                    glyph: '\u{b0}',
+                });
+            }
+        }
+    }
+    particles
 }
 
 fn stage_name(stage: Stage) -> &'static str {

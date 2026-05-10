@@ -28,11 +28,19 @@ fn watch_view_model_uses_rendered_mech_pet_art_instead_of_fixture_cat() {
     let art = vm.pet_art.join("\n");
 
     assert_eq!(vm.species, "mech");
-    assert_eq!(vm.stage, "brass walker");
+    assert_eq!(vm.stage, "mech");
+    // pet.jsx mech adult templates use these box-drawing markers; at least
+    // one of the three morphs must surface.
     assert!(
-        [".---.", "_[=]_", ".-^-.", "/====\\", "O--O", "d====b"]
-            .iter()
-            .any(|marker| art.contains(marker)),
+        [
+            "\u{250c}\u{2500}\u{2500}\u{2500}\u{2510}",
+            "\u{2517}\u{2517}\u{2517}",
+            "\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}",
+            "\u{2502}",
+            "\u{203e}\u{203e}",
+        ]
+        .iter()
+        .any(|marker| art.contains(marker)),
         "expected rendered adult mech art, got:\n{art}"
     );
     assert!(!art.contains("/\\_/\\"));

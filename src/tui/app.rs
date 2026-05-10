@@ -51,8 +51,6 @@ pub struct WatchApp {
     poller: Box<dyn WatchUsagePoller>,
     poll_count: u64,
     animation_frame: u64,
-    last_terminal_width: u16,
-    last_compact_for_test: bool,
     last_poll: Option<Instant>,
 }
 
@@ -77,8 +75,6 @@ impl WatchApp {
             poller,
             poll_count: 0,
             animation_frame: 0,
-            last_terminal_width: 0,
-            last_compact_for_test: false,
             last_poll: None,
         }
     }
@@ -102,9 +98,7 @@ impl WatchApp {
             self.advance_animation_frame();
 
             let render_evolution = self.vm.should_render_evolution_moment();
-            let mut frame_width: u16 = 0;
             terminal.draw(|frame| {
-                frame_width = frame.area().width;
                 render_watch_frame(frame, &self.vm);
                 match self.overlay {
                     Some(Overlay::Help) => render_help_overlay(frame),
@@ -114,7 +108,6 @@ impl WatchApp {
                     render_evolution_overlay(frame);
                 }
             })?;
-            self.last_terminal_width = frame_width;
             if render_evolution {
                 self.vm.acknowledge_latest_evolution();
             }
@@ -141,12 +134,8 @@ impl WatchApp {
 
     fn advance_animation_frame(&mut self) {
         self.animation_frame = self.animation_frame.wrapping_add(1);
-        let compact = self.last_terminal_width > 0 && self.last_terminal_width < 72;
-        let _ = crate::commands::watch::rerender_pet_for_view_model(
-            &mut self.vm,
-            self.animation_frame,
-            compact,
-        );
+        let _ =
+            crate::commands::watch::rerender_pet_for_view_model(&mut self.vm, self.animation_frame);
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -198,19 +187,12 @@ impl WatchApp {
 
     pub fn advance_animation_for_test(&mut self) {
         self.animation_frame = self.animation_frame.wrapping_add(1);
-        let _ = crate::commands::watch::rerender_pet_for_view_model(
-            &mut self.vm,
-            self.animation_frame,
-            self.last_compact_for_test,
-        );
+        let _ =
+            crate::commands::watch::rerender_pet_for_view_model(&mut self.vm, self.animation_frame);
     }
 
     pub fn view_model_for_test(&self) -> &WatchViewModel {
         &self.vm
-    }
-
-    pub fn set_compact_for_test(&mut self, compact: bool) {
-        self.last_compact_for_test = compact;
     }
 
     #[doc(hidden)]

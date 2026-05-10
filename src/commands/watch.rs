@@ -67,7 +67,6 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
         mood,
         AnimationFrame {
             tick: now.unix_timestamp().max(0) as u64,
-            compact: false,
             blink_suppression_ticks: 0,
         },
     );
@@ -240,11 +239,7 @@ fn parse_mood(value: &str) -> Mood {
     }
 }
 
-pub fn rerender_pet_for_view_model(
-    vm: &mut WatchViewModel,
-    tick: u64,
-    compact: bool,
-) -> Result<()> {
+pub fn rerender_pet_for_view_model(vm: &mut WatchViewModel, tick: u64) -> Result<()> {
     let species = parse_species(&vm.pet_render.generated_species)
         .unwrap_or_else(|| generate_pet(&vm.pet_render.seed).species);
     let stage = parse_stage(&vm.pet_render.stage);
@@ -256,7 +251,6 @@ pub fn rerender_pet_for_view_model(
         mood,
         AnimationFrame {
             tick,
-            compact,
             blink_suppression_ticks: 0,
         },
     );

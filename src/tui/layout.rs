@@ -12,9 +12,7 @@ use crate::tui::{
     view_model::{EventView, SourceStatus, WatchViewModel},
 };
 
-const COMPACT_WIDTH: u16 = 72;
 const BAR_WIDTH: usize = 20;
-const PET_PANEL_LINES: u16 = 10;
 const BODY_X_PADDING: u16 = 2;
 const BODY_Y_PADDING: u16 = 1;
 
@@ -41,11 +39,7 @@ pub fn render_watch_frame(frame: &mut Frame<'_>, vm: &WatchViewModel) {
     render_footer(frame, chunks[2], &styles);
 
     let body = padded_body(chunks[1]);
-    if area.width < COMPACT_WIDTH {
-        render_compact(frame, body, vm, &styles);
-    } else {
-        render_wide(frame, body, vm, &styles);
-    }
+    render_wide(frame, body, vm, &styles);
 }
 
 pub fn render_help_overlay(frame: &mut Frame<'_>) {
@@ -126,15 +120,6 @@ fn render_divider(frame: &mut Frame<'_>, area: Rect, styles: &SemanticStyles) {
         .map(|_| Line::from(Span::styled("╎", styles.section_header)))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines).style(styles.body), area);
-}
-
-fn render_compact(frame: &mut Frame<'_>, area: Rect, vm: &WatchViewModel, styles: &SemanticStyles) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(PET_PANEL_LINES), Constraint::Min(3)])
-        .split(area);
-    render_pet_panel(frame, rows[0], vm, styles);
-    render_activity_panel(frame, rows[1], vm, styles);
 }
 
 fn render_chrome(frame: &mut Frame<'_>, area: Rect, vm: &WatchViewModel, styles: &SemanticStyles) {
@@ -465,6 +450,7 @@ fn role_style(role: PaletteRoleName, styles: &SemanticStyles) -> Style {
         PaletteRoleName::Mouth => styles.pet_mouth,
         PaletteRoleName::Accent => styles.pet_accent,
         PaletteRoleName::Pattern => styles.pet_pattern,
+        PaletteRoleName::Particle => styles.pet_accent,
     }
 }
 

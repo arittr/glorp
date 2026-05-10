@@ -64,6 +64,8 @@ pub struct VisibleTraits {
     pub accent: String,
     pub palette_index: usize,
     pub morph_index: usize,
+    #[serde(default)]
+    pub morph_pup_index: usize,
     pub seed_hue: u16,
     pub saturation_percent: u8,
 }
@@ -131,10 +133,40 @@ fn visible_traits(species: Species, rng: &mut StableRng) -> VisibleTraits {
         Species::Crystal => pick(rng, &["v", "^", "_", "."]),
         Species::Mech => pick(rng, &["-", "_", "=", "v"]),
     };
-    let pattern = pick(rng, &[".", "*", "+", ":", "~", "#"]).to_string();
-    let accent = pick(rng, &["'", "`", "^", "*", "+", "="]).to_string();
+    // 3-char patterns match the `{pattern}` slot width in pet.jsx templates.
+    let pattern = pick(
+        rng,
+        &[
+            "   ",
+            " . ",
+            " * ",
+            " \u{25c7} ",
+            " + ",
+            " ~ ",
+            "...",
+            " v ",
+            " \u{2027} ",
+            " \u{2726} ",
+            "\u{b7}.\u{b7}",
+            " \u{25d8} ",
+            "\u{2021} \u{2021}",
+            " \u{274d} ",
+            " \u{25e2} ",
+            "\u{2039}\u{b7}\u{203a}",
+        ],
+    )
+    .to_string();
+    let accent = pick(
+        rng,
+        &[
+            "\u{b7}", ":", "\u{2726}", "*", "+", "\u{25cb}", "\u{25c7}", "\u{2665}", "\u{273f}",
+            "\u{25aa}", "\u{25e6}", "\u{2727}", "\u{25a0}", "\u{25c8}", "\u{274d}",
+        ],
+    )
+    .to_string();
     let palette_index = rng.next_usize(8);
     let morph_index = rng.next_usize(4);
+    let morph_pup_index = rng.next_usize(4);
     let seed_hue = rng.next_usize(360) as u16;
     let saturation_percent = 82 + rng.next_usize(19) as u8;
 
@@ -145,6 +177,7 @@ fn visible_traits(species: Species, rng: &mut StableRng) -> VisibleTraits {
         accent,
         palette_index,
         morph_index,
+        morph_pup_index,
         seed_hue,
         saturation_percent,
     }
