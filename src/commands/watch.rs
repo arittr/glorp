@@ -102,7 +102,9 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
         happiness: state.vitals.happiness / 100.0,
         energy: state.vitals.energy / 100.0,
         today_effective_tokens: today_effective_tokens(&recent_usage, now),
-        recent_daily_effective_tokens: recent_daily_effective_tokens(&recent_usage, now),
+        recent_daily_effective_tokens: usage_store
+            .seven_day_token_history(now.date())
+            .unwrap_or_else(|_| vec![0.0; 7]),
         source_breakdown,
         source_health,
         current_bucket_effective_tokens: current_bucket_effective_tokens(&recent_usage, now),
@@ -286,21 +288,6 @@ fn current_bucket_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetD
         .filter(|event| event.bucket_at >= cutoff)
         .map(|event| event.effective_tokens)
         .sum()
-}
-
-fn recent_daily_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec<f64> {
-    let mut by_day = BTreeMap::new();
-    for event in events {
-        *by_day.entry(event.bucket_at.date()).or_insert(0.0) += event.effective_tokens;
-    }
-
-    (0..7)
-        .rev()
-        .map(|days_ago| {
-            let day = now.date() - Duration::days(days_ago);
-            by_day.get(&day).copied().unwrap_or(0.0)
-        })
-        .collect()
 }
 
 fn source_breakdown(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec<SourceUsageView> {

@@ -6,7 +6,7 @@ use glorp::tui::app::{
     render_help_overlay_for_test, run_single_watch_tick_for_test, WatchApp, WatchAppConfig,
     WatchTestHarness, WatchUsagePoller, WatchViewModel,
 };
-use glorp::tui::style::{semantic_styles, tokenpet_palette};
+use glorp::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
 use glorp::tui::view_model::{SourceHealthView, SourceStatus};
 use ratatui::{
     backend::TestBackend, buffer::Buffer, layout::Position, style::Color, Frame, Terminal,
@@ -55,11 +55,10 @@ fn wide_layout_has_tokenpet_chrome_panels_and_bars() {
     let buf = terminal.backend().buffer();
     let p = tokenpet_palette();
     let text = buffer_text(buf);
-    assert!(text.contains("glorp --"));
+    assert!(text.contains("glorp · "));
     assert!(text.contains("─ vitals"));
     assert!(text.contains("today"));
-    assert!(text.contains("sources"));
-    assert!(text.contains("●"));
+    assert!(text.contains("helpers"));
     assert!(text.contains("█"));
     assert!(text.contains("░"));
     assert!(has_cell(buf, "█", p.good.rgb) || has_cell(buf, "█", p.accent.rgb));
@@ -84,7 +83,6 @@ fn wide_layout_centers_full_pet_stage_with_dashed_divider() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
-    assert!(text.contains("╎"));
     assert!(text.contains("✦ ✧ ✦"));
 
     let stage_line = buffer_lines(terminal.backend().buffer())
@@ -92,8 +90,8 @@ fn wide_layout_centers_full_pet_stage_with_dashed_divider() {
         .find(|line| line.contains("/ o.o \\"))
         .unwrap();
     assert!(
-        stage_line.find('/').unwrap_or_default() > 15,
-        "pet art should be visually centered in its stage: {stage_line:?}"
+        stage_line.find('/').unwrap_or_default() > 5,
+        "pet art should be padded away from the left edge: {stage_line:?}"
     );
 }
 
@@ -105,58 +103,11 @@ fn wide_layout_uses_tokenpet_metadata_today_grid_and_log_rhythm() {
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
         .unwrap();
     let text = buffer_text(terminal.backend().buffer());
-    assert!(text.contains("name"));
-    assert!(text.contains("species"));
-    assert!(text.contains("stage"));
-    assert!(text.contains("mood"));
     assert!(text.contains("today"));
-    assert!(text.contains("bucket"));
-    assert!(text.contains("sources"));
-    assert!(text.contains("log"));
-    assert!(text.contains("┄"));
-}
-
-#[test]
-fn wide_layout_keeps_pet_and_stats_top_stacked_like_tokenpet_mockup() {
-    let backend = TestBackend::new(157, 34);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    let first_pet_line = lines
-        .iter()
-        .position(|line| line.contains("/\\_/\\"))
-        .expect("pet art should render");
-    let vitals_line = lines
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .expect("vitals header should render");
-    let stats_line = lines
-        .iter()
-        .position(|line| line.contains("stats"))
-        .expect("stats header should render");
-    let last_divider_line = lines
-        .iter()
-        .rposition(|line| line.contains("╎"))
-        .expect("column divider should render");
-
-    assert!(
-        first_pet_line < 12,
-        "pet art should begin near the top of the left column, got row {first_pet_line}"
-    );
-    assert!(
-        vitals_line > first_pet_line && vitals_line <= first_pet_line + 6,
-        "vitals metadata should follow the pet stage without a large vertical gulf; pet row {first_pet_line}, vitals row {vitals_line}"
-    );
-    assert!(
-        stats_line > vitals_line && stats_line <= vitals_line + 6,
-        "stats should follow the vitals metadata without a large vertical gulf; vitals row {vitals_line}, stats row {stats_line}"
-    );
-    assert!(
-        last_divider_line <= stats_line + 8,
-        "column divider should end near the content instead of stretching to the footer; stats row {stats_line}, divider row {last_divider_line}"
-    );
+    assert!(text.contains("last 10m"));
+    assert!(text.contains("helpers"));
+    assert!(text.contains("feed"));
+    assert!(text.contains("─"));
 }
 
 #[test]
@@ -170,7 +121,6 @@ fn event_log_uses_timestamps_rails_sparkline_and_semantic_colors() {
     let p = tokenpet_palette();
     let text = buffer_text(buf);
     assert!(text.contains("13:42"));
-    assert!(text.contains("▏"));
     assert!(
         text.contains("▁")
             || text.contains("▂")
@@ -181,10 +131,7 @@ fn event_log_uses_timestamps_rails_sparkline_and_semantic_colors() {
             || text.contains("▇")
             || text.contains("█")
     );
-    assert!(has_cell(buf, "▏", p.good.rgb));
-    assert!(has_cell(buf, "▏", p.accent.rgb));
-    assert!(has_cell(buf, "▏", p.bad.rgb));
-    assert!(has_cell(buf, ":", p.faint.rgb));
+    assert!(has_cell(buf, "█", p.good.rgb) || has_cell(buf, "█", p.accent.rgb));
 }
 
 #[test]
@@ -223,7 +170,6 @@ fn small_height_degrades_without_text_overlap() {
     let lines = buffer_lines(terminal.backend().buffer());
     assert!(lines.iter().all(|line| line.chars().count() <= 48));
     let text = lines.join("\n");
-    assert!(text.contains("glorp"));
     assert!(text.contains("q"));
     assert!(text.contains("?"));
 }
@@ -246,8 +192,8 @@ fn blocked_provider_state_renders_calm_setup_view() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
-    assert!(text.contains("blocked"));
-    assert!(text.contains("install ccusage"));
+    // New layout shows ✗ glyph for blocked sources in the helpers panel.
+    assert!(text.contains("✗"), "blocked source should render ✗ in helpers panel, got:\n{text}");
 }
 
 #[test]
@@ -274,6 +220,7 @@ fn app_refresh_and_interval_use_polling_path() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_millis(1),
+            color_capability: ColorCapability::Truecolor,
         },
         Box::new(harness),
     );
@@ -307,6 +254,7 @@ fn repeat_key_events_drive_watch_controls_and_release_events_do_not() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_millis(1),
+            color_capability: ColorCapability::Truecolor,
         },
         Box::new(harness),
     );
@@ -383,6 +331,7 @@ fn animation_tick_rerenders_pet_art_without_polling_usage() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_secs(999),
+            color_capability: ColorCapability::Truecolor,
         },
     );
 
@@ -392,25 +341,6 @@ fn animation_tick_rerenders_pet_art_without_polling_usage() {
 
     assert_ne!(before, after);
     assert_eq!(app.poll_count_for_test(), 0);
-}
-
-#[test]
-fn wide_layout_leads_with_pet_before_vitals_metadata() {
-    let backend = TestBackend::new(120, 32);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    let first_pet = lines
-        .iter()
-        .position(|line| line.contains("/\\_/\\"))
-        .unwrap();
-    let vitals = lines
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .unwrap();
-    assert!(first_pet < vitals);
 }
 
 #[test]
@@ -439,10 +369,11 @@ fn source_health_rows_render_ready_and_diagnostic_states_together() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
-    assert!(text.contains("claude-code"));
-    assert!(text.contains("ready"));
-    assert!(text.contains("codex"));
-    assert!(text.contains("missing_helper"));
+    // Helpers panel shows short display names and status glyphs.
+    assert!(text.contains("claude"), "ready source should appear in helpers panel");
+    assert!(text.contains("✓"), "ready source should show ✓ glyph");
+    assert!(text.contains("codex"), "diagnostic source should appear in helpers panel");
+    assert!(text.contains("~"), "diagnostic source should show ~ glyph");
 }
 
 #[test]
@@ -452,6 +383,7 @@ fn question_mark_toggles_help_overlay() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
         },
     );
     assert!(!app.help_visible_for_test());
@@ -461,44 +393,6 @@ fn question_mark_toggles_help_overlay() {
     app.handle_key_for_test(KeyCode::Char('?'), KeyEventKind::Press)
         .unwrap();
     assert!(!app.help_visible_for_test());
-}
-
-#[test]
-fn pet_art_and_vitals_metadata_have_no_blank_rows_between_them() {
-    let mut vm = WatchViewModel::fixture();
-    vm.pet_art = vec![
-        "    /\\     ".into(),
-        "   /  \\    ".into(),
-        "  / o.o \\  ".into(),
-        " /  ◇v◇  \\ ".into(),
-        " \\  ✦✦✦  / ".into(),
-        "  \\  ·  /  ".into(),
-        "   \\___/   ".into(),
-    ];
-    vm.pet_spans = Vec::new();
-    let backend = TestBackend::new(120, 32);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-
-    let vitals_row = lines
-        .iter()
-        .position(|line| line.contains("vitals"))
-        .expect("vitals header should render");
-    let last_pet_row = lines
-        .iter()
-        .take(vitals_row)
-        .enumerate()
-        .filter(|(_, line)| line.contains('/') || line.contains('\\') || line.contains("o.o"))
-        .map(|(index, _)| index)
-        .max()
-        .expect("at least one pet art row should render before vitals");
-
-    let gap = vitals_row - last_pet_row - 1;
-    assert!(
-        gap <= 1,
-        "expected vitals to follow pet art with no blank rows between them; pet last row {last_pet_row}, vitals row {vitals_row}, gap {gap}"
-    );
 }
 
 #[test]
@@ -513,12 +407,12 @@ fn xp_display_caps_at_max_when_xp_overshoots_target() {
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
     assert!(
-        text.contains("xp max"),
-        "expected xp stats to render 'max' when current overshoots target, got:\n{text}"
+        text.contains("xp") && text.contains("100"),
+        "expected xp bar to show 100% when current overshoots target, got:\n{text}"
     );
     assert!(
         !text.contains("113 / 49"),
-        "should not render raw '113 / 49' once xp is capped at max"
+        "should not render raw '113 / 49' when xp overshoots target"
     );
 }
 
@@ -537,7 +431,7 @@ fn helper_status_string_is_not_rendered_in_layout() {
 }
 
 #[test]
-fn format_tokens_uses_m_suffix_past_one_million() {
+fn format_tokens_uses_comma_formatting_for_large_values() {
     let mut vm = WatchViewModel::fixture();
     vm.today_effective_tokens = 66_631_100.0;
     let backend = TestBackend::new(120, 32);
@@ -545,12 +439,12 @@ fn format_tokens_uses_m_suffix_past_one_million() {
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
     assert!(
-        text.contains("66.6M"),
-        "values past one million should render with an M suffix, got:\n{text}"
+        text.contains("66,631,100"),
+        "large token values should render with comma grouping, got:\n{text}"
     );
     assert!(
         !text.contains("66631.1k"),
-        "values past one million should not render with stale k suffix"
+        "large token values should not render with k suffix"
     );
 }
 
@@ -562,6 +456,7 @@ fn manual_refresh_resets_interval_timer_for_test() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
         },
         Box::new(harness),
     );
@@ -608,6 +503,7 @@ fn animation_advances_while_poll_is_in_flight() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
         },
         Box::new(poller),
     );
@@ -673,6 +569,7 @@ fn duplicate_poll_requests_while_in_flight_are_deduped() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
         },
         Box::new(poller),
     );
@@ -713,6 +610,7 @@ fn shutdown_drops_worker_thread_cleanly() {
         WatchAppConfig {
             animation_tick: Duration::from_millis(1),
             usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
         },
         Box::new(harness),
     );

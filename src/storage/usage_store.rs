@@ -731,6 +731,27 @@ impl UsageStore {
             .map_err(Into::into)
     }
 
+    pub fn seven_day_token_history(
+        &self,
+        now_utc_date: time::Date,
+    ) -> crate::error::Result<Vec<f64>> {
+        let mut out = vec![0.0_f64; 7];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let offset_days = 6 - i as i64;
+            let day = now_utc_date - time::Duration::days(offset_days);
+            let day_str = day.to_string();
+            let value: f64 = self.conn.query_row(
+                "SELECT COALESCE(SUM(effective_tokens), 0.0)
+                 FROM usage_events
+                 WHERE period_date = ?1",
+                params![day_str],
+                |row| row.get(0),
+            )?;
+            *slot = value;
+        }
+        Ok(out)
+    }
+
     fn migrate(&self) -> crate::error::Result<()> {
         self.conn.execute_batch(
             "
@@ -925,4 +946,54 @@ fn format_time(value: OffsetDateTime) -> crate::error::Result<String> {
 fn parse_time_for_sql(value: &str) -> rusqlite::Result<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seven_day_token_history_returns_seven_oldest_first() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let today = OffsetDateTime::now_utc();
+        let day0 = today - time::Duration::days(6);
+        let day6 = today;
+        store
+            .insert_event(&NormalizedUsageEvent::for_test_at(day0, 1000.0))
+            .unwrap();
+        store
+            .insert_event(&NormalizedUsageEvent::for_test_at(day6, 5000.0))
+            .unwrap();
+
+        let history = store.seven_day_token_history(today.date()).unwrap();
+        assert_eq!(history.len(), 7);
+        assert_eq!(history[0], 1000.0);
+        assert_eq!(history[6], 5000.0);
+        for v in &history[1..6] {
+            assert_eq!(*v, 0.0);
+        }
+    }
+
+    #[test]
+    fn seven_day_token_history_sums_multiple_events_per_day() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let today = OffsetDateTime::now_utc();
+        store
+            .insert_event(&NormalizedUsageEvent::for_test_at(today, 1500.0))
+            .unwrap();
+        store
+            .insert_event(&NormalizedUsageEvent::for_test_at(today, 2500.0))
+            .unwrap();
+
+        let history = store.seven_day_token_history(today.date()).unwrap();
+        assert_eq!(history[6], 4000.0);
+    }
+
+    #[test]
+    fn seven_day_token_history_zero_for_empty_store() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let today = OffsetDateTime::now_utc();
+        let history = store.seven_day_token_history(today.date()).unwrap();
+        assert_eq!(history, vec![0.0; 7]);
+    }
 }

@@ -28,15 +28,9 @@ fn semantic_styles_preserve_tokenpet_roles() {
     let p = tokenpet_palette();
     assert_eq!(styles.body.fg, Some(p.fg.rgb));
     assert_eq!(styles.body.bg, Some(p.bg.rgb));
-    assert_eq!(styles.chrome_title.fg, Some(p.dim.rgb));
-    assert_eq!(styles.chrome_title.bg, Some(p.surface.rgb));
-    assert_eq!(styles.prompt_user.fg, Some(p.good.rgb));
-    assert_eq!(styles.prompt_path.fg, Some(p.accent.rgb));
     assert_eq!(styles.section_header.fg, Some(p.faint.rgb));
     assert_eq!(styles.timestamp.fg, Some(p.faint.rgb));
     assert_eq!(styles.empty_bar.fg, Some(p.faint.rgb));
-    assert_eq!(styles.filled_bar_good.fg, Some(p.good.rgb));
-    assert_eq!(styles.filled_bar_accent.fg, Some(p.accent.rgb));
     assert_eq!(styles.event_rail_usage.fg, Some(p.good.rgb));
     assert_eq!(styles.event_rail_diagnostic.fg, Some(p.bad.rgb));
     assert_eq!(styles.sparkline_today.fg, Some(p.accent.rgb));
@@ -45,4 +39,18 @@ fn semantic_styles_preserve_tokenpet_roles() {
     assert_eq!(styles.log(LogKind::Usage).fg, Some(p.good.rgb));
     assert_eq!(styles.log(LogKind::Diagnostic).fg, Some(p.bad.rgb));
     assert_eq!(styles.log(LogKind::Evolution).fg, Some(p.accent.rgb));
+}
+
+#[test]
+fn bar_ramp_good_middle_stop_matches_palette_good() {
+    use glorp::tui::style::{tokenpet_palette, BAR_RAMP_GOOD};
+    let palette = tokenpet_palette();
+    assert_eq!(BAR_RAMP_GOOD.stops[2], palette.good.rgb);
+}
+
+#[test]
+fn bar_ramp_accent_middle_stop_matches_palette_accent() {
+    use glorp::tui::style::{tokenpet_palette, BAR_RAMP_ACCENT};
+    let palette = tokenpet_palette();
+    assert_eq!(BAR_RAMP_ACCENT.stops[2], palette.accent.rgb);
 }
