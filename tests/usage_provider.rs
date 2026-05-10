@@ -1,8 +1,10 @@
 use glorp::game::effective_tokens::EffectiveTokenWeights;
+use glorp::game::runtime::apply_usage_poll;
+use glorp::storage::state::PetState;
 use glorp::storage::usage_store::UsageStore;
 use glorp::usage::ccusage::{CcusageCommandProvider, HelperDiscovery, HelperPaths};
 use glorp::usage::normalize::RawTokenTotals;
-use glorp::usage::provider::{ProviderCursorKey, UsageProvider};
+use glorp::usage::provider::{ProviderCursorKey, UsagePollResult, UsageProvider};
 use serde::Serialize;
 use tempfile::tempdir;
 use time::OffsetDateTime;
@@ -19,6 +21,21 @@ fn provider(claude: Option<&str>, codex: Option<&str>) -> CcusageCommandProvider
         codex: codex.map(fixture),
         node: None,
     })
+}
+
+// Run a full poll/stage/apply/mark lifecycle so the provider cursor advances,
+// matching what `glorp poll` does in production. Tests that issue back-to-back
+// `provider.poll` calls without applying would otherwise see the same totals
+// re-emitted because the cursor only advances after pet state is saved.
+fn complete_poll_lifecycle(
+    provider: &CcusageCommandProvider,
+    store: &mut UsageStore,
+) -> UsagePollResult {
+    let result = provider.poll(store).unwrap();
+    let mut state = PetState::new_for_test("test-seed", "test");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    apply_usage_poll(&mut state, store, &result, OffsetDateTime::now_utc()).unwrap();
+    result
 }
 
 #[test]
@@ -55,8 +72,8 @@ fn repeated_poll_does_not_double_count_unchanged_totals() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let provider = provider(Some("ccusage-ok.mjs"), None);
-    let first = provider.poll(&mut store).unwrap();
-    let second = provider.poll(&mut store).unwrap();
+    let first = complete_poll_lifecycle(&provider, &mut store);
+    let second = complete_poll_lifecycle(&provider, &mut store);
     assert!(first.total_effective_tokens > 0.0);
     assert_eq!(second.total_effective_tokens, 0.0);
 }
@@ -66,7 +83,7 @@ fn poll_with_increased_same_day_total_emits_only_increment() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let original_provider = provider(Some("ccusage-ok.mjs"), None);
-    let first = original_provider.poll(&mut store).unwrap();
+    let first = complete_poll_lifecycle(&original_provider, &mut store);
     assert!(first.total_effective_tokens > 0.0);
 
     let next_provider = provider(Some("ccusage-next.mjs"), None);
@@ -84,7 +101,7 @@ fn decreasing_totals_emit_sanitized_diagnostic_without_negative_delta() {
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let next_provider = provider(Some("ccusage-next.mjs"), None);
 
-    let first = next_provider.poll(&mut store).unwrap();
+    let first = complete_poll_lifecycle(&next_provider, &mut store);
     assert!(first.total_effective_tokens > 0.0);
 
     let provider = provider(Some("ccusage-ok.mjs"), None);
@@ -158,7 +175,16 @@ fn transcript_like_fields_are_ignored() {
     let provider = provider(Some("ccusage-prompts.mjs"), Some("ccusage-codex-ok.mjs"));
     let result = provider.poll(&mut store).unwrap();
     assert_eq!(result.diagnostics.len(), 0);
-    let stored = store.recent_events(10).unwrap();
+
+    let mut state = PetState::new_for_test("test-seed", "test");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    apply_usage_poll(&mut state, &mut store, &result, OffsetDateTime::now_utc()).unwrap();
+
+    let stored = store.recent_events(50).unwrap();
+    assert!(
+        !stored.is_empty(),
+        "stored events should not be empty after apply"
+    );
     let rendered = serde_json::to_string(&stored).unwrap();
     assert!(!rendered.contains("secret prompt"));
     assert!(!rendered.contains("secret response"));
@@ -207,7 +233,7 @@ fn provider_uses_configured_cache_read_weight_for_real_deltas() {
         cache_read_weight: 0.05,
     });
 
-    provider.poll(&mut store).unwrap();
+    complete_poll_lifecycle(&provider, &mut store);
     let next_provider = CcusageCommandProvider::new(HelperPaths {
         claude: Some(fixture("ccusage-next.mjs")),
         codex: None,
@@ -225,9 +251,7 @@ fn provider_uses_configured_cache_read_weight_for_real_deltas() {
 fn helper_version_change_does_not_create_new_food_for_same_totals() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let first = provider(Some("ccusage-ok.mjs"), None)
-        .poll(&mut store)
-        .unwrap();
+    let first = complete_poll_lifecycle(&provider(Some("ccusage-ok.mjs"), None), &mut store);
     assert!(first.total_effective_tokens > 0.0);
 
     let second = provider(Some("ccusage-ok-v2.mjs"), None)

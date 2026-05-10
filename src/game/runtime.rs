@@ -41,7 +41,7 @@ pub fn stage_usage_poll_deltas(
                 observed_at: now,
                 bucket_at,
                 effective_tokens,
-                ..event_for_delta(delta, now)?
+                ..event_for_delta(delta, now)
             };
             ids.push(usage_store.insert_unapplied_event_bucket(
                 &event,
@@ -54,8 +54,11 @@ pub fn stage_usage_poll_deltas(
     Ok(ids)
 }
 
-fn event_for_delta(delta: &UsageDelta, now: OffsetDateTime) -> Result<NormalizedUsageEvent> {
-    Ok(NormalizedUsageEvent {
+// `bucket_at` and `effective_tokens` are placeholders here because Rust struct
+// literals require every field — the smear loop's `..` syntax overrides both
+// with the per-bucket values that actually get inserted.
+fn event_for_delta(delta: &UsageDelta, now: OffsetDateTime) -> NormalizedUsageEvent {
+    NormalizedUsageEvent {
         provider_surface: delta.provider_surface.clone(),
         provider_version: delta.cursor_update.provider_version.clone(),
         parser_version: delta.cursor_update.parser_version.clone(),
@@ -73,7 +76,7 @@ fn event_for_delta(delta: &UsageDelta, now: OffsetDateTime) -> Result<Normalized
         effective_tokens: 0.0,
         cost_usd: None,
         confidence: delta.confidence.clone(),
-    })
+    }
 }
 
 pub fn apply_unapplied_usage(

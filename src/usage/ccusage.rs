@@ -168,6 +168,15 @@ impl CcusageCommandProvider {
                 }
             };
 
+        // Record the helper version on the metadata cursor. This is a sentinel row
+        // distinct from the data cursors that gate `UsageDelta` emission: data
+        // cursors use a JSON-serialized `ProviderCursorKey` and only advance after
+        // the unapplied ledger row is applied and pet state is saved. The metadata
+        // cursor exists so `glorp doctor` can report the running helper version
+        // even when no apply has happened yet.
+        let metadata_key = helper_version_metadata_key(provider_surface, command_name);
+        store.set_provider_cursor(provider_surface, &metadata_key, "{}", &version, &version)?;
+
         let mut deltas = Vec::new();
         let mut diagnostics = Vec::new();
         let weights = self.weights;
@@ -268,15 +277,9 @@ impl CcusageCommandProvider {
             };
 
             if !delta_totals.has_positive_effective_bucket() {
-                // Empty delta: advance the cursor so subsequent polls do not re-read the
-                // same totals. Nothing to feed the pet, no row to stage.
-                write_cursor(
-                    store,
-                    provider_surface,
-                    &cursor_key,
-                    record.raw_totals,
-                    &version,
-                )?;
+                // Empty delta: nothing to feed the pet and nothing to stage. The cursor
+                // stays put; the next poll will recompute the same empty delta and skip
+                // again. No double-counting risk because no UsageDelta is emitted.
                 continue;
             }
 
@@ -289,18 +292,11 @@ impl CcusageCommandProvider {
                 provider_version: version.clone(),
                 parser_version: version.clone(),
             };
-            // Advance the cursor so subsequent polls do not re-emit the same delta.
-            // The command path stages the delta into the unapplied ledger via
-            // `stage_usage_poll_deltas` (which smears across buckets) before applying
-            // and saving pet state. If apply or save fails, the unapplied rows remain
-            // and the next successful run reapplies them via `apply_unapplied_usage`.
-            write_cursor(
-                store,
-                provider_surface,
-                &cursor_key,
-                record.raw_totals,
-                &version,
-            )?;
+            // The cursor advance is deferred to `mark_events_applied_and_advance_cursors`,
+            // which runs after pet state is saved. This guarantees the unapplied ledger
+            // row is durable before we forget the source totals; a save failure leaves
+            // both the row and the unchanged cursor so the next successful run recovers
+            // via `apply_unapplied_usage`.
             deltas.push(UsageDelta {
                 provider_surface: record.provider_surface,
                 command: command_name.to_string(),
@@ -621,6 +617,13 @@ fn persist_diagnostic(store: &mut UsageStore, diagnostic: &ProviderDiagnostic) -
 
 fn cursor_key(key: &ProviderCursorKey) -> Result<String> {
     serde_json::to_string(key).map_err(GlorpError::from)
+}
+
+// Sentinel cursor key used to record the helper version without claiming any
+// real cursor position. The "::" delimiter and lack of JSON braces guarantee
+// this string never collides with a real `ProviderCursorKey` JSON.
+fn helper_version_metadata_key(provider_surface: &str, command_name: &str) -> String {
+    format!("helper_version::{provider_surface}::{command_name}")
 }
 
 fn legacy_cursor_key_with_parser_version(
