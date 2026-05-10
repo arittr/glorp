@@ -5,6 +5,7 @@ use glorp::tui::app::{
     WatchTestHarness, WatchViewModel,
 };
 use glorp::tui::style::tokenpet_palette;
+use glorp::tui::view_model::{SourceHealthView, SourceStatus};
 use ratatui::{
     backend::TestBackend, buffer::Buffer, layout::Position, style::Color, Frame, Terminal,
 };
@@ -247,6 +248,14 @@ fn blocked_provider_state_renders_calm_setup_view() {
     vm.helper_status = "missing ccusage helper".into();
     vm.errors
         .push("install ccusage or use npm package with bundled helpers".into());
+    vm.source_health = vec![SourceHealthView {
+        name: "claude-code".into(),
+        status: SourceStatus::Blocked,
+        today_effective_tokens: 0.0,
+        bucket_effective_tokens: 0.0,
+        diagnostic_code: None,
+        diagnostic_message: None,
+    }];
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();

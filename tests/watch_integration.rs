@@ -4,6 +4,7 @@ use glorp::{
         state::PetState,
         usage_store::{NormalizedUsageEvent, ProviderDiagnostic, UsageStore},
     },
+    tui::view_model::SourceStatus,
 };
 use tempfile::tempdir;
 use time::{macros::datetime, Duration, OffsetDateTime};
@@ -103,6 +104,72 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
         .errors
         .iter()
         .any(|error| error.contains("ccusage-codex helper was not found")));
+}
+
+#[test]
+fn watch_totals_use_observed_and_bucket_time_not_source_period_midnight() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage_store = UsageStore::open(&usage_db).unwrap();
+    let period_start = datetime!(2026-05-09 00:00 UTC);
+    let observed_at = OffsetDateTime::now_utc();
+    let bucket_at = observed_at - Duration::minutes(observed_at.minute() as i64 % 10);
+
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            period_start,
+            observed_at,
+            bucket_at,
+            effective_tokens: 1_300.0,
+            ..NormalizedUsageEvent::for_test_at(period_start, 1_300.0)
+        })
+        .unwrap();
+
+    let vm = build_watch_view_model_for_test(&mech_state(), &usage_db).unwrap();
+    assert!(vm.today_effective_tokens >= 1_300.0);
+    assert!(vm.current_bucket_effective_tokens >= 1_300.0);
+    assert!(vm
+        .recent_events
+        .iter()
+        .any(|event| event.timestamp != "00:00" && event.text.contains("1.3k")));
+}
+
+#[test]
+fn mixed_provider_health_keeps_ready_source_and_diagnostic_source_visible() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage_store = UsageStore::open(&usage_db).unwrap();
+    let now = OffsetDateTime::now_utc();
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            observed_at: now,
+            bucket_at: now,
+            effective_tokens: 4_200.0,
+            ..NormalizedUsageEvent::for_test_at(now, 4_200.0)
+        })
+        .unwrap();
+    usage_store
+        .insert_diagnostic(&ProviderDiagnostic {
+            provider_surface: "codex".into(),
+            code: "missing_helper".into(),
+            message: "ccusage-codex helper was not found".into(),
+            recorded_at: now,
+        })
+        .unwrap();
+
+    let vm = build_watch_view_model_for_test(&mech_state(), &usage_db).unwrap();
+    assert!(vm
+        .source_health
+        .iter()
+        .any(|source| source.name == "claude-code" && source.status == SourceStatus::Ready));
+    assert!(vm.source_health.iter().any(|source| {
+        source.name == "codex"
+            && source.status == SourceStatus::Diagnostic
+            && source.diagnostic_code.as_deref() == Some("missing_helper")
+    }));
+    assert!(!vm.is_blocked());
 }
 
 fn mech_state() -> PetState {

@@ -18,7 +18,7 @@ use crate::{
     tui::{
         app::{WatchApp, WatchUsagePoller},
         style::LogKind,
-        view_model::{EventView, SourceUsageView, WatchViewModel},
+        view_model::{EventView, SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel},
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
@@ -70,7 +70,9 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
     );
 
     let source_breakdown = source_breakdown(&recent_usage, now);
-    let diagnostics = active_diagnostics(&source_breakdown, usage_store.recent_diagnostics(5)?);
+    let all_diagnostics = usage_store.recent_diagnostics(5)?;
+    let source_health = source_health(&recent_usage, &all_diagnostics, now);
+    let diagnostics = active_diagnostics(&source_breakdown, all_diagnostics);
     let helper_status = helper_status(&usage_store, &source_breakdown, &diagnostics)?;
     let recent_events = build_recent_events(state, &recent_usage, &diagnostics);
     let errors = diagnostics
@@ -93,6 +95,7 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
         today_effective_tokens: today_effective_tokens(&recent_usage, now),
         recent_daily_effective_tokens: recent_daily_effective_tokens(&recent_usage, now),
         source_breakdown,
+        source_health,
         current_bucket_effective_tokens: current_bucket_effective_tokens(&recent_usage, now),
         recent_events,
         helper_status,
@@ -230,7 +233,7 @@ fn today_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetDateTime) 
     let today = now.date();
     events
         .iter()
-        .filter(|event| event.period_start.date() == today)
+        .filter(|event| event.bucket_at.date() == today)
         .map(|event| event.effective_tokens)
         .sum()
 }
@@ -239,7 +242,7 @@ fn current_bucket_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetD
     let cutoff = now - Duration::minutes(10);
     events
         .iter()
-        .filter(|event| event.period_start >= cutoff)
+        .filter(|event| event.bucket_at >= cutoff)
         .map(|event| event.effective_tokens)
         .sum()
 }
@@ -247,7 +250,7 @@ fn current_bucket_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetD
 fn recent_daily_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec<f64> {
     let mut by_day = BTreeMap::new();
     for event in events {
-        *by_day.entry(event.period_start.date()).or_insert(0.0) += event.effective_tokens;
+        *by_day.entry(event.bucket_at.date()).or_insert(0.0) += event.effective_tokens;
     }
 
     (0..7)
@@ -264,7 +267,7 @@ fn source_breakdown(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec
     let mut by_source = BTreeMap::new();
     for event in events
         .iter()
-        .filter(|event| event.period_start.date() == today)
+        .filter(|event| event.bucket_at.date() == today)
     {
         *by_source
             .entry(event.provider_surface.clone())
@@ -275,6 +278,56 @@ fn source_breakdown(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec
         .map(|(name, effective_tokens)| SourceUsageView {
             name,
             effective_tokens,
+        })
+        .collect()
+}
+
+fn source_health(
+    events: &[NormalizedUsageEvent],
+    diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
+    now: OffsetDateTime,
+) -> Vec<SourceHealthView> {
+    let mut names = std::collections::BTreeSet::new();
+    for event in events {
+        names.insert(event.provider_surface.clone());
+    }
+    for diagnostic in diagnostics {
+        names.insert(diagnostic.provider_surface.clone());
+    }
+
+    let bucket_cutoff = now - Duration::minutes(10);
+    let today = now.date();
+    names
+        .into_iter()
+        .map(|name| {
+            let today_effective_tokens = events
+                .iter()
+                .filter(|event| event.provider_surface == name && event.bucket_at.date() == today)
+                .map(|event| event.effective_tokens)
+                .sum::<f64>();
+            let bucket_effective_tokens = events
+                .iter()
+                .filter(|event| event.provider_surface == name && event.bucket_at >= bucket_cutoff)
+                .map(|event| event.effective_tokens)
+                .sum::<f64>();
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.provider_surface == name);
+            let status = if today_effective_tokens > 0.0 || bucket_effective_tokens > 0.0 {
+                SourceStatus::Ready
+            } else if diagnostic.is_some() {
+                SourceStatus::Diagnostic
+            } else {
+                SourceStatus::Blocked
+            };
+            SourceHealthView {
+                name,
+                status,
+                today_effective_tokens,
+                bucket_effective_tokens,
+                diagnostic_code: diagnostic.map(|diagnostic| diagnostic.code.clone()),
+                diagnostic_message: diagnostic.map(|diagnostic| diagnostic.message.clone()),
+            }
         })
         .collect()
 }
@@ -308,7 +361,7 @@ fn build_recent_events(
     }
     for event in usage_events.iter().rev().take(4).rev() {
         events.push(EventView {
-            timestamp: timestamp_column(event.period_start),
+            timestamp: timestamp_column(event.observed_at),
             kind: LogKind::Usage,
             text: format!(
                 "{} added {} effective tokens",

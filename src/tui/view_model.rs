@@ -16,6 +16,7 @@ pub struct WatchViewModel {
     pub today_effective_tokens: f64,
     pub recent_daily_effective_tokens: Vec<f64>,
     pub source_breakdown: Vec<SourceUsageView>,
+    pub source_health: Vec<SourceHealthView>,
     pub current_bucket_effective_tokens: f64,
     pub recent_events: Vec<EventView>,
     pub helper_status: String,
@@ -27,6 +28,23 @@ pub struct WatchViewModel {
 pub struct SourceUsageView {
     pub name: String,
     pub effective_tokens: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStatus {
+    Ready,
+    Diagnostic,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceHealthView {
+    pub name: String,
+    pub status: SourceStatus,
+    pub today_effective_tokens: f64,
+    pub bucket_effective_tokens: f64,
+    pub diagnostic_code: Option<String>,
+    pub diagnostic_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +80,24 @@ impl WatchViewModel {
                 SourceUsageView {
                     name: "codex".into(),
                     effective_tokens: 5_520.0,
+                },
+            ],
+            source_health: vec![
+                SourceHealthView {
+                    name: "claude-code".into(),
+                    status: SourceStatus::Ready,
+                    today_effective_tokens: 12_900.0,
+                    bucket_effective_tokens: 1_300.0,
+                    diagnostic_code: None,
+                    diagnostic_message: None,
+                },
+                SourceHealthView {
+                    name: "codex".into(),
+                    status: SourceStatus::Ready,
+                    today_effective_tokens: 5_520.0,
+                    bucket_effective_tokens: 1_000.0,
+                    diagnostic_code: None,
+                    diagnostic_message: None,
                 },
             ],
             current_bucket_effective_tokens: 2_300.0,
@@ -107,6 +143,12 @@ impl WatchViewModel {
     }
 
     pub fn is_blocked(&self) -> bool {
-        !self.errors.is_empty() && !self.helper_status.contains("ready")
+        !self.source_health.is_empty()
+            && self.source_health.iter().all(|source| {
+                matches!(
+                    source.status,
+                    SourceStatus::Blocked | SourceStatus::Diagnostic
+                )
+            })
     }
 }
