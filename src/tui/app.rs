@@ -142,7 +142,10 @@ impl WatchApp {
         match key.code {
             KeyCode::Char('q') => Ok(true),
             KeyCode::Char('?') => {
-                self.overlay = Some(Overlay::Help);
+                self.overlay = match self.overlay {
+                    Some(Overlay::Help) => None,
+                    None => Some(Overlay::Help),
+                };
                 Ok(false)
             }
             KeyCode::Esc => {
@@ -155,6 +158,10 @@ impl WatchApp {
             }
             _ => Ok(false),
         }
+    }
+
+    pub fn help_visible_for_test(&self) -> bool {
+        self.overlay == Some(Overlay::Help)
     }
 
     pub fn refresh_for_test(&mut self) -> Result<WatchViewModel> {

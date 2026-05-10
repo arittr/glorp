@@ -124,6 +124,10 @@ fn wide_layout_keeps_pet_and_stats_top_stacked_like_tokenpet_mockup() {
         .iter()
         .position(|line| line.contains("/\\_/\\"))
         .expect("pet art should render");
+    let vitals_line = lines
+        .iter()
+        .position(|line| line.contains("vitals"))
+        .expect("vitals header should render");
     let stats_line = lines
         .iter()
         .position(|line| line.contains("stats"))
@@ -138,8 +142,12 @@ fn wide_layout_keeps_pet_and_stats_top_stacked_like_tokenpet_mockup() {
         "pet art should begin near the top of the left column, got row {first_pet_line}"
     );
     assert!(
-        stats_line <= first_pet_line + 8,
-        "stats should follow the pet stage without a large vertical gulf; pet row {first_pet_line}, stats row {stats_line}"
+        vitals_line > first_pet_line && vitals_line <= first_pet_line + 6,
+        "vitals metadata should follow the pet stage without a large vertical gulf; pet row {first_pet_line}, vitals row {vitals_line}"
+    );
+    assert!(
+        stats_line > vitals_line && stats_line <= vitals_line + 6,
+        "stats should follow the vitals metadata without a large vertical gulf; vitals row {vitals_line}, stats row {stats_line}"
     );
     assert!(
         last_divider_line <= stats_line + 8,
@@ -193,15 +201,32 @@ fn compact_boundary_is_exact_at_72_columns() {
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
         .unwrap();
     let lines_72 = buffer_lines(at_72.backend().buffer());
-    assert!(lines_72
+    assert!(
+        lines_72.iter().any(|line| line.contains("╎")),
+        "72-col layout should show the column divider in wide mode"
+    );
+    let today_72 = lines_72
         .iter()
-        .any(|line| line.contains("vitals") && line.contains("today")));
+        .position(|line| line.contains("today"))
+        .unwrap();
+    let vitals_72 = lines_72
+        .iter()
+        .position(|line| line.contains("vitals"))
+        .unwrap();
+    assert!(
+        today_72 < vitals_72,
+        "in wide mode the right-column today header should sit above the left-column vitals header that now follows the pet art"
+    );
 
     let mut at_71 = Terminal::new(TestBackend::new(71, 24)).unwrap();
     at_71
         .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
         .unwrap();
     let lines_71 = buffer_lines(at_71.backend().buffer());
+    assert!(
+        !lines_71.iter().any(|line| line.contains("╎")),
+        "71-col layout should not draw a column divider in compact mode"
+    );
     let vitals_line = lines_71
         .iter()
         .position(|line| line.contains("vitals"))
@@ -407,4 +432,91 @@ fn animation_tick_rerenders_pet_art_without_polling_usage() {
 
     assert_ne!(before, after);
     assert_eq!(app.poll_count_for_test(), 0);
+}
+
+#[test]
+fn wide_layout_leads_with_pet_before_vitals_metadata() {
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture()))
+        .unwrap();
+    let lines = buffer_lines(terminal.backend().buffer());
+    let first_pet = lines
+        .iter()
+        .position(|line| line.contains("/\\_/\\"))
+        .unwrap();
+    let vitals = lines
+        .iter()
+        .position(|line| line.contains("vitals"))
+        .unwrap();
+    assert!(first_pet < vitals);
+}
+
+#[test]
+fn source_health_rows_render_ready_and_diagnostic_states_together() {
+    let mut vm = WatchViewModel::fixture();
+    vm.source_health = vec![
+        SourceHealthView {
+            name: "claude-code".into(),
+            status: SourceStatus::Ready,
+            today_effective_tokens: 4_200.0,
+            bucket_effective_tokens: 1_300.0,
+            diagnostic_code: None,
+            diagnostic_message: None,
+        },
+        SourceHealthView {
+            name: "codex".into(),
+            status: SourceStatus::Diagnostic,
+            today_effective_tokens: 0.0,
+            bucket_effective_tokens: 0.0,
+            diagnostic_code: Some("missing_helper".into()),
+            diagnostic_message: Some("ccusage-codex helper was not found".into()),
+        },
+    ];
+
+    let backend = TestBackend::new(100, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(text.contains("claude-code"));
+    assert!(text.contains("ready"));
+    assert!(text.contains("codex"));
+    assert!(text.contains("missing_helper"));
+}
+
+#[test]
+fn question_mark_toggles_help_overlay() {
+    let mut app = WatchApp::with_config(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+        },
+    );
+    assert!(!app.help_visible_for_test());
+    app.handle_key_for_test(KeyCode::Char('?'), KeyEventKind::Press)
+        .unwrap();
+    assert!(app.help_visible_for_test());
+    app.handle_key_for_test(KeyCode::Char('?'), KeyEventKind::Press)
+        .unwrap();
+    assert!(!app.help_visible_for_test());
+}
+
+#[test]
+fn compact_layout_uses_compact_pet_art_width() {
+    let mut app = WatchApp::with_config(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+        },
+    );
+    app.set_compact_for_test(true);
+    app.advance_animation_for_test();
+    assert!(app
+        .view_model_for_test()
+        .pet_art
+        .iter()
+        .all(|line| line.chars().count() <= 18));
 }

@@ -9,7 +9,7 @@ use ratatui::{
 use crate::pet::render::PaletteRoleName;
 use crate::tui::{
     style::{semantic_styles, tokenpet_palette, LogKind, SemanticStyles},
-    view_model::{EventView, WatchViewModel},
+    view_model::{EventView, SourceStatus, WatchViewModel},
 };
 
 const COMPACT_WIDTH: u16 = 72;
@@ -210,12 +210,15 @@ fn render_pet_panel(
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(meta_height),
             Constraint::Length(stage_height),
+            Constraint::Length(meta_height),
             Constraint::Length(stats_height),
             Constraint::Min(0),
         ])
         .split(area);
+
+    let art_lines = centered_art_lines(rows[0].width, rows[0].height, vm, styles);
+    render_lines(frame, rows[0], art_lines, styles);
 
     let mut meta = vec![section_line("vitals", styles)];
     if meta_height >= 5 {
@@ -253,10 +256,7 @@ fn render_pet_panel(
             Span::styled(vm.mood.as_str(), styles.primary_text),
         ]));
     }
-    render_lines(frame, rows[0], meta, styles);
-
-    let art_lines = centered_art_lines(rows[1].width, rows[1].height, vm, styles);
-    render_lines(frame, rows[1], art_lines, styles);
+    render_lines(frame, rows[1], meta, styles);
 
     let mut stats = vec![section_line("stats", styles)];
     stats.push(bar_line("fed", vm.fed, styles.filled_bar_good, styles));
@@ -320,7 +320,7 @@ fn activity_content_height(vm: &WatchViewModel) -> u16 {
     };
     (today_lines
         + 1
-        + vm.source_breakdown.iter().take(3).count()
+        + vm.source_health.iter().take(4).count()
         + 1
         + vm.recent_events.iter().take(5).count()) as u16
 }
@@ -508,11 +508,28 @@ fn render_activity_panel(
     }
 
     lines.push(section_line("sources", styles));
-    for source in vm.source_breakdown.iter().take(3) {
+    for source in vm.source_health.iter().take(4) {
+        let status_style = match source.status {
+            SourceStatus::Ready => styles.event_rail_usage,
+            SourceStatus::Diagnostic => styles.event_rail_diagnostic,
+            SourceStatus::Blocked => styles.blocked,
+        };
+        let status = match source.status {
+            SourceStatus::Ready => "ready",
+            SourceStatus::Diagnostic => source.diagnostic_code.as_deref().unwrap_or("diagnostic"),
+            SourceStatus::Blocked => "blocked",
+        };
         lines.push(Line::from(vec![
+            Span::styled("▏", status_style),
+            Span::raw(" "),
             Span::styled(source.name.as_str(), styles.label),
             Span::styled(" ", styles.prompt_sep),
-            Span::styled(format_tokens(source.effective_tokens), styles.primary_text),
+            Span::styled(status, status_style),
+            Span::styled(" ", styles.prompt_sep),
+            Span::styled(
+                format_tokens(source.today_effective_tokens),
+                styles.primary_text,
+            ),
         ]));
     }
 
