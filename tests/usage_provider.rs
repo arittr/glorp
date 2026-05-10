@@ -1,7 +1,9 @@
 use glorp::game::effective_tokens::EffectiveTokenWeights;
 use glorp::storage::usage_store::UsageStore;
 use glorp::usage::ccusage::{CcusageCommandProvider, HelperDiscovery, HelperPaths};
-use glorp::usage::provider::UsageProvider;
+use glorp::usage::normalize::RawTokenTotals;
+use glorp::usage::provider::{ProviderCursorKey, UsageProvider};
+use serde::Serialize;
 use tempfile::tempdir;
 
 fn fixture(name: &str) -> std::path::PathBuf {
@@ -230,5 +232,104 @@ fn helper_version_change_does_not_create_new_food_for_same_totals() {
     let second = provider(Some("ccusage-ok-v2.mjs"), None)
         .poll(&mut store)
         .unwrap();
+    assert_eq!(second.total_effective_tokens, 0.0);
+}
+
+#[test]
+fn legacy_cursor_with_parser_version_migrates_without_double_feeding() {
+    #[derive(Serialize)]
+    struct LegacyKey {
+        provider_surface: String,
+        command: String,
+        parser_version: String,
+        period_start: String,
+        model: Option<String>,
+    }
+
+    fn legacy_key_json(period_start: &str, model: Option<&str>) -> String {
+        serde_json::to_string(&LegacyKey {
+            provider_surface: "claude-code".to_string(),
+            command: "ccusage".to_string(),
+            parser_version: "ccusage 18.0.11".to_string(),
+            period_start: period_start.to_string(),
+            model: model.map(str::to_string),
+        })
+        .unwrap()
+    }
+
+    fn new_key_json(period_start: &str, model: Option<&str>) -> String {
+        serde_json::to_string(&ProviderCursorKey {
+            provider_surface: "claude-code".to_string(),
+            command: "ccusage".to_string(),
+            source_surface: "daily".to_string(),
+            period_start: period_start.to_string(),
+            model: model.map(str::to_string),
+        })
+        .unwrap()
+    }
+
+    fn totals_json(
+        uncached_input: u64,
+        output: u64,
+        cache_creation: u64,
+        cache_read: u64,
+    ) -> String {
+        serde_json::to_string(&RawTokenTotals {
+            uncached_input,
+            output,
+            cache_creation,
+            cache_read,
+            reasoning_output: 0,
+        })
+        .unwrap()
+    }
+
+    // Totals match the (date, model) records emitted by ccusage-ok.mjs / ccusage-daily.json.
+    let seeded = [
+        (
+            "2026-05-08",
+            Some("claude-sonnet-4"),
+            totals_json(1000, 2000, 300, 40000),
+        ),
+        (
+            "2026-05-09",
+            Some("claude-opus-4"),
+            totals_json(1000, 1500, 300, 50000),
+        ),
+        (
+            "2026-05-09",
+            Some("claude-sonnet-4"),
+            totals_json(500, 1000, 200, 30000),
+        ),
+    ];
+
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+
+    for (period_start, model, value) in &seeded {
+        store
+            .set_provider_cursor(
+                "claude-code",
+                &legacy_key_json(period_start, *model),
+                value,
+                "ccusage 18.0.11",
+                "ccusage 18.0.11",
+            )
+            .unwrap();
+    }
+
+    let provider = provider(Some("ccusage-ok.mjs"), None);
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_effective_tokens, 0.0);
+
+    for (period_start, model, value) in &seeded {
+        let migrated = store
+            .provider_cursor("claude-code", &new_key_json(period_start, *model))
+            .unwrap();
+        assert_eq!(migrated.as_deref(), Some(value.as_str()));
+    }
+
+    let second = provider.poll(&mut store).unwrap();
     assert_eq!(second.total_effective_tokens, 0.0);
 }
