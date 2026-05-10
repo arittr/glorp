@@ -261,12 +261,12 @@ pub fn rerender_pet_for_view_model(vm: &mut WatchViewModel, tick: u64) -> Result
 
 fn next_stage_xp_target(stage: Stage) -> f64 {
     match stage {
-        Stage::S0 => 0.25,
-        Stage::S1 => 1.0,
-        Stage::S2 => 3.0,
-        Stage::S3 => 7.0,
-        Stage::S4 => 21.0,
-        Stage::S5 | Stage::S6 => 49.0,
+        Stage::S0 => 0.04,
+        Stage::S1 => 0.25,
+        Stage::S2 => 1.0,
+        Stage::S3 => 4.0,
+        Stage::S4 => 14.0,
+        Stage::S5 | Stage::S6 => 60.0,
     }
 }
 

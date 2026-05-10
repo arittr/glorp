@@ -33,30 +33,32 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     apply_usage_poll(&mut state, &mut usage_store, &poll2, now).unwrap();
 
     // Two polls of one calibrated active day each smear into ledger buckets,
-    // crossing both s0->s1 and s1->s2. Each transition records once.
+    // crossing s0->s1, s1->s2, and s2->s3. Each transition records once.
     assert_eq!(state.lifetime_effective_tokens, 200_000.0);
-    assert_eq!(state.stage, "s2");
-    assert!(state.xp > 1.0);
+    assert_eq!(state.stage, "s3");
+    assert!(state.xp >= 1.0);
     assert!(state.vitals.fed > 40.0);
     assert_eq!(state.last_usage_poll_at, Some(now));
     assert_eq!(state.last_updated_at, now);
+    for transition in [
+        "evolved from s0 to s1",
+        "evolved from s1 to s2",
+        "evolved from s2 to s3",
+    ] {
+        assert_eq!(
+            state
+                .recent_events
+                .iter()
+                .filter(|event| event.contains(transition))
+                .count(),
+            1,
+            "expected {transition} recorded once",
+        );
+    }
     assert_eq!(
-        state
-            .recent_events
-            .iter()
-            .filter(|event| event.contains("evolved from s0 to s1"))
-            .count(),
-        1
+        state.seen_stage_transitions,
+        vec!["s0->s1", "s1->s2", "s2->s3"]
     );
-    assert_eq!(
-        state
-            .recent_events
-            .iter()
-            .filter(|event| event.contains("evolved from s1 to s2"))
-            .count(),
-        1
-    );
-    assert_eq!(state.seen_stage_transitions, vec!["s0->s1", "s1->s2"]);
 }
 
 #[test]
@@ -154,7 +156,7 @@ fn catchup_application_records_each_stage_transition_once() {
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
 
-    for day in 0..49 {
+    for day in 0..60 {
         let observed_at = now + Duration::days(day);
         let buckets = glorp::game::catchup::smear_catchup_delta(100_000.0, state.calibration);
         let bucket_count = buckets.len();

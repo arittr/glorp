@@ -91,7 +91,7 @@ fn display_tokens(value: f64) -> f64 {
 }
 
 fn stage_progress_line(xp: f64) -> String {
-    const THRESHOLDS: [f64; 7] = [0.0, 0.25, 1.0, 3.0, 7.0, 21.0, 49.0];
+    const THRESHOLDS: [f64; 7] = [0.0, 0.04, 0.25, 1.0, 4.0, 14.0, 60.0];
     let xp = xp.max(0.0);
     let current = THRESHOLDS
         .iter()
