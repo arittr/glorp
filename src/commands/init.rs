@@ -1,6 +1,10 @@
 use crate::{
+    config::AppConfig,
     error::{GlorpError, Result},
-    game::{calibration::CalibrationBaseline, metabolism::RhythmProfile},
+    game::{
+        calibration::CalibrationBaseline, effective_tokens::EffectiveTokenWeights,
+        metabolism::RhythmProfile,
+    },
     paths::AppPaths,
     pet::generation::{generate_pet, resolve_accepted_name},
     storage::{
@@ -31,19 +35,14 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
     let mut calibration = CalibrationBaseline::default();
     let mut rhythm = RhythmProfile::default();
     if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
-        let _ = CcusageCommandProvider::from_environment().poll(&mut usage_store);
-        if let Ok(events) = usage_store.recent_events(90) {
-            let history = events
-                .iter()
-                .map(|event| {
-                    crate::game::calibration::DailyUsage::with_activity_timestamp(
-                        event.period_start,
-                        event.effective_tokens,
-                    )
-                })
-                .collect::<Vec<_>>();
-            calibration = CalibrationBaseline::from_history(&history);
-            rhythm = RhythmProfile::from_history(&history);
+        let config = AppConfig::load_or_default(&paths.config_file).unwrap_or_default();
+        let weights = EffectiveTokenWeights::from_config(config);
+        if let Ok(snapshot) = CcusageCommandProvider::from_environment_with_weights(weights)
+            .snapshot_for_calibration(&mut usage_store)
+        {
+            calibration = CalibrationBaseline::from_history(&snapshot.daily_usage);
+            rhythm = RhythmProfile::from_history(&snapshot.daily_usage);
+            usage_store.advance_cursors(snapshot.cursor_updates, OffsetDateTime::now_utc())?;
         }
     }
 

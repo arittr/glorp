@@ -20,10 +20,17 @@ impl Default for CalibrationBaseline {
 
 impl CalibrationBaseline {
     pub fn from_history(history: &[DailyUsage]) -> Self {
-        let mut active_days = history
+        let mut by_day = std::collections::BTreeMap::<Date, f64>::new();
+        for day in history
             .iter()
             .copied()
             .filter(|day| day.effective_tokens > 0.0)
+        {
+            *by_day.entry(day.day).or_insert(0.0) += day.effective_tokens;
+        }
+        let mut active_days = by_day
+            .into_iter()
+            .map(|(day, effective_tokens)| DailyUsage::new(day, effective_tokens))
             .collect::<Vec<_>>();
 
         if active_days.len() < MIN_ACTIVE_DAYS_FOR_MEDIAN {

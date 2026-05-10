@@ -159,3 +159,34 @@ fn init_uses_historical_usage_for_calibration_without_initial_xp() {
     assert!(state.contains("\"calibration\""));
     assert!(state.contains("\"daily_effective_tokens\""));
 }
+
+#[test]
+fn init_does_not_feed_pet_or_persist_history_as_usage_events() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
+        .env(
+            "GLORP_CCUSAGE_CODEX_BIN",
+            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
+        )
+        .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
+        .assert()
+        .success();
+
+    let state_json = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+    assert!(
+        state_json.contains(r#""xp": 0.0"#) || state_json.contains(r#""xp":0.0"#),
+        "expected xp to be zero after init, got: {state_json}"
+    );
+    assert!(
+        state_json.contains(r#""lifetime_effective_tokens": 0.0"#)
+            || state_json.contains(r#""lifetime_effective_tokens":0.0"#),
+        "expected lifetime_effective_tokens to be zero after init, got: {state_json}"
+    );
+
+    let usage_store =
+        glorp::storage::usage_store::UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    assert_eq!(usage_store.recent_event_count().unwrap(), 0);
+}

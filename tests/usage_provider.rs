@@ -5,6 +5,7 @@ use glorp::usage::normalize::RawTokenTotals;
 use glorp::usage::provider::{ProviderCursorKey, UsageProvider};
 use serde::Serialize;
 use tempfile::tempdir;
+use time::OffsetDateTime;
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -332,4 +333,53 @@ fn legacy_cursor_with_parser_version_migrates_without_double_feeding() {
 
     let second = provider.poll(&mut store).unwrap();
     assert_eq!(second.total_effective_tokens, 0.0);
+}
+
+#[test]
+fn snapshot_for_calibration_returns_daily_usage_without_inserting_events() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = provider(Some("ccusage-ok.mjs"), Some("ccusage-codex-ok.mjs"));
+
+    let snapshot = provider.snapshot_for_calibration(&mut store).unwrap();
+
+    assert!(!snapshot.daily_usage.is_empty());
+    assert!(snapshot
+        .daily_usage
+        .iter()
+        .all(|day| day.effective_tokens > 0.0));
+    assert!(!snapshot.cursor_updates.is_empty());
+    assert!(snapshot
+        .cursor_updates
+        .iter()
+        .any(|update| update.provider_surface == "claude-code"));
+    assert!(snapshot
+        .cursor_updates
+        .iter()
+        .any(|update| update.provider_surface == "codex"));
+
+    assert_eq!(store.recent_event_count().unwrap(), 0);
+    assert_eq!(store.lifetime_effective_tokens().unwrap(), 0.0);
+    assert_eq!(store.unapplied_events(50).unwrap().len(), 0);
+
+    for update in &snapshot.cursor_updates {
+        let pre_advance = store
+            .provider_cursor(&update.provider_surface, &update.cursor_key)
+            .unwrap();
+        assert!(pre_advance.is_none());
+    }
+
+    store
+        .advance_cursors(snapshot.cursor_updates.clone(), OffsetDateTime::now_utc())
+        .unwrap();
+
+    for update in &snapshot.cursor_updates {
+        let post_advance = store
+            .provider_cursor(&update.provider_surface, &update.cursor_key)
+            .unwrap();
+        assert_eq!(post_advance.as_deref(), Some(update.cursor_value.as_str()));
+    }
+
+    let after_calibration_poll = provider.poll(&mut store).unwrap();
+    assert_eq!(after_calibration_poll.total_effective_tokens, 0.0);
 }

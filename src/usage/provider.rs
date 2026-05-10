@@ -23,6 +23,13 @@ pub struct UsageDelta {
 }
 
 #[derive(Debug, Clone)]
+pub struct UsageSnapshot {
+    pub daily_usage: Vec<crate::game::calibration::DailyUsage>,
+    pub cursor_updates: Vec<ProviderCursorUpdate>,
+    pub diagnostics: Vec<ProviderDiagnostic>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProviderDiagnostic {
     pub provider_surface: String,
     pub code: String,
@@ -40,4 +47,5 @@ pub struct ProviderCursorKey {
 
 pub trait UsageProvider {
     fn poll(&self, store: &mut UsageStore) -> Result<UsagePollResult>;
+    fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot>;
 }

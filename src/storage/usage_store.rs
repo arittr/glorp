@@ -368,6 +368,45 @@ impl UsageStore {
             .map_err(Into::into)
     }
 
+    pub fn advance_cursors(
+        &mut self,
+        updates: Vec<ProviderCursorUpdate>,
+        _now: OffsetDateTime,
+    ) -> crate::error::Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let updated_at = format_time(OffsetDateTime::now_utc())?;
+        let tx = self.conn.transaction()?;
+        for update in &updates {
+            tx.execute(
+                "INSERT INTO provider_cursors (
+                    provider_surface,
+                    cursor_key,
+                    cursor_value,
+                    provider_version,
+                    parser_version,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(provider_surface, cursor_key) DO UPDATE SET
+                    cursor_value = excluded.cursor_value,
+                    provider_version = excluded.provider_version,
+                    parser_version = excluded.parser_version,
+                    updated_at = excluded.updated_at",
+                params![
+                    update.provider_surface,
+                    update.cursor_key,
+                    update.cursor_value,
+                    update.provider_version,
+                    update.parser_version,
+                    updated_at,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn insert_diagnostic(&self, diagnostic: &ProviderDiagnostic) -> crate::error::Result<()> {
         self.conn.execute(
             "INSERT INTO provider_diagnostics (

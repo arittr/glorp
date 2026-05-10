@@ -77,6 +77,21 @@ fn historical_usage_calibrates_but_does_not_grant_initial_xp() {
 }
 
 #[test]
+fn calibration_groups_multiple_rows_on_the_same_active_day_before_median() {
+    let history = vec![
+        DailyUsage::new(date!(2026 - 05 - 01), 40_000.0),
+        DailyUsage::new(date!(2026 - 05 - 01), 60_000.0),
+        DailyUsage::new(date!(2026 - 05 - 02), 100_000.0),
+        DailyUsage::new(date!(2026 - 05 - 03), 100_000.0),
+        DailyUsage::new(date!(2026 - 05 - 04), 100_000.0),
+        DailyUsage::new(date!(2026 - 05 - 05), 100_000.0),
+    ];
+
+    let baseline = CalibrationBaseline::from_history(&history);
+    assert_eq!(baseline.daily_effective_tokens, 100_000.0);
+}
+
+#[test]
 fn low_and_high_usage_users_progress_by_relative_effort() {
     let low = CalibrationBaseline {
         daily_effective_tokens: 50_000.0,

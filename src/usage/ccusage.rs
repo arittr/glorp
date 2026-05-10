@@ -8,6 +8,7 @@ use crate::storage::usage_store::{
 use crate::usage::normalize::{normalize_usage_json, RawTokenTotals};
 use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
+    UsageSnapshot,
 };
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -321,6 +322,137 @@ impl CcusageCommandProvider {
         })
     }
 
+    fn snapshot_helper(
+        &self,
+        store: &mut UsageStore,
+        provider_surface: &str,
+        command_name: &str,
+        helper: Option<&Path>,
+        daily_args: &[&str],
+    ) -> Result<UsageSnapshot> {
+        let Some(helper) = helper else {
+            let diagnostic = diagnostic(
+                provider_surface,
+                "missing_helper",
+                &format!("{command_name} helper was not found"),
+            );
+            persist_diagnostic(store, &diagnostic)?;
+            return Ok(UsageSnapshot {
+                daily_usage: Vec::new(),
+                cursor_updates: Vec::new(),
+                diagnostics: vec![diagnostic],
+            });
+        };
+
+        let helper_command = match helper_command(
+            provider_surface,
+            command_name,
+            helper,
+            self.helpers.node.as_deref(),
+        ) {
+            Ok(helper_command) => helper_command,
+            Err(diagnostic) => {
+                persist_diagnostic(store, &diagnostic)?;
+                return Ok(UsageSnapshot {
+                    daily_usage: Vec::new(),
+                    cursor_updates: Vec::new(),
+                    diagnostics: vec![diagnostic],
+                });
+            }
+        };
+        let version = self
+            .run_command(provider_surface, &helper_command, &["--version"])
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    safe_version_line(&output.stdout)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let output = self.run_command(provider_surface, &helper_command, daily_args)?;
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            let diagnostic = diagnostic(
+                provider_surface,
+                "helper_exit",
+                &format!("{command_name} exited with status {code}"),
+            );
+            persist_diagnostic(store, &diagnostic)?;
+            return Ok(UsageSnapshot {
+                daily_usage: Vec::new(),
+                cursor_updates: Vec::new(),
+                diagnostics: vec![diagnostic],
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let records = match normalize_usage_json(provider_surface, &stdout) {
+            Ok(records) => records,
+            Err(diagnostic) => {
+                persist_diagnostic(store, &diagnostic)?;
+                return Ok(UsageSnapshot {
+                    daily_usage: Vec::new(),
+                    cursor_updates: Vec::new(),
+                    diagnostics: vec![diagnostic],
+                });
+            }
+        };
+
+        let mut daily_usage = Vec::new();
+        let mut cursor_updates = Vec::new();
+        let mut diagnostics = Vec::new();
+        let weights = self.weights;
+        for record in records {
+            let parsed_period_start = match parse_period_start(&record.period_start) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    let diagnostic = diagnostic(
+                        provider_surface,
+                        "invalid_period_start",
+                        &format!("{provider_surface} returned invalid_period_start"),
+                    );
+                    persist_diagnostic(store, &diagnostic)?;
+                    diagnostics.push(diagnostic);
+                    continue;
+                }
+            };
+
+            let effective_tokens = record.raw_totals.effective_tokens(weights);
+            daily_usage.push(
+                crate::game::calibration::DailyUsage::with_activity_timestamp(
+                    parsed_period_start,
+                    effective_tokens,
+                ),
+            );
+
+            let key = ProviderCursorKey {
+                provider_surface: record.provider_surface.clone(),
+                command: command_name.to_string(),
+                source_surface: "daily".to_string(),
+                period_start: record.period_start.clone(),
+                model: record.model.clone(),
+            };
+            let cursor_key = cursor_key(&key)?;
+            let cursor_value = serde_json::to_string(&record.raw_totals)?;
+            cursor_updates.push(ProviderCursorUpdate {
+                provider_surface: provider_surface.to_string(),
+                cursor_key,
+                cursor_value,
+                provider_version: version.clone(),
+                parser_version: version.clone(),
+            });
+        }
+
+        Ok(UsageSnapshot {
+            daily_usage,
+            cursor_updates,
+            diagnostics,
+        })
+    }
+
     fn run_command(
         &self,
         _provider_surface: &str,
@@ -360,6 +492,36 @@ impl UsageProvider for CcusageCommandProvider {
             deltas,
             diagnostics,
             total_effective_tokens,
+        })
+    }
+
+    fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot> {
+        let claude = self.snapshot_helper(
+            store,
+            CLAUDE_SURFACE,
+            "ccusage",
+            self.helpers.claude.as_deref(),
+            &["daily", "--json", "--offline", "--order", "asc"],
+        )?;
+        let codex = self.snapshot_helper(
+            store,
+            CODEX_SURFACE,
+            "ccusage-codex",
+            self.helpers.codex.as_deref(),
+            &["daily", "--json", "--offline"],
+        )?;
+
+        let mut daily_usage = claude.daily_usage;
+        daily_usage.extend(codex.daily_usage);
+        let mut cursor_updates = claude.cursor_updates;
+        cursor_updates.extend(codex.cursor_updates);
+        let mut diagnostics = claude.diagnostics;
+        diagnostics.extend(codex.diagnostics);
+
+        Ok(UsageSnapshot {
+            daily_usage,
+            cursor_updates,
+            diagnostics,
         })
     }
 }
