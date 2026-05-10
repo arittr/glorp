@@ -220,8 +220,10 @@ mod bar_ramp_tests {
 
     #[test]
     fn ramp_index_zero_fill_never_called() {
-        // Sanity: callers should never call ramp_index for N=0.
-        // We only test the function for N >= 1.
+        // Defensive: callers should never call ramp_index with N=0,
+        // but the guard returns 0 to avoid panics on division.
+        assert_eq!(ramp_index(0, 0), 0);
+        assert_eq!(ramp_index(5, 0), 0);
     }
 
     #[test]
