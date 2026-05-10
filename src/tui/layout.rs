@@ -256,11 +256,13 @@ fn render_frame_top_line<'a>(
     width: usize,
     pet_name: &'a str,
     species: &'a str,
+    stage: &'a str,
     age: &'a str,
     mood: &'a str,
     styles: &'a SemanticStyles,
 ) -> Line<'a> {
     let frame_style = Style::default().fg(tokenpet_palette().accent.rgb);
+    let stage_style = Style::default().fg(tokenpet_palette().accent.rgb);
     let mood_style = Style::default().fg(tokenpet_palette().good.rgb);
     let display_name: String = if pet_name.chars().count() > NAME_MAX {
         let truncated: String = pet_name.chars().take(NAME_MAX - 1).collect();
@@ -268,14 +270,18 @@ fn render_frame_top_line<'a>(
     } else {
         pet_name.to_string()
     };
-    let title_text = format!("glorp · {display_name} the {species} · {age} · {mood}");
+    let title_text = format!("glorp · {display_name} the {species} · {stage} · {age} · {mood}");
     let title_visible = title_text.chars().count();
     let n_fill = width.saturating_sub(5 + title_visible);
+    // Build the title as styled segments. Render the stage in accent and the
+    // mood in good color; everything else uses the dim label style.
+    let prefix = format!("glorp · {display_name} the {species} · ");
+    let between = format!(" · {age} · ");
     let mut spans: Vec<Span<'a>> = Vec::new();
     spans.push(Span::styled("┏━ ", frame_style));
-    let prefix_end = title_text.len() - mood.len();
-    let prefix = &title_text[..prefix_end];
-    spans.push(Span::styled(prefix.to_string(), styles.label));
+    spans.push(Span::styled(prefix, styles.label));
+    spans.push(Span::styled(stage.to_string(), stage_style));
+    spans.push(Span::styled(between, styles.label));
     spans.push(Span::styled(mood.to_string(), mood_style));
     spans.push(Span::styled(" ".to_string(), styles.label));
     spans.push(Span::styled("━".repeat(n_fill), frame_style));
@@ -334,14 +340,18 @@ fn today_row<'a>(
     annotation: Option<String>,
     styles: &'a SemanticStyles,
 ) -> Line<'a> {
-    let value_owned = value.to_string();
+    // Fixed-column layout so values and annotations stay aligned across rows
+    // even when token magnitudes differ by orders of magnitude.
+    //   2 sp + label(8) + 1 sp + value(right-aligned, 13) + 4 sp + annotation
+    const VALUE_WIDTH: usize = 13;
+    let value_owned = format!("{value:>VALUE_WIDTH$}");
     let mut spans: Vec<Span<'a>> = Vec::new();
     spans.push(Span::raw("  "));
     spans.push(Span::styled(format!("{label:<8}"), styles.label));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(value_owned, styles.primary_text));
     if let Some(ann) = annotation {
-        spans.push(Span::raw("       "));
+        spans.push(Span::raw("    "));
         spans.push(Span::styled(ann, styles.label));
     }
     Line::from(spans)
@@ -498,7 +508,7 @@ mod frame_top_tests {
     #[test]
     fn frame_top_pads_to_target_width() {
         let styles = semantic_styles();
-        let line = render_frame_top_line(78, "mochi", "fuzz", "12d 4h", "content", &styles);
+        let line = render_frame_top_line(78, "mochi", "fuzz", "pup", "12d 4h", "content", &styles);
         let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         assert_eq!(total, 78);
     }
@@ -507,7 +517,7 @@ mod frame_top_tests {
     fn frame_top_truncates_long_pet_name() {
         let styles = semantic_styles();
         let very_long = "thisnameiswaytoolongforthetitle";
-        let line = render_frame_top_line(78, very_long, "fuzz", "12d 4h", "content", &styles);
+        let line = render_frame_top_line(78, very_long, "fuzz", "pup", "12d 4h", "content", &styles);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
         assert!(text.contains("…"));
         let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
@@ -912,6 +922,7 @@ fn render_wide(
         width,
         &vm.pet_name,
         &vm.species,
+        &vm.stage,
         &age_label,
         &vm.mood,
         styles,
