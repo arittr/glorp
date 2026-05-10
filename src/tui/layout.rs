@@ -242,7 +242,6 @@ fn body_row<'a>(inner: Vec<Span<'a>>, inner_width: usize, styles: &'a SemanticSt
             } else {
                 let truncated: String = span.content.chars().take(remaining).collect();
                 spans.push(Span::styled(truncated, span.style));
-                remaining = 0;
                 break;
             }
         }
