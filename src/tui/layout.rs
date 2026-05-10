@@ -1257,3 +1257,130 @@ mod bar_line_tests {
         }
     }
 }
+
+pub fn render_watch_frame_with_capability(
+    frame: &mut Frame<'_>,
+    vm: &WatchViewModel,
+    capability: ColorCapability,
+) {
+    let area = frame.area();
+    let p = tokenpet_palette();
+    frame.render_widget(Block::default().style(Style::default().bg(p.bg.rgb)), area);
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let styles = semantic_styles();
+    if (area.width as usize) < COMPACT_THRESHOLD {
+        render_compact_new(frame, area, vm, capability, &styles);
+    } else {
+        render_wide_new(frame, area, vm, capability, &styles);
+    }
+}
+
+const COMPACT_THRESHOLD: usize = 80;
+
+fn render_wide_new(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    vm: &WatchViewModel,
+    capability: ColorCapability,
+    styles: &SemanticStyles,
+) {
+    let width = area.width as usize;
+    let inner_width = width.saturating_sub(2);
+    let pet_col = 26;
+    let gap = 2;
+    let pad_left = 2;
+    let pad_right = 3;
+    let data_col = inner_width.saturating_sub(pet_col + gap + pad_left + pad_right);
+
+    let pet_lines = render_pet_panel_lines(pet_col, vm, capability, styles);
+    let mut data_lines: Vec<Line> = Vec::new();
+    data_lines.push(Line::from(Span::raw("")));
+    data_lines.extend(render_today_panel_lines(data_col, vm, styles));
+    data_lines.push(Line::from(Span::raw("")));
+    data_lines.extend(render_sparkline_lines(data_col, &vm.recent_daily_effective_tokens, capability, styles));
+    data_lines.push(Line::from(Span::raw("")));
+    data_lines.extend(render_feed_panel_lines(data_col, vm, styles));
+    data_lines.push(Line::from(Span::raw("")));
+    data_lines.extend(render_helpers_panel_lines(data_col, vm, styles));
+
+    let age_label = format!("{}d", vm.age_days);
+    let mut framed: Vec<Line> = Vec::new();
+    framed.push(render_frame_top_line(
+        width,
+        &vm.pet_name,
+        &vm.species,
+        &age_label,
+        &vm.mood,
+        styles,
+    ));
+    let body_height = area.height.saturating_sub(2) as usize;
+    let max_rows = pet_lines.len().max(data_lines.len()).max(body_height);
+    for row_index in 0..max_rows {
+        let pet_line = pet_lines.get(row_index);
+        let data_line = data_lines.get(row_index);
+        let mut inner: Vec<Span> = Vec::new();
+        inner.push(Span::raw(" ".repeat(pad_left)));
+        if let Some(line) = pet_line {
+            let cell_count: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            inner.extend(line.spans.iter().cloned());
+            if cell_count < pet_col {
+                inner.push(Span::raw(" ".repeat(pet_col - cell_count)));
+            }
+        } else {
+            inner.push(Span::raw(" ".repeat(pet_col)));
+        }
+        inner.push(Span::raw(" ".repeat(gap)));
+        if let Some(line) = data_line {
+            let cell_count: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            inner.extend(line.spans.iter().cloned());
+            if cell_count < data_col {
+                inner.push(Span::raw(" ".repeat(data_col - cell_count)));
+            }
+        } else {
+            inner.push(Span::raw(" ".repeat(data_col)));
+        }
+        inner.push(Span::raw(" ".repeat(pad_right)));
+        framed.push(body_row(inner, inner_width, styles));
+    }
+    framed.push(render_frame_bottom_line(width, styles));
+    frame.render_widget(Paragraph::new(framed).style(styles.body), area);
+}
+
+fn render_compact_new(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    _vm: &WatchViewModel,
+    _capability: ColorCapability,
+    styles: &SemanticStyles,
+) {
+    // Placeholder until Task 16 fills this in. For now, render an empty body
+    // so the entry point compiles.
+    frame.render_widget(Paragraph::new(vec![Line::from("compact placeholder")]).style(styles.body), area);
+}
+
+#[cfg(test)]
+mod render_wide_tests {
+    use super::*;
+    use crate::tui::style::ColorCapability;
+    use crate::tui::view_model::WatchViewModel;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn render_wide_draws_frame_at_80_cols() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let vm = WatchViewModel::fixture();
+        terminal
+            .draw(|f| {
+                render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row0: String = (0..80).map(|x| buffer[(x, 0)].symbol().to_string()).collect();
+        assert!(row0.starts_with("┏━"));
+        assert!(row0.ends_with("┓"));
+    }
+}
