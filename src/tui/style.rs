@@ -19,6 +19,34 @@ pub struct TokenpetPalette {
     pub bad: TokenpetColor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorCapability {
+    Truecolor,
+    Flat,
+}
+
+impl ColorCapability {
+    pub fn detect() -> Self {
+        Self::detect_from(|k| std::env::var(k).ok())
+    }
+
+    pub fn detect_from<F>(read: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if read("NO_COLOR").is_some() {
+            return ColorCapability::Flat;
+        }
+        if matches!(read("TERM").as_deref(), Some("dumb")) {
+            return ColorCapability::Flat;
+        }
+        match read("COLORTERM").as_deref() {
+            Some("truecolor") | Some("24bit") => ColorCapability::Truecolor,
+            _ => ColorCapability::Flat,
+        }
+    }
+}
+
 pub fn tokenpet_palette() -> TokenpetPalette {
     TokenpetPalette {
         bg: TokenpetColor {
@@ -147,5 +175,49 @@ pub fn semantic_styles() -> SemanticStyles {
         pet_mouth: Style::default().fg(p.dim.rgb),
         pet_accent: Style::default().fg(p.accent.rgb),
         pet_pattern: Style::default().fg(p.faint.rgb),
+    }
+}
+
+#[cfg(test)]
+mod color_capability_tests {
+    use super::*;
+
+    fn lookup(map: &[(&str, &str)], key: &str) -> Option<String> {
+        map.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string())
+    }
+
+    #[test]
+    fn truecolor_when_colorterm_truecolor() {
+        let env = [("COLORTERM", "truecolor")];
+        let cap = ColorCapability::detect_from(|k| lookup(&env, k));
+        assert_eq!(cap, ColorCapability::Truecolor);
+    }
+
+    #[test]
+    fn truecolor_when_colorterm_24bit() {
+        let env = [("COLORTERM", "24bit")];
+        let cap = ColorCapability::detect_from(|k| lookup(&env, k));
+        assert_eq!(cap, ColorCapability::Truecolor);
+    }
+
+    #[test]
+    fn flat_when_no_color_set() {
+        let env = [("COLORTERM", "truecolor"), ("NO_COLOR", "1")];
+        let cap = ColorCapability::detect_from(|k| lookup(&env, k));
+        assert_eq!(cap, ColorCapability::Flat);
+    }
+
+    #[test]
+    fn flat_when_term_dumb() {
+        let env = [("TERM", "dumb")];
+        let cap = ColorCapability::detect_from(|k| lookup(&env, k));
+        assert_eq!(cap, ColorCapability::Flat);
+    }
+
+    #[test]
+    fn flat_when_no_relevant_env() {
+        let env: [(&str, &str); 0] = [];
+        let cap = ColorCapability::detect_from(|k| lookup(&env, k));
+        assert_eq!(cap, ColorCapability::Flat);
     }
 }
