@@ -371,12 +371,12 @@ impl UsageStore {
     pub fn advance_cursors(
         &mut self,
         updates: Vec<ProviderCursorUpdate>,
-        _now: OffsetDateTime,
+        now: OffsetDateTime,
     ) -> crate::error::Result<()> {
         if updates.is_empty() {
             return Ok(());
         }
-        let updated_at = format_time(OffsetDateTime::now_utc())?;
+        let updated_at = format_time(now)?;
         let tx = self.conn.transaction()?;
         for update in &updates {
             tx.execute(

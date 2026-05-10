@@ -78,13 +78,16 @@ fn historical_usage_calibrates_but_does_not_grant_initial_xp() {
 
 #[test]
 fn calibration_groups_multiple_rows_on_the_same_active_day_before_median() {
+    // Without grouping, this is 5 records (>= MIN_ACTIVE_DAYS_FOR_MEDIAN)
+    // sorted as [50k, 50k, 200k, 200k, 200k] with median 200_000.
+    // With grouping, it is 4 distinct active days (< MIN_ACTIVE_DAYS_FOR_MEDIAN)
+    // and the baseline falls back to DEFAULT_DAILY_EFFECTIVE_TOKENS (100_000).
     let history = vec![
-        DailyUsage::new(date!(2026 - 05 - 01), 40_000.0),
-        DailyUsage::new(date!(2026 - 05 - 01), 60_000.0),
-        DailyUsage::new(date!(2026 - 05 - 02), 100_000.0),
-        DailyUsage::new(date!(2026 - 05 - 03), 100_000.0),
-        DailyUsage::new(date!(2026 - 05 - 04), 100_000.0),
-        DailyUsage::new(date!(2026 - 05 - 05), 100_000.0),
+        DailyUsage::new(date!(2026 - 05 - 01), 50_000.0),
+        DailyUsage::new(date!(2026 - 05 - 01), 50_000.0),
+        DailyUsage::new(date!(2026 - 05 - 02), 200_000.0),
+        DailyUsage::new(date!(2026 - 05 - 03), 200_000.0),
+        DailyUsage::new(date!(2026 - 05 - 04), 200_000.0),
     ];
 
     let baseline = CalibrationBaseline::from_history(&history);

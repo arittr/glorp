@@ -5,7 +5,7 @@ use crate::storage::usage_store::{
     NormalizedUsageEvent, ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic,
     UsageStore,
 };
-use crate::usage::normalize::{normalize_usage_json, RawTokenTotals};
+use crate::usage::normalize::{normalize_usage_json, NormalizedUsageRecord, RawTokenTotals};
 use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
     UsageSnapshot,
@@ -45,6 +45,16 @@ pub struct CcusageCommandProvider {
     weights: EffectiveTokenWeights,
 }
 
+enum HelperInvocation {
+    Records {
+        version: String,
+        records: Vec<NormalizedUsageRecord>,
+    },
+    EarlyExit {
+        diagnostics: Vec<ProviderDiagnostic>,
+    },
+}
+
 impl CcusageCommandProvider {
     pub fn new(helpers: HelperPaths) -> Self {
         Self {
@@ -66,14 +76,14 @@ impl CcusageCommandProvider {
         Self::new(HelperDiscovery::discover().into()).with_weights(weights)
     }
 
-    fn poll_helper(
+    fn invoke_helper(
         &self,
         store: &mut UsageStore,
         provider_surface: &str,
         command_name: &str,
         helper: Option<&Path>,
         daily_args: &[&str],
-    ) -> Result<UsagePollResult> {
+    ) -> Result<HelperInvocation> {
         let Some(helper) = helper else {
             let diagnostic = diagnostic(
                 provider_surface,
@@ -81,10 +91,8 @@ impl CcusageCommandProvider {
                 &format!("{command_name} helper was not found"),
             );
             persist_diagnostic(store, &diagnostic)?;
-            return Ok(UsagePollResult {
-                deltas: Vec::new(),
+            return Ok(HelperInvocation::EarlyExit {
                 diagnostics: vec![diagnostic],
-                total_effective_tokens: 0.0,
             });
         };
 
@@ -97,10 +105,8 @@ impl CcusageCommandProvider {
             Ok(helper_command) => helper_command,
             Err(diagnostic) => {
                 persist_diagnostic(store, &diagnostic)?;
-                return Ok(UsagePollResult {
-                    deltas: Vec::new(),
+                return Ok(HelperInvocation::EarlyExit {
                     diagnostics: vec![diagnostic],
-                    total_effective_tokens: 0.0,
                 });
             }
         };
@@ -125,10 +131,8 @@ impl CcusageCommandProvider {
                 &format!("{command_name} exited with status {code}"),
             );
             persist_diagnostic(store, &diagnostic)?;
-            return Ok(UsagePollResult {
-                deltas: Vec::new(),
+            return Ok(HelperInvocation::EarlyExit {
                 diagnostics: vec![diagnostic],
-                total_effective_tokens: 0.0,
             });
         }
 
@@ -137,13 +141,34 @@ impl CcusageCommandProvider {
             Ok(records) => records,
             Err(diagnostic) => {
                 persist_diagnostic(store, &diagnostic)?;
-                return Ok(UsagePollResult {
-                    deltas: Vec::new(),
+                return Ok(HelperInvocation::EarlyExit {
                     diagnostics: vec![diagnostic],
-                    total_effective_tokens: 0.0,
                 });
             }
         };
+
+        Ok(HelperInvocation::Records { version, records })
+    }
+
+    fn poll_helper(
+        &self,
+        store: &mut UsageStore,
+        provider_surface: &str,
+        command_name: &str,
+        helper: Option<&Path>,
+        daily_args: &[&str],
+    ) -> Result<UsagePollResult> {
+        let (version, records) =
+            match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
+                HelperInvocation::Records { version, records } => (version, records),
+                HelperInvocation::EarlyExit { diagnostics } => {
+                    return Ok(UsagePollResult {
+                        deltas: Vec::new(),
+                        diagnostics,
+                        total_effective_tokens: 0.0,
+                    });
+                }
+            };
 
         let mut deltas = Vec::new();
         let mut diagnostics = Vec::new();
@@ -330,76 +355,17 @@ impl CcusageCommandProvider {
         helper: Option<&Path>,
         daily_args: &[&str],
     ) -> Result<UsageSnapshot> {
-        let Some(helper) = helper else {
-            let diagnostic = diagnostic(
-                provider_surface,
-                "missing_helper",
-                &format!("{command_name} helper was not found"),
-            );
-            persist_diagnostic(store, &diagnostic)?;
-            return Ok(UsageSnapshot {
-                daily_usage: Vec::new(),
-                cursor_updates: Vec::new(),
-                diagnostics: vec![diagnostic],
-            });
-        };
-
-        let helper_command = match helper_command(
-            provider_surface,
-            command_name,
-            helper,
-            self.helpers.node.as_deref(),
-        ) {
-            Ok(helper_command) => helper_command,
-            Err(diagnostic) => {
-                persist_diagnostic(store, &diagnostic)?;
-                return Ok(UsageSnapshot {
-                    daily_usage: Vec::new(),
-                    cursor_updates: Vec::new(),
-                    diagnostics: vec![diagnostic],
-                });
-            }
-        };
-        let version = self
-            .run_command(provider_surface, &helper_command, &["--version"])
-            .ok()
-            .and_then(|output| {
-                if output.status.success() {
-                    safe_version_line(&output.stdout)
-                } else {
-                    None
+        let (version, records) =
+            match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
+                HelperInvocation::Records { version, records } => (version, records),
+                HelperInvocation::EarlyExit { diagnostics } => {
+                    return Ok(UsageSnapshot {
+                        daily_usage: Vec::new(),
+                        cursor_updates: Vec::new(),
+                        diagnostics,
+                    });
                 }
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let output = self.run_command(provider_surface, &helper_command, daily_args)?;
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
-            let diagnostic = diagnostic(
-                provider_surface,
-                "helper_exit",
-                &format!("{command_name} exited with status {code}"),
-            );
-            persist_diagnostic(store, &diagnostic)?;
-            return Ok(UsageSnapshot {
-                daily_usage: Vec::new(),
-                cursor_updates: Vec::new(),
-                diagnostics: vec![diagnostic],
-            });
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let records = match normalize_usage_json(provider_surface, &stdout) {
-            Ok(records) => records,
-            Err(diagnostic) => {
-                persist_diagnostic(store, &diagnostic)?;
-                return Ok(UsageSnapshot {
-                    daily_usage: Vec::new(),
-                    cursor_updates: Vec::new(),
-                    diagnostics: vec![diagnostic],
-                });
-            }
-        };
+            };
 
         let mut daily_usage = Vec::new();
         let mut cursor_updates = Vec::new();
