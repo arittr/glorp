@@ -17,7 +17,8 @@ use crate::{
     error::{GlorpError, Result},
     tui::{
         layout::{
-            render_evolution_overlay, render_hatch_overlay, render_help_overlay, render_watch_frame,
+            render_evolution_overlay, render_hatch_overlay, render_help_overlay,
+            render_watch_frame_with_capability,
         },
         style::LogKind,
         view_model::{EventView, SourceUsageView},
@@ -30,6 +31,7 @@ pub use crate::tui::view_model::WatchViewModel;
 pub struct WatchAppConfig {
     pub animation_tick: Duration,
     pub usage_poll_interval: Duration,
+    pub color_capability: crate::tui::style::ColorCapability,
 }
 
 impl Default for WatchAppConfig {
@@ -37,6 +39,7 @@ impl Default for WatchAppConfig {
         Self {
             animation_tick: Duration::from_millis(250),
             usage_poll_interval: Duration::from_secs(10),
+            color_capability: crate::tui::style::ColorCapability::detect(),
         }
     }
 }
@@ -140,7 +143,7 @@ impl WatchApp {
             let render_evolution = self.update_evolution_overlay();
             let stage_label = self.vm.stage.clone();
             terminal.draw(|frame| {
-                render_watch_frame(frame, &self.vm);
+                render_watch_frame_with_capability(frame, &self.vm, self.config.color_capability);
                 match self.overlay {
                     Some(Overlay::Help) => render_help_overlay(frame),
                     None => {}
@@ -440,22 +443,30 @@ pub fn run_single_watch_tick_for_test(harness: &mut WatchTestHarness) -> Result<
 }
 
 pub fn render_frame_for_test(frame: &mut ratatui::Frame<'_>, vm: &WatchViewModel) {
-    render_watch_frame(frame, vm);
+    render_watch_frame_with_capability(frame, vm, crate::tui::style::ColorCapability::Truecolor);
 }
 
 pub fn render_help_overlay_for_test(frame: &mut ratatui::Frame<'_>) {
-    render_watch_frame(frame, &WatchViewModel::fixture());
+    render_watch_frame_with_capability(
+        frame,
+        &WatchViewModel::fixture(),
+        crate::tui::style::ColorCapability::Truecolor,
+    );
     render_help_overlay(frame);
 }
 
 pub fn render_evolution_overlay_for_test(frame: &mut ratatui::Frame<'_>) {
     let vm = WatchViewModel::fixture();
-    render_watch_frame(frame, &vm);
+    render_watch_frame_with_capability(frame, &vm, crate::tui::style::ColorCapability::Truecolor);
     render_evolution_overlay(frame, Some(vm.stage.as_str()));
 }
 
 pub fn render_hatch_overlay_for_test(frame: &mut ratatui::Frame<'_>) {
-    render_watch_frame(frame, &WatchViewModel::fixture());
+    render_watch_frame_with_capability(
+        frame,
+        &WatchViewModel::fixture(),
+        crate::tui::style::ColorCapability::Truecolor,
+    );
     render_hatch_overlay(frame);
 }
 
