@@ -846,6 +846,37 @@ fn format_xp(value: f64) -> String {
     }
 }
 
+fn render_helpers_panel_lines<'a>(
+    width: usize,
+    vm: &'a WatchViewModel,
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
+    let mut out = Vec::new();
+    out.push(Line::from(section_line("helpers", width, styles)));
+    let p = tokenpet_palette();
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::raw("  "));
+    let mut first = true;
+    for (surface, display) in EXPECTED_SOURCES {
+        if !first {
+            spans.push(Span::raw("     "));
+        }
+        first = false;
+        let health = vm.source_health.iter().find(|s| s.name == *surface);
+        let (glyph, glyph_style) = match health.map(|h| h.status) {
+            Some(SourceStatus::Ready) => ('✓', Style::default().fg(p.good.rgb)),
+            Some(SourceStatus::Diagnostic) => ('~', Style::default().fg(p.accent.rgb)),
+            Some(SourceStatus::Blocked) => ('✗', Style::default().fg(p.bad.rgb)),
+            None => ('—', Style::default().fg(p.dim.rgb)),
+        };
+        spans.push(Span::styled(display.to_string(), styles.label));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(glyph.to_string(), glyph_style));
+    }
+    out.push(Line::from(spans));
+    out
+}
+
 fn render_feed_panel_lines<'a>(
     width: usize,
     vm: &'a WatchViewModel,
@@ -1034,6 +1065,41 @@ mod sparkline_tests {
             .collect::<String>();
         assert!(text.contains('·'));
         assert!(!text.contains('█'));
+    }
+}
+
+#[cfg(test)]
+mod helpers_panel_tests {
+    use super::*;
+    use crate::tui::view_model::{SourceStatus, WatchViewModel};
+
+    #[test]
+    fn helpers_panel_renders_check_when_ready() {
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let lines = render_helpers_panel_lines(43, &vm, &styles);
+        let text: String = lines[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains('✓'));
+    }
+
+    #[test]
+    fn helpers_panel_renders_x_when_blocked() {
+        let styles = semantic_styles();
+        let mut vm = WatchViewModel::fixture();
+        for src in vm.source_health.iter_mut() {
+            src.status = SourceStatus::Blocked;
+        }
+        let lines = render_helpers_panel_lines(43, &vm, &styles);
+        let text: String = lines[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains('✗'));
     }
 }
 
