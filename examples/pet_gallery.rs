@@ -631,3 +631,70 @@ mod braille_tests {
         for l in &lines { assert_eq!(l.chars().count(), 7); }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeatureGlyphPick {
+    pub eye: &'static str,    // single-glyph string (may be multi-byte)
+    pub mouth: &'static str,
+    pub accent: &'static str,
+}
+
+/// Stage-appropriate eye glyph alphabets per species.
+fn eyes_for(species: SpeciesK, stage: Stage) -> &'static [&'static str] {
+    match (species, stage) {
+        (SpeciesK::Blob, Stage::S0) => &["o", "•", "●"],
+        (SpeciesK::Blob, Stage::S1) => &["o", "•", "●", "◉"],
+        (SpeciesK::Blob, _)         => &["◉", "◎", "⬢", "◐"], // S2+
+        (SpeciesK::Mech, _)         => &["◇", "◆", "▣", "◫", "□"],
+        (SpeciesK::Ghost, _)        => &["·", "°", "ʘ", "◌"],
+        (SpeciesK::Glitch, _)       => &["x", "#", "0", "▩", "▤"],
+        (SpeciesK::Crystal, _)      => &["◇", "◊", "⬡", "◈"],
+        (SpeciesK::Fuzz, _)         => &["^", "u", "*", "•"],
+    }
+}
+
+fn mouths_for(species: SpeciesK, _stage: Stage) -> &'static [&'static str] {
+    match species {
+        SpeciesK::Mech       => &["═", "─", "▪"],
+        SpeciesK::Ghost      => &["", "·", "○"],
+        SpeciesK::Glitch     => &["~", "≈", "─"],
+        SpeciesK::Crystal    => &["◇", "◊"],
+        SpeciesK::Blob       => &["w", "v", "ω"],
+        SpeciesK::Fuzz       => &["w", "ᴗ", "ᵕ"],
+    }
+}
+
+fn accents_for(species: SpeciesK, _stage: Stage) -> &'static [&'static str] {
+    match species {
+        SpeciesK::Mech    => &["╿", "│", "┃"],
+        SpeciesK::Glitch  => &["▤", "▦", "░"],
+        SpeciesK::Crystal => &["◆", "✦"],
+        _                 => &["·", "•"],
+    }
+}
+
+pub fn pick_features(species: SpeciesK, stage: Stage, rng: &mut SpikeRng) -> FeatureGlyphPick {
+    let eyes = eyes_for(species, stage);
+    let mouths = mouths_for(species, stage);
+    let accents = accents_for(species, stage);
+    FeatureGlyphPick {
+        eye: eyes[rng.next_usize_capped(eyes.len())],
+        mouth: mouths[rng.next_usize_capped(mouths.len())],
+        accent: accents[rng.next_usize_capped(accents.len())],
+    }
+}
+
+#[cfg(test)]
+mod feature_tests {
+    use super::*;
+    #[test]
+    fn picks_are_deterministic_per_seed() {
+        let mut a = SpikeRng::new(7);
+        let mut b = SpikeRng::new(7);
+        for sp in [SpeciesK::Blob, SpeciesK::Mech, SpeciesK::Ghost] {
+            for st in [Stage::S0, Stage::S1, Stage::S2] {
+                assert_eq!(pick_features(sp, st, &mut a), pick_features(sp, st, &mut b));
+            }
+        }
+    }
+}
