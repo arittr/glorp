@@ -1,0 +1,7 @@
+---
+source: src/pet/generate.rs
+expression: "generate_pet_lines(Species::Blob, Stage::S0, 42).join(\"\\n\")"
+---
+⠀•⢸•⢰⠀⠀
+⠀⣾⣿v⣿⣷⠀
+⠀⠻⠿⠿⠿⠟⠀

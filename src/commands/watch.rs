@@ -7,8 +7,7 @@ use crate::{
     },
     paths::AppPaths,
     pet::{
-        art::stage_label,
-        generation::{generate_pet, Species},
+        generation::{generate_pet, stage_label, Species},
         render::{render_pet, AnimationFrame},
     },
     storage::{

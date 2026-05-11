@@ -1,0 +1,9 @@
+---
+source: src/pet/generate.rs
+expression: "generate_pet_lines(Species::Glitch, Stage::S2, 21).join(\"\\n\")"
+---
+⠀⠀⠀0⣿⣼0⣀⠀⠀⠀
+⠀⠀⠀⠶⣶─⣶⠶⠀⠀⠀
+⠀⠀⠀⣭⣭⣭⣭⣭⠀⠀⠀
+⠀⠀⠀⣒⣛⣛⣛⣒⠀⠀⠀
+⠀⠀⠀⠭⠿⠿⠿⠭⠀⠀⠀

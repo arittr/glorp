@@ -34,6 +34,8 @@ This spec is the follow-up the `2026-05-10-glorp-watch-visual-redesign-design.md
 
 ## Pet generation
 
+> **Architecture pivot (2026-05-10):** The original spec specified a unified Gaussian-envelope algorithmic generator. The Phase 0 spike implemented it (tasks 1–22 of `2026-05-10-glorp-procedural-pet.md`) and failed the aesthetic gate: parameter-perturbed ellipses produced species that all share the same macro-shape, with only the eye/mouth glyph distinguishing them. The pivot, taken before any production code shipped, is to **species-specific compositional parts** — each species has its own authored library of small glyph parts that get procedurally combined. The sections below describe the post-pivot design; the original algorithmic approach is preserved in the "Alternatives considered" section below as a documented dead end.
+
 ### Blueprint
 
 A pet's seed deterministically produces a `PetBlueprint`:
@@ -42,97 +44,111 @@ A pet's seed deterministically produces a `PetBlueprint`:
 struct PetBlueprint {
     species: Species,
     stage: Stage,
-    silhouette: SilhouetteParams,
-    palette: PaletteRoles,                // existing OkLCH role assignment
-    feature_anchors: FeatureAnchors,      // where eyes/mouth/ornaments attach
-    feature_glyphs: FeatureGlyphSet,      // glyphs picked from stage-appropriate subsets
-    mutation_vector: MutationVector,      // delta applied to SilhouetteParams at each stage-up
+    part_selection: PartSelection,        // which parts compose this pet
+    feature_glyphs: FeatureGlyphPick,     // eye/mouth/accent glyphs picked per seed
+    evolution_path: EvolutionPath,        // seeded trajectory through part variants across stages
 }
 
-struct SilhouetteParams {
-    width_px: u8,            // pixel grid width (always even — Braille is 2 wide per cell)
-    height_px: u8,           // pixel grid height (multiple of 4 — Braille is 4 tall per cell)
-    roundness: f32,          // 0..1 — Gaussian envelope tightness
-    taper: f32,              // 0..1 — corner falloff strength
-    body_density: f32,       // 0..1 — overall fill probability
-    asymmetry_seed: u32,     // drives one-off asymmetric ornaments (single antenna, etc.)
-    head_zone_ratio: f32,    // 0..1 — fraction of top grid reserved as head
-    ornament_density: f32,   // 0..1 — additive features beyond core silhouette
+struct PartSelection {
+    head: PartId,
+    body: PartId,
+    accessories: Vec<PartId>,             // 0..=4 species-appropriate accessories
 }
 ```
 
 Stage sizes (pixels → braille char dimensions):
-- s0: 14×8 px → 7×2 braille cells
-- s1: 18×12 px → 9×3 braille cells
-- s2: 22×16 px → 11×4 braille cells
+- s0: 14×12 px → 7×3 braille cells
+- s1: 18×16 px → 9×4 braille cells
+- s2: 22×20 px → 11×5 braille cells
+- s3+: same as s2 grid; later stages distinguish themselves through part richness, not geometry
 
-### Silhouette algorithm
+### Composition
 
-1. Sample a 2D field over a half-grid (left side only). For each pixel `(x, y)`, compute fill probability `p(x, y)` as:
-   - A Gaussian envelope centred on a body anchor, scaled by `roundness`.
-   - Multiplied by a head-zone gain (cells in the top `head_zone_ratio` get a boost).
-   - Multiplied by a corner falloff `(1 - distance_to_corner ** taper)` so silhouettes are never rectangular.
-   - Multiplied by seeded coherent noise (one octave) to perturb the envelope so two pets with the same overall shape still differ in detail.
-2. Threshold `p(x, y) > body_density` → boolean fill. Reject samples where total filled pixels fall below a per-stage minimum; re-sample with adjusted density up to a small retry cap.
-3. Mirror the left half to the right half. Bilateral symmetry is guaranteed for the core silhouette.
-4. Add ornaments as a separate overlay layer (the core silhouette stays symmetric). The `asymmetry_seed` drives 0–2 asymmetric ornaments (single antenna, side curl) and 0–`ornament_density × stage_max` symmetric ornaments (matched antennae, fin pairs). Ornaments attach to the silhouette edge, never replace body pixels. Asymmetric ornaments are bounded so the pet still reads as a coherent creature — a single fin on one side, not a chaotic protrusion field. Ornaments are pixel patterns drawn from a small algorithmic catalogue (rectangles, hooks, dots), not authored art.
-5. Reserve eye-anchor cells. The head zone always contains two anchor positions (one per eye) that body pixels are forbidden from filling. These anchors are where feature glyphs overlay during rendering.
+A pet is composed at render time by laying authored parts onto a `Bitmap`:
 
-### Aesthetic biases ("stay cute" constants)
+1. Resolve `PartSelection` from `(species, stage, seed)`. Each species has its own part catalog; seed picks one head + one body + 0–N accessories.
+2. Render the body part at its species-defined anchor (typically centered horizontally in the bottom 2/3 of the grid).
+3. Render the head part at its species-defined anchor (typically centered horizontally in the top 1/3, possibly overlapping the body for some species like Ghost).
+4. Render accessories at their per-part attachment points (e.g., antennae attach to the head's top edge; fins attach to the body's side).
+5. Reserve eye-anchor cells inside the head's eye region.
+6. Encode to Braille and overlay feature glyphs (eyes, mouth, optional accent) at the head's anchor positions.
 
-Tunable constants in `pet/generate.rs::AESTHETIC`. These are **starting values for the Phase 0 spike**, not final — every constant is expected to shift during tuning. Final values land with the Phase 1 implementation.
+Bilateral symmetry is enforced per-part: parts are authored as either symmetric (drawn whole) or as a half-pattern that the composer mirrors. Asymmetric accessories (single antenna, side curl) are placed without mirroring and bounded to ≤1 per pet.
 
-- Symmetry: always (load-bearing, not tuned).
-- `MIN_ROUNDNESS = 0.45` — prevents stringy or fragmented bodies.
-- `MAX_TAPER = 0.75` — prevents pinched corners that look broken.
-- `HEAD_ZONE_MIN_RATIO = 0.30` — ensures a recognisable head region.
-- `MIN_FILLED_PIXELS_RATIO = 0.35` — rejects sparse silhouettes (lower bound; real creatures rarely fill more than ~50% of their bounding box).
-- `MAX_ORNAMENT_DENSITY[stage]` — `[0.10, 0.25, 0.45]` for s0/s1/s2.
-- `EYE_ANCHOR_RESERVATION = 2×4 px` per eye (one full Braille character cell) — body pixels cannot occupy these cells, so eye glyphs always have a clean canvas (load-bearing, not tuned).
+### Part catalog
 
-### Per-species variation
-
-Each species supplies an override block for the aesthetic constants and a glyph-subset bias. Examples (concrete subsets defined during implementation):
-- Blob: high roundness, low ornament density, eyes biased to `• o ●`.
-- Mech: low roundness, high symmetry strictness, ornament catalogue biased to box-drawing glyphs (`╭ ╮ ╰ ╯`), eyes biased to geometric glyphs (`◇ ◆ ▣`).
-- Ghost: tall aspect ratio, jittered baseline, eyes biased to `· ° ʘ`.
-
-Species is the *only* hand-authored degree of freedom in pet generation. Within a species, all variation is procedural.
-
-### Mutation vector and evolution
-
-Each pet's `MutationVector` is a stable seeded perturbation of `SilhouetteParams`:
+Each species has its own `PartCatalog` exposing four slots:
 
 ```rust
-struct MutationVector {
-    d_roundness: f32,
-    d_taper: f32,
-    d_body_density: f32,
-    d_ornament_density: f32,
-    d_head_zone_ratio: f32,
+struct PartCatalog {
+    heads: &'static [Part],
+    bodies: &'static [Part],
+    accessories: &'static [Part],
+    mood_overrides: MoodOverrides,        // mood-specific eye/mouth glyph swaps
+}
+
+struct Part {
+    id: PartId,
+    pixels: &'static [u16],               // bitmap rows packed as bits
+    width_px: u8,
+    height_px: u8,
+    anchor: Anchor,                       // head | body | head_top | body_side | body_bottom
+    min_stage: Stage,                     // unlocked at this stage and later
+    symmetry: PartSymmetry,               // Symmetric | HalfMirror | AsymmetricFree
 }
 ```
 
-At each stage-up, the new stage's `SilhouetteParams` is computed by adding the mutation vector to the previous stage's params (clamped to per-stage bounds). Two pets that hatched as similar blobs at s0 can diverge meaningfully by s2.
+Each species' catalog defines a distinct aesthetic. **No part is shared across species** — this is the central pivot from the failed algorithmic approach.
 
-Feature glyph subsets also expand by stage — s0 picks from a narrow alphabet, s2 picks from a richer one. Evolution shows in both silhouette and feature richness.
+- **Blob:** round soft heads, bubble bodies, droplet accessories. ~3 heads × 3 bodies × 4 accessories.
+- **Fuzz:** fluffy/irregular outline heads, oval bodies with edge-fuzz, antenna/whisker accessories. ~3 × 3 × 5.
+- **Mech:** rectangular/dome heads, segmented or block bodies, piston/claw arms + tread/peg feet. ~3 × 3 × 5.
+- **Ghost:** drift-veil/hollow-skull heads, wave-tail/smoke-trail bodies (no defined feet), drift-curl accessories. ~3 × 3 × 3.
+- **Crystal:** triangle/diamond/hex cap heads, prism/faceted/cluster bodies, shoulder-shard/side-spike accessories. ~3 × 3 × 4.
+- **Glitch:** fragmented/glitchy heads, scan-line/broken-block bodies, pixel-scatter/missing-row artifacts. ~3 × 3 × 4.
+
+Total authoring estimate: ~80 parts × ~25 pixel cells average = ~2,000 cells. Encoded as code, ~400 LOC across all six species — well under the 630-line `art.rs` it replaces, with dramatically more variety per pet (combinatorial parts × parts × accessories × accessories).
+
+### Aesthetic biases ("stay cute" constants)
+
+Authoring discipline replaces algorithmic biases for the silhouette. Two constants survive as load-bearing invariants:
+
+- `EYE_ANCHOR_RESERVATION = 2×4 px` per eye (one full Braille character cell) — every head part must reserve this cell for the eye glyph.
+- Bilateral symmetry for the core silhouette — every head and body part is either drawn symmetrically or mirrored from a half-pattern by the composer. Accessories may be asymmetric (max 1 per pet).
+
+The "stay cute" responsibility is now on the part author, not on tuning constants. Reviewing the part catalog *is* the aesthetic tuning loop.
+
+### Evolution
+
+Each pet's `EvolutionPath` is a seeded trajectory through part variants:
+
+```rust
+struct EvolutionPath {
+    head_progression: [PartId; STAGE_COUNT],     // which head this pet uses at each stage
+    body_progression: [PartId; STAGE_COUNT],     // which body this pet uses at each stage
+    accessory_growth: [Vec<PartId>; STAGE_COUNT], // accessories unlock per stage
+}
+```
+
+When the pet stage-ups, `blueprint_for(species, stage, seed)` returns a `PartSelection` that draws from the catalog's parts whose `min_stage <= stage`. The seeded path ensures that each pet's progression is unique — Blob A might evolve `bubble-head → smooth-head → crown-head` while Blob B evolves `bubble-head → bubble-head → dome-head` with two accessories.
+
+Stage-up animations (Phase 4 tachyonfx work) get clean before/after bitmaps to morph between, which the part composer naturally provides.
 
 ### Rendering
 
-The pet bitmap is rendered to Braille at 2×4 px per char. Feature glyphs (eyes, mouth, ornaments anchored to specific positions) replace the underlying Braille cell at their anchor coordinates with a single Unicode glyph from the appropriate stage subset.
+Same as before the pivot: composed `Bitmap` → Braille encoder → feature glyph overlay → `RenderedPet { lines, spans, event_lines }`. The per-cell `StyledSegment` role assignment is now driven by which *part* contributed each cell (head part → Head/Eye regions, body part → Body, accessory parts → Accent or Pattern depending on attachment point).
 
-Per-cell palette role assignment preserves the existing `StyledSegment` model: each output cell carries a `PaletteRoleName` based on its source region (head zone → `Eye`/`Body`/`Accent`, ornament cells → `Accent` or `Pattern`, body interior → `Body`, mouth/jaw region → `Mouth`).
-
-The static (pre-animation) renderer output stays in the existing `RenderedPet { lines: Vec<String>, spans: Vec<StyledSegment> }` shape. Phase 3 wraps this in `PetFrame`, which adds `overlay_effects: Vec<EffectHandle>` for active tachyonfx layers. Phases 1–2 use `RenderedPet` directly; Phase 3 onward, `PetPanel` consumes `PetFrame` and treats its `lines`/`spans` fields exactly like today's `RenderedPet`.
+The static (pre-animation) renderer output stays in the existing `RenderedPet` shape. Phase 3 wraps it in `PetFrame` with `overlay_effects` for tachyonfx layers, exactly as planned pre-pivot.
 
 ### Aesthetic validation gate
 
-Phase 0 of the migration ships a standalone `examples/pet_gallery.rs` binary that generates 50 pets across species × stages and prints them in a grid. The gate has two criteria; both must pass:
+Phase 0 of the new plan ships an updated `examples/pet_gallery.rs` that generates 50 pets across species × stages × seed permutations. The gate has two criteria; both must pass:
 
-1. **Zero visually broken pets** in a sample of 50. Broken means: disconnected blobs, sub-minimum body area, missing eye anchors, sharp rectangular outlines, or any silhouette that doesn't read as a single creature.
-2. **≥85% read as intentional creatures** (cute or characterful) on visual inspection. The remaining ≤15% may read as "weird but plausible" — odd but still creature-shaped.
+1. **Zero visually broken pets** in 50 samples. Broken means: parts that overlap badly, missing eye anchors, parts that don't compose to a recognizable creature.
+2. **Each species is visibly distinct from every other species at the macro-shape level.** This is the criterion the algorithmic approach failed. A reader who has never seen glorp pets should be able to look at three pets and group them by species without reading any labels, based on silhouette alone.
+3. **≥85% read as intentional creatures**, with the remaining ≤15% allowed to be "weird but plausible" within their species' aesthetic.
 
-If criterion 1 fails, fix the algorithm or rejection rules until it passes — broken pets are not negotiable. If criterion 2 fails after a tuning pass, the fallback is compositional parts: a small authored part library (heads, bodies, eye-pairs, accents) procedurally composed. The rest of this design (animation, layout, transitions) is unaffected by which generation strategy lands.
+If any criterion fails, iterate on the part catalog (add/swap parts, tune anchors) until it passes. There is no further fallback — if compositional parts can't pass this gate, the overhaul scope contracts to "tune the existing `art.rs`" and we abandon procedural generation entirely for this pass.
 
 ## Pet animation
 
@@ -337,7 +353,9 @@ Independent of Phase 1 — `PetPanel` is defined against the `RenderedPet` shape
 
 **ratatui-image (Kitty/Sixel/iTerm2 pixel pets).** Rejected. Procedural uniqueness with authored sprites would require generating PNG bitmaps per pet at runtime — significant engineering for marginal aesthetic gain when Braille already provides sprite-level fidelity in pure text. Also has tmux compatibility issues many users would hit.
 
-**Compositional parts (authored part library + procedural composition).** Held in reserve as the Phase 0 fallback. Not the default because hand-authoring parts per species contradicts the "minimal authoring, maximum variation" requirement.
+**Algorithmic Gaussian-envelope silhouette (the original spec direction).** Attempted in the first procedural-pet plan and rejected after Phase 0. The algorithm produced pets that varied subtly *within* a species but failed to differentiate *between* species — all six species rendered as ellipses with different glyph fills. Two tuning rounds (S0 grid size, mutation count, head-zone gain, noise amplitude, body-density clamps) reduced dense-block outputs but could not produce categorically distinct silhouettes per species because the algorithm's macro-shape is fundamentally a single Gaussian envelope. The "every species looks the same" failure was the trigger for the parts pivot. Spike code preserved as historical reference in branch `feat/procedural-pet` commits through 2026-05-10.
+
+**Compositional parts (authored part library + procedural composition) — now the chosen approach.** Originally held in reserve as the Phase 0 fallback. After the algorithmic dead-end, promoted to the primary design. Authoring cost (~80 parts across 6 species × ~25 cells avg = ~2,000 cells, ~400 LOC) is lower than the existing `art.rs` it replaces, and the combinatorics deliver real macro-shape variety because each species owns its own non-overlapping part catalog.
 
 **Algorithmic silhouette with ASCII (no Braille).** Rejected. ASCII at 1 glyph per cell gives too little resolution for procedural shapes to read as intentional creatures; results look chaotic. Braille's 2×4 sub-character grid is what makes procedural generation viable.
 

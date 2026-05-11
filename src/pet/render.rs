@@ -1,6 +1,5 @@
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
-use crate::pet::art::{stage_key, template_lines};
 use crate::pet::generation::{GeneratedPet, Species};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,55 +70,51 @@ pub struct AnimationProfile {
     pub blink_jitter: u8,
 }
 
-const ART_WIDTH: usize = 11;
-const FRAME_WIDTH: usize = 13;
-const FRAME_HEIGHT: usize = 10;
-
-const GLITCH_NOISE: &[char] = &[
-    '\u{2592}', '\u{2591}', '\u{2593}', '\u{2580}', '\u{2584}', '\u{258c}', '\u{2590}',
-];
-
 pub fn render_pet(
     pet: &GeneratedPet,
     stage: Stage,
     mood: Mood,
     frame: AnimationFrame,
 ) -> RenderedPet {
-    let stage_key = stage_key(stage);
-    let profile = species_animation_profile(pet.species);
-    let blinking = should_blink(pet, mood, frame, profile);
-    let expression = expression_for(pet, mood, blinking);
-    let raw = template_lines(
-        pet.species,
-        stage_key,
-        pet.traits.morph_index,
-        pet.traits.morph_pup_index,
-    );
-    let rendered = raw
-        .iter()
-        .enumerate()
-        .map(|(line_index, line)| render_template_line(line, line_index, pet, &expression))
-        .collect::<Vec<_>>();
-    let mut lines = rendered
-        .iter()
-        .map(|line| line.text.clone())
-        .collect::<Vec<_>>();
-    let mut spans = rendered
-        .into_iter()
-        .flat_map(|line| line.spans)
-        .collect::<Vec<_>>();
+    use crate::pet::generate::generate_pet_lines;
+    use crate::pet::generation::fnv1a64;
 
-    // Glitch corruption: rare per-tick body cell swap.
-    if pet.species == Species::Glitch {
-        apply_glitch_corruption(&mut lines, &mut spans, frame.tick);
+    let seed = fnv1a64(&pet.seed);
+    let lines = generate_pet_lines(pet.species, stage, seed);
+
+    // Build per-cell StyledSegments. Heuristic: braille cells (U+2800..U+28FF)
+    // are Body; non-braille cells are feature glyphs assigned by line position.
+    // The animator (Phase 3) will handle mood-driven eye/mouth swaps and
+    // blink suppression; for now the renderer just emits whatever the
+    // generator produced, regardless of mood/frame.
+    let mut spans = Vec::new();
+    for (line_idx, line) in lines.iter().enumerate() {
+        for (ch_idx, c) in line.chars().enumerate() {
+            let role = if (0x2800..=0x28FF).contains(&(c as u32)) {
+                PaletteRoleName::Body
+            } else if c == ' ' {
+                continue;
+            } else if line_idx == 0 {
+                PaletteRoleName::Eye
+            } else {
+                PaletteRoleName::Mouth
+            };
+            spans.push(StyledSegment {
+                line: line_idx,
+                start: ch_idx,
+                end: ch_idx + 1,
+                role,
+            });
+        }
     }
 
-    // Wrap pet art in a 13x10 frame and overlay particles.
-    let (framed_lines, framed_spans) = frame_with_particles(lines, spans, pet.species, frame.tick);
+    // mood + frame are reserved for Phase 3 (PetAnimator). Suppress unused
+    // variable warnings without changing the public signature.
+    let _ = (mood, frame);
 
     RenderedPet {
-        lines: framed_lines,
-        spans: framed_spans,
+        lines,
+        spans,
         event_lines: Vec::new(),
     }
 }
@@ -210,419 +205,6 @@ impl PaletteRole {
     }
 }
 
-struct Expression {
-    eyes: String,
-    mouth: String,
-}
-
-fn expression_for(pet: &GeneratedPet, mood: Mood, blinking: bool) -> Expression {
-    if blinking {
-        return Expression {
-            eyes: closed_blink_eyes(pet.species).to_string(),
-            mouth: pet.traits.mouth.clone(),
-        };
-    }
-
-    match mood {
-        Mood::Happy => Expression {
-            eyes: "^.^".to_string(),
-            mouth: "\u{03c9}".to_string(),
-        },
-        Mood::Content => Expression {
-            eyes: pet.traits.eyes.clone(),
-            mouth: pet.traits.mouth.clone(),
-        },
-        Mood::Hungry => Expression {
-            eyes: "u.u".to_string(),
-            mouth: "o".to_string(),
-        },
-        Mood::Sad => Expression {
-            eyes: "T.T".to_string(),
-            mouth: "\u{fe35}".to_string(),
-        },
-        Mood::Sleepy => Expression {
-            eyes: "-.-".to_string(),
-            mouth: "-".to_string(),
-        },
-        Mood::Wilted => Expression {
-            eyes: ",_,".to_string(),
-            mouth: "_".to_string(),
-        },
-    }
-}
-
-fn should_blink(
-    pet: &GeneratedPet,
-    mood: Mood,
-    frame: AnimationFrame,
-    profile: AnimationProfile,
-) -> bool {
-    if matches!(mood, Mood::Sad | Mood::Sleepy | Mood::Wilted) {
-        return false;
-    }
-    if frame.blink_suppression_ticks > 0 {
-        return false;
-    }
-    let jitter = u64::from(profile.blink_jitter.max(1));
-    let cadence =
-        u64::from(profile.blink_average) + (u64::from(pet.animation_phase.blink) % jitter);
-    (frame.tick + u64::from(pet.animation_phase.blink)).is_multiple_of(cadence)
-}
-
-struct RenderedTemplateLine {
-    text: String,
-    spans: Vec<StyledSegment>,
-}
-
-fn render_template_line(
-    template: &str,
-    line: usize,
-    pet: &GeneratedPet,
-    expression: &Expression,
-) -> RenderedTemplateLine {
-    let mut text = String::new();
-    let mut spans = Vec::new();
-    let mut cursor = 0;
-    let mut rest = template;
-
-    while let Some(open) = rest.find('{') {
-        let (body, after_body) = rest.split_at(open);
-        push_segment(
-            &mut text,
-            &mut spans,
-            line,
-            body,
-            PaletteRoleName::Body,
-            &mut cursor,
-        );
-
-        if let Some(close) = after_body.find('}') {
-            let token = &after_body[..=close];
-            let (value, role) =
-                slot_value(token, pet, expression).unwrap_or((token, PaletteRoleName::Body));
-            push_segment(&mut text, &mut spans, line, value, role, &mut cursor);
-            rest = &after_body[close + 1..];
-        } else {
-            push_segment(
-                &mut text,
-                &mut spans,
-                line,
-                after_body,
-                PaletteRoleName::Body,
-                &mut cursor,
-            );
-            rest = "";
-        }
-    }
-
-    push_segment(
-        &mut text,
-        &mut spans,
-        line,
-        rest,
-        PaletteRoleName::Body,
-        &mut cursor,
-    );
-    RenderedTemplateLine { text, spans }
-}
-
-fn slot_value<'a>(
-    token: &str,
-    pet: &'a GeneratedPet,
-    expression: &'a Expression,
-) -> Option<(&'a str, PaletteRoleName)> {
-    match token {
-        "{eyes}" => Some((&expression.eyes, PaletteRoleName::Eye)),
-        "{mouth}" => Some((&expression.mouth, PaletteRoleName::Mouth)),
-        "{pattern}" => Some((&pet.traits.pattern, PaletteRoleName::Pattern)),
-        "{accent}" => Some((&pet.traits.accent, PaletteRoleName::Accent)),
-        _ => None,
-    }
-}
-
-fn push_segment(
-    text: &mut String,
-    spans: &mut Vec<StyledSegment>,
-    line: usize,
-    value: &str,
-    role: PaletteRoleName,
-    cursor: &mut usize,
-) {
-    let width = value.chars().count();
-    if width == 0 {
-        return;
-    }
-    text.push_str(value);
-    spans.push(StyledSegment {
-        line,
-        start: *cursor,
-        end: *cursor + width,
-        role,
-    });
-    *cursor += width;
-}
-
-fn apply_glitch_corruption(lines: &mut [String], spans: &mut [StyledSegment], tick: u64) {
-    if !tick.is_multiple_of(37) {
-        return;
-    }
-    if lines.is_empty() {
-        return;
-    }
-    let row = ((tick * 7) as usize) % lines.len();
-    let line = &lines[row];
-    let total_chars = line.chars().count();
-    if total_chars == 0 {
-        return;
-    }
-    let col = ((tick * 11) as usize) % total_chars;
-    let target_char = line.chars().nth(col).unwrap_or(' ');
-    if target_char == ' ' {
-        return;
-    }
-    // Skip if the cell belongs to anything other than a body span.
-    let in_body = spans.iter().any(|span| {
-        span.line == row
-            && span.role == PaletteRoleName::Body
-            && col >= span.start
-            && col < span.end
-    });
-    if !in_body {
-        return;
-    }
-
-    let noise = GLITCH_NOISE[((tick * 3) as usize) % GLITCH_NOISE.len()];
-    replace_char_in_line(&mut lines[row], col, noise);
-}
-
-fn replace_char_in_line(line: &mut String, char_index: usize, replacement: char) {
-    let mut indices = line.char_indices();
-    let target = indices.nth(char_index);
-    if let Some((start_byte, ch)) = target {
-        let end_byte = start_byte + ch.len_utf8();
-        let mut replacement_buf = [0u8; 4];
-        let replacement_str = replacement.encode_utf8(&mut replacement_buf);
-        line.replace_range(start_byte..end_byte, replacement_str);
-    }
-}
-
-fn frame_with_particles(
-    art_lines: Vec<String>,
-    art_spans: Vec<StyledSegment>,
-    species: Species,
-    tick: u64,
-) -> (Vec<String>, Vec<StyledSegment>) {
-    // Build a 13x10 grid of chars initialized with spaces, then overlay
-    // the 11x8 art at rows 1..=8, cols 1..=11.
-    let mut grid: Vec<Vec<char>> = (0..FRAME_HEIGHT).map(|_| vec![' '; FRAME_WIDTH]).collect();
-
-    for (row_index, line) in art_lines.iter().enumerate().take(8) {
-        let target_row = row_index + 1;
-        for (col_index, ch) in line.chars().take(ART_WIDTH).enumerate() {
-            grid[target_row][col_index + 1] = ch;
-        }
-    }
-
-    // Translate art spans to framed-grid spans (line +1, start/end +1).
-    let mut framed_spans: Vec<StyledSegment> = art_spans
-        .into_iter()
-        .map(|span| StyledSegment {
-            line: span.line + 1,
-            start: span.start + 1,
-            end: span.end + 1,
-            role: span.role,
-        })
-        .collect();
-
-    // Overlay particles for this tick.
-    for particle in particles_for_species(species, tick) {
-        if particle.row < FRAME_HEIGHT && particle.col < FRAME_WIDTH {
-            grid[particle.row][particle.col] = particle.glyph;
-            framed_spans.push(StyledSegment {
-                line: particle.row,
-                start: particle.col,
-                end: particle.col + 1,
-                role: PaletteRoleName::Particle,
-            });
-        }
-    }
-
-    let lines: Vec<String> = grid
-        .into_iter()
-        .map(|row| row.into_iter().collect::<String>())
-        .collect();
-    (lines, framed_spans)
-}
-
-struct Particle {
-    row: usize,
-    col: usize,
-    glyph: char,
-}
-
-fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
-    let mut particles = Vec::new();
-    match species {
-        Species::Fuzz => {
-            // Tail flick: row 9 col 6, '~' when tick % 23 < 3.
-            if tick % 23 < 3 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 6,
-                    glyph: '~',
-                });
-            }
-        }
-        Species::Blob => {
-            if tick % 19 < 3 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 4,
-                    glyph: '.',
-                });
-            }
-            if tick % 23 < 4 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 6,
-                    glyph: '\u{b0}',
-                });
-            }
-            if tick % 17 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 8,
-                    glyph: '.',
-                });
-            }
-        }
-        Species::Ghost => {
-            if tick % 13 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 5,
-                    glyph: '~',
-                });
-            }
-            if tick % 19 < 4 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 7,
-                    glyph: '\u{b7}',
-                });
-            }
-            if tick % 21 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 3,
-                    glyph: '\'',
-                });
-            }
-            if tick % 17 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 9,
-                    glyph: '.',
-                });
-            }
-        }
-        Species::Glitch => {
-            // Scan line: only at tick % 41 == 0, draw a single cell.
-            if tick.is_multiple_of(41) {
-                let row = ((tick / 41) as usize) % FRAME_HEIGHT;
-                let col = ((tick / 41) as usize) % FRAME_WIDTH;
-                particles.push(Particle {
-                    row,
-                    col,
-                    glyph: '\u{2592}',
-                });
-            }
-            if tick % 11 < 2 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 2,
-                    glyph: '\u{2592}',
-                });
-            }
-            if tick % 13 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 4,
-                    glyph: '\u{2591}',
-                });
-            }
-            if tick % 17 < 2 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 10,
-                    glyph: '\u{2593}',
-                });
-            }
-        }
-        Species::Crystal => {
-            if tick % 23 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 1,
-                    glyph: '\u{2727}',
-                });
-            }
-            if tick % 19 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 11,
-                    glyph: '\u{2726}',
-                });
-            }
-            if tick % 21 < 3 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 1,
-                    glyph: '\u{2727}',
-                });
-            }
-            if tick % 17 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 11,
-                    glyph: '\u{b7}',
-                });
-            }
-            if tick % 27 < 3 {
-                particles.push(Particle {
-                    row: 5,
-                    col: 0,
-                    glyph: '\u{2727}',
-                });
-            }
-        }
-        Species::Mech => {
-            // LED at row 0 col 6: '●' when tick % 4 < 2 else '○'.
-            let led_glyph = if tick % 4 < 2 { '\u{25cf}' } else { '\u{25cb}' };
-            particles.push(Particle {
-                row: 0,
-                col: 6,
-                glyph: led_glyph,
-            });
-            if tick % 9 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 4,
-                    glyph: '~',
-                });
-            }
-            if tick % 11 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 8,
-                    glyph: '\u{b0}',
-                });
-            }
-        }
-    }
-    particles
-}
-
 fn stage_name(stage: Stage) -> &'static str {
     match stage {
         Stage::S0 => "s0",
@@ -632,5 +214,66 @@ fn stage_name(stage: Stage) -> &'static str {
         Stage::S4 => "s4",
         Stage::S5 => "s5",
         Stage::S6 => "s6",
+    }
+}
+
+#[cfg(test)]
+mod render_v2_tests {
+    use super::*;
+    use crate::game::evolution::Stage;
+    use crate::game::metabolism::Mood;
+    use crate::pet::generation::generate_pet;
+
+    #[test]
+    fn render_pet_produces_braille_lines() {
+        let pet = generate_pet("test-seed-1");
+        let r = render_pet(
+            &pet,
+            Stage::S0,
+            Mood::Content,
+            AnimationFrame {
+                tick: 0,
+                blink_suppression_ticks: 0,
+            },
+        );
+        assert!(!r.lines.is_empty());
+        let has_braille = r
+            .lines
+            .iter()
+            .any(|l| l.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32))));
+        assert!(
+            has_braille,
+            "expected at least one braille char in rendered lines"
+        );
+    }
+
+    #[test]
+    fn render_pet_deterministic_for_fixed_frame() {
+        let pet = generate_pet("test-seed-2");
+        let frame = AnimationFrame {
+            tick: 5,
+            blink_suppression_ticks: 0,
+        };
+        let a = render_pet(&pet, Stage::S1, Mood::Content, frame);
+        let b = render_pet(&pet, Stage::S1, Mood::Content, frame);
+        assert_eq!(a.lines, b.lines);
+        assert_eq!(a.spans, b.spans);
+    }
+
+    #[test]
+    fn render_pet_two_seeds_differ() {
+        // generate_pet picks species deterministically from seed; with two
+        // very different seeds we expect different rendered outputs even if
+        // they collide on species occasionally.
+        let pet_a = generate_pet("seed-aaa");
+        let pet_b = generate_pet("seed-zzz");
+        let frame = AnimationFrame {
+            tick: 0,
+            blink_suppression_ticks: 0,
+        };
+        let a = render_pet(&pet_a, Stage::S2, Mood::Content, frame);
+        let b = render_pet(&pet_b, Stage::S2, Mood::Content, frame);
+        // Either lines differ or spans differ — output should not be identical.
+        assert!(a.lines != b.lines || a.spans != b.spans);
     }
 }
