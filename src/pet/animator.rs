@@ -284,17 +284,19 @@ fn species_breath_rhythm_decis(species: Option<Species>) -> (i64, i64) {
 }
 
 /// Deterministic ±1 column offset for the pet's idle-wander animation.
-/// Returns -1, 0, or +1 based on the current wall clock so the pet appears
-/// to drift slowly side-to-side rather than sit pinned in its column.
+/// Returns -1, 0, or +1 based on the current wall clock. Tuned to read as
+/// slow drift rather than periodic stepping: the pet sits centered for
+/// long stretches and takes brief excursions to either side.
 ///
-/// 8-step wave cycling every 16 seconds (2 seconds per step):
-///   0 → 0 → +1 → +1 → 0 → 0 → -1 → -1 → repeat
+/// 8-step wave at 8 seconds per step (64s full cycle). Six of the eight
+/// steps are 0 (rest), one is +1, one is -1, so the pet is centered ~75%
+/// of the time and the excursions feel like gentle floating rather than
+/// rhythmic hops.
 pub fn compute_wander_offset(now: time::OffsetDateTime) -> i8 {
-    let step = now.unix_timestamp().rem_euclid(16) / 2;
+    let step = now.unix_timestamp().rem_euclid(64) / 8;
     match step {
-        0 | 1 | 4 | 5 => 0,
-        2 | 3 => 1,
-        6 | 7 => -1,
+        2 => 1,
+        6 => -1,
         _ => 0,
     }
 }
@@ -458,12 +460,30 @@ mod tests {
         use time::macros::datetime;
         let mut seen = std::collections::HashSet::new();
         let start = datetime!(2026-05-11 12:00:00 UTC);
-        for s in 0..16 {
+        for s in 0..64 {
             let v = compute_wander_offset(start + time::Duration::seconds(s));
             assert!((-1..=1).contains(&v), "got {v}");
             seen.insert(v);
         }
         assert_eq!(seen.len(), 3, "should visit -1, 0, and +1 across a cycle");
+    }
+
+    #[test]
+    fn wander_rests_at_center_most_of_the_time() {
+        use time::macros::datetime;
+        let start = datetime!(2026-05-11 12:00:00 UTC);
+        let mut rest_seconds = 0;
+        for s in 0..64 {
+            if compute_wander_offset(start + time::Duration::seconds(s)) == 0 {
+                rest_seconds += 1;
+            }
+        }
+        // Should be 75% rest (48 out of 64 seconds) so the motion reads as
+        // drift, not as periodic stepping.
+        assert!(
+            rest_seconds >= 48,
+            "expected ≥75% rest, got {rest_seconds}/64"
+        );
     }
 
     #[test]
