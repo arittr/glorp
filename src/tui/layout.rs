@@ -537,12 +537,6 @@ fn render_pet_panel_rows<'a>(
     out
 }
 
-/// Tallest body the wide layout uses, in rows including both chrome rails.
-/// Sized to fit the natural content (pet + vitals on the left, today + 7-day
-/// + feed + helpers on the right) with single-row gaps. Taller terminals pad
-/// above and below so the frame stays tight rather than stretching content.
-const MAX_WIDE_HEIGHT: u16 = 24;
-
 pub fn render_watch_frame_with_capability(
     frame: &mut Frame<'_>,
     vm: &WatchViewModel,
@@ -558,17 +552,10 @@ pub fn render_watch_frame_with_capability(
     if (area.width as usize) < COMPACT_THRESHOLD {
         render_compact(frame, area, vm, capability, &styles);
     } else {
-        // Cap body height so a tall terminal centers the frame vertically
-        // instead of stretching content with blank rows.
-        let target_height = MAX_WIDE_HEIGHT.min(area.height);
-        let frame_y = area.y + area.height.saturating_sub(target_height) / 2;
-        let frame_rect = Rect {
-            x: area.x,
-            y: frame_y,
-            width: area.width,
-            height: target_height,
-        };
-        render_wide(frame, frame_rect, vm, capability, &styles);
+        // Frame fills the terminal. Content packs to the top with single-row
+        // section gaps; remaining body height becomes trailing blank rows
+        // before the bottom chrome.
+        render_wide(frame, area, vm, capability, &styles);
     }
 }
 
@@ -1013,6 +1000,11 @@ mod render_wide_tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// Tall enough to fit the fixture content (~17 rows) with trailing blanks
+    /// padded to the frame bottom; tests exercise the wide layout's "fill
+    /// terminal height" behavior.
+    const TEST_HEIGHT: u16 = 30;
+
     fn render_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1032,9 +1024,9 @@ mod render_wide_tests {
 
     #[test]
     fn render_wide_draws_rounded_frame_at_natural_width() {
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, TEST_HEIGHT);
         let top = row_string(&buf, 0);
-        let bottom = row_string(&buf, (MAX_WIDE_HEIGHT - 1) as u16);
+        let bottom = row_string(&buf, (TEST_HEIGHT - 1) as u16);
         let right_rail = (COMPACT_THRESHOLD - 1) as u16;
         assert!(
             top.starts_with("┏━"),
@@ -1043,7 +1035,7 @@ mod render_wide_tests {
         assert!(top.ends_with('┓'), "top row should end with ┓");
         assert!(bottom.starts_with("┗━"));
         assert!(bottom.ends_with('┛'));
-        for y in 1..(MAX_WIDE_HEIGHT - 1) as u16 {
+        for y in 1..(TEST_HEIGHT - 1) as u16 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail");
             assert_eq!(buf[(right_rail, y)].symbol(), "┃", "row {y} right rail");
         }
@@ -1054,14 +1046,14 @@ mod render_wide_tests {
         // Frame fills the terminal above COMPACT_THRESHOLD; right column
         // flexes to RIGHT_COL_MAX; any further surplus is outer padding.
         let test_width: u16 = 140;
-        let buf = render_buffer(test_width, MAX_WIDE_HEIGHT);
+        let buf = render_buffer(test_width, TEST_HEIGHT);
         let right_rail = test_width - 1;
         assert_eq!(buf[(0u16, 0u16)].symbol(), "┏");
         assert_eq!(buf[(right_rail, 0u16)].symbol(), "┓");
-        let bottom_row = MAX_WIDE_HEIGHT - 1;
+        let bottom_row = TEST_HEIGHT - 1;
         assert_eq!(buf[(0u16, bottom_row)].symbol(), "┗");
         assert_eq!(buf[(right_rail, bottom_row)].symbol(), "┛");
-        for y in 1..(MAX_WIDE_HEIGHT - 1) as u16 {
+        for y in 1..(TEST_HEIGHT - 1) as u16 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail broken");
             assert_eq!(
                 buf[(right_rail, y)].symbol(),
@@ -1073,8 +1065,8 @@ mod render_wide_tests {
 
     #[test]
     fn every_body_row_fills_terminal_width_exactly() {
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
-        for y in 0..MAX_WIDE_HEIGHT as u16 {
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, TEST_HEIGHT);
+        for y in 0..TEST_HEIGHT as u16 {
             let row = row_string(&buf, y);
             assert_eq!(
                 row.chars().count(),
@@ -1089,11 +1081,11 @@ mod render_wide_tests {
         // The right column section dividers (today, 7-day, feed, helpers)
         // should each end at the right edge of the right column, with the
         // outer right pad as space before the rail.
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, TEST_HEIGHT);
         // Right column ends at: 1 (left rail) + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL - 1
         let right_col_end = (1 + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL - 1) as u16;
         let mut divider_rows: Vec<u16> = Vec::new();
-        for y in 0..MAX_WIDE_HEIGHT {
+        for y in 0..TEST_HEIGHT {
             let row = row_string(&buf, y);
             if row.contains("─ today ")
                 || row.contains("─ 7-day ")
@@ -1123,11 +1115,11 @@ mod render_wide_tests {
 
     #[test]
     fn pet_art_fits_inside_left_column_without_overflow() {
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, TEST_HEIGHT);
         // Cells at the gutter (between LEFT_COL end and GUTTER start) should
         // be blank space or a divider dash — never pet content overflowing.
         let gutter_start = (1 + LEFT_PAD + LEFT_COL) as u16;
-        for y in 1..(MAX_WIDE_HEIGHT - 1) as u16 {
+        for y in 1..(TEST_HEIGHT - 1) as u16 {
             for offset in 0..(GUTTER as u16) {
                 let gutter = buf[(gutter_start + offset, y)].symbol();
                 assert!(
