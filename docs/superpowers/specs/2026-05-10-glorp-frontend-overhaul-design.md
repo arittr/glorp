@@ -75,19 +75,20 @@ Stage sizes (pixels → braille char dimensions):
    - Multiplied by seeded coherent noise (one octave) to perturb the envelope so two pets with the same overall shape still differ in detail.
 2. Threshold `p(x, y) > body_density` → boolean fill. Reject samples where total filled pixels fall below a per-stage minimum; re-sample with adjusted density up to a small retry cap.
 3. Mirror the left half to the right half. Bilateral symmetry is guaranteed for the core silhouette.
-4. Add ornaments. The `asymmetry_seed` drives 0–2 asymmetric features (single antenna, side curl) and 0–`ornament_density × stage_max` symmetric ornaments (matched antennae, fin pairs). Ornaments are pixel patterns drawn from a small algorithmic catalogue, not authored art.
+4. Add ornaments as a separate overlay layer (the core silhouette stays symmetric). The `asymmetry_seed` drives 0–2 asymmetric ornaments (single antenna, side curl) and 0–`ornament_density × stage_max` symmetric ornaments (matched antennae, fin pairs). Ornaments attach to the silhouette edge, never replace body pixels. Asymmetric ornaments are bounded so the pet still reads as a coherent creature — a single fin on one side, not a chaotic protrusion field. Ornaments are pixel patterns drawn from a small algorithmic catalogue (rectangles, hooks, dots), not authored art.
 5. Reserve eye-anchor cells. The head zone always contains two anchor positions (one per eye) that body pixels are forbidden from filling. These anchors are where feature glyphs overlay during rendering.
 
 ### Aesthetic biases ("stay cute" constants)
 
-Tunable constants in `pet/generate.rs::AESTHETIC`, all subject to spike tuning:
-- Symmetry: always.
+Tunable constants in `pet/generate.rs::AESTHETIC`. These are **starting values for the Phase 0 spike**, not final — every constant is expected to shift during tuning. Final values land with the Phase 1 implementation.
+
+- Symmetry: always (load-bearing, not tuned).
 - `MIN_ROUNDNESS = 0.45` — prevents stringy or fragmented bodies.
 - `MAX_TAPER = 0.75` — prevents pinched corners that look broken.
 - `HEAD_ZONE_MIN_RATIO = 0.30` — ensures a recognisable head region.
-- `MIN_FILLED_PIXELS_RATIO = 0.55` — rejects sparse silhouettes.
+- `MIN_FILLED_PIXELS_RATIO = 0.35` — rejects sparse silhouettes (lower bound; real creatures rarely fill more than ~50% of their bounding box).
 - `MAX_ORNAMENT_DENSITY[stage]` — `[0.10, 0.25, 0.45]` for s0/s1/s2.
-- `EYE_ANCHOR_RESERVATION = 2×4 px` per eye (one full Braille character cell) — body pixels cannot occupy these cells, so eye glyphs always have a clean canvas.
+- `EYE_ANCHOR_RESERVATION = 2×4 px` per eye (one full Braille character cell) — body pixels cannot occupy these cells, so eye glyphs always have a clean canvas (load-bearing, not tuned).
 
 ### Per-species variation
 
@@ -126,7 +127,12 @@ The static (pre-animation) renderer output stays in the existing `RenderedPet { 
 
 ### Aesthetic validation gate
 
-Phase 0 of the migration ships a standalone `examples/pet_gallery.rs` binary that generates 50 pets across species × stages and prints them in a grid. The gate criterion is subjective: ≥70% of generated pets read as intentional creatures. If the gate fails, the fallback is compositional parts — a small authored part library (heads, bodies, eye-pairs, accents) procedurally composed. The rest of this design (animation, layout, transitions) is unaffected by which generation strategy lands.
+Phase 0 of the migration ships a standalone `examples/pet_gallery.rs` binary that generates 50 pets across species × stages and prints them in a grid. The gate has two criteria; both must pass:
+
+1. **Zero visually broken pets** in a sample of 50. Broken means: disconnected blobs, sub-minimum body area, missing eye anchors, sharp rectangular outlines, or any silhouette that doesn't read as a single creature.
+2. **≥85% read as intentional creatures** (cute or characterful) on visual inspection. The remaining ≤15% may read as "weird but plausible" — odd but still creature-shaped.
+
+If criterion 1 fails, fix the algorithm or rejection rules until it passes — broken pets are not negotiable. If criterion 2 fails after a tuning pass, the fallback is compositional parts: a small authored part library (heads, bodies, eye-pairs, accents) procedurally composed. The rest of this design (animation, layout, transitions) is unaffected by which generation strategy lands.
 
 ## Pet animation
 
@@ -169,7 +175,7 @@ struct PetFrame {
    - **Stage-up** (~800 ms): old bitmap held for ~200 ms with a brightening flash, then `evolve` transition (chars morph through random intermediates) into the new bitmap, then `sweep_in` settle.
    - **Feed pulse** (~400 ms): left-to-right `wave` highlight across the body; a small floating `+` particle drifts up from the mouth for ~6 ticks via the existing particle plumbing.
    - **Low-energy droop** (continuous): `darken` + `desaturate` applied with intensity `1 - energy_fraction`. Visible over hours of inactivity.
-5. **Mouse-tracked eyes** (crossterm mouse events, no library). When `glorp watch` receives a `MouseEvent` whose coordinates fall within the pet panel's rect, the eye overlay glyph swaps based on cursor x relative to pet center (`< <`, `o o`, `> >`). Mouse Y can tilt eyes via additional glyph variants. Falls back to the neutral glyph when the cursor leaves the area. Requires `EnableMouseCapture` at terminal init, guarded by capability check.
+5. **Mouse-tracked eyes** (crossterm mouse events, no library). When `glorp watch` receives a `MouseEvent` whose coordinates fall within the pet panel's rect, the eye overlay glyph swaps based on cursor x relative to pet center (`< <`, `o o`, `> >`). Falls back to the neutral glyph when the cursor leaves the area. Requires `EnableMouseCapture` at terminal init, guarded by capability check. A new watch-mode key `m` toggles mouse tracking at runtime so users in tmux or terminals where mouse capture interferes with text selection can disable it without leaving the app. (Y-axis tracking is a future possibility but out of scope for this overhaul — keep the feature minimal until we see how it lands.)
 
 ### Render integration
 
@@ -227,10 +233,10 @@ Below ~10 rows, the dispatcher falls back to a minimal rendering: pet art + sing
 
 - Outer rounded border via `Block::bordered().border_type(BorderType::Rounded)`. Replaces `box_with_chrome`.
 - Inner padding via `Block::padding(Padding::new(2, 2, 1, 1))`. Replaces manual 4-space pads.
-- Section dividers become `Block::default().borders(Borders::TOP)` on each downstream panel. Replaces `section_divider()`.
+- Section dividers become `Block::default().borders(Borders::TOP).title(format!(" {} ", label))` on each downstream panel — the title sits on the top border line and reads as `─── vitals ───`. Replaces `section_divider()`.
 - `Stylize` trait used throughout for style construction (`"foo".bold().fg(color)`), in preference to manual `Style::default().fg(...).add_modifier(...)` chains.
 - Existing `SemanticStyles` struct retained as-is — verbose but clear. Existing bar gradients (`BAR_RAMP_GOOD`, `BAR_RAMP_ACCENT`) retained.
-- Adaptive palette: a single `terminal-light` query at app init picks dark vs light. Today's hardcoded dark palette becomes the dark variant; a light variant is authored (same OkLCH roles, inverted lightness anchors). The query is a one-shot; no re-detection.
+- Adaptive palette (optional, Phase 6 polish — see Migration sequence): a single `terminal-light` query at app init picks dark vs light. Today's hardcoded dark palette becomes the dark variant; a light variant is authored using the same OkLCH role structure with inverted lightness anchors. The query is a one-shot; no re-detection. Dark ships unconditionally; the light variant ships only if it can be authored to the same aesthetic quality as the dark one.
 
 ### Deletions
 
@@ -253,9 +259,9 @@ Each phase is independently shippable. Order:
 
 ### Phase 0 — Procedural pet spike (gate)
 
-New `examples/pet_gallery.rs`, standalone, no ratatui. Generates and prints 50 pets across species × stages. Iterate on `AESTHETIC` constants until ≥70% read as intentional creatures.
+New `examples/pet_gallery.rs`, standalone, no ratatui. Generates and prints 50 pets across species × stages. Iterate on `AESTHETIC` constants until both gate criteria pass (see Pet generation → Aesthetic validation gate): zero broken pets, ≥85% read as intentional creatures.
 
-**Gate decision:** if the criterion passes, proceed to Phase 1. If it fails, replace the generation algorithm with compositional parts (small authored part library + procedural composition) before proceeding. Phases 2–6 are not affected by the choice.
+**Gate decision:** if both criteria pass, proceed to Phase 1. If only criterion 1 (no broken) passes but criterion 2 falls short after tuning, replace the generation algorithm with compositional parts (small authored part library + procedural composition) before proceeding. Phases 2–6 are not affected by which generation strategy lands.
 
 ### Phase 1 — Pet rendering replacement
 
@@ -266,6 +272,8 @@ New `examples/pet_gallery.rs`, standalone, no ratatui. Generates and prints 50 p
 - New snapshot tests for the generator (deterministic per seed).
 
 ### Phase 2 — Layout overhaul
+
+Independent of Phase 1 — `PetPanel` is defined against the `RenderedPet` shape, which is stable across the old (authored template) and new (procedural) generators. If Phase 2 ships first, `PetPanel` renders today's pet art; when Phase 1 lands, the same panel renders generated pets without code change.
 
 - Introduce the `Panel` trait + `src/tui/panels/` module.
 - Migrate panels one at a time, simplest first: `PetPanel`, `VitalsPanel`, `TodayPanel`, `SparkPanel`, `FeedPanel`, `HelpersPanel`. Each migration is its own commit. App stays working between commits.
@@ -333,12 +341,12 @@ New `examples/pet_gallery.rs`, standalone, no ratatui. Generates and prints 50 p
 1. **Procedural cuteness.** The Phase 0 gate exists because procedural generation can produce visually weird creatures. Mitigation: explicit aesthetic biases (symmetry, roundness, head/body structure, eye anchors, taper), spike before committing, fallback to compositional parts if the gate fails.
 2. **Per-cell palette role assignment for procedural bitmaps.** Today's role assignment is authored per template cell. The new generator must assign roles algorithmically by region (head zone → eye/body, ornament cells → accent, body interior → body, mouth region → mouth). Risk that automatic assignment produces visually muddy color regions. Mitigation: per-species role-region rules tuned during spike.
 3. **Tachyonfx coexistence with the buffer-level rendering ratatui uses.** Tachyonfx is now a ratatui-org crate so the integration is supported, but glorp's snapshot tests assert on buffers. Transitions are temporal — their assertions need to be against discrete intermediate frames, not state-free. Mitigation: snapshot tests run the animator at fixed tick offsets and assert the buffer at each.
-4. **Mouse capture compatibility.** `EnableMouseCapture` works in most terminals but interferes with native selection in some. Mitigation: gate behind a config toggle; default on; document the trade-off.
+4. **Mouse capture compatibility.** `EnableMouseCapture` works in most terminals but interferes with native text selection (most visible in tmux). Mitigation: enable by default where the terminal supports it, expose a new watch-mode key `m` to toggle mouse tracking at runtime, and document the toggle in `?` help.
 5. **Existing pets look different after migration.** Each saved pet's seed regenerates a different-looking creature. This is a one-time visible change. Mitigation: communicate clearly in release notes ("your pet got a glow-up; same name, same age, same trajectory, new look").
 6. **Spike scope creep.** Phase 0 must remain a throwaway. Mitigation: hard cap at ~200 LOC, no ratatui dependency, no integration with existing modules. The output is a printed grid plus a go/no-go decision, nothing else.
 
 ## Open questions
 
-- Light-palette OkLCH anchors are not yet authored. Phase 6 needs them designed before the `terminal-light` adaptive switch ships. If a clean light palette can't be authored quickly, ship the dark palette unconditionally and defer adaptive theming.
-- Tachyonfx version pin and feature flags — defer until Phase 4 implementation begins.
+- Tachyonfx version pin and feature flags — defer until Phase 4 implementation begins; pin to whatever's current then.
 - Exact glyph subsets per stage and species — finalised during Phase 0 spike, captured in `pet/generate.rs::SPECIES`.
+- Stage-up transition memory model — the morph effect needs both the previous-stage bitmap and the new-stage bitmap held simultaneously for ~800 ms. Confirm during Phase 4 whether `PetAnimator` holds them inline or whether tachyonfx's `evolve` primitive takes ownership.
