@@ -402,6 +402,39 @@ fn source_health_rows_render_ready_and_diagnostic_states_together() {
 }
 
 #[test]
+fn p_key_pets_pet_and_sets_speech_bubble() {
+    let mut vm = WatchViewModel::fixture();
+    vm.happiness = 0.5;
+    vm.energy = 0.5;
+    vm.current_speech = None;
+    let mut app = WatchApp::with_config(
+        vm,
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
+        },
+    );
+    app.handle_key_for_test(KeyCode::Char('p'), KeyEventKind::Press)
+        .unwrap();
+    let after = app.view_model_for_test();
+    assert!(
+        after.current_speech.is_some(),
+        "petting should set a speech bubble"
+    );
+    assert!(
+        after.happiness > 0.5,
+        "petting should bump happiness, got {}",
+        after.happiness
+    );
+    assert!(
+        after.energy > 0.5,
+        "petting should bump energy, got {}",
+        after.energy
+    );
+}
+
+#[test]
 fn question_mark_toggles_help_overlay() {
     let mut app = WatchApp::with_config(
         WatchViewModel::fixture(),

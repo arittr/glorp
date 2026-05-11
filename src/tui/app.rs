@@ -75,6 +75,12 @@ pub struct WatchApp {
     evolution_overlay_started_at: Option<Instant>,
     pet_animator: PetAnimator,
     last_frame_time: Option<Instant>,
+    /// Wall-clock instant of the last 'p' press; drives a transient speech
+    /// bubble override and happiness bump in the watch view.
+    pet_petted_at: Option<Instant>,
+    /// The phrase chosen at the moment of the last 'p' press, held until
+    /// the petting bubble window expires.
+    petting_phrase: Option<String>,
 }
 
 /// Faster tick rate used while tachyonfx effects are active. ~60 fps target.
@@ -126,6 +132,8 @@ impl WatchApp {
             evolution_overlay_started_at: None,
             pet_animator: PetAnimator::new(),
             last_frame_time: None,
+            pet_petted_at: None,
+            petting_phrase: None,
         }
     }
 
@@ -156,6 +164,10 @@ impl WatchApp {
             // Drain any completed poll result before drawing so the new vm is
             // visible this frame.
             self.try_collect_poll_result()?;
+
+            // Reassert any in-flight petting bubble after the worker poll
+            // may have replaced vm.current_speech.
+            self.apply_pet_petted_override();
 
             // Update the pet animator with the latest view model. This may
             // enqueue mood-fade / stage-up / feed-pulse / hatch effects.
@@ -281,7 +293,42 @@ impl WatchApp {
                 self.last_poll = Some(Instant::now());
                 Ok(false)
             }
+            KeyCode::Char('p') => {
+                self.pet_the_pet();
+                Ok(false)
+            }
             _ => Ok(false),
+        }
+    }
+
+    /// Trigger the petting interaction: choose a reaction phrase, override
+    /// the visible speech bubble for a few seconds, and give vitals a small
+    /// transient lift. Non-persistent — the next worker poll restores the
+    /// real PetState happiness/energy from disk.
+    fn pet_the_pet(&mut self) {
+        let now_wall = time::OffsetDateTime::now_utc();
+        let phrase = crate::pet::speech::pick_petting_phrase(now_wall);
+        self.vm.current_speech = Some(phrase.clone());
+        self.petting_phrase = Some(phrase);
+        self.pet_petted_at = Some(Instant::now());
+        self.vm.happiness = (self.vm.happiness + 0.08).min(1.0);
+        self.vm.energy = (self.vm.energy + 0.04).min(1.0);
+    }
+
+    /// Reassert the petting speech override on each frame while the bubble
+    /// window is still open. Without this, the regular worker poll would
+    /// replace `vm.current_speech` with the mood-derived line.
+    fn apply_pet_petted_override(&mut self) {
+        let Some(started_at) = self.pet_petted_at else {
+            return;
+        };
+        if started_at.elapsed() < crate::pet::speech::PETTING_BUBBLE_VISIBLE {
+            if let Some(phrase) = self.petting_phrase.as_deref() {
+                self.vm.current_speech = Some(phrase.to_string());
+            }
+        } else {
+            self.pet_petted_at = None;
+            self.petting_phrase = None;
         }
     }
 
