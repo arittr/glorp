@@ -64,6 +64,51 @@ impl SpikeRng {
     }
 }
 
+// ============================================================================
+// Part types for compositional bitmap authoring.
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PartId(pub u16);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchor {
+    HeadCenter,   // head part centered horizontally, top of grid
+    BodyCenter,   // body part centered horizontally, below head zone
+    HeadTop,      // accessory attaches to top edge of head part
+    BodySide,     // accessory attaches to side of body part
+    BodyBottom,   // accessory attaches to bottom of body part
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartSymmetry {
+    Symmetric,      // pixels drawn as a whole symmetric shape
+    HalfMirror,     // pixels are the left half; composer mirrors to right
+    AsymmetricFree, // pixels are placed once, no mirror (e.g., single antenna)
+}
+
+/// A small authored bitmap pattern with metadata for composition.
+/// Pixels are stored row-major in `rows`: each u32 represents one row, with
+/// bit 0 (lsb) = column 0 of that row. `width_px` columns, `rows.len()` rows.
+pub struct Part {
+    pub id: PartId,
+    pub rows: &'static [u32],
+    pub width_px: u8,
+    pub height_px: u8,
+    pub anchor: Anchor,
+    pub min_stage: Stage,
+    pub symmetry: PartSymmetry,
+    pub eye_anchors: Option<EyeAnchors>, // present on head parts only
+}
+
+pub struct PartCatalog {
+    pub heads: &'static [Part],
+    pub bodies: &'static [Part],
+    pub accessories: &'static [Part],
+}
+
+// ============================================================================
+
 /// Constants that survived the parts pivot.
 pub mod aesthetic {
     pub const EYE_ANCHOR_W_PX: u8 = 2;
@@ -102,6 +147,17 @@ mod tests {
             let f = r.next_f32_unit();
             assert!((0.0..1.0).contains(&f), "out of bounds: {f}");
         }
+    }
+
+    #[test]
+    fn part_row_bit_decoding() {
+        // A part with one 4-pixel-wide row "1011" (col 0, 2, 3 on; col 1 off)
+        // should be encoded as 0b1101 (lsb is column 0).
+        let row: u32 = 0b1101;
+        assert!(row & 1 != 0, "col 0");
+        assert!(row & 2 == 0, "col 1");
+        assert!(row & 4 != 0, "col 2");
+        assert!(row & 8 != 0, "col 3");
     }
 }
 
