@@ -217,16 +217,16 @@ pub(crate) fn fnv1a64(input: &str) -> u64 {
 }
 
 #[derive(Debug, Clone)]
-struct StableRng {
+pub(crate) struct StableRng {
     state: u64,
 }
 
 impl StableRng {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self { state: seed.max(1) }
     }
 
-    fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         let mut x = self.state;
         x ^= x << 13;
         x ^= x >> 7;
@@ -235,8 +235,48 @@ impl StableRng {
         x
     }
 
-    fn next_usize(&mut self, upper: usize) -> usize {
+    pub(crate) fn next_usize(&mut self, upper: usize) -> usize {
         debug_assert!(upper > 0);
         (self.next_u64() as usize) % upper
+    }
+
+    pub(crate) fn next_f32_unit(&mut self) -> f32 {
+        ((self.next_u64() >> 40) as f32) / (1u32 << 24) as f32
+    }
+
+    pub(crate) fn next_bias(&mut self, p: f32) -> bool {
+        self.next_f32_unit() < p
+    }
+
+    pub(crate) fn next_signed_unit(&mut self) -> f32 {
+        self.next_f32_unit() * 2.0 - 1.0
+    }
+}
+
+#[cfg(test)]
+mod stable_rng_tests {
+    use super::*;
+    #[test]
+    fn next_f32_unit_in_range() {
+        let mut rng = StableRng::new(7);
+        for _ in 0..10_000 {
+            let f = rng.next_f32_unit();
+            assert!((0.0..1.0).contains(&f), "out of bounds: {f}");
+        }
+    }
+    #[test]
+    fn next_bias_obeys_distribution() {
+        let mut rng = StableRng::new(13);
+        let n = 10_000;
+        let hits = (0..n).filter(|_| rng.next_bias(0.30)).count() as f32 / n as f32;
+        assert!((0.27..0.33).contains(&hits), "p=0.30 should land near 0.30, got {hits}");
+    }
+    #[test]
+    fn next_signed_unit_in_signed_range() {
+        let mut rng = StableRng::new(21);
+        for _ in 0..1_000 {
+            let v = rng.next_signed_unit();
+            assert!((-1.0..=1.0).contains(&v));
+        }
     }
 }
