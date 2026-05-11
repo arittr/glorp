@@ -87,6 +87,18 @@ impl SpikeRng {
     }
 }
 
+/// Starting values for spike tuning. Per spec, expected to shift during Phase 0.
+pub mod aesthetic {
+    pub const MIN_ROUNDNESS: f32 = 0.45;
+    pub const MAX_TAPER: f32 = 0.75;
+    pub const HEAD_ZONE_MIN_RATIO: f32 = 0.30;
+    pub const MIN_FILLED_PIXELS_RATIO: f32 = 0.35;
+    pub const MAX_ORNAMENT_DENSITY: [f32; 3] = [0.10, 0.25, 0.45]; // s0, s1, s2
+    pub const EYE_ANCHOR_W_PX: u8 = 2;
+    pub const EYE_ANCHOR_H_PX: u8 = 4;
+    pub const RESAMPLE_RETRY_CAP: u8 = 6;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +129,17 @@ mod tests {
             let f = r.next_f32_unit();
             assert!((0.0..1.0).contains(&f), "out of bounds: {f}");
         }
+    }
+}
+
+#[cfg(test)]
+mod aesthetic_tests {
+    use super::aesthetic::*;
+    #[test]
+    fn aesthetic_constants_in_unit_range() {
+        for v in [MIN_ROUNDNESS, MAX_TAPER, HEAD_ZONE_MIN_RATIO, MIN_FILLED_PIXELS_RATIO] {
+            assert!((0.0..=1.0).contains(&v), "{v} out of range");
+        }
+        for v in MAX_ORNAMENT_DENSITY { assert!((0.0..=1.0).contains(&v)); }
     }
 }
