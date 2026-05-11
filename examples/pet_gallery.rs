@@ -467,6 +467,41 @@ impl SpikeRng {
     }
 }
 
+/// Convert a 2×4 pixel block (column-major) into the Unicode Braille glyph.
+///
+/// Bit mapping (per Unicode standard):
+///   dx=0,dy=0 → 0x01    dx=1,dy=0 → 0x08
+///   dx=0,dy=1 → 0x02    dx=1,dy=1 → 0x10
+///   dx=0,dy=2 → 0x04    dx=1,dy=2 → 0x20
+///   dx=0,dy=3 → 0x40    dx=1,dy=3 → 0x80
+pub fn braille_block(bm: &Bitmap, x0: u8, y0: u8) -> char {
+    let bit = |dx: u8, dy: u8, mask: u8| -> u8 {
+        if bm.get(x0 + dx, y0 + dy) { mask } else { 0 }
+    };
+    let mut byte: u8 = 0;
+    byte |= bit(0, 0, 0x01);
+    byte |= bit(0, 1, 0x02);
+    byte |= bit(0, 2, 0x04);
+    byte |= bit(0, 3, 0x40);
+    byte |= bit(1, 0, 0x08);
+    byte |= bit(1, 1, 0x10);
+    byte |= bit(1, 2, 0x20);
+    byte |= bit(1, 3, 0x80);
+    char::from_u32(0x2800 + byte as u32).unwrap()
+}
+
+/// Encode the full bitmap as braille lines. Each line is `width_px / 2` chars
+/// wide. There are `height_px / 4` lines.
+pub fn encode_braille(bm: &Bitmap) -> Vec<String> {
+    let mut lines = Vec::with_capacity((bm.h / 4) as usize);
+    for by in 0..(bm.h / 4) {
+        let mut line = String::with_capacity((bm.w / 2) as usize);
+        for bx in 0..(bm.w / 2) { line.push(braille_block(bm, bx * 2, by * 4)); }
+        lines.push(line);
+    }
+    lines
+}
+
 #[cfg(test)]
 mod silhouette_tests {
     use super::*;
@@ -570,5 +605,29 @@ mod async_tests {
         add_asymmetric_ornaments(&mut a, 7);
         add_asymmetric_ornaments(&mut b, 7);
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod braille_tests {
+    use super::*;
+    #[test]
+    fn empty_block_is_blank_braille() {
+        let bm = Bitmap::new(2, 4);
+        assert_eq!(braille_block(&bm, 0, 0), '\u{2800}');
+    }
+    #[test]
+    fn full_block_is_solid_braille() {
+        let mut bm = Bitmap::new(2, 4);
+        for y in 0..4 { for x in 0..2 { bm.set(x, y, true); }}
+        assert_eq!(braille_block(&bm, 0, 0), '\u{28FF}');
+    }
+    #[test]
+    fn encode_produces_expected_dims() {
+        let mut bm = Bitmap::new(14, 8);
+        for x in 0..14 { bm.set(x, 0, true); }
+        let lines = encode_braille(&bm);
+        assert_eq!(lines.len(), 2);
+        for l in &lines { assert_eq!(l.chars().count(), 7); }
     }
 }
