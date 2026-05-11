@@ -34,6 +34,18 @@ impl Species {
             Species::Mech => "mech",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Species> {
+        match s {
+            "fuzz" => Some(Species::Fuzz),
+            "blob" => Some(Species::Blob),
+            "ghost" => Some(Species::Ghost),
+            "glitch" => Some(Species::Glitch),
+            "crystal" => Some(Species::Crystal),
+            "mech" => Some(Species::Mech),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
