@@ -396,6 +396,60 @@ pub fn reserve_eye_anchors(bm: &mut Bitmap, anchors: EyeAnchors) {
     }
 }
 
+/// A small algorithmic pattern attached to the silhouette edge. Each pattern is
+/// a list of (dx, dy) offsets relative to a placement anchor.
+#[derive(Debug, Clone, Copy)]
+pub enum OrnamentKind { Dot, Antenna, Fin, Hook }
+
+pub fn ornament_pattern(kind: OrnamentKind) -> &'static [(i8, i8)] {
+    match kind {
+        OrnamentKind::Dot => &[(0, 0)],
+        OrnamentKind::Antenna => &[(0, 0), (0, -1), (0, -2)],
+        OrnamentKind::Fin => &[(0, 0), (1, 0), (1, 1)],
+        OrnamentKind::Hook => &[(0, 0), (1, 0), (1, -1)],
+    }
+}
+
+const SYM_ORNAMENT_KINDS: [OrnamentKind; 4] =
+    [OrnamentKind::Dot, OrnamentKind::Antenna, OrnamentKind::Fin, OrnamentKind::Hook];
+
+/// Apply 0..N symmetric ornament pairs along the silhouette top/side edges.
+/// `n_pairs` is bounded by ornament_density × stage_max upstream.
+pub fn add_symmetric_ornaments(
+    bm: &mut Bitmap,
+    rng: &mut SpikeRng,
+    n_pairs: u8,
+) {
+    for _ in 0..n_pairs {
+        let kind = SYM_ORNAMENT_KINDS[rng.next_usize_capped(SYM_ORNAMENT_KINDS.len())];
+        // Pick a column near the silhouette edge in the top half
+        let half_w = bm.w / 2;
+        let col = rng.next_usize_capped(half_w as usize) as u8;
+        let edge_y = find_top_filled(bm, col).unwrap_or(0);
+        place_ornament(bm, kind, col, edge_y, false);
+        place_ornament(bm, kind, bm.w - 1 - col, edge_y, true); // mirror
+    }
+}
+
+fn place_ornament(bm: &mut Bitmap, kind: OrnamentKind, ax: u8, ay: u8, mirror: bool) {
+    for &(dx, dy) in ornament_pattern(kind) {
+        let adx = if mirror { -dx } else { dx };
+        let nx = (ax as i32 + adx as i32).clamp(0, bm.w as i32 - 1) as u8;
+        let ny = (ay as i32 + dy as i32).clamp(0, bm.h as i32 - 1) as u8;
+        bm.set(nx, ny, true);
+    }
+}
+
+fn find_top_filled(bm: &Bitmap, x: u8) -> Option<u8> {
+    (0..bm.h).find(|&y| bm.get(x, y))
+}
+
+impl SpikeRng {
+    pub fn next_usize_capped(&mut self, upper: usize) -> usize {
+        if upper == 0 { 0 } else { (self.next_u64() as usize) % upper }
+    }
+}
+
 #[cfg(test)]
 mod silhouette_tests {
     use super::*;
@@ -458,5 +512,26 @@ mod anchor_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ornament_tests {
+    use super::*;
+    fn p() -> SilhouetteParams {
+        SilhouetteParams {
+            width_px: 14, height_px: 8, roundness: 0.55, taper: 0.55,
+            body_density: 0.55, asymmetry_seed: 0,
+            head_zone_ratio: 0.30, ornament_density: 0.10,
+        }
+    }
+    #[test]
+    fn symmetric_ornaments_preserve_symmetry() {
+        let mut bm = sample_silhouette(&p(), 1).unwrap();
+        let mut rng = SpikeRng::new(99);
+        add_symmetric_ornaments(&mut bm, &mut rng, 3);
+        for y in 0..bm.h { for x in 0..(bm.w / 2) {
+            assert_eq!(bm.get(x, y), bm.get(bm.w - 1 - x, y));
+        }}
     }
 }
