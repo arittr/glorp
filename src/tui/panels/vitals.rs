@@ -6,8 +6,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
 use crate::tui::style::{
-    ramp_index, semantic_styles, BarRamp, ColorCapability, SemanticStyles, BAR_RAMP_ACCENT,
-    BAR_RAMP_GOOD,
+    bar_ramp_accent, bar_ramp_good, ramp_index, semantic_styles, BarRamp, ColorCapability,
+    SemanticStyles,
 };
 use crate::tui::view_model::WatchViewModel;
 
@@ -43,29 +43,13 @@ fn build_vitals_lines<'a>(
         (vm.xp_current / vm.xp_target).clamp(0.0, 1.0)
     };
 
+    let good = bar_ramp_good();
+    let accent = bar_ramp_accent();
     vec![
-        Line::from(bar_spans("fed", vm.fed, BAR_RAMP_GOOD, capability, styles)),
-        Line::from(bar_spans(
-            "happy",
-            vm.happiness,
-            BAR_RAMP_ACCENT,
-            capability,
-            styles,
-        )),
-        Line::from(bar_spans(
-            "energy",
-            vm.energy,
-            BAR_RAMP_GOOD,
-            capability,
-            styles,
-        )),
-        Line::from(bar_spans(
-            "xp",
-            xp_fraction,
-            BAR_RAMP_ACCENT,
-            capability,
-            styles,
-        )),
+        Line::from(bar_spans("fed", vm.fed, good, capability, styles)),
+        Line::from(bar_spans("happy", vm.happiness, accent, capability, styles)),
+        Line::from(bar_spans("energy", vm.energy, good, capability, styles)),
+        Line::from(bar_spans("xp", xp_fraction, accent, capability, styles)),
     ]
 }
 
@@ -170,7 +154,7 @@ mod tests {
     #[test]
     fn vitals_bar_spans_zero_fill_has_twelve_empty_cells() {
         let styles = semantic_styles();
-        let spans = bar_spans("fed", 0.0, BAR_RAMP_GOOD, ColorCapability::Flat, &styles);
+        let spans = bar_spans("fed", 0.0, bar_ramp_good(), ColorCapability::Flat, &styles);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().filter(|c| *c == '░').count(), 12);
         assert_eq!(text.chars().filter(|c| *c == '█').count(), 0);
@@ -179,7 +163,7 @@ mod tests {
     #[test]
     fn vitals_bar_spans_full_fill_has_twelve_solid_cells() {
         let styles = semantic_styles();
-        let spans = bar_spans("fed", 1.0, BAR_RAMP_GOOD, ColorCapability::Flat, &styles);
+        let spans = bar_spans("fed", 1.0, bar_ramp_good(), ColorCapability::Flat, &styles);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().filter(|c| *c == '█').count(), 12);
     }
