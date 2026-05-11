@@ -7,14 +7,28 @@
 // generator into src/pet/generate.rs.
 
 fn main() {
-    println!("parts_gallery — Blob proof-of-concept\n");
-    for stage in [Stage::S0, Stage::S1, Stage::S2] {
-        for seed in [42u64, 99, 137, 7, 21] {
-            println!("--- Blob {stage:?} seed={seed} ---");
-            for line in generate_pet_lines(SpeciesK::Blob, stage, seed) {
-                println!("    {line}");
+    println!("parts_gallery — full 50-pet species-distinctness gate\n");
+    let species: [SpeciesK; 6] = [
+        SpeciesK::Fuzz, SpeciesK::Blob, SpeciesK::Ghost,
+        SpeciesK::Glitch, SpeciesK::Crystal, SpeciesK::Mech,
+    ];
+    let stages: [Stage; 3] = [Stage::S0, Stage::S1, Stage::S2];
+
+    let mut count: u32 = 0;
+    for sp in species {
+        for st in stages {
+            for seed_base in 0u64..3 {
+                if count >= 50 { return; }
+                let seed = (sp as u64).wrapping_mul(0x9e37)
+                    ^ (st as u64).wrapping_mul(0x7c15)
+                    ^ (seed_base * 137);
+                println!("--- #{count:02}  {sp:?}  {st:?}  seed={seed} ---");
+                for line in generate_pet_lines(sp, st, seed) {
+                    println!("    {line}");
+                }
+                println!();
+                count += 1;
             }
-            println!();
         }
     }
 }
@@ -846,10 +860,673 @@ mod blob {
 
 pub fn blob_catalog() -> PartCatalog { blob::catalog() }
 
+// =====================================================================
+// Mech species catalog
+// =====================================================================
+//
+// Mech aesthetic: blocky, rectangular, hard 90-degree edges. Heads have flat
+// tops; bodies are vertical rectangles. No rounded corners anywhere.
+
+mod mech {
+    use super::*;
+
+    pub static HEAD_RECT: Part = Part {
+        id: PartId(300),
+        rows: &[0b11111111, 0b11111111, 0b11111111, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_ANTENNA: Part = Part {
+        id: PartId(301),
+        rows: &[0b00011000, 0b11111111, 0b11111111, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_DOME_FLAT: Part = Part {
+        id: PartId(302),
+        rows: &[0b01111110, 0b11111111, 0b11111111, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    // Mech bodies: 10 px wide rectangles, flat tops/bottoms.
+    pub static BODY_BLOCK_S0: Part = Part {
+        id: PartId(400),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_SEGMENTED_S0: Part = Part {
+        id: PartId(401),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1000000001, 0b1111111111,
+            0b1111111111, 0b1000000001, 0b1111111111, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_BLOCK_TALL: Part = Part {
+        id: PartId(402),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_SEGMENTED_TALL: Part = Part {
+        id: PartId(403),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1000000001,
+            0b1111111111, 0b1111111111, 0b1000000001, 0b1111111111,
+            0b1111111111, 0b1000000001, 0b1111111111, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_BLOCK_HUGE: Part = Part {
+        id: PartId(404),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 16,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S2,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static HEADS: &[Part] = &[HEAD_RECT, HEAD_ANTENNA, HEAD_DOME_FLAT];
+    pub static BODIES: &[Part] = &[
+        BODY_BLOCK_S0, BODY_SEGMENTED_S0,
+        BODY_BLOCK_TALL, BODY_SEGMENTED_TALL,
+        BODY_BLOCK_HUGE,
+    ];
+
+    pub fn catalog() -> PartCatalog {
+        PartCatalog { heads: HEADS, bodies: BODIES, accessories: &[] }
+    }
+}
+
+pub fn mech_catalog() -> PartCatalog { mech::catalog() }
+
+// =====================================================================
+// Ghost species catalog
+// =====================================================================
+//
+// Ghost aesthetic: tall, wispy, narrower head, body tapers to nothing at the
+// bottom (no defined feet). Hollow/wave silhouettes.
+
+mod ghost {
+    use super::*;
+
+    pub static HEAD_VEIL: Part = Part {
+        id: PartId(500),
+        rows: &[0b00011000, 0b00111100, 0b01111110, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_HOLLOW: Part = Part {
+        id: PartId(501),
+        rows: &[0b00111100, 0b01100110, 0b11000011, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_SHARP: Part = Part {
+        id: PartId(502),
+        rows: &[0b00011000, 0b00111100, 0b01111110, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    // Ghost bodies: tapering, wavy bottoms (no defined feet).
+    pub static BODY_WAVE_S0: Part = Part {
+        id: PartId(600),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b0111111110, 0b0011111100,
+            0b0011111100, 0b0010110100, 0b0001100100, 0b0001010100,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_SMOKE_S0: Part = Part {
+        id: PartId(601),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b0111111110,
+            0b0011111100, 0b0001111000, 0b0011001100, 0b0010000100,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_WAVE_TALL: Part = Part {
+        id: PartId(602),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b0111111110, 0b0011111100, 0b0011111100,
+            0b0010111100, 0b0010110100, 0b0001100100, 0b0001000100,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_SMOKE_TALL: Part = Part {
+        id: PartId(603),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b0111111110, 0b0011111100,
+            0b0001111000, 0b0011001100, 0b0010000100, 0b0001000100,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_WAVE_HUGE: Part = Part {
+        id: PartId(604),
+        rows: &[
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b0111111110,
+            0b0111111110, 0b0011111100, 0b0011111100, 0b0010111100,
+            0b0010110100, 0b0001100100, 0b0001010100, 0b0001000100,
+        ],
+        width_px: 10,
+        height_px: 16,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S2,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static HEADS: &[Part] = &[HEAD_VEIL, HEAD_HOLLOW, HEAD_SHARP];
+    pub static BODIES: &[Part] = &[
+        BODY_WAVE_S0, BODY_SMOKE_S0,
+        BODY_WAVE_TALL, BODY_SMOKE_TALL,
+        BODY_WAVE_HUGE,
+    ];
+
+    pub fn catalog() -> PartCatalog {
+        PartCatalog { heads: HEADS, bodies: BODIES, accessories: &[] }
+    }
+}
+
+pub fn ghost_catalog() -> PartCatalog { ghost::catalog() }
+
+// =====================================================================
+// Crystal species catalog
+// =====================================================================
+//
+// Crystal aesthetic: faceted, geometric. Pointed/diamond heads, prism bodies
+// with angular sides.
+
+mod crystal {
+    use super::*;
+
+    pub static HEAD_DIAMOND: Part = Part {
+        id: PartId(700),
+        rows: &[0b00011000, 0b00111100, 0b01111110, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_HEX: Part = Part {
+        id: PartId(701),
+        rows: &[0b00111100, 0b01111110, 0b11111111, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_SHARD: Part = Part {
+        id: PartId(702),
+        rows: &[0b00011000, 0b00100100, 0b01000010, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    // Crystal bodies: diamond/prism silhouettes — narrow waist or sharp angles.
+    pub static BODY_PRISM_S0: Part = Part {
+        id: PartId(800),
+        rows: &[
+            0b0011111100, 0b0111111110, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b0111111110, 0b0011111100, 0b0001111000,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_FACET_S0: Part = Part {
+        id: PartId(801),
+        rows: &[
+            0b0111111110, 0b1111111111, 0b1111111111, 0b0111111110,
+            0b0011111100, 0b0111111110, 0b1111111111, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_PRISM_TALL: Part = Part {
+        id: PartId(802),
+        rows: &[
+            0b0011111100, 0b0111111110, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b0111111110, 0b0011111100,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_CLUSTER_TALL: Part = Part {
+        id: PartId(803),
+        rows: &[
+            0b0111111110, 0b1111111111, 0b1111111111, 0b0111111110,
+            0b0011111100, 0b0011111100, 0b0111111110, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b0111111110, 0b0011111100,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_PRISM_HUGE: Part = Part {
+        id: PartId(804),
+        rows: &[
+            0b0011111100, 0b0111111110, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b0111111110, 0b0011111100,
+        ],
+        width_px: 10,
+        height_px: 16,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S2,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static HEADS: &[Part] = &[HEAD_DIAMOND, HEAD_HEX, HEAD_SHARD];
+    pub static BODIES: &[Part] = &[
+        BODY_PRISM_S0, BODY_FACET_S0,
+        BODY_PRISM_TALL, BODY_CLUSTER_TALL,
+        BODY_PRISM_HUGE,
+    ];
+
+    pub fn catalog() -> PartCatalog {
+        PartCatalog { heads: HEADS, bodies: BODIES, accessories: &[] }
+    }
+}
+
+pub fn crystal_catalog() -> PartCatalog { crystal::catalog() }
+
+// =====================================================================
+// Glitch species catalog
+// =====================================================================
+//
+// Glitch aesthetic: fragmented, irregular, scan-line patterns, scattered
+// missing pixels. Reads as "broken creature."
+
+mod glitch {
+    use super::*;
+
+    pub static HEAD_FRAG: Part = Part {
+        id: PartId(900),
+        rows: &[0b01111110, 0b11011011, 0b11111111, 0b10111101],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_SCRAMBLE: Part = Part {
+        id: PartId(901),
+        rows: &[0b00111100, 0b11111111, 0b10100101, 0b11011011],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_NOISE: Part = Part {
+        id: PartId(902),
+        rows: &[0b01101110, 0b11101111, 0b10111101, 0b11011011],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    // Glitch bodies: scan-line patterns, scattered gaps.
+    pub static BODY_SCAN_S0: Part = Part {
+        id: PartId(1000),
+        rows: &[
+            0b1111111111, 0b0000000000, 0b1111111111, 0b1111111111,
+            0b0011111100, 0b1111111111, 0b0000000000, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_FRAG_S0: Part = Part {
+        id: PartId(1001),
+        rows: &[
+            0b1111111111, 0b1011011101, 0b1111111111, 0b1101110111,
+            0b1111111111, 0b1011101101, 0b1111111111, 0b1110111011,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_SCAN_TALL: Part = Part {
+        id: PartId(1002),
+        rows: &[
+            0b1111111111, 0b0000000000, 0b1111111111, 0b1111111111,
+            0b0011111100, 0b1111111111, 0b0000000000, 0b1111111111,
+            0b1111111111, 0b0011111100, 0b1111111111, 0b0000000000,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_FRAG_TALL: Part = Part {
+        id: PartId(1003),
+        rows: &[
+            0b1111111111, 0b1011011101, 0b1111111111, 0b1101110111,
+            0b1111111111, 0b1011101101, 0b1111111111, 0b1110111011,
+            0b1111111111, 0b1011011101, 0b1111111111, 0b1101110111,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_SCAN_HUGE: Part = Part {
+        id: PartId(1004),
+        rows: &[
+            0b1111111111, 0b0000000000, 0b1111111111, 0b1111111111,
+            0b0011111100, 0b1111111111, 0b0000000000, 0b1111111111,
+            0b1111111111, 0b0011111100, 0b1111111111, 0b0000000000,
+            0b1111111111, 0b1111111111, 0b0011111100, 0b1111111111,
+        ],
+        width_px: 10,
+        height_px: 16,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S2,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static HEADS: &[Part] = &[HEAD_FRAG, HEAD_SCRAMBLE, HEAD_NOISE];
+    pub static BODIES: &[Part] = &[
+        BODY_SCAN_S0, BODY_FRAG_S0,
+        BODY_SCAN_TALL, BODY_FRAG_TALL,
+        BODY_SCAN_HUGE,
+    ];
+
+    pub fn catalog() -> PartCatalog {
+        PartCatalog { heads: HEADS, bodies: BODIES, accessories: &[] }
+    }
+}
+
+pub fn glitch_catalog() -> PartCatalog { glitch::catalog() }
+
+// =====================================================================
+// Fuzz species catalog
+// =====================================================================
+//
+// Fuzz aesthetic: fluffy, irregular, slightly bigger heads with edge fuzz.
+
+mod fuzz {
+    use super::*;
+
+    pub static HEAD_FLUFF: Part = Part {
+        id: PartId(1100),
+        rows: &[0b00111100, 0b01111110, 0b11111111, 0b01111110],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_TUFT: Part = Part {
+        id: PartId(1101),
+        rows: &[0b00100100, 0b01111110, 0b11111111, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    pub static HEAD_PUFF: Part = Part {
+        id: PartId(1102),
+        rows: &[0b01011010, 0b01111110, 0b11111111, 0b01111110],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (0, 0), right: (6, 0) }),
+    };
+
+    // Fuzz bodies: wider, rounded, with edge irregularity in cols 2-5.
+    pub static BODY_FLUFFY_S0: Part = Part {
+        id: PartId(1200),
+        rows: &[
+            0b1101111011, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1101111011, 0b0111111110,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_OVAL_S0: Part = Part {
+        id: PartId(1201),
+        rows: &[
+            0b0111111110, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b0111111110,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_FLUFFY_TALL: Part = Part {
+        id: PartId(1202),
+        rows: &[
+            0b1101111011, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1101111011, 0b0111111110,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_OVAL_TALL: Part = Part {
+        id: PartId(1203),
+        rows: &[
+            0b0111111110, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b0111111110,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_FLUFFY_HUGE: Part = Part {
+        id: PartId(1204),
+        rows: &[
+            0b1101111011, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1111111111, 0b1111111111,
+            0b1111111111, 0b1111111111, 0b1101111011, 0b0111111110,
+        ],
+        width_px: 10,
+        height_px: 16,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S2,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static HEADS: &[Part] = &[HEAD_FLUFF, HEAD_TUFT, HEAD_PUFF];
+    pub static BODIES: &[Part] = &[
+        BODY_FLUFFY_S0, BODY_OVAL_S0,
+        BODY_FLUFFY_TALL, BODY_OVAL_TALL,
+        BODY_FLUFFY_HUGE,
+    ];
+
+    pub fn catalog() -> PartCatalog {
+        PartCatalog { heads: HEADS, bodies: BODIES, accessories: &[] }
+    }
+}
+
+pub fn fuzz_catalog() -> PartCatalog { fuzz::catalog() }
+
 pub fn catalog_for(species: SpeciesK) -> PartCatalog {
     match species {
-        SpeciesK::Blob => blob_catalog(),
-        _ => blob_catalog(), // placeholder until v2 Tasks 7a-7e fill in the others
+        SpeciesK::Blob    => blob_catalog(),
+        SpeciesK::Mech    => mech_catalog(),
+        SpeciesK::Ghost   => ghost_catalog(),
+        SpeciesK::Crystal => crystal_catalog(),
+        SpeciesK::Glitch  => glitch_catalog(),
+        SpeciesK::Fuzz    => fuzz_catalog(),
     }
 }
 
@@ -866,22 +1543,25 @@ pub fn compose_parts(blueprint: &PetBlueprint, catalog: &PartCatalog) -> Bitmap 
     let head = catalog.heads.iter().find(|p| p.id == blueprint.selection.head)
         .expect("head id must resolve in this catalog");
 
-    // Head: centered horizontally, top-anchored at (0, 0).
+    // Head: centered horizontally, top-anchored. We snap head_x down to an
+    // even value so eye-anchor reservations align with braille character
+    // boundaries (each braille char covers 2×4 px; an odd anchor x would
+    // straddle two chars and leave artifacts at the head's left/right edges).
     let head_full_w = match head.symmetry {
         PartSymmetry::HalfMirror => head.width_px * 2,
         _ => head.width_px,
     };
-    let head_x = (w.saturating_sub(head_full_w)) / 2;
+    let head_x = ((w.saturating_sub(head_full_w)) / 2) & !1;
     let head_y = 0;
     render_part(&mut bm, head, head_x, head_y);
 
-    // Body: centered horizontally, attached directly below the head (1-px
-    // overlap to keep the silhouette continuous).
+    // Body: centered horizontally (also snapped to even x), attached directly
+    // below the head with a 1-px overlap to keep the silhouette continuous.
     let body_full_w = match body.symmetry {
         PartSymmetry::HalfMirror => body.width_px * 2,
         _ => body.width_px,
     };
-    let body_x = (w.saturating_sub(body_full_w)) / 2;
+    let body_x = ((w.saturating_sub(body_full_w)) / 2) & !1;
     let body_y = head.height_px.saturating_sub(1);
     render_part(&mut bm, body, body_x, body_y);
 
@@ -912,7 +1592,7 @@ pub fn generate_pet_lines(species: SpeciesK, stage: Stage, seed: u64) -> Vec<Str
         PartSymmetry::HalfMirror => head.width_px * 2,
         _ => head.width_px,
     };
-    let head_x = (w.saturating_sub(head_full_w)) / 2;
+    let head_x = ((w.saturating_sub(head_full_w)) / 2) & !1;
     let anchors = head.eye_anchors.map(|a| EyeAnchors {
         left: (head_x.saturating_add(a.left.0), a.left.1),
         right: (head_x.saturating_add(a.right.0), a.right.1),
