@@ -159,6 +159,26 @@ pub fn coherent_noise(x: i32, y: i32, seed: u32) -> f32 {
     ((h as f32) / (u32::MAX as f32)) * 2.0 - 1.0
 }
 
+/// Combines envelope × head-zone × taper × (1 + noise×amplitude) into a
+/// per-pixel fill probability.
+pub fn fill_probability(
+    x: i32, y: i32,
+    params: &SilhouetteParams,
+    noise_seed: u32,
+) -> f32 {
+    let half_w = (params.width_px / 2) as f32;
+    let h = params.height_px as f32;
+    let cx = half_w * 0.5;
+    let cy = h * 0.5;
+
+    let env = gaussian_envelope(x as f32, y as f32, cx, cy, half_w, h, params.roundness);
+    let head = head_zone_gain(y as f32, h, params.head_zone_ratio.max(aesthetic::HEAD_ZONE_MIN_RATIO));
+    let taper = corner_taper(x as f32, y as f32, half_w, h, params.taper.min(aesthetic::MAX_TAPER));
+    let noise = coherent_noise(x, y, noise_seed) * 0.18; // amplitude tuned during spike
+
+    (env * head * taper * (1.0 + noise)).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +301,32 @@ mod noise_tests {
             let v = coherent_noise(x, y, 99);
             assert!((-1.0..=1.0).contains(&v), "out of bounds: {v}");
         }}
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+    fn default_params() -> SilhouetteParams {
+        SilhouetteParams {
+            width_px: 14, height_px: 8, roundness: 0.55, taper: 0.55,
+            body_density: 0.5, asymmetry_seed: 0,
+            head_zone_ratio: 0.30, ornament_density: 0.10,
+        }
+    }
+    #[test]
+    fn fill_probability_in_range() {
+        let p = default_params();
+        for x in 0..7 { for y in 0..8 {
+            let f = fill_probability(x, y, &p, 1);
+            assert!((0.0..=1.0).contains(&f));
+        }}
+    }
+    #[test]
+    fn center_more_likely_than_corner() {
+        let p = default_params();
+        let center = fill_probability(2, 3, &p, 1);
+        let corner = fill_probability(0, 0, &p, 1);
+        assert!(center > corner, "center {center} not > corner {corner}");
     }
 }
