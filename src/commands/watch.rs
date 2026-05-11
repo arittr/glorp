@@ -84,7 +84,15 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
     let source_health = source_health(&recent_usage, &all_diagnostics, now);
     let diagnostics = active_diagnostics(&source_breakdown, all_diagnostics);
     let helper_status = helper_status(&usage_store, &source_breakdown, &diagnostics)?;
-    let recent_events = build_recent_events(state, &recent_usage, &diagnostics);
+    let pet_activities = crate::pet::activity::derive_pet_activities(
+        &state.pet.accepted_name,
+        species,
+        mood_label(mood),
+        &recent_usage,
+        &state.seen_stage_transitions,
+        now,
+    );
+    let recent_events = build_recent_events(state, &recent_usage, &diagnostics, pet_activities);
     let errors = diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.clone())
@@ -123,7 +131,22 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
         acknowledged_evolution: None,
         cursor_screen: None,
         mouse_tracking_enabled: true,
+        current_speech: crate::pet::speech::current_pet_speech(
+            mood_label(mood),
+            recent_tokens_per_min(&recent_usage, now),
+            now,
+        ),
     })
+}
+
+/// Tokens observed in the last 60 seconds, returned as a per-minute rate.
+fn recent_tokens_per_min(usage_events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
+    let cutoff = now - Duration::minutes(1);
+    usage_events
+        .iter()
+        .filter(|e| e.observed_at >= cutoff)
+        .map(|e| e.effective_tokens)
+        .sum()
 }
 
 #[doc(hidden)]
@@ -388,6 +411,7 @@ fn build_recent_events(
     state: &PetState,
     usage_events: &[NormalizedUsageEvent],
     diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
+    pet_activities: Vec<EventView>,
 ) -> Vec<EventView> {
     let mut events = Vec::new();
     for event in state.recent_events.iter().rev().take(3).rev() {
@@ -403,6 +427,9 @@ fn build_recent_events(
     for diagnostic_event in deduped_recent_diagnostics(diagnostics, 2) {
         events.push(diagnostic_event);
     }
+    // Pet activities are rendered as if they happened "now" — append at the
+    // end so they sit at the bottom of the feed (most recent).
+    events.extend(pet_activities);
     events
 }
 

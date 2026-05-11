@@ -12,23 +12,68 @@ use crate::tui::view_model::WatchViewModel;
 
 pub struct PetPanel;
 
+/// Rows reserved above the pet for the speech bubble. Only reserved when
+/// speech is actually active so the pet sits at its natural top position
+/// in the column most of the time. The bubble cycles ~5s on / ~25s off, so
+/// brief layout shifts on the appearance/disappearance are tolerable and
+/// far better than permanently moving the pet down.
+fn speech_rows(vm: &WatchViewModel) -> u16 {
+    if vm.current_speech.is_some() {
+        1
+    } else {
+        0
+    }
+}
+
 impl Panel for PetPanel {
     fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
-        let line_count = (vm.pet_art.len() as u16).max(2);
+        let line_count = (vm.pet_art.len() as u16).max(2) + speech_rows(vm);
         Constraint::Length(line_count)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
         let base = semantic_styles();
-        // Continuous low-energy droop: darken pet foreground colors based on
-        // current energy. At energy >= 0.6 the multiplier is 1.0 (no change);
-        // it falls linearly to 0.55 at energy 0.0.
         let m = low_energy_lightness_multiplier(vm.energy);
         let droop = darken_pet_styles(&base, m);
-        let cursor_norm_x = cursor_normalized_x_within(vm, area);
-        let lines = build_pet_lines(vm, area.width as usize, &droop, cursor_norm_x);
-        Paragraph::new(lines).render(area, buf);
+
+        let speech_h = speech_rows(vm).min(area.height);
+        let speech_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: speech_h,
+        };
+        let pet_area = Rect {
+            x: area.x,
+            y: area.y + speech_h,
+            width: area.width,
+            height: area.height.saturating_sub(speech_h),
+        };
+
+        if let Some(speech) = vm.current_speech.as_deref() {
+            render_speech_bubble(speech_area, buf, speech, &droop);
+        }
+
+        let cursor_norm_x = cursor_normalized_x_within(vm, pet_area);
+        let lines = build_pet_lines(vm, pet_area.width as usize, &droop, cursor_norm_x);
+        Paragraph::new(lines).render(pet_area, buf);
     }
+}
+
+/// Render a small speech bubble: "« text »" centered above the pet, styled
+/// with the accent color so it pops without being shouty.
+fn render_speech_bubble(area: Rect, buf: &mut Buffer, text: &str, styles: &SemanticStyles) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let bubble = format!("« {text} »");
+    let bubble_width = bubble.chars().count() as u16;
+    let pad = (area.width.saturating_sub(bubble_width)) / 2;
+    let line = Line::from(vec![
+        Span::raw(" ".repeat(pad as usize)),
+        Span::styled(bubble, styles.pet_accent),
+    ]);
+    Paragraph::new(line).render(area, buf);
 }
 
 /// Returns a copy of `base` with all pet-role foreground colors scaled by
@@ -370,7 +415,8 @@ mod tests {
         // Place cursor at right side; expect '>' glyph to appear in the
         // panel area. Eye glyph row depends on stage (S6 templates have
         // extra top decoration), so scan the full panel.
-        vm.cursor_screen = Some((38, 0));
+        // Cursor inside the pet area (after the SPEECH_ROWS=2 offset).
+        vm.cursor_screen = Some((38, 4));
         let panel = PetPanel;
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
