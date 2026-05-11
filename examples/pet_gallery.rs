@@ -124,6 +124,16 @@ pub fn gaussian_envelope(
     (-(dx * dx + dy * dy) * 0.5).exp().clamp(0.0, 1.0)
 }
 
+/// Returns a multiplier that boosts fill probability for cells in the top
+/// `head_zone_ratio` of the grid. Always >= 1.0.
+pub fn head_zone_gain(y: f32, h: f32, head_zone_ratio: f32) -> f32 {
+    let cutoff = h * head_zone_ratio;
+    if y < cutoff {
+        let t = 1.0 - (y / cutoff).clamp(0.0, 1.0);
+        1.0 + t * 0.35
+    } else { 1.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +209,17 @@ mod envelope_tests {
         let loose = gaussian_envelope(off.0, off.1, 3.5, 4.0, 7.0, 8.0, 0.20);
         let tight = gaussian_envelope(off.0, off.1, 3.5, 4.0, 7.0, 8.0, 0.95);
         assert!(loose > tight, "loose {loose} should be > tight {tight}");
+    }
+}
+
+#[cfg(test)]
+mod head_zone_tests {
+    use super::*;
+    #[test]
+    fn head_zone_boosts_top() {
+        let top = head_zone_gain(0.0, 8.0, 0.30);
+        let middle = head_zone_gain(4.0, 8.0, 0.30);
+        assert!(top > middle);
+        assert!((middle - 1.0).abs() < 1e-6);
     }
 }
