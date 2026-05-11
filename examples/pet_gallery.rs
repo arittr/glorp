@@ -812,6 +812,49 @@ pub fn species_baseline(species: SpeciesK, stage: Stage) -> SilhouetteParams {
     }
 }
 
+/// Derive a deterministic mutation vector from the pet's primary seed.
+pub fn derive_mutation_vector(seed: u64) -> MutationVector {
+    let mut rng = SpikeRng::new(seed ^ 0xa1b2_c3d4_e5f6_0708);
+    MutationVector {
+        d_roundness: rng.next_signed_unit() * 0.10,
+        d_taper: rng.next_signed_unit() * 0.10,
+        d_body_density: rng.next_signed_unit() * 0.08,
+        d_ornament_density: rng.next_signed_unit() * 0.06,
+        d_head_zone_ratio: rng.next_signed_unit() * 0.05,
+    }
+}
+
+/// Apply the mutation vector once, clamping to aesthetic floors/ceilings.
+pub fn apply_mutation(params: SilhouetteParams, v: &MutationVector) -> SilhouetteParams {
+    SilhouetteParams {
+        roundness: (params.roundness + v.d_roundness)
+            .max(aesthetic::MIN_ROUNDNESS).min(0.95),
+        taper: (params.taper + v.d_taper)
+            .min(aesthetic::MAX_TAPER).max(0.20),
+        body_density: (params.body_density + v.d_body_density).clamp(0.40, 0.85),
+        ornament_density: (params.ornament_density + v.d_ornament_density).clamp(0.0, 0.50),
+        head_zone_ratio: (params.head_zone_ratio + v.d_head_zone_ratio)
+            .max(aesthetic::HEAD_ZONE_MIN_RATIO).min(0.50),
+        ..params
+    }
+}
+
+pub fn blueprint_for(species: SpeciesK, stage: Stage, seed: u64) -> PetBlueprint {
+    let mv = derive_mutation_vector(seed);
+    let mut p = species_baseline(species, stage);
+    p.asymmetry_seed = (seed >> 16) as u32 ^ (seed as u32);
+    // Apply the mutation vector once per stage past S0. S3+ cap at three
+    // applications until later stages get richer geometry.
+    let mutations = match stage {
+        Stage::S0 => 0,
+        Stage::S1 => 1,
+        Stage::S2 => 2,
+        Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 3,
+    };
+    for _ in 0..mutations { p = apply_mutation(p, &mv); }
+    PetBlueprint { species, stage, silhouette: p, mutation_vector: mv }
+}
+
 #[cfg(test)]
 mod baseline_tests {
     use super::*;
@@ -826,5 +869,28 @@ mod baseline_tests {
                 assert!(p.head_zone_ratio >= aesthetic::HEAD_ZONE_MIN_RATIO, "{sp:?} {st:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    #[test]
+    fn mutation_vectors_are_seed_stable() {
+        assert_eq!(derive_mutation_vector(42), derive_mutation_vector(42));
+    }
+    #[test]
+    fn s2_diverges_from_s0_along_seed_direction() {
+        let s0 = blueprint_for(SpeciesK::Blob, Stage::S0, 42);
+        let s2 = blueprint_for(SpeciesK::Blob, Stage::S2, 42);
+        let drift = (s2.silhouette.roundness - s0.silhouette.roundness).abs()
+                  + (s2.silhouette.taper - s0.silhouette.taper).abs();
+        assert!(drift > 0.0, "s2 should differ from s0 for the same seed");
+    }
+    #[test]
+    fn two_seeds_diverge_by_s2() {
+        let a = blueprint_for(SpeciesK::Blob, Stage::S2, 42).silhouette;
+        let b = blueprint_for(SpeciesK::Blob, Stage::S2, 99).silhouette;
+        assert!((a.roundness - b.roundness).abs() + (a.taper - b.taper).abs() > 0.01);
     }
 }
