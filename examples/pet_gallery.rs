@@ -698,3 +698,74 @@ mod feature_tests {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharGrid { pub lines: Vec<Vec<char>> }
+
+impl CharGrid {
+    pub fn from_braille(braille_lines: Vec<String>) -> Self {
+        let lines = braille_lines.into_iter().map(|s| s.chars().collect()).collect();
+        Self { lines }
+    }
+    pub fn put(&mut self, char_x: usize, char_y: usize, c: char) {
+        if let Some(row) = self.lines.get_mut(char_y) {
+            if char_x < row.len() { row[char_x] = c; }
+        }
+    }
+    pub fn into_string_lines(self) -> Vec<String> {
+        self.lines.into_iter().map(|row| row.iter().collect()).collect()
+    }
+}
+
+/// Convert pixel anchor (top-left of a 2×4 anchor cell) to the character cell.
+fn px_to_char_cell(px_x: u8, px_y: u8) -> (usize, usize) {
+    ((px_x / 2) as usize, (px_y / 4) as usize)
+}
+
+/// Build the final glyph grid: braille body, with eye glyphs at anchors and a
+/// mouth glyph just below the eye-line in the head zone.
+pub fn render_lines(
+    bm: &Bitmap,
+    anchors: EyeAnchors,
+    features: &FeatureGlyphPick,
+) -> Vec<String> {
+    let braille = encode_braille(bm);
+    let mut grid = CharGrid::from_braille(braille);
+
+    let (lx, ly) = px_to_char_cell(anchors.left.0, anchors.left.1);
+    let (rx, ry) = px_to_char_cell(anchors.right.0, anchors.right.1);
+    if let Some(c) = features.eye.chars().next() {
+        grid.put(lx, ly, c);
+        grid.put(rx, ry, c);
+    }
+
+    let mouth_char_y = ly + 1;
+    let mouth_char_x = ((bm.w / 2) / 2) as usize;
+    if let Some(c) = features.mouth.chars().next() {
+        grid.put(mouth_char_x, mouth_char_y, c);
+    }
+
+    grid.into_string_lines()
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    fn p() -> SilhouetteParams {
+        SilhouetteParams {
+            width_px: 14, height_px: 8, roundness: 0.55, taper: 0.55,
+            body_density: 0.55, asymmetry_seed: 0,
+            head_zone_ratio: 0.30, ornament_density: 0.10,
+        }
+    }
+    #[test]
+    fn rendered_lines_have_expected_dimensions() {
+        let mut bm = sample_silhouette(&p(), 1).unwrap();
+        let anchors = place_eye_anchors(&p());
+        reserve_eye_anchors(&mut bm, anchors);
+        let features = FeatureGlyphPick { eye: "o", mouth: "w", accent: "·" };
+        let lines = render_lines(&bm, anchors, &features);
+        assert_eq!(lines.len(), (p().height_px / 4) as usize);
+        for l in &lines { assert_eq!(l.chars().count(), (p().width_px / 2) as usize); }
+    }
+}
