@@ -1,9 +1,9 @@
 use glorp::game::evolution::Stage;
 use glorp::game::metabolism::Mood;
-use glorp::pet::generation::{generate_pet, morph_count, resolve_accepted_name, stage_label, Species};
-use glorp::pet::render::{
-    palette_roles, render_pet, species_animation_profile, AnimationFrame,
+use glorp::pet::generation::{
+    generate_pet, morph_count, resolve_accepted_name, stage_label, Species,
 };
+use glorp::pet::render::{palette_roles, render_pet, species_animation_profile, AnimationFrame};
 
 fn frame(tick: u64) -> AnimationFrame {
     AnimationFrame {
@@ -235,7 +235,3 @@ fn species_animation_profiles_match_tokenpet_mockup() {
     assert_eq!(species_animation_profile(Species::Crystal).blink_jitter, 22);
     assert_eq!(species_animation_profile(Species::Mech).blink_average, 22);
 }
-
-
-
-

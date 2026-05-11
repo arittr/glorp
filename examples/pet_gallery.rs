@@ -10,8 +10,12 @@ use glorp::pet::generation::Species;
 fn main() {
     println!("parts_gallery — production parts generator\n");
     let species = [
-        Species::Fuzz, Species::Blob, Species::Ghost,
-        Species::Glitch, Species::Crystal, Species::Mech,
+        Species::Fuzz,
+        Species::Blob,
+        Species::Ghost,
+        Species::Glitch,
+        Species::Crystal,
+        Species::Mech,
     ];
     let stages: [Stage; 3] = [Stage::S0, Stage::S1, Stage::S2];
 
@@ -19,7 +23,9 @@ fn main() {
     for sp in species {
         for st in stages {
             for seed_base in 0u64..3 {
-                if count >= 50 { return; }
+                if count >= 50 {
+                    return;
+                }
                 let seed = (sp as u64).wrapping_mul(0x9e37)
                     ^ (st as u64).wrapping_mul(0x7c15)
                     ^ (seed_base * 137);

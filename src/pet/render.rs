@@ -112,7 +112,11 @@ pub fn render_pet(
     // variable warnings without changing the public signature.
     let _ = (mood, frame);
 
-    RenderedPet { lines, spans, event_lines: Vec::new() }
+    RenderedPet {
+        lines,
+        spans,
+        event_lines: Vec::new(),
+    }
 }
 
 pub fn palette_roles(pet: &GeneratedPet) -> PaletteRoles {
@@ -223,18 +227,33 @@ mod render_v2_tests {
     #[test]
     fn render_pet_produces_braille_lines() {
         let pet = generate_pet("test-seed-1");
-        let r = render_pet(&pet, Stage::S0, Mood::Content,
-                           AnimationFrame { tick: 0, blink_suppression_ticks: 0 });
+        let r = render_pet(
+            &pet,
+            Stage::S0,
+            Mood::Content,
+            AnimationFrame {
+                tick: 0,
+                blink_suppression_ticks: 0,
+            },
+        );
         assert!(!r.lines.is_empty());
-        let has_braille = r.lines.iter().any(|l|
-            l.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32))));
-        assert!(has_braille, "expected at least one braille char in rendered lines");
+        let has_braille = r
+            .lines
+            .iter()
+            .any(|l| l.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32))));
+        assert!(
+            has_braille,
+            "expected at least one braille char in rendered lines"
+        );
     }
 
     #[test]
     fn render_pet_deterministic_for_fixed_frame() {
         let pet = generate_pet("test-seed-2");
-        let frame = AnimationFrame { tick: 5, blink_suppression_ticks: 0 };
+        let frame = AnimationFrame {
+            tick: 5,
+            blink_suppression_ticks: 0,
+        };
         let a = render_pet(&pet, Stage::S1, Mood::Content, frame);
         let b = render_pet(&pet, Stage::S1, Mood::Content, frame);
         assert_eq!(a.lines, b.lines);
@@ -248,7 +267,10 @@ mod render_v2_tests {
         // they collide on species occasionally.
         let pet_a = generate_pet("seed-aaa");
         let pet_b = generate_pet("seed-zzz");
-        let frame = AnimationFrame { tick: 0, blink_suppression_ticks: 0 };
+        let frame = AnimationFrame {
+            tick: 0,
+            blink_suppression_ticks: 0,
+        };
         let a = render_pet(&pet_a, Stage::S2, Mood::Content, frame);
         let b = render_pet(&pet_b, Stage::S2, Mood::Content, frame);
         // Either lines differ or spans differ — output should not be identical.
