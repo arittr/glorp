@@ -42,16 +42,53 @@ pub fn render_watch_frame_with_capability(
         .border_style(Style::default().fg(p.accent.rgb))
         .style(styles.body);
 
-    let inner = outer.inner(frame.area());
-    frame.render_widget(outer, frame.area());
-
-    let mode = if (inner.width as usize) >= COMPACT_THRESHOLD {
+    // Decide mode by terminal width (after subtracting frame borders).
+    let mode = if (frame.area().width as usize) >= COMPACT_THRESHOLD + 2 {
         Mode::Wide
     } else {
         Mode::Compact
     };
 
+    // Shrink the outer frame to natural content height instead of filling
+    // the terminal. This keeps both columns ending together and stops the
+    // dead-space wedge that appears when the right column is shorter than
+    // the terminal is tall.
+    let inner_h = natural_inner_height(vm, mode);
+    let target_h = (inner_h + 2).min(frame.area().height);
+    let frame_rect = Rect {
+        x: frame.area().x,
+        y: frame.area().y,
+        width: frame.area().width,
+        height: target_h,
+    };
+
+    let inner = outer.inner(frame_rect);
+    frame.render_widget(outer, frame_rect);
+
     layout_and_render(inner, mode, frame.buffer_mut(), vm);
+}
+
+/// Sum the height of each panel's preferred constraint (Length or Min). For
+/// wide mode returns the larger of left vs right column natural heights.
+/// For compact mode returns the sum of all panel heights plus 1-row spacings.
+fn natural_inner_height(vm: &WatchViewModel, mode: Mode) -> u16 {
+    let h = |c: Constraint| -> u16 {
+        match c {
+            Constraint::Length(n) | Constraint::Min(n) | Constraint::Max(n) => n,
+            _ => 5,
+        }
+    };
+    let pet = h(PetPanel.preferred_constraint(vm));
+    let vitals = h(VitalsPanel.preferred_constraint(vm));
+    let today = h(TodayPanel.preferred_constraint(vm));
+    let spark = h(SparkPanel.preferred_constraint(vm));
+    let feed = h(FeedPanel.preferred_constraint(vm));
+    let helpers = h(HelpersPanel.preferred_constraint(vm));
+    match mode {
+        Mode::Wide => (pet + vitals).max(today + spark + feed + helpers),
+        // 6 panels stacked with spacing(1) → 5 row-gaps.
+        Mode::Compact => pet + vitals + today + spark + feed + helpers + 5,
+    }
 }
 
 /// Returns the rect within `frame.area()` that the pet panel occupies for the
@@ -60,37 +97,40 @@ pub fn render_watch_frame_with_capability(
 /// has drawn it.
 pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
     use crate::tui::panels::Panel;
-    let outer_block = Block::bordered();
-    let inner = outer_block.inner(frame_area);
-    let mode = if (inner.width as usize) >= COMPACT_THRESHOLD {
+    let mode = if (frame_area.width as usize) >= COMPACT_THRESHOLD + 2 {
         Mode::Wide
     } else {
         Mode::Compact
     };
-    let pet_height = PetPanel.preferred_constraint(vm);
-    let pet_h = match pet_height {
+    // Mirror the shrinking logic in render_watch_frame_with_capability so the
+    // animator targets the same rect the dispatcher just drew into.
+    let inner_h = natural_inner_height(vm, mode);
+    let target_h = (inner_h + 2).min(frame_area.height);
+    let frame_rect = Rect {
+        x: frame_area.x,
+        y: frame_area.y,
+        width: frame_area.width,
+        height: target_h,
+    };
+    let outer_block = Block::bordered();
+    let inner = outer_block.inner(frame_rect);
+    let pet_h = match PetPanel.preferred_constraint(vm) {
         Constraint::Length(n) => n,
         _ => 5,
     };
     match mode {
-        Mode::Wide => {
-            // Pet is at the top of the left column (40 wide, starting at inner.x).
-            Rect {
-                x: inner.x,
-                y: inner.y,
-                width: WIDE_LEFT_COL.min(inner.width),
-                height: pet_h.min(inner.height),
-            }
-        }
-        Mode::Compact => {
-            // Pet is the first panel at top of inner.
-            Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: pet_h.min(inner.height),
-            }
-        }
+        Mode::Wide => Rect {
+            x: inner.x,
+            y: inner.y,
+            width: WIDE_LEFT_COL.min(inner.width),
+            height: pet_h.min(inner.height),
+        },
+        Mode::Compact => Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: pet_h.min(inner.height),
+        },
     }
 }
 
@@ -195,10 +235,11 @@ fn render_compact(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewM
     );
 }
 
-/// Stacks panels vertically using `Flex::Start` (content packs to top).
-/// Spacing of `spacing` blank rows is inserted between panels. A trailing
-/// `Constraint::Min(0)` spacer absorbs any leftover height so panels render
-/// at their natural sizes and empty space falls to the bottom of the column.
+/// Stacks panels vertically using `Flex::Start`. Trailing spacer absorbs any
+/// difference between the frame's actual height and the sum of panel heights
+/// (rare now that the outer frame shrinks to natural content, but kept as a
+/// safety net for cases where the terminal is smaller than the natural
+/// content and the frame gets clamped).
 fn render_column_with_spacing(
     area: Rect,
     panels: &[&dyn Panel],
@@ -215,7 +256,6 @@ fn render_column_with_spacing(
         .spacing(spacing)
         .split(area);
 
-    // Only zip the panel rects (skip the trailing spacer rect at the end).
     for (panel, rect) in panels.iter().zip(rects.iter().take(panels.len())) {
         panel.render(*rect, buf, vm);
     }
@@ -385,12 +425,23 @@ mod render_wide_tests {
             .collect()
     }
 
+    /// Scan from the top for the row containing the rounded bottom-corner glyph.
+    /// Returns the row index, panicking with a useful message if not found.
+    fn find_bottom_corner_row(buf: &ratatui::buffer::Buffer, max_y: u16) -> u16 {
+        for y in 0..max_y {
+            let row = row_string(buf, y);
+            if row.contains("╰") {
+                return y;
+            }
+        }
+        panic!("no ╰ corner found in any row");
+    }
+
     #[test]
     fn render_wide_draws_rounded_frame() {
         // Width 110 >= COMPACT_THRESHOLD (104) → wide mode.
         let buf = render_buffer(110, TEST_HEIGHT);
         let top = row_string(&buf, 0);
-        let bottom = row_string(&buf, TEST_HEIGHT - 1);
         assert!(
             top.contains("╭"),
             "top row should start with rounded corner ╭, got {top:?}"
@@ -399,6 +450,8 @@ mod render_wide_tests {
             top.contains("╮"),
             "top row should end with rounded corner ╮, got {top:?}"
         );
+        let bottom_row = find_bottom_corner_row(&buf, TEST_HEIGHT);
+        let bottom = row_string(&buf, bottom_row);
         assert!(
             bottom.contains("╰"),
             "bottom row should have rounded corner ╰"
@@ -410,13 +463,17 @@ mod render_wide_tests {
     }
 
     #[test]
-    fn render_wide_fills_terminal_frame() {
+    fn render_wide_frame_spans_full_width_and_natural_height() {
         let test_width: u16 = 140;
         let buf = render_buffer(test_width, TEST_HEIGHT);
         assert_eq!(buf[(0u16, 0u16)].symbol(), "╭");
         assert_eq!(buf[(test_width - 1, 0u16)].symbol(), "╮");
-        assert_eq!(buf[(0u16, TEST_HEIGHT - 1)].symbol(), "╰");
-        assert_eq!(buf[(test_width - 1, TEST_HEIGHT - 1)].symbol(), "╯");
+        // Frame now shrinks to natural content height; the bottom corner
+        // appears at the natural-content-end row rather than TEST_HEIGHT-1.
+        let bottom_row = find_bottom_corner_row(&buf, TEST_HEIGHT);
+        assert!(bottom_row > 0 && bottom_row < TEST_HEIGHT - 1);
+        assert_eq!(buf[(0u16, bottom_row)].symbol(), "╰");
+        assert_eq!(buf[(test_width - 1, bottom_row)].symbol(), "╯");
     }
 
     #[test]
@@ -429,7 +486,8 @@ mod render_wide_tests {
     #[test]
     fn render_wide_footer_appears_in_frame() {
         let buf = render_buffer(110, TEST_HEIGHT);
-        let bottom = row_string(&buf, TEST_HEIGHT - 1);
+        let bottom_row = find_bottom_corner_row(&buf, TEST_HEIGHT);
+        let bottom = row_string(&buf, bottom_row);
         assert!(
             bottom.contains("quit"),
             "footer should contain 'quit', got {bottom:?}"

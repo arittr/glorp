@@ -679,12 +679,20 @@ fn wide_layout_outer_frame_uses_rounded_box_drawing() {
     let buf = terminal.backend().buffer();
     let rows = buffer_rows(buf);
     let top = &rows[0];
-    let bottom = &rows[23];
     assert!(
         top.starts_with("╭"),
         "top row should start with rounded corner ╭; got {top:?}"
     );
     assert!(top.ends_with('╮'), "top row should end with ╮; got {top:?}");
+
+    // Find the bottom-corner row — the frame shrinks to natural content
+    // height instead of filling the terminal, so the bottom border can sit
+    // well above row 23.
+    let bottom_idx = rows
+        .iter()
+        .position(|r| r.starts_with('╰'))
+        .expect("expected to find a ╰ row");
+    let bottom = &rows[bottom_idx];
     assert!(
         bottom.starts_with("╰"),
         "bottom should start with ╰; got {bottom:?}"
@@ -693,7 +701,7 @@ fn wide_layout_outer_frame_uses_rounded_box_drawing() {
         bottom.ends_with('╯'),
         "bottom should end with ╯; got {bottom:?}"
     );
-    for (y, row) in rows.iter().enumerate().take(23).skip(1) {
+    for (y, row) in rows.iter().enumerate().take(bottom_idx).skip(1) {
         let chars: Vec<char> = row.chars().collect();
         assert_eq!(chars[0], '│', "row {y} left rail");
         assert_eq!(chars[chars.len() - 1], '│', "row {y} right rail");
