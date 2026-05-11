@@ -8,7 +8,31 @@
 // generator into src/pet/generate.rs.
 
 fn main() {
-    println!("pet_gallery — Phase 0 procedural pet spike");
+    println!("pet_gallery — Phase 0 procedural pet spike\n");
+    let species: [SpeciesK; 6] = [
+        SpeciesK::Fuzz, SpeciesK::Blob, SpeciesK::Ghost,
+        SpeciesK::Glitch, SpeciesK::Crystal, SpeciesK::Mech,
+    ];
+    let stages: [Stage; 3] = [Stage::S0, Stage::S1, Stage::S2];
+
+    // 50 pets = 6 species × 3 stages × ~3 seeds, capped at 50.
+    let mut count: u32 = 0;
+    for sp in species {
+        for st in stages {
+            for seed_base in 0u64..3 {
+                if count >= 50 { return; }
+                let seed = (sp as u64).wrapping_mul(0x9e37)
+                    ^ (st as u64).wrapping_mul(0x7c15)
+                    ^ (seed_base * 137);
+                println!("--- #{count:02}  {sp:?}  {st:?}  seed={seed} ---");
+                for line in generate_pet_lines(sp, st, seed) {
+                    println!("    {line}");
+                }
+                println!();
+                count += 1;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
