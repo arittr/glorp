@@ -1026,7 +1026,7 @@ mod render_wide_tests {
     fn render_wide_draws_rounded_frame_at_natural_width() {
         let buf = render_buffer(COMPACT_THRESHOLD as u16, TEST_HEIGHT);
         let top = row_string(&buf, 0);
-        let bottom = row_string(&buf, (TEST_HEIGHT - 1) as u16);
+        let bottom = row_string(&buf, TEST_HEIGHT - 1);
         let right_rail = (COMPACT_THRESHOLD - 1) as u16;
         assert!(
             top.starts_with("┏━"),
@@ -1035,7 +1035,7 @@ mod render_wide_tests {
         assert!(top.ends_with('┓'), "top row should end with ┓");
         assert!(bottom.starts_with("┗━"));
         assert!(bottom.ends_with('┛'));
-        for y in 1..(TEST_HEIGHT - 1) as u16 {
+        for y in 1..TEST_HEIGHT - 1 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail");
             assert_eq!(buf[(right_rail, y)].symbol(), "┃", "row {y} right rail");
         }
@@ -1053,7 +1053,7 @@ mod render_wide_tests {
         let bottom_row = TEST_HEIGHT - 1;
         assert_eq!(buf[(0u16, bottom_row)].symbol(), "┗");
         assert_eq!(buf[(right_rail, bottom_row)].symbol(), "┛");
-        for y in 1..(TEST_HEIGHT - 1) as u16 {
+        for y in 1..TEST_HEIGHT - 1 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail broken");
             assert_eq!(
                 buf[(right_rail, y)].symbol(),
@@ -1066,7 +1066,7 @@ mod render_wide_tests {
     #[test]
     fn every_body_row_fills_terminal_width_exactly() {
         let buf = render_buffer(COMPACT_THRESHOLD as u16, TEST_HEIGHT);
-        for y in 0..TEST_HEIGHT as u16 {
+        for y in 0..TEST_HEIGHT {
             let row = row_string(&buf, y);
             assert_eq!(
                 row.chars().count(),
@@ -1119,7 +1119,7 @@ mod render_wide_tests {
         // Cells at the gutter (between LEFT_COL end and GUTTER start) should
         // be blank space or a divider dash — never pet content overflowing.
         let gutter_start = (1 + LEFT_PAD + LEFT_COL) as u16;
-        for y in 1..(TEST_HEIGHT - 1) as u16 {
+        for y in 1..TEST_HEIGHT - 1 {
             for offset in 0..(GUTTER as u16) {
                 let gutter = buf[(gutter_start + offset, y)].symbol();
                 assert!(
