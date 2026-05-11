@@ -1,9 +1,0 @@
----
-source: src/pet/generate.rs
-expression: "generate_pet_lines(Species::Mech, Stage::S2, 99).join(\"\\n\")"
----
-⠀⠀⠀▣⣾⣷▣⣀⠀⠀⠀
-⠀⠀⠀⣿⣿▪⣿⣿⠀⠀⠀
-⠀⠀⠀⣿⣿⣿⣿⣿⠀⠀⠀
-⠀⠀⠀⣿⣿⣿⣿⣿⠀⠀⠀
-⠀⠀⠀⠿⠿⠿⠿⠿⠀⠀⠀

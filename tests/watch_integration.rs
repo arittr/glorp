@@ -29,12 +29,14 @@ fn watch_view_model_uses_rendered_mech_pet_art_instead_of_fixture_cat() {
 
     assert_eq!(vm.species, "mech");
     assert_eq!(vm.stage, "mech");
-    // Pet art should contain at least one Braille glyph (U+2800..U+28FF) —
-    // proves the parts generator was invoked for this view model rather than
-    // a hardcoded fixture.
+    // Mech templates use box-drawing characters (U+2500..U+257F) and block
+    // elements (U+2580..U+259F); the presence of any of those proves the
+    // render path produced a real Mech template, not the fixture cat.
     assert!(
-        art.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32))),
-        "pet_art should contain Braille glyphs, got: {art:?}"
+        art.chars()
+            .any(|c| ('\u{2500}'..='\u{257F}').contains(&c)
+                || ('\u{2580}'..='\u{259F}').contains(&c)),
+        "pet_art should contain block/box-drawing glyphs, got: {art:?}"
     );
     assert!(!art.contains("/\\_/\\"));
     assert!(!art.contains("( o.o )"));

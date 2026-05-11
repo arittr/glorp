@@ -107,8 +107,14 @@ fn build_pet_lines<'a>(
             if left_pad > 0 {
                 spans.push(Span::raw(" ".repeat(left_pad)));
             }
-            // Cursor-tracked eyes only swap on line 0 where the eye glyphs live.
-            let eye_override = if line_index == 0 { cursor_eye } else { None };
+            // Cursor-tracked eye swap: apply on any line containing a
+            // PaletteRoleName::Eye segment. Authored templates place eyes
+            // wherever the species' template draws them (Fuzz's `/\_/\` ears
+            // sit on line 0 with eyes on line 1, Mech has eyes on line 2 or
+            // 3 after the head plate, etc.), so we can't pin to a fixed
+            // line index.
+            let _ = line_index;
+            let eye_override = cursor_eye;
             spans.extend(role_spans_for_line(
                 art_line,
                 line_index,
@@ -245,9 +251,13 @@ mod tests {
             .iter()
             .map(|c| c.symbol().to_string())
             .collect();
+        // Authored templates use block characters (█ ▌ ▐ ▀ ▄ ░ ▒ ▓) and
+        // ASCII glyphs, not braille. Any non-space, non-newline char counts
+        // as rendered pet content.
+        let printable_count = s.chars().filter(|c| !c.is_whitespace()).count();
         assert!(
-            s.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32))),
-            "pet panel should render at least one braille char into the area"
+            printable_count > 5,
+            "pet panel should render visible pet content into the area; got {printable_count} non-blank chars"
         );
     }
 
@@ -317,7 +327,9 @@ mod tests {
     #[test]
     fn pet_panel_swaps_eye_glyph_when_cursor_inside() {
         let mut vm = vm_with_real_pet();
-        // Place cursor at right side; expect '>' glyph to appear on line 0.
+        // Place cursor at right side; expect '>' glyph to appear in the
+        // panel area. Eye glyph row depends on stage (S6 templates have
+        // extra top decoration), so scan the full panel.
         vm.cursor_screen = Some((38, 0));
         let panel = PetPanel;
         let backend = TestBackend::new(40, 10);
@@ -328,12 +340,15 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        let row0: String = (0..40)
-            .map(|x| buf[(x, 0u16)].symbol().to_string())
-            .collect();
+        let mut all = String::new();
+        for y in 0..10 {
+            for x in 0..40 {
+                all.push_str(buf[(x, y)].symbol());
+            }
+        }
         assert!(
-            row0.contains('>'),
-            "expected '>' eye glyph in row 0, got {row0:?}"
+            all.contains('>'),
+            "expected '>' eye glyph in pet panel, got {all:?}"
         );
     }
 }
