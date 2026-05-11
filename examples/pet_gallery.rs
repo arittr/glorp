@@ -22,10 +22,18 @@ pub enum SpeciesK {
     Fuzz, Blob, Ghost, Glitch, Crystal, Mech,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartSelection {
+    pub head: PartId,
+    pub body: PartId,
+    pub accessories: Vec<PartId>, // 0..=N
+}
+
 #[derive(Debug, Clone)]
 pub struct PetBlueprint {
     pub species: SpeciesK,
     pub stage: Stage,
+    pub selection: PartSelection,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +136,69 @@ pub fn render_part(bm: &mut Bitmap, part: &Part, top_left_x: u8, top_left_y: u8)
     }
 }
 
+fn stage_index(s: Stage) -> u8 {
+    match s {
+        Stage::S0 => 0, Stage::S1 => 1, Stage::S2 => 2,
+        Stage::S3 => 3, Stage::S4 => 4, Stage::S5 => 5, Stage::S6 => 6,
+    }
+}
+
+/// Pick a part from a slice, filtering by `min_stage <= target_stage` and
+/// rng-pick. Returns None if no parts satisfy the stage gate.
+pub fn pick_part_for_stage<'a>(
+    parts: &'a [Part],
+    stage: Stage,
+    rng: &mut SpikeRng,
+) -> Option<&'a Part> {
+    let target = stage_index(stage);
+    let eligible: Vec<&Part> = parts.iter()
+        .filter(|p| stage_index(p.min_stage) <= target)
+        .collect();
+    if eligible.is_empty() { None }
+    else {
+        let idx = (rng.next_u64() as usize) % eligible.len();
+        Some(eligible[idx])
+    }
+}
+
+pub fn blueprint_for(
+    species: SpeciesK,
+    stage: Stage,
+    seed: u64,
+    catalog: &PartCatalog,
+) -> PetBlueprint {
+    let mut rng = SpikeRng::new(seed);
+    let head = pick_part_for_stage(catalog.heads, stage, &mut rng)
+        .expect("every species catalog must have at least one head part for every stage");
+    let body = pick_part_for_stage(catalog.bodies, stage, &mut rng)
+        .expect("every species catalog must have at least one body part for every stage");
+
+    let stage_idx = stage_index(stage);
+    let max_accessories = match stage {
+        Stage::S0 => 0,
+        Stage::S1 => 1,
+        Stage::S2 => 2,
+        _         => 3,
+    };
+    let mut accessories: Vec<PartId> = Vec::with_capacity(max_accessories);
+    let eligible_accessories: Vec<&Part> = catalog.accessories.iter()
+        .filter(|p| stage_index(p.min_stage) <= stage_idx)
+        .collect();
+    if !eligible_accessories.is_empty() && max_accessories > 0 {
+        let count = (rng.next_u64() as usize) % (max_accessories + 1);
+        for _ in 0..count {
+            let idx = (rng.next_u64() as usize) % eligible_accessories.len();
+            accessories.push(eligible_accessories[idx].id);
+        }
+    }
+
+    PetBlueprint {
+        species,
+        stage,
+        selection: PartSelection { head: head.id, body: body.id, accessories },
+    }
+}
+
 // ============================================================================
 
 /// Constants that survived the parts pivot.
@@ -212,6 +283,33 @@ mod tests {
         // Right half: mirrored to cols 6-7 (w=8, so bm.w-1-x for x in {0,1} = {7,6})
         assert!(bm.get(7, 0));
         assert!(bm.get(6, 0));
+    }
+
+    #[test]
+    fn pick_part_for_stage_returns_none_for_empty() {
+        let mut rng = SpikeRng::new(7);
+        let result = pick_part_for_stage(&[], Stage::S0, &mut rng);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn pick_part_for_stage_filters_by_min_stage() {
+        static ROWS: &[u32] = &[0b1];
+        static PARTS: [Part; 2] = [
+            Part { id: PartId(1), rows: ROWS, width_px: 1, height_px: 1,
+                   anchor: Anchor::HeadCenter, min_stage: Stage::S0,
+                   symmetry: PartSymmetry::Symmetric, eye_anchors: None },
+            Part { id: PartId(2), rows: ROWS, width_px: 1, height_px: 1,
+                   anchor: Anchor::HeadCenter, min_stage: Stage::S2,
+                   symmetry: PartSymmetry::Symmetric, eye_anchors: None },
+        ];
+        let mut rng = SpikeRng::new(7);
+        // At S0, only Part 1 is eligible.
+        let p = pick_part_for_stage(&PARTS, Stage::S0, &mut rng).unwrap();
+        assert_eq!(p.id, PartId(1));
+        // At S2, both are eligible — the pick may be either.
+        let p = pick_part_for_stage(&PARTS, Stage::S2, &mut rng).unwrap();
+        assert!(p.id == PartId(1) || p.id == PartId(2));
     }
 }
 
