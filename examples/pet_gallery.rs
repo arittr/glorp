@@ -51,6 +51,42 @@ pub struct PetBlueprint {
     pub mutation_vector: MutationVector,
 }
 
+#[derive(Debug, Clone)]
+pub struct SpikeRng {
+    state: u64,
+}
+
+impl SpikeRng {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed.max(1) }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    /// Uniform float in [0.0, 1.0).
+    pub fn next_f32_unit(&mut self) -> f32 {
+        // Use top 24 bits — float mantissa is 23+1 bits.
+        ((self.next_u64() >> 40) as f32) / (1u32 << 24) as f32
+    }
+
+    /// Coin flip biased toward `p` (0..1).
+    pub fn next_bias(&mut self, p: f32) -> bool {
+        self.next_f32_unit() < p
+    }
+
+    /// Uniform f32 in [-1.0, 1.0]; for noise perturbation.
+    pub fn next_signed_unit(&mut self) -> f32 {
+        self.next_f32_unit() * 2.0 - 1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +99,23 @@ mod tests {
             head_zone_ratio: 0.30, ornament_density: 0.10,
         };
         assert_eq!(p, p.clone());
+    }
+
+    #[test]
+    fn rng_is_deterministic_per_seed() {
+        let mut a = SpikeRng::new(42);
+        let mut b = SpikeRng::new(42);
+        for _ in 0..1000 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+    }
+
+    #[test]
+    fn rng_f32_unit_is_within_bounds() {
+        let mut r = SpikeRng::new(7);
+        for _ in 0..10_000 {
+            let f = r.next_f32_unit();
+            assert!((0.0..1.0).contains(&f), "out of bounds: {f}");
+        }
     }
 }
