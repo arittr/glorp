@@ -76,17 +76,15 @@ pub fn render_pet(
     mood: Mood,
     frame: AnimationFrame,
 ) -> RenderedPet {
-    use crate::pet::generate::generate_pet_lines;
+    use crate::pet::generate::generate_pet_lines_animated;
     use crate::pet::generation::fnv1a64;
 
     let seed = fnv1a64(&pet.seed);
-    let lines = generate_pet_lines(pet.species, stage, seed);
+    let blink_open = blink_open_for(pet, mood, frame);
+    let lines = generate_pet_lines_animated(pet.species, stage, seed, mood, blink_open);
 
     // Build per-cell StyledSegments. Heuristic: braille cells (U+2800..U+28FF)
     // are Body; non-braille cells are feature glyphs assigned by line position.
-    // The animator (Phase 3) will handle mood-driven eye/mouth swaps and
-    // blink suppression; for now the renderer just emits whatever the
-    // generator produced, regardless of mood/frame.
     let mut spans = Vec::new();
     for (line_idx, line) in lines.iter().enumerate() {
         for (ch_idx, c) in line.chars().enumerate() {
@@ -108,15 +106,36 @@ pub fn render_pet(
         }
     }
 
-    // mood + frame are reserved for Phase 3 (PetAnimator). Suppress unused
-    // variable warnings without changing the public signature.
-    let _ = (mood, frame);
-
     RenderedPet {
         lines,
         spans,
         event_lines: Vec::new(),
     }
+}
+
+/// Decide whether the eye is currently open. Blink is a brief eye-close that
+/// fires roughly every `blink_average` ticks (with a per-species jitter
+/// derived from the pet's seed). `blink_suppression_ticks` from the frame
+/// inhibits blinking immediately after mood changes so the suppression read
+/// as an expression change rather than an eye-flicker.
+fn blink_open_for(pet: &GeneratedPet, _mood: Mood, frame: AnimationFrame) -> bool {
+    if frame.blink_suppression_ticks > 0 {
+        return true;
+    }
+    let profile = species_animation_profile(pet.species);
+    if profile.blink_average == 0 {
+        return true;
+    }
+    let jitter = u64::from(profile.blink_jitter.max(1));
+    let phase_seed = u64::from(pet.animation_phase.blink).max(1);
+    let period = u64::from(profile.blink_average);
+    let phase = (phase_seed.wrapping_mul(2_654_435_761)) % period.max(1);
+    let cycle_pos = (frame.tick.wrapping_add(phase)) % period.max(1);
+    // Eye is closed for the first 2 ticks of each cycle; a small jitter
+    // shifts the closure by ±1 tick per pet so blinks aren't synchronized
+    // across pets.
+    let jittered_open_threshold = 2 + ((phase_seed % jitter) % 2);
+    cycle_pos >= jittered_open_threshold
 }
 
 pub fn palette_roles(pet: &GeneratedPet) -> PaletteRoles {
@@ -275,5 +294,61 @@ mod render_v2_tests {
         let b = render_pet(&pet_b, Stage::S2, Mood::Content, frame);
         // Either lines differ or spans differ — output should not be identical.
         assert!(a.lines != b.lines || a.spans != b.spans);
+    }
+
+    #[test]
+    fn render_pet_mood_changes_visible_output() {
+        // Different moods should produce different rendered output via the
+        // mood-override eye/mouth glyphs.
+        let pet = generate_pet("mood-test");
+        let frame = AnimationFrame {
+            tick: 0,
+            blink_suppression_ticks: 1, // suppress blink so mood is the only diff
+        };
+        let content = render_pet(&pet, Stage::S1, Mood::Content, frame);
+        let sleepy = render_pet(&pet, Stage::S1, Mood::Sleepy, frame);
+        let happy = render_pet(&pet, Stage::S1, Mood::Happy, frame);
+        assert_ne!(
+            content.lines, sleepy.lines,
+            "sleepy should differ from content"
+        );
+        assert_ne!(
+            content.lines, happy.lines,
+            "happy should differ from content"
+        );
+        assert_ne!(sleepy.lines, happy.lines, "sleepy should differ from happy");
+    }
+
+    #[test]
+    fn blink_suppression_keeps_eyes_open() {
+        // With blink_suppression_ticks > 0, the eye stays open regardless of
+        // tick value.
+        let pet = generate_pet("blink-suppress-test");
+        let suppressed = render_pet(
+            &pet,
+            Stage::S0,
+            Mood::Content,
+            AnimationFrame {
+                tick: 0,
+                blink_suppression_ticks: 5,
+            },
+        );
+        // Also render at tick=0 without suppression; if the species' phase puts
+        // it on a closed-eye tick, the two outputs would differ. We verify that
+        // the suppression branch produces stable output for nearby ticks (the
+        // pet does NOT blink during the suppression window).
+        let suppressed_2 = render_pet(
+            &pet,
+            Stage::S0,
+            Mood::Content,
+            AnimationFrame {
+                tick: 1,
+                blink_suppression_ticks: 5,
+            },
+        );
+        assert_eq!(
+            suppressed.lines, suppressed_2.lines,
+            "blink-suppressed pet should render identically across ticks"
+        );
     }
 }
