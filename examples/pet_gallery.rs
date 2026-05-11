@@ -112,6 +112,18 @@ pub fn stage_grid_full(stage: Stage) -> (u8, u8) {
     }
 }
 
+/// Returns a fill probability in [0, 1] for pixel (x, y) under a 2D Gaussian
+/// envelope centered on (cx, cy) with sigma scaled by `roundness` and the
+/// grid's larger dimension.
+pub fn gaussian_envelope(
+    x: f32, y: f32, cx: f32, cy: f32, half_w: f32, h: f32, roundness: f32,
+) -> f32 {
+    let sigma = (half_w.max(h) * 0.5) * (1.0 - roundness * 0.5).max(0.15);
+    let dx = (x - cx) / sigma;
+    let dy = (y - cy) / sigma;
+    (-(dx * dx + dy * dy) * 0.5).exp().clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +179,25 @@ mod stage_tests {
             assert_eq!(w % 2, 0, "width not even for {:?}: {w}", s);
             assert_eq!(h % 4, 0, "height not /4 for {:?}: {h}", s);
         }
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+    #[test]
+    fn envelope_peaks_at_center() {
+        let p_center = gaussian_envelope(3.5, 4.0, 3.5, 4.0, 7.0, 8.0, 0.5);
+        let p_corner = gaussian_envelope(0.0, 0.0, 3.5, 4.0, 7.0, 8.0, 0.5);
+        assert!(p_center > 0.95, "center: {p_center}");
+        assert!(p_corner < p_center, "corner ({p_corner}) >= center ({p_center})");
+    }
+
+    #[test]
+    fn higher_roundness_yields_tighter_envelope() {
+        let off = (5.0, 6.0);
+        let loose = gaussian_envelope(off.0, off.1, 3.5, 4.0, 7.0, 8.0, 0.20);
+        let tight = gaussian_envelope(off.0, off.1, 3.5, 4.0, 7.0, 8.0, 0.95);
+        assert!(loose > tight, "loose {loose} should be > tight {tight}");
     }
 }
