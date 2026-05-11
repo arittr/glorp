@@ -1,7 +1,6 @@
 use glorp::game::evolution::Stage;
 use glorp::game::metabolism::Mood;
-use glorp::pet::art::{morph_count, stage_label};
-use glorp::pet::generation::{generate_pet, resolve_accepted_name, Species};
+use glorp::pet::generation::{generate_pet, morph_count, resolve_accepted_name, stage_label, Species};
 use glorp::pet::render::{
     closed_blink_eyes, palette_roles, render_pet, species_animation_profile, AnimationFrame,
     PaletteRoleName,

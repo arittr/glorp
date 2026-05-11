@@ -1,3 +1,4 @@
+use crate::game::evolution::Stage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -96,6 +97,92 @@ pub fn resolve_accepted_name(generated_name: &str, replacement: Option<&str>) ->
         .filter(|name| !name.is_empty())
         .unwrap_or(generated_name)
         .to_string()
+}
+
+pub fn stage_label(species: Species, stage: Stage) -> &'static str {
+    let labels = match species {
+        Species::Fuzz => [
+            "fluff",
+            "fuzzling",
+            "kit",
+            "pup",
+            "fuzz",
+            "archfuzz",
+            "mythic-fuzz",
+        ],
+        Species::Blob => [
+            "droplet",
+            "blip",
+            "globule",
+            "wee-blob",
+            "blob",
+            "mega-blob",
+            "primordial",
+        ],
+        Species::Ghost => [
+            "whisper",
+            "wisp",
+            "shade",
+            "phantom-pup",
+            "ghost",
+            "wraith",
+            "revenant",
+        ],
+        Species::Glitch => [
+            "bit", "byte", "packet", "thread", "glitch", "daemon", "kernel",
+        ],
+        Species::Crystal => [
+            "grain", "shard", "facet", "cluster", "crystal", "spire", "lodestar",
+        ],
+        Species::Mech => ["chip", "bolt", "rivet", "drone", "mech", "warmech", "titan"],
+    };
+    labels[stage_key(stage).index()]
+}
+
+pub fn morph_count(_species: Species, stage: Stage) -> usize {
+    let key = stage_key(stage);
+    match key {
+        StageKey::S0 | StageKey::S1 | StageKey::S2 => 1,
+        StageKey::S3 => 1, // pup_templates(species).len() is always 1
+        StageKey::S4 | StageKey::S5 | StageKey::S6 => 3, // adult_templates(species).len() is always 3
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageKey {
+    S0,
+    S1,
+    S2,
+    S3,
+    S4,
+    S5,
+    S6,
+}
+
+impl StageKey {
+    fn index(self) -> usize {
+        match self {
+            StageKey::S0 => 0,
+            StageKey::S1 => 1,
+            StageKey::S2 => 2,
+            StageKey::S3 => 3,
+            StageKey::S4 => 4,
+            StageKey::S5 => 5,
+            StageKey::S6 => 6,
+        }
+    }
+}
+
+fn stage_key(stage: Stage) -> StageKey {
+    match stage {
+        Stage::S0 => StageKey::S0,
+        Stage::S1 => StageKey::S1,
+        Stage::S2 => StageKey::S2,
+        Stage::S3 => StageKey::S3,
+        Stage::S4 => StageKey::S4,
+        Stage::S5 => StageKey::S5,
+        Stage::S6 => StageKey::S6,
+    }
 }
 
 fn generated_name(species: Species, rng: &mut StableRng) -> String {
