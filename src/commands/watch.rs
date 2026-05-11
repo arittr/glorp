@@ -121,6 +121,8 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
         errors,
         latest_evolution: state.seen_stage_transitions.last().cloned(),
         acknowledged_evolution: None,
+        cursor_screen: None,
+        mouse_tracking_enabled: true,
     })
 }
 

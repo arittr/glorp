@@ -25,6 +25,12 @@ pub struct WatchViewModel {
     pub errors: Vec<String>,
     pub latest_evolution: Option<String>,
     pub acknowledged_evolution: Option<String>,
+    /// Raw mouse position in screen coordinates, or None when the cursor is
+    /// off the terminal or mouse tracking is disabled. PetPanel hit-tests
+    /// against its rect to decide whether to swap to cursor-tracked eyes.
+    pub cursor_screen: Option<(u16, u16)>,
+    /// Whether mouse tracking is currently enabled (toggled via `m` key).
+    pub mouse_tracking_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +141,8 @@ impl WatchViewModel {
             errors: Vec::new(),
             latest_evolution: None,
             acknowledged_evolution: None,
+            cursor_screen: None,
+            mouse_tracking_enabled: true,
         }
     }
 

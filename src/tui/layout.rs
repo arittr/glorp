@@ -86,7 +86,7 @@ fn frame_footer() -> Vec<Span<'static>> {
     let styles = semantic_styles();
     vec![
         Span::raw(" "),
-        Span::styled("q quit · r refresh · ? help", styles.label),
+        Span::styled("q quit · r refresh · m mouse · ? help", styles.label),
         Span::raw(" "),
     ]
 }
@@ -193,8 +193,9 @@ pub fn render_help_overlay(frame: &mut Frame<'_>) {
         frame,
         "glorp help",
         &[
-            "q quit   r refresh   ? help",
+            "q quit   r refresh   m mouse   ? help",
             "r refreshes usage and pet state now",
+            "m toggles cursor-tracked eyes (hover pet to see)",
             "usage polls stay calm when helpers are blocked",
         ],
     );
