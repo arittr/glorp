@@ -330,3 +330,69 @@ mod fill_tests {
         assert!(center > corner, "center {center} not > corner {corner}");
     }
 }
+
+/// A boolean bitmap, indexed [y][x] with x in 0..width_px, y in 0..height_px.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bitmap { pub w: u8, pub h: u8, pub cells: Vec<bool> }
+
+impl Bitmap {
+    pub fn new(w: u8, h: u8) -> Self { Self { w, h, cells: vec![false; (w as usize) * (h as usize)] } }
+    pub fn idx(&self, x: u8, y: u8) -> usize { (y as usize) * (self.w as usize) + (x as usize) }
+    pub fn get(&self, x: u8, y: u8) -> bool { self.cells[self.idx(x, y)] }
+    pub fn set(&mut self, x: u8, y: u8, v: bool) { let i = self.idx(x, y); self.cells[i] = v; }
+    pub fn filled_ratio(&self) -> f32 {
+        let on = self.cells.iter().filter(|&&b| b).count();
+        on as f32 / self.cells.len() as f32
+    }
+}
+
+/// Sample the half-grid, mirror to full width, return the bitmap. Retries up to
+/// RESAMPLE_RETRY_CAP times with adjusted density if filled_ratio is below
+/// MIN_FILLED_PIXELS_RATIO. Returns None if all retries are too sparse.
+pub fn sample_silhouette(params: &SilhouetteParams, noise_seed: u32) -> Option<Bitmap> {
+    let (full_w, h) = (params.width_px, params.height_px);
+    let half_w = full_w / 2;
+    let mut density = params.body_density;
+    for _retry in 0..aesthetic::RESAMPLE_RETRY_CAP {
+        let mut bm = Bitmap::new(full_w, h);
+        for y in 0..h { for x in 0..half_w {
+            let p = fill_probability(x as i32, y as i32, params, noise_seed);
+            let on = p > (1.0 - density); // higher density = lower threshold
+            bm.set(x, y, on);
+            bm.set(full_w - 1 - x, y, on); // mirror
+        }}
+        if bm.filled_ratio() >= aesthetic::MIN_FILLED_PIXELS_RATIO { return Some(bm); }
+        density = (density + 0.10).min(0.95); // bump and retry
+    }
+    None
+}
+
+#[cfg(test)]
+mod silhouette_tests {
+    use super::*;
+    fn p() -> SilhouetteParams {
+        SilhouetteParams {
+            width_px: 14, height_px: 8, roundness: 0.55, taper: 0.55,
+            body_density: 0.55, asymmetry_seed: 0,
+            head_zone_ratio: 0.30, ornament_density: 0.10,
+        }
+    }
+    #[test]
+    fn silhouette_is_bilaterally_symmetric() {
+        let bm = sample_silhouette(&p(), 1).expect("should produce silhouette");
+        for y in 0..bm.h { for x in 0..(bm.w / 2) {
+            assert_eq!(bm.get(x, y), bm.get(bm.w - 1 - x, y), "mismatch at ({x}, {y})");
+        }}
+    }
+    #[test]
+    fn silhouette_meets_min_fill_ratio() {
+        let bm = sample_silhouette(&p(), 1).unwrap();
+        assert!(bm.filled_ratio() >= aesthetic::MIN_FILLED_PIXELS_RATIO);
+    }
+    #[test]
+    fn silhouette_is_deterministic_for_same_seed() {
+        let a = sample_silhouette(&p(), 42).unwrap();
+        let b = sample_silhouette(&p(), 42).unwrap();
+        assert_eq!(a, b);
+    }
+}
