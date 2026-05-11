@@ -85,7 +85,14 @@ fn natural_inner_height(vm: &WatchViewModel, mode: Mode) -> u16 {
     let feed = h(FeedPanel.preferred_constraint(vm));
     let helpers = h(HelpersPanel.preferred_constraint(vm));
     match mode {
-        Mode::Wide => (pet + vitals).max(today + spark + feed + helpers),
+        // Wide-mode columns use spacing(COLUMN_GAP): left column has 1 gap
+        // between pet+vitals; right column has 3 gaps between
+        // today/spark/feed/helpers.
+        Mode::Wide => {
+            let left = pet + vitals + COLUMN_GAP;
+            let right = today + spark + feed + helpers + 3 * COLUMN_GAP;
+            left.max(right)
+        }
         // 6 panels stacked with spacing(1) → 5 row-gaps.
         Mode::Compact => pet + vitals + today + spark + feed + helpers + 5,
     }
@@ -120,13 +127,14 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
     };
     match mode {
         Mode::Wide => {
-            // Left column uses Flex::Center; pet sits below half the leftover
-            // space. Leftover = inner.height - (pet + vitals) constraints.
+            // Left column uses Flex::Center with spacing(COLUMN_GAP); pet
+            // sits below half the leftover space. Account for the gap row
+            // between pet and vitals.
             let vitals_h = match VitalsPanel.preferred_constraint(vm) {
                 Constraint::Length(n) => n,
                 _ => 5,
             };
-            let column_content_h = pet_h + vitals_h;
+            let column_content_h = pet_h + vitals_h + COLUMN_GAP;
             let leftover = inner.height.saturating_sub(column_content_h);
             let top_pad = leftover / 2;
             Rect {
@@ -282,6 +290,9 @@ fn render_column_with_spacing(
 /// evenly above and below the content block. Used for the two wide-mode
 /// columns so the shorter column's content sits vertically centered in the
 /// frame instead of being top-aligned with a wedge of empty space below it.
+/// A 1-row inter-panel gap gives each section divider visual breathing room.
+const COLUMN_GAP: u16 = 1;
+
 fn render_centered_column(
     area: Rect,
     panels: &[&dyn Panel],
@@ -290,7 +301,10 @@ fn render_centered_column(
 ) {
     let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
 
-    let rects = Layout::vertical(constraints).flex(Flex::Center).split(area);
+    let rects = Layout::vertical(constraints)
+        .flex(Flex::Center)
+        .spacing(COLUMN_GAP)
+        .split(area);
 
     for (panel, rect) in panels.iter().zip(rects.iter()) {
         panel.render(*rect, buf, vm);

@@ -84,6 +84,26 @@ fn cursor_eye_glyph(norm_x: f32) -> char {
     }
 }
 
+/// Build a replacement eye string that matches the original eye span's width.
+/// For span widths >= 3 ("o o" / "^ ^" style) we render `glyph` at both ends
+/// with a single space in between — both eyes track together. For shorter
+/// spans we render just the glyph. For longer spans we pad with spaces.
+fn build_cursor_eye_string(glyph: char, span_width: usize) -> String {
+    match span_width {
+        0 => String::new(),
+        1 | 2 => glyph.to_string(),
+        n => {
+            let mut s = String::with_capacity(n);
+            s.push(glyph);
+            for _ in 0..(n - 2) {
+                s.push(' ');
+            }
+            s.push(glyph);
+            s
+        }
+    }
+}
+
 fn build_pet_lines<'a>(
     vm: &'a WatchViewModel,
     area_width: usize,
@@ -167,7 +187,13 @@ fn role_spans_for_line<'a>(
         if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
             (eye_override, segment.role)
         {
-            spans.push(Span::styled(glyph.to_string(), style));
+            // Authored eye slots are typically 3+ chars wide ("o o", "^ ^",
+            // "v v" etc.). Preserve the original span width so the right
+            // eye doesn't disappear — place the cursor glyph at both ends
+            // of the span with the existing inner characters between them.
+            let span_width = end - start;
+            let replaced = build_cursor_eye_string(glyph, span_width);
+            spans.push(Span::styled(replaced, style));
         } else {
             let value = char_slice(art_line, &char_indices, start, end);
             spans.push(Span::styled(value, style));
@@ -322,6 +348,20 @@ mod tests {
         assert_eq!(cursor_eye_glyph(-0.9), '<');
         assert_eq!(cursor_eye_glyph(0.0), 'o');
         assert_eq!(cursor_eye_glyph(0.9), '>');
+    }
+
+    #[test]
+    fn build_cursor_eye_string_preserves_span_width() {
+        // Width 3 ("o o" style): glyph at both ends, space in between.
+        assert_eq!(build_cursor_eye_string('<', 3), "< <");
+        assert_eq!(build_cursor_eye_string('>', 3), "> >");
+        // Width 5 (wider templates): glyph at both ends, more space.
+        assert_eq!(build_cursor_eye_string('o', 5), "o   o");
+        // Width 1 or 2 (rare): just the glyph.
+        assert_eq!(build_cursor_eye_string('<', 1), "<");
+        assert_eq!(build_cursor_eye_string('<', 2), "<");
+        // Width 0: empty.
+        assert_eq!(build_cursor_eye_string('<', 0), "");
     }
 
     #[test]
