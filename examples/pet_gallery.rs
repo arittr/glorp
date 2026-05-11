@@ -367,6 +367,35 @@ pub fn sample_silhouette(params: &SilhouetteParams, noise_seed: u32) -> Option<B
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EyeAnchors { pub left: (u8, u8), pub right: (u8, u8) }
+
+/// Place two symmetric eye anchors inside the head zone, separated from the
+/// vertical midline by a margin. Returns top-left pixel of each anchor cell.
+pub fn place_eye_anchors(params: &SilhouetteParams) -> EyeAnchors {
+    let full_w = params.width_px;
+    let head_h = ((params.height_px as f32) * params.head_zone_ratio.max(aesthetic::HEAD_ZONE_MIN_RATIO)) as u8;
+    let eye_y = (head_h / 2).saturating_sub(aesthetic::EYE_ANCHOR_H_PX / 2);
+    let midline = full_w / 2;
+    let margin = (full_w / 6).max(2);
+    let left_x = midline.saturating_sub(margin + aesthetic::EYE_ANCHOR_W_PX);
+    let right_x = midline + margin;
+    EyeAnchors { left: (left_x, eye_y), right: (right_x, eye_y) }
+}
+
+/// After silhouette sampling, force eye-anchor cells off (no body pixels there).
+pub fn reserve_eye_anchors(bm: &mut Bitmap, anchors: EyeAnchors) {
+    for &(ax, ay) in &[anchors.left, anchors.right] {
+        for dy in 0..aesthetic::EYE_ANCHOR_H_PX {
+            for dx in 0..aesthetic::EYE_ANCHOR_W_PX {
+                let x = ax.saturating_add(dx).min(bm.w - 1);
+                let y = ay.saturating_add(dy).min(bm.h - 1);
+                bm.set(x, y, false);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod silhouette_tests {
     use super::*;
@@ -394,5 +423,40 @@ mod silhouette_tests {
         let a = sample_silhouette(&p(), 42).unwrap();
         let b = sample_silhouette(&p(), 42).unwrap();
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    fn p() -> SilhouetteParams {
+        SilhouetteParams {
+            width_px: 14, height_px: 8, roundness: 0.55, taper: 0.55,
+            body_density: 0.55, asymmetry_seed: 0,
+            head_zone_ratio: 0.30, ornament_density: 0.10,
+        }
+    }
+    #[test]
+    fn eye_anchors_are_symmetric_around_midline() {
+        let a = place_eye_anchors(&p());
+        let midline = (p().width_px / 2) as i32;
+        let left_d = midline - (a.left.0 as i32 + aesthetic::EYE_ANCHOR_W_PX as i32);
+        let right_d = a.right.0 as i32 - midline;
+        assert_eq!(left_d, right_d);
+    }
+    #[test]
+    fn reservation_clears_anchor_cells() {
+        let mut bm = sample_silhouette(&p(), 1).unwrap();
+        let a = place_eye_anchors(&p());
+        reserve_eye_anchors(&mut bm, a);
+        for &(ax, ay) in &[a.left, a.right] {
+            for dy in 0..aesthetic::EYE_ANCHOR_H_PX {
+                for dx in 0..aesthetic::EYE_ANCHOR_W_PX {
+                    let x = (ax + dx).min(bm.w - 1);
+                    let y = (ay + dy).min(bm.h - 1);
+                    assert!(!bm.get(x, y), "anchor cell ({x}, {y}) still filled");
+                }
+            }
+        }
     }
 }
