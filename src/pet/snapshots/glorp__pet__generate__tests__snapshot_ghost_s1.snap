@@ -1,0 +1,8 @@
+---
+source: src/pet/generate.rs
+expression: "generate_pet_lines(Species::Ghost, Stage::S1, 137).join(\"\\n\")"
+---
+⠀⠀·⣋⣙·⣀⠀⠀
+⠀⠀⣿⣿○⣿⣿⠀⠀
+⠀⠀⠙⢿⣿⡿⠋⠀⠀
+⠀⠀⠀⠏⠀⠝⠀⠀⠀

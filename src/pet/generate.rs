@@ -1839,4 +1839,24 @@ mod tests {
         }
         assert_eq!(braille_block(&bm, 0, 0), '\u{28FF}');
     }
+
+    #[test]
+    fn snapshot_blob_s0() {
+        insta::assert_snapshot!(generate_pet_lines(Species::Blob, Stage::S0, 42).join("\n"));
+    }
+
+    #[test]
+    fn snapshot_mech_s2() {
+        insta::assert_snapshot!(generate_pet_lines(Species::Mech, Stage::S2, 99).join("\n"));
+    }
+
+    #[test]
+    fn snapshot_ghost_s1() {
+        insta::assert_snapshot!(generate_pet_lines(Species::Ghost, Stage::S1, 137).join("\n"));
+    }
+
+    #[test]
+    fn snapshot_glitch_s2() {
+        insta::assert_snapshot!(generate_pet_lines(Species::Glitch, Stage::S2, 21).join("\n"));
+    }
 }
