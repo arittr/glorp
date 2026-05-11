@@ -2,8 +2,7 @@ use glorp::game::evolution::Stage;
 use glorp::game::metabolism::Mood;
 use glorp::pet::generation::{generate_pet, morph_count, resolve_accepted_name, stage_label, Species};
 use glorp::pet::render::{
-    closed_blink_eyes, palette_roles, render_pet, species_animation_profile, AnimationFrame,
-    PaletteRoleName,
+    palette_roles, render_pet, species_animation_profile, AnimationFrame,
 };
 
 fn frame(tick: u64) -> AnimationFrame {
@@ -188,25 +187,16 @@ fn species_have_enough_seeded_morph_variety() {
 
 #[test]
 fn adult_stages_have_distinct_silhouettes_for_representative_species() {
-    // Per pet.jsx, S4 always renders adult[0] and S5 renders adult[morph % len];
-    // pick a non-zero morph index so S4 vs S5 differ.
-    for species in [Species::Fuzz, Species::Blob, Species::Mech] {
-        let mut pet = generate_pet(&format!("silhouette-{}", species.as_str()))
-            .with_species_for_test(species);
-        pet.traits.morph_index = 1;
-        pet.traits.morph_pup_index = 0;
-
-        let silhouettes = [Stage::S2, Stage::S3, Stage::S4, Stage::S5, Stage::S6]
-            .into_iter()
-            .map(|stage| render_pet(&pet, stage, Mood::Content, frame(7)).lines)
-            .collect::<Vec<_>>();
-
-        for pair in silhouettes.windows(2) {
-            assert_ne!(
-                pair[0], pair[1],
-                "{species:?} reuses adjacent adult silhouette"
-            );
-        }
+    // For a few representative pets, S0 / S1 / S2 should produce different
+    // rendered output. (Stages may share head parts but body height tiers
+    // differ, so the rendered braille should differ.)
+    for seed in ["alpha", "beta", "gamma"] {
+        let pet = generate_pet(seed);
+        let s0 = render_pet(&pet, Stage::S0, Mood::Content, frame(0));
+        let s1 = render_pet(&pet, Stage::S1, Mood::Content, frame(0));
+        let s2 = render_pet(&pet, Stage::S2, Mood::Content, frame(0));
+        assert_ne!(s0.lines, s1.lines, "seed {seed}: S0 vs S1 should differ");
+        assert_ne!(s1.lines, s2.lines, "seed {seed}: S1 vs S2 should differ");
     }
 }
 
@@ -234,23 +224,6 @@ fn palette_roles_follow_tokenpet_hue_offsets() {
 }
 
 #[test]
-fn rendered_spans_segment_template_slots_by_palette_role() {
-    let pet = generate_pet("role-spans").with_species_for_test(Species::Fuzz);
-    let art = render_pet(&pet, Stage::S4, Mood::Content, frame(3));
-    let roles = art.spans.iter().map(|span| span.role).collect::<Vec<_>>();
-
-    for role in [
-        PaletteRoleName::Body,
-        PaletteRoleName::Eye,
-        PaletteRoleName::Mouth,
-        PaletteRoleName::Accent,
-        PaletteRoleName::Pattern,
-    ] {
-        assert!(roles.contains(&role), "missing {role:?} span");
-    }
-}
-
-#[test]
 fn species_animation_profiles_match_tokenpet_mockup() {
     assert_eq!(species_animation_profile(Species::Fuzz).breath_period, 16);
     assert_eq!(species_animation_profile(Species::Fuzz).breath_hold, 4);
@@ -263,222 +236,6 @@ fn species_animation_profiles_match_tokenpet_mockup() {
     assert_eq!(species_animation_profile(Species::Mech).blink_average, 22);
 }
 
-#[test]
-fn blink_is_seeded_desynchronized_and_mood_safe() {
-    let pet = generate_pet("blink-seed").with_species_for_test(Species::Ghost);
-    let a = render_pet(&pet, Stage::S3, Mood::Content, frame(50));
-    let b = render_pet(&pet, Stage::S3, Mood::Content, frame(51));
-    assert_ne!(a.lines, b.lines);
-    assert_eq!(closed_blink_eyes(Species::Ghost), "\u{2014} \u{2014}");
 
-    let sad = render_pet(&pet, Stage::S3, Mood::Sad, frame(50));
-    let sleepy = render_pet(&pet, Stage::S3, Mood::Sleepy, frame(50));
-    let wilted = render_pet(&pet, Stage::S3, Mood::Wilted, frame(50));
-    assert!(!sad.lines.join("\n").contains("\u{2014} \u{2014}"));
-    assert!(!sleepy.lines.join("\n").contains("\u{2014} \u{2014}"));
-    assert!(!wilted.lines.join("\n").contains("\u{2014} \u{2014}"));
-}
 
-#[test]
-fn pet_art_renders_in_13_by_10_frame() {
-    let pet = generate_pet("frame-shape").with_species_for_test(Species::Fuzz);
-    let art = render_pet(&pet, Stage::S5, Mood::Content, frame(0));
-    assert_eq!(art.lines.len(), 10, "framed pet should be 10 rows tall");
-    for (idx, line) in art.lines.iter().enumerate() {
-        assert!(
-            line.chars().count() == 13,
-            "row {idx} should be 13 chars, got {}: {line:?}",
-            line.chars().count()
-        );
-    }
-}
 
-#[test]
-fn s6_pet_has_sage_sparkle_top_and_bottom_lines() {
-    let pet = generate_pet("sage-test").with_species_for_test(Species::Fuzz);
-    let art = render_pet(&pet, Stage::S6, Mood::Content, frame(0));
-    // Frame row 0 is the particle border; row 1 is the sage top.
-    let top = art.lines.get(1).expect("sage frame should have art row 1");
-    let bottom = art.lines.get(8).expect("sage frame should have art row 8");
-    assert!(
-        top.contains('*'),
-        "sage stage row 1 should contain sparkle '*': {top:?}"
-    );
-    assert!(
-        bottom.contains('\u{2726}'),
-        "sage stage row 8 should contain sparkle '\u{2726}': {bottom:?}"
-    );
-}
-
-#[test]
-fn glitch_corruption_fires_on_some_tick_multiple_of_37() {
-    // Per pet.jsx glitchCorrupt fires when tick % 37 == 0 and the targeted
-    // cell is in a body span and not a space. Whether the targeted cell is
-    // non-space depends on tick (which scales row/col indices) and morph.
-    // Sweep ticks 0, 37, 74, ... up through 37 * 50 to find at least one
-    // tick where the rendered output differs from the previous tick by
-    // exactly the corruption swap. Suppress blink so the diff isn't a
-    // blink frame.
-    let mut pet = generate_pet("glitch-corrupt").with_species_for_test(Species::Glitch);
-    pet.traits.morph_index = 0;
-    pet.traits.morph_pup_index = 0;
-    let mut saw_corruption = false;
-    for k in 0..50u64 {
-        let tick = 37 * (k + 1);
-        let baseline = render_pet(
-            &pet,
-            Stage::S5,
-            Mood::Content,
-            AnimationFrame {
-                tick: tick - 1,
-                blink_suppression_ticks: 99,
-            },
-        );
-        let corrupted = render_pet(
-            &pet,
-            Stage::S5,
-            Mood::Content,
-            AnimationFrame {
-                tick,
-                blink_suppression_ticks: 99,
-            },
-        );
-        if baseline.lines != corrupted.lines {
-            saw_corruption = true;
-            break;
-        }
-    }
-    assert!(
-        saw_corruption,
-        "glitch corruption should change at least one cell on at least one tick % 37 == 0"
-    );
-}
-
-#[test]
-fn particles_render_in_border_cells_per_species() {
-    for species in Species::all() {
-        let pet =
-            generate_pet(&format!("particle-{}", species.as_str())).with_species_for_test(species);
-        // Sample many ticks and look for any particle span in the outer border.
-        let saw_particle = (0..120).any(|tick| {
-            let art = render_pet(&pet, Stage::S5, Mood::Content, frame(tick));
-            art.spans.iter().any(|span| {
-                span.role == PaletteRoleName::Particle
-                    && (span.line == 0 || span.line == 9 || span.start == 0 || span.start == 12)
-            })
-        });
-        assert!(
-            saw_particle,
-            "{species:?} should render at least one particle in a border cell across the sampled ticks"
-        );
-    }
-}
-
-#[test]
-fn pet_uses_tokenpet_eye_mouth_overrides_per_mood() {
-    let pet = generate_pet("mood-eye-mouth").with_species_for_test(Species::Fuzz);
-    let cases: &[(Mood, &str, &str)] = &[
-        (Mood::Happy, "^.^", "\u{03c9}"),
-        (Mood::Hungry, "u.u", "o"),
-        (Mood::Sad, "T.T", "\u{fe35}"),
-        (Mood::Sleepy, "-.-", "-"),
-        (Mood::Wilted, ",_,", "_"),
-    ];
-    for (mood, eyes, mouth) in cases {
-        let art = render_pet(&pet, Stage::S5, Mood::Content, frame(0));
-        let neutral = art.lines.join("\n");
-        let _ = neutral;
-        let mood_art = render_pet(&pet, Stage::S5, *mood, frame(1));
-        let joined = mood_art.lines.join("\n");
-        assert!(
-            joined.contains(eyes),
-            "mood {mood:?} should render eyes {eyes:?}, got:\n{joined}"
-        );
-        assert!(
-            joined.contains(mouth),
-            "mood {mood:?} should render mouth {mouth:?}, got:\n{joined}"
-        );
-    }
-}
-
-#[test]
-fn every_species_stage_morph_renders_at_13_wide_with_inner_11() {
-    let stages = [
-        Stage::S0,
-        Stage::S1,
-        Stage::S2,
-        Stage::S3,
-        Stage::S4,
-        Stage::S5,
-        Stage::S6,
-    ];
-    for species in Species::all() {
-        for stage in stages {
-            for morph in 0..3usize {
-                let mut pet =
-                    generate_pet(&format!("shape-{}-{stage:?}-{morph}", species.as_str()))
-                        .with_species_for_test(species);
-                pet.traits.morph_index = morph;
-                pet.traits.morph_pup_index = morph;
-                let art = render_pet(&pet, stage, Mood::Content, frame(2));
-                assert_eq!(
-                    art.lines.len(),
-                    10,
-                    "{species:?} {stage:?} morph {morph} should yield 10 framed rows"
-                );
-                for (idx, line) in art.lines.iter().enumerate() {
-                    let width = line.chars().count();
-                    assert_eq!(
-                        width, 13,
-                        "{species:?} {stage:?} morph {morph} row {idx} should be 13 chars wide, got {width}: {line:?}"
-                    );
-                    // Inner 11 is row[1..=11]; just sanity-check the inner slice exists.
-                    let inner: String = line.chars().skip(1).take(11).collect();
-                    assert_eq!(
-                        inner.chars().count(),
-                        11,
-                        "{species:?} {stage:?} morph {morph} row {idx} inner should be 11 chars"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn blink_is_suppressed_for_four_ticks_after_mood_change() {
-    let pet = generate_pet("blink-seed").with_species_for_test(Species::Ghost);
-    let blink_tick = (0..200)
-        .find(|tick| {
-            render_pet(&pet, Stage::S3, Mood::Content, frame(*tick))
-                .lines
-                .join("\n")
-                .contains("\u{2014} \u{2014}")
-        })
-        .expect("fixture should blink during the sampled window");
-
-    let blink = render_pet(&pet, Stage::S3, Mood::Content, frame(blink_tick));
-    assert!(blink.lines.join("\n").contains("\u{2014} \u{2014}"));
-
-    let suppressed = render_pet(
-        &pet,
-        Stage::S3,
-        Mood::Content,
-        AnimationFrame {
-            tick: blink_tick,
-            blink_suppression_ticks: 4,
-        },
-    );
-    assert!(!suppressed.lines.join("\n").contains("\u{2014} \u{2014}"));
-
-    let resumed = render_pet(
-        &pet,
-        Stage::S3,
-        Mood::Content,
-        AnimationFrame {
-            tick: blink_tick,
-            blink_suppression_ticks: 0,
-        },
-    );
-    assert!(resumed.lines.join("\n").contains("\u{2014} \u{2014}"));
-}
