@@ -99,6 +99,19 @@ pub mod aesthetic {
     pub const RESAMPLE_RETRY_CAP: u8 = 6;
 }
 
+/// Pixel dimensions of the full bitmap for each stage.
+///
+/// The spec defines S0/S1/S2 (14×8, 18×12, 22×16). Production has S3..=S6 too.
+/// For Phase 1 we cap S3+ at the S2 grid; richer geometry for late stages is
+/// future work (tracked outside this plan).
+pub fn stage_grid_full(stage: Stage) -> (u8, u8) {
+    match stage {
+        Stage::S0 => (14, 8),
+        Stage::S1 => (18, 12),
+        Stage::S2 | Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => (22, 16),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +154,18 @@ mod aesthetic_tests {
             assert!((0.0..=1.0).contains(&v), "{v} out of range");
         }
         for v in MAX_ORNAMENT_DENSITY { assert!((0.0..=1.0).contains(&v)); }
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+    #[test]
+    fn full_widths_are_even_and_heights_multiple_of_4() {
+        for s in [Stage::S0, Stage::S1, Stage::S2, Stage::S3, Stage::S4, Stage::S5, Stage::S6] {
+            let (w, h) = stage_grid_full(s);
+            assert_eq!(w % 2, 0, "width not even for {:?}: {w}", s);
+            assert_eq!(h % 4, 0, "height not /4 for {:?}: {h}", s);
+        }
     }
 }
