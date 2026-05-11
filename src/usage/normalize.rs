@@ -186,11 +186,18 @@ fn codex_totals(
     provider_surface: &str,
     value: &Value,
 ) -> std::result::Result<RawTokenTotals, ProviderDiagnostic> {
+    // OpenAI/codex semantics: `inputTokens` is the TOTAL prompt size and
+    // `cachedInputTokens` is the cached subset of that total. So real
+    // uncached input is the difference. Claude's `inputTokens` is already
+    // exclusive of cache reads (separate field in Anthropic's API), so
+    // that path stays as-is.
+    let total_input = required_u64(provider_surface, value, "inputTokens")?;
+    let cached_input = required_u64(provider_surface, value, "cachedInputTokens")?;
     Ok(RawTokenTotals {
-        uncached_input: required_u64(provider_surface, value, "inputTokens")?,
+        uncached_input: total_input.saturating_sub(cached_input),
         output: required_u64(provider_surface, value, "outputTokens")?,
         cache_creation: optional_u64(value, "cacheCreationTokens").unwrap_or(0),
-        cache_read: required_u64(provider_surface, value, "cachedInputTokens")?,
+        cache_read: cached_input,
         reasoning_output: optional_u64(value, "reasoningOutputTokens").unwrap_or(0),
     })
 }
@@ -238,4 +245,50 @@ fn optional_u64(value: &Value, field: &str) -> Option<u64> {
 
 fn optional_f64(value: &Value, field: &str) -> Option<f64> {
     value.get(field)?.as_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::effective_tokens::EffectiveTokenWeights;
+
+    #[test]
+    fn codex_uncached_input_subtracts_cached_subset() {
+        // Real ccusage-codex emits `inputTokens` as the TOTAL prompt size
+        // and `cachedInputTokens` as the cached subset. Make sure we don't
+        // double-bill the cached portion at full input weight.
+        let row = serde_json::json!({
+            "inputTokens": 19_994_265,
+            "outputTokens": 118_665,
+            "cachedInputTokens": 19_074_688,
+            "reasoningOutputTokens": 49_449
+        });
+        let totals = codex_totals("codex", &row).unwrap();
+        assert_eq!(totals.uncached_input, 919_577);
+        assert_eq!(totals.cache_read, 19_074_688);
+
+        let weights = EffectiveTokenWeights::default();
+        let effective = totals.effective_tokens(weights);
+        // Expected: 919_577 + 118_665 + 0 + 19_074_688 * 0.03 ≈ 1_610_482.64
+        assert!(
+            (1_610_000.0..1_611_000.0).contains(&effective),
+            "got {effective}"
+        );
+    }
+
+    #[test]
+    fn claude_input_already_excludes_cache_reads() {
+        // Claude's `inputTokens` is genuinely uncached input by API design,
+        // so the totals struct should mirror it 1:1.
+        let row = serde_json::json!({
+            "inputTokens": 100,
+            "outputTokens": 200,
+            "cacheCreationTokens": 50,
+            "cacheReadTokens": 1000
+        });
+        let totals = claude_totals("claude-code", &row).unwrap();
+        assert_eq!(totals.uncached_input, 100);
+        assert_eq!(totals.cache_creation, 50);
+        assert_eq!(totals.cache_read, 1000);
+    }
 }
