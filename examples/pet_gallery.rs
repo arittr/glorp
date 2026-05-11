@@ -107,6 +107,27 @@ pub struct PartCatalog {
     pub accessories: &'static [Part],
 }
 
+/// Render a single Part into the bitmap at the given top-left pixel position.
+/// Honors the part's symmetry: HalfMirror parts are also rendered mirrored to
+/// the right side; Symmetric parts are rendered once at the requested
+/// position; AsymmetricFree parts are rendered once at the requested position
+/// without mirroring.
+pub fn render_part(bm: &mut Bitmap, part: &Part, top_left_x: u8, top_left_y: u8) {
+    for (dy, &row) in part.rows.iter().enumerate() {
+        for dx in 0..part.width_px {
+            let bit_set = (row >> dx) & 1 == 1;
+            if !bit_set { continue; }
+            let x = top_left_x.saturating_add(dx);
+            let y = top_left_y.saturating_add(dy as u8);
+            if x < bm.w && y < bm.h { bm.set(x, y, true); }
+            if matches!(part.symmetry, PartSymmetry::HalfMirror) {
+                let mx = bm.w.saturating_sub(1).saturating_sub(x);
+                if mx < bm.w && y < bm.h { bm.set(mx, y, true); }
+            }
+        }
+    }
+}
+
 // ============================================================================
 
 /// Constants that survived the parts pivot.
@@ -158,6 +179,39 @@ mod tests {
         assert!(row & 2 == 0, "col 1");
         assert!(row & 4 != 0, "col 2");
         assert!(row & 8 != 0, "col 3");
+    }
+
+    #[test]
+    fn render_part_symmetric_writes_pixels() {
+        // A 2×2 fully-filled symmetric part
+        static ROWS: &[u32] = &[0b11, 0b11];
+        let part = Part {
+            id: PartId(1), rows: ROWS, width_px: 2, height_px: 2,
+            anchor: Anchor::BodyCenter, min_stage: Stage::S0,
+            symmetry: PartSymmetry::Symmetric, eye_anchors: None,
+        };
+        let mut bm = Bitmap::new(8, 8);
+        render_part(&mut bm, &part, 3, 4);
+        for y in 4..6 { for x in 3..5 { assert!(bm.get(x, y), "pixel ({x},{y}) should be on"); } }
+    }
+
+    #[test]
+    fn render_part_half_mirror_writes_mirrored_pixels() {
+        // A 2×1 half-mirror part: pixels at (0,0) and (1,0) on the left half
+        static ROWS: &[u32] = &[0b11];
+        let part = Part {
+            id: PartId(2), rows: ROWS, width_px: 2, height_px: 1,
+            anchor: Anchor::HeadTop, min_stage: Stage::S0,
+            symmetry: PartSymmetry::HalfMirror, eye_anchors: None,
+        };
+        let mut bm = Bitmap::new(8, 4);
+        render_part(&mut bm, &part, 0, 0);
+        // Left half: cols 0-1 set on row 0
+        assert!(bm.get(0, 0));
+        assert!(bm.get(1, 0));
+        // Right half: mirrored to cols 6-7 (w=8, so bm.w-1-x for x in {0,1} = {7,6})
+        assert!(bm.get(7, 0));
+        assert!(bm.get(6, 0));
     }
 }
 
