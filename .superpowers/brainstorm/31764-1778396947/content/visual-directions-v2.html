@@ -1,0 +1,90 @@
+<h2>B + C hybrid: framed outer + pet-left / data-right</h2>
+<p class="subtitle">Heavy accent outer frame from <strong>B</strong>, horizontal split from <strong>C</strong>. Pet sits in the left column with vitals beneath; data lives in the right column. Two variants below — the second drops the inner card borders so the outer frame does all the work.</p>
+
+<style>
+  .term {
+    background: #13110f;
+    color: #efebe4;
+    font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.35;
+    padding: 14px 18px;
+    border-radius: 6px;
+    border: 1px solid #2a2522;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 0;
+  }
+  .term .dim    { color: #97918a; }
+  .term .faint  { color: #504c49; }
+  .term .accent { color: #f0a646; }
+  .term .good   { color: #82bc83; }
+  .term .bad    { color: #ea6a64; }
+  .term .fg     { color: #efebe4; }
+  .term .b      { font-weight: 700; }
+  .dir-blurb { color: var(--dim); font-size: 12px; margin: 6px 0 14px; }
+  .cards .card-image { padding: 0; background: transparent; }
+  .cards .card-body { padding: 12px 16px 14px; }
+</style>
+
+<div class="cards">
+
+  <!-- ── B+C with inner cards ────────────────────────────────────────── -->
+  <div class="card" data-choice="b1" onclick="toggleSelect(this)">
+    <div class="card-image">
+<pre class="term"><span class="accent">┏━ </span><span class="b">glorp</span> <span class="dim">·</span> <span class="b">mochi</span> <span class="dim">the fuzz · 12d 4h ·</span> <span class="good">content</span> <span class="accent">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</span>
+<span class="accent">┃</span>                                                                              <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">┌─────────────────────────────┐</span>  <span class="faint">┌──</span> <span class="dim">today</span> <span class="faint">───────────────────────────┐</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>                             <span class="faint">│</span>  <span class="faint">│</span>  <span class="dim">tokens  </span> <span class="b">412,847</span>  <span class="good">↑ 22.9%</span>     <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>          <span class="accent">/\_/\</span>              <span class="faint">│</span>  <span class="faint">│</span>  <span class="dim">prompts </span> <span class="b">87</span>       <span class="dim">9 sessions</span>    <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>         <span class="accent">(</span> <span class="good b">o o</span> <span class="accent">)</span>             <span class="faint">│</span>  <span class="faint">│</span>  <span class="dim">commits </span> <span class="b">14</span>       <span class="dim">3 PRs merged</span>  <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>          <span class="accent">\</span> <span class="fg">.</span> <span class="accent">/</span>              <span class="faint">│</span>  <span class="faint">│</span>  <span class="dim">diff    </span> <span class="good">+1,247</span> <span class="bad">-382</span>             <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>           <span class="accent">v v</span>               <span class="faint">│</span>  <span class="faint">└─────────────────────────────────┘</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>                             <span class="faint">│</span>                                       <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">├──</span> <span class="dim">vitals</span> <span class="faint">───────────────────┤</span>  <span class="faint">┌──</span> <span class="dim">7-day</span> <span class="faint">───────────────────────────┐</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>  <span class="dim">fed   </span> <span class="good">█████████</span><span class="faint">░░░</span>  <span class="b">62</span>  <span class="faint">│</span>  <span class="faint">│</span>     <span class="accent">▂   ▃   ▆   ▁   ▄   ▅   █</span>      <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>  <span class="dim">happy </span> <span class="accent">██████████</span><span class="faint">░░</span>  <span class="b">78</span>  <span class="faint">│</span>  <span class="faint">└─────────────────────────────────┘</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>  <span class="dim">energy</span> <span class="good">███████████</span><span class="faint">░</span>  <span class="b">88</span>  <span class="faint">│</span>                                       <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">│</span>  <span class="dim">xp    </span> <span class="accent">█████</span><span class="faint">░░░░░░░</span>  <span class="b">51</span>  <span class="faint">│</span>  <span class="faint">┌──</span> <span class="dim">feed</span> <span class="faint">────────────────────────────┐</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">└─────────────────────────────┘</span>  <span class="faint">│</span>  <span class="faint">14:21</span>  <span class="good">+52k</span> <span class="dim">tokens   claude</span>      <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>                                  <span class="faint">│</span>  <span class="faint">14:18</span>  <span class="accent">evolution</span>     <span class="dim">pup → adult</span> <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>                                  <span class="faint">│</span>  <span class="faint">14:02</span>  <span class="good">+18k</span> <span class="dim">tokens   codex</span>       <span class="faint">│</span>  <span class="accent">┃</span>
+<span class="accent">┃</span>                                  <span class="faint">└─────────────────────────────────┘</span>  <span class="accent">┃</span>
+<span class="accent">┗━ </span><span class="dim">q quit · r refresh · ? help</span> <span class="accent">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛</span></pre>
+    </div>
+    <div class="card-body">
+      <h3>B1 — Outer frame + inner cards</h3>
+      <p class="dir-blurb">Heavy accent outer frame, plus a faint <code>┌──┐</code> card around each section inside. Most decorative. Risk: borders eat horizontal space and look noisy at narrow widths.</p>
+    </div>
+  </div>
+
+  <!-- ── B+C, no inner cards ─────────────────────────────────────────── -->
+  <div class="card" data-choice="b2" onclick="toggleSelect(this)">
+    <div class="card-image">
+<pre class="term"><span class="accent">┏━ </span><span class="b">glorp</span> <span class="dim">·</span> <span class="b">mochi</span> <span class="dim">the fuzz · 12d 4h ·</span> <span class="good">content</span> <span class="accent">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</span>
+<span class="accent">┃</span>                                                                              <span class="accent">┃</span>
+<span class="accent">┃</span>                                       <span class="faint">─</span> <span class="dim">today</span> <span class="faint">────────────────────────────</span>   <span class="accent">┃</span>
+<span class="accent">┃</span>            <span class="accent">/\_/\</span>                       <span class="dim">tokens  </span> <span class="b">412,847</span>  <span class="good">↑ 22.9%</span>          <span class="accent">┃</span>
+<span class="accent">┃</span>           <span class="accent">(</span> <span class="good b">o o</span> <span class="accent">)</span>                      <span class="dim">prompts </span> <span class="b">87</span>       <span class="dim">9 sessions</span>         <span class="accent">┃</span>
+<span class="accent">┃</span>            <span class="accent">\</span> <span class="fg">.</span> <span class="accent">/</span>                       <span class="dim">commits </span> <span class="b">14</span>       <span class="dim">3 PRs merged</span>       <span class="accent">┃</span>
+<span class="accent">┃</span>             <span class="accent">v v</span>                        <span class="dim">diff    </span> <span class="good">+1,247</span> <span class="bad">-382</span>                  <span class="accent">┃</span>
+<span class="accent">┃</span>                                                                              <span class="accent">┃</span>
+<span class="accent">┃</span>   <span class="faint">─</span> <span class="dim">vitals</span> <span class="faint">────────────────────</span>     <span class="faint">─</span> <span class="dim">7-day</span> <span class="faint">────────────────────────────</span>   <span class="accent">┃</span>
+<span class="accent">┃</span>     <span class="dim">fed   </span> <span class="good">█████████</span><span class="faint">░░░</span>  <span class="b">62</span>           <span class="accent">▂   ▃   ▆   ▁   ▄   ▅   █</span>            <span class="accent">┃</span>
+<span class="accent">┃</span>     <span class="dim">happy </span> <span class="accent">██████████</span><span class="faint">░░</span>  <span class="b">78</span>                                              <span class="accent">┃</span>
+<span class="accent">┃</span>     <span class="dim">energy</span> <span class="good">███████████</span><span class="faint">░</span>  <span class="b">88</span>     <span class="faint">─</span> <span class="dim">feed</span> <span class="faint">─────────────────────────────</span>   <span class="accent">┃</span>
+<span class="accent">┃</span>     <span class="dim">xp    </span> <span class="accent">█████</span><span class="faint">░░░░░░░</span>  <span class="b">51</span>       <span class="faint">14:21</span>  <span class="good">+52k</span> <span class="dim">tokens   claude</span>           <span class="accent">┃</span>
+<span class="accent">┃</span>                                       <span class="faint">14:18</span>  <span class="accent">evolution</span>     <span class="dim">pup → adult</span>      <span class="accent">┃</span>
+<span class="accent">┃</span>                                       <span class="faint">14:02</span>  <span class="good">+18k</span> <span class="dim">tokens   codex</span>            <span class="accent">┃</span>
+<span class="accent">┃</span>                                                                              <span class="accent">┃</span>
+<span class="accent">┗━ </span><span class="dim">q quit · r refresh · ? help</span> <span class="accent">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛</span></pre>
+    </div>
+    <div class="card-body">
+      <h3>B2 — Outer frame, no inner cards</h3>
+      <p class="dir-blurb">Same warm outer frame, but inside it sections are just <code>─ vitals ─</code> rules. The frame does the framing; sections breathe. Cleaner. Pet is centered in the left half, data flows down the right half.</p>
+    </div>
+  </div>
+
+</div>
+
+<p class="subtitle" style="margin-top: 24px;">Both keep the accent outer frame and the left/right split. Difference: <strong>B1</strong> wraps each section in a faint card, <strong>B2</strong> uses just rule lines for sections. B2 is lighter and copes better at narrow widths; B1 is more decorated and reads more "card-like".</p>

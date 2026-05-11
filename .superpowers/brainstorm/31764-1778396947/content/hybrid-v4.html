@@ -1,0 +1,61 @@
+<h2>Hybrid v4 — column-aligned, token-only, gradient bars</h2>
+<p class="subtitle">Frame is exactly 78 columns. Every body row ends at the same column. Today/feed/helpers all token-only per the spec (no commits/PRs/diffs). Bars use a 5-stop gradient ramp. Pet is the bigger fuzz placeholder with environmental flourishes (sparkles above, ground line below).</p>
+
+<style>
+  .term {
+    background: #13110f;
+    color: #efebe4;
+    font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.35;
+    padding: 14px 18px;
+    border-radius: 6px;
+    border: 1px solid #2a2522;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 0;
+  }
+  .term .dim    { color: #97918a; }
+  .term .faint  { color: #504c49; }
+  .term .accent { color: #f0a646; }
+  .term .good   { color: #82bc83; }
+  .term .bad    { color: #ea6a64; }
+  .term .fg     { color: #efebe4; }
+  .term .b      { font-weight: 700; }
+
+  .term .g0 { color: #3d6948; }
+  .term .g1 { color: #5a8462; }
+  .term .g2 { color: #82bc83; }
+  .term .g3 { color: #a8d690; }
+  .term .g4 { color: #d2eea2; }
+  .term .a0 { color: #6e4516; }
+  .term .a1 { color: #b87a2c; }
+  .term .a2 { color: #f0a646; }
+  .term .a3 { color: #ffc66e; }
+  .term .a4 { color: #ffe0a8; }
+</style>
+
+<pre class="term"><span class="accent">┏━</span> <span class="b">glorp</span> <span class="dim">·</span> <span class="b">mochi</span> <span class="dim">the fuzz · 12d 4h ·</span> <span class="good">content</span> <span class="accent">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</span>
+<span class="accent">┃</span>                                                                            <span class="accent">┃</span>
+<span class="accent">┃</span>                 <span class="accent">·</span>            <span class="faint">─</span> <span class="dim">today</span> <span class="faint">───────────────────────────────────</span>   <span class="accent">┃</span>
+<span class="accent">┃</span>         <span class="accent">·</span>                      <span class="dim">tokens   </span><span class="b">412,847</span>       <span class="good">↑ 22.9%</span>              <span class="accent">┃</span>
+<span class="accent">┃</span>       <span class="accent">.-^^^^^^^^-.</span>             <span class="dim">claude   </span><span class="b">287,140</span>       <span class="dim">70%</span>                  <span class="accent">┃</span>
+<span class="accent">┃</span>      <span class="accent">/</span>            <span class="accent">\</span>            <span class="dim">codex    </span><span class="b">125,707</span>       <span class="dim">30%</span>                  <span class="accent">┃</span>
+<span class="accent">┃</span>     <span class="accent">/</span>  <span class="good b">●</span>        <span class="good b">●</span>  <span class="accent">\</span>           <span class="dim">bucket   </span><span class="b">+8,420</span>        <span class="dim">this 10m</span>             <span class="accent">┃</span>
+<span class="accent">┃</span>    <span class="accent">|</span>       <span class="fg">ω</span>        <span class="accent">|</span>                                                      <span class="accent">┃</span>
+<span class="accent">┃</span>     <span class="accent">\</span>   <span class="faint">.----.</span>     <span class="accent">/</span>         <span class="faint">─</span> <span class="dim">7-day</span> <span class="faint">───────────────────────────────────</span>   <span class="accent">┃</span>
+<span class="accent">┃</span>      <span class="accent">`----------'</span>                   <span class="a0">▁</span>   <span class="a1">▂</span>   <span class="a2">▃</span>   <span class="a1">▁</span>   <span class="a2">▄</span>   <span class="a3">▅</span>   <span class="a4">█</span>              <span class="accent">┃</span>
+<span class="accent">┃</span>       <span class="accent">(</span>          <span class="accent">)</span>                                                         <span class="accent">┃</span>
+<span class="accent">┃</span>        <span class="accent">\________/</span>            <span class="faint">─</span> <span class="dim">feed</span> <span class="faint">────────────────────────────────────</span>   <span class="accent">┃</span>
+<span class="accent">┃</span>         <span class="accent">d</span>      <span class="accent">b</span>             <span class="faint">14:21</span>  <span class="good">+52k tokens</span>   <span class="dim">claude</span>                   <span class="accent">┃</span>
+<span class="accent">┃</span>   <span class="faint">,,,,,,,,,,,,,,,,,,,,,,,,,</span>  <span class="faint">14:18</span>  <span class="accent">evolution</span>     <span class="dim">pup → adult</span>              <span class="accent">┃</span>
+<span class="accent">┃</span>                              <span class="faint">14:02</span>  <span class="good">+18k tokens</span>   <span class="dim">codex</span>                    <span class="accent">┃</span>
+<span class="accent">┃</span>  <span class="faint">─</span> <span class="dim">vitals</span> <span class="faint">─────────────────</span>                                                <span class="accent">┃</span>
+<span class="accent">┃</span>    <span class="dim">fed   </span><span class="g0">█</span><span class="g1">█</span><span class="g1">█</span><span class="g2">█</span><span class="g3">█</span><span class="g3">█</span><span class="g4">█</span><span class="faint">░░░░░</span>  <span class="b">62</span>    <span class="faint">─</span> <span class="dim">helpers</span> <span class="faint">─────────────────────────────────</span>   <span class="accent">┃</span>
+<span class="accent">┃</span>    <span class="dim">happy </span><span class="a0">█</span><span class="a0">█</span><span class="a1">█</span><span class="a2">█</span><span class="a2">█</span><span class="a2">█</span><span class="a3">█</span><span class="a4">█</span><span class="a4">█</span><span class="faint">░░░</span>  <span class="b">78</span>      <span class="dim">ccusage</span>  <span class="good">✓</span>     <span class="dim">codex</span>  <span class="good">✓</span>                     <span class="accent">┃</span>
+<span class="accent">┃</span>    <span class="dim">energy</span><span class="g0">█</span><span class="g0">█</span><span class="g1">█</span><span class="g1">█</span><span class="g2">█</span><span class="g2">█</span><span class="g2">█</span><span class="g3">█</span><span class="g3">█</span><span class="g4">█</span><span class="g4">█</span><span class="faint">░</span>  <span class="b">88</span>                                                  <span class="accent">┃</span>
+<span class="accent">┃</span>    <span class="dim">xp    </span><span class="a0">█</span><span class="a1">█</span><span class="a2">█</span><span class="a2">█</span><span class="a3">█</span><span class="a4">█</span><span class="faint">░░░░░░</span>  <span class="b">51</span>                                                  <span class="accent">┃</span>
+<span class="accent">┃</span>                                                                            <span class="accent">┃</span>
+<span class="accent">┗━</span> <span class="dim">q quit · r refresh · ? help</span> <span class="accent">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛</span></pre>
+
+<p class="subtitle" style="margin-top: 24px;">Sparkline now lives in the <code>7-day</code> rail with the same gradient idea: dim early days fade into bright today (<code>█</code>). Bars: 12 cells filled with a dark→bright ramp. Pet placeholder is a fuzz; real implementation extends to all six species with distinct silhouettes.</p>

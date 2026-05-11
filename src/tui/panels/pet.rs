@@ -1,8 +1,10 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use crate::pet::animator::low_energy_lightness_multiplier;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::panels::Panel;
 use crate::tui::style::{semantic_styles, SemanticStyles};
@@ -17,10 +19,40 @@ impl Panel for PetPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
-        let styles = semantic_styles();
+        let base = semantic_styles();
+        // Continuous low-energy droop: darken pet foreground colors based on
+        // current energy. At energy >= 0.6 the multiplier is 1.0 (no change);
+        // it falls linearly to 0.55 at energy 0.0.
+        let m = low_energy_lightness_multiplier(vm.energy);
+        let droop = darken_pet_styles(&base, m);
         let cursor_norm_x = cursor_normalized_x_within(vm, area);
-        let lines = build_pet_lines(vm, area.width as usize, &styles, cursor_norm_x);
+        let lines = build_pet_lines(vm, area.width as usize, &droop, cursor_norm_x);
         Paragraph::new(lines).render(area, buf);
+    }
+}
+
+/// Returns a copy of `base` with all pet-role foreground colors scaled by
+/// `multiplier` (1.0 = unchanged, 0.55 = ~half lightness). Non-RGB colors
+/// pass through unchanged.
+fn darken_pet_styles(base: &SemanticStyles, multiplier: f32) -> SemanticStyles {
+    let mut s = base.clone();
+    s.pet_body = darken_style(s.pet_body, multiplier);
+    s.pet_eye = darken_style(s.pet_eye, multiplier);
+    s.pet_mouth = darken_style(s.pet_mouth, multiplier);
+    s.pet_accent = darken_style(s.pet_accent, multiplier);
+    s.pet_pattern = darken_style(s.pet_pattern, multiplier);
+    s
+}
+
+fn darken_style(style: Style, multiplier: f32) -> Style {
+    if let Some(Color::Rgb(r, g, b)) = style.fg {
+        let m = multiplier.clamp(0.0, 1.0);
+        let r = (r as f32 * m) as u8;
+        let g = (g as f32 * m) as u8;
+        let b = (b as f32 * m) as u8;
+        style.fg(Color::Rgb(r, g, b))
+    } else {
+        style
     }
 }
 

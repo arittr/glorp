@@ -54,6 +54,46 @@ pub fn render_watch_frame_with_capability(
     layout_and_render(inner, mode, frame.buffer_mut(), vm);
 }
 
+/// Returns the rect within `frame.area()` that the pet panel occupies for the
+/// current mode and view model. Callers (specifically the watch loop) use this
+/// to apply tachyonfx effects onto the rendered pet panel after the dispatcher
+/// has drawn it.
+pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
+    use crate::tui::panels::Panel;
+    let outer_block = Block::bordered();
+    let inner = outer_block.inner(frame_area);
+    let mode = if (inner.width as usize) >= COMPACT_THRESHOLD {
+        Mode::Wide
+    } else {
+        Mode::Compact
+    };
+    let pet_height = PetPanel.preferred_constraint(vm);
+    let pet_h = match pet_height {
+        Constraint::Length(n) => n,
+        _ => 5,
+    };
+    match mode {
+        Mode::Wide => {
+            // Pet is at the top of the left column (40 wide, starting at inner.x).
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: WIDE_LEFT_COL.min(inner.width),
+                height: pet_h.min(inner.height),
+            }
+        }
+        Mode::Compact => {
+            // Pet is the first panel at top of inner.
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: pet_h.min(inner.height),
+            }
+        }
+    }
+}
+
 /// Produces the styled title spans for the outer frame.
 fn frame_title(vm: &WatchViewModel) -> Vec<Span<'_>> {
     const NAME_MAX: usize = 16;

@@ -1,3 +1,4 @@
+pub mod animator;
 pub mod generate;
 pub mod generation;
 pub mod render;
