@@ -134,6 +134,16 @@ pub fn head_zone_gain(y: f32, h: f32, head_zone_ratio: f32) -> f32 {
     } else { 1.0 }
 }
 
+/// Returns a 0..1 multiplier that falls off toward the four corners of the
+/// grid. `taper` (0..1) controls strength; higher = stronger falloff.
+pub fn corner_taper(x: f32, y: f32, half_w: f32, h: f32, taper: f32) -> f32 {
+    let nx = (x - half_w * 0.5).abs() / (half_w * 0.5).max(1.0);
+    let ny = (y - h * 0.5).abs() / (h * 0.5).max(1.0);
+    let radial = (nx * nx + ny * ny).sqrt().min(1.0);
+    let strength = taper.clamp(0.0, 1.0);
+    (1.0 - radial.powf(2.0) * strength).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +231,17 @@ mod head_zone_tests {
         let middle = head_zone_gain(4.0, 8.0, 0.30);
         assert!(top > middle);
         assert!((middle - 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod taper_tests {
+    use super::*;
+    #[test]
+    fn center_unaffected_corners_attenuated() {
+        let center = corner_taper(3.5, 4.0, 7.0, 8.0, 0.75);
+        let corner = corner_taper(0.0, 0.0, 7.0, 8.0, 0.75);
+        assert!((center - 1.0).abs() < 1e-6);
+        assert!(corner < 0.5);
     }
 }
