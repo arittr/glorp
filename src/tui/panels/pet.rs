@@ -18,8 +18,37 @@ impl Panel for PetPanel {
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
         let styles = semantic_styles();
-        let lines = build_pet_lines(vm, area.width as usize, &styles);
+        let cursor_norm_x = cursor_normalized_x_within(vm, area);
+        let lines = build_pet_lines(vm, area.width as usize, &styles, cursor_norm_x);
         Paragraph::new(lines).render(area, buf);
+    }
+}
+
+/// Hit-test the screen cursor against the pet panel rect. Returns normalized
+/// x ∈ [-1.0, 1.0] relative to the panel center, or None when the cursor is
+/// outside the rect, missing, or mouse tracking is disabled.
+fn cursor_normalized_x_within(vm: &WatchViewModel, area: Rect) -> Option<f32> {
+    if !vm.mouse_tracking_enabled {
+        return None;
+    }
+    let (cx, cy) = vm.cursor_screen?;
+    if cx < area.x || cx >= area.x + area.width || cy < area.y || cy >= area.y + area.height {
+        return None;
+    }
+    let local_x = (cx - area.x) as f32;
+    let width = area.width.max(1) as f32;
+    Some((local_x / width) * 2.0 - 1.0)
+}
+
+/// Pick the cursor-tracked eye glyph based on normalized x position.
+/// Left third → looking left; middle → straight; right third → looking right.
+fn cursor_eye_glyph(norm_x: f32) -> char {
+    if norm_x < -0.33 {
+        '<'
+    } else if norm_x > 0.33 {
+        '>'
+    } else {
+        'o'
     }
 }
 
@@ -27,6 +56,7 @@ fn build_pet_lines<'a>(
     vm: &'a WatchViewModel,
     area_width: usize,
     styles: &'a SemanticStyles,
+    cursor_norm_x: Option<f32>,
 ) -> Vec<Line<'a>> {
     let pet_width = vm
         .pet_art
@@ -35,6 +65,7 @@ fn build_pet_lines<'a>(
         .max()
         .unwrap_or(0);
     let left_pad = area_width.saturating_sub(pet_width) / 2;
+    let cursor_eye = cursor_norm_x.map(cursor_eye_glyph);
 
     vm.pet_art
         .iter()
@@ -44,11 +75,14 @@ fn build_pet_lines<'a>(
             if left_pad > 0 {
                 spans.push(Span::raw(" ".repeat(left_pad)));
             }
+            // Cursor-tracked eyes only swap on line 0 where the eye glyphs live.
+            let eye_override = if line_index == 0 { cursor_eye } else { None };
             spans.extend(role_spans_for_line(
                 art_line,
                 line_index,
                 &vm.pet_spans,
                 styles,
+                eye_override,
             ));
             Line::from(spans)
         })
@@ -60,6 +94,7 @@ fn role_spans_for_line<'a>(
     line_index: usize,
     pet_spans: &'a [crate::pet::render::StyledSegment],
     styles: &'a SemanticStyles,
+    eye_override: Option<char>,
 ) -> Vec<Span<'a>> {
     let total_chars = art_line.chars().count();
     if total_chars == 0 {
@@ -90,8 +125,15 @@ fn role_spans_for_line<'a>(
             let body = char_slice(art_line, &char_indices, cursor, start);
             spans.push(Span::styled(body, styles.pet_body));
         }
-        let value = char_slice(art_line, &char_indices, start, end);
-        spans.push(Span::styled(value, role_style(segment.role, styles)));
+        let style = role_style(segment.role, styles);
+        if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
+            (eye_override, segment.role)
+        {
+            spans.push(Span::styled(glyph.to_string(), style));
+        } else {
+            let value = char_slice(art_line, &char_indices, start, end);
+            spans.push(Span::styled(value, style));
+        }
         cursor = end;
     }
 
@@ -195,6 +237,71 @@ mod tests {
         assert_eq!(
             first_cell, " ",
             "expected left-pad space, got {first_cell:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_normalized_x_is_none_when_cursor_outside_area() {
+        let mut vm = vm_with_real_pet();
+        vm.cursor_screen = Some((100, 100));
+        let area = Rect::new(0, 0, 40, 5);
+        assert!(cursor_normalized_x_within(&vm, area).is_none());
+    }
+
+    #[test]
+    fn cursor_normalized_x_maps_left_edge_to_negative_one() {
+        let mut vm = vm_with_real_pet();
+        vm.cursor_screen = Some((0, 0));
+        let area = Rect::new(0, 0, 40, 5);
+        let n = cursor_normalized_x_within(&vm, area).unwrap();
+        assert!(n <= -0.95, "left edge should be ~-1.0, got {n}");
+    }
+
+    #[test]
+    fn cursor_normalized_x_maps_right_edge_to_near_positive_one() {
+        let mut vm = vm_with_real_pet();
+        vm.cursor_screen = Some((39, 0));
+        let area = Rect::new(0, 0, 40, 5);
+        let n = cursor_normalized_x_within(&vm, area).unwrap();
+        assert!(n > 0.9, "right edge should be ~+1.0, got {n}");
+    }
+
+    #[test]
+    fn cursor_normalized_x_disabled_when_tracking_off() {
+        let mut vm = vm_with_real_pet();
+        vm.cursor_screen = Some((20, 2));
+        vm.mouse_tracking_enabled = false;
+        let area = Rect::new(0, 0, 40, 5);
+        assert!(cursor_normalized_x_within(&vm, area).is_none());
+    }
+
+    #[test]
+    fn cursor_eye_glyph_picks_directional_chars() {
+        assert_eq!(cursor_eye_glyph(-0.9), '<');
+        assert_eq!(cursor_eye_glyph(0.0), 'o');
+        assert_eq!(cursor_eye_glyph(0.9), '>');
+    }
+
+    #[test]
+    fn pet_panel_swaps_eye_glyph_when_cursor_inside() {
+        let mut vm = vm_with_real_pet();
+        // Place cursor at right side; expect '>' glyph to appear on line 0.
+        vm.cursor_screen = Some((38, 0));
+        let panel = PetPanel;
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                panel.render(f.area(), f.buffer_mut(), &vm);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row0: String = (0..40)
+            .map(|x| buf[(x, 0u16)].symbol().to_string())
+            .collect();
+        assert!(
+            row0.contains('>'),
+            "expected '>' eye glyph in row 0, got {row0:?}"
         );
     }
 }

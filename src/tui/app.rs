@@ -7,7 +7,10 @@ use std::{
 
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -154,10 +157,10 @@ impl WatchApp {
             })?;
 
             if event::poll(self.config.animation_tick)? {
-                if let Event::Key(key) = event::read()? {
-                    if self.handle_key(key)? {
-                        break;
-                    }
+                match event::read()? {
+                    Event::Key(key) if self.handle_key(key)? => break,
+                    Event::Mouse(mouse) => self.handle_mouse(mouse),
+                    _ => {}
                 }
             }
 
@@ -226,12 +229,39 @@ impl WatchApp {
                 self.overlay = None;
                 Ok(false)
             }
+            KeyCode::Char('m') => {
+                self.vm.mouse_tracking_enabled = !self.vm.mouse_tracking_enabled;
+                if !self.vm.mouse_tracking_enabled {
+                    self.vm.cursor_screen = None;
+                }
+                Ok(false)
+            }
             KeyCode::Char('r') => {
                 self.kick_off_poll()?;
                 self.last_poll = Some(Instant::now());
                 Ok(false)
             }
             _ => Ok(false),
+        }
+    }
+
+    /// Update vm.cursor_screen from a crossterm MouseEvent so PetPanel can
+    /// swap to cursor-tracked eyes on its next render. Drag/scroll/release
+    /// events all update position; explicit Up events with no recorded
+    /// position would be impossible from crossterm so we just take whatever
+    /// coordinates the event carries.
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if !self.vm.mouse_tracking_enabled {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::Moved
+            | MouseEventKind::Drag(_)
+            | MouseEventKind::Down(_)
+            | MouseEventKind::Up(_) => {
+                self.vm.cursor_screen = Some((mouse.column, mouse.row));
+            }
+            _ => {}
         }
     }
 
@@ -370,7 +400,7 @@ pub struct TerminalRestoreGuard {
 impl TerminalRestoreGuard {
     pub fn activate() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
         Ok(Self { active: true })
     }
 }
@@ -379,7 +409,12 @@ impl Drop for TerminalRestoreGuard {
     fn drop(&mut self) {
         if self.active {
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+            let _ = execute!(
+                io::stdout(),
+                Show,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
             self.active = false;
         }
     }
