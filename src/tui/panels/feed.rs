@@ -10,9 +10,14 @@ use crate::tui::view_model::WatchViewModel;
 pub struct FeedPanel;
 
 impl Panel for FeedPanel {
-    fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
-        // at least 3 rows (1 divider + 2 events); flex up to absorb leftover space
-        Constraint::Min(3)
+    fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
+        // 1 row for the TOP border/title + one row per event, capped so the
+        // panel doesn't hog vertical space when there are many events. Extra
+        // space goes to the trailing spacer in render_column_with_spacing,
+        // pushing helpers + empty area to the bottom of the column.
+        const MAX_EVENT_ROWS: u16 = 8;
+        let events = (vm.recent_events.len() as u16).clamp(2, MAX_EVENT_ROWS);
+        Constraint::Length(events + 1)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
@@ -113,13 +118,15 @@ mod tests {
     }
 
     #[test]
-    fn feed_panel_preferred_constraint_is_min3() {
-        let vm = WatchViewModel::fixture();
+    fn feed_panel_preferred_constraint_matches_event_count() {
+        // Constraint is Length(events + 1) where events is clamped to [2, 8].
+        let mut vm = WatchViewModel::fixture();
+        vm.recent_events.clear();
         let panel = FeedPanel;
         assert_eq!(
             panel.preferred_constraint(&vm),
-            Constraint::Min(3),
-            "feed panel should flex with Min(3)"
+            Constraint::Length(3),
+            "empty feed should still reserve room for the divider + 2 placeholder rows"
         );
     }
 

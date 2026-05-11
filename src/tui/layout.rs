@@ -196,7 +196,9 @@ fn render_compact(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewM
 }
 
 /// Stacks panels vertically using `Flex::Start` (content packs to top).
-/// Spacing of `spacing` blank rows is inserted between panels.
+/// Spacing of `spacing` blank rows is inserted between panels. A trailing
+/// `Constraint::Min(0)` spacer absorbs any leftover height so panels render
+/// at their natural sizes and empty space falls to the bottom of the column.
 fn render_column_with_spacing(
     area: Rect,
     panels: &[&dyn Panel],
@@ -204,14 +206,17 @@ fn render_column_with_spacing(
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
 ) {
-    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
+    let mut constraints: Vec<Constraint> =
+        panels.iter().map(|p| p.preferred_constraint(vm)).collect();
+    constraints.push(Constraint::Min(0));
 
     let rects = Layout::vertical(constraints)
         .flex(Flex::Start)
         .spacing(spacing)
         .split(area);
 
-    for (panel, rect) in panels.iter().zip(rects.iter()) {
+    // Only zip the panel rects (skip the trailing spacer rect at the end).
+    for (panel, rect) in panels.iter().zip(rects.iter().take(panels.len())) {
         panel.render(*rect, buf, vm);
     }
 }

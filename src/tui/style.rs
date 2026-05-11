@@ -383,10 +383,7 @@ mod bar_ramp_tests {
             );
         }
         if let (Color::Rgb(_, d_fg_g, _), Color::Rgb(_, d_bg_g, _)) = (dark.fg.rgb, dark.bg.rgb) {
-            assert!(
-                d_fg_g > d_bg_g,
-                "dark theme fg should be brighter than bg"
-            );
+            assert!(d_fg_g > d_bg_g, "dark theme fg should be brighter than bg");
         }
     }
 
