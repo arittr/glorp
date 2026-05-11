@@ -144,6 +144,21 @@ pub fn corner_taper(x: f32, y: f32, half_w: f32, h: f32, taper: f32) -> f32 {
     (1.0 - radial.powf(2.0) * strength).max(0.0)
 }
 
+/// Cheap deterministic noise: hashes (x, y, seed) into a [-1, 1] perturbation.
+/// Single octave is enough — we want subtle envelope distortion, not a fractal.
+pub fn coherent_noise(x: i32, y: i32, seed: u32) -> f32 {
+    // FNV-1a 32-bit on the (seed, x, y) triple
+    let mut h: u32 = 0x811c_9dc5;
+    for b in seed.to_le_bytes().iter()
+        .chain(x.to_le_bytes().iter())
+        .chain(y.to_le_bytes().iter())
+    {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    ((h as f32) / (u32::MAX as f32)) * 2.0 - 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +258,28 @@ mod taper_tests {
         let corner = corner_taper(0.0, 0.0, 7.0, 8.0, 0.75);
         assert!((center - 1.0).abs() < 1e-6);
         assert!(corner < 0.5);
+    }
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::*;
+    #[test]
+    fn noise_is_deterministic() {
+        assert_eq!(coherent_noise(3, 5, 42), coherent_noise(3, 5, 42));
+    }
+    #[test]
+    fn noise_varies_across_coords() {
+        let a = coherent_noise(0, 0, 7);
+        let b = coherent_noise(1, 0, 7);
+        let c = coherent_noise(0, 1, 7);
+        assert!(a != b || a != c, "noise too flat");
+    }
+    #[test]
+    fn noise_in_bounds() {
+        for x in 0..30 { for y in 0..30 {
+            let v = coherent_noise(x, y, 99);
+            assert!((-1.0..=1.0).contains(&v), "out of bounds: {v}");
+        }}
     }
 }
