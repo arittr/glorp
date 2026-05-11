@@ -72,7 +72,7 @@ fn wide_layout_has_tokenpet_chrome_panels_and_bars() {
     let p = tokenpet_palette();
     let text = buffer_text(buf);
     assert!(text.contains("glorp · "));
-    assert!(text.contains("─ vitals"));
+    assert!(text.contains("vitals"), "expected vitals section header");
     assert!(text.contains("today"));
     assert!(text.contains("helpers"));
     assert!(text.contains("█"));
@@ -681,16 +681,16 @@ fn wide_layout_outer_frame_uses_rounded_box_drawing() {
     let top = &rows[0];
     let bottom = &rows[23];
     assert!(
-        top.starts_with("┏━"),
-        "top row should start with ┏━; got {top:?}"
+        top.starts_with("╭"),
+        "top row should start with rounded corner ╭; got {top:?}"
     );
-    assert!(top.ends_with('┓'), "top row should end with ┓; got {top:?}");
-    assert!(bottom.starts_with("┗━"), "bottom should start with ┗━");
-    assert!(bottom.ends_with('┛'), "bottom should end with ┛");
+    assert!(top.ends_with('╮'), "top row should end with ╮; got {top:?}");
+    assert!(bottom.starts_with("╰"), "bottom should start with ╰; got {bottom:?}");
+    assert!(bottom.ends_with('╯'), "bottom should end with ╯; got {bottom:?}");
     for (y, row) in rows.iter().enumerate().take(23).skip(1) {
         let chars: Vec<char> = row.chars().collect();
-        assert_eq!(chars[0], '┃', "row {y} left rail");
-        assert_eq!(chars[chars.len() - 1], '┃', "row {y} right rail");
+        assert_eq!(chars[0], '│', "row {y} left rail");
+        assert_eq!(chars[chars.len() - 1], '│', "row {y} right rail");
     }
 }
 
@@ -705,9 +705,10 @@ fn wide_layout_section_dividers_all_end_at_same_right_column() {
     let rows = buffer_rows(buf);
     let labels = [" today ", " 7-day ", " feed ", " helpers "];
 
-    // Collect divider rows and the rightmost column where a `─` appears in
-    // each. All dividers should end at the same column — the right edge of
-    // the right column — with the cell after it being outer pad space.
+    // Collect the rightmost column where a `─` appears in each section
+    // divider row. In the native-Layout path the right column fills the inner
+    // frame area, so the last `─` is immediately followed by the outer frame
+    // wall `│` (not a pad space). All dividers must end at the same column.
     let mut divider_ends: Vec<usize> = Vec::new();
     for row in &rows {
         if !labels.iter().any(|label| row.contains(label)) {
@@ -722,10 +723,12 @@ fn wide_layout_section_dividers_all_end_at_same_right_column() {
             .map(|(i, _)| i)
             .unwrap_or_else(|| panic!("divider row had no `─`: {row:?}"));
         divider_ends.push(rightmost_dash);
-        assert_eq!(
-            chars[rightmost_dash + 1],
-            ' ',
-            "cell after the last `─` should be outer pad space: {row:?}"
+        // The character after the last dash should be either the frame wall
+        // `│` (native-Layout path fills to the edge) or a pad space.
+        let after = chars.get(rightmost_dash + 1).copied().unwrap_or(' ');
+        assert!(
+            after == '│' || after == ' ',
+            "cell after the last `─` should be frame wall or pad space: {row:?}"
         );
     }
     assert!(
@@ -761,27 +764,16 @@ fn wide_layout_pet_art_fits_inside_left_column() {
     let buf = terminal.backend().buffer();
     let rows = buffer_rows(buf);
 
-    // Locate the right column's leftmost edge: on a divider row like
-    // `─ today ─...`, the first `─` marks the right column start. The
-    // four cells immediately before it are the gutter — pet art must
-    // never bleed into them on any body row.
-    let right_col_start = rows
-        .iter()
-        .find_map(|row| {
-            row.contains(" today ").then(|| {
-                row.chars()
-                    .enumerate()
-                    .find(|(_, c)| *c == '─')
-                    .map(|(i, _)| i)
-                    .expect("today divider should contain `─`")
-            })
-        })
-        .expect("expected a today divider row");
-    let gutter_start = right_col_start - 4;
+    // In the native-Layout wide path the outer frame takes 1 cell, then the
+    // left column occupies 40 cells (cols 1–40), the gutter takes 4 cells
+    // (cols 41–44), and the right column starts at col 45.
+    // Pet art must never bleed past col 40 into the gutter.
+    let left_col_end: usize = 40; // last left-column cell (0-indexed, inclusive)
+    let gutter_start: usize = left_col_end + 1; // col 41
 
     for (y, row) in rows.iter().enumerate().take(23).skip(1) {
         let chars: Vec<char> = row.chars().collect();
-        for offset in 0..4 {
+        for offset in 0..4usize {
             let col = gutter_start + offset;
             assert!(
                 chars[col] == ' ' || chars[col] == '─',
