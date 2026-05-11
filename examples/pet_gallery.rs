@@ -894,3 +894,54 @@ mod mutation_tests {
         assert!((a.roundness - b.roundness).abs() + (a.taper - b.taper).abs() > 0.01);
     }
 }
+
+/// End-to-end: seed + species + stage → rendered glyph lines.
+pub fn generate_pet_lines(species: SpeciesK, stage: Stage, seed: u64) -> Vec<String> {
+    let blueprint = blueprint_for(species, stage, seed);
+    let noise_seed = (seed.wrapping_mul(0xdead_beef)) as u32;
+
+    let mut bm = sample_silhouette(&blueprint.silhouette, noise_seed)
+        .expect("silhouette retries should produce a bitmap at spec densities");
+
+    let anchors = place_eye_anchors(&blueprint.silhouette);
+    reserve_eye_anchors(&mut bm, anchors);
+
+    let mut rng = SpikeRng::new(seed);
+    let stage_idx = match stage {
+        Stage::S0 => 0,
+        Stage::S1 => 1,
+        Stage::S2 | Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 2,
+    };
+    let max_pairs = (blueprint.silhouette.ornament_density
+                     * aesthetic::MAX_ORNAMENT_DENSITY[stage_idx]
+                     * (bm.w as u32 * bm.h as u32) as f32 / 12.0) as u8;
+    add_symmetric_ornaments(&mut bm, &mut rng, max_pairs.min(3));
+    add_asymmetric_ornaments(&mut bm, blueprint.silhouette.asymmetry_seed);
+
+    let features = pick_features(species, stage, &mut rng);
+    render_lines(&bm, anchors, &features)
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+    #[test]
+    fn pipeline_is_deterministic_per_seed() {
+        let a = generate_pet_lines(SpeciesK::Blob, Stage::S0, 42);
+        let b = generate_pet_lines(SpeciesK::Blob, Stage::S0, 42);
+        assert_eq!(a, b);
+    }
+    #[test]
+    fn pipeline_produces_expected_dimensions() {
+        let lines = generate_pet_lines(SpeciesK::Mech, Stage::S2, 99);
+        let (w, h) = stage_grid_full(Stage::S2);
+        assert_eq!(lines.len(), (h / 4) as usize);
+        for l in &lines { assert_eq!(l.chars().count(), (w / 2) as usize); }
+    }
+    #[test]
+    fn two_seeds_produce_different_outputs_for_same_species() {
+        let a = generate_pet_lines(SpeciesK::Blob, Stage::S2, 42);
+        let b = generate_pet_lines(SpeciesK::Blob, Stage::S2, 99);
+        assert_ne!(a, b);
+    }
+}
