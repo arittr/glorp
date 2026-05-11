@@ -4,30 +4,7 @@ A terminal pet fed by real Claude Code and Codex token usage.
 
 It lives in your shell, hatches from a local seed, and grows from the work you actually do. No manual feeding, no fake metrics — when you ship more code, your pet evolves.
 
-```
-┏━ glorp · mochi the fuzz · 12d 4h · content ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                            ┃
-┃                 ·            ─ today ─────────────────────────────────     ┃
-┃         ·                       tokens          412,847        ↑ 22.9%     ┃
-┃       .-^^^^^^^^-.              claude          287,140        70%         ┃
-┃      /            \             codex           125,707        30%         ┃
-┃     /  ●        ●  \            last 10m        +8,420         this 10m    ┃
-┃    |       ω        |                                                      ┃
-┃     \   .----.     /          ─ 7-day ────────────────────────────────     ┃
-┃      `----------'               ▁   ▂   ▃   ▁   ▄   ▅   █                  ┃
-┃       (          )                                                         ┃
-┃        \________/             ─ feed ─────────────────────────────────     ┃
-┃         d      b                14:21  +52k tokens   claude                ┃
-┃   ,,,,,,,,,,,,,,,,,,,,,,,,,    14:18  evolution     pup → adult            ┃
-┃                                                                            ┃
-┃  ─ vitals ─────────────────                                                ┃
-┃    fed   ███████░░░░░  62     ─ helpers ──────────────────────────────     ┃
-┃    happy █████████░░░  78        ccusage  ✓     codex  ✓                   ┃
-┃    energy███████████░  88                                                  ┃
-┃    xp    ██████░░░░░░  51                                                  ┃
-┃                                                                            ┃
-┗━ q quit · r refresh · ? help ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-```
+<img width="1018" height="475" alt="Screenshot 2026-05-11 at 12 08 28 PM" src="https://github.com/user-attachments/assets/24ba726a-befc-4ff4-95cc-642424cf0b3e" />
 
 ## Privacy
 
