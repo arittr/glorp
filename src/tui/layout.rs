@@ -119,12 +119,23 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
         _ => 5,
     };
     match mode {
-        Mode::Wide => Rect {
-            x: inner.x,
-            y: inner.y,
-            width: WIDE_LEFT_COL.min(inner.width),
-            height: pet_h.min(inner.height),
-        },
+        Mode::Wide => {
+            // Left column uses Flex::Center; pet sits below half the leftover
+            // space. Leftover = inner.height - (pet + vitals) constraints.
+            let vitals_h = match VitalsPanel.preferred_constraint(vm) {
+                Constraint::Length(n) => n,
+                _ => 5,
+            };
+            let column_content_h = pet_h + vitals_h;
+            let leftover = inner.height.saturating_sub(column_content_h);
+            let top_pad = leftover / 2;
+            Rect {
+                x: inner.x,
+                y: inner.y + top_pad,
+                width: WIDE_LEFT_COL.min(inner.width),
+                height: pet_h.min(inner.height.saturating_sub(top_pad)),
+            }
+        }
         Mode::Compact => Rect {
             x: inner.x,
             y: inner.y,
@@ -189,6 +200,11 @@ fn layout_and_render(
 /// Left column (fixed 40 cells): PetPanel stacked above VitalsPanel.
 /// Gutter (4 cells): empty space.
 /// Right column (remaining): TodayPanel, SparkPanel, FeedPanel, HelpersPanel stacked vertically.
+///
+/// Both columns use `Flex::Center` so any leftover height is split evenly above
+/// and below the content. The taller column already fills the frame (set by
+/// `natural_inner_height`), so centering is a no-op for it. The shorter column
+/// gets its content centered vertically rather than crammed at the top.
 fn render_wide(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewModel) {
     let right_col = area.width.saturating_sub(WIDE_LEFT_COL + WIDE_GUTTER);
     let [left_area, _, right_area] = Layout::horizontal([
@@ -200,11 +216,12 @@ fn render_wide(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewMode
         return;
     };
 
-    // Left column: PetPanel + VitalsPanel
-    render_column(left_area, &[&PetPanel as &dyn Panel, &VitalsPanel], buf, vm);
+    // Left column: PetPanel + VitalsPanel — centered so the shorter column's
+    // content sits vertically in the middle of the frame.
+    render_centered_column(left_area, &[&PetPanel as &dyn Panel, &VitalsPanel], buf, vm);
 
-    // Right column: TodayPanel + SparkPanel + FeedPanel + HelpersPanel
-    render_column(
+    // Right column: TodayPanel + SparkPanel + FeedPanel + HelpersPanel.
+    render_centered_column(
         right_area,
         &[
             &TodayPanel as &dyn Panel,
@@ -261,14 +278,23 @@ fn render_column_with_spacing(
     }
 }
 
-/// Stacks panels vertically with no explicit spacing (panels pack tight to top).
-fn render_column(
+/// Stacks panels vertically with `Flex::Center`: leftover height is split
+/// evenly above and below the content block. Used for the two wide-mode
+/// columns so the shorter column's content sits vertically centered in the
+/// frame instead of being top-aligned with a wedge of empty space below it.
+fn render_centered_column(
     area: Rect,
     panels: &[&dyn Panel],
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
 ) {
-    render_column_with_spacing(area, panels, 0, buf, vm);
+    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
+
+    let rects = Layout::vertical(constraints).flex(Flex::Center).split(area);
+
+    for (panel, rect) in panels.iter().zip(rects.iter()) {
+        panel.render(*rect, buf, vm);
+    }
 }
 
 // ── Overlay popups ───────────────────────────────────────────────────────────
