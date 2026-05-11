@@ -44,6 +44,25 @@ fn pick_munch_phrase(now: OffsetDateTime) -> String {
     PHRASES[idx].to_string()
 }
 
+/// How long after a 'p' press the petting bubble stays visible.
+pub const PETTING_BUBBLE_VISIBLE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Pick a reaction phrase when the user pets the pet. Selection rotates
+/// deterministically off `now` so repeated petting cycles through the pool.
+pub fn pick_petting_phrase(now: OffsetDateTime) -> String {
+    const PHRASES: &[&str] = &[
+        "*purrs*",
+        "hi!",
+        "*nuzzles*",
+        "more pets?",
+        "hehe",
+        "*wiggles*",
+        "thanks!",
+    ];
+    let idx = (now.unix_timestamp()).rem_euclid(PHRASES.len() as i64) as usize;
+    PHRASES[idx].to_string()
+}
+
 fn mood_phrase(mood: &str, now: OffsetDateTime) -> String {
     let phrases: &[&str] = match mood {
         "happy" => &["great job!", "feeling fantastic", "all good!", "happy days"],

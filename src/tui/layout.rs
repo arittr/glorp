@@ -318,8 +318,9 @@ pub fn render_help_overlay(frame: &mut Frame<'_>) {
         frame,
         "glorp help",
         &[
-            "q quit   r refresh   m mouse   ? help",
+            "q quit   r refresh   p pet   m mouse   ? help",
             "r refreshes usage and pet state now",
+            "p gives your pet a quick affection bump",
             "m toggles cursor-tracked eyes (hover pet to see)",
             "usage polls stay calm when helpers are blocked",
         ],
