@@ -29,19 +29,12 @@ fn watch_view_model_uses_rendered_mech_pet_art_instead_of_fixture_cat() {
 
     assert_eq!(vm.species, "mech");
     assert_eq!(vm.stage, "mech");
-    // pet.jsx mech adult templates use these box-drawing markers; at least
-    // one of the three morphs must surface.
+    // Pet art should contain at least one Braille glyph (U+2800..U+28FF) —
+    // proves the parts generator was invoked for this view model rather than
+    // a hardcoded fixture.
     assert!(
-        [
-            "\u{250c}\u{2500}\u{2500}\u{2500}\u{2510}",
-            "\u{2517}\u{2517}\u{2517}",
-            "\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}",
-            "\u{2502}",
-            "\u{203e}\u{203e}",
-        ]
-        .iter()
-        .any(|marker| art.contains(marker)),
-        "expected rendered adult mech art, got:\n{art}"
+        art.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32))),
+        "pet_art should contain Braille glyphs, got: {art:?}"
     );
     assert!(!art.contains("/\\_/\\"));
     assert!(!art.contains("( o.o )"));
