@@ -444,6 +444,23 @@ fn find_top_filled(bm: &Bitmap, x: u8) -> Option<u8> {
     (0..bm.h).find(|&y| bm.get(x, y))
 }
 
+/// Apply 0..=2 asymmetric ornaments to one side only, driven by asymmetry_seed.
+/// Bounded count keeps the pet from becoming a chaotic protrusion field.
+pub fn add_asymmetric_ornaments(bm: &mut Bitmap, asymmetry_seed: u32) {
+    let mut rng = SpikeRng::new(asymmetry_seed as u64);
+    let count = rng.next_usize_capped(3) as u8; // 0, 1, or 2
+    let half_w = bm.w / 2;
+    for _ in 0..count {
+        let kind = SYM_ORNAMENT_KINDS[rng.next_usize_capped(SYM_ORNAMENT_KINDS.len())];
+        let side_left = rng.next_bias(0.5);
+        let col_in_half = rng.next_usize_capped(half_w as usize) as u8;
+        let col = if side_left { col_in_half } else { bm.w - 1 - col_in_half };
+        let edge_y = find_top_filled(bm, col).unwrap_or(0);
+        // mirror=true on the right side so the ornament protrudes outward.
+        place_ornament(bm, kind, col, edge_y, !side_left);
+    }
+}
+
 impl SpikeRng {
     pub fn next_usize_capped(&mut self, upper: usize) -> usize {
         if upper == 0 { 0 } else { (self.next_u64() as usize) % upper }
@@ -533,5 +550,25 @@ mod ornament_tests {
         for y in 0..bm.h { for x in 0..(bm.w / 2) {
             assert_eq!(bm.get(x, y), bm.get(bm.w - 1 - x, y));
         }}
+    }
+}
+
+#[cfg(test)]
+mod async_tests {
+    use super::*;
+    fn p(seed: u32) -> SilhouetteParams {
+        SilhouetteParams {
+            width_px: 14, height_px: 8, roundness: 0.55, taper: 0.55,
+            body_density: 0.55, asymmetry_seed: seed,
+            head_zone_ratio: 0.30, ornament_density: 0.10,
+        }
+    }
+    #[test]
+    fn asymmetric_ornaments_deterministic_per_seed() {
+        let mut a = sample_silhouette(&p(7), 1).unwrap();
+        let mut b = sample_silhouette(&p(7), 1).unwrap();
+        add_asymmetric_ornaments(&mut a, 7);
+        add_asymmetric_ornaments(&mut b, 7);
+        assert_eq!(a, b);
     }
 }
