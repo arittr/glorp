@@ -92,7 +92,12 @@ fn frame_footer() -> Vec<Span<'static>> {
 }
 
 /// Lays out and renders all panels into the inner area of the outer frame.
-fn layout_and_render(inner: Rect, mode: Mode, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewModel) {
+fn layout_and_render(
+    inner: Rect,
+    mode: Mode,
+    buf: &mut ratatui::buffer::Buffer,
+    vm: &WatchViewModel,
+) {
     match mode {
         Mode::Wide => render_wide(inner, buf, vm),
         Mode::Compact => render_compact(inner, buf, vm),
@@ -159,10 +164,7 @@ fn render_column_with_spacing(
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
 ) {
-    let constraints: Vec<Constraint> = panels
-        .iter()
-        .map(|p| p.preferred_constraint(vm))
-        .collect();
+    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
 
     let rects = Layout::vertical(constraints)
         .flex(Flex::Start)
@@ -304,7 +306,10 @@ mod render_compact_tests {
                 all.push_str(buffer[(x, y)].symbol());
             }
         }
-        assert!(all.contains("vitals"), "compact render should show vitals section");
+        assert!(
+            all.contains("vitals"),
+            "compact render should show vitals section"
+        );
         assert!(all.contains("fed"), "compact render should show fed bar");
     }
 }
@@ -348,8 +353,14 @@ mod render_wide_tests {
             top.contains("╮"),
             "top row should end with rounded corner ╮, got {top:?}"
         );
-        assert!(bottom.contains("╰"), "bottom row should have rounded corner ╰");
-        assert!(bottom.contains("╯"), "bottom row should have rounded corner ╯");
+        assert!(
+            bottom.contains("╰"),
+            "bottom row should have rounded corner ╰"
+        );
+        assert!(
+            bottom.contains("╯"),
+            "bottom row should have rounded corner ╯"
+        );
     }
 
     #[test]
@@ -386,11 +397,20 @@ mod render_wide_tests {
         for y in 0..TEST_HEIGHT {
             all.push_str(&row_string(&buf, y));
         }
-        assert!(all.contains("vitals"), "wide render should show vitals panel");
+        assert!(
+            all.contains("vitals"),
+            "wide render should show vitals panel"
+        );
         assert!(all.contains("today"), "wide render should show today panel");
-        assert!(all.contains("7-day"), "wide render should show 7-day spark panel");
+        assert!(
+            all.contains("7-day"),
+            "wide render should show 7-day spark panel"
+        );
         assert!(all.contains("feed"), "wide render should show feed panel");
-        assert!(all.contains("helpers"), "wide render should show helpers panel");
+        assert!(
+            all.contains("helpers"),
+            "wide render should show helpers panel"
+        );
     }
 
     #[test]

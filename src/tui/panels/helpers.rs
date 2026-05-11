@@ -78,7 +78,10 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        buf.content().iter().map(|c| c.symbol().to_string()).collect()
+        buf.content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect()
     }
 
     #[test]

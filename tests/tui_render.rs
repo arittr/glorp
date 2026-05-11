@@ -685,8 +685,14 @@ fn wide_layout_outer_frame_uses_rounded_box_drawing() {
         "top row should start with rounded corner ╭; got {top:?}"
     );
     assert!(top.ends_with('╮'), "top row should end with ╮; got {top:?}");
-    assert!(bottom.starts_with("╰"), "bottom should start with ╰; got {bottom:?}");
-    assert!(bottom.ends_with('╯'), "bottom should end with ╯; got {bottom:?}");
+    assert!(
+        bottom.starts_with("╰"),
+        "bottom should start with ╰; got {bottom:?}"
+    );
+    assert!(
+        bottom.ends_with('╯'),
+        "bottom should end with ╯; got {bottom:?}"
+    );
     for (y, row) in rows.iter().enumerate().take(23).skip(1) {
         let chars: Vec<char> = row.chars().collect();
         assert_eq!(chars[0], '│', "row {y} left rail");

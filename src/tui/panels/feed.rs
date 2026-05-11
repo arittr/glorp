@@ -61,7 +61,10 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        buf.content().iter().map(|c| c.symbol().to_string()).collect()
+        buf.content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect()
     }
 
     #[test]
@@ -98,8 +101,15 @@ mod tests {
             .unwrap();
         // No panic means the clamp held; also verify the border appears.
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
-        assert!(s.contains("feed"), "border title still present in small rect");
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(
+            s.contains("feed"),
+            "border title still present in small rect"
+        );
     }
 
     #[test]
@@ -118,6 +128,9 @@ mod tests {
         let mut vm = WatchViewModel::fixture();
         vm.recent_events.clear();
         let s = render_to_string(50, 4, &vm);
-        assert!(s.contains("feed"), "divider should still appear with no events");
+        assert!(
+            s.contains("feed"),
+            "divider should still appear with no events"
+        );
     }
 }

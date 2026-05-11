@@ -9,12 +9,12 @@ use ratatui::layout::{Constraint, Rect};
 
 use crate::tui::view_model::WatchViewModel;
 
-pub mod pet;
-pub mod vitals;
-pub mod today;
-pub mod spark;
 pub mod feed;
 pub mod helpers;
+pub mod pet;
+pub mod spark;
+pub mod today;
+pub mod vitals;
 
 pub use feed::FeedPanel;
 pub use helpers::HelpersPanel;

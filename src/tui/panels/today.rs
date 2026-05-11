@@ -161,7 +161,10 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        buf.content().iter().map(|c| c.symbol().to_string()).collect()
+        buf.content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect()
     }
 
     #[test]
@@ -202,7 +205,10 @@ mod tests {
         let mut vm = WatchViewModel::fixture();
         vm.source_breakdown.retain(|s| s.name != "codex");
         let s = render_to_string(50, 6, &vm);
-        assert!(s.contains("codex"), "expected 'codex' label even when absent");
+        assert!(
+            s.contains("codex"),
+            "expected 'codex' label even when absent"
+        );
         assert!(s.contains('—'), "expected dash for absent source");
     }
 

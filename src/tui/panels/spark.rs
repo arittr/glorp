@@ -5,7 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
-use crate::tui::style::{ramp_index, semantic_styles, tokenpet_palette, ColorCapability, BAR_RAMP_GOOD};
+use crate::tui::style::{
+    ramp_index, semantic_styles, tokenpet_palette, ColorCapability, BAR_RAMP_GOOD,
+};
 use crate::tui::view_model::WatchViewModel;
 
 pub struct SparkPanel;
@@ -43,7 +45,10 @@ fn build_spark_lines<'a>(
     styles: &'a crate::tui::style::SemanticStyles,
 ) -> Vec<Line<'a>> {
     if history.is_empty() {
-        return vec![Line::from(Span::styled("       ·   ·   ·   ·   ·   ·   ·", styles.empty_bar))];
+        return vec![Line::from(Span::styled(
+            "       ·   ·   ·   ·   ·   ·   ·",
+            styles.empty_bar,
+        ))];
     }
 
     let glyphs: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -99,7 +104,10 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        buf.content().iter().map(|c| c.symbol().to_string()).collect()
+        buf.content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect()
     }
 
     #[test]
@@ -116,7 +124,10 @@ mod tests {
         // The fixture has non-zero data so at least one block glyph must appear.
         let block_glyphs = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         let has_block = s.chars().any(|c| block_glyphs.contains(&c));
-        assert!(has_block, "expected at least one block glyph in sparkline area");
+        assert!(
+            has_block,
+            "expected at least one block glyph in sparkline area"
+        );
     }
 
     #[test]
@@ -135,7 +146,10 @@ mod tests {
         let mut vm = WatchViewModel::fixture();
         vm.recent_daily_effective_tokens = vec![];
         let s = render_to_string(40, 3, &vm);
-        assert!(s.contains('·'), "expected placeholder dot for empty history");
+        assert!(
+            s.contains('·'),
+            "expected placeholder dot for empty history"
+        );
     }
 
     #[test]
@@ -145,7 +159,10 @@ mod tests {
         let s = render_to_string(40, 3, &vm);
         // Two real values → at most two block glyphs; 5 leading zeros → dots.
         let dot_count = s.chars().filter(|&c| c == '·').count();
-        assert!(dot_count >= 5, "expected at least 5 placeholder dots for 5 zero-padded slots, got {dot_count}");
+        assert!(
+            dot_count >= 5,
+            "expected at least 5 placeholder dots for 5 zero-padded slots, got {dot_count}"
+        );
     }
 
     #[test]
@@ -164,7 +181,9 @@ mod tests {
 
     #[test]
     fn build_spark_lines_fixture_data_renders_seven_glyphs() {
-        let history = vec![1_000.0, 8_000.0, 4_000.0, 13_000.0, 9_500.0, 16_000.0, 18_420.0];
+        let history = vec![
+            1_000.0, 8_000.0, 4_000.0, 13_000.0, 9_500.0, 16_000.0, 18_420.0,
+        ];
         let styles = semantic_styles();
         let lines = build_spark_lines(&history, ColorCapability::Flat, &styles);
         let text: String = lines
@@ -174,6 +193,9 @@ mod tests {
             .collect();
         let block_glyphs = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         let glyph_count = text.chars().filter(|c| block_glyphs.contains(c)).count();
-        assert_eq!(glyph_count, 7, "fixture data should render exactly 7 block glyphs");
+        assert_eq!(
+            glyph_count, 7,
+            "fixture data should render exactly 7 block glyphs"
+        );
     }
 }

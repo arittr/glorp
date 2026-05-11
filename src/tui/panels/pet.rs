@@ -3,10 +3,10 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use crate::pet::render::PaletteRoleName;
 use crate::tui::panels::Panel;
 use crate::tui::style::{semantic_styles, SemanticStyles};
 use crate::tui::view_model::WatchViewModel;
-use crate::pet::render::PaletteRoleName;
 
 pub struct PetPanel;
 
@@ -143,7 +143,10 @@ mod tests {
             &pet,
             Stage::S2,
             Mood::Content,
-            AnimationFrame { tick: 0, blink_suppression_ticks: 0 },
+            AnimationFrame {
+                tick: 0,
+                blink_suppression_ticks: 0,
+            },
         );
         let mut vm = WatchViewModel::fixture();
         vm.pet_art = rendered.lines;
@@ -163,7 +166,11 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         assert!(
             s.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32))),
             "pet panel should render at least one braille char into the area"
@@ -185,6 +192,9 @@ mod tests {
         // The first cell of row 0 should be a space (left-pad), not pet content,
         // because the art is narrower than 80 columns.
         let first_cell = buf[(0u16, 0u16)].symbol();
-        assert_eq!(first_cell, " ", "expected left-pad space, got {first_cell:?}");
+        assert_eq!(
+            first_cell, " ",
+            "expected left-pad space, got {first_cell:?}"
+        );
     }
 }

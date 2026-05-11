@@ -125,7 +125,11 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         assert!(s.contains("vitals"), "expected vitals divider title");
     }
 
@@ -141,7 +145,11 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         assert!(s.contains("fed"), "expected fed label");
         assert!(s.contains("happy"), "expected happy label");
         assert!(s.contains("energy"), "expected energy label");
