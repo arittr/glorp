@@ -1,4 +1,5 @@
 use crate::game::evolution::Stage;
+use crate::game::metabolism::Mood;
 use crate::pet::generation::{Species, StableRng};
 
 // ============================================================================
@@ -379,6 +380,75 @@ pub(crate) fn pick_features(
         eye: eyes[(rng.next_u64() as usize) % eyes.len()],
         mouth: mouths[(rng.next_u64() as usize) % mouths.len()],
         accent: accents[(rng.next_u64() as usize) % accents.len()],
+    }
+}
+
+/// Closed-eye glyph for the blink animation, picked per species so the
+/// shape is consistent with the species' open-eye aesthetic.
+fn closed_eye_for(species: Species) -> &'static str {
+    match species {
+        Species::Blob | Species::Fuzz => "-",
+        Species::Mech => "═",
+        Species::Ghost => "·",
+        Species::Glitch => "~",
+        Species::Crystal => "◊",
+    }
+}
+
+/// Mood-specific eye glyph override. Returns None to fall through to the
+/// seeded default from `eyes_for`.
+fn mood_eye_override(species: Species, mood: Mood) -> Option<&'static str> {
+    use Mood::*;
+    match (species, mood) {
+        (_, Content) => None,
+        (Species::Mech, Sleepy) => Some("═"),
+        (_, Sleepy) => Some("-"),
+        (Species::Glitch, Hungry) => Some("0"),
+        (_, Hungry) => Some("o"),
+        (_, Sad) => Some("`"),
+        (Species::Mech, Happy) => Some("◆"),
+        (_, Happy) => Some("^"),
+        (_, Wilted) => Some("·"),
+    }
+}
+
+/// Mood-specific mouth glyph override.
+fn mood_mouth_override(species: Species, mood: Mood) -> Option<&'static str> {
+    use Mood::*;
+    match (species, mood) {
+        (_, Content) => None,
+        (_, Sleepy) => Some("~"),
+        (Species::Mech, Hungry) => Some("▪"),
+        (_, Hungry) => Some("o"),
+        (_, Sad) => Some("_"),
+        (Species::Mech, Happy) => Some("◡"),
+        (_, Happy) => Some("ω"),
+        (_, Wilted) => Some("."),
+    }
+}
+
+/// Feature glyph picker that consumes mood and blink state. The base eye and
+/// mouth picks come from the seeded `pick_features`; mood and blink then
+/// override those picks deterministically so the rendered pet visibly
+/// reflects its current state.
+pub(crate) fn pick_features_animated(
+    species: Species,
+    stage: Stage,
+    mood: Mood,
+    blink_open: bool,
+    rng: &mut StableRng,
+) -> FeatureGlyphPick {
+    let base = pick_features(species, stage, rng);
+    let eye = if !blink_open {
+        closed_eye_for(species)
+    } else {
+        mood_eye_override(species, mood).unwrap_or(base.eye)
+    };
+    let mouth = mood_mouth_override(species, mood).unwrap_or(base.mouth);
+    FeatureGlyphPick {
+        eye,
+        mouth,
+        accent: base.accent,
     }
 }
 
@@ -1689,6 +1759,20 @@ pub fn compose_parts(blueprint: &PetBlueprint, catalog: &PartCatalog) -> Bitmap 
 }
 
 pub fn generate_pet_lines(species: Species, stage: Stage, seed: u64) -> Vec<String> {
+    generate_pet_lines_animated(species, stage, seed, Mood::Content, true)
+}
+
+/// Variant of `generate_pet_lines` that honors the pet's mood and blink state.
+/// `blink_open=false` swaps the eye to a closed-eye glyph; the mood overrides
+/// the seeded eye/mouth picks per species (see mood_eye_override /
+/// mood_mouth_override).
+pub fn generate_pet_lines_animated(
+    species: Species,
+    stage: Stage,
+    seed: u64,
+    mood: Mood,
+    blink_open: bool,
+) -> Vec<String> {
     let catalog = catalog_for(species);
     let blueprint = blueprint_for(species, stage, seed, &catalog);
     let bm = compose_parts(&blueprint, &catalog);
@@ -1717,7 +1801,7 @@ pub fn generate_pet_lines(species: Species, stage: Stage, seed: u64) -> Vec<Stri
         });
 
     let mut rng = StableRng::new(seed);
-    let features = pick_features(species, stage, &mut rng);
+    let features = pick_features_animated(species, stage, mood, blink_open, &mut rng);
     render_lines(&bm, anchors, &features)
 }
 
