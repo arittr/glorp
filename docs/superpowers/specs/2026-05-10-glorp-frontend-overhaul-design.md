@@ -150,6 +150,10 @@ struct PetAnimator {
     cursor_hint: Option<CursorHint>,        // from mouse-tracked eyes
 }
 
+// Normalized cursor x relative to the pet panel: -1.0 (left edge) … 0.0 (center) … +1.0 (right edge).
+// `None` when the cursor is outside the panel or mouse tracking is disabled.
+type CursorHint = f32;
+
 enum PetEvent { Hatch, StageUp { from: Stage, to: Stage }, Mood(Mood), Feed, LowEnergy(f32) }
 
 impl PetAnimator {
@@ -237,6 +241,7 @@ Below ~10 rows, the dispatcher falls back to a minimal rendering: pet art + sing
 - `Stylize` trait used throughout for style construction (`"foo".bold().fg(color)`), in preference to manual `Style::default().fg(...).add_modifier(...)` chains.
 - Existing `SemanticStyles` struct retained as-is — verbose but clear. Existing bar gradients (`BAR_RAMP_GOOD`, `BAR_RAMP_ACCENT`) retained.
 - Adaptive palette (optional, Phase 6 polish — see Migration sequence): a single `terminal-light` query at app init picks dark vs light. Today's hardcoded dark palette becomes the dark variant; a light variant is authored using the same OkLCH role structure with inverted lightness anchors. The query is a one-shot; no re-detection. Dark ships unconditionally; the light variant ships only if it can be authored to the same aesthetic quality as the dark one.
+- Frame footer copy updates with Phase 5 to `q quit · r refresh · m mouse · ? help`. When mouse tracking is disabled (terminal capability or `m`-toggled off), the `m mouse` token greys out via `.dim()` instead of disappearing — keeps the footer width stable.
 
 ### Deletions
 
@@ -285,7 +290,8 @@ Independent of Phase 1 — `PetPanel` is defined against the `RenderedPet` shape
 - Introduce `PetAnimator` in `src/pet/animator.rs`.
 - Move per-tick animation logic out of `app.rs` and `view_model.rs` into the animator.
 - Watch loop calls `animator.tick()` once per frame; result feeds `PetPanel`.
-- No new visible behaviour — pure refactor.
+- Introduce the two-rate scheme: idle stays at 250 ms; when the animator reports `active_transitions` or in-flight breath/blink, the watch loop ticks at ~16 ms (60 fps target) until quiescent. `WatchAppConfig` exposes both rates so tests can pin them. Measure CPU during a synthetic stage-up before declaring done; fall back to 33 ms (30 fps) if needed.
+- No new visible behaviour from the refactor itself, but the higher burst rate is observable as smoother blink and breath.
 
 ### Phase 4 — Tachyonfx transitions
 
@@ -301,7 +307,8 @@ Independent of Phase 1 — `PetPanel` is defined against the `RenderedPet` shape
 - Enable `EnableMouseCapture` in terminal init, guarded by capability check.
 - Mouse event handling in the watch loop.
 - Pet-area hit-testing using the `PetPanel` rect.
-- Eye glyph selection based on cursor x/y; neutral fallback when cursor leaves.
+- Eye glyph selection based on cursor x relative to pet center; neutral fallback when cursor leaves.
+- New watch-mode key `m` toggles mouse tracking; update `?` help and the frame footer to surface it.
 
 ### Phase 6 — Polish
 
@@ -344,6 +351,7 @@ Independent of Phase 1 — `PetPanel` is defined against the `RenderedPet` shape
 4. **Mouse capture compatibility.** `EnableMouseCapture` works in most terminals but interferes with native text selection (most visible in tmux). Mitigation: enable by default where the terminal supports it, expose a new watch-mode key `m` to toggle mouse tracking at runtime, and document the toggle in `?` help.
 5. **Existing pets look different after migration.** Each saved pet's seed regenerates a different-looking creature. This is a one-time visible change. Mitigation: communicate clearly in release notes ("your pet got a glow-up; same name, same age, same trajectory, new look").
 6. **Spike scope creep.** Phase 0 must remain a throwaway. Mitigation: hard cap at ~200 LOC, no ratatui dependency, no integration with existing modules. The output is a printed grid plus a go/no-go decision, nothing else.
+7. **Tick rate vs animation smoothness.** Today's loop ticks at 250 ms (~4 fps). Tachyonfx transitions and braille-pixel breathing both look choppy at that rate; the library's own examples run at 30-60 fps. Mitigation: in Phase 3 (Animation orchestration), introduce a two-rate scheme — idle tick stays at 250 ms when nothing animates, and a higher render rate (~16 ms / 60 fps target, capped to terminal redraw capability) engages while any `active_transitions` exist or while breath/blink is in-progress. The poll worker thread is unaffected. Measure CPU during a stage-up to confirm the burst rate is acceptable; if not, fall back to 33 ms / 30 fps during transitions.
 
 ## Open questions
 
