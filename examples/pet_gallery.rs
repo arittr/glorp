@@ -769,3 +769,62 @@ mod render_tests {
         for l in &lines { assert_eq!(l.chars().count(), (p().width_px / 2) as usize); }
     }
 }
+
+pub fn species_baseline(species: SpeciesK, stage: Stage) -> SilhouetteParams {
+    let (w, h) = stage_grid_full(stage);
+    let stage_idx = match stage {
+        Stage::S0 => 0,
+        Stage::S1 => 1,
+        Stage::S2 | Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 2,
+    };
+    let max_ornament = aesthetic::MAX_ORNAMENT_DENSITY[stage_idx];
+    match species {
+        SpeciesK::Blob    => SilhouetteParams {
+            width_px: w, height_px: h, roundness: 0.75, taper: 0.55,
+            body_density: 0.62, asymmetry_seed: 0,
+            head_zone_ratio: 0.36, ornament_density: max_ornament * 0.5,
+        },
+        SpeciesK::Fuzz    => SilhouetteParams {
+            width_px: w, height_px: h, roundness: 0.62, taper: 0.65,
+            body_density: 0.66, asymmetry_seed: 0,
+            head_zone_ratio: 0.40, ornament_density: max_ornament * 0.8,
+        },
+        SpeciesK::Mech    => SilhouetteParams {
+            width_px: w, height_px: h, roundness: 0.50, taper: 0.40,
+            body_density: 0.58, asymmetry_seed: 0,
+            head_zone_ratio: 0.32, ornament_density: max_ornament,
+        },
+        SpeciesK::Ghost   => SilhouetteParams {
+            width_px: w, height_px: h, roundness: 0.55, taper: 0.70,
+            body_density: 0.50, asymmetry_seed: 0,
+            head_zone_ratio: 0.45, ornament_density: max_ornament * 0.3,
+        },
+        SpeciesK::Glitch  => SilhouetteParams {
+            width_px: w, height_px: h, roundness: 0.50, taper: 0.55,
+            body_density: 0.60, asymmetry_seed: 0,
+            head_zone_ratio: 0.30, ornament_density: max_ornament,
+        },
+        SpeciesK::Crystal => SilhouetteParams {
+            width_px: w, height_px: h, roundness: 0.48, taper: 0.45,
+            body_density: 0.55, asymmetry_seed: 0,
+            head_zone_ratio: 0.32, ornament_density: max_ornament * 0.6,
+        },
+    }
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+    #[test]
+    fn baselines_satisfy_aesthetic_floors() {
+        for sp in [SpeciesK::Blob, SpeciesK::Fuzz, SpeciesK::Mech,
+                   SpeciesK::Ghost, SpeciesK::Glitch, SpeciesK::Crystal] {
+            for st in [Stage::S0, Stage::S1, Stage::S2] {
+                let p = species_baseline(sp, st);
+                assert!(p.roundness >= aesthetic::MIN_ROUNDNESS, "{sp:?} {st:?}");
+                assert!(p.taper <= aesthetic::MAX_TAPER, "{sp:?} {st:?}");
+                assert!(p.head_zone_ratio >= aesthetic::HEAD_ZONE_MIN_RATIO, "{sp:?} {st:?}");
+            }
+        }
+    }
+}
