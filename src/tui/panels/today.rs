@@ -9,11 +9,7 @@ use crate::tui::view_model::WatchViewModel;
 pub struct TodayPanel;
 
 impl Panel for TodayPanel {
-    fn min_height(&self, _width: u16) -> u16 {
-        0
-    }
-
-    fn preferred_constraint(&self) -> Constraint {
+    fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         Constraint::Min(0)
     }
 

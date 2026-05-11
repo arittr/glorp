@@ -24,11 +24,10 @@ pub use today::TodayPanel;
 pub use vitals::VitalsPanel;
 
 pub trait Panel {
-    /// Minimum height (in rows) this panel needs at the given width.
-    fn min_height(&self, width: u16) -> u16;
-
-    /// Preferred constraint for the layout solver.
-    fn preferred_constraint(&self) -> Constraint;
+    /// Preferred layout constraint for this panel given the current view
+    /// model. Panels that need exact sizing return `Constraint::Length(n)`;
+    /// flexible panels return `Constraint::Min(n)`.
+    fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint;
 
     /// Render into the allocated rect.
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel);

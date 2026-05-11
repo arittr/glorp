@@ -11,13 +11,8 @@ use crate::pet::render::PaletteRoleName;
 pub struct PetPanel;
 
 impl Panel for PetPanel {
-    fn min_height(&self, _width: u16) -> u16 {
-        // Pet art is typically 3-5 lines; 5 covers S2 pets conservatively.
-        5
-    }
-
-    fn preferred_constraint(&self) -> Constraint {
-        let line_count = 5u16; // conservative; Task 3 can wire in vm.pet_art.len()
+    fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
+        let line_count = (vm.pet_art.len() as u16).max(2);
         Constraint::Length(line_count)
     }
 
