@@ -762,14 +762,17 @@ pub fn add_symmetric_ornaments(
         let half_w = bm.w / 2;
         let col = rng.next_usize_capped(half_w as usize) as u8;
         let edge_y = find_top_filled(bm, col).unwrap_or(0);
-        place_ornament(bm, kind, col, edge_y);
-        place_ornament(bm, kind, bm.w - 1 - col, edge_y); // mirror
+        place_ornament(bm, kind, col, edge_y, false);
+        place_ornament(bm, kind, bm.w - 1 - col, edge_y, true); // mirror with dx negated
     }
 }
 
-fn place_ornament(bm: &mut Bitmap, kind: OrnamentKind, ax: u8, ay: u8) {
+// `mirror=true` negates dx so asymmetric patterns (Fin, Hook) actually mirror
+// instead of extending the same direction on both sides.
+fn place_ornament(bm: &mut Bitmap, kind: OrnamentKind, ax: u8, ay: u8, mirror: bool) {
     for &(dx, dy) in ornament_pattern(kind) {
-        let nx = (ax as i32 + dx as i32).clamp(0, bm.w as i32 - 1) as u8;
+        let adx = if mirror { -dx } else { dx };
+        let nx = (ax as i32 + adx as i32).clamp(0, bm.w as i32 - 1) as u8;
         let ny = (ay as i32 + dy as i32).clamp(0, bm.h as i32 - 1) as u8;
         bm.set(nx, ny, true);
     }
@@ -835,7 +838,8 @@ pub fn add_asymmetric_ornaments(bm: &mut Bitmap, asymmetry_seed: u32) {
         let col_in_half = rng.next_usize_capped(half_w as usize) as u8;
         let col = if side_left { col_in_half } else { bm.w - 1 - col_in_half };
         let edge_y = find_top_filled(bm, col).unwrap_or(0);
-        place_ornament(bm, kind, col, edge_y);
+        // mirror=true on the right side so the ornament protrudes outward.
+        place_ornament(bm, kind, col, edge_y, !side_left);
     }
 }
 
@@ -1734,9 +1738,11 @@ pub fn ornament_pattern(kind: OrnamentKind) -> &'static [(i8, i8)] {
 const SYM_ORNAMENT_KINDS: [OrnamentKind; 4] =
     [OrnamentKind::Dot, OrnamentKind::Antenna, OrnamentKind::Fin, OrnamentKind::Hook];
 
-fn place_ornament(bm: &mut Bitmap, kind: OrnamentKind, ax: u8, ay: u8) {
+// `mirror=true` negates dx so asymmetric patterns actually mirror.
+fn place_ornament(bm: &mut Bitmap, kind: OrnamentKind, ax: u8, ay: u8, mirror: bool) {
     for &(dx, dy) in ornament_pattern(kind) {
-        let nx = (ax as i32 + dx as i32).clamp(0, bm.w as i32 - 1) as u8;
+        let adx = if mirror { -dx } else { dx };
+        let nx = (ax as i32 + adx as i32).clamp(0, bm.w as i32 - 1) as u8;
         let ny = (ay as i32 + dy as i32).clamp(0, bm.h as i32 - 1) as u8;
         bm.set(nx, ny, true);
     }
@@ -1752,8 +1758,8 @@ pub fn add_symmetric_ornaments(bm: &mut Bitmap, rng: &mut StableRng, n_pairs: u8
         let half_w = bm.w / 2;
         let col = rng.next_usize(half_w as usize) as u8;
         let edge_y = find_top_filled(bm, col).unwrap_or(0);
-        place_ornament(bm, kind, col, edge_y);
-        place_ornament(bm, kind, bm.w - 1 - col, edge_y);
+        place_ornament(bm, kind, col, edge_y, false);
+        place_ornament(bm, kind, bm.w - 1 - col, edge_y, true);
     }
 }
 
@@ -1767,7 +1773,7 @@ pub fn add_asymmetric_ornaments(bm: &mut Bitmap, asymmetry_seed: u32) {
         let col_in_half = rng.next_usize(half_w as usize) as u8;
         let col = if side_left { col_in_half } else { bm.w - 1 - col_in_half };
         let edge_y = find_top_filled(bm, col).unwrap_or(0);
-        place_ornament(bm, kind, col, edge_y);
+        place_ornament(bm, kind, col, edge_y, !side_left);
     }
 }
 
