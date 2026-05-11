@@ -253,6 +253,22 @@ fn species_stage_up_ms(species: Option<Species>) -> (u32, u32) {
     }
 }
 
+/// Deterministic ±1 column offset for the pet's idle-wander animation.
+/// Returns -1, 0, or +1 based on the current wall clock so the pet appears
+/// to drift slowly side-to-side rather than sit pinned in its column.
+///
+/// 8-step wave cycling every 16 seconds (2 seconds per step):
+///   0 → 0 → +1 → +1 → 0 → 0 → -1 → -1 → repeat
+pub fn compute_wander_offset(now: time::OffsetDateTime) -> i8 {
+    let step = now.unix_timestamp().rem_euclid(16) / 2;
+    match step {
+        0 | 1 | 4 | 5 => 0,
+        2 | 3 => 1,
+        6 | 7 => -1,
+        _ => 0,
+    }
+}
+
 /// Multiplier applied to the body palette role lightness when energy is low.
 /// Returns 1.0 (no change) at energy >= 0.6, falling linearly to 0.55 at
 /// energy == 0.0. The renderer multiplies the body's foreground color by
@@ -376,6 +392,19 @@ mod tests {
         let glitch = species_stage_up_ms(Some(Species::Glitch));
         let mech = species_stage_up_ms(Some(Species::Mech));
         assert_ne!(glitch, mech);
+    }
+
+    #[test]
+    fn wander_offset_returns_one_of_three_values() {
+        use time::macros::datetime;
+        let mut seen = std::collections::HashSet::new();
+        let start = datetime!(2026-05-11 12:00:00 UTC);
+        for s in 0..16 {
+            let v = compute_wander_offset(start + time::Duration::seconds(s));
+            assert!((-1..=1).contains(&v), "got {v}");
+            seen.insert(v);
+        }
+        assert_eq!(seen.len(), 3, "should visit -1, 0, and +1 across a cycle");
     }
 
     #[test]

@@ -35,6 +35,11 @@ pub struct WatchViewModel {
     /// Computed deterministically from mood + recent token activity + wall
     /// clock; cycles ~5s visible / ~25s hidden.
     pub current_speech: Option<String>,
+    /// Column offset for the idle-wander animation. -1, 0, or +1 — applied
+    /// on top of the panel's center-pad so the pet appears to drift slowly
+    /// rather than sit rigidly. Updated each frame from wall clock by the
+    /// watch app; fixtures default to 0 to keep snapshot tests stable.
+    pub wander_offset_x: i8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +153,7 @@ impl WatchViewModel {
             cursor_screen: None,
             mouse_tracking_enabled: true,
             current_speech: None,
+            wander_offset_x: 0,
         }
     }
 

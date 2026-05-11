@@ -161,7 +161,8 @@ fn build_pet_lines<'a>(
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(0);
-    let left_pad = area_width.saturating_sub(pet_width) / 2;
+    let center_pad = area_width.saturating_sub(pet_width) / 2;
+    let left_pad = (center_pad as i32 + vm.wander_offset_x as i32).max(0) as usize;
     let cursor_eye = cursor_norm_x.map(cursor_eye_glyph);
 
     vm.pet_art

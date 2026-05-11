@@ -136,6 +136,7 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
             recent_tokens_per_min(&recent_usage, now),
             now,
         ),
+        wander_offset_x: crate::pet::animator::compute_wander_offset(now),
     })
 }
 
