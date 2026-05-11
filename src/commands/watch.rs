@@ -72,7 +72,16 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
     );
 
     let source_breakdown = source_breakdown(&recent_usage, now);
-    let all_diagnostics = usage_store.recent_diagnostics(5)?;
+    // Stale diagnostics shouldn't keep a source marked broken forever.
+    // After STALE_DIAGNOSTIC_CUTOFF without a fresh failure, treat the
+    // diagnostic as resolved and let the source go back to healthy idle.
+    const STALE_DIAGNOSTIC_CUTOFF: Duration = Duration::hours(1);
+    let cutoff = now - STALE_DIAGNOSTIC_CUTOFF;
+    let all_diagnostics: Vec<_> = usage_store
+        .recent_diagnostics(5)?
+        .into_iter()
+        .filter(|d| d.recorded_at >= cutoff)
+        .collect();
     let source_health = source_health(&recent_usage, &all_diagnostics, now);
     let diagnostics = active_diagnostics(&source_breakdown, all_diagnostics);
     let helper_status = helper_status(&usage_store, &source_breakdown, &diagnostics)?;
