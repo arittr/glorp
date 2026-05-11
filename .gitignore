@@ -4,3 +4,4 @@
 /npm/platform/*/bin/
 **/.DS_Store
 /.superpowers/**/state/
+/.superpowers/
