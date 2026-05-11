@@ -7,8 +7,16 @@
 // generator into src/pet/generate.rs.
 
 fn main() {
-    println!("parts_gallery — Phase 0 compositional parts spike");
-    println!("(catalogs not yet defined — gallery printer wired in v2 Task 8)");
+    println!("parts_gallery — Blob proof-of-concept\n");
+    for stage in [Stage::S0, Stage::S1, Stage::S2] {
+        for seed in [42u64, 99, 137, 7, 21] {
+            println!("--- Blob {stage:?} seed={seed} ---");
+            for line in generate_pet_lines(SpeciesK::Blob, stage, seed) {
+                println!("    {line}");
+            }
+            println!();
+        }
+    }
 }
 
 // Mirror of production `crate::game::evolution::Stage` so the spike has no
@@ -98,6 +106,7 @@ pub enum PartSymmetry {
 /// A small authored bitmap pattern with metadata for composition.
 /// Pixels are stored row-major in `rows`: each u32 represents one row, with
 /// bit 0 (lsb) = column 0 of that row. `width_px` columns, `rows.len()` rows.
+#[derive(Debug, Clone, Copy)]
 pub struct Part {
     pub id: PartId,
     pub rows: &'static [u32],
@@ -161,6 +170,34 @@ pub fn pick_part_for_stage<'a>(
     }
 }
 
+/// Target body pixel height per stage. Bodies whose `height_px` is within ±2
+/// pixels of this target are preferred for the stage.
+fn stage_body_height_target(stage: Stage) -> u8 {
+    let (_, h) = stage_grid_full(stage);
+    h.saturating_sub(4) // head is 4 px; body roughly fills the rest with 1-px overlap
+}
+
+/// Pick a body part appropriate for the stage by both min_stage gate and
+/// pixel-height tier. Falls back to any stage-eligible body if no body
+/// matches the height tier.
+fn pick_body_for_stage<'a>(
+    parts: &'a [Part],
+    stage: Stage,
+    rng: &mut SpikeRng,
+) -> Option<&'a Part> {
+    let target = stage_body_height_target(stage);
+    let target_idx = stage_index(stage);
+    let tier_match: Vec<&Part> = parts.iter()
+        .filter(|p| stage_index(p.min_stage) <= target_idx)
+        .filter(|p| (p.height_px as i16 - target as i16).abs() <= 2)
+        .collect();
+    if !tier_match.is_empty() {
+        let idx = (rng.next_u64() as usize) % tier_match.len();
+        return Some(tier_match[idx]);
+    }
+    pick_part_for_stage(parts, stage, rng)
+}
+
 pub fn blueprint_for(
     species: SpeciesK,
     stage: Stage,
@@ -170,7 +207,7 @@ pub fn blueprint_for(
     let mut rng = SpikeRng::new(seed);
     let head = pick_part_for_stage(catalog.heads, stage, &mut rng)
         .expect("every species catalog must have at least one head part for every stage");
-    let body = pick_part_for_stage(catalog.bodies, stage, &mut rng)
+    let body = pick_body_for_stage(catalog.bodies, stage, &mut rng)
         .expect("every species catalog must have at least one body part for every stage");
 
     let stage_idx = stage_index(stage);
@@ -603,5 +640,306 @@ mod render_tests {
         let lines = render_lines(&bm, anchors, &features);
         assert_eq!(lines.len(), (TEST_H / 4) as usize);
         for l in &lines { assert_eq!(l.chars().count(), (TEST_W / 2) as usize); }
+    }
+}
+
+// =====================================================================
+// Blob species catalog
+// =====================================================================
+//
+// Blob aesthetic: round, smooth, soft. Heads are domes/bubbles; bodies are
+// rounded blobs. Symmetric parts authored at full width (no half-mirror) to
+// keep the pixel patterns readable.
+
+mod blob {
+    use super::*;
+
+    // Eye anchors are part-relative pixel coords (top-left of each 2×4 cell).
+    // Heads are 8 px wide × 4 px tall. Eye anchors at (1, 0) and (5, 0) place
+    // each eye in its own braille char cell at the head's top row.
+
+    pub static HEAD_DOME: Part = Part {
+        id: PartId(100),
+        rows: &[0b01111110, 0b11111111, 0b11111111, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (1, 0), right: (5, 0) }),
+    };
+
+    pub static HEAD_BUBBLE: Part = Part {
+        id: PartId(101),
+        rows: &[0b00111100, 0b11111111, 0b11111111, 0b01111110],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (1, 0), right: (5, 0) }),
+    };
+
+    pub static HEAD_EGG: Part = Part {
+        id: PartId(102),
+        rows: &[0b00011000, 0b01111110, 0b11111111, 0b11111111],
+        width_px: 8,
+        height_px: 4,
+        anchor: Anchor::HeadCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: Some(EyeAnchors { left: (1, 0), right: (5, 0) }),
+    };
+
+    // Bodies are 10 px wide; composer centers them in the 14-px grid.
+
+    pub static BODY_BUBBLE: Part = Part {
+        id: PartId(200),
+        rows: &[
+            0b0111111110,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b0111111110,
+            0b0011111100,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_COLUMN: Part = Part {
+        id: PartId(201),
+        rows: &[
+            0b0011111100,
+            0b0111111110,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b0111111110,
+            0b0011111100,
+            0b0011111100,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_BULB: Part = Part {
+        id: PartId(202),
+        rows: &[
+            0b0011111100,
+            0b0111111110,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b0111111110,
+        ],
+        width_px: 10,
+        height_px: 8,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S0,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    // S1+ bodies: 12 px tall so head (4) + body (12) - overlap (1) ≈ 15 px,
+    // close to the 16-px S1 grid height.
+    pub static BODY_TALL_BUBBLE: Part = Part {
+        id: PartId(203),
+        rows: &[
+            0b0111111110,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b0111111110,
+            0b0011111100,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static BODY_TALL_GOURD: Part = Part {
+        id: PartId(204),
+        rows: &[
+            0b0011111100,
+            0b0011111100,
+            0b0111111110,
+            0b0111111110,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b0111111110,
+        ],
+        width_px: 10,
+        height_px: 12,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S1,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    // S2+ body: 16 px tall to fill the 20-px S2 grid (4 head + 16 body - 1 overlap).
+    pub static BODY_HUGE: Part = Part {
+        id: PartId(205),
+        rows: &[
+            0b0111111110,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b1111111111,
+            0b0111111110,
+            0b0011111100,
+        ],
+        width_px: 10,
+        height_px: 16,
+        anchor: Anchor::BodyCenter,
+        min_stage: Stage::S2,
+        symmetry: PartSymmetry::Symmetric,
+        eye_anchors: None,
+    };
+
+    pub static HEADS: &[Part] = &[HEAD_DOME, HEAD_BUBBLE, HEAD_EGG];
+    pub static BODIES: &[Part] = &[
+        BODY_BUBBLE, BODY_COLUMN, BODY_BULB,
+        BODY_TALL_BUBBLE, BODY_TALL_GOURD, BODY_HUGE,
+    ];
+    pub static ACCESSORIES: &[Part] = &[];
+
+    pub fn catalog() -> PartCatalog {
+        PartCatalog { heads: HEADS, bodies: BODIES, accessories: ACCESSORIES }
+    }
+}
+
+pub fn blob_catalog() -> PartCatalog { blob::catalog() }
+
+pub fn catalog_for(species: SpeciesK) -> PartCatalog {
+    match species {
+        SpeciesK::Blob => blob_catalog(),
+        _ => blob_catalog(), // placeholder until v2 Tasks 7a-7e fill in the others
+    }
+}
+
+// =====================================================================
+// Composition
+// =====================================================================
+
+pub fn compose_parts(blueprint: &PetBlueprint, catalog: &PartCatalog) -> Bitmap {
+    let (w, h) = stage_grid_full(blueprint.stage);
+    let mut bm = Bitmap::new(w, h);
+
+    let body = catalog.bodies.iter().find(|p| p.id == blueprint.selection.body)
+        .expect("body id must resolve in this catalog");
+    let head = catalog.heads.iter().find(|p| p.id == blueprint.selection.head)
+        .expect("head id must resolve in this catalog");
+
+    // Head: centered horizontally, top-anchored at (0, 0).
+    let head_full_w = match head.symmetry {
+        PartSymmetry::HalfMirror => head.width_px * 2,
+        _ => head.width_px,
+    };
+    let head_x = (w.saturating_sub(head_full_w)) / 2;
+    let head_y = 0;
+    render_part(&mut bm, head, head_x, head_y);
+
+    // Body: centered horizontally, attached directly below the head (1-px
+    // overlap to keep the silhouette continuous).
+    let body_full_w = match body.symmetry {
+        PartSymmetry::HalfMirror => body.width_px * 2,
+        _ => body.width_px,
+    };
+    let body_x = (w.saturating_sub(body_full_w)) / 2;
+    let body_y = head.height_px.saturating_sub(1);
+    render_part(&mut bm, body, body_x, body_y);
+
+    // Accessories placed in v2 Task 6.
+
+    // Reserve eye anchors at the head's part-relative positions, offset.
+    if let Some(anchors) = head.eye_anchors {
+        let lx = head_x.saturating_add(anchors.left.0);
+        let ly = head_y.saturating_add(anchors.left.1);
+        let rx = head_x.saturating_add(anchors.right.0);
+        let ry = head_y.saturating_add(anchors.right.1);
+        reserve_eye_anchors(&mut bm, EyeAnchors { left: (lx, ly), right: (rx, ry) });
+    }
+
+    bm
+}
+
+pub fn generate_pet_lines(species: SpeciesK, stage: Stage, seed: u64) -> Vec<String> {
+    let catalog = catalog_for(species);
+    let blueprint = blueprint_for(species, stage, seed, &catalog);
+    let bm = compose_parts(&blueprint, &catalog);
+
+    // Resolve head anchors on the composed bitmap for the renderer.
+    let (w, _h) = stage_grid_full(stage);
+    let head = catalog.heads.iter().find(|p| p.id == blueprint.selection.head)
+        .expect("head id must resolve");
+    let head_full_w = match head.symmetry {
+        PartSymmetry::HalfMirror => head.width_px * 2,
+        _ => head.width_px,
+    };
+    let head_x = (w.saturating_sub(head_full_w)) / 2;
+    let anchors = head.eye_anchors.map(|a| EyeAnchors {
+        left: (head_x.saturating_add(a.left.0), a.left.1),
+        right: (head_x.saturating_add(a.right.0), a.right.1),
+    }).unwrap_or(EyeAnchors { left: (0, 0), right: (0, 0) });
+
+    let mut rng = SpikeRng::new(seed);
+    let features = pick_features(species, stage, &mut rng);
+    render_lines(&bm, anchors, &features)
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+
+    #[test]
+    fn blueprint_is_deterministic_per_seed() {
+        let catalog = blob_catalog();
+        let a = blueprint_for(SpeciesK::Blob, Stage::S1, 42, &catalog);
+        let b = blueprint_for(SpeciesK::Blob, Stage::S1, 42, &catalog);
+        assert_eq!(a.selection, b.selection);
+    }
+
+    #[test]
+    fn generate_pet_lines_dimensions_match_stage() {
+        let lines = generate_pet_lines(SpeciesK::Blob, Stage::S0, 42);
+        let (w, h) = stage_grid_full(Stage::S0);
+        assert_eq!(lines.len(), (h / 4) as usize);
+        for l in &lines { assert_eq!(l.chars().count(), (w / 2) as usize); }
     }
 }
