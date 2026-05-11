@@ -137,6 +137,7 @@ pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<Watch
             now,
         ),
         wander_offset_x: crate::pet::animator::compute_wander_offset(now),
+        breath_offset_y: crate::pet::animator::compute_breath_offset(Some(species), now),
     })
 }
 

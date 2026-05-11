@@ -40,6 +40,10 @@ pub struct WatchViewModel {
     /// rather than sit rigidly. Updated each frame from wall clock by the
     /// watch app; fixtures default to 0 to keep snapshot tests stable.
     pub wander_offset_x: i8,
+    /// Row offset for the idle-breathing animation. 0 = resting (lower
+    /// position), 1 = peak inhale (raised one row). PetPanel reserves a
+    /// fixed extra row above the art so the shift fits without clipping.
+    pub breath_offset_y: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +158,7 @@ impl WatchViewModel {
             mouse_tracking_enabled: true,
             current_speech: None,
             wander_offset_x: 0,
+            breath_offset_y: 0,
         }
     }
 
