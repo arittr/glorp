@@ -189,6 +189,9 @@ pub enum LogKind {
     Diagnostic,
     Evolution,
     Help,
+    /// Pet activity / thought line — "<name> is doing X" entries that
+    /// surface the pet's interior life in the feed.
+    PetActivity,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +228,9 @@ impl SemanticStyles {
                 .fg(p.accent.rgb)
                 .add_modifier(Modifier::BOLD),
             LogKind::Help => Style::default().fg(p.dim.rgb),
+            LogKind::PetActivity => Style::default()
+                .fg(p.accent.rgb)
+                .add_modifier(Modifier::ITALIC),
         }
     }
 }

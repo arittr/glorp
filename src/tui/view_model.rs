@@ -31,6 +31,10 @@ pub struct WatchViewModel {
     pub cursor_screen: Option<(u16, u16)>,
     /// Whether mouse tracking is currently enabled (toggled via `m` key).
     pub mouse_tracking_enabled: bool,
+    /// Pet's current speech-bubble line, or None when the bubble is hidden.
+    /// Computed deterministically from mood + recent token activity + wall
+    /// clock; cycles ~5s visible / ~25s hidden.
+    pub current_speech: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +147,7 @@ impl WatchViewModel {
             acknowledged_evolution: None,
             cursor_screen: None,
             mouse_tracking_enabled: true,
+            current_speech: None,
         }
     }
 
