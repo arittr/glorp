@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
 use crate::tui::style::{
-    ramp_index, semantic_styles, tokenpet_palette, ColorCapability, BAR_RAMP_GOOD,
+    bar_ramp_good, ramp_index, semantic_styles, tokenpet_palette, ColorCapability,
 };
 use crate::tui::view_model::WatchViewModel;
 
@@ -74,7 +74,7 @@ fn build_spark_lines<'a>(
             match capability {
                 ColorCapability::Truecolor => {
                     let idx = ramp_index(i, 7);
-                    Style::default().fg(BAR_RAMP_GOOD.stops[idx])
+                    Style::default().fg(bar_ramp_good().stops[idx])
                 }
                 ColorCapability::Flat => Style::default().fg(tokenpet_palette().good.rgb),
             }

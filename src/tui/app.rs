@@ -130,6 +130,12 @@ impl WatchApp {
     }
 
     pub fn run(mut self) -> Result<()> {
+        // Detect terminal background BEFORE EnableMouseCapture / EnterAlternateScreen;
+        // terminal-light queries OSC 11 against the host terminal and the
+        // response could be lost once we've taken over the screen.
+        let theme = crate::tui::style::detect_theme();
+        crate::tui::style::init_theme(theme);
+
         let _restore = TerminalRestoreGuard::activate()?;
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;

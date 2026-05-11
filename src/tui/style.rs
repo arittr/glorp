@@ -1,4 +1,35 @@
+use std::sync::OnceLock;
+
 use ratatui::style::{Color, Modifier, Style};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Dark,
+    Light,
+}
+
+static ACTIVE_THEME: OnceLock<Theme> = OnceLock::new();
+
+/// Initialize the active theme. Call once at app startup (e.g. from
+/// `WatchApp::run`). Subsequent calls are no-ops.
+pub fn init_theme(theme: Theme) {
+    let _ = ACTIVE_THEME.set(theme);
+}
+
+/// Returns the active theme, defaulting to `Dark` if not yet initialized.
+/// Tests get `Dark` because they never call `init_theme`.
+pub fn current_theme() -> Theme {
+    *ACTIVE_THEME.get().unwrap_or(&Theme::Dark)
+}
+
+/// Detect terminal background and pick the appropriate theme. Uses
+/// `terminal_light::luma()`; falls back to `Dark` on detection failure.
+pub fn detect_theme() -> Theme {
+    match terminal_light::luma() {
+        Ok(luma) if luma > 0.5 => Theme::Light,
+        _ => Theme::Dark,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenpetColor {
@@ -48,6 +79,15 @@ impl ColorCapability {
 }
 
 pub fn tokenpet_palette() -> TokenpetPalette {
+    match current_theme() {
+        Theme::Dark => tokenpet_palette_dark(),
+        Theme::Light => tokenpet_palette_light(),
+    }
+}
+
+/// Dark theme — the original glorp palette. Cream-on-coffee with warm orange
+/// accents.
+pub fn tokenpet_palette_dark() -> TokenpetPalette {
     TokenpetPalette {
         bg: TokenpetColor {
             name: "bg",
@@ -88,6 +128,56 @@ pub fn tokenpet_palette() -> TokenpetPalette {
             name: "bad",
             source_oklch: "oklch(0.68 0.16 25)",
             rgb: Color::Rgb(0xea, 0x6a, 0x64),
+        },
+    }
+}
+
+/// Light theme. Inverts the dark palette's lightness anchors while preserving
+/// hue families: cream background with deep warm-grey foreground, and
+/// accent/good/bad pulled to ~0.50 lightness so they remain legible on cream.
+/// The accent shifts from peach (0.78 L) to burnt-amber (0.55 L); good shifts
+/// from sage-mint to forest-moss; bad shifts from coral to brick.
+pub fn tokenpet_palette_light() -> TokenpetPalette {
+    TokenpetPalette {
+        bg: TokenpetColor {
+            name: "bg",
+            source_oklch: "oklch(0.96 0.008 80)",
+            rgb: Color::Rgb(0xf6, 0xf2, 0xea),
+        },
+        surface: TokenpetColor {
+            name: "surface",
+            source_oklch: "oklch(0.92 0.010 80)",
+            rgb: Color::Rgb(0xe9, 0xe3, 0xd8),
+        },
+        fg: TokenpetColor {
+            name: "fg",
+            source_oklch: "oklch(0.22 0.012 60)",
+            rgb: Color::Rgb(0x24, 0x20, 0x1c),
+        },
+        dim: TokenpetColor {
+            name: "dim",
+            source_oklch: "oklch(0.42 0.014 70)",
+            rgb: Color::Rgb(0x55, 0x4e, 0x46),
+        },
+        faint: TokenpetColor {
+            name: "faint",
+            source_oklch: "oklch(0.70 0.010 70)",
+            rgb: Color::Rgb(0xa9, 0xa2, 0x97),
+        },
+        accent: TokenpetColor {
+            name: "accent",
+            source_oklch: "oklch(0.55 0.13 60)",
+            rgb: Color::Rgb(0xa7, 0x6a, 0x2a),
+        },
+        good: TokenpetColor {
+            name: "good",
+            source_oklch: "oklch(0.46 0.10 145)",
+            rgb: Color::Rgb(0x3b, 0x6f, 0x47),
+        },
+        bad: TokenpetColor {
+            name: "bad",
+            source_oklch: "oklch(0.50 0.15 25)",
+            rgb: Color::Rgb(0xa8, 0x40, 0x3a),
         },
     }
 }
@@ -171,6 +261,8 @@ pub struct BarRamp {
     pub stops: [Color; 5],
 }
 
+/// Dark-theme bar ramps. Low values render in deep saturated colors; high
+/// values render bright. Designed to read clearly against the dark coffee bg.
 pub const BAR_RAMP_GOOD: BarRamp = BarRamp {
     stops: [
         Color::Rgb(0x3d, 0x69, 0x48),
@@ -190,6 +282,43 @@ pub const BAR_RAMP_ACCENT: BarRamp = BarRamp {
         Color::Rgb(0xff, 0xe0, 0xa8),
     ],
 };
+
+/// Light-theme bar ramps. Direction is inverted from dark: low values are
+/// faint (close to background), high values are saturated and deep. Reads
+/// clearly against the cream bg.
+pub const BAR_RAMP_GOOD_LIGHT: BarRamp = BarRamp {
+    stops: [
+        Color::Rgb(0xc8, 0xdf, 0xc8),
+        Color::Rgb(0x9a, 0xc0, 0x9c),
+        Color::Rgb(0x6b, 0x95, 0x6e),
+        Color::Rgb(0x44, 0x6b, 0x47),
+        Color::Rgb(0x21, 0x46, 0x26),
+    ],
+};
+
+pub const BAR_RAMP_ACCENT_LIGHT: BarRamp = BarRamp {
+    stops: [
+        Color::Rgb(0xf2, 0xdb, 0xae),
+        Color::Rgb(0xdb, 0xab, 0x6c),
+        Color::Rgb(0xb6, 0x7a, 0x32),
+        Color::Rgb(0x85, 0x55, 0x18),
+        Color::Rgb(0x52, 0x36, 0x05),
+    ],
+};
+
+pub fn bar_ramp_good() -> BarRamp {
+    match current_theme() {
+        Theme::Dark => BAR_RAMP_GOOD,
+        Theme::Light => BAR_RAMP_GOOD_LIGHT,
+    }
+}
+
+pub fn bar_ramp_accent() -> BarRamp {
+    match current_theme() {
+        Theme::Dark => BAR_RAMP_ACCENT,
+        Theme::Light => BAR_RAMP_ACCENT_LIGHT,
+    }
+}
 
 pub fn ramp_index(i: usize, n: usize) -> usize {
     if n == 0 {
@@ -234,16 +363,61 @@ mod bar_ramp_tests {
     }
 
     #[test]
-    fn green_ramp_middle_stop_matches_palette_good() {
+    fn green_ramp_middle_stop_matches_dark_palette_good() {
+        // BAR_RAMP_GOOD is the dark-theme ramp; its middle stop should match
+        // the dark palette's `good` color. Light-theme ramp is tested via
+        // `bar_ramp_good()` in a separate case below.
         let ramp = BAR_RAMP_GOOD;
-        let palette_good = tokenpet_palette().good.rgb;
+        let palette_good = tokenpet_palette_dark().good.rgb;
         assert_eq!(ramp.stops[2], palette_good);
+    }
+
+    #[test]
+    fn light_palette_fg_is_dark_and_bg_is_light() {
+        let light = tokenpet_palette_light();
+        let dark = tokenpet_palette_dark();
+        if let (Color::Rgb(_, l_fg_g, _), Color::Rgb(_, l_bg_g, _)) = (light.fg.rgb, light.bg.rgb) {
+            assert!(
+                l_fg_g < l_bg_g,
+                "light theme fg should be darker than bg (G channel: fg {l_fg_g}, bg {l_bg_g})"
+            );
+        }
+        if let (Color::Rgb(_, d_fg_g, _), Color::Rgb(_, d_bg_g, _)) = (dark.fg.rgb, dark.bg.rgb) {
+            assert!(
+                d_fg_g > d_bg_g,
+                "dark theme fg should be brighter than bg"
+            );
+        }
+    }
+
+    #[test]
+    fn light_palette_inverts_lightness_relative_to_dark() {
+        // Spot-check that light bg approximately equals dark fg in brightness
+        // (both are off-white cream). This validates the inverted-anchor design.
+        let light_bg = tokenpet_palette_light().bg.rgb;
+        let dark_fg = tokenpet_palette_dark().fg.rgb;
+        if let (Color::Rgb(_, lb, _), Color::Rgb(_, df, _)) = (light_bg, dark_fg) {
+            let diff = (lb as i32 - df as i32).abs();
+            assert!(diff < 30, "light bg should be within 30 G units of dark fg");
+        }
+    }
+
+    #[test]
+    fn light_ramps_invert_direction() {
+        // Light theme ramps should go from faint→saturated as i increases.
+        // We check that the last stop is darker than the first (cream-relative).
+        let ramp = BAR_RAMP_GOOD_LIGHT;
+        if let (Color::Rgb(_, g0, _), Color::Rgb(_, g4, _)) = (ramp.stops[0], ramp.stops[4]) {
+            assert!(g0 > g4, "light ramp first stop should be lighter than last");
+        } else {
+            panic!("light ramp stops should be Rgb");
+        }
     }
 
     #[test]
     fn amber_ramp_middle_stop_matches_palette_accent() {
         let ramp = BAR_RAMP_ACCENT;
-        let palette_accent = tokenpet_palette().accent.rgb;
+        let palette_accent = tokenpet_palette_dark().accent.rgb;
         assert_eq!(ramp.stops[2], palette_accent);
     }
 }
