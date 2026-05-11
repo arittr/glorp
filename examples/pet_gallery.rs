@@ -130,7 +130,7 @@ pub mod aesthetic {
 /// future work (tracked outside this plan).
 pub fn stage_grid_full(stage: Stage) -> (u8, u8) {
     match stage {
-        Stage::S0 => (14, 8),
+        Stage::S0 => (14, 12),
         Stage::S1 => (18, 12),
         Stage::S2 | Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => (22, 16),
     }
@@ -154,7 +154,7 @@ pub fn head_zone_gain(y: f32, h: f32, head_zone_ratio: f32) -> f32 {
     let cutoff = h * head_zone_ratio;
     if y < cutoff {
         let t = 1.0 - (y / cutoff).clamp(0.0, 1.0);
-        1.0 + t * 0.35
+        1.0 + t * 0.75
     } else { 1.0 }
 }
 
@@ -198,7 +198,7 @@ pub fn fill_probability(
     let env = gaussian_envelope(x as f32, y as f32, cx, cy, half_w, h, params.roundness);
     let head = head_zone_gain(y as f32, h, params.head_zone_ratio.max(aesthetic::HEAD_ZONE_MIN_RATIO));
     let taper = corner_taper(x as f32, y as f32, half_w, h, params.taper.min(aesthetic::MAX_TAPER));
-    let noise = coherent_noise(x, y, noise_seed) * 0.18; // amplitude tuned during spike
+    let noise = coherent_noise(x, y, noise_seed) * 0.22; // amplitude tuned during spike
 
     (env * head * taper * (1.0 + noise)).clamp(0.0, 1.0)
 }
@@ -805,12 +805,12 @@ pub fn species_baseline(species: SpeciesK, stage: Stage) -> SilhouetteParams {
     match species {
         SpeciesK::Blob    => SilhouetteParams {
             width_px: w, height_px: h, roundness: 0.75, taper: 0.55,
-            body_density: 0.62, asymmetry_seed: 0,
+            body_density: 0.52, asymmetry_seed: 0,
             head_zone_ratio: 0.36, ornament_density: max_ornament * 0.5,
         },
         SpeciesK::Fuzz    => SilhouetteParams {
             width_px: w, height_px: h, roundness: 0.62, taper: 0.65,
-            body_density: 0.66, asymmetry_seed: 0,
+            body_density: 0.55, asymmetry_seed: 0,
             head_zone_ratio: 0.40, ornament_density: max_ornament * 0.8,
         },
         SpeciesK::Mech    => SilhouetteParams {
@@ -825,7 +825,7 @@ pub fn species_baseline(species: SpeciesK, stage: Stage) -> SilhouetteParams {
         },
         SpeciesK::Glitch  => SilhouetteParams {
             width_px: w, height_px: h, roundness: 0.50, taper: 0.55,
-            body_density: 0.60, asymmetry_seed: 0,
+            body_density: 0.52, asymmetry_seed: 0,
             head_zone_ratio: 0.30, ornament_density: max_ornament,
         },
         SpeciesK::Crystal => SilhouetteParams {
@@ -855,7 +855,7 @@ pub fn apply_mutation(params: SilhouetteParams, v: &MutationVector) -> Silhouett
             .max(aesthetic::MIN_ROUNDNESS).min(0.95),
         taper: (params.taper + v.d_taper)
             .min(aesthetic::MAX_TAPER).max(0.20),
-        body_density: (params.body_density + v.d_body_density).clamp(0.40, 0.85),
+        body_density: (params.body_density + v.d_body_density).clamp(0.40, 0.58),
         ornament_density: (params.ornament_density + v.d_ornament_density).clamp(0.0, 0.50),
         head_zone_ratio: (params.head_zone_ratio + v.d_head_zone_ratio)
             .max(aesthetic::HEAD_ZONE_MIN_RATIO).min(0.50),
@@ -870,10 +870,10 @@ pub fn blueprint_for(species: SpeciesK, stage: Stage, seed: u64) -> PetBlueprint
     // Apply the mutation vector once per stage past S0. S3+ cap at three
     // applications until later stages get richer geometry.
     let mutations = match stage {
-        Stage::S0 => 0,
-        Stage::S1 => 1,
-        Stage::S2 => 2,
-        Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 3,
+        Stage::S0 => 1,
+        Stage::S1 => 2,
+        Stage::S2 => 3,
+        Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 4,
     };
     for _ in 0..mutations { p = apply_mutation(p, &mv); }
     PetBlueprint { species, stage, silhouette: p, mutation_vector: mv }
