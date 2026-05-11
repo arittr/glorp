@@ -1306,9 +1306,10 @@ pub fn generate_pet_lines(species: SpeciesK, stage: Stage, seed: u64) -> Vec<Str
         Stage::S1 => 1,
         Stage::S2 | Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 2,
     };
+    // Promote to u32 before multiplying; bm.w * bm.h overflows u8 at S2 (22*16 = 352).
     let max_pairs = (blueprint.silhouette.ornament_density
                      * aesthetic::MAX_ORNAMENT_DENSITY[stage_idx]
-                     * (bm.w * bm.h) as f32 / 12.0) as u8;
+                     * (bm.w as u32 * bm.h as u32) as f32 / 12.0) as u8;
     add_symmetric_ornaments(&mut bm, &mut rng, max_pairs.min(3));
     add_asymmetric_ornaments(&mut bm, blueprint.silhouette.asymmetry_seed);
 
@@ -1979,9 +1980,10 @@ pub fn generate_pet_lines(species: Species, stage: Stage, seed: u64) -> Vec<Stri
         Stage::S1 => 1,
         Stage::S2 | Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 2,
     };
+    // Promote to u32 before multiplying; bm.w * bm.h overflows u8 at S2 (22*16 = 352).
     let max_pairs = (blueprint.silhouette.ornament_density
                      * aesthetic::MAX_ORNAMENT_DENSITY[stage_idx]
-                     * (bm.w * bm.h) as f32 / 12.0) as u8;
+                     * (bm.w as u32 * bm.h as u32) as f32 / 12.0) as u8;
     add_symmetric_ornaments(&mut bm, &mut rng, max_pairs.min(3));
     add_asymmetric_ornaments(&mut bm, blueprint.silhouette.asymmetry_seed);
 
@@ -2220,9 +2222,10 @@ pub fn render_pet(
         Stage::S1 => 1,
         Stage::S2 | Stage::S3 | Stage::S4 | Stage::S5 | Stage::S6 => 2,
     };
+    // Promote to u32 before multiplying; bm.w * bm.h overflows u8 at S2 (22*16 = 352).
     let max_pairs = (blueprint.silhouette.ornament_density
                      * aesthetic::MAX_ORNAMENT_DENSITY[stage_idx]
-                     * (bm.w * bm.h) as f32 / 12.0) as u8;
+                     * (bm.w as u32 * bm.h as u32) as f32 / 12.0) as u8;
     add_symmetric_ornaments(&mut bm, &mut rng, max_pairs.min(3));
     add_asymmetric_ornaments(&mut bm, blueprint.silhouette.asymmetry_seed);
 
