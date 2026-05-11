@@ -33,6 +33,7 @@ fn ms(n: u32) -> FxDuration {
     FxDuration::from_millis(n)
 }
 
+use crate::pet::generation::Species;
 use crate::tui::view_model::WatchViewModel;
 
 /// Threshold (in tokens) above which a single tick of usage growth is
@@ -98,41 +99,54 @@ impl PetAnimator {
     }
 
     /// Diff the view model against the previous frame's snapshot and enqueue
-    /// effects for any detected transitions.
+    /// effects for any detected transitions. Effects are flavored by species
+    /// where it matters: glitch flickers harder on mood swings, mech sweeps
+    /// in tighter on feed, etc.
     pub fn update(&mut self, vm: &WatchViewModel) {
+        let species = Species::parse(&vm.pet_render.generated_species);
+
         // Hatch: first time we see a freshly-hatched pet, play coalesce.
         if self.first_update && vm.age_days == 0 {
-            self.enqueue(EffectKey::Hatch, coalesce(ms(1200)));
+            self.enqueue(EffectKey::Hatch, coalesce(ms(species_hatch_ms(species))));
         }
 
         // Stage-up: stage label changed. dissolve+coalesce sequence so the
-        // pet morphs out and the new one fades in.
+        // pet morphs out and the new one fades in. Glitch dissolves longer
+        // for a more chaotic rebirth; mech coalesces tighter.
         if let Some(prev) = &self.last_stage {
             if prev != &vm.stage {
+                let (diss, coal) = species_stage_up_ms(species);
                 self.enqueue(
                     EffectKey::StageUp,
-                    sequence(&[dissolve(ms(300)), coalesce(ms(500))]),
+                    sequence(&[dissolve(ms(diss)), coalesce(ms(coal))]),
                 );
             }
         }
 
-        // Mood fade: mood label changed. ~400ms hsl drift toward the new mood.
+        // Mood fade: mood label changed. ~400ms hsl drift toward the new mood,
+        // scaled by species (glitch swings harder; ghost barely registers).
         if let Some(prev) = &self.last_mood {
             if prev != &vm.mood {
-                let drift = mood_hsl_drift(&vm.mood);
+                let drift = mood_hsl_drift_for(&vm.mood, species);
                 self.enqueue(EffectKey::MoodFade, hsl_shift(Some(drift), None, ms(400)));
             }
         }
 
         // Feed pulse: today's effective tokens jumped by more than the
-        // threshold since the last tick. Sweep an accent wash across the
-        // pet to signal that food arrived.
+        // threshold since the last tick. Species-tinted sweep tells you
+        // who got fed at a glance.
         if let Some(prev_tokens) = self.last_today_tokens {
             let delta = vm.today_effective_tokens - prev_tokens;
             if delta >= FEED_EVENT_TOKEN_THRESHOLD {
                 self.enqueue(
                     EffectKey::FeedPulse,
-                    sweep_in(Motion::LeftToRight, 10, 0, Color::Yellow, ms(400)),
+                    sweep_in(
+                        Motion::LeftToRight,
+                        10,
+                        0,
+                        species_feed_color(species),
+                        ms(400),
+                    ),
                 );
             }
         }
@@ -176,6 +190,66 @@ fn mood_hsl_drift(mood: &str) -> [f32; 3] {
         "happy" => [15.0, 20.0, 10.0],
         "wilted" => [0.0, -40.0, -30.0],
         _ => [0.0, 0.0, 0.0], // content / unknown
+    }
+}
+
+/// Per-species scaling on `mood_hsl_drift`. Glitch reacts harder, ghost
+/// barely shifts (already low-saturation by design), others sit near 1.0.
+fn species_mood_drift_scale(species: Option<Species>) -> f32 {
+    match species {
+        Some(Species::Glitch) => 1.6,
+        Some(Species::Ghost) => 0.4,
+        Some(Species::Crystal) => 1.2,
+        Some(Species::Blob) => 1.1,
+        Some(Species::Fuzz) => 1.0,
+        Some(Species::Mech) => 0.7,
+        None => 1.0,
+    }
+}
+
+fn mood_hsl_drift_for(mood: &str, species: Option<Species>) -> [f32; 3] {
+    let [h, s, l] = mood_hsl_drift(mood);
+    let scale = species_mood_drift_scale(species);
+    [h * scale, s * scale, l * scale]
+}
+
+/// Sweep color used for the feed pulse, flavored per species so each pet
+/// looks like itself eating.
+fn species_feed_color(species: Option<Species>) -> Color {
+    match species {
+        Some(Species::Fuzz) => Color::Rgb(255, 200, 150), // warm peach
+        Some(Species::Blob) => Color::Rgb(140, 220, 160), // mint
+        Some(Species::Ghost) => Color::Rgb(190, 170, 240), // pale lavender
+        Some(Species::Glitch) => Color::Rgb(120, 255, 180), // acid green
+        Some(Species::Crystal) => Color::Rgb(170, 220, 255), // ice cyan
+        Some(Species::Mech) => Color::Rgb(255, 220, 100), // amber
+        None => Color::Yellow,
+    }
+}
+
+/// Hatch coalesce duration. Mech snaps together, blob takes its time.
+fn species_hatch_ms(species: Option<Species>) -> u32 {
+    match species {
+        Some(Species::Mech) => 900,
+        Some(Species::Glitch) => 1000,
+        Some(Species::Fuzz) | Some(Species::Crystal) => 1200,
+        Some(Species::Ghost) => 1400,
+        Some(Species::Blob) => 1500,
+        None => 1200,
+    }
+}
+
+/// Stage-up dissolve+coalesce timings. Glitch lingers in the dissolve;
+/// mech morphs cleanly; crystal does a slow, deliberate rebuild.
+fn species_stage_up_ms(species: Option<Species>) -> (u32, u32) {
+    match species {
+        Some(Species::Glitch) => (500, 400),
+        Some(Species::Crystal) => (300, 700),
+        Some(Species::Mech) => (250, 400),
+        Some(Species::Blob) => (350, 600),
+        Some(Species::Ghost) => (400, 500),
+        Some(Species::Fuzz) => (300, 500),
+        None => (300, 500),
     }
 }
 
@@ -275,6 +349,33 @@ mod tests {
         vm.today_effective_tokens = 1_050.0; // +50, below threshold
         a.update(&vm);
         assert!(!a.has_active_effects(), "tiny growth should not pulse");
+    }
+
+    #[test]
+    fn feed_color_differs_per_species() {
+        let fuzz = species_feed_color(Some(Species::Fuzz));
+        let glitch = species_feed_color(Some(Species::Glitch));
+        let mech = species_feed_color(Some(Species::Mech));
+        assert_ne!(fuzz, glitch);
+        assert_ne!(glitch, mech);
+        assert_ne!(fuzz, mech);
+    }
+
+    #[test]
+    fn mood_drift_scales_per_species() {
+        let base = mood_hsl_drift("happy");
+        let glitch = mood_hsl_drift_for("happy", Some(Species::Glitch));
+        let ghost = mood_hsl_drift_for("happy", Some(Species::Ghost));
+        // Glitch should swing harder than baseline; ghost should swing less.
+        assert!(glitch[0].abs() > base[0].abs());
+        assert!(ghost[0].abs() < base[0].abs());
+    }
+
+    #[test]
+    fn stage_up_timings_differ_per_species() {
+        let glitch = species_stage_up_ms(Some(Species::Glitch));
+        let mech = species_stage_up_ms(Some(Species::Mech));
+        assert_ne!(glitch, mech);
     }
 
     #[test]
