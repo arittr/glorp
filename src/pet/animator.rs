@@ -253,6 +253,52 @@ fn species_stage_up_ms(species: Option<Species>) -> (u32, u32) {
     }
 }
 
+/// Deterministic 0/1 row offset for the pet's idle-breathing animation.
+/// Returns 1 only during the brief "peak inhale" window of each cycle so the
+/// pet appears to rise on a slow breath and settle back to rest. Period and
+/// inhale duration vary per species — glitch breathes jittery and quick,
+/// crystal breathes slow and deliberate.
+pub fn compute_breath_offset(species: Option<Species>, now: time::OffsetDateTime) -> u8 {
+    let (period_ds, inhale_ds) = species_breath_rhythm_decis(species);
+    let ts_ds = now.unix_timestamp() * 10 + i64::from(now.millisecond() / 100);
+    let phase = ts_ds.rem_euclid(period_ds);
+    if phase < inhale_ds {
+        1
+    } else {
+        0
+    }
+}
+
+/// Per-species breath rhythm in tenths-of-a-second. Returns (period, inhale_window).
+/// Glitch: 2.0s cycle, 0.4s peak — twitchy. Crystal: 6.0s cycle, 0.8s peak — slow.
+fn species_breath_rhythm_decis(species: Option<Species>) -> (i64, i64) {
+    match species {
+        Some(Species::Glitch) => (20, 4),
+        Some(Species::Mech) => (40, 5),
+        Some(Species::Fuzz) => (40, 8),
+        Some(Species::Ghost) => (45, 10),
+        Some(Species::Blob) => (50, 12),
+        Some(Species::Crystal) => (60, 8),
+        None => (40, 8),
+    }
+}
+
+/// Deterministic ±1 column offset for the pet's idle-wander animation.
+/// Returns -1, 0, or +1 based on the current wall clock so the pet appears
+/// to drift slowly side-to-side rather than sit pinned in its column.
+///
+/// 8-step wave cycling every 16 seconds (2 seconds per step):
+///   0 → 0 → +1 → +1 → 0 → 0 → -1 → -1 → repeat
+pub fn compute_wander_offset(now: time::OffsetDateTime) -> i8 {
+    let step = now.unix_timestamp().rem_euclid(16) / 2;
+    match step {
+        0 | 1 | 4 | 5 => 0,
+        2 | 3 => 1,
+        6 | 7 => -1,
+        _ => 0,
+    }
+}
+
 /// Multiplier applied to the body palette role lightness when energy is low.
 /// Returns 1.0 (no change) at energy >= 0.6, falling linearly to 0.55 at
 /// energy == 0.0. The renderer multiplies the body's foreground color by
@@ -376,6 +422,48 @@ mod tests {
         let glitch = species_stage_up_ms(Some(Species::Glitch));
         let mech = species_stage_up_ms(Some(Species::Mech));
         assert_ne!(glitch, mech);
+    }
+
+    #[test]
+    fn breath_offset_returns_zero_or_one() {
+        use time::macros::datetime;
+        let mut saw_zero = false;
+        let mut saw_one = false;
+        let start = datetime!(2026-05-11 12:00:00 UTC);
+        for ms in (0..6000).step_by(100) {
+            let v = compute_breath_offset(
+                Some(Species::Fuzz),
+                start + time::Duration::milliseconds(ms),
+            );
+            assert!(matches!(v, 0 | 1), "got {v}");
+            if v == 0 {
+                saw_zero = true;
+            } else {
+                saw_one = true;
+            }
+        }
+        assert!(saw_zero && saw_one, "should toggle within one cycle");
+    }
+
+    #[test]
+    fn breath_rhythm_differs_per_species() {
+        assert_ne!(
+            species_breath_rhythm_decis(Some(Species::Glitch)),
+            species_breath_rhythm_decis(Some(Species::Crystal))
+        );
+    }
+
+    #[test]
+    fn wander_offset_returns_one_of_three_values() {
+        use time::macros::datetime;
+        let mut seen = std::collections::HashSet::new();
+        let start = datetime!(2026-05-11 12:00:00 UTC);
+        for s in 0..16 {
+            let v = compute_wander_offset(start + time::Duration::seconds(s));
+            assert!((-1..=1).contains(&v), "got {v}");
+            seen.insert(v);
+        }
+        assert_eq!(seen.len(), 3, "should visit -1, 0, and +1 across a cycle");
     }
 
     #[test]

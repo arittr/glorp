@@ -25,9 +25,13 @@ fn speech_rows(vm: &WatchViewModel) -> u16 {
     }
 }
 
+/// Extra row reserved above the pet art so the idle breath shift has
+/// somewhere to rise into without clipping the bottom row.
+const BREATH_HEADROOM: u16 = 1;
+
 impl Panel for PetPanel {
     fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
-        let line_count = (vm.pet_art.len() as u16).max(2) + speech_rows(vm);
+        let line_count = (vm.pet_art.len() as u16).max(2) + speech_rows(vm) + BREATH_HEADROOM;
         Constraint::Length(line_count)
     }
 
@@ -55,8 +59,20 @@ impl Panel for PetPanel {
         }
 
         let cursor_norm_x = cursor_normalized_x_within(vm, pet_area);
-        let lines = build_pet_lines(vm, pet_area.width as usize, &droop, cursor_norm_x);
-        Paragraph::new(lines).render(pet_area, buf);
+        // Inhale raises the pet by 1 row; rest position is BREATH_HEADROOM
+        // rows below the area top. When the area is too tight for the
+        // headroom, we just clamp to 0.
+        let rest_y = BREATH_HEADROOM.min(pet_area.height.saturating_sub(1));
+        let breath_lift = u16::from(vm.breath_offset_y).min(rest_y);
+        let pet_top = pet_area.y + (rest_y - breath_lift);
+        let pet_render_area = Rect {
+            x: pet_area.x,
+            y: pet_top,
+            width: pet_area.width,
+            height: pet_area.height.saturating_sub(rest_y - breath_lift),
+        };
+        let lines = build_pet_lines(vm, pet_render_area.width as usize, &droop, cursor_norm_x);
+        Paragraph::new(lines).render(pet_render_area, buf);
     }
 }
 
@@ -161,7 +177,8 @@ fn build_pet_lines<'a>(
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(0);
-    let left_pad = area_width.saturating_sub(pet_width) / 2;
+    let center_pad = area_width.saturating_sub(pet_width) / 2;
+    let left_pad = (center_pad as i32 + vm.wander_offset_x as i32).max(0) as usize;
     let cursor_eye = cursor_norm_x.map(cursor_eye_glyph);
 
     vm.pet_art

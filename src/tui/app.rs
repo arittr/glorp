@@ -232,6 +232,10 @@ impl WatchApp {
         self.animation_frame = self.animation_frame.wrapping_add(1);
         let _ =
             crate::commands::watch::rerender_pet_for_view_model(&mut self.vm, self.animation_frame);
+        let now = time::OffsetDateTime::now_utc();
+        self.vm.wander_offset_x = crate::pet::animator::compute_wander_offset(now);
+        let species = crate::pet::generation::Species::parse(&self.vm.pet_render.generated_species);
+        self.vm.breath_offset_y = crate::pet::animator::compute_breath_offset(species, now);
     }
 
     /// Returns whether the evolution overlay should render this frame.
