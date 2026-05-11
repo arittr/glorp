@@ -537,6 +537,11 @@ fn render_pet_panel_rows<'a>(
     out
 }
 
+/// Tallest body the wide layout uses, in rows including both chrome rails.
+/// Any taller terminal pads above and below so the frame stays tight rather
+/// than stretching content thin across blank rows.
+const MAX_WIDE_HEIGHT: u16 = 30;
+
 pub fn render_watch_frame_with_capability(
     frame: &mut Frame<'_>,
     vm: &WatchViewModel,
@@ -552,7 +557,17 @@ pub fn render_watch_frame_with_capability(
     if (area.width as usize) < COMPACT_THRESHOLD {
         render_compact(frame, area, vm, capability, &styles);
     } else {
-        render_wide(frame, area, vm, capability, &styles);
+        // Cap body height so a tall terminal centers the frame vertically
+        // instead of stretching content with blank rows.
+        let target_height = MAX_WIDE_HEIGHT.min(area.height);
+        let frame_y = area.y + area.height.saturating_sub(target_height) / 2;
+        let frame_rect = Rect {
+            x: area.x,
+            y: frame_y,
+            width: area.width,
+            height: target_height,
+        };
+        render_wide(frame, frame_rect, vm, capability, &styles);
     }
 }
 
@@ -607,26 +622,22 @@ fn render_wide(
         .min(event_count.max(2));
     let feed = render_feed_panel_rows(right_col, vm, max_feed_entries, styles);
 
-    let consumed = today.len() + spark.len() + feed.len() + helpers.len() + 5;
-    let residual = body_height.saturating_sub(consumed);
-    let slots = 5usize;
-    let extra_per_slot = residual / slots;
-    let extra_remainder = residual % slots;
-    let slot_size = |slot_index: usize| -> usize {
-        1 + extra_per_slot + if slot_index < extra_remainder { 1 } else { 0 }
-    };
+    // Tight single-row gaps between sections. Any leftover height piles up
+    // at the top so the content reads as packed under the title rather than
+    // sprawling across the body.
     let blank_run = |n: usize| -> Vec<Vec<Span<'_>>> { (0..n).map(|_| Vec::new()).collect() };
+    let consumed_with_gaps = today.len() + 1 + spark.len() + 1 + feed.len() + 1 + helpers.len();
+    let top_blank = body_height.saturating_sub(consumed_with_gaps).max(1);
 
     let mut right_rows: Vec<Vec<Span>> = Vec::new();
-    right_rows.extend(blank_run(slot_size(0)));
+    right_rows.extend(blank_run(top_blank));
     right_rows.extend(today);
-    right_rows.extend(blank_run(slot_size(1)));
+    right_rows.extend(blank_run(1));
     right_rows.extend(spark);
-    right_rows.extend(blank_run(slot_size(2)));
+    right_rows.extend(blank_run(1));
     right_rows.extend(feed);
-    right_rows.extend(blank_run(slot_size(3)));
+    right_rows.extend(blank_run(1));
     right_rows.extend(helpers);
-    right_rows.extend(blank_run(slot_size(4)));
 
     // Left column: pet art and vitals, vertically centered.
     let raw_left = render_pet_panel_rows(LEFT_COL, vm, capability, styles);
