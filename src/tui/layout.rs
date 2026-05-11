@@ -538,9 +538,10 @@ fn render_pet_panel_rows<'a>(
 }
 
 /// Tallest body the wide layout uses, in rows including both chrome rails.
-/// Any taller terminal pads above and below so the frame stays tight rather
-/// than stretching content thin across blank rows.
-const MAX_WIDE_HEIGHT: u16 = 30;
+/// Sized to fit the natural content (pet + vitals on the left, today + 7-day
+/// + feed + helpers on the right) with single-row gaps. Taller terminals pad
+/// above and below so the frame stays tight rather than stretching content.
+const MAX_WIDE_HEIGHT: u16 = 24;
 
 pub fn render_watch_frame_with_capability(
     frame: &mut Frame<'_>,
@@ -622,15 +623,12 @@ fn render_wide(
         .min(event_count.max(2));
     let feed = render_feed_panel_rows(right_col, vm, max_feed_entries, styles);
 
-    // Tight single-row gaps between sections. Any leftover height piles up
-    // at the top so the content reads as packed under the title rather than
-    // sprawling across the body.
+    // Pack content to the top with single-row gaps between sections; any
+    // residual body height becomes a trailing gap before the footer rather
+    // than getting distributed across sections.
     let blank_run = |n: usize| -> Vec<Vec<Span<'_>>> { (0..n).map(|_| Vec::new()).collect() };
-    let consumed_with_gaps = today.len() + 1 + spark.len() + 1 + feed.len() + 1 + helpers.len();
-    let top_blank = body_height.saturating_sub(consumed_with_gaps).max(1);
-
     let mut right_rows: Vec<Vec<Span>> = Vec::new();
-    right_rows.extend(blank_run(top_blank));
+    right_rows.extend(blank_run(1));
     right_rows.extend(today);
     right_rows.extend(blank_run(1));
     right_rows.extend(spark);
@@ -638,17 +636,21 @@ fn render_wide(
     right_rows.extend(feed);
     right_rows.extend(blank_run(1));
     right_rows.extend(helpers);
+    // Fill remaining body height with trailing blanks so the chrome bottom
+    // sits at the frame's actual bottom edge, not at the last content row.
+    if right_rows.len() < body_height {
+        right_rows.extend(blank_run(body_height - right_rows.len()));
+    }
 
-    // Left column: pet art and vitals, vertically centered.
+    // Left column: pet art and vitals, packed to top with a single-row top
+    // gap so it visually anchors to the title, mirroring the right column.
     let raw_left = render_pet_panel_rows(LEFT_COL, vm, capability, styles);
-    let left_rows: Vec<Vec<Span>> = if raw_left.len() < body_height {
-        let pad_top = (body_height - raw_left.len()) / 2;
-        let mut padded: Vec<Vec<Span>> = (0..pad_top).map(|_| Vec::new()).collect();
-        padded.extend(raw_left);
-        padded
-    } else {
-        raw_left
-    };
+    let mut left_rows: Vec<Vec<Span>> = Vec::new();
+    left_rows.push(Vec::new());
+    left_rows.extend(raw_left);
+    if left_rows.len() < body_height {
+        left_rows.extend(blank_run(body_height - left_rows.len()));
+    }
 
     // Pad each column to its width, then join horizontally.
     let left_padded = pad_rows(left_rows, LEFT_COL, pad_style);
@@ -1030,9 +1032,9 @@ mod render_wide_tests {
 
     #[test]
     fn render_wide_draws_rounded_frame_at_natural_width() {
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
         let top = row_string(&buf, 0);
-        let bottom = row_string(&buf, 29);
+        let bottom = row_string(&buf, (MAX_WIDE_HEIGHT - 1) as u16);
         let right_rail = (COMPACT_THRESHOLD - 1) as u16;
         assert!(
             top.starts_with("┏━"),
@@ -1041,7 +1043,7 @@ mod render_wide_tests {
         assert!(top.ends_with('┓'), "top row should end with ┓");
         assert!(bottom.starts_with("┗━"));
         assert!(bottom.ends_with('┛'));
-        for y in 1..29 {
+        for y in 1..(MAX_WIDE_HEIGHT - 1) as u16 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail");
             assert_eq!(buf[(right_rail, y)].symbol(), "┃", "row {y} right rail");
         }
@@ -1052,13 +1054,14 @@ mod render_wide_tests {
         // Frame fills the terminal above COMPACT_THRESHOLD; right column
         // flexes to RIGHT_COL_MAX; any further surplus is outer padding.
         let test_width: u16 = 140;
-        let buf = render_buffer(test_width, 30);
+        let buf = render_buffer(test_width, MAX_WIDE_HEIGHT);
         let right_rail = test_width - 1;
         assert_eq!(buf[(0u16, 0u16)].symbol(), "┏");
         assert_eq!(buf[(right_rail, 0u16)].symbol(), "┓");
-        assert_eq!(buf[(0u16, 29u16)].symbol(), "┗");
-        assert_eq!(buf[(right_rail, 29u16)].symbol(), "┛");
-        for y in 1..29 {
+        let bottom_row = MAX_WIDE_HEIGHT - 1;
+        assert_eq!(buf[(0u16, bottom_row)].symbol(), "┗");
+        assert_eq!(buf[(right_rail, bottom_row)].symbol(), "┛");
+        for y in 1..(MAX_WIDE_HEIGHT - 1) as u16 {
             assert_eq!(buf[(0u16, y)].symbol(), "┃", "row {y} left rail broken");
             assert_eq!(
                 buf[(right_rail, y)].symbol(),
@@ -1070,8 +1073,8 @@ mod render_wide_tests {
 
     #[test]
     fn every_body_row_fills_terminal_width_exactly() {
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
-        for y in 0..30 {
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
+        for y in 0..MAX_WIDE_HEIGHT as u16 {
             let row = row_string(&buf, y);
             assert_eq!(
                 row.chars().count(),
@@ -1086,11 +1089,11 @@ mod render_wide_tests {
         // The right column section dividers (today, 7-day, feed, helpers)
         // should each end at the right edge of the right column, with the
         // outer right pad as space before the rail.
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
         // Right column ends at: 1 (left rail) + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL - 1
         let right_col_end = (1 + LEFT_PAD + LEFT_COL + GUTTER + RIGHT_COL - 1) as u16;
         let mut divider_rows: Vec<u16> = Vec::new();
-        for y in 0..30u16 {
+        for y in 0..MAX_WIDE_HEIGHT {
             let row = row_string(&buf, y);
             if row.contains("─ today ")
                 || row.contains("─ 7-day ")
@@ -1120,11 +1123,11 @@ mod render_wide_tests {
 
     #[test]
     fn pet_art_fits_inside_left_column_without_overflow() {
-        let buf = render_buffer(COMPACT_THRESHOLD as u16, 30);
+        let buf = render_buffer(COMPACT_THRESHOLD as u16, MAX_WIDE_HEIGHT);
         // Cells at the gutter (between LEFT_COL end and GUTTER start) should
         // be blank space or a divider dash — never pet content overflowing.
         let gutter_start = (1 + LEFT_PAD + LEFT_COL) as u16;
-        for y in 1..29 {
+        for y in 1..(MAX_WIDE_HEIGHT - 1) as u16 {
             for offset in 0..(GUTTER as u16) {
                 let gutter = buf[(gutter_start + offset, y)].symbol();
                 assert!(
