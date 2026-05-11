@@ -18,9 +18,10 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
     error::{GlorpError, Result},
+    pet::animator::PetAnimator,
     tui::{
         layout::{
-            render_evolution_overlay, render_hatch_overlay, render_help_overlay,
+            pet_panel_rect, render_evolution_overlay, render_hatch_overlay, render_help_overlay,
             render_watch_frame_with_capability,
         },
         style::LogKind,
@@ -72,7 +73,12 @@ pub struct WatchApp {
     last_poll: Option<Instant>,
     last_acknowledged_evolution: Option<String>,
     evolution_overlay_started_at: Option<Instant>,
+    pet_animator: PetAnimator,
+    last_frame_time: Option<Instant>,
 }
+
+/// Faster tick rate used while tachyonfx effects are active. ~60 fps target.
+const FAST_TICK: Duration = Duration::from_millis(16);
 
 impl WatchApp {
     pub fn new(vm: WatchViewModel) -> Self {
@@ -118,6 +124,8 @@ impl WatchApp {
             last_poll: None,
             last_acknowledged_evolution: None,
             evolution_overlay_started_at: None,
+            pet_animator: PetAnimator::new(),
+            last_frame_time: None,
         }
     }
 
@@ -143,11 +151,30 @@ impl WatchApp {
             // visible this frame.
             self.try_collect_poll_result()?;
 
+            // Update the pet animator with the latest view model. This may
+            // enqueue mood-fade / stage-up / feed-pulse / hatch effects.
+            self.pet_animator.update(&self.vm);
+
+            let now = Instant::now();
+            let elapsed_ms = self
+                .last_frame_time
+                .map(|t| now.duration_since(t).as_millis() as u32)
+                .unwrap_or(0);
+            self.last_frame_time = Some(now);
+
             let render_evolution = self.update_evolution_overlay();
             let stage_label = self.vm.stage.clone();
+            let vm_ref = &self.vm;
+            let capability = self.config.color_capability;
+            let overlay = self.overlay;
+            let animator = &mut self.pet_animator;
             terminal.draw(|frame| {
-                render_watch_frame_with_capability(frame, &self.vm, self.config.color_capability);
-                match self.overlay {
+                let frame_area = frame.area();
+                render_watch_frame_with_capability(frame, vm_ref, capability);
+                // Apply tachyonfx effects on top of the rendered pet panel.
+                let pet_rect = pet_panel_rect(frame_area, vm_ref);
+                animator.apply(pet_rect, frame.buffer_mut(), elapsed_ms);
+                match overlay {
                     Some(Overlay::Help) => render_help_overlay(frame),
                     None => {}
                 }
@@ -156,7 +183,14 @@ impl WatchApp {
                 }
             })?;
 
-            if event::poll(self.config.animation_tick)? {
+            // Two-rate tick: while effects are active, poll at 60 fps so the
+            // animation looks smooth. Otherwise use the configured idle tick.
+            let tick = if self.pet_animator.has_active_effects() {
+                FAST_TICK
+            } else {
+                self.config.animation_tick
+            };
+            if event::poll(tick)? {
                 match event::read()? {
                     Event::Key(key) if self.handle_key(key)? => break,
                     Event::Mouse(mouse) => self.handle_mouse(mouse),
