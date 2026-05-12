@@ -44,6 +44,10 @@ pub struct WatchViewModel {
     /// position), 1 = peak inhale (raised one row). PetPanel reserves a
     /// fixed extra row above the art so the shift fits without clipping.
     pub breath_offset_y: u8,
+    /// Stage progress data for the progress panel.
+    pub progress: ProgressView,
+    /// Birth / age metadata for the bio card panel.
+    pub bio: BioView,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +201,19 @@ impl WatchViewModel {
             current_speech: None,
             wander_offset_x: 0,
             breath_offset_y: 0,
+            progress: ProgressView {
+                stage_label: "fuzz".to_string(),
+                next_stage_label: "archfuzz".to_string(),
+                fraction: 0.61,
+                xp_in_stage: 8.5,
+                xp_to_next: 14.0,
+                rate_per_hour: 109_000.0,
+                is_max_stage: false,
+            },
+            bio: BioView {
+                hatched_label: "apr 24 14:32".to_string(),
+                age_label: "18d".to_string(),
+            },
         }
     }
 
@@ -302,5 +319,12 @@ mod tests {
         assert_eq!(BioView::format_age(Duration::days(7)), "7d");
         assert_eq!(BioView::format_age(Duration::days(90)), "90d");
         assert_eq!(BioView::format_age(Duration::days(365)), "365d");
+    }
+
+    #[test]
+    fn watch_view_model_fixture_has_progress_and_bio() {
+        let vm = WatchViewModel::fixture();
+        assert!(!vm.progress.stage_label.is_empty(), "progress.stage_label must be non-empty in fixture");
+        assert!(!vm.bio.hatched_label.is_empty(), "bio.hatched_label must be non-empty in fixture");
     }
 }

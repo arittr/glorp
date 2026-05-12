@@ -18,8 +18,8 @@ use crate::{
         app::{WatchApp, WatchUsagePoller},
         style::LogKind,
         view_model::{
-            EventView, PetRenderModel, SourceHealthView, SourceStatus, SourceUsageView,
-            WatchViewModel,
+            BioView, EventView, PetRenderModel, ProgressView, SourceHealthView, SourceStatus,
+            SourceUsageView, WatchViewModel,
         },
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
@@ -143,6 +143,21 @@ pub(crate) fn build_watch_view_model_at(
         ),
         wander_offset_x: crate::pet::animator::compute_wander_offset(now),
         breath_offset_y: crate::pet::animator::compute_breath_offset(Some(species), now),
+        // TODO(Task 8): replace with real ProgressView computed from state
+        progress: ProgressView {
+            stage_label: stage_label(species, stage).to_string(),
+            next_stage_label: String::new(),
+            fraction: 0.0,
+            xp_in_stage: 0.0,
+            xp_to_next: 1.0,
+            rate_per_hour: 0.0,
+            is_max_stage: false,
+        },
+        // TODO(Task 9): replace with real BioView computed from state
+        bio: BioView {
+            hatched_label: String::new(),
+            age_label: String::new(),
+        },
     })
 }
 
