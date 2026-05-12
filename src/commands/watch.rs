@@ -52,9 +52,16 @@ pub fn run() -> Result<()> {
 }
 
 pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<WatchViewModel> {
+    build_watch_view_model_at(state, usage_db, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn build_watch_view_model_at(
+    state: &PetState,
+    usage_db: &Path,
+    now: OffsetDateTime,
+) -> Result<WatchViewModel> {
     let usage_store = UsageStore::open(usage_db)?;
     let recent_usage = usage_store.recent_events(500)?;
-    let now = OffsetDateTime::now_utc();
     let species = parse_species(&state.pet.generated_species)
         .unwrap_or_else(|| generate_pet(&state.pet.seed).species);
     let stage = parse_stage(&state.stage);
@@ -157,6 +164,15 @@ pub fn build_watch_view_model_for_test(
     usage_db: &Path,
 ) -> Result<WatchViewModel> {
     build_watch_view_model(state, usage_db)
+}
+
+#[doc(hidden)]
+pub fn build_watch_view_model_for_test_at(
+    state: &PetState,
+    usage_db: &Path,
+    now: OffsetDateTime,
+) -> Result<WatchViewModel> {
+    build_watch_view_model_at(state, usage_db, now)
 }
 
 struct RealWatchPoller {

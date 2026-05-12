@@ -1,5 +1,5 @@
 use glorp::{
-    commands::watch::build_watch_view_model_for_test,
+    commands::watch::{build_watch_view_model_for_test, build_watch_view_model_for_test_at},
     storage::{
         state::PetState,
         usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, ProviderDiagnostic, UsageStore},
@@ -48,7 +48,10 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
     let dir = tempdir().unwrap();
     let usage_db = dir.path().join("usage.sqlite");
     let mut usage_store = UsageStore::open(&usage_db).unwrap();
-    let now = OffsetDateTime::now_utc();
+    // Pin `now` to a mid-day UTC instant so the `now - 9min` event below
+    // doesn't cross midnight when the test happens to run in the first
+    // few minutes of UTC.
+    let now = datetime!(2026-05-11 12:00:00 UTC);
     usage_store
         .insert_event(&NormalizedUsageEvent {
             provider_surface: "claude-code".into(),
@@ -83,7 +86,7 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
         .unwrap();
 
     let state = mech_state();
-    let vm = build_watch_view_model_for_test(&state, &usage_db).unwrap();
+    let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
 
     assert_eq!(vm.today_effective_tokens, 5_000.0);
     assert_eq!(vm.current_bucket_effective_tokens, 5_000.0);
