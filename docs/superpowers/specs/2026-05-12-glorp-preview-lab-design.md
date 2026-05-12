@@ -6,8 +6,9 @@ Date: 2026-05-12
 
 Build a developer-only preview loop for Glorp's terminal UI and pet art. The
 preview lab renders deterministic Glorp states into durable artifacts that both
-humans and agents can inspect: terminal text, ANSI-colored captures, structured
-cell data, and a browser-friendly HTML contact sheet with frame playback.
+humans and agents can inspect. Slice 1 produces terminal text, structured cell
+data, and a browser-friendly HTML contact sheet. Later slices add ANSI-colored
+captures, animation frame strips, and HTML playback.
 
 This exists because Glorp is a Rust `ratatui` TUI. Browser-centric development
 tools cannot directly see or inspect it the way they can inspect a TypeScript
@@ -30,8 +31,9 @@ agent to critique, and structured enough for Gauntlet to consume later.
   stages, moods, morph variants, and animation ticks can be scanned quickly.
 - Produce a single artifact bundle that works for human inspection and agent
   review.
-- Include animation previews as frame strips and HTML playback, without requiring
-  a live terminal recording for the first useful version.
+- Keep the first useful version static and deterministic; add animation previews
+  as frame strips and HTML playback in later slices without requiring a live
+  terminal recording.
 - Keep Gauntlet adjacent: preview artifacts should be easy for Gauntlet stories
   to review, but Gauntlet should not be required for every visual iteration.
 - Avoid new third-party dependencies.
@@ -255,12 +257,15 @@ state instead of recomputing width from `.chars().count()`.
 ### HTML contact sheet
 
 The HTML viewer renders terminal frames from escaped buffer cells inside
-fixed-size terminal panels. It supports:
+fixed-size terminal panels. Slice 1 supports:
 
 - scenario grouping
 - width and height labels
 - source metadata pulled from `manifest.json`
 - side-by-side still contact sheets
+
+Later slices add:
+
 - frame-strip views for animation
 - playback controls for animation groups: play, pause, previous frame, next frame,
   and speed
@@ -270,10 +275,11 @@ sizes, no marketing layout, no animated CSS flourishes beyond the actual termina
 frame playback.
 
 HTML generation must escape every cell symbol and label (`<`, `>`, `&`, quotes)
-before writing markup. The first implementation may render rows as text with
-style runs or as a CSS grid keyed by cell coordinates; either way, the rendered
-panel dimensions must be derived from the frame's `width` and `height`, not from
-browser text flow.
+before writing markup. Slice 1 renders cells with a fixed CSS grid keyed by
+terminal coordinates. The rendered panel dimensions are derived from the frame's
+`width` and `height`, not from browser text flow. Row-text/style-run rendering is
+allowed only for a later qualitative view; it must not replace the exact
+geometry contact sheet.
 
 ## Scenario Model
 
@@ -314,6 +320,7 @@ Rendering also uses an explicit context:
 
 ```rust
 struct PreviewRenderContext {
+    fixed_now: OffsetDateTime,
     color_capability: ColorCapability,
 }
 ```
@@ -323,6 +330,12 @@ capability inside individual panels. `render_watch_frame_with_capability` should
 pass the chosen capability through layout and panel rendering so `Truecolor` and
 `Flat` previews are deterministic and testable. A `watch-flat-color` scenario is
 only meaningful after that refactor.
+
+All watch scenarios use the same fixed clock from `PreviewRenderContext`.
+Preview code must call `build_watch_view_model_at(state, usage_db, fixed_now)`
+or a wrapper around it, never the wall-clock `build_watch_view_model`, because
+the current time affects pet animation tick, age, today totals, and seven-day
+history.
 
 ## Watch UI Scenarios
 
@@ -347,9 +360,9 @@ Slice 1 renders only:
 
 Watch scenarios are deterministic, but they should avoid inventing a second
 product state model. Build ordinary watch scenarios from seeded `PetState` and a
-temporary `UsageStore`, then call the real watch view-model builder. Mutate the
-resulting `WatchViewModel` only for pure visual edge cases such as long names,
-overlay visibility, cursor position, or forced source health.
+temporary `UsageStore`, then call the fixed-clock real watch view-model builder.
+Mutate the resulting `WatchViewModel` only for pure visual edge cases such as
+long names, overlay visibility, cursor position, or forced source health.
 
 The watch scenarios force `ColorCapability::Truecolor` by default so contact
 sheets are stable. A separate `watch-flat-color` scenario exercises the flat
@@ -543,11 +556,15 @@ Unit tests:
 - Text export preserves geometry for fixed-width rows.
 - HTML export escapes `<`, `>`, `&`, quotes, box drawing, and multi-byte pet
   glyphs.
+- HTML contact sheet uses fixed cell coordinates for Slice 1 rather than browser
+  text-flow geometry.
 - Manifest generation lists every generated file.
 - Pet matrix scenario count matches the configured matrix inventory; Slice 1 is
   exactly 6 species x 7 stages for `pet-species-stage`.
 - Truecolor and flat-color renders are deterministic and differ only where color
   capability should change output.
+- Watch scenario generation uses a fixed `OffsetDateTime`; repeated preview runs
+  produce stable watch captures.
 
 Integration tests:
 
