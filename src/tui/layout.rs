@@ -213,11 +213,8 @@ fn render_compact(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewM
     );
 }
 
-/// Stacks panels vertically using `Flex::Start`. Trailing spacer absorbs any
-/// difference between the frame's actual height and the sum of panel heights
-/// (rare now that the outer frame shrinks to natural content, but kept as a
-/// safety net for cases where the terminal is smaller than the natural
-/// content and the frame gets clamped).
+/// Stacks panels vertically with `Flex::Center` so any leftover height
+/// splits evenly above and below the content block.
 fn render_column_with_spacing(
     area: Rect,
     panels: &[&dyn Panel],
@@ -225,23 +222,22 @@ fn render_column_with_spacing(
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
 ) {
-    let mut constraints: Vec<Constraint> =
-        panels.iter().map(|p| p.preferred_constraint(vm)).collect();
-    constraints.push(Constraint::Min(0));
+    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
 
     let rects = Layout::vertical(constraints)
-        .flex(Flex::Start)
+        .flex(Flex::Center)
         .spacing(spacing)
         .split(area);
 
-    for (panel, rect) in panels.iter().zip(rects.iter().take(panels.len())) {
+    for (panel, rect) in panels.iter().zip(rects.iter()) {
         panel.render(*rect, buf, vm);
     }
 }
 
-/// Stacks panels vertically top-aligned, with leftover height absorbed by a
-/// trailing spacer. A 1-row inter-panel gap gives each section divider
-/// visual breathing room.
+/// Stacks panels vertically with leftover height split evenly above and
+/// below the content block (`Flex::Center`). The outer frame fills the
+/// whole terminal, so without centering the content gets jammed at the top
+/// with a wedge of dead space below.
 const COLUMN_GAP: u16 = 1;
 
 fn render_centered_column(
@@ -250,16 +246,14 @@ fn render_centered_column(
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
 ) {
-    let mut constraints: Vec<Constraint> =
-        panels.iter().map(|p| p.preferred_constraint(vm)).collect();
-    constraints.push(Constraint::Min(0));
+    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
 
     let rects = Layout::vertical(constraints)
-        .flex(Flex::Start)
+        .flex(Flex::Center)
         .spacing(COLUMN_GAP)
         .split(area);
 
-    for (panel, rect) in panels.iter().zip(rects.iter().take(panels.len())) {
+    for (panel, rect) in panels.iter().zip(rects.iter()) {
         panel.render(*rect, buf, vm);
     }
 }
