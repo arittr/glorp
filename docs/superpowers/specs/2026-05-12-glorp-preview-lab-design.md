@@ -72,17 +72,74 @@ It is intentionally documented only in developer docs and specs. Hidden-but-buil
 is simpler than `cfg(debug_assertions)` because release builds, CI jobs, and
 agent worktrees can all use the same command when needed.
 
+The hidden command still ships in npm-installed binaries because the npm wrapper
+forwards arguments to the native executable. Treat it as internal but reachable:
+use Clap's hidden-subcommand support, keep it out of README/npm docs, and test
+that normal help output omits it.
+
+## Implementation Slices
+
+The full preview lab is useful, but the first implementation must stay small
+enough to land safely.
+
+### Slice 1
+
+Slice 1 is the first useful loop:
+
+- hidden `dev-preview` command
+- safe output directory ownership checks
+- deterministic render context plumbing for color capability
+- `watch-wide-normal`
+- `watch-compact-normal`
+- one `pet-species-stage` matrix
+- `manifest.json`
+- `review.md`
+- `.txt` captures
+- `.cells.json` captures
+- simple static HTML contact sheet
+
+Slice 1 explicitly does not include ANSI polish, HTML playback controls,
+watch-effect animation strips, exhaustive mood/morph matrices, browser
+screenshots, or Gauntlet stories.
+
+### Later Slices
+
+Later slices add, in this order:
+
+- ANSI export polish
+- renderer-level pet animation strips
+- HTML frame playback
+- watch-effect animation strips through the shared watch-preview driver
+- mood and adult-morph matrices
+- named animation-hit strips
+- Gauntlet stories over the generated preview bundle and real TUI
+
 ## Output Bundle
 
-Each run overwrites the output directory atomically enough for local development:
-write into a temporary sibling directory, then replace the previous preview
-directory when generation succeeds. If cleanup of the previous directory fails,
-the command returns a clear error instead of mixing old and new frames.
+Each run writes into a temporary sibling directory, then replaces the requested
+output directory only when generation succeeds and the target is safe to replace.
 
-Output layout:
+Safe replacement rules:
+
+- Refuse symlink output paths.
+- If the output path does not exist, create it.
+- If the output path exists and is empty, replace it.
+- If the output path exists and is non-empty, replace it only when it is owned by
+  the preview lab.
+- Preview ownership requires both `.glorp-preview` and a manifest whose
+  `producer` is `glorp-dev-preview`.
+- Refuse to delete or overwrite any non-empty directory without those ownership
+  markers.
+- Refuse file output paths with a clear error.
+
+The generator writes `.glorp-preview` into every successful output bundle. This
+is a local safety marker, not a public API.
+
+Full output layout after later slices:
 
 ```text
 target/glorp-preview/
+  .glorp-preview
   index.html
   manifest.json
   review.md
@@ -106,6 +163,9 @@ target/glorp-preview/
     preview.js
 ```
 
+Slice 1 omits `.ansi` files and `frames/`; it writes only the still captures
+needed by the first contact sheet.
+
 `index.html` is self-contained except for the small local `assets/` files it
 references. It does not fetch remote assets.
 
@@ -113,6 +173,22 @@ references. It does not fetch remote assets.
 fixture inputs, generated files, frame ticks, and the intent of the scenario.
 Agents should be able to answer "what am I looking at?" from the manifest
 without guessing from the pixels.
+
+The manifest includes top-level metadata:
+
+```json
+{
+  "schema_version": 1,
+  "producer": "glorp-dev-preview",
+  "glorp_version": "0.1.0",
+  "generated_at": "2026-05-12T00:00:00Z"
+}
+```
+
+Each artifact entry includes a `type` such as `text`, `ansi`, `cells`, `html`,
+or `review`. Future Gauntlet stories consume preview output through this
+manifest and should not import Glorp Rust modules or treat `.cells.json` as
+stable beyond the manifest schema version.
 
 `review.md` is a short human-readable entrypoint generated from the same
 manifest. It links the highest-value scenarios and lists the review questions
@@ -125,6 +201,10 @@ without requiring Drew or an agent to open JSON first.
 `.txt` captures contain visible terminal cells with no color escape codes. They
 are good for diffing line widths, truncation, rough layout, and simple terminal
 inspection.
+
+Text captures are exported from the final `ratatui::Buffer`, not from raw pet
+strings or intermediate layout data. That keeps them aligned with what the TUI
+actually rendered.
 
 ### ANSI captures
 
@@ -152,6 +232,8 @@ try to emulate terminal cursor movement; each capture is a stable frame.
       "x": 0,
       "y": 0,
       "symbol": " ",
+      "display_width": 1,
+      "continuation": false,
       "fg": "#f0a646",
       "bg": null,
       "modifiers": ["bold"]
@@ -163,9 +245,16 @@ try to emulate terminal cursor movement; each capture is a stable frame.
 The JSON format is deliberately simple and not a public API. It exists so agents
 and tests can check exact geometry, colors, and overlap without parsing ANSI.
 
+Cell JSON is exported from the final `ratatui::Buffer`. The exporter records a
+`display_width` and `continuation` flag so multi-width or ambiguous Unicode cells
+can be represented without pretending every glyph is a single ASCII column. If
+`ratatui` represents a wide glyph by writing the visible symbol into one cell and
+blanking continuation cells, the preview exporter preserves that final buffer
+state instead of recomputing width from `.chars().count()`.
+
 ### HTML contact sheet
 
-The HTML viewer renders terminal cells as positioned monospace spans inside
+The HTML viewer renders terminal frames from escaped buffer cells inside
 fixed-size terminal panels. It supports:
 
 - scenario grouping
@@ -179,6 +268,12 @@ fixed-size terminal panels. It supports:
 The HTML should favor inspection over decoration: dense labels, stable panel
 sizes, no marketing layout, no animated CSS flourishes beyond the actual terminal
 frame playback.
+
+HTML generation must escape every cell symbol and label (`<`, `>`, `&`, quotes)
+before writing markup. The first implementation may render rows as text with
+style runs or as a CSS grid keyed by cell coordinates; either way, the rendered
+panel dimensions must be derived from the frame's `width` and `height`, not from
+browser text flow.
 
 ## Scenario Model
 
@@ -215,9 +310,23 @@ This shared frame format is the important boundary. It keeps watch previews,
 pet matrices, animation strips, HTML playback, and future Gauntlet review pointed
 at the same evidence.
 
+Rendering also uses an explicit context:
+
+```rust
+struct PreviewRenderContext {
+    color_capability: ColorCapability,
+}
+```
+
+Before preview export lands, the TUI render path must stop detecting color
+capability inside individual panels. `render_watch_frame_with_capability` should
+pass the chosen capability through layout and panel rendering so `Truecolor` and
+`Flat` previews are deterministic and testable. A `watch-flat-color` scenario is
+only meaningful after that refactor.
+
 ## Watch UI Scenarios
 
-The first version renders these full watch scenarios:
+The full design eventually renders these watch scenarios:
 
 - `watch-wide-normal`: 120x32, healthy helpers, representative token usage.
 - `watch-wide-large-values`: 120x32, large token counts and long source values.
@@ -229,9 +338,18 @@ The first version renders these full watch scenarios:
 - `watch-help-overlay`: 120x32, help overlay visible.
 - `watch-evolution-overlay`: 120x32, evolution overlay visible.
 
-These scenarios are built from fixture view models, not live state. The fixture
-builders should live near the dev-preview code unless an existing test fixture is
-already reusable without making production modules test-only.
+Slice 1 renders only:
+
+| Scenario | Size | Purpose |
+| --- | --- | --- |
+| `watch-wide-normal` | 120x32 | Main two-column layout in a healthy state. |
+| `watch-compact-normal` | 72x24 | Main compact layout in a healthy state. |
+
+Watch scenarios are deterministic, but they should avoid inventing a second
+product state model. Build ordinary watch scenarios from seeded `PetState` and a
+temporary `UsageStore`, then call the real watch view-model builder. Mutate the
+resulting `WatchViewModel` only for pure visual edge cases such as long names,
+overlay visibility, cursor position, or forced source health.
 
 The watch scenarios force `ColorCapability::Truecolor` by default so contact
 sheets are stable. A separate `watch-flat-color` scenario exercises the flat
@@ -240,7 +358,7 @@ fallback.
 ## Pet-Art Matrix Scenarios
 
 The pet-art preview directly renders the pet module rather than the full TUI.
-It should include:
+The full design should include:
 
 - all six species from `Species::all()`
 - all seven stages, `S0` through `S6`
@@ -249,9 +367,14 @@ It should include:
 - animation ticks that reveal breathing, blinking, glitch corruption, particles,
   and evolution flash frames
 
-Initial matrix pages:
+Slice 1 renders only:
 
-- `pet-species-stage`: species rows by stage columns, content mood, tick 0.
+| Matrix | Scope | Purpose |
+| --- | --- | --- |
+| `pet-species-stage` | 6 species x 7 stages, content mood, tick 0 | Scan the core lifecycle silhouettes quickly. |
+
+Later matrix pages:
+
 - `pet-mood`: species rows by mood columns, one mature stage, tick 0.
 - `pet-adult-morphs`: species rows by adult morph variants for stages S4/S5/S6.
 - `pet-animation-strips`: selected species and stages rendered at ticks
@@ -266,19 +389,22 @@ text does not obscure the terminal art being judged.
 Pet matrices must use the same palette-role mapping as the watch TUI. If the
 existing role-to-style conversion is private to a panel renderer, expose a small
 internal helper and reuse it. Do not copy a second color mapping into the preview
-module.
+module. This helper extraction is required before Slice 1 pet matrices are
+complete.
 
 ## Animation Preview
 
 Animation is included as pre-rendered frames, not a live terminal process.
 
-There are two animation tiers in the first implementation:
+There are two animation tiers in the full preview lab:
 
 - Renderer-level pet animation: breathing, blinking, glitch corruption,
   particles, and evolution-flash art produced by `render_pet`.
 - Watch-effect animation: at least one feed-pulse or stage-up strip produced by
   rendering a full watch frame, instantiating `PetAnimator`, and applying the
   effect to the `ratatui` buffer across deterministic elapsed-time steps.
+
+Those tiers are not part of Slice 1. Slice 1 can ship with static frames only.
 
 Frame strip rules:
 
@@ -288,10 +414,30 @@ Frame strip rules:
   visible.
 - For blink behavior, include a strip known to hit closed-eye frames for at
   least one species.
+- Add named scenario-derived strips for special cases rather than relying only
+  on the default ticks:
+  - `blink-hit`: computed from the selected pet's blink cadence.
+  - `glitch-corruption-hit`: includes a tick that triggers glitch corruption.
+  - `particle-hit`: includes a tick that triggers a scan-line or particle state.
 - For full watch scenarios, animation strips should cover representative effects
   rather than every layout scenario.
 - Watch-effect strips use fixed elapsed-time steps, such as
   `0ms, 80ms, 160ms, 240ms, 320ms, 400ms`, so effect playback is stable in tests.
+  A fresh `PetAnimator` is used per strip.
+
+Watch-effect strip harness:
+
+1. Build `prev_vm` and `next_vm`.
+2. Set `wander_offset_x` and `breath_offset_y` explicitly on both VMs.
+3. Call `PetAnimator::update(prev_vm)` to seed previous state.
+4. Call `PetAnimator::update(next_vm)` to enqueue the intended transition.
+5. For each elapsed-time step, render the base watch frame, compute
+   `pet_panel_rect`, then call `PetAnimator::apply`.
+6. Export the final `ratatui::Buffer`.
+
+The harness should live near the watch rendering code or as a shared internal
+helper so it mirrors the live `WatchApp` render order instead of forking a second
+ad hoc effect pipeline inside `dev_preview`.
 
 HTML playback rules:
 
@@ -365,15 +511,22 @@ New code:
 - `src/dev_preview/export.rs` - text, ANSI, cell JSON, manifest, and HTML writers.
 - `src/dev_preview/watch.rs` - watch view-model fixtures and watch rendering.
 - `src/dev_preview/pets.rs` - pet matrix scenarios.
-- `src/dev_preview/templates.rs` - static HTML, CSS, and JS strings.
+- `src/dev_preview/assets/preview.html` - static HTML shell included with
+  `include_str!`.
+- `src/dev_preview/assets/preview.css` - static CSS included with `include_str!`.
+- `src/dev_preview/assets/preview.js` - static JS included with `include_str!`.
 
 Existing code touched:
 
 - `src/cli.rs` - add hidden `DevPreview` subcommand with `--out` and `--scenario`.
 - `src/commands/mod.rs` - expose `dev_preview`.
 - `src/lib.rs` - route the hidden command.
-- `src/tui/app.rs` or `src/tui/layout.rs` only if a test-only render helper must
-  become a normal internal helper.
+- `src/tui/layout.rs` and panel rendering - thread explicit color capability
+  through the render path instead of letting panels detect environment state.
+- `src/tui/panels/pet.rs` or a sibling module - expose a `pub(crate)` pet role
+  style helper reused by both `PetPanel` and preview.
+- `src/tui/app.rs` or `src/tui/layout.rs` - expose a shared internal
+  watch-preview frame driver if watch-effect strips are implemented.
 
 The implementation should prefer reusing existing render functions over adding
 parallel visual logic. If a preview cannot be produced without duplicating layout
@@ -384,27 +537,40 @@ behavior, the layout should expose a small internal render helper instead.
 Unit tests:
 
 - Buffer-to-cell conversion preserves symbols, coordinates, colors, and modifiers.
-- ANSI export resets styles at line boundaries.
+- Buffer export preserves or marks multi-width/ambiguous Unicode cells without
+  recomputing geometry from raw strings.
+- ANSI export resets styles at line boundaries once ANSI export is implemented.
 - Text export preserves geometry for fixed-width rows.
+- HTML export escapes `<`, `>`, `&`, quotes, box drawing, and multi-byte pet
+  glyphs.
 - Manifest generation lists every generated file.
-- Pet matrix scenario count matches species, stage, and mood expectations.
+- Pet matrix scenario count matches the configured matrix inventory; Slice 1 is
+  exactly 6 species x 7 stages for `pet-species-stage`.
+- Truecolor and flat-color renders are deterministic and differ only where color
+  capability should change output.
 
 Integration tests:
 
 - `glorp dev-preview --out <tempdir> --scenario watch` writes `index.html`,
-  `manifest.json`, and at least one `.txt`, `.ansi`, and `.cells.json` capture.
+  `manifest.json`, and at least one `.txt` and `.cells.json` capture.
 - `glorp dev-preview --out <tempdir> --scenario pets` writes pet matrix captures
   that include every species name and all stage labels.
 - Generated HTML references only local files present in the output directory.
 - Re-running the command replaces stale output rather than mixing old and new
   scenario files.
+- `glorp help` does not show `dev-preview`.
+- Direct `glorp dev-preview` invocation works despite being hidden.
+- Non-empty output directories without `.glorp-preview` and a matching manifest
+  are refused and left unchanged.
+- Symlink output paths and file output paths are refused.
+- Tests run with a temporary `GLORP_CONFIG_DIR` and do not read or create user
+  state.
 
 Manual verification:
 
 ```bash
 cargo run -- dev-preview
 open target/glorp-preview/index.html
-less -R target/glorp-preview/captures/watch-wide-normal.ansi
 cargo test
 ```
 
@@ -418,6 +584,10 @@ These are intentionally out of the first implementation but fit the design:
   for a few seconds and stores frame captures.
 - Gauntlet stories that review `target/glorp-preview/index.html` through the web
   adapter or drive `glorp watch` through the TUI adapter.
+- ANSI export polish after the plain text, cell JSON, and HTML paths are useful.
+- HTML playback controls for frame strips.
+- Watch-effect animation strips through the shared watch-preview driver.
+- Mood, morph, and named animation-hit pet matrices.
 - Browser screenshots of the generated contact sheet for sharing in issues or
   pull requests.
 - Snapshot comparison between two preview bundles.
@@ -427,9 +597,14 @@ These are intentionally out of the first implementation but fit the design:
 
 - A developer can run `cargo run -- dev-preview` from the repo root and inspect
   a generated `target/glorp-preview/index.html`.
-- The bundle includes full watch UI previews and pet-art matrix previews.
-- At least one renderer-level pet animation strip and one watch-effect animation
-  strip are visible in the HTML and step-able frame by frame.
+- The Slice 1 bundle includes `watch-wide-normal`, `watch-compact-normal`, and
+  `pet-species-stage`.
+- The Slice 1 bundle includes `manifest.json`, `review.md`, `.txt` captures,
+  `.cells.json` captures, and a simple static HTML contact sheet.
+- The output directory replacement logic refuses symlinks, file paths, and
+  non-empty non-preview directories.
+- Truecolor and flat-color rendering are driven by explicit render context, not
+  ambient terminal environment.
 - The manifest describes every scenario well enough for an agent to review it
   without guessing the fixture intent.
 - The command does not read or mutate user Glorp state.
