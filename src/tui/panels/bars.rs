@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn build_spark_line_all_zero_renders_seven_dots() {
         let styles = semantic_styles();
-        let spans = build_spark_line(&vec![0.0; 7], &styles);
+        let spans = build_spark_line(&[0.0; 7], &styles);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         let dot_count = text.chars().filter(|c| *c == '·' || *c == '.').count();
         assert_eq!(dot_count, 7);

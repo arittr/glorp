@@ -345,7 +345,6 @@ pub fn ramp_index(i: usize, n: usize) -> usize {
 ///
 /// Dark-background truecolor tuned. Color-blind / 8-color palette tuning is
 /// deferred — ratatui's color downgrade handles low-capability terminals.
-
 pub fn fed_color() -> Color {
     Color::Rgb(0xe8, 0xc4, 0x74)
 }
