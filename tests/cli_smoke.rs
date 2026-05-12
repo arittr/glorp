@@ -77,6 +77,9 @@ fn reset_requires_confirmation_and_removes_pet_state() {
         .failure()
         .stderr(predicate::str::contains("--yes"));
 
+    // Plant a usage.sqlite to confirm reset clears it too.
+    std::fs::write(dir.path().join("usage.sqlite"), "sentinel usage db").unwrap();
+
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
@@ -85,6 +88,7 @@ fn reset_requires_confirmation_and_removes_pet_state() {
         .success();
 
     assert!(!dir.path().join("state.json").exists());
+    assert!(!dir.path().join("usage.sqlite").exists());
 }
 
 #[test]
