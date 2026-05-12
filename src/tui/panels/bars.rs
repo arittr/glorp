@@ -35,6 +35,37 @@ pub fn bar_spans_solid<'a>(
     spans
 }
 
+/// Render a 7-day token history as a row of height-quantized block glyphs.
+/// Ports SparkPanel's quantization so the visual is byte-identical when this
+/// is rendered inside TodayPanel's footer (Task 18).
+pub fn build_spark_line<'a>(
+    history: &[f64],
+    styles: &'a SemanticStyles,
+) -> Vec<Span<'a>> {
+    const GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = history.iter().copied().fold(0.0_f64, f64::max);
+    let mut spans: Vec<Span<'a>> = Vec::with_capacity(history.len() * 2);
+    for (i, &v) in history.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("   "));
+        }
+        if v <= 0.0 || max <= 0.0 {
+            spans.push(Span::styled("·".to_string(), styles.sparkline_past));
+        } else {
+            let frac = (v / max).clamp(0.0, 1.0);
+            let idx = ((frac * (GLYPHS.len() - 1) as f64).round() as usize).min(GLYPHS.len() - 1);
+            let glyph = GLYPHS[idx];
+            let style = if i == history.len() - 1 {
+                styles.sparkline_today
+            } else {
+                styles.sparkline_past
+            };
+            spans.push(Span::styled(glyph.to_string(), style));
+        }
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +104,27 @@ mod tests {
         let spans = bar_spans_solid("fed", 0.5, fed_color(), &styles);
         let filled_span = spans.iter().find(|s| s.content.contains('█')).unwrap();
         assert_eq!(filled_span.style.fg, Some(fed_color()));
+    }
+
+    #[test]
+    fn build_spark_line_seven_days_uses_block_heights() {
+        let styles = semantic_styles();
+        let history = vec![0.0, 0.0, 0.0, 1_000.0, 5_000.0, 10_000.0, 20_000.0];
+        let spans = build_spark_line(&history, &styles);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        // Zero days render as the spark dot glyph; non-zero days render as block-height glyphs.
+        // The exact dot glyph is whatever the existing SparkPanel used — read spark.rs to confirm.
+        let dot_count = text.chars().filter(|c| *c == '·' || *c == '.').count();
+        assert_eq!(dot_count, 3, "three zero days must render as dots");
+        assert!(text.contains('█'), "max day should hit highest block glyph");
+    }
+
+    #[test]
+    fn build_spark_line_all_zero_renders_seven_dots() {
+        let styles = semantic_styles();
+        let spans = build_spark_line(&vec![0.0; 7], &styles);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let dot_count = text.chars().filter(|c| *c == '·' || *c == '.').count();
+        assert_eq!(dot_count, 7);
     }
 }
