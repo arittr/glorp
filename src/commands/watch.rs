@@ -1,5 +1,6 @@
 use crate::{
     error::{GlorpError, Result},
+    format::format_tokens,
     game::{
         evolution::Stage,
         metabolism::{apply_food, Mood, Vitals as GameVitals},
@@ -7,7 +8,8 @@ use crate::{
     },
     paths::AppPaths,
     pet::{
-        generation::{generate_pet, stage_label},
+        art::stage_label,
+        generation::generate_pet,
         render::{render_pet, AnimationFrame},
     },
     storage::{
@@ -63,7 +65,7 @@ pub(crate) fn build_watch_view_model_at(
     let species = state.pet.generated_species;
     let stage = state.stage;
     let mood = mood_from_state(state);
-    let generated = generate_pet(&state.pet.seed).with_species_for_test(species);
+    let generated = generate_pet(&state.pet.seed).with_species(species);
     let rendered = render_pet(
         &generated,
         stage,
@@ -135,7 +137,6 @@ pub(crate) fn build_watch_view_model_at(
             .seen_stage_transitions
             .last()
             .map(|stage| stage.as_str().to_string()),
-        acknowledged_evolution: None,
         cursor_screen: None,
         mouse_tracking_enabled: true,
         current_speech: crate::pet::speech::current_pet_speech(
@@ -315,7 +316,7 @@ fn mood_from_state(state: &PetState) -> Mood {
 
 pub fn rerender_pet_for_view_model(vm: &mut WatchViewModel, tick: u64) -> Result<()> {
     let species = vm.pet_render.generated_species;
-    let generated = generate_pet(&vm.pet_render.seed).with_species_for_test(species);
+    let generated = generate_pet(&vm.pet_render.seed).with_species(species);
     let rendered = render_pet(
         &generated,
         vm.pet_render.stage,
@@ -630,17 +631,6 @@ fn helper_status(
 
 fn timestamp_column(timestamp: OffsetDateTime) -> String {
     format!("{:02}:{:02}", timestamp.hour(), timestamp.minute())
-}
-
-fn format_tokens(value: f64) -> String {
-    let value = value.max(0.0);
-    if value >= 1_000_000.0 {
-        format!("{:.1}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.1}k", value / 1_000.0)
-    } else {
-        format!("{value:.0}")
-    }
 }
 
 #[cfg(test)]

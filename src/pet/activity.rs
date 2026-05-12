@@ -10,6 +10,7 @@
 
 use time::OffsetDateTime;
 
+use crate::format::format_tokens;
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
 use crate::pet::generation::Species;
@@ -49,7 +50,7 @@ pub fn derive_pet_activities(
 
     // 2. Token spike in the last hour → munching activity.
     if let Some(spike_total) = recent_munch_spike(usage_events, now) {
-        let pretty = format_tokens_short(spike_total);
+        let pretty = format_tokens(spike_total);
         out.push(EventView {
             timestamp: format_hhmm(now),
             kind: LogKind::PetActivity,
@@ -157,16 +158,6 @@ fn idle_thought(pet_name: &str, species: Species, mood: Mood, now: OffsetDateTim
     format!("{pet_name} {}", catalog[idx])
 }
 
-fn format_tokens_short(value: f64) -> String {
-    if value >= 1_000_000.0 {
-        format!("{:.1}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.1}k", value / 1_000.0)
-    } else {
-        format!("{value:.0}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,14 +232,5 @@ mod tests {
         let acts =
             derive_pet_activities("vex", Species::Glitch, Mood::Happy, &[], &transitions, now);
         assert!(acts.iter().any(|e| e.text.contains("evolved into s4")));
-    }
-
-    #[test]
-    fn format_tokens_short_renders_pretty_units() {
-        assert_eq!(format_tokens_short(750.0), "750");
-        // 1250 / 1000 = 1.25, Rust's default rounding rounds-half-to-even here.
-        assert_eq!(format_tokens_short(1_250.0), "1.2k");
-        assert_eq!(format_tokens_short(123_456.0), "123.5k");
-        assert_eq!(format_tokens_short(2_345_678.0), "2.3M");
     }
 }

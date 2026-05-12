@@ -2,6 +2,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{
     error::Result,
+    format::format_tokens,
     game::{
         calibration::CalibrationBaseline,
         evolution::{apply_xp_delta, stage_for_xp, Stage, StageTransition},
@@ -222,13 +223,5 @@ fn reconcile_stage_with_xp(state: &mut PetState) {
                 to: Stage::from_index(index).unwrap_or(Stage::S6),
             },
         );
-    }
-}
-
-fn format_tokens(value: f64) -> String {
-    if value >= 1_000.0 {
-        format!("{:.1}k", value / 1_000.0)
-    } else {
-        format!("{value:.0}")
     }
 }

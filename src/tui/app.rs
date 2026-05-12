@@ -18,6 +18,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
     error::{GlorpError, Result},
+    format::format_tokens,
     pet::animator::PetAnimator,
     tui::{
         layout::{
@@ -625,13 +626,4 @@ fn timestamp_column(timestamp: &str) -> String {
         .and_then(|time| time.get(0..5))
         .unwrap_or("--:--")
         .to_string()
-}
-
-fn format_tokens(value: f64) -> String {
-    let value = value.max(0.0);
-    if value.abs() >= 1_000.0 {
-        format!("{:.1}k", value / 1_000.0)
-    } else {
-        format!("{value:.0}")
-    }
 }

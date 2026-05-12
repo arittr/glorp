@@ -10,7 +10,6 @@ use crate::tui::style::{claude_color, codex_color, semantic_styles, SemanticStyl
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
 
 /// Expected source surfaces and their display names.
-/// Duplicated from `layout.rs` — T7 will deduplicate when the old path is deleted.
 const EXPECTED_SOURCES: &[(&str, &str)] = &[("claude-code", "claude"), ("codex", "codex")];
 
 pub struct TodayPanel;

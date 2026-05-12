@@ -4,6 +4,7 @@ pub mod config;
 #[cfg(feature = "dev-preview")]
 pub mod dev_preview;
 pub mod error;
+pub mod format;
 pub mod game;
 pub mod paths;
 pub mod pet;

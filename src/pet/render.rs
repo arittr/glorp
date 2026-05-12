@@ -13,16 +13,6 @@ pub struct AnimationFrame {
 pub struct RenderedPet {
     pub lines: Vec<String>,
     pub spans: Vec<StyledSegment>,
-    pub event_lines: Vec<String>,
-}
-
-impl RenderedPet {
-    pub fn with_evolution_flash(mut self, from: Stage, to: Stage) -> Self {
-        self.event_lines
-            .push(format!("* evolved from {from} to {to} *"));
-        self.lines.insert(0, String::from("** evolution flash **"));
-        self
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,7 +106,6 @@ pub fn render_pet(
     RenderedPet {
         lines: framed_lines,
         spans: framed_spans,
-        event_lines: Vec::new(),
     }
 }
 

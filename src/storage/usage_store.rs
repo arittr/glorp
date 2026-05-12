@@ -162,14 +162,6 @@ impl UsageStore {
         Ok(())
     }
 
-    pub fn insert_unapplied_event(
-        &mut self,
-        event: &NormalizedUsageEvent,
-        cursor_update: &ProviderCursorUpdate,
-    ) -> crate::error::Result<i64> {
-        self.insert_unapplied_event_bucket(event, cursor_update, 0, 1)
-    }
-
     pub fn insert_unapplied_event_bucket(
         &mut self,
         event: &NormalizedUsageEvent,

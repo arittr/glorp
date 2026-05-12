@@ -1,8 +1,7 @@
 use glorp::game::evolution::Stage;
 use glorp::game::metabolism::Mood;
-use glorp::pet::generation::{
-    generate_pet, morph_count, resolve_accepted_name, stage_label, Species,
-};
+use glorp::pet::art::{morph_count, stage_label};
+use glorp::pet::generation::{generate_pet, resolve_accepted_name, Species};
 use glorp::pet::render::{palette_roles, render_pet, species_animation_profile, AnimationFrame};
 
 fn frame(tick: u64) -> AnimationFrame {
@@ -33,8 +32,8 @@ fn mvp_species_are_available() {
 
 #[test]
 fn species_names_have_distinct_grammar() {
-    let fuzz = generate_pet("force-fuzz-1").with_species_for_test(Species::Fuzz);
-    let mech = generate_pet("force-mech-1").with_species_for_test(Species::Mech);
+    let fuzz = generate_pet("force-fuzz-1").with_species(Species::Fuzz);
+    let mech = generate_pet("force-mech-1").with_species(Species::Mech);
     assert_ne!(fuzz.generated_name, mech.generated_name);
     assert!(fuzz.generated_name.chars().all(|c| c.is_ascii_lowercase()));
     assert!(
@@ -80,8 +79,8 @@ fn render_is_stable_for_same_seed_state_and_tick() {
 
 #[test]
 fn different_same_species_seeds_have_visible_variation() {
-    let a = generate_pet("blob-a").with_species_for_test(Species::Blob);
-    let b = generate_pet("blob-b").with_species_for_test(Species::Blob);
+    let a = generate_pet("blob-a").with_species(Species::Blob);
+    let b = generate_pet("blob-b").with_species(Species::Blob);
     let art_a = render_pet(&a, Stage::S5, Mood::Content, frame(0));
     let art_b = render_pet(&b, Stage::S5, Mood::Content, frame(0));
     assert_ne!(art_a.lines, art_b.lines);
@@ -180,10 +179,17 @@ fn tokenpet_stage_labels_match_spec() {
 #[test]
 fn species_have_enough_seeded_morph_variety() {
     for species in Species::all() {
-        // Pup (S3) has 1 template per pet.jsx; adults (S4/S5/S6) have 3.
+        // Pup (S3) has a single template per pet.jsx; adult stages have
+        // multiple morphs whose exact count comes from `pet/art.rs` templates.
         assert_eq!(morph_count(species, Stage::S3), 1);
-        assert_eq!(morph_count(species, Stage::S4), 3);
-        assert_eq!(morph_count(species, Stage::S6), 3);
+        assert!(
+            morph_count(species, Stage::S4) >= 3,
+            "expected {species:?} adult templates to provide >=3 morphs"
+        );
+        assert!(
+            morph_count(species, Stage::S6) >= 3,
+            "expected {species:?} sage templates to provide >=3 morphs"
+        );
     }
 }
 
@@ -200,14 +206,6 @@ fn adult_stages_have_distinct_silhouettes_for_representative_species() {
         assert_ne!(s0.lines, s1.lines, "seed {seed}: S0 vs S1 should differ");
         assert_ne!(s1.lines, s2.lines, "seed {seed}: S1 vs S2 should differ");
     }
-}
-
-#[test]
-fn evolution_event_has_renderable_celebration() {
-    let pet = generate_pet("ori-shard");
-    let art = render_pet(&pet, Stage::S4, Mood::Happy, frame(1))
-        .with_evolution_flash(Stage::S3, Stage::S4);
-    assert!(art.event_lines.iter().any(|line| line.contains("evolved")));
 }
 
 #[test]

@@ -27,7 +27,6 @@ pub struct WatchViewModel {
     pub helper_status: String,
     pub errors: Vec<String>,
     pub latest_evolution: Option<String>,
-    pub acknowledged_evolution: Option<String>,
     /// Raw mouse position in screen coordinates, or None when the cursor is
     /// off the terminal or mouse tracking is disabled. PetPanel hit-tests
     /// against its rect to decide whether to swap to cursor-tracked eyes.
@@ -198,7 +197,6 @@ impl WatchViewModel {
             helper_status: "helper ready".into(),
             errors: Vec::new(),
             latest_evolution: None,
-            acknowledged_evolution: None,
             cursor_screen: None,
             mouse_tracking_enabled: true,
             current_speech: None,
@@ -269,24 +267,6 @@ impl WatchViewModel {
                     SourceStatus::Blocked | SourceStatus::Diagnostic
                 )
             })
-    }
-
-    pub fn should_render_evolution_moment(&self) -> bool {
-        self.latest_evolution.is_some() && self.latest_evolution != self.acknowledged_evolution
-    }
-
-    pub fn acknowledge_latest_evolution(&mut self) {
-        self.acknowledged_evolution = self.latest_evolution.clone();
-    }
-
-    #[doc(hidden)]
-    pub fn acknowledge_latest_evolution_for_test(&mut self) {
-        self.acknowledge_latest_evolution();
-    }
-
-    #[doc(hidden)]
-    pub fn acknowledged_evolution_for_test(&self, transition: &str) -> bool {
-        self.acknowledged_evolution.as_deref() == Some(transition)
     }
 }
 

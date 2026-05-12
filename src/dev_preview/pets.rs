@@ -3,7 +3,8 @@ use crate::dev_preview::scenarios::PreviewRenderContext;
 use crate::error::Result;
 use crate::game::{evolution::Stage, metabolism::Mood};
 use crate::pet::{
-    generation::{generate_pet, stage_label, Species},
+    art::stage_label,
+    generation::{generate_pet, Species},
     render::{render_pet, AnimationFrame},
 };
 use crate::tui::panels::pet::pet_role_spans_for_line;
@@ -60,8 +61,7 @@ fn render_pet_matrix(ctx: &PreviewRenderContext) -> PreviewFrame {
 
 fn render_pet_cell(area: Rect, buffer: &mut Buffer, species: Species, stage: Stage) {
     let styles = semantic_styles();
-    let pet =
-        generate_pet(&format!("glorp-preview-{}", species.as_str())).with_species_for_test(species);
+    let pet = generate_pet(&format!("glorp-preview-{}", species.as_str())).with_species(species);
     let rendered = render_pet(
         &pet,
         stage,

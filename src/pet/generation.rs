@@ -1,5 +1,4 @@
 use crate::error::GlorpError;
-use crate::game::evolution::Stage;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -71,7 +70,7 @@ pub struct GeneratedPet {
 }
 
 impl GeneratedPet {
-    pub fn with_species_for_test(mut self, species: Species) -> Self {
+    pub fn with_species(mut self, species: Species) -> Self {
         self.species = species;
         let hash = fnv1a64(&format!("{}:{}", self.seed, species.as_str()));
         let mut rng = StableRng::new(hash);
@@ -122,56 +121,6 @@ pub fn resolve_accepted_name(generated_name: &str, replacement: Option<&str>) ->
         .filter(|name| !name.is_empty())
         .unwrap_or(generated_name)
         .to_string()
-}
-
-pub fn stage_label(species: Species, stage: Stage) -> &'static str {
-    let labels = match species {
-        Species::Fuzz => [
-            "fluff",
-            "fuzzling",
-            "kit",
-            "pup",
-            "fuzz",
-            "archfuzz",
-            "mythic-fuzz",
-        ],
-        Species::Blob => [
-            "droplet",
-            "blip",
-            "globule",
-            "wee-blob",
-            "blob",
-            "mega-blob",
-            "primordial",
-        ],
-        Species::Ghost => [
-            "whisper",
-            "wisp",
-            "shade",
-            "phantom-pup",
-            "ghost",
-            "wraith",
-            "revenant",
-        ],
-        Species::Glitch => [
-            "bit", "byte", "packet", "thread", "glitch", "daemon", "kernel",
-        ],
-        Species::Crystal => [
-            "grain", "shard", "facet", "cluster", "crystal", "spire", "lodestar",
-        ],
-        Species::Mech => [
-            "chip", "bolt", "rivet", "drone", "mech", "archmech", "titan",
-        ],
-    };
-    labels[stage.index()]
-}
-
-pub fn morph_count(_species: Species, stage: Stage) -> usize {
-    match stage {
-        Stage::S0 | Stage::S1 | Stage::S2 => 1,
-        Stage::S3 => 1, // pup_templates(species).len() is always 1
-        Stage::S4 | Stage::S5 | Stage::S6 => 3, // adult_templates(species).len() is always 3
-    }
 }
 
 fn generated_name(species: Species, rng: &mut StableRng) -> String {

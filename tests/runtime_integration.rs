@@ -245,7 +245,9 @@ fn unapplied_usage_survives_state_save_failure_and_applies_once_next_run() {
         provider_version: "test-provider".into(),
         parser_version: "test-parser".into(),
     };
-    let inserted_id = usage_store.insert_unapplied_event(&event, &cursor).unwrap();
+    let inserted_id = usage_store
+        .insert_unapplied_event_bucket(&event, &cursor, 0, 1)
+        .unwrap();
 
     let mut failed_state = PetState::new_for_test("mochi-7f3a", "mochi");
     failed_state.calibration.daily_effective_tokens = 100_000.0;

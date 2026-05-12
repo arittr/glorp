@@ -186,11 +186,8 @@ fn latest_evolution_renders_once_for_running_watch() {
     let mut state = mech_state();
     state.seen_stage_transitions = vec![glorp::game::evolution::Stage::S1];
 
-    let mut vm = build_watch_view_model_for_test(&state, &usage_db).unwrap();
+    let vm = build_watch_view_model_for_test(&state, &usage_db).unwrap();
     assert_eq!(vm.latest_evolution.as_deref(), Some("s1"));
-    assert!(!vm.acknowledged_evolution_for_test("s1"));
-    vm.acknowledge_latest_evolution_for_test();
-    assert!(vm.acknowledged_evolution_for_test("s1"));
 }
 
 #[test]
