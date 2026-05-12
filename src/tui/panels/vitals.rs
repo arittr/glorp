@@ -1,14 +1,13 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use crate::tui::panels::bars::bar_spans_solid;
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{
-    bar_ramp_accent, bar_ramp_good, ramp_index, semantic_styles, BarRamp, ColorCapability,
-    SemanticStyles,
+    energy_color, fed_color, happy_color, semantic_styles, ColorCapability, SemanticStyles,
 };
 use crate::tui::view_model::WatchViewModel;
 
@@ -16,8 +15,8 @@ pub struct VitalsPanel;
 
 impl Panel for VitalsPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
-        // 1 row for the TOP border/title + 4 bar rows.
-        Constraint::Length(5)
+        // 1 border row + 3 bar rows (fed, happy, energy). xp moved to ProgressPanel.
+        Constraint::Length(4)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
@@ -31,70 +30,24 @@ impl Panel for VitalsPanel {
     }
 }
 
-fn build_vitals_lines<'a>(
+pub(crate) fn build_vitals_lines<'a>(
     vm: &'a WatchViewModel,
     _width: u16,
-    capability: ColorCapability,
+    _capability: ColorCapability,
     styles: &'a SemanticStyles,
 ) -> Vec<Line<'a>> {
-    let xp_fraction = if vm.xp_target <= 0.0 {
-        0.0
-    } else {
-        (vm.xp_current / vm.xp_target).clamp(0.0, 1.0)
-    };
-
-    let good = bar_ramp_good();
-    let accent = bar_ramp_accent();
     vec![
-        Line::from(bar_spans("fed", vm.fed, good, capability, styles)),
-        Line::from(bar_spans("happy", vm.happiness, accent, capability, styles)),
-        Line::from(bar_spans("energy", vm.energy, good, capability, styles)),
-        Line::from(bar_spans("xp", xp_fraction, accent, capability, styles)),
+        Line::from(bar_spans_solid("fed", vm.fed, fed_color(), styles)),
+        Line::from(bar_spans_solid("happy", vm.happiness, happy_color(), styles)),
+        Line::from(bar_spans_solid("energy", vm.energy, energy_color(), styles)),
     ]
-}
-
-/// Duplicated from `layout::bar_row` — T7 will deduplicate when the old path
-/// is deleted.
-fn bar_spans<'a>(
-    label: &'a str,
-    fill_fraction: f64,
-    ramp: BarRamp,
-    capability: ColorCapability,
-    styles: &'a SemanticStyles,
-) -> Vec<Span<'a>> {
-    const BAR_CELLS: usize = 12;
-    let clamped = fill_fraction.clamp(0.0, 1.0);
-    let n_filled = (clamped * BAR_CELLS as f64).round() as usize;
-    let n_filled = n_filled.min(BAR_CELLS);
-    let n_empty = BAR_CELLS - n_filled;
-    let value_pct = (clamped * 100.0).round() as u32;
-
-    let mut spans: Vec<Span<'a>> = Vec::with_capacity(BAR_CELLS + 6);
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("{label:<6}"), styles.label));
-    spans.push(Span::raw(" "));
-    for i in 0..n_filled {
-        let style = match capability {
-            ColorCapability::Truecolor => {
-                let idx = ramp_index(i, n_filled);
-                Style::default().fg(ramp.stops[idx])
-            }
-            ColorCapability::Flat => Style::default().fg(ramp.stops[2]),
-        };
-        spans.push(Span::styled("█", style));
-    }
-    if n_empty > 0 {
-        spans.push(Span::styled("░".repeat(n_empty), styles.empty_bar));
-    }
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("{value_pct}"), styles.primary_text));
-    spans
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Constraint;
     use ratatui::Terminal;
 
     fn test_context() -> RenderContext {
@@ -114,63 +67,55 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf
-            .content()
-            .iter()
-            .map(|c| c.symbol().to_string())
-            .collect();
+        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
         assert!(s.contains("vitals"), "expected vitals divider title");
     }
 
     #[test]
-    fn vitals_panel_renders_all_four_labels() {
+    fn vitals_panel_renders_three_labels_no_xp() {
         let vm = WatchViewModel::fixture();
         let panel = VitalsPanel;
         let ctx = test_context();
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), &vm, &ctx);
-            })
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf
-            .content()
-            .iter()
-            .map(|c| c.symbol().to_string())
-            .collect();
-        assert!(s.contains("fed"), "expected fed label");
-        assert!(s.contains("happy"), "expected happy label");
-        assert!(s.contains("energy"), "expected energy label");
-        assert!(s.contains("xp"), "expected xp label");
+        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        assert!(s.contains("fed"));
+        assert!(s.contains("happy"));
+        assert!(s.contains("energy"));
+        assert!(!s.contains("xp"), "xp moved to ProgressPanel");
     }
 
     #[test]
-    fn vitals_panel_preferred_constraint_is_five() {
+    fn vitals_panel_preferred_constraint_is_four() {
         let vm = WatchViewModel::fixture();
         let panel = VitalsPanel;
         assert_eq!(
             panel.preferred_constraint(&vm),
-            Constraint::Length(5),
-            "expected Length(5): 1 border row + 4 bar rows"
+            Constraint::Length(4),
+            "1 border + 3 bar rows (xp dropped)"
         );
     }
 
     #[test]
-    fn vitals_bar_spans_zero_fill_has_twelve_empty_cells() {
+    fn vitals_panel_rows_use_per_stat_colors() {
+        use crate::tui::style::{energy_color, fed_color, happy_color, semantic_styles};
         let styles = semantic_styles();
-        let spans = bar_spans("fed", 0.0, bar_ramp_good(), ColorCapability::Flat, &styles);
-        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text.chars().filter(|c| *c == '░').count(), 12);
-        assert_eq!(text.chars().filter(|c| *c == '█').count(), 0);
-    }
-
-    #[test]
-    fn vitals_bar_spans_full_fill_has_twelve_solid_cells() {
-        let styles = semantic_styles();
-        let spans = bar_spans("fed", 1.0, bar_ramp_good(), ColorCapability::Flat, &styles);
-        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text.chars().filter(|c| *c == '█').count(), 12);
+        let vm = WatchViewModel::fixture();
+        let lines = build_vitals_lines(&vm, 40, ColorCapability::Truecolor, &styles);
+        assert_eq!(lines.len(), 3);
+        // First filled span on each line should carry that stat's color.
+        let line_fg = |line: &Line| {
+            line.spans
+                .iter()
+                .find(|s| s.content.contains('█'))
+                .and_then(|s| s.style.fg)
+        };
+        assert_eq!(line_fg(&lines[0]), Some(fed_color()));
+        assert_eq!(line_fg(&lines[1]), Some(happy_color()));
+        assert_eq!(line_fg(&lines[2]), Some(energy_color()));
     }
 }
