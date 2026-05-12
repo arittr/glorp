@@ -812,6 +812,22 @@ impl UsageStore {
         Ok(out)
     }
 
+    pub fn best_day_effective_tokens(&self) -> crate::error::Result<f64> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(MAX(daily_total), 0.0) FROM (
+                SELECT period_date, SUM(effective_tokens) AS daily_total
+                FROM (
+                    SELECT period_date, effective_tokens FROM usage_events
+                    UNION ALL
+                    SELECT period_date, effective_tokens FROM daily_aggregates
+                )
+                GROUP BY period_date
+            )",
+        )?;
+        let best: f64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(best)
+    }
+
     fn migrate(&self) -> crate::error::Result<()> {
         self.conn.execute_batch(
             "
@@ -1094,5 +1110,56 @@ mod tests {
         let today = OffsetDateTime::now_utc();
         let history = store.seven_day_token_history(today.date()).unwrap();
         assert_eq!(history, vec![0.0; 7]);
+    }
+
+    #[test]
+    fn best_day_returns_largest_daily_total_from_events_only() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store
+            .insert_event(&sample_event_at(now, 3_000.0))
+            .unwrap();
+        store
+            .insert_event(&sample_event_at(now, 2_000.0))
+            .unwrap();
+        store
+            .insert_event(&sample_event_at(
+                now - time::Duration::days(1),
+                4_000.0,
+            ))
+            .unwrap();
+        let best = store.best_day_effective_tokens().unwrap();
+        assert_eq!(best, 5_000.0, "today sums to 5k, beats yesterday's 4k");
+    }
+
+    #[test]
+    fn best_day_returns_zero_when_empty() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        assert_eq!(store.best_day_effective_tokens().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn best_day_sums_overlap_between_events_and_aggregates() {
+        // Compaction window: same period_date appears in both tables.
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let period_date = now.date().to_string();
+        store
+            .insert_event(&sample_event_at(now, 1_000.0))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO daily_aggregates (
+                    provider_surface, period_date, source_surface,
+                    input_tokens, output_tokens, cache_creation_tokens,
+                    cache_read_tokens, reasoning_output_tokens,
+                    effective_tokens, cost_usd, event_count
+                ) VALUES ('claude-code', ?1, 'daily', 0, 0, 0, 0, 0, 2000.0, 0, 1)",
+                rusqlite::params![period_date],
+            )
+            .unwrap();
+        let best = store.best_day_effective_tokens().unwrap();
+        assert_eq!(best, 3_000.0, "events 1k + aggregate 2k = 3k");
     }
 }
