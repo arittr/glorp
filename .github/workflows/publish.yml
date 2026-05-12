@@ -149,7 +149,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          # No registry-url — that writes an .npmrc that expects
+          # NODE_AUTH_TOKEN. We use OIDC trusted publishing, so npm
+          # exchanges the workflow's id-token for a publish token
+          # automatically. Setting registry-url leaves an empty auth
+          # token in .npmrc, which short-circuits OIDC and gets 404'd.
       - name: download platform binary
         uses: actions/download-artifact@v4
         with:
@@ -181,7 +185,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          # No registry-url — that writes an .npmrc that expects
+          # NODE_AUTH_TOKEN. We use OIDC trusted publishing, so npm
+          # exchanges the workflow's id-token for a publish token
+          # automatically. Setting registry-url leaves an empty auth
+          # token in .npmrc, which short-circuits OIDC and gets 404'd.
       - name: assert main package version matches tag
         run: |
           PKG_VERSION=$(node -p "require('./npm/glorp/package.json').version")
