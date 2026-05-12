@@ -48,8 +48,10 @@ jobs:
         with:
           node-version: '22'
       - name: install npm package deps (ccusage helpers)
-        working-directory: npm/glorp
+        # Run at the workspace root, not inside npm/glorp — npm 11's
+        # workspace resolver chokes when invoked from a workspace child
+        # whose package has unresolvable optionalDependencies.
         run: npm install --no-audit --no-fund
       - name: launcher smoke test
         working-directory: npm/glorp
-        run: npm test
+        run: node test/smoke.mjs
