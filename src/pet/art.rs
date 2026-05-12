@@ -332,22 +332,23 @@ const BLOB_TINY: &[Template; 3] = &[
 
 // ── Ghost ─────────────────────────────────────────────────────────
 // Chunky filled bodies (\u{2588} outline + \u{2592}/\u{2591} two-tone interior
-// shimmer) with dangling tentacles below. Older stages keep the same body
-// silhouette but trade head rows for longer tentacles with varied style
-// and count per morph.
+// shimmer) with dangling tentacles below. Each morph varies head silhouette
+// AND tentacle style+count, so pets at the same stage read as distinct
+// specters rather than recolored siblings.
 const GHOST_PUP: &[Template] = &[[
     "           ",
     "   _____   ",
     "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
     " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
     " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
-    " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+    "  \\\u{2588}{pattern}\u{2588}/  ",
     "   \\\u{2588}{accent}\u{2588}/   ",
-    "   . . .   ",
+    "    |~|    ",
 ]];
 
 const GHOST_ADULT: &[Template] = &[
-    // Morph 0 — chunky S4 ghost with four short tentacle stubs.
+    // Morph 0 — classic S4 ghost: rounded cap, full chunky body, four
+    // short tentacle stubs with sharp drip tips.
     [
         "   _____   ",
         "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
@@ -358,27 +359,41 @@ const GHOST_ADULT: &[Template] = &[
         "  | |{accent}| |  ",
         "  ' ' ' '  ",
     ],
-    // Morph 1 — wraith: compact head, three curled tentacles.
+    // Morph 1 — hooded wraith: peaked _-^-_ hood, compact body, three
+    // curled tendrils meeting in a wavy drip.
     [
-        "   _____   ",
-        "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
-        " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
-        " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
+        "   _-^-_   ",
+        "  /\u{2588}\u{2592}\u{2588}\u{2592}\u{2588}\\  ",
+        " |\u{2588}\u{2592}{eyes}\u{2592}\u{2588}| ",
+        " |\u{2588}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2588}| ",
         " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
         "   | | |   ",
         "   ) {accent} (   ",
         "   ' ~ '   ",
     ],
-    // Morph 2 — wraith with four wavy tendrils (experimental U+2307).
+    // Morph 2 — tattered specter: jagged ~v~v~ torn top, lighter dappled
+    // body, four wavy tendrils staggered for asymmetric drip.
     [
-        "   _____   ",
-        "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
-        " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
-        " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
-        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+        "   ~v~v~   ",
+        "  \u{2591}\u{2588}\u{2591}\u{2588}\u{2591}\u{2588}\u{2591}  ",
+        " |\u{2591}\u{2592}{eyes}\u{2592}\u{2591}| ",
+        " |\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}| ",
+        " |\u{2591}\u{2592}{pattern}\u{2592}\u{2591}| ",
         "  \u{2307} \u{2307}{accent}\u{2307} \u{2307}  ",
-        "   \u{2307} \u{2307} \u{2307}   ",
-        "    \u{2307} \u{2307}    ",
+        "   \u{2307}  \u{2307}   ",
+        "  \u{2307}  \u{2307}  \u{2307}  ",
+    ],
+    // Morph 3 — chaotic phantom: overline crown, bracket-cropped shoulders,
+    // V-pattern tendrils that tangle as they fall.
+    [
+        "   _\u{203e}\u{203e}\u{203e}_   ",
+        "  \u{2310}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{00ac}  ",
+        " |\u{2588}\u{2592}{eyes}\u{2592}\u{2588}| ",
+        " |\u{2588}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2588}| ",
+        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+        "  / \\{accent}/ \\  ",
+        "   \\ v /   ",
+        "    \\/    ",
     ],
 ];
 
