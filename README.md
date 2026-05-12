@@ -1,5 +1,10 @@
 # glorp
 
+[![npm version](https://img.shields.io/npm/v/%40arittr%2Fglorp?logo=npm&label=npm)](https://www.npmjs.com/package/@arittr/glorp)
+[![npm downloads](https://img.shields.io/npm/dm/%40arittr%2Fglorp?logo=npm&label=downloads)](https://www.npmjs.com/package/@arittr/glorp)
+[![CI](https://img.shields.io/github/actions/workflow/status/arittr/glorp/ci.yml?branch=main&logo=github&label=ci)](https://github.com/arittr/glorp/actions/workflows/ci.yml)
+[![License](https://img.shields.io/npm/l/%40arittr%2Fglorp)](LICENSE)
+
 A terminal pet fed by real Claude Code and Codex token usage.
 
 It lives in your shell, hatches from a local seed, and grows from the work you actually do. No manual feeding, no fake metrics — when you ship more code, your pet evolves.
