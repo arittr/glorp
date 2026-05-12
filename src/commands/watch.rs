@@ -36,8 +36,6 @@ pub fn run() -> Result<()> {
         ));
     };
 
-    let state =
-        poll_usage_and_apply(&state_store, &paths.usage_db, &paths.config_file)?.unwrap_or(state);
     let vm = build_watch_view_model(&state, &paths.usage_db)?;
     WatchApp::with_poll_callback(
         vm,

@@ -3,6 +3,12 @@
   "version": "0.1.5",
   "description": "A terminal pet fed by real AI coding token usage",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arittr/glorp.git"
+  },
+  "homepage": "https://github.com/arittr/glorp",
+  "bugs": "https://github.com/arittr/glorp/issues",
   "bin": {
     "glorp": "bin/glorp.js"
   },

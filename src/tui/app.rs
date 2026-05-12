@@ -155,9 +155,7 @@ impl WatchApp {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
-        if self.last_poll.is_none() {
-            self.last_poll = Some(Instant::now());
-        }
+        self.start_initial_poll()?;
         loop {
             self.advance_animation_frame();
 
@@ -371,6 +369,16 @@ impl WatchApp {
         Ok(())
     }
 
+    fn start_initial_poll(&mut self) -> Result<bool> {
+        if self.last_poll.is_some() {
+            return Ok(false);
+        }
+        let was_in_flight = self.in_flight;
+        self.kick_off_poll()?;
+        self.last_poll = Some(Instant::now());
+        Ok(!was_in_flight)
+    }
+
     /// Non-blocking collection of any completed poll result.
     fn try_collect_poll_result(&mut self) -> Result<()> {
         match self.result_rx.try_recv() {
@@ -430,6 +438,11 @@ impl WatchApp {
         let was_in_flight = self.in_flight;
         self.kick_off_poll()?;
         Ok(!was_in_flight)
+    }
+
+    #[doc(hidden)]
+    pub fn start_initial_poll_for_test(&mut self) -> Result<bool> {
+        self.start_initial_poll()
     }
 
     /// Block until any in-flight poll result lands. Tests rely on this to

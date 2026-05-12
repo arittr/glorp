@@ -612,6 +612,51 @@ fn animation_advances_while_poll_is_in_flight() {
 }
 
 #[test]
+fn initial_poll_starts_in_background_without_replacing_cached_frame() {
+    let start = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let calls = Arc::new(AtomicU32::new(0));
+    let poller = BlockingTestPoller {
+        start: Arc::clone(&start),
+        release: Arc::clone(&release),
+        calls: Arc::clone(&calls),
+    };
+    let mut cached = WatchViewModel::fixture();
+    cached.today_effective_tokens = 42.0;
+
+    let mut app = WatchApp::with_poll_callback(
+        cached,
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
+        },
+        Box::new(poller),
+    );
+
+    let started = app.start_initial_poll_for_test().unwrap();
+    assert!(started, "initial startup should request one poll");
+    assert!(app.in_flight_for_test(), "startup poll should be in flight");
+
+    start.wait();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        app.view_model_for_test().today_effective_tokens,
+        42.0,
+        "cached view model should remain visible while initial poll runs"
+    );
+    assert_eq!(
+        app.poll_count_for_test(),
+        0,
+        "initial poll should not be counted until the worker result lands"
+    );
+
+    release.wait();
+    app.await_pending_poll_for_test().unwrap();
+    assert_eq!(app.poll_count_for_test(), 1);
+}
+
+#[test]
 fn duplicate_poll_requests_while_in_flight_are_deduped() {
     let start = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));

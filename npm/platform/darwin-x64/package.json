@@ -2,6 +2,11 @@
   "name": "@arittr/glorp-darwin-x64",
   "version": "0.1.5",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arittr/glorp.git"
+  },
+  "homepage": "https://github.com/arittr/glorp",
   "os": [
     "darwin"
   ],
