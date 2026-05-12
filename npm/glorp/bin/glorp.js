@@ -17,14 +17,14 @@ function platformKey() {
 }
 
 function platformPackageName() {
-  return `@glorp/${platformKey()}`;
+  return `@arittr/glorp-${platformKey()}`;
 }
 
 function resolvePackageJson(pkg) {
   try {
     return require.resolve(`${pkg}/package.json`);
   } catch {
-    if (!pkg.startsWith("@glorp/")) return undefined;
+    if (!pkg.startsWith("@arittr/glorp-")) return undefined;
     const local = path.resolve(here, "../../platform", platformKey(), "package.json");
     return fs.existsSync(local) ? local : undefined;
   }

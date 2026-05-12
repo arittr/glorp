@@ -1,5 +1,5 @@
 {
-  "name": "@glorp/darwin-arm64",
+  "name": "@arittr/glorp-darwin-arm64",
   "version": "0.1.0",
   "license": "MIT",
   "os": [

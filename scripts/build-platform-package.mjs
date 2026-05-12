@@ -73,7 +73,7 @@ function verifyOptionalPackages() {
 }
 
 function packageName(platform) {
-  return `@glorp/${platform}`;
+  return `@arittr/glorp-${platform}`;
 }
 
 const { platform, printPackageName, printPackageDir } = parseArgs(process.argv.slice(2));
