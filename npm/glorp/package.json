@@ -1,5 +1,5 @@
 {
-  "name": "glorp",
+  "name": "@arittr/glorp",
   "version": "0.1.0",
   "description": "A terminal pet fed by real AI coding token usage",
   "license": "MIT",

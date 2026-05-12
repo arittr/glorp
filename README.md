@@ -13,7 +13,7 @@ Glorp is local-only. No telemetry, no upload, no transcripts. The pet never stor
 ## Install
 
 ```bash
-npm install -g glorp
+npm install -g @arittr/glorp
 glorp init
 glorp watch
 ```

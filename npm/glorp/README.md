@@ -7,7 +7,7 @@ It lives in your shell, hatches from a local seed, and grows from the work you a
 ## Install
 
 ```bash
-npm install -g glorp
+npm install -g @arittr/glorp
 glorp init
 glorp watch
 ```
