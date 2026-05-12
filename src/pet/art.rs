@@ -110,11 +110,13 @@ pub(crate) fn template_lines(
 }
 
 // Some species visibly transform at S5+: Crystal pets cluster, Ghost pets grow
-// longer tentacles. Skip the singleton morph 0 at elder stages for those
-// species so every elder pet reads as the evolved form while still preserving
-// morph-driven variation across the remaining morphs.
+// longer tentacles, Blob pets bubble and bud co-blobs. Skip the singleton
+// morph 0 at elder stages for those species so every elder pet reads as the
+// evolved form while still preserving morph-driven variation across the
+// remaining morphs.
 fn elder_morph_index(species: Species, morph_index: usize, len: usize) -> usize {
-    let skip_first = matches!(species, Species::Crystal | Species::Ghost) && len > 1;
+    let skip_first =
+        matches!(species, Species::Crystal | Species::Ghost | Species::Blob) && len > 1;
     if skip_first {
         1 + (morph_index % (len - 1))
     } else {
@@ -253,80 +255,100 @@ const FUZZ_TINY: &[Template; 3] = &[
 ];
 
 // ── Blob ──────────────────────────────────────────────────────────
+// Chunky filled gelatinous bodies using ( ) rounded walls + \u{2591}/\u{2592}
+// density for jelly translucency. Variants differ in cap silhouette, body
+// width, and trailing bubble pattern.
 const BLOB_PUP: &[Template] = &[[
     "           ",
-    "           ",
-    "           ",
     "   .---.   ",
-    "  ( {eyes} )  ",
-    "  ( {pattern} )  ",
-    "   '.{mouth}.'   ",
-    "   o {accent} o   ",
+    "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
+    " (\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}) ",
+    " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
+    " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
+    "  \\\u{2591}{pattern}\u{2591}/  ",
+    "   '_{accent}_'   ",
 ]];
 
 const BLOB_ADULT: &[Template] = &[
+    // Morph 0 — classic round chunky blob with trailing dribbles.
     [
-        "           ",
         "   .---.   ",
-        "  / {eyes} \\  ",
-        " ( {pattern}   ) ",
-        " (   {mouth}   ) ",
-        "  '.___.'  ",
-        "  . . {accent} .  ",
+        "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
+        " (\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}) ",
+        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2592}{pattern}\u{2592}\u{2591}) ",
+        "  \\\u{2591}\u{2592}{accent}\u{2592}\u{2591}/  ",
         "   \u{b0} o \u{b0}   ",
     ],
+    // Morph 1 — wobble blob with bubbles drifting up off the top.
     [
-        "           ",
-        "  ._____.  ",
-        " ( {eyes}   ) ",
-        " ( . {mouth} . ) ",
-        " (-_____-) ",
-        " ( {pattern}   ) ",
-        "  '. {accent} .'  ",
+        "  \u{b0} . o .  ",
+        "  .-._.-.  ",
+        " (\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2592}{eyes}\u{2592}\u{2591}) ",
+        " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2591}{pattern}\u{2591}\u{2591}) ",
+        "  \\\u{2591}\u{2591}{accent}\u{2591}\u{2591}/  ",
         "   \u{b0} \u{b0} \u{b0}   ",
     ],
+    // Morph 2 — mega-blob: full-width body extends to the edges, wide cap.
     [
-        "     o     ",
-        "    o.o    ",
+        "           ",
+        "  .\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}.  ",
+        " /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\ ",
+        "(\u{2591}\u{2592}\u{2591}{eyes}\u{2591}\u{2592}\u{2591})",
+        "(\u{2591}\u{2592}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2592}\u{2591})",
+        "(\u{2591}\u{2592}\u{2591}{pattern}\u{2591}\u{2592}\u{2591})",
+        "  \\\u{2591}\u{2591}{accent}\u{2591}\u{2591}/  ",
+        " ' . \u{b0} . ' ",
+    ],
+    // Morph 3 — twin blob: main body with two tiny co-blobs budding at base.
+    [
         "   .---.   ",
-        "  ( {eyes} )  ",
-        "  (  {mouth}  )  ",
-        "  ( {pattern} )  ",
-        "   '___'   ",
-        "   o {accent} o   ",
+        "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
+        " (\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2592}{pattern}\u{2592}\u{2591}) ",
+        "  \\\u{2591}\u{2591}{accent}\u{2591}\u{2591}/  ",
+        " (o) \u{b0} (o) ",
     ],
 ];
 
 const BLOB_TINY: &[Template; 3] = &[
+    // S0 droplet — single drop forming.
     [
         "           ",
         "           ",
         "           ",
         "           ",
         "           ",
-        "     o     ",
-        "    \u{b0} \u{b0}    ",
         "     .     ",
+        "    o.o    ",
+        "    '.'    ",
     ],
+    // S1 blip — small chunky droplet.
     [
         "           ",
         "           ",
         "           ",
         "           ",
-        "   .---.   ",
-        "  ( {eyes} )  ",
-        "   '._.'   ",
-        "    \u{b0} \u{b0}    ",
+        "    .-.    ",
+        "   /\u{2591}\u{2591}\u{2591}\\   ",
+        "   (\u{2591}\u{2592}\u{2591})   ",
+        "    '_'    ",
     ],
+    // S2 globule — small round blob with eyes and mouth.
     [
         "           ",
         "           ",
         "           ",
         "   .---.   ",
-        "  ( {eyes} )  ",
-        "   . {mouth} .   ",
-        "  ( {pattern} )  ",
-        "   \u{b0} o \u{b0}   ",
+        "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
+        "  (\u{2591}{eyes}\u{2591})  ",
+        "  (\u{2591}{mouth}\u{2591})  ",
+        "   '___'   ",
     ],
 ];
 
@@ -383,14 +405,14 @@ const GHOST_ADULT: &[Template] = &[
         "   \u{2307}  \u{2307}   ",
         "  \u{2307}  \u{2307}  \u{2307}  ",
     ],
-    // Morph 3 — chaotic phantom: overline crown, bracket-cropped shoulders,
+    // Morph 3 — chaotic phantom: torn jagged shroud, dense ▓░ dappled body,
     // V-pattern tendrils that tangle as they fall.
     [
-        "   _\u{203e}\u{203e}\u{203e}_   ",
-        "  \u{2310}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{00ac}  ",
-        " |\u{2588}\u{2592}{eyes}\u{2592}\u{2588}| ",
-        " |\u{2588}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2588}| ",
-        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+        "   \\v/v\\   ",
+        "  /\u{2593}\u{2591}\u{2593}\u{2591}\u{2593}\\  ",
+        " |\u{2593}\u{2591}{eyes}\u{2591}\u{2593}| ",
+        " |\u{2593}\u{2591}\u{2592}{mouth}\u{2592}\u{2591}\u{2593}| ",
+        " |\u{2593}\u{2591}{pattern}\u{2591}\u{2593}| ",
         "  / \\{accent}/ \\  ",
         "   \\ v /   ",
         "    \\/    ",
