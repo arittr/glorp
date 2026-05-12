@@ -796,18 +796,46 @@ impl UsageStore {
         now_utc_date: time::Date,
     ) -> crate::error::Result<Vec<f64>> {
         let mut out = vec![0.0_f64; 7];
-        for (i, slot) in out.iter_mut().enumerate() {
-            let offset_days = 6 - i as i64;
-            let day = now_utc_date - time::Duration::days(offset_days);
-            let day_str = day.to_string();
-            let value: f64 = self.conn.query_row(
-                "SELECT COALESCE(SUM(effective_tokens), 0.0)
-                 FROM usage_events
-                 WHERE period_date = ?1",
-                params![day_str],
-                |row| row.get(0),
-            )?;
-            *slot = value;
+        let earliest = (now_utc_date - time::Duration::days(6)).to_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT period_date, SUM(effective_tokens) AS daily_total
+             FROM (
+                 SELECT period_date, effective_tokens FROM usage_events
+                 UNION ALL
+                 SELECT period_date, effective_tokens FROM daily_aggregates
+             )
+             WHERE period_date >= ?1
+             GROUP BY period_date",
+        )?;
+        let rows = stmt.query_map(params![earliest], |row| {
+            let date_str: String = row.get(0)?;
+            let total: f64 = row.get(1)?;
+            Ok((date_str, total))
+        })?;
+        for row in rows {
+            let (date_str, total) = row?;
+            // period_date is stored as YYYY-MM-DD via time::Date::to_string().
+            let parts: Vec<&str> = date_str.split('-').collect();
+            if parts.len() == 3 {
+                if let (Ok(y), Ok(m_u8), Ok(d)) = (
+                    parts[0].parse::<i32>(),
+                    parts[1].parse::<u8>(),
+                    parts[2].parse::<u8>(),
+                ) {
+                    if let Ok(month) = time::Month::try_from(m_u8) {
+                        if let Ok(date) =
+                            time::Date::from_calendar_date(y, month, d)
+                        {
+                            let days_ago =
+                                (now_utc_date - date).whole_days();
+                            if (0..=6).contains(&days_ago) {
+                                let idx = (6 - days_ago) as usize;
+                                out[idx] = total;
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -1110,6 +1138,42 @@ mod tests {
         let today = OffsetDateTime::now_utc();
         let history = store.seven_day_token_history(today.date()).unwrap();
         assert_eq!(history, vec![0.0; 7]);
+    }
+
+    #[test]
+    fn seven_day_token_history_includes_compacted_days() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        // Day -6 only in daily_aggregates (simulating post-compaction).
+        let six_days_ago = (now.date() - time::Duration::days(6)).to_string();
+        store
+            .conn
+            .execute(
+                "INSERT INTO daily_aggregates (
+                    provider_surface, period_date, source_surface,
+                    input_tokens, output_tokens, cache_creation_tokens,
+                    cache_read_tokens, reasoning_output_tokens,
+                    effective_tokens, cost_usd, event_count
+                ) VALUES ('claude-code', ?1, 'daily', 0, 0, 0, 0, 0, 7777.0, 0, 1)",
+                rusqlite::params![six_days_ago],
+            )
+            .unwrap();
+        // Today only in usage_events.
+        store
+            .insert_event(&sample_event_at(now, 1_234.0))
+            .unwrap();
+        let history = store.seven_day_token_history(now.date()).unwrap();
+        assert_eq!(history.len(), 7);
+        assert!(
+            history[0] > 7_700.0,
+            "day-6 (oldest) must surface from aggregates, got {}",
+            history[0]
+        );
+        assert!(
+            history[6] > 1_200.0,
+            "today (newest) must surface from events, got {}",
+            history[6]
+        );
     }
 
     #[test]
