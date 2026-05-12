@@ -49,53 +49,15 @@ pub fn render_watch_frame_with_capability(
         Mode::Compact
     };
 
-    // Shrink the outer frame to natural content height instead of filling
-    // the terminal. This keeps both columns ending together and stops the
-    // dead-space wedge that appears when the right column is shorter than
-    // the terminal is tall.
-    let inner_h = natural_inner_height(vm, mode);
-    let target_h = (inner_h + 2).min(frame.area().height);
-    let frame_rect = Rect {
-        x: frame.area().x,
-        y: frame.area().y,
-        width: frame.area().width,
-        height: target_h,
-    };
+    // Fill the full terminal height with the outer chrome so resizing the
+    // terminal extends the frame to the bottom of the window. Trailing
+    // space inside the frame is absorbed by the layout's bottom spacer.
+    let frame_rect = frame.area();
 
     let inner = outer.inner(frame_rect);
     frame.render_widget(outer, frame_rect);
 
     layout_and_render(inner, mode, frame.buffer_mut(), vm);
-}
-
-/// Sum the height of each panel's preferred constraint (Length or Min). For
-/// wide mode returns the larger of left vs right column natural heights.
-/// For compact mode returns the sum of all panel heights plus 1-row spacings.
-fn natural_inner_height(vm: &WatchViewModel, mode: Mode) -> u16 {
-    let h = |c: Constraint| -> u16 {
-        match c {
-            Constraint::Length(n) | Constraint::Min(n) | Constraint::Max(n) => n,
-            _ => 5,
-        }
-    };
-    let pet = h(PetPanel.preferred_constraint(vm));
-    let vitals = h(VitalsPanel.preferred_constraint(vm));
-    let today = h(TodayPanel.preferred_constraint(vm));
-    let spark = h(SparkPanel.preferred_constraint(vm));
-    let feed = h(FeedPanel.preferred_constraint(vm));
-    let helpers = h(HelpersPanel.preferred_constraint(vm));
-    match mode {
-        // Wide-mode columns use spacing(COLUMN_GAP): left column has 1 gap
-        // between pet+vitals; right column has 3 gaps between
-        // today/spark/feed/helpers.
-        Mode::Wide => {
-            let left = pet + vitals + COLUMN_GAP;
-            let right = today + spark + feed + helpers + 3 * COLUMN_GAP;
-            left.max(right)
-        }
-        // 6 panels stacked with spacing(1) → 5 row-gaps.
-        Mode::Compact => pet + vitals + today + spark + feed + helpers + 5,
-    }
 }
 
 /// Returns the rect within `frame.area()` that the pet panel occupies for the
@@ -109,18 +71,9 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
     } else {
         Mode::Compact
     };
-    // Mirror the shrinking logic in render_watch_frame_with_capability so the
-    // animator targets the same rect the dispatcher just drew into.
-    let inner_h = natural_inner_height(vm, mode);
-    let target_h = (inner_h + 2).min(frame_area.height);
-    let frame_rect = Rect {
-        x: frame_area.x,
-        y: frame_area.y,
-        width: frame_area.width,
-        height: target_h,
-    };
+    // Mirror render_watch_frame_with_capability: frame fills the terminal.
     let outer_block = Block::bordered();
-    let inner = outer_block.inner(frame_rect);
+    let inner = outer_block.inner(frame_area);
     let pet_h = match PetPanel.preferred_constraint(vm) {
         Constraint::Length(n) => n,
         _ => 5,
@@ -286,11 +239,9 @@ fn render_column_with_spacing(
     }
 }
 
-/// Stacks panels vertically with `Flex::Center`: leftover height is split
-/// evenly above and below the content block. Used for the two wide-mode
-/// columns so the shorter column's content sits vertically centered in the
-/// frame instead of being top-aligned with a wedge of empty space below it.
-/// A 1-row inter-panel gap gives each section divider visual breathing room.
+/// Stacks panels vertically top-aligned, with leftover height absorbed by a
+/// trailing spacer. A 1-row inter-panel gap gives each section divider
+/// visual breathing room.
 const COLUMN_GAP: u16 = 1;
 
 fn render_centered_column(
@@ -299,14 +250,16 @@ fn render_centered_column(
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
 ) {
-    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
+    let mut constraints: Vec<Constraint> =
+        panels.iter().map(|p| p.preferred_constraint(vm)).collect();
+    constraints.push(Constraint::Min(0));
 
     let rects = Layout::vertical(constraints)
-        .flex(Flex::Center)
+        .flex(Flex::Start)
         .spacing(COLUMN_GAP)
         .split(area);
 
-    for (panel, rect) in panels.iter().zip(rects.iter()) {
+    for (panel, rect) in panels.iter().zip(rects.iter().take(panels.len())) {
         panel.render(*rect, buf, vm);
     }
 }
@@ -504,17 +457,15 @@ mod render_wide_tests {
     }
 
     #[test]
-    fn render_wide_frame_spans_full_width_and_natural_height() {
+    fn render_wide_frame_spans_full_width_and_terminal_height() {
         let test_width: u16 = 140;
         let buf = render_buffer(test_width, TEST_HEIGHT);
         assert_eq!(buf[(0u16, 0u16)].symbol(), "╭");
         assert_eq!(buf[(test_width - 1, 0u16)].symbol(), "╮");
-        // Frame now shrinks to natural content height; the bottom corner
-        // appears at the natural-content-end row rather than TEST_HEIGHT-1.
-        let bottom_row = find_bottom_corner_row(&buf, TEST_HEIGHT);
-        assert!(bottom_row > 0 && bottom_row < TEST_HEIGHT - 1);
-        assert_eq!(buf[(0u16, bottom_row)].symbol(), "╰");
-        assert_eq!(buf[(test_width - 1, bottom_row)].symbol(), "╯");
+        // Frame fills the full terminal height: bottom border sits on the
+        // last row of the terminal.
+        assert_eq!(buf[(0u16, TEST_HEIGHT - 1)].symbol(), "╰");
+        assert_eq!(buf[(test_width - 1, TEST_HEIGHT - 1)].symbol(), "╯");
     }
 
     #[test]
