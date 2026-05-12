@@ -23,11 +23,12 @@ impl Panel for FeedPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
+        const MAX_EVENT_ROWS: u16 = 6;
         let block = Block::default().borders(Borders::TOP).title(" feed ");
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let lines = build_feed_lines(vm, inner.height);
+        let lines = build_feed_lines(vm, inner.height.min(MAX_EVENT_ROWS));
         Paragraph::new(lines).render(inner, buf);
     }
 }
