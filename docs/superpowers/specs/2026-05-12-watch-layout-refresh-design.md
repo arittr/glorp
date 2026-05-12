@@ -1,7 +1,7 @@
 # Watch Layout Refresh — Design
 
-**Status**: Design approved, ready for implementation plan.
-**Source**: Visual brainstorm session (2026-05-12), Hybrid 2 selected.
+**Status**: Design approved (revision 2), ready for implementation plan.
+**Source**: Visual brainstorm session (2026-05-12), Hybrid 2 selected. Revised after architecture / code-quality / product review.
 
 ## Problem
 
@@ -9,7 +9,13 @@ The watch view feels sparse on tall terminals. Small species (crystal in particu
 
 ## Goal
 
-Reshape the watch view so every region carries content the viewer cares about, surfacing pet "history" (lifetime stats, hatched-on, best day) and stage progress as first-class data, while filling the pet column with species-flavored ambient motion.
+Reshape the watch view so every region carries content the viewer cares about, surfacing the pet's stage progress as first-class data and filling the pet column with species-flavored ambient motion.
+
+## Success criterion
+
+On a **180×50 reference terminal** (the high end of common terminal sizes), the inner frame area should contain no dead band larger than **4 consecutive empty rows** in either column. Habitat is what carries this for the left column; the right column's `today → progress → feed` ordering carries it on the right.
+
+We are **not** optimizing for ultrawide (>200 cols) terminals beyond the existing layout policy (right column flexes 50–70 then becomes outer padding). That edge is accepted, not solved.
 
 ## Out of scope
 
@@ -28,27 +34,22 @@ Reshape the watch view so every region carries content the viewer cares about, s
 │              ╱╲                  today ───────────────────               │
 │             ╱ ⋄ ╲                  tokens          1,633,930             │
 │             ╲⋄⋄⋄╱                  claude          425,549  26%          │
-│              ╲╱                    codex         1,208,381  74%   ⚠      │
+│              ╲╱                    codex   ⚠     1,208,381  74%          │
 │                                    last 10m       +109.8k  this 10m     │
 │                                    . . . . . ▮ .          ← 7-day       │
 │                                                                          │
 │   habitat continues...           progress ────────────────                │
 │                                    shard ➜ fractal                       │
-│                                    ▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱  33%                  │
-│                                    1.6M / 5.0M     ↑ 109k/hr             │
+│                                    ▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱  33%  ↑ 109k/hr       │
 │                                                                          │
 │  vitals ───────────────          feed ────────────────────                │
 │  fed    ▰▰▰▰▰░░ 74                 04:06  codex added 61.9k              │
 │  happy  ▰▰▰▰░░░ 72                 04:06  codex added 56.1k              │
 │  energy ▰▰▰▰░░░ 72                 04:07  claude-code added 17.3k        │
 │                                    04:07  codex added 8.6k               │
-│  ┌─ luxopal ───────────────┐       04:07  luxopal evolved into s0→s1     │
-│  │ lifetime  1.6M tokens   │       --:--  gained 61.9k effective tokens  │
-│  │ best day  1.6M today    │       --:--  gained 56.1k effective tokens  │
-│  │ hatched   may 11 04:00  │                                             │
-│  │ active    1 day         │                                             │
-│  │ age       0d 4h         │                                             │
-│  └─────────────────────────┘                                             │
+│  bio ──────────────────            04:07  luxopal evolved into s0→s1     │
+│  hatched  may 11 04:00             --:--  gained 61.9k effective tokens  │
+│  age      0d 4h                                                          │
 │                                                                          │
 ╰ q quit · r refresh · m mouse · ? help ──────────────────────────────────╯
 ```
@@ -56,7 +57,9 @@ Reshape the watch view so every region carries content the viewer cares about, s
 Key changes from current:
 
 - Right column reads: **today → progress → feed**. `SparkPanel` is dropped (7-day strip moves inline at the bottom of `today`). `HelpersPanel` is dropped (broken sources show an inline `⚠` on their `today` row).
-- Left column reads: **pet + habitat → vitals → bio card**. `PetPanel.render` becomes a two-pass paint (habitat first, then pet art on top). `VitalsPanel` drops its `xp` row (XP now lives in `progress`). New `BioCardPanel` below vitals.
+- Left column reads: **pet + habitat → vitals → bio**. `PetPanel.render` becomes a two-pass paint (habitat first, then pet art on top). `VitalsPanel` drops its `xp` row (progress now lives in the new `progress` panel). New `BioCardPanel` below vitals, using the same `Borders::TOP` + section-title convention as every other panel (NOT a boxed card; flat section is what fits the existing visual language).
+
+The bio section is intentionally minimal — just `hatched` and `age`. Earlier drafts had lifetime/best-day/active-days, but on day 0 four of five rows would read zero or `—`, and `lifetime` overlaps `today`'s `tokens`. Two rows are enough to anchor the bottom-left without becoming filler.
 
 ## Architecture
 
@@ -66,17 +69,23 @@ The watch pipeline stays: `Frame → outer chrome → inner Rect → wide/compac
 
 ```
 src/tui/view_model.rs         + ProgressView, + BioView; existing fields unchanged
-src/tui/panels/mod.rs         + bio_card, + progress; - removed exports
+src/tui/panels/mod.rs         + bio_card, + progress, + bars; - spark, - helpers
 src/tui/panels/pet.rs         add habitat backdrop pass before existing render
 src/tui/panels/today.rs       add 7-day inline footer, add ⚠ marker on source rows
 src/tui/panels/vitals.rs      drop xp row
 src/tui/panels/progress.rs    NEW
 src/tui/panels/bio_card.rs    NEW
+src/tui/panels/bars.rs        NEW (shared bar/spark/format helpers — see "Shared bars module")
 src/tui/layout.rs             remove SparkPanel + HelpersPanel from render_wide/compact;
-                              reorder right column to today → progress → feed
+                              reorder right column to today → progress → feed;
+                              update pet_panel_rect() to account for BioCardPanel below vitals
+                              and to return the 13×10 pet sub-rect (NOT the full panel rect)
+                              so tachyonfx effects scope correctly
 src/commands/watch.rs         compute ProgressView, BioView in build_watch_view_model_at
-src/storage/usage_store.rs    + best_day_effective_tokens(), + active_days_count()
-src/tui/panels/spark.rs       REMOVED (logic absorbed into today)
+src/storage/usage_store.rs    + best_day_effective_tokens(), + events_within(duration);
+                              fix seven_day_token_history to be aggregate-aware
+src/tui/app.rs                no change to render loop; pet_panel_rect() change is invisible
+src/tui/panels/spark.rs       REMOVED (logic absorbed into bars + today footer)
 src/tui/panels/helpers.rs     REMOVED (signal absorbed into today)
 ```
 
@@ -90,24 +99,30 @@ pub struct ProgressView {
     pub stage_label: String,        // "shard"
     pub next_stage_label: String,   // "fractal" — or "—" at S6
     pub fraction: f32,              // 0.0..=1.0; saturates at 1.0
-    pub tokens_in_stage: f64,       // xp earned in current stage, displayed as tokens
-    pub tokens_to_next: f64,        // tokens needed to reach next stage
-    pub rate_per_hour: f64,         // 6h-half-life EMA over last ~48h of events
+    pub xp_in_stage: f64,           // state.xp - stage_start_xp(state.stage)
+    pub xp_to_next: f64,            // next_stage_xp_target(state.stage)
+    pub rate_per_hour: f64,         // 6h-half-life EMA, effective tokens / hour
+    pub is_max_stage: bool,         // true at S6; ProgressPanel renders "stage maxed" instead of a bar
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BioView {
-    pub lifetime_tokens: f64,
-    pub best_day_tokens: f64,
-    pub hatched_at: OffsetDateTime,
-    pub active_days: u32,
+    pub hatched_label: String,      // "may 11 04:00" — pre-formatted at vm build, local TZ
     pub age_label: String,          // "0d 4h" sub-day, "12d" otherwise
 }
 ```
 
-`WatchViewModel` gains `pub progress: ProgressView` and `pub bio: BioView`. Existing `xp_current` / `xp_target` are kept — `ProgressView` derives `tokens_*` and `fraction` from them at build time, so stage thresholds stay defined in exactly one place (`next_stage_xp_target`).
+`WatchViewModel` gains `pub progress: ProgressView` and `pub bio: BioView`. Existing `xp_current` / `xp_target` are **kept** in `WatchViewModel` — `ProgressView` derives `xp_in_stage`, `xp_to_next`, and `fraction` from them at build time, so stage thresholds stay defined in exactly one place (`next_stage_xp_target` in `commands/watch.rs`).
 
-`SourceHealthView` (already exists) carries `diagnostic_code: Option<String>` which `TodayPanel` uses to render the `⚠` marker. No new type needed for the helpers-collapse.
+### XP unit clarification (correctness)
+
+The existing `state.xp` and `next_stage_xp_target` are in **stage-progress units**, not tokens. S0→S1 target is `0.04`, S5→S6 target is `60.0`. Roughly 1 XP ≈ "one calibrated daily-effective-tokens budget" (per `game/evolution.rs`), with sqrt-squashing above 0.25 so the unit is non-linear vs raw tokens beyond mid-stages.
+
+`ProgressView` therefore renders **just the percentage and the rate** — no raw XP or token counts in the bar. The percentage reads correctly at every stage; the rate (in tokens/hour) is what users actually want to track. Field naming reflects this: `xp_in_stage` / `xp_to_next`, not `tokens_in_stage` / `tokens_to_next`. The struct still exposes the raw XP for tests and any future tooling, but the panel doesn't print them. We deliberately do not display "tokens to next stage" — that conversion would be misleading without exposing the calibration baseline, which is not in scope.
+
+### Source health marker
+
+`SourceHealthView` (already exists) carries `status: SourceStatus` (`Ready | Diagnostic | Blocked`). `TodayPanel` renders the `⚠` marker when `status != Ready` — **NOT** when `diagnostic_code.is_some()`. The distinction matters: a silently-uninstalled helper has no `diagnostic_code` but `status == Blocked`, and that case must surface the marker (this was the helpers-panel regression flagged in review).
 
 Existing fixtures (`WatchViewModel::fixture()`, `fixture_with_events()`) populate sensible defaults for both new structs so snapshot tests don't break.
 
@@ -116,61 +131,81 @@ Existing fixtures (`WatchViewModel::fixture()`, `fixture_with_events()`) populat
 All new work happens in `commands/watch.rs::build_watch_view_model_at(state, usage_db, now)`:
 
 ```
-usage_store.recent_events(500)            (existing)
+usage_store.events_within(Duration::hours(48), now)   NEW — replaces recent_events(500)
+                                                      for EMA computation
     │
     ├─ progress_rate_ema(events, now)     → rate_per_hour
 state.xp / next_stage_xp_target(stage)
     │
     ├→ ProgressView { stage_label, next_stage_label, fraction,
-                      tokens_in_stage, tokens_to_next, rate_per_hour }
+                      xp_in_stage, xp_to_next, rate_per_hour, is_max_stage }
 
-usage_store.lifetime_effective_tokens()   (existing)
-usage_store.best_day_effective_tokens()   NEW
-usage_store.active_days_count()           NEW
 state.created_at
     │
-    ├→ BioView { lifetime_tokens, best_day_tokens, hatched_at,
-                 active_days, age_label }
+    ├→ BioView { hatched_label, age_label }
 ```
+
+### `events_within` — replaces the 500-row LIMIT for EMA
+
+```rust
+pub fn events_within(
+    &self,
+    duration: Duration,
+    now: OffsetDateTime,
+) -> Result<Vec<NormalizedUsageEvent>>
+```
+
+`SELECT … FROM usage_events WHERE observed_at >= ?1 ORDER BY observed_at DESC`. Returns every event in the window, not capped at 500 rows. Smear inserts 6–12 buckets per delta × 2 providers polling every ~10s, which can exceed 500 rows within hours — the old `recent_events(500)` would silently truncate the EMA tail. The existing `recent_events(500)` stays for the feed-rendering use case where 500 is plenty and is also display-bounded.
 
 ### EMA rate
 
 ```rust
 fn progress_rate_ema(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
-    const TAU_HOURS: f64 = 6.0 / std::f64::consts::LN_2;   // 6h half-life
-    let cutoff = now - Duration::hours(48);
+    const TAU_HOURS: f64 = 6.0 / std::f64::consts::LN_2;   // half-life = τ·ln2 = 6h
     let weighted: f64 = events
         .iter()
-        .filter(|e| e.observed_at >= cutoff)
         .map(|e| {
             let dt_h = (now - e.observed_at).as_seconds_f64() / 3600.0;
             e.effective_tokens * (-dt_h / TAU_HOURS).exp()
         })
         .sum();
-    weighted / TAU_HOURS
+    weighted / TAU_HOURS    // tokens/hour
 }
 ```
 
 Properties: monotonic increase during active use, smooth decay during idle, no persisted state.
 
-### New `UsageStore` methods
+**Burst behavior — known and accepted.** A single 600k-token delta arriving over a short window reads as `~600k / τ ≈ 69k/hr` at peak, decaying thereafter. This is intrinsic EMA behavior, not a bug: the rate communicates "you're delivering tokens at a τ-window-averaged pace." Smear-bucket clustering (6–12 buckets of `delta/N` each, all within minutes) has negligible effect — the sum of the weighted buckets approximates the sum of the original delta because all weights are near 1 during the burst. No bucket-count weighting needed; documented behavior.
 
-```rust
-pub fn best_day_effective_tokens(&self) -> Result<f64> {
-    // UNION: today's running sum from usage_events + each historical day from daily_aggregates
-    // Returns max across the union, or 0.0 if both are empty.
-}
+### `best_day_effective_tokens` — fixed SQL
 
-pub fn active_days_count(&self) -> Result<u32> {
-    // SELECT COUNT(*) FROM (
-    //   SELECT DISTINCT period_date FROM usage_events
-    //   UNION
-    //   SELECT DISTINCT period_date FROM daily_aggregates
-    // )
-}
+The earlier draft of "max across union" was wrong: it would pick the larger of either source per day, not the daily sum. A day with rows in both `usage_events` (still-recent, uncompacted) and `daily_aggregates` (after compaction overlap) would undercount.
+
+Correct shape:
+
+```sql
+SELECT MAX(daily_total) FROM (
+    SELECT period_date, SUM(effective_tokens) AS daily_total
+    FROM (
+        SELECT period_date, effective_tokens FROM usage_events
+        UNION ALL
+        SELECT period_date, effective_tokens FROM daily_aggregates
+    )
+    GROUP BY period_date
+)
 ```
 
-Both use SQL the same shape as existing aggregate queries in `usage_store.rs`. No new tables, no schema migration.
+`UNION ALL` (not `UNION`) so duplicate `(period_date, effective_tokens)` pairs aren't deduped — they may legitimately appear when a row sits in `usage_events` and is also rolled up into `daily_aggregates` during the compaction window. The outer `GROUP BY period_date` sums them all per day. Returns 0.0 for a freshly hatched pet.
+
+`best_day_effective_tokens` is **not consumed by the bio card** in this revision (bio cut to `hatched · age`), but is added to `UsageStore` for completeness and tested.
+
+### `seven_day_token_history` — same compaction blind spot
+
+`seven_day_token_history` (`usage_store.rs:734`) currently queries only `usage_events`. Beyond compaction (90-day retention by default) the older days vanish even though they exist as `daily_aggregates`. The fix is to use the same aggregate-aware union pattern as `best_day_effective_tokens`. This change ships in the same PR — the new 7-day inline strip in `today` depends on the existing field and we shouldn't lock in the bug.
+
+### `events_within` is also used for the existing feed
+
+After this change, `today`'s `last_10m` / `this_10m` computation also uses `events_within(60min)` instead of consuming the 500-row stream. Today's `current_bucket_effective_tokens` keeps working because all its events fit comfortably under 500 — but standardizing on a time-windowed query removes a class of "silently truncates under load" bugs.
 
 ## Habitat rendering
 
@@ -181,10 +216,15 @@ Lives in `src/tui/panels/pet.rs`, not `pet/render.rs`. The panel composes; the r
 **Pass 1 — Ambient backdrop.** A new helper
 
 ```rust
-fn ambient_glyphs_for(species: Species, panel: Rect, tick: u64) -> Vec<AmbientGlyph>
+fn ambient_glyphs_for(
+    species: Species,
+    panel: Rect,
+    pet_inner_rect: Rect,   // the 13×10 the pet occupies — excluded from glyph placement
+    now: OffsetDateTime,    // wall-clock; see drift period note
+) -> Vec<AmbientGlyph>
 ```
 
-returns 12-18 deterministic positions across the panel rect. Each glyph carries:
+returns 12–18 deterministic positions across the panel rect. Each glyph carries:
 
 ```rust
 struct AmbientGlyph {
@@ -195,11 +235,29 @@ struct AmbientGlyph {
 }
 ```
 
-Positions are seeded by `(species_hash, tick / DRIFT_PERIOD)`. Same slots for several seconds, then shift ±1 row/col on the next period. `DRIFT_PERIOD ≈ 32` (8s at 250ms idle tick). Half-life-per-slot ~8s — viewer sees motion every few seconds without it being twitchy.
+Positions are seeded by `(species_hash, drift_phase)`, where `drift_phase = (now.unix_timestamp() / DRIFT_SECS as i64)`. **`DRIFT_SECS = 8` — anchored to wall-clock seconds, NOT animation_frame ticks.** Same slots for ~8s, then shift ±1 row/col on the next phase. This avoids the strobe-during-fast-tick problem flagged in review: tachyonfx bursts run at 60fps but the habitat continues to drift at wall-clock rate.
 
-The pet's centered 13×10 sub-rect is excluded so the pet stays a clean silhouette over the ambient field.
+The pet's `pet_inner_rect` (the 13×10 sub-rect occupied by the pet art, after wander/breath offsets) is excluded so the pet stays a clean silhouette over the ambient field.
 
 **Pass 2 — Pet art.** Unchanged. Existing `render_pet`-rendered art sits at its wander/breath-offset position on top of the backdrop. The pet's own 13×10 particle frame stays — that's its personal halo.
+
+### tachyonfx layering — explicit policy
+
+`pet_panel_rect()` (called from the watch loop at `tui/app.rs:188-193` to scope tachyonfx overlay) must return the **13×10 pet sub-rect**, NOT the full `PetPanel` rect. Otherwise mood-fade / stage-up / feed-pulse effects would sweep across the habitat too — habitat glyphs would desaturate during mood changes, glitch noise would pulse with feed events, etc.
+
+The helper's existing calculation `let pet_h = match PetPanel.preferred_constraint(vm) { Constraint::Length(n) => n, _ => 5 };` returns the wrong height now: it's the full panel height including habitat. Fix: return the inner pet rect explicitly, accounting for the wander/breath offset:
+
+```rust
+pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
+    // ... existing column-content-h calc, NOW including BioCardPanel's preferred height
+    // ... existing inner panel rect calc
+    // Return the 13×10 sub-rect within the panel that holds the pet art,
+    // offset by vm.wander_offset_x and vm.breath_offset_y so effects track
+    // the pet's actual on-screen position frame-by-frame.
+}
+```
+
+`column_content_h` in `pet_panel_rect` must include `BioCardPanel`'s preferred height (`2` content rows + `1` title row + `1` divider rule = `4`, plus `COLUMN_GAP` above). Without this fix the helper underestimates by ~5 rows and tachyonfx effects draw over vitals.
 
 ### Per-species glyph sets
 
@@ -212,24 +270,20 @@ The pet's centered 13×10 sub-rect is excluded so the pet stays a clean silhouet
 | Crystal | `✦ ✧ ◇ ⋄ ·` (facet sparkles) |
 | Mech    | `· + ╴ ╵ ╶` (grid ticks) |
 
-Density target: ~3% of panel cells fill on any given tick. On a 40×14 panel rect that's ~17 glyphs.
-
-The drift period reuses the existing `animation_frame` counter, so fast-tick bursts during effects naturally accelerate the habitat too.
+Density target: ~3% of panel cells fill on any given drift phase. On a 40×14 panel rect that's ~17 glyphs.
 
 ## Helpers collapse
 
-`HelpersPanel` is removed from the layout. Source health flows through the existing `SourceHealthView` instead:
+`HelpersPanel` is removed from the layout. Source health flows through the existing `SourceHealthView`:
 
-`TodayPanel` renders an inline marker on each source row. The marker shows when that source has a recent diagnostic (existing `diagnostic_code: Option<String>` field, which already ages out after 1h per the existing `STALE_DIAGNOSTIC_CUTOFF`). The marker sits **between the source label and its numeric value**:
+`TodayPanel` renders an inline `⚠` marker on each source row when `status != Ready` (i.e. `Diagnostic` or `Blocked`). The marker sits **between the source label and its numeric value**:
 
 ```
 codex          1,208,381   74%        (healthy)
-codex  ⚠       1,208,381   74%        (active diagnostic)
+codex  ⚠       1,208,381   74%        (blocked or has active diagnostic)
 ```
 
-The `⚠` glyph uses the existing `diagnostic` log kind style (red/orange). Hover/tooltip is not part of this design — the meaning is signaled by color and position alone. Column alignment is preserved by reserving a 3-cell gutter after the source label whether or not a marker is rendered.
-
-When all sources have diagnostics (totally broken state), users still see numbers (likely zeros) plus markers; the `errors` field on `WatchViewModel` continues to drive any modal or future error treatment.
+The `⚠` glyph uses the existing `diagnostic` log kind style (red/orange). Column alignment is preserved by reserving a 3-cell gutter after every source label whether or not a marker is rendered. The 1-hour staleness window from `STALE_DIAGNOSTIC_CUTOFF` is intentionally *not* applied to the `Blocked` state — a uninstalled helper stays marked indefinitely, not just for an hour.
 
 ## 7-day inline strip
 
@@ -240,45 +294,83 @@ last 10m       +109.8k  this 10m
 . . . . . ▮ .          ← 7-day
 ```
 
-Implementation reuses `SparkPanel`'s `format_bar` helper (extracted to a shared module or `pub(super)`-promoted), so the visual is identical. Save ~3 rows of panel chrome on the right column.
+Implementation reuses the shared bar/spark helpers from the new `bars` module (see next section), so the visual is byte-identical to the dropped spark panel.
+
+## Shared bars module
+
+`src/tui/panels/bars.rs` is **new** and absorbs:
+
+- `build_spark_lines` (currently in `spark.rs`)
+- `bar_spans` (currently duplicated across `vitals.rs` and `today.rs`)
+- `format_tokens_full` / `format_tokens_short` (currently duplicated; existing standing "T7 will deduplicate" TODOs)
+
+This refactor was already pending across the existing panels. We absorb it here rather than letting the duplicates rot. All panels touched by this change point at the shared helpers.
 
 ## Error handling
 
-- `best_day_effective_tokens()` / `active_days_count()` on a freshly hatched pet → `0.0` / `0`. Bio card renders `best day  —` and `active days  0` for the empty case.
-- EMA rate with zero events in last 48h → `0.0`. ProgressPanel hides the `↑ N/hr` token from the third row of the panel rather than printing `↑ 0/hr`; the `tokens_in / tokens_to_next` portion still renders.
-- S6 pets: `next_stage_label = "—"`, `tokens_to_next = 0.0`, `fraction = 1.0`. Bar renders full + a locked-stage glyph; rate still shows.
-- Source-health marker is purely additive — `diagnostic_code.is_none()` renders nothing extra. No new failure modes.
+- `events_within(48h)` returning empty → EMA rate `0.0`. `ProgressPanel` hides the `↑ Nk/hr` segment so the row reads `▰▰▰▱▱▱▱▱▱▱▱▱▱▱  33%` alone.
+- S6 pets (`is_max_stage == true`): `ProgressPanel` renders a single line "**stage:** aurora · max evolved" with the species's max-stage label and a sage glyph (`✦`); no bar, no rate. Not a permanently-full bar.
+- `best_day_effective_tokens` / `seven_day_token_history` on a freshly hatched pet → 0 / `[0.0; 7]`. Today's 7-day strip renders 7 zero-height dots.
+- `BioView::age_label` at age 0 (instant after hatch): `"0d 0h"`. Sub-day formatting kicks in for any pet < 24h old.
+- Source-health marker is purely additive — `status == Ready` renders the 3-cell gutter without a glyph.
 
 ## Testing
 
 ### Unit tests
 
-- `progress_rate_ema` — empty events → 0; single recent event → tokens / τ_hours within tolerance; two events 6h apart → second weighted half as much.
-- `BioView::age_label` formatting at 0h, 1h, 23h, 24h, 7d, 90d.
-- `best_day_effective_tokens` SQL — rows only in `usage_events`, rows only in `daily_aggregates`, rows in both, empty case.
-- `active_days_count` SQL — equivalent shape.
-- `ambient_glyphs_for` — same `tick / DRIFT_PERIOD` returns same positions; positions never overlap the pet sub-rect.
+- `progress_rate_ema` —
+  - empty events → 0.0
+  - single event at `now` → tokens / τ_hours within tolerance
+  - two events 6h apart → second weighted ~half as much as first
+  - 50k events spread over 48h → finite, no overflow (regression guard for the truncation bug)
+- `BioView::age_label` formatting at 0h, 1h, 23h, 24h, 25h, 7d, 90d, 365d.
+- `best_day_effective_tokens` SQL —
+  - rows only in `usage_events`
+  - rows only in `daily_aggregates`
+  - rows in BOTH for the same `period_date` (compaction overlap) → sums correctly, not max-only
+  - empty case
+- `events_within(duration)` SQL — boundary at exactly `duration` ago, near-boundary inclusion.
+- `seven_day_token_history` — old days that exist only in `daily_aggregates` are surfaced, no longer drop off after compaction.
+- `ambient_glyphs_for` — same `drift_phase` returns same positions across calls; positions never overlap the pet inner rect; per-species glyph sets are non-empty.
+- `pet_panel_rect` — returns the inner 13×10 pet sub-rect, offset by wander/breath; total column height calc includes `BioCardPanel`.
 
 ### Snapshot tests
 
-- Existing `tests/tui_render.rs` snapshots adopt `ProgressView` / `BioView` defaults on the fixture. Existing assertions remain valid because xp display moves but title-bar / vitals fed/happy/energy don't.
-- New per-panel snapshot tests using the existing render-buffer harness for `ProgressPanel` and `BioCardPanel`.
-- One new wide-mode whole-frame snapshot covering all panels in the new arrangement.
+The following existing assertions in `tests/tui_render.rs` need explicit deletion or rewrite (not "fixture-update propagation"):
+
+- Lines that assert `text.contains("helpers")` — at least 6 occurrences (~121, 168, 258, 438, 443, 842) — all removed.
+- `compact_threshold_switches_modes` (~522-531) — the helper-string assertion is replaced with an assertion about the new compact panel ordering (today / progress / feed; no helpers).
+- Any assertion about the `xp` row in vitals — moves to progress panel assertions.
+
+New per-panel snapshots:
+
+- `ProgressPanel` at S0 (sub-S1, fractional bar)
+- `ProgressPanel` at S6 (max-evolved, no bar)
+- `ProgressPanel` with rate = 0 (idle, no rate token)
+- `BioCardPanel` at age 0h (sub-day formatting)
+- `BioCardPanel` at age 12d (day-only formatting)
+- `TodayPanel` with one source `Blocked` (marker rendered) and one `Ready` (no marker; gutter preserved)
+- `TodayPanel` 7-day footer with all-zero history
+- `PetPanel` 2-pass render for crystal (sparkles present in panel rect, none overlap 13×10 pet sub-rect)
+
+New whole-frame snapshots:
+
+- Wide mode with all panels in the new arrangement (fed pet, ProgressView populated).
+- **Compact mode** with the same content (verifies the new panel ordering in compact still works).
 
 ### Integration tests
 
-- `tests/watch_integration.rs` gains a case that seeds 2 weeks of `daily_aggregates`, hatches a pet at a fixed `created_at`, and asserts `vm.bio.lifetime_tokens`, `vm.bio.best_day_tokens`, `vm.bio.active_days`, `vm.bio.age_label` from a deterministic `now`.
-- A second case asserts the inline `⚠` marker by seeding a `provider_diagnostic` and checking `vm.source_health[codex].diagnostic_code.is_some()`.
+- `tests/watch_integration.rs` gains a case that seeds `daily_aggregates` for 8 days, hatches a pet at a fixed `created_at`, and asserts `vm.bio.age_label` and `vm.bio.hatched_label` from a deterministic `now`.
+- A second case asserts the inline `⚠` marker by seeding a `provider_diagnostic` for codex and checking `vm.source_health[codex].status != Ready`.
+- A third case asserts EMA monotonicity: insert N events over 6h, verify `rate_per_hour` is strictly greater than after the same setup minus the last event.
 
 ### Dev-preview QA
 
-`glorp dev-preview` renders the new layout to `target/glorp-preview/index.html`. Manual visual QA happens in a browser, not a tall terminal — easier to verify habitat density, progress bar styling, bio card framing.
+`glorp dev-preview` renders the new layout to `target/glorp-preview/index.html`. Manual visual QA happens in a browser — easier to verify habitat density, progress bar styling, the `⚠` placement, and absence of dead bands at 180×50.
 
 ## Implementation order
 
 Two PRs at execution time, in this order:
 
-1. **Layout refactor** — view-model changes, new `BioCardPanel` / `ProgressPanel`, today gains 7-day footer + `⚠` marker, vitals drops xp, layout drops `SparkPanel` + `HelpersPanel`, removed files deleted. Plus `UsageStore` query additions and EMA helper.
-2. **Habitat** — `ambient_glyphs_for` + `PetPanel.render` 2-pass paint. Pure rendering, no view-model changes.
-
-Both should land on `main` within a day of each other; the design is one piece.
+1. **Layout refactor** — view-model changes, new `BioCardPanel` / `ProgressPanel` / `bars` module, today gains 7-day footer + `⚠` marker, vitals drops xp, layout drops `SparkPanel` + `HelpersPanel`, removed files deleted, `UsageStore` query additions (`events_within`, `best_day_effective_tokens`, fixed `seven_day_token_history`), EMA helper. **Includes a no-op `ambient_glyphs_for` stub returning an empty Vec, plus the 2-pass paint scaffolding in `PetPanel.render`.** This way merging PR1 doesn't visibly widen the empty space — the pet column is the same shape it is today, just with the rest of the layout reflowed. PR1 is independently shippable.
+2. **Habitat** — fills in `ambient_glyphs_for` per-species and the drift-phase logic. Pure rendering, no view-model changes. Independently shippable on top of PR1.
