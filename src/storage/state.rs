@@ -123,11 +123,32 @@ impl StateStore {
             )));
         }
 
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = self.path.parent().ok_or_else(|| {
+            crate::error::GlorpError::Message(format!(
+                "state path has no parent directory: {}",
+                self.path.display()
+            ))
+        })?;
+        std::fs::create_dir_all(parent)?;
+
         let text = serde_json::to_string_pretty(state)?;
-        std::fs::write(&self.path, text)?;
+
+        // Atomic save: write to a sibling temp file in the same directory, fsync
+        // its contents to disk, then rename into place. POSIX `rename(2)` is
+        // atomic on the same filesystem; `NamedTempFile::persist` uses
+        // `MoveFileExA` on Windows, which is atomic for same-volume moves.
+        // `NamedTempFile` auto-deletes the temp file on drop if persist fails,
+        // so the directory is not littered with `state.json.tmp.*` files when
+        // any step errors out.
+        let mut tmp = tempfile::Builder::new()
+            .prefix("state.json.tmp.")
+            .tempfile_in(parent)?;
+        {
+            use std::io::Write;
+            tmp.as_file_mut().write_all(text.as_bytes())?;
+            tmp.as_file_mut().sync_all()?;
+        }
+        tmp.persist(&self.path).map_err(|err| err.error)?;
         Ok(())
     }
 
@@ -175,4 +196,74 @@ pub fn write_state_for_test(
     let paths = crate::paths::AppPaths::from_config_dir(dir.to_path_buf());
     paths.ensure()?;
     StateStore::new(paths.state_file).save(&fixture.into_state())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn tmp_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state.json.tmp."))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn save_leaves_no_temp_files_behind() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path().join("state.json"));
+        store
+            .save(&PetState::new_for_test("seed-1", "buddy"))
+            .unwrap();
+        assert!(
+            tmp_files_in(dir.path()).is_empty(),
+            "save should not leak temp files: {:?}",
+            tmp_files_in(dir.path())
+        );
+    }
+
+    #[test]
+    fn load_ignores_stray_temp_files_in_the_state_directory() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path().join("state.json"));
+        let original = PetState::new_for_test("seed-2", "kit");
+        store.save(&original).unwrap();
+
+        // Hand-write a leftover that resembles a crash mid-save from a previous
+        // run. `load()` must read `state.json` and not be tripped by siblings.
+        let stray = dir.path().join("state.json.tmp.99999");
+        std::fs::write(&stray, b"garbage that is not json").unwrap();
+
+        let loaded = store.load().unwrap().expect("state.json should load");
+        assert_eq!(loaded, original);
+        assert!(stray.exists(), "load must not touch foreign temp files");
+    }
+
+    #[test]
+    fn load_rejects_corrupted_destination_file() {
+        // This documents the invariant the atomic save protects: if the
+        // destination file is ever partially written, `load` surfaces an error
+        // rather than returning a half-state. Atomic rename ensures the real
+        // pipeline never produces such a file, but the detector must stay sharp.
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path().join("state.json"));
+        store
+            .save(&PetState::new_for_test("seed-3", "scrap"))
+            .unwrap();
+        std::fs::write(dir.path().join("state.json"), b"{\"schema_versi").unwrap();
+
+        let err = store.load().expect_err("corrupted state.json must error");
+        assert!(
+            matches!(err, crate::error::GlorpError::Message(ref msg) if msg.contains("malformed state.json")),
+            "expected malformed-json error, got: {err:?}"
+        );
+    }
 }

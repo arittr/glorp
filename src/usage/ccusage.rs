@@ -9,13 +9,21 @@ use crate::usage::provider::{
     UsageSnapshot,
 };
 use std::ffi::OsStr;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+use wait_timeout::ChildExt;
 
 const CLAUDE_SURFACE: &str = "claude-code";
 const CODEX_SURFACE: &str = "codex";
 const CONFIDENCE: &str = "local-log-derived";
+
+/// Hard ceiling for a single ccusage helper invocation. A helper that hangs
+/// past this (frozen Node startup, slow fs lock, runaway loop) gets killed
+/// so the watch worker thread cannot wedge.
+pub(crate) const HELPER_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelperCommand {
@@ -120,7 +128,24 @@ impl CcusageCommandProvider {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        let output = self.run_command(provider_surface, &helper_command, daily_args)?;
+        let output = match self.run_command(provider_surface, &helper_command, daily_args) {
+            Ok(output) => output,
+            Err(GlorpError::Io(err)) if err.kind() == io::ErrorKind::TimedOut => {
+                let diagnostic = diagnostic(
+                    provider_surface,
+                    "helper_timeout",
+                    &format!(
+                        "{command_name} did not return within {}s",
+                        HELPER_SUBPROCESS_TIMEOUT.as_secs()
+                    ),
+                );
+                persist_diagnostic(store, &diagnostic)?;
+                return Ok(HelperInvocation::EarlyExit {
+                    diagnostics: vec![diagnostic],
+                });
+            }
+            Err(err) => return Err(err),
+        };
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
             let diagnostic = diagnostic(
@@ -398,8 +423,48 @@ impl CcusageCommandProvider {
         let mut command = Command::new(&helper.program);
         command.args(&helper.args_prefix);
         command.args(args);
-        command.output().map_err(GlorpError::from)
+        run_command_with_timeout(&mut command, HELPER_SUBPROCESS_TIMEOUT)
     }
+}
+
+/// Spawn `command` and wait up to `timeout` for it to finish. On timeout the
+/// child is killed and a `TimedOut` IO error is returned, which the caller
+/// surfaces as a `helper_timeout` diagnostic. Stdout / stderr are captured
+/// the same way `Command::output` would.
+pub(crate) fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output> {
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.stdin(Stdio::null());
+    let mut child = command.spawn().map_err(GlorpError::from)?;
+
+    let status = match child.wait_timeout(timeout).map_err(GlorpError::from)? {
+        Some(status) => status,
+        None => {
+            // Best-effort kill: even if the kill itself fails the child will be
+            // reaped when its parent (the watch worker thread or the test) exits.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GlorpError::from(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("helper subprocess exceeded {}s timeout", timeout.as_secs()),
+            )));
+        }
+    };
+
+    let mut stdout = Vec::new();
+    if let Some(mut handle) = child.stdout.take() {
+        let _ = handle.read_to_end(&mut stdout);
+    }
+    let mut stderr = Vec::new();
+    if let Some(mut handle) = child.stderr.take() {
+        let _ = handle.read_to_end(&mut stderr);
+    }
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 impl UsageProvider for CcusageCommandProvider {
@@ -771,5 +836,43 @@ mod parse_period_start_tests {
         assert!(parse_period_start("not a date").is_err());
         assert!(parse_period_start("2026/03/23").is_err());
         assert!(parse_period_start("Marz 23, 2026").is_err());
+    }
+}
+
+#[cfg(test)]
+mod run_command_timeout_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// `sleep 5` started with a 100ms budget must be killed and return
+    /// `ErrorKind::TimedOut` quickly. The hard ceiling here (2s) is what
+    /// the watch loop relies on to avoid wedging on a hung helper.
+    #[test]
+    fn timeout_kills_long_running_child() {
+        let mut command = Command::new("sleep");
+        command.arg("5");
+        let started = Instant::now();
+        let result = run_command_with_timeout(&mut command, Duration::from_millis(100));
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(GlorpError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::TimedOut),
+            other => panic!("expected TimedOut io error, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout path should not block past the configured timeout (took {elapsed:?})"
+        );
+    }
+
+    /// A child that exits well within the timeout returns its captured output.
+    #[test]
+    fn fast_child_returns_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf hello"]);
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(5))
+            .expect("fast child should succeed");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello");
     }
 }

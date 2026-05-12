@@ -477,12 +477,18 @@ impl WatchApp {
 
 impl Drop for WatchApp {
     fn drop(&mut self) {
-        // Best-effort: if the worker is gone the send fails harmlessly. We
-        // still join so the thread does not outlive the app.
+        // Signal shutdown and detach the worker rather than joining. A slow
+        // helper subprocess (Node startup, network call, fs lock) can keep
+        // an in-flight poll parked for many seconds; the Shutdown message
+        // sits behind it in the channel queue, so a blocking join would hang
+        // the user's terminal after they press `q`. Detaching is safe
+        // because the save boundary in `apply_unapplied_usage` plus the
+        // unapplied-row ledger already reconciles any in-flight work on the
+        // next successful run, and the OS reaps the worker (and any child
+        // process it spawned) when glorp exits.
         let _ = self.request_tx.send(PollRequest::Shutdown);
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
+        // Take the handle out of the option but deliberately do not join.
+        let _ = self.worker.take();
     }
 }
 

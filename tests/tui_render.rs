@@ -752,9 +752,62 @@ fn shutdown_drops_worker_thread_cleanly() {
         },
         Box::new(harness),
     );
-    // Drop the app without ever running. Drop sends Shutdown and joins the
-    // worker; if that path hangs the test will hang.
+    // Drop the app without ever running. Drop signals shutdown to the worker
+    // and detaches; if that path blocks the test will hang.
     drop(app);
+}
+
+/// Poller that parks forever inside `poll_usage` once entered. Used to
+/// simulate a hung Node helper so we can prove that dropping `WatchApp`
+/// while a poll is in flight does not block the main thread.
+struct ForeverBlockingPoller {
+    entered: Arc<Barrier>,
+}
+
+impl WatchUsagePoller for ForeverBlockingPoller {
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
+        self.entered.wait();
+        // Sleep effectively forever; the OS reaps this thread when the
+        // process exits. The test asserts that Drop does NOT wait on this.
+        std::thread::sleep(Duration::from_secs(3600));
+        Ok(current.clone())
+    }
+}
+
+#[test]
+fn drop_does_not_block_on_in_flight_poll() {
+    let entered = Arc::new(Barrier::new(2));
+    let poller = ForeverBlockingPoller {
+        entered: Arc::clone(&entered),
+    };
+    let mut app = WatchApp::with_poll_callback(
+        WatchViewModel::fixture(),
+        WatchAppConfig {
+            animation_tick: Duration::from_millis(1),
+            usage_poll_interval: Duration::from_secs(60),
+            color_capability: ColorCapability::Truecolor,
+        },
+        Box::new(poller),
+    );
+    // Send a poll so the worker is parked inside `poll_usage` when we drop.
+    let started = app.kick_off_poll_for_test().unwrap();
+    assert!(started);
+    entered.wait();
+
+    // `WatchApp` is not `Send` (PetAnimator holds tachyonfx state that isn't
+    // thread-safe), so we can't run `drop` on a side thread and wait via
+    // recv_timeout. Instead, take a wall-clock measurement around `drop(app)`
+    // on this thread. This catches a regression back to the original
+    // blocking-join behaviour, which would take a full hour (the poller's
+    // sleep) to return — the assertion budget is tight enough to fail fast
+    // if Drop ever waits on the worker.
+    let started_drop = std::time::Instant::now();
+    drop(app);
+    let elapsed = started_drop.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "WatchApp::drop must not block on an in-flight poll (took {elapsed:?})"
+    );
 }
 
 /// Standard wide-mode terminal width for layout invariants:
