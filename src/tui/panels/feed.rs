@@ -1,11 +1,12 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::semantic_styles;
+use crate::tui::style::{claude_color, codex_color, semantic_styles};
 use crate::tui::view_model::WatchViewModel;
 
 pub struct FeedPanel;
@@ -16,7 +17,7 @@ impl Panel for FeedPanel {
         // panel doesn't hog vertical space when there are many events. Extra
         // space goes to the trailing spacer in render_column_with_spacing,
         // pushing helpers + empty area to the bottom of the column.
-        const MAX_EVENT_ROWS: u16 = 8;
+        const MAX_EVENT_ROWS: u16 = 6;
         let events = (vm.recent_events.len() as u16).clamp(2, MAX_EVENT_ROWS);
         Constraint::Length(events + 1)
     }
@@ -34,21 +35,52 @@ impl Panel for FeedPanel {
 /// Build the event lines for the feed panel.
 ///
 /// Clamps the number of events to `max_rows` so the content never overflows
-/// the allocated rect.
-fn build_feed_lines(vm: &WatchViewModel, max_rows: u16) -> Vec<Line<'_>> {
+/// the allocated rect. Source names ("claude-code", "codex") at the start of
+/// event text are extracted as separately-colored spans.
+pub(crate) fn build_feed_lines(vm: &WatchViewModel, max_rows: u16) -> Vec<Line<'_>> {
     let styles = semantic_styles();
     vm.recent_events
         .iter()
         .take(max_rows as usize)
         .map(|event| {
-            Line::from(vec![
+            let text_style = styles.log(event.kind);
+            let (source_span, rest_span) = extract_source_span(&event.text, text_style);
+            let mut spans = vec![
                 Span::raw("  "),
                 Span::styled(event.timestamp.as_str(), styles.timestamp),
                 Span::raw("  "),
-                Span::styled(event.text.as_str(), styles.log(event.kind)),
-            ])
+                source_span,
+            ];
+            if let Some(rest) = rest_span {
+                spans.push(rest);
+            }
+            Line::from(spans)
         })
         .collect()
+}
+
+/// If `text` starts with a known source name ("claude-code" or "codex"),
+/// returns a colored span for the source name and an optional span for the
+/// remainder. Otherwise returns a single span for the full text with
+/// `fallback_style`.
+fn extract_source_span(text: &str, fallback_style: Style) -> (Span<'_>, Option<Span<'_>>) {
+    for name in &["claude-code", "codex"] {
+        if let Some(rest) = text.strip_prefix(name) {
+            let color = if *name == "claude-code" {
+                claude_color()
+            } else {
+                codex_color()
+            };
+            let source_span = Span::styled(&text[..name.len()], Style::default().fg(color));
+            let rest_span = if rest.is_empty() {
+                None
+            } else {
+                Some(Span::styled(rest, fallback_style))
+            };
+            return (source_span, rest_span);
+        }
+    }
+    (Span::styled(text, fallback_style), None)
 }
 
 #[cfg(test)]
@@ -141,6 +173,62 @@ mod tests {
         assert!(
             s.contains("feed"),
             "divider should still appear with no events"
+        );
+    }
+
+    fn test_context() -> RenderContext {
+        RenderContext::new(crate::tui::style::ColorCapability::Truecolor)
+    }
+
+    #[test]
+    fn feed_panel_caps_at_six_events() {
+        let vm = WatchViewModel::fixture_with_n_events(12);
+        let panel = FeedPanel;
+        // Constraint must be 1 border + 6 events regardless of vm size.
+        assert_eq!(
+            panel.preferred_constraint(&vm),
+            Constraint::Length(7),
+            "1 border + 6 events, even when vm has 12"
+        );
+        // Render into a terminal sized to match the constraint (7 rows).
+        // inner.height = 6, so build_feed_lines receives max_rows=6.
+        let backend = TestBackend::new(60, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ctx = test_context();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // Count rows that look like event rows (contain "13:" timestamp pattern).
+        let event_rows = (0..buf.area().height)
+            .filter(|&y| {
+                let line: String = (0..buf.area().width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                line.contains("13:")
+            })
+            .count();
+        assert!(
+            event_rows <= 6,
+            "feed must not render more than 6 events, got {event_rows}"
+        );
+    }
+
+    #[test]
+    fn feed_panel_source_label_colors() {
+        use crate::tui::style::{claude_color, codex_color};
+        let vm = WatchViewModel::fixture_with_n_events(3);
+        let lines = build_feed_lines(&vm, 6);
+        let find_source = |needle: &str, color: ratatui::style::Color| {
+            lines.iter().any(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains(needle) && s.style.fg == Some(color))
+            })
+        };
+        assert!(
+            find_source("claude-code", claude_color()) || find_source("codex", codex_color()),
+            "at least one source label must carry its source color"
         );
     }
 }

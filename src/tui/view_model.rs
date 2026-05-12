@@ -240,6 +240,24 @@ impl WatchViewModel {
         vm
     }
 
+    /// Like `fixture_with_events` but fills `recent_events` with `n` Usage events
+    /// (alternating claude-code / codex sources) for cap and color tests.
+    #[doc(hidden)]
+    pub fn fixture_with_n_events(n: usize) -> Self {
+        let mut vm = Self::fixture();
+        vm.recent_events = (0..n)
+            .map(|i| {
+                let source = if i % 2 == 0 { "claude-code" } else { "codex" };
+                EventView {
+                    timestamp: format!("13:{:02}", i % 60),
+                    kind: LogKind::Usage,
+                    text: format!("{source} added 1.0k effective tokens"),
+                }
+            })
+            .collect();
+        vm
+    }
+
     pub fn is_blocked(&self) -> bool {
         !self.source_health.is_empty()
             && self.source_health.iter().all(|source| {
