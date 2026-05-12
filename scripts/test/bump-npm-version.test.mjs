@@ -49,10 +49,17 @@ version = "${version}"
     name: "glorp",
     lockfileVersion: 3,
     packages: {
+      "node_modules/@arittr/glorp-linux-x64": {
+        version,
+        optional: true
+      },
       "npm/glorp": {
         name: "@arittr/glorp",
         version,
         optionalDependencies
+      },
+      "npm/glorp/node_modules/@arittr/glorp-linux-x64": {
+        optional: true
       }
     }
   });

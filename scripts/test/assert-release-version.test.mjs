@@ -14,7 +14,12 @@ function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
 }
 
-function writeFixture({ version = "0.1.6", cargoVersion = version, platformVersions = {} } = {}) {
+function writeFixture({
+  version = "0.1.6",
+  cargoVersion = version,
+  platformVersions = {},
+  staleLockPlatformEntry = false
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "glorp-release-version-"));
 
   fs.writeFileSync(
@@ -46,16 +51,23 @@ version = "${cargoVersion}"
     version,
     optionalDependencies
   });
+  const lockPackages = {
+    "npm/glorp": {
+      name: "@arittr/glorp",
+      version,
+      optionalDependencies
+    }
+  };
+  if (staleLockPlatformEntry) {
+    lockPackages["npm/glorp/node_modules/@arittr/glorp-linux-x64"] = {
+      optional: true
+    };
+  }
+
   writeJson(path.join(root, "package-lock.json"), {
     name: "glorp",
     lockfileVersion: 3,
-    packages: {
-      "npm/glorp": {
-        name: "@arittr/glorp",
-        version,
-        optionalDependencies
-      }
-    }
+    packages: lockPackages
   });
 
   for (const platform of platforms) {
@@ -102,6 +114,18 @@ describe("assert-release-version", () => {
     assert.match(
       result.stderr,
       /npm\/platform\/linux-x64\/package\.json version 0\.1\.5 does not match expected 0\.1\.6/
+    );
+  });
+
+  it("fails when package-lock keeps stale nested optional platform package entries", () => {
+    const root = writeFixture({ staleLockPlatformEntry: true });
+
+    const result = run(root, ["--tag", "v0.1.6"]);
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /package-lock\.json contains stale nested optional platform package entry npm\/glorp\/node_modules\/@arittr\/glorp-linux-x64/
     );
   });
 });

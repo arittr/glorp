@@ -101,6 +101,16 @@ function bumpPackageLock(file, target) {
   for (const name of Object.keys(main.optionalDependencies ?? {})) {
     main.optionalDependencies[name] = target;
   }
+
+  for (const key of Object.keys(lockfile.packages ?? {})) {
+    if (key.startsWith("node_modules/@arittr/glorp-")) {
+      delete lockfile.packages[key];
+    }
+    if (key.startsWith("npm/glorp/node_modules/@arittr/glorp-")) {
+      delete lockfile.packages[key];
+    }
+  }
+
   writeJson(file, lockfile);
 }
 

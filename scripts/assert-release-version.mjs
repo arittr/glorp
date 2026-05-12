@@ -138,6 +138,16 @@ function main() {
         expectVersion(`package-lock.json optional dependency ${name}`, version);
       }
     }
+
+    for (const [key, pkg] of Object.entries(lockfile.packages ?? {})) {
+      if (key.startsWith("npm/glorp/node_modules/@arittr/glorp-")) {
+        failures.push(`package-lock.json contains stale nested optional platform package entry ${key}`);
+      }
+
+      if (key.startsWith("node_modules/@arittr/glorp-")) {
+        expectVersion(`package-lock.json ${key}`, pkg.version);
+      }
+    }
   }
 
   if (failures.length > 0) {
