@@ -146,7 +146,9 @@ pub fn stage_label(species: Species, stage: Stage) -> &'static str {
         Species::Crystal => [
             "grain", "shard", "facet", "cluster", "crystal", "spire", "lodestar",
         ],
-        Species::Mech => ["chip", "bolt", "rivet", "drone", "mech", "warmech", "titan"],
+        Species::Mech => [
+            "chip", "bolt", "rivet", "drone", "mech", "archmech", "titan",
+        ],
     };
     labels[stage_key(stage).index()]
 }

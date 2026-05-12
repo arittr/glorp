@@ -61,7 +61,9 @@ pub fn stage_label(species: Species, stage: Stage) -> &'static str {
         Species::Crystal => [
             "grain", "shard", "facet", "cluster", "crystal", "spire", "lodestar",
         ],
-        Species::Mech => ["chip", "bolt", "rivet", "drone", "mech", "warmech", "titan"],
+        Species::Mech => [
+            "chip", "bolt", "rivet", "drone", "mech", "archmech", "titan",
+        ],
     };
     labels[stage_key(stage).index()]
 }
@@ -109,15 +111,15 @@ pub(crate) fn template_lines(
     }
 }
 
-// Some species visibly transform at S5+: Crystal pets cluster, Ghost pets grow
-// longer tentacles, Blob pets bubble and bud co-blobs, Fuzz pets grow a tail.
-// Skip the singleton morph 0 at elder stages for those species so every elder
-// pet reads as the evolved form while still preserving morph-driven variation
-// across the remaining morphs.
+// Most species visibly transform at S5+: Crystal pets cluster, Ghost pets grow
+// longer tentacles, Blob pets bubble and bud co-blobs, Fuzz pets grow a tail,
+// Mech pets upgrade chassis. Skip the singleton morph 0 at elder stages so
+// every elder pet reads as the evolved form while still preserving
+// morph-driven variation across the remaining morphs.
 fn elder_morph_index(species: Species, morph_index: usize, len: usize) -> usize {
     let skip_first = matches!(
         species,
-        Species::Crystal | Species::Ghost | Species::Blob | Species::Fuzz
+        Species::Crystal | Species::Ghost | Species::Blob | Species::Fuzz | Species::Mech
     ) && len > 1;
     if skip_first {
         1 + (morph_index % (len - 1))
@@ -642,51 +644,69 @@ const CRYSTAL_TINY: &[Template; 3] = &[
 ];
 
 // ── Mech ──────────────────────────────────────────────────────────
+// Chunky industrial chassis using \u{2588}/\u{2592} for armor plating and
+// double-line \u{2550}/\u{2551} chrome. Elder morphs upgrade the chassis:
+// heavier wide frame, hovering drone, or bracketed titan plating.
 const MECH_PUP: &[Template] = &[[
     "           ",
     "           ",
     "    _._    ",
     "   \u{250c}\u{2500}\u{2500}\u{2500}\u{2510}   ",
-    "   \u{2502}{eyes}\u{2502}   ",
-    "   \u{2502}.{mouth}.\u{2502}   ",
-    "   \u{2502}{pattern}\u{2502}   ",
-    "   \u{2514}\u{2500}{accent}\u{2500}\u{2518}   ",
+    "  \u{250c}\u{2518}{eyes}\u{2514}\u{2510}  ",
+    "  \u{2502}\u{b7}\u{b7}{mouth}\u{b7}\u{b7}\u{2502}  ",
+    "  \u{2514}\u{2500}{pattern}\u{2500}\u{2518}  ",
+    "    \u{2500}{accent}\u{2500}    ",
 ]];
 
 const MECH_ADULT: &[Template] = &[
+    // Morph 0 — S4 mech: humanoid build with bolt-shoulders and split feet.
     [
         "    /\u{b7}\\    ",
         "   \u{250c}\u{2500}\u{2500}\u{2500}\u{2510}   ",
-        "  \u{250c}\u{2518}{eyes}\u{2514}\u{2510}  ",
-        "  \u{2502} .{mouth}. \u{2502}  ",
-        "  \u{2502} {pattern} \u{2502}  ",
-        "  \u{2514}\u{2500}\u{2500}{accent}\u{2500}\u{2500}\u{2518}  ",
-        "  /\u{2017}\u{2017}\u{2017}\u{2017}\u{2017}\\  ",
-        "  \u{203e}\u{203e}   \u{203e}\u{203e}  ",
+        "   \u{2502}{eyes}\u{2502}   ",
+        "   \u{2502}\u{b7}{mouth}\u{b7}\u{2502}   ",
+        " \u{250c}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2510} ",
+        " \u{2502}\u{2588}\u{2591}{pattern}\u{2591}\u{2588}\u{2502} ",
+        " \u{2502}\u{2588}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2588}\u{2502} ",
+        " \u{2514}\u{2500}\u{2518}\u{203e}\u{203e}\u{203e}\u{2514}\u{2500}\u{2518} ",
     ],
+    // Morph 1 — sentinel: crossed-mast antenna, full-width platform base.
     [
-        "  | /\u{b7}\\ |  ",
-        "  \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}  ",
-        "  \u{2502} {eyes} \u{2502}  ",
-        " -\u{2502} .{mouth}. \u{2502}- ",
-        " -\u{2502} {pattern} \u{2502}- ",
-        "  \u{2514}\u{2500}\u{2500}{accent}\u{2500}\u{2500}\u{2518}  ",
-        "  \u{250c}\u{2500}\u{2500}\u{2534}\u{2500}\u{2500}\u{2510}  ",
-        "  \u{203e}\u{203e}   \u{203e}\u{203e}  ",
+        "  \\\\__//   ",
+        "  \u{250c}\u{2567}\u{2550}\u{2567}\u{2550}\u{2567}\u{2510}  ",
+        "  \u{2502}\u{2593}{eyes}\u{2593}\u{2502}  ",
+        "  \u{2502}\u{2593}\u{b7}{mouth}\u{b7}\u{2593}\u{2502}  ",
+        "\u{250c}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2510}",
+        "\u{2502}\u{2591}\u{2591}\u{2591}{pattern}\u{2591}\u{2591}\u{2591}\u{2502}",
+        "\u{2502}\u{2591}\u{2591}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2591}\u{2591}\u{2502}",
+        "\u{2514}\u{2500}\u{2510}\u{2568}\u{2550}\u{2550}\u{2550}\u{2568}\u{250c}\u{2500}\u{2518}",
     ],
+    // Morph 2 — drone: sensor halo, narrowed neck, hover exhaust trail.
     [
-        "   _.{accent}._   ",
-        "  \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}  ",
-        "  \u{2502} {eyes} \u{2502}  ",
-        "  \u{2502}  {mouth}  \u{2502}  ",
-        "  \u{2502} {pattern} \u{2502}  ",
-        "  \u{2514}\u{252c}\u{2500}\u{2500}\u{2500}\u{252c}\u{2518}  ",
-        "  \u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}  ",
-        "  \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}  ",
+        " \u{b0} \\\u{b7}/ \u{b0}  ",
+        "   \u{2553}\u{2500}\u{2500}\u{2500}\u{2556}   ",
+        "   \u{2551}{eyes}\u{2551}   ",
+        "   \u{2551}\u{b7}{mouth}\u{b7}\u{2551}   ",
+        "    \u{2559}\u{2565}\u{255c}    ",
+        "   \u{2503}\u{2592}{pattern}\u{2592}\u{2503}   ",
+        "  \u{2517}\u{2501}\u{2501}{accent}\u{2501}\u{2501}\u{251b}  ",
+        "  \u{2591} \u{2591} \u{2591} \u{2591}  ",
+    ],
+    // Morph 3 — bio-mech: heavy chrome, exposed core indicators, bolted ends.
+    [
+        "   __\u{2588}__   ",
+        "   \u{250f}\u{2501}\u{2501}\u{2501}\u{2513}   ",
+        "   \u{2503}{eyes}\u{2503}   ",
+        "   \u{2503}\u{b7}{mouth}\u{b7}\u{2503}   ",
+        " \u{250f}\u{2501}\u{2567}\u{2550}\u{2550}\u{2550}\u{2567}\u{2501}\u{2513} ",
+        " \u{2503}\u{2592}\u{2591}{pattern}\u{2591}\u{2592}\u{2503} ",
+        " \u{2503}\u{2592}\u{25c9}{accent}\u{25c9}\u{2592}\u{2503} ",
+        " \u{2517}\u{2501}\u{2568}\u{2550}\u{2550}\u{2550}\u{2568}\u{2501}\u{251b} ",
     ],
 ];
 
 const MECH_TINY: &[Template; 3] = &[
+    // S0 chip — tiny printed-circuit chip with one indicator.
     [
         "           ",
         "           ",
@@ -694,9 +714,10 @@ const MECH_TINY: &[Template; 3] = &[
         "           ",
         "           ",
         "    \u{250c}\u{2500}\u{2510}    ",
-        "    \u{2502}\u{b7}\u{2502}    ",
+        "    \u{2502}\u{2588}\u{2502}    ",
         "    \u{2514}\u{2500}\u{2518}    ",
     ],
+    // S1 bolt — small mech head, blinking indicator.
     [
         "           ",
         "           ",
@@ -707,6 +728,7 @@ const MECH_TINY: &[Template; 3] = &[
         "   \u{2502}o o\u{2502}   ",
         "   \u{2514}\u{2500}\u{2500}\u{2500}\u{2518}   ",
     ],
+    // S2 rivet — small forming robot with eyes, pattern, mouth slot.
     [
         "           ",
         "           ",

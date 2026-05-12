@@ -161,7 +161,9 @@ fn tokenpet_stage_labels_match_spec() {
         ),
         (
             Species::Mech,
-            ["chip", "bolt", "rivet", "drone", "mech", "warmech", "titan"],
+            [
+                "chip", "bolt", "rivet", "drone", "mech", "archmech", "titan",
+            ],
         ),
     ];
     for (species, labels) in cases {
