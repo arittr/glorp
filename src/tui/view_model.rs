@@ -102,6 +102,26 @@ pub struct ProgressView {
     pub is_max_stage: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct BioView {
+    /// Pre-formatted "may 11 04:00" — local TZ, computed at vm-build time.
+    pub hatched_label: String,
+    /// "0d 4h" if < 24h, otherwise "12d".
+    pub age_label: String,
+}
+
+impl BioView {
+    pub fn format_age(age: time::Duration) -> String {
+        let total_hours = age.whole_hours();
+        if total_hours < 24 {
+            format!("0d {total_hours}h")
+        } else {
+            let days = age.whole_days();
+            format!("{days}d")
+        }
+    }
+}
+
 impl WatchViewModel {
     pub fn fixture() -> Self {
         Self {
@@ -235,6 +255,7 @@ impl WatchViewModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use time::Duration;
 
     #[test]
     fn progress_view_has_required_fields() {
@@ -265,5 +286,21 @@ mod tests {
             is_max_stage: true,
         };
         assert!(p.is_max_stage);
+    }
+
+    #[test]
+    fn bio_view_age_label_sub_day_formats_as_hours() {
+        assert_eq!(BioView::format_age(Duration::ZERO), "0d 0h");
+        assert_eq!(BioView::format_age(Duration::hours(1)), "0d 1h");
+        assert_eq!(BioView::format_age(Duration::hours(23)), "0d 23h");
+    }
+
+    #[test]
+    fn bio_view_age_label_day_or_more_drops_hours() {
+        assert_eq!(BioView::format_age(Duration::hours(24)), "1d");
+        assert_eq!(BioView::format_age(Duration::hours(25)), "1d");
+        assert_eq!(BioView::format_age(Duration::days(7)), "7d");
+        assert_eq!(BioView::format_age(Duration::days(90)), "90d");
+        assert_eq!(BioView::format_age(Duration::days(365)), "365d");
     }
 }
