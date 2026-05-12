@@ -110,13 +110,15 @@ pub(crate) fn template_lines(
 }
 
 // Some species visibly transform at S5+: Crystal pets cluster, Ghost pets grow
-// longer tentacles, Blob pets bubble and bud co-blobs. Skip the singleton
-// morph 0 at elder stages for those species so every elder pet reads as the
-// evolved form while still preserving morph-driven variation across the
-// remaining morphs.
+// longer tentacles, Blob pets bubble and bud co-blobs, Fuzz pets grow a tail.
+// Skip the singleton morph 0 at elder stages for those species so every elder
+// pet reads as the evolved form while still preserving morph-driven variation
+// across the remaining morphs.
 fn elder_morph_index(species: Species, morph_index: usize, len: usize) -> usize {
-    let skip_first =
-        matches!(species, Species::Crystal | Species::Ghost | Species::Blob) && len > 1;
+    let skip_first = matches!(
+        species,
+        Species::Crystal | Species::Ghost | Species::Blob | Species::Fuzz
+    ) && len > 1;
     if skip_first {
         1 + (morph_index % (len - 1))
     } else {
@@ -177,80 +179,100 @@ fn tiny_template(species: Species, index: usize) -> &'static Template {
 }
 
 // ── Fuzz ──────────────────────────────────────────────────────────
+// Chunky filled cat-creature: /\_/\ ears, two-tone ░▒ fur shading, and a tail
+// that grows at elder stages. Morph 0 is the tail-less S4 form; morphs 1-3
+// (S5+ via elder_morph_index) each sport a distinct tail.
 const FUZZ_PUP: &[Template] = &[[
     "           ",
     "           ",
-    "           ",
     "   /\\_/\\   ",
-    "  ( {eyes} )  ",
-    "    .{mouth}.    ",
-    "   /{pattern}\\   ",
-    "   d {accent} b   ",
+    "  (\u{2591}{eyes}\u{2591})  ",
+    "   ='{mouth}'=   ",
+    " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\ ",
+    "  \\\u{2591}{accent}\u{2591}/   ",
+    "    d b    ",
 ]];
 
 const FUZZ_ADULT: &[Template] = &[
+    // Morph 0 — S4 fuzz: chunky cat-body with no tail yet.
     [
         "           ",
         "   /\\_/\\   ",
-        "  ( {eyes} )  ",
-        " ='  {mouth}  '= ",
-        "  / {pattern} \\  ",
-        " (   {accent}   ) ",
-        "  \\_____/  ",
+        "  (\u{2591}{eyes}\u{2591})  ",
+        "   ='{mouth}'=   ",
+        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\ ",
+        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}) ",
+        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/  ",
         "   d   b   ",
     ],
+    // Morph 1 — short curved tail extending behind to the right.
     [
-        "  /\\---/\\  ",
-        " /  {eyes}  \\ ",
-        " \\   {mouth}   / ",
-        "  / {pattern} \\  ",
-        " (   {accent}   ) ",
-        " /       \\ ",
-        " \\_______/ ",
-        "   \u{02bc}   \u{02bc}   ",
+        "   /\\_/\\   ",
+        "  (\u{2591}{eyes}\u{2591})  ",
+        "   ='{mouth}'=   ",
+        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
+        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591})~",
+        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/ ~",
+        "   d   b ~ ",
+        "           ",
     ],
+    // Morph 2 — long fluffy tail dangling down behind the body.
     [
-        "           ",
-        "           ",
-        "  /\\   /\\  ",
-        " |  {eyes}  | ",
-        "  \\_{pattern}_/  ",
-        "    {mouth} {mouth}    ",
-        "  __ {accent} __  ",
-        "  d/   \\b  ",
+        "   /\\_/\\   ",
+        "  (\u{2591}{eyes}\u{2591})  ",
+        "   ='{mouth}'=   ",
+        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
+        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}}",
+        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/\u{2591} ",
+        "   d   b\u{2591}  ",
+        "        '  ",
+    ],
+    // Morph 3 — tail arched up high over the back, curled forward.
+    [
+        "          )",
+        "   /\\_/\\  )",
+        "  (\u{2591}{eyes}\u{2591}) )",
+        "   ='{mouth}'=  )",
+        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
+        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}) ",
+        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/  ",
+        "   d   b   ",
     ],
 ];
 
 const FUZZ_TINY: &[Template; 3] = &[
+    // S0 fluff — small chunky fluffball.
     [
         "           ",
         "           ",
         "           ",
         "           ",
         "           ",
-        "           ",
-        "    \u{029a}\u{029a}\u{029a}    ",
-        "    ___    ",
+        "    \u{2591}\u{2591}\u{2591}    ",
+        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
+        "    ' '    ",
     ],
+    // S1 fuzzling — small forming creature, single ear emerging.
     [
         "           ",
         "           ",
         "           ",
         "           ",
-        "    ___    ",
-        "   /{eyes}\\   ",
-        "   \\___/   ",
-        "    \u{02bc} \u{02bc}    ",
+        "    /\\     ",
+        "   \u{2591}\u{2592}\u{2591}\u{2592}\u{2591}   ",
+        "   (\u{2591}\u{2591}\u{2591})   ",
+        "    ' '    ",
     ],
+    // S2 kit — small cat with face and ears.
     [
         "           ",
         "           ",
         "           ",
         "   /\\_/\\   ",
-        "  ( {eyes} )  ",
-        "    .{mouth}.    ",
-        "   /{pattern}\\   ",
-        "    | |    ",
+        "  (\u{2591}{eyes}\u{2591})  ",
+        "   ='{mouth}'=   ",
+        "   \\\u{2591}\u{2592}\u{2591}/   ",
+        "    d b    ",
     ],
 ];
 
