@@ -11,6 +11,7 @@ use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
 
 pub mod bars;
+pub mod bio_card;
 pub mod feed;
 pub mod helpers;
 pub mod pet;
@@ -19,6 +20,7 @@ pub mod spark;
 pub mod today;
 pub mod vitals;
 
+pub use bio_card::BioCardPanel;
 pub use feed::FeedPanel;
 pub use helpers::HelpersPanel;
 pub use pet::PetPanel;
