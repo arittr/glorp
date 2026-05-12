@@ -441,6 +441,66 @@ impl UsageStore {
         Ok(())
     }
 
+    pub fn events_within(
+        &self,
+        duration: time::Duration,
+        now: OffsetDateTime,
+    ) -> crate::error::Result<Vec<NormalizedUsageEvent>> {
+        let cutoff = format_time(now - duration)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                provider_surface,
+                provider_version,
+                parser_version,
+                command,
+                source_surface,
+                period_start,
+                observed_at,
+                bucket_at,
+                model,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                reasoning_output_tokens,
+                effective_tokens,
+                cost_usd,
+                confidence,
+                provider_delta_id
+             FROM usage_events
+             WHERE observed_at >= ?1
+             ORDER BY observed_at DESC, id DESC",
+        )?;
+        let events = stmt
+            .query_map(params![cutoff], |row| {
+                let period_start: String = row.get(5)?;
+                let observed_at: String = row.get(6)?;
+                let bucket_at: String = row.get(7)?;
+                Ok(NormalizedUsageEvent {
+                    provider_surface: row.get(0)?,
+                    provider_version: row.get(1)?,
+                    parser_version: row.get(2)?,
+                    command: row.get(3)?,
+                    source_surface: row.get(4)?,
+                    period_start: parse_time_for_sql(&period_start)?,
+                    observed_at: parse_time_for_sql(&observed_at)?,
+                    bucket_at: parse_time_for_sql(&bucket_at)?,
+                    model: row.get(8)?,
+                    input_tokens: row.get(9)?,
+                    output_tokens: row.get(10)?,
+                    cache_creation_tokens: row.get(11)?,
+                    cache_read_tokens: row.get(12)?,
+                    reasoning_output_tokens: row.get(13)?,
+                    effective_tokens: row.get(14)?,
+                    cost_usd: row.get(15)?,
+                    confidence: row.get(16)?,
+                    provider_delta_id: row.get(17)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+
     pub fn recent_events(&self, limit: u32) -> crate::error::Result<Vec<NormalizedUsageEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT
@@ -951,6 +1011,45 @@ fn parse_time_for_sql(value: &str) -> rusqlite::Result<OffsetDateTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_event_at(observed_at: OffsetDateTime, tokens: f64) -> NormalizedUsageEvent {
+        NormalizedUsageEvent {
+            observed_at,
+            bucket_at: observed_at,
+            ..NormalizedUsageEvent::for_test_at(observed_at, tokens)
+        }
+    }
+
+    #[test]
+    fn events_within_returns_events_inside_window_only() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let inside_a = sample_event_at(now - time::Duration::minutes(10), 1_000.0);
+        let inside_b = sample_event_at(now - time::Duration::hours(1), 2_000.0);
+        let outside = sample_event_at(now - time::Duration::hours(3), 9_999.0);
+        for e in [&inside_a, &inside_b, &outside] {
+            store.insert_event(e).unwrap();
+        }
+        let got = store
+            .events_within(time::Duration::hours(2), now)
+            .unwrap();
+        let totals: Vec<f64> = got.iter().map(|e| e.effective_tokens).collect();
+        assert!(totals.contains(&1_000.0), "inside_a must be present");
+        assert!(totals.contains(&2_000.0), "inside_b must be present");
+        assert!(!totals.contains(&9_999.0), "outside must be excluded");
+    }
+
+    #[test]
+    fn events_within_boundary_is_inclusive_at_lower_bound() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let on_boundary = sample_event_at(now - time::Duration::hours(2), 5_555.0);
+        store.insert_event(&on_boundary).unwrap();
+        let got = store
+            .events_within(time::Duration::hours(2), now)
+            .unwrap();
+        assert_eq!(got.len(), 1, "boundary event must be included (>= comparison)");
+    }
 
     #[test]
     fn seven_day_token_history_returns_seven_oldest_first() {
