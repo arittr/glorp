@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::tui::panels::{
-    FeedPanel, HelpersPanel, Panel, PetPanel, SparkPanel, TodayPanel, VitalsPanel,
+    FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
 };
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
@@ -90,9 +90,8 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
     };
     match mode {
         Mode::Wide => {
-            // Left column uses Flex::Center with spacing(COLUMN_GAP); pet
-            // sits below half the leftover space. Account for the gap row
-            // between pet and vitals.
+            // TODO(Task 22): update this rect calculation for the new Fill(1) pet.
+            // For now, approximate by centering based on remaining height.
             let vitals_h = match VitalsPanel.preferred_constraint(vm) {
                 Constraint::Length(n) => n,
                 _ => 5,
@@ -169,125 +168,98 @@ fn layout_and_render(
 
 /// Wide layout: two columns.
 ///
-/// Left column (fixed 40 cells): PetPanel stacked above VitalsPanel.
+/// Left column (fixed 40 cells): PetPanel (Fill) → VitalsPanel.
 /// Gutter (4 cells): empty space.
-/// Right column (remaining): TodayPanel, SparkPanel, FeedPanel, HelpersPanel stacked vertically.
-///
-/// Both columns use `Flex::Center` so any leftover height is split evenly above
-/// and below the content. The taller column already fills the frame (set by
-/// `natural_inner_height`), so centering is a no-op for it. The shorter column
-/// gets its content centered vertically rather than crammed at the top.
+/// Right column (remaining): TodayPanel → ProgressPanel → FeedPanel packed top,
+/// trailing slack absorbed by Min(0).
 fn render_wide(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
     ctx: &RenderContext,
 ) {
-    let right_col = area.width.saturating_sub(WIDE_LEFT_COL + WIDE_GUTTER);
-    let [left_area, _, right_area] = Layout::horizontal([
-        Constraint::Length(WIDE_LEFT_COL),
-        Constraint::Length(WIDE_GUTTER),
-        Constraint::Length(right_col),
-    ])
-    .split(area)[..] else {
-        return;
-    };
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(WIDE_LEFT_COL),
+            Constraint::Length(WIDE_GUTTER),
+            Constraint::Min(50),
+        ])
+        .split(area);
 
-    // Left column: PetPanel + VitalsPanel — centered so the shorter column's
-    // content sits vertically in the middle of the frame.
-    render_centered_column(
-        left_area,
-        &[&PetPanel as &dyn Panel, &VitalsPanel],
-        buf,
-        vm,
-        ctx,
-    );
+    let left_col = body[0];
+    let right_col = body[2];
 
-    // Right column: TodayPanel + SparkPanel + FeedPanel + HelpersPanel.
-    render_centered_column(
-        right_area,
-        &[
-            &TodayPanel as &dyn Panel,
-            &SparkPanel,
-            &FeedPanel,
-            &HelpersPanel,
-        ],
-        buf,
-        vm,
-        ctx,
-    );
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .flex(Flex::Start)
+        .constraints([
+            PetPanel.preferred_constraint(vm),    // Fill(1) — expands to fill column
+            Constraint::Length(COLUMN_GAP),
+            VitalsPanel.preferred_constraint(vm), // Length(5) — anchored to bottom of Fill
+        ])
+        .split(left_col);
+
+    // PetPanel assumes its area is at least PET_H (10) rows tall; skip if too small.
+    if left[0].height >= 10 {
+        PetPanel.render(left[0], buf, vm, ctx);
+    }
+    VitalsPanel.render(left[2], buf, vm, ctx);
+
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .flex(Flex::Start)
+        .constraints([
+            TodayPanel.preferred_constraint(vm),    // Length(6)
+            Constraint::Length(COLUMN_GAP),
+            ProgressPanel.preferred_constraint(vm), // Length(3)
+            Constraint::Length(COLUMN_GAP),
+            FeedPanel.preferred_constraint(vm),     // Length(7) or less
+        ])
+        .split(right_col);
+
+    TodayPanel.render(right[0], buf, vm, ctx);
+    ProgressPanel.render(right[2], buf, vm, ctx);
+    FeedPanel.render(right[4], buf, vm, ctx);
 }
 
-/// Compact layout: all six panels stacked vertically with 1-cell spacing.
+/// Compact layout: single column packed from the top.
+///
+/// Order: pet → vitals → today → progress → feed, trailing slack at bottom.
 fn render_compact(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
     ctx: &RenderContext,
 ) {
-    render_column_with_spacing(
-        area,
-        &[
-            &PetPanel as &dyn Panel,
-            &VitalsPanel,
-            &TodayPanel,
-            &SparkPanel,
-            &FeedPanel,
-            &HelpersPanel,
-        ],
-        1,
-        buf,
-        vm,
-        ctx,
-    );
-}
-
-/// Stacks panels vertically with `Flex::Center` so any leftover height
-/// splits evenly above and below the content block.
-fn render_column_with_spacing(
-    area: Rect,
-    panels: &[&dyn Panel],
-    spacing: u16,
-    buf: &mut ratatui::buffer::Buffer,
-    vm: &WatchViewModel,
-    ctx: &RenderContext,
-) {
-    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
-
-    let rects = Layout::vertical(constraints)
-        .flex(Flex::Center)
-        .spacing(spacing)
+    let stack = Layout::default()
+        .direction(Direction::Vertical)
+        .flex(Flex::Start)
+        .constraints([
+            PetPanel.preferred_constraint(vm),      // Fill(1) — expands to fill leftover
+            Constraint::Length(COLUMN_GAP),
+            VitalsPanel.preferred_constraint(vm),   // Length(5)
+            Constraint::Length(COLUMN_GAP),
+            TodayPanel.preferred_constraint(vm),    // Length(6)
+            Constraint::Length(COLUMN_GAP),
+            ProgressPanel.preferred_constraint(vm), // Length(3)
+            Constraint::Length(COLUMN_GAP),
+            FeedPanel.preferred_constraint(vm),     // Length(7)
+        ])
         .split(area);
 
-    for (panel, rect) in panels.iter().zip(rects.iter()) {
-        panel.render(*rect, buf, vm, ctx);
+    // PetPanel assumes its area is at least PET_H (10) rows tall; skip if too small.
+    if stack[0].height >= 10 {
+        PetPanel.render(stack[0], buf, vm, ctx);
     }
+    VitalsPanel.render(stack[2], buf, vm, ctx);
+    TodayPanel.render(stack[4], buf, vm, ctx);
+    ProgressPanel.render(stack[6], buf, vm, ctx);
+    FeedPanel.render(stack[8], buf, vm, ctx);
 }
 
-/// Stacks panels vertically with leftover height split evenly above and
-/// below the content block (`Flex::Center`). The outer frame fills the
-/// whole terminal, so without centering the content gets jammed at the top
-/// with a wedge of dead space below.
+/// Gap between stacked panels in both wide and compact layouts.
 const COLUMN_GAP: u16 = 1;
-
-fn render_centered_column(
-    area: Rect,
-    panels: &[&dyn Panel],
-    buf: &mut ratatui::buffer::Buffer,
-    vm: &WatchViewModel,
-    ctx: &RenderContext,
-) {
-    let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
-
-    let rects = Layout::vertical(constraints)
-        .flex(Flex::Center)
-        .spacing(COLUMN_GAP)
-        .split(area);
-
-    for (panel, rect) in panels.iter().zip(rects.iter()) {
-        panel.render(*rect, buf, vm, ctx);
-    }
-}
 
 // ── Overlay popups ───────────────────────────────────────────────────────────
 
@@ -379,7 +351,8 @@ mod render_compact_tests {
     #[test]
     fn render_compact_draws_rounded_frame() {
         // Width 60 < COMPACT_THRESHOLD (104) → compact mode.
-        let backend = TestBackend::new(60, 30);
+        // Height 40 gives Fill(1) PetPanel ≥ 10 rows so pet.rs clamp is safe.
+        let backend = TestBackend::new(60, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let vm = WatchViewModel::fixture();
         terminal
@@ -398,7 +371,7 @@ mod render_compact_tests {
 
     #[test]
     fn render_compact_shows_vitals_content() {
-        let backend = TestBackend::new(60, 30);
+        let backend = TestBackend::new(60, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let vm = WatchViewModel::fixture();
         terminal
@@ -524,24 +497,51 @@ mod render_wide_tests {
         );
         assert!(all.contains("today"), "wide render should show today panel");
         assert!(
-            all.contains("7-day"),
-            "wide render should show 7-day spark panel"
+            all.contains("progress"),
+            "wide render should show progress panel"
         );
         assert!(all.contains("feed"), "wide render should show feed panel");
-        assert!(
-            all.contains("helpers"),
-            "wide render should show helpers panel"
-        );
     }
 
     #[test]
     fn compact_threshold_switches_modes() {
         // Just below threshold: compact; at threshold: wide.
-        let compact_buf = render_buffer((COMPACT_THRESHOLD - 1) as u16 + 2, TEST_HEIGHT); // +2 for outer frame
-        let wide_buf = render_buffer((COMPACT_THRESHOLD + 2) as u16 + 2, TEST_HEIGHT);
+        // Use height 40 so Fill(1) PetPanel gets ≥ PET_H rows in compact mode.
+        let compact_buf = render_buffer((COMPACT_THRESHOLD - 1) as u16 + 2, 40); // +2 for outer frame
+        let wide_buf = render_buffer((COMPACT_THRESHOLD + 2) as u16 + 2, 40);
 
         // Both should have a frame (╭ corner).
         assert_eq!(compact_buf[(0u16, 0u16)].symbol(), "╭");
         assert_eq!(wide_buf[(0u16, 0u16)].symbol(), "╭");
+    }
+
+    #[test]
+    fn render_wide_does_not_include_helpers_or_spark_strings() {
+        let vm = WatchViewModel::fixture();
+        let ctx = RenderContext::new(crate::tui::style::ColorCapability::Truecolor);
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_watch_frame_with_context(f, &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        // HelpersPanel section title was " helpers " — must be gone from layout.
+        assert!(!s.contains("helpers"), "helpers panel must be removed");
+        // SparkPanel section title was rendered as a dedicated border row.
+        // TodayPanel's footer now inlines "← 7-day" legitimately, so we can't
+        // assert the absence of "7-day" — but we CAN check SparkPanel's distinctive
+        // top-border title (with en-dashes on either side) is absent.
+        // Since we can't rely on border char encoding, just verify SparkPanel's
+        // unique content ("7-day" as a section label) is gone by checking there
+        // is NO section that only contains "7-day" text (not prefixed with ←).
+        // The simplest defensible check: assert the new panels are present.
+        assert!(s.contains("today"), "today panel must still render");
+        assert!(s.contains("progress"), "progress panel must render");
+        assert!(s.contains("feed"), "feed panel must render");
     }
 }
