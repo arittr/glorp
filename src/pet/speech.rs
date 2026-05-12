@@ -6,6 +6,8 @@
 
 use time::OffsetDateTime;
 
+use crate::game::metabolism::Mood;
+
 /// How long (in seconds) the speech bubble stays visible within each cycle.
 const SPEECH_VISIBLE_SECS: i64 = 5;
 
@@ -22,7 +24,7 @@ const MUNCH_SPEECH_THRESHOLD_PER_MIN: f64 = 30_000.0;
 /// Text choice prioritizes feeding reactions when tokens have been pouring
 /// in, then falls back to mood-flavored idle lines.
 pub fn current_pet_speech(
-    mood: &str,
+    mood: Mood,
     recent_tokens_per_min: f64,
     now: OffsetDateTime,
 ) -> Option<String> {
@@ -63,15 +65,14 @@ pub fn pick_petting_phrase(now: OffsetDateTime) -> String {
     PHRASES[idx].to_string()
 }
 
-fn mood_phrase(mood: &str, now: OffsetDateTime) -> String {
+fn mood_phrase(mood: Mood, now: OffsetDateTime) -> String {
     let phrases: &[&str] = match mood {
-        "happy" => &["great job!", "feeling fantastic", "all good!", "happy days"],
-        "content" => &["hmm", "thinking deeply", "just chilling", "all is well"],
-        "sleepy" => &["zzz...", "so tired", "*yawn*", "5 more minutes"],
-        "sad" => &["...", "missing you", "kinda down", "*sigh*"],
-        "hungry" => &["feed me?", "tokens?", "hungry...", "where's the food"],
-        "wilted" => &["...", "running low", "need energy", "fading"],
-        _ => &["hmm", "...", "thinking"],
+        Mood::Happy => &["great job!", "feeling fantastic", "all good!", "happy days"],
+        Mood::Content => &["hmm", "thinking deeply", "just chilling", "all is well"],
+        Mood::Sleepy => &["zzz...", "so tired", "*yawn*", "5 more minutes"],
+        Mood::Sad => &["...", "missing you", "kinda down", "*sigh*"],
+        Mood::Hungry => &["feed me?", "tokens?", "hungry...", "where's the food"],
+        Mood::Wilted => &["...", "running low", "need energy", "fading"],
     };
     let idx = (now.unix_timestamp() / SPEECH_CYCLE_SECS).rem_euclid(phrases.len() as i64) as usize;
     phrases[idx].to_string()
@@ -87,24 +88,24 @@ mod tests {
         // Cycle boundary: a unix_timestamp % 30 == 0 should be the start of
         // the visible window.
         let visible = datetime!(2026-05-11 12:00 UTC); // unix_ts % 30 == 0 here
-        assert!(current_pet_speech("happy", 0.0, visible).is_some());
+        assert!(current_pet_speech(Mood::Happy, 0.0, visible).is_some());
 
         // 4 seconds in is still visible (< SPEECH_VISIBLE_SECS = 5).
         let still_visible = visible + time::Duration::seconds(4);
-        assert!(current_pet_speech("happy", 0.0, still_visible).is_some());
+        assert!(current_pet_speech(Mood::Happy, 0.0, still_visible).is_some());
     }
 
     #[test]
     fn speech_hidden_outside_visible_window() {
         let visible = datetime!(2026-05-11 12:00 UTC);
         let hidden = visible + time::Duration::seconds(10);
-        assert!(current_pet_speech("happy", 0.0, hidden).is_none());
+        assert!(current_pet_speech(Mood::Happy, 0.0, hidden).is_none());
     }
 
     #[test]
     fn munch_speech_fires_on_high_token_rate() {
         let visible = datetime!(2026-05-11 12:00 UTC);
-        let speech = current_pet_speech("content", 50_000.0, visible).unwrap();
+        let speech = current_pet_speech(Mood::Content, 50_000.0, visible).unwrap();
         let munch_phrases = ["yum!", "more!", "tasty!", "delicious", "*chomp*"];
         assert!(munch_phrases.contains(&speech.as_str()));
     }
@@ -112,8 +113,8 @@ mod tests {
     #[test]
     fn mood_phrase_changes_with_mood() {
         let visible = datetime!(2026-05-11 12:00 UTC);
-        let happy = current_pet_speech("happy", 0.0, visible);
-        let sleepy = current_pet_speech("sleepy", 0.0, visible);
+        let happy = current_pet_speech(Mood::Happy, 0.0, visible);
+        let sleepy = current_pet_speech(Mood::Sleepy, 0.0, visible);
         assert_ne!(happy, sleepy);
     }
 }

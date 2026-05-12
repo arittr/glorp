@@ -10,6 +10,8 @@
 
 use time::OffsetDateTime;
 
+use crate::game::evolution::Stage;
+use crate::game::metabolism::Mood;
 use crate::pet::generation::Species;
 use crate::storage::usage_store::NormalizedUsageEvent;
 use crate::tui::style::LogKind;
@@ -29,9 +31,9 @@ const IDLE_THOUGHT_MINUTES: i64 = 20;
 pub fn derive_pet_activities(
     pet_name: &str,
     species: Species,
-    mood: &str,
+    mood: Mood,
     usage_events: &[NormalizedUsageEvent],
-    seen_stage_transitions: &[String],
+    seen_stage_transitions: &[Stage],
     now: OffsetDateTime,
 ) -> Vec<EventView> {
     let mut out = Vec::new();
@@ -97,12 +99,12 @@ fn is_idle(usage_events: &[NormalizedUsageEvent], now: OffsetDateTime) -> bool {
 /// Picks an idle thought line. Mood overrides species when the mood is
 /// strong (sleepy / sad / wilted); otherwise the species' personality
 /// shines through.
-fn idle_thought(pet_name: &str, species: Species, mood: &str, now: OffsetDateTime) -> String {
+fn idle_thought(pet_name: &str, species: Species, mood: Mood, now: OffsetDateTime) -> String {
     // Mood-driven overrides first.
     match mood {
-        "sleepy" => return format!("{pet_name} is dozing"),
-        "wilted" => return format!("{pet_name} is low on energy"),
-        "sad" => return format!("{pet_name} is moping a little"),
+        Mood::Sleepy => return format!("{pet_name} is dozing"),
+        Mood::Wilted => return format!("{pet_name} is low on energy"),
+        Mood::Sad => return format!("{pet_name} is moping a little"),
         _ => {}
     }
 
@@ -185,7 +187,8 @@ mod tests {
             usage_event(now - time::Duration::minutes(5), 60_000.0),
             usage_event(now - time::Duration::minutes(15), 50_000.0),
         ];
-        let acts = derive_pet_activities("vex-jit", Species::Glitch, "happy", &events, &[], now);
+        let acts =
+            derive_pet_activities("vex-jit", Species::Glitch, Mood::Happy, &events, &[], now);
         assert!(acts.iter().any(|e| e.text.contains("munched")));
     }
 
@@ -193,14 +196,14 @@ mod tests {
     fn munch_spike_does_not_fire_below_threshold() {
         let now = datetime!(2026-05-11 12:00 UTC);
         let events = vec![usage_event(now - time::Duration::minutes(5), 5_000.0)];
-        let acts = derive_pet_activities("vex", Species::Blob, "happy", &events, &[], now);
+        let acts = derive_pet_activities("vex", Species::Blob, Mood::Happy, &events, &[], now);
         assert!(!acts.iter().any(|e| e.text.contains("munched")));
     }
 
     #[test]
     fn idle_thought_appears_when_no_recent_activity() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let acts = derive_pet_activities("vex", Species::Mech, "happy", &[], &[], now);
+        let acts = derive_pet_activities("vex", Species::Mech, Mood::Happy, &[], &[], now);
         assert!(acts.iter().any(|e| e.text.contains("vex")));
         assert!(acts.iter().any(|e| e.kind == LogKind::PetActivity));
     }
@@ -208,14 +211,14 @@ mod tests {
     #[test]
     fn idle_thought_uses_mood_override_when_sleepy() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let acts = derive_pet_activities("vex", Species::Blob, "sleepy", &[], &[], now);
+        let acts = derive_pet_activities("vex", Species::Blob, Mood::Sleepy, &[], &[], now);
         assert!(acts.iter().any(|e| e.text.contains("dozing")));
     }
 
     #[test]
     fn idle_thought_is_species_flavored() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let mech_acts = derive_pet_activities("m", Species::Mech, "happy", &[], &[], now);
+        let mech_acts = derive_pet_activities("m", Species::Mech, Mood::Happy, &[], &[], now);
         let mech_text = mech_acts.iter().find(|e| !e.text.contains("evolved"));
         // Mech catalog includes mechanical/technical verbs.
         let has_mech = mech_text.is_some_and(|e| {
@@ -234,9 +237,10 @@ mod tests {
     #[test]
     fn stage_transition_emits_evolution_activity() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let transitions = vec!["daemon".to_string()];
-        let acts = derive_pet_activities("vex", Species::Glitch, "happy", &[], &transitions, now);
-        assert!(acts.iter().any(|e| e.text.contains("evolved into daemon")));
+        let transitions = vec![Stage::S4];
+        let acts =
+            derive_pet_activities("vex", Species::Glitch, Mood::Happy, &[], &transitions, now);
+        assert!(acts.iter().any(|e| e.text.contains("evolved into s4")));
     }
 
     #[test]

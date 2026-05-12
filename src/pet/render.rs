@@ -1,6 +1,6 @@
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
-use crate::pet::art::{stage_key, template_lines};
+use crate::pet::art::template_lines;
 use crate::pet::generation::{GeneratedPet, Species};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,11 +18,8 @@ pub struct RenderedPet {
 
 impl RenderedPet {
     pub fn with_evolution_flash(mut self, from: Stage, to: Stage) -> Self {
-        self.event_lines.push(format!(
-            "* evolved from {} to {} *",
-            stage_name(from),
-            stage_name(to)
-        ));
+        self.event_lines
+            .push(format!("* evolved from {from} to {to} *"));
         self.lines.insert(0, String::from("** evolution flash **"));
         self
     }
@@ -85,13 +82,12 @@ pub fn render_pet(
     mood: Mood,
     frame: AnimationFrame,
 ) -> RenderedPet {
-    let stage_key = stage_key(stage);
     let profile = species_animation_profile(pet.species);
     let blinking = should_blink(pet, mood, frame, profile);
     let expression = expression_for(pet, mood, blinking);
     let raw = template_lines(
         pet.species,
-        stage_key,
+        stage,
         pet.traits.morph_index,
         pet.traits.morph_pup_index,
     );
@@ -621,16 +617,4 @@ fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
         }
     }
     particles
-}
-
-fn stage_name(stage: Stage) -> &'static str {
-    match stage {
-        Stage::S0 => "s0",
-        Stage::S1 => "s1",
-        Stage::S2 => "s2",
-        Stage::S3 => "s3",
-        Stage::S4 => "s4",
-        Stage::S5 => "s5",
-        Stage::S6 => "s6",
-    }
 }

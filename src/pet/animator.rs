@@ -103,7 +103,7 @@ impl PetAnimator {
     /// where it matters: glitch flickers harder on mood swings, mech sweeps
     /// in tighter on feed, etc.
     pub fn update(&mut self, vm: &WatchViewModel) {
-        let species = Species::parse(&vm.pet_render.generated_species);
+        let species = Some(vm.pet_render.generated_species);
 
         // Hatch: first time we see a freshly-hatched pet, play coalesce.
         if self.first_update && vm.age_days == 0 {

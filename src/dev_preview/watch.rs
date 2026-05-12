@@ -2,6 +2,8 @@ use crate::commands::watch::build_watch_view_model_at;
 use crate::dev_preview::frame::{frame_from_buffer, PreviewFrame};
 use crate::dev_preview::scenarios::PreviewRenderContext;
 use crate::error::Result;
+use crate::game::evolution::Stage;
+use crate::pet::generation::Species;
 use crate::storage::{
     state::{PetState, Vitals},
     usage_store::{NormalizedUsageEvent, UsageStore},
@@ -58,8 +60,8 @@ fn render_watch_frame(
 
 fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
     let mut state = PetState::new_for_test("glorp-preview-watch", "Mochi");
-    state.pet.generated_species = "fuzz".to_string();
-    state.stage = "s4".to_string();
+    state.pet.generated_species = Species::Fuzz;
+    state.stage = Stage::S4;
     state.xp = 8.5;
     state.lifetime_effective_tokens = 52_000.0;
     state.vitals = Vitals {

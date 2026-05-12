@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use time::OffsetDateTime;
 
-use crate::game::{calibration::CalibrationBaseline, metabolism::RhythmProfile};
+use crate::game::{calibration::CalibrationBaseline, evolution::Stage, metabolism::RhythmProfile};
+use crate::pet::generation::Species;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -10,7 +11,7 @@ const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub struct PetState {
     pub schema_version: u32,
     pub pet: PetIdentity,
-    pub stage: String,
+    pub stage: Stage,
     pub xp: f64,
     pub lifetime_effective_tokens: f64,
     pub vitals: Vitals,
@@ -18,8 +19,13 @@ pub struct PetState {
     pub calibration: CalibrationBaseline,
     #[serde(default)]
     pub rhythm: RhythmProfile,
-    #[serde(default)]
-    pub seen_stage_transitions: Vec<String>,
+    /// Destination stage of every transition the pet has visited, in the
+    /// order they fired. Used by the activity feed and the watch overlay
+    /// to render evolution moments. Serialized as a list of stage strings
+    /// (`["s0","s1",...]`); also accepts the pre-0.2 legacy format
+    /// (`["s0->s1","s1->s2",...]`) when loading existing state files.
+    #[serde(default, deserialize_with = "deserialize_seen_stage_transitions")]
+    pub seen_stage_transitions: Vec<Stage>,
     #[serde(default)]
     pub recent_events: Vec<String>,
     pub created_at: OffsetDateTime,
@@ -30,7 +36,7 @@ pub struct PetState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PetIdentity {
     pub seed: String,
-    pub generated_species: String,
+    pub generated_species: Species,
     pub accepted_name: String,
 }
 
@@ -52,10 +58,10 @@ impl PetState {
             schema_version: CURRENT_SCHEMA_VERSION,
             pet: PetIdentity {
                 seed: seed.to_string(),
-                generated_species: "fuzz".to_string(),
+                generated_species: Species::Fuzz,
                 accepted_name: name.to_string(),
             },
-            stage: "hatchling".to_string(),
+            stage: Stage::S0,
             xp: 0.0,
             lifetime_effective_tokens: 0.0,
             calibration: CalibrationBaseline::default(),
@@ -173,8 +179,8 @@ impl PetStateFixture {
         }
     }
 
-    pub fn with_stage(mut self, stage: &str) -> Self {
-        self.state.stage = stage.to_string();
+    pub fn with_stage(mut self, stage: Stage) -> Self {
+        self.state.stage = stage;
         self
     }
 
@@ -198,10 +204,125 @@ pub fn write_state_for_test(
     StateStore::new(paths.state_file).save(&fixture.into_state())
 }
 
+// Backwards-compat deserializer for `seen_stage_transitions`.
+//
+// Pre-0.2 state files stored each transition as a `"from->to"` pair string
+// (e.g. `"s0->s1"`); 0.2+ stores destination stages directly (`"s1"`). Both
+// representations carry the same information for the only consumer (the
+// activity feed / evolution overlay), since stages advance monotonically.
+// We accept either on load so existing users keep their evolution history;
+// the next save rewrites the field in the new shape.
+fn deserialize_seen_stage_transitions<'de, D>(deserializer: D) -> Result<Vec<Stage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use std::str::FromStr;
+    let raw: Vec<String> = Vec::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|entry| {
+            let destination = entry.split_once("->").map_or(entry.as_str(), |(_, to)| to);
+            Stage::from_str(destination).map_err(serde::de::Error::custom)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn pet_state_deserializes_legacy_string_stage_format() {
+        // Existing users' state.json files store `stage`, `generated_species`,
+        // and `mood`-adjacent fields as the same lowercase strings the typed
+        // enums now serialize to. This test locks the wire format so the
+        // typed-enum refactor never accidentally renames the JSON keys.
+        // `time` crate's default serde representation is a tuple
+        // `[year, ordinal_day, hour, minute, second, nanos, offset_hours, offset_minutes, offset_seconds]`.
+        // Real state.json files on disk use exactly this shape.
+        let json = r#"{
+            "schema_version": 1,
+            "pet": {
+                "seed": "legacy-seed",
+                "generated_species": "ghost",
+                "accepted_name": "casper"
+            },
+            "stage": "s2",
+            "xp": 0.5,
+            "lifetime_effective_tokens": 12345.0,
+            "vitals": {"fed": 70.0, "happiness": 80.0, "energy": 60.0},
+            "calibration": {"daily_effective_tokens": 100000.0},
+            "rhythm": {"active_hours": [false, false, false, false, false, false, false, false, false, true, true, true, true, true, true, true, true, true, false, false, false, false, false, false], "weekend_activity_weight": 0.45},
+            "seen_stage_transitions": ["s0", "s1", "s2"],
+            "recent_events": [],
+            "created_at": [2026, 121, 0, 0, 0, 0, 0, 0, 0],
+            "last_updated_at": [2026, 129, 0, 0, 0, 0, 0, 0, 0],
+            "last_usage_poll_at": null
+        }"#;
+        let state: PetState = serde_json::from_str(json).expect("legacy JSON must deserialize");
+        assert_eq!(state.stage, Stage::S2);
+        assert_eq!(state.pet.generated_species, Species::Ghost);
+        assert_eq!(
+            state.seen_stage_transitions,
+            vec![Stage::S0, Stage::S1, Stage::S2]
+        );
+    }
+
+    #[test]
+    fn pet_state_deserializes_pre_0_2_seen_stage_transitions_pair_format() {
+        // Pre-0.2 state.json files stored seen_stage_transitions as `from->to`
+        // pair strings; we must keep loading those without losing the user's
+        // evolution history. The custom deserializer parses the destination
+        // half of each pair.
+        let json = r#"{
+            "schema_version": 1,
+            "pet": {
+                "seed": "old-seed",
+                "generated_species": "fuzz",
+                "accepted_name": "buddy"
+            },
+            "stage": "s3",
+            "xp": 0.1,
+            "lifetime_effective_tokens": 0.0,
+            "vitals": {"fed": 70.0, "happiness": 80.0, "energy": 60.0},
+            "calibration": {"daily_effective_tokens": 100000.0},
+            "rhythm": {"active_hours": [false, false, false, false, false, false, false, false, false, true, true, true, true, true, true, true, true, true, false, false, false, false, false, false], "weekend_activity_weight": 0.45},
+            "seen_stage_transitions": ["s0->s1", "s1->s2", "s2->s3"],
+            "recent_events": [],
+            "created_at": [2026, 121, 0, 0, 0, 0, 0, 0, 0],
+            "last_updated_at": [2026, 129, 0, 0, 0, 0, 0, 0, 0],
+            "last_usage_poll_at": null
+        }"#;
+        let state: PetState =
+            serde_json::from_str(json).expect("legacy pair-format JSON must deserialize");
+        assert_eq!(
+            state.seen_stage_transitions,
+            vec![Stage::S1, Stage::S2, Stage::S3],
+            "legacy `from->to` entries should yield the destination stages"
+        );
+    }
+
+    #[test]
+    fn pet_state_serializes_to_legacy_string_format() {
+        // The on-disk format must remain readable by older binaries (and by
+        // hand-edited JSON). Round-trip through serde_json::Value so we can
+        // check the exact string shape without depending on field ordering.
+        let mut state = PetState::new_for_test("seed", "buddy");
+        state.stage = Stage::S3;
+        state.pet.generated_species = Species::Mech;
+        state.seen_stage_transitions = vec![Stage::S0, Stage::S1];
+
+        let value: serde_json::Value = serde_json::to_value(&state).unwrap();
+        assert_eq!(value["stage"], serde_json::Value::String("s3".into()));
+        assert_eq!(
+            value["pet"]["generated_species"],
+            serde_json::Value::String("mech".into())
+        );
+        assert_eq!(
+            value["seen_stage_transitions"],
+            serde_json::json!(["s0", "s1"])
+        );
+    }
 
     fn tmp_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
         std::fs::read_dir(dir)

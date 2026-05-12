@@ -7,7 +7,7 @@ use crate::{
     },
     paths::AppPaths,
     pet::{
-        generation::{generate_pet, stage_label, Species},
+        generation::{generate_pet, stage_label},
         render::{render_pet, AnimationFrame},
     },
     storage::{
@@ -60,9 +60,8 @@ pub(crate) fn build_watch_view_model_at(
 ) -> Result<WatchViewModel> {
     let usage_store = UsageStore::open(usage_db)?;
     let recent_usage = usage_store.recent_events(500)?;
-    let species = parse_species(&state.pet.generated_species)
-        .unwrap_or_else(|| generate_pet(&state.pet.seed).species);
-    let stage = parse_stage(&state.stage);
+    let species = state.pet.generated_species;
+    let stage = state.stage;
     let mood = mood_from_state(state);
     let generated = generate_pet(&state.pet.seed).with_species_for_test(species);
     let rendered = render_pet(
@@ -92,7 +91,7 @@ pub(crate) fn build_watch_view_model_at(
     let pet_activities = crate::pet::activity::derive_pet_activities(
         &state.pet.accepted_name,
         species,
-        mood_label(mood),
+        mood,
         &recent_usage,
         &state.seen_stage_transitions,
         now,
@@ -108,14 +107,14 @@ pub(crate) fn build_watch_view_model_at(
         pet_spans: rendered.spans,
         pet_render: PetRenderModel {
             seed: state.pet.seed.clone(),
-            generated_species: state.pet.generated_species.clone(),
-            stage: state.stage.clone(),
-            mood: mood_label(mood).to_string(),
+            generated_species: state.pet.generated_species,
+            stage: state.stage,
+            mood,
         },
         pet_name: state.pet.accepted_name.clone(),
         species: species.as_str().to_string(),
         stage: stage_label(species, stage).to_string(),
-        mood: mood_label(mood).to_string(),
+        mood: mood.as_str().to_string(),
         age_days: (now - state.created_at).whole_days().max(0) as u32,
         xp_current: state.xp,
         xp_target: next_stage_xp_target(stage),
@@ -132,12 +131,15 @@ pub(crate) fn build_watch_view_model_at(
         recent_events,
         helper_status,
         errors,
-        latest_evolution: state.seen_stage_transitions.last().cloned(),
+        latest_evolution: state
+            .seen_stage_transitions
+            .last()
+            .map(|stage| stage.as_str().to_string()),
         acknowledged_evolution: None,
         cursor_screen: None,
         mouse_tracking_enabled: true,
         current_speech: crate::pet::speech::current_pet_speech(
-            mood_label(mood),
+            mood,
             recent_tokens_per_min(&recent_usage, now),
             now,
         ),
@@ -298,30 +300,6 @@ fn poll_usage_and_apply(
     Ok(Some(state))
 }
 
-fn parse_species(value: &str) -> Option<Species> {
-    match value {
-        "fuzz" => Some(Species::Fuzz),
-        "blob" => Some(Species::Blob),
-        "ghost" => Some(Species::Ghost),
-        "glitch" => Some(Species::Glitch),
-        "crystal" => Some(Species::Crystal),
-        "mech" => Some(Species::Mech),
-        _ => None,
-    }
-}
-
-fn parse_stage(value: &str) -> Stage {
-    match value {
-        "s1" => Stage::S1,
-        "s2" => Stage::S2,
-        "s3" => Stage::S3,
-        "s4" => Stage::S4,
-        "s5" => Stage::S5,
-        "s6" => Stage::S6,
-        _ => Stage::S0,
-    }
-}
-
 fn mood_from_state(state: &PetState) -> Mood {
     apply_food(
         GameVitals {
@@ -335,38 +313,13 @@ fn mood_from_state(state: &PetState) -> Mood {
     .mood
 }
 
-fn mood_label(mood: Mood) -> &'static str {
-    match mood {
-        Mood::Happy => "happy",
-        Mood::Content => "content",
-        Mood::Hungry => "hungry",
-        Mood::Sad => "sad",
-        Mood::Sleepy => "sleepy",
-        Mood::Wilted => "wilted",
-    }
-}
-
-fn parse_mood(value: &str) -> Mood {
-    match value {
-        "happy" => Mood::Happy,
-        "hungry" => Mood::Hungry,
-        "sad" => Mood::Sad,
-        "sleepy" => Mood::Sleepy,
-        "wilted" => Mood::Wilted,
-        _ => Mood::Content,
-    }
-}
-
 pub fn rerender_pet_for_view_model(vm: &mut WatchViewModel, tick: u64) -> Result<()> {
-    let species = parse_species(&vm.pet_render.generated_species)
-        .unwrap_or_else(|| generate_pet(&vm.pet_render.seed).species);
-    let stage = parse_stage(&vm.pet_render.stage);
-    let mood = parse_mood(&vm.pet_render.mood);
+    let species = vm.pet_render.generated_species;
     let generated = generate_pet(&vm.pet_render.seed).with_species_for_test(species);
     let rendered = render_pet(
         &generated,
-        stage,
-        mood,
+        vm.pet_render.stage,
+        vm.pet_render.mood,
         AnimationFrame {
             tick,
             blink_suppression_ticks: 0,
@@ -693,6 +646,7 @@ fn format_tokens(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pet::generation::Species;
     use crate::storage::{state::PetState, usage_store::UsageStore};
     use tempfile::tempdir;
     use time::{Date, Month, PrimitiveDateTime, Time};
@@ -761,8 +715,8 @@ mod tests {
         drop(store);
 
         let mut state = PetState::new_for_test("test", "Mochi");
-        state.pet.generated_species = "fuzz".to_string();
-        state.stage = "s4".to_string();
+        state.pet.generated_species = Species::Fuzz;
+        state.stage = Stage::S4;
         state.xp = 8.5; // 61% toward S4 target of 14.0
 
         let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
@@ -789,8 +743,8 @@ mod tests {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
 
         let mut state = PetState::new_for_test("test", "Mochi");
-        state.pet.generated_species = "fuzz".to_string();
-        state.stage = "s6".to_string();
+        state.pet.generated_species = Species::Fuzz;
+        state.stage = Stage::S6;
         state.xp = 100.0;
 
         let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();

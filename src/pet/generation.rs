@@ -1,5 +1,8 @@
+use crate::error::GlorpError;
 use crate::game::evolution::Stage;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -34,16 +37,26 @@ impl Species {
             Species::Mech => "mech",
         }
     }
+}
 
-    pub fn parse(s: &str) -> Option<Species> {
+impl fmt::Display for Species {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Species {
+    type Err = GlorpError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "fuzz" => Some(Species::Fuzz),
-            "blob" => Some(Species::Blob),
-            "ghost" => Some(Species::Ghost),
-            "glitch" => Some(Species::Glitch),
-            "crystal" => Some(Species::Crystal),
-            "mech" => Some(Species::Mech),
-            _ => None,
+            "fuzz" => Ok(Species::Fuzz),
+            "blob" => Ok(Species::Blob),
+            "ghost" => Ok(Species::Ghost),
+            "glitch" => Ok(Species::Glitch),
+            "crystal" => Ok(Species::Crystal),
+            "mech" => Ok(Species::Mech),
+            other => Err(GlorpError::Message(format!("unknown species {other:?}"))),
         }
     }
 }
@@ -150,52 +163,14 @@ pub fn stage_label(species: Species, stage: Stage) -> &'static str {
             "chip", "bolt", "rivet", "drone", "mech", "archmech", "titan",
         ],
     };
-    labels[stage_key(stage).index()]
+    labels[stage.index()]
 }
 
 pub fn morph_count(_species: Species, stage: Stage) -> usize {
-    let key = stage_key(stage);
-    match key {
-        StageKey::S0 | StageKey::S1 | StageKey::S2 => 1,
-        StageKey::S3 => 1, // pup_templates(species).len() is always 1
-        StageKey::S4 | StageKey::S5 | StageKey::S6 => 3, // adult_templates(species).len() is always 3
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StageKey {
-    S0,
-    S1,
-    S2,
-    S3,
-    S4,
-    S5,
-    S6,
-}
-
-impl StageKey {
-    fn index(self) -> usize {
-        match self {
-            StageKey::S0 => 0,
-            StageKey::S1 => 1,
-            StageKey::S2 => 2,
-            StageKey::S3 => 3,
-            StageKey::S4 => 4,
-            StageKey::S5 => 5,
-            StageKey::S6 => 6,
-        }
-    }
-}
-
-fn stage_key(stage: Stage) -> StageKey {
     match stage {
-        Stage::S0 => StageKey::S0,
-        Stage::S1 => StageKey::S1,
-        Stage::S2 => StageKey::S2,
-        Stage::S3 => StageKey::S3,
-        Stage::S4 => StageKey::S4,
-        Stage::S5 => StageKey::S5,
-        Stage::S6 => StageKey::S6,
+        Stage::S0 | Stage::S1 | Stage::S2 => 1,
+        Stage::S3 => 1, // pup_templates(species).len() is always 1
+        Stage::S4 | Stage::S5 | Stage::S6 => 3, // adult_templates(species).len() is always 3
     }
 }
 

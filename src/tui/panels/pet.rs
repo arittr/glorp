@@ -89,8 +89,7 @@ impl Panel for PetPanel {
 
         // Pass 1: ambient backdrop. PR1 stub returns empty so this is a no-op.
         let now = time::OffsetDateTime::now_utc();
-        // TODO(PR2): replace Species::Fuzz fallback with real species from vm
-        let species = Species::parse(&vm.pet_render.generated_species).unwrap_or(Species::Fuzz);
+        let species = vm.pet_render.generated_species;
         let glyphs = ambient_glyphs_for(species, area, pet_inner, now);
         for g in glyphs {
             if g.col < area.x + area.width && g.row < area.y + area.height {

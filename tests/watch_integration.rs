@@ -184,13 +184,13 @@ fn latest_evolution_renders_once_for_running_watch() {
     let usage_db = dir.path().join("usage.sqlite");
     let _usage_store = UsageStore::open(&usage_db).unwrap();
     let mut state = mech_state();
-    state.seen_stage_transitions = vec!["s0->s1".into()];
+    state.seen_stage_transitions = vec![glorp::game::evolution::Stage::S1];
 
     let mut vm = build_watch_view_model_for_test(&state, &usage_db).unwrap();
-    assert_eq!(vm.latest_evolution.as_deref(), Some("s0->s1"));
-    assert!(!vm.acknowledged_evolution_for_test("s0->s1"));
+    assert_eq!(vm.latest_evolution.as_deref(), Some("s1"));
+    assert!(!vm.acknowledged_evolution_for_test("s1"));
     vm.acknowledge_latest_evolution_for_test();
-    assert!(vm.acknowledged_evolution_for_test("s0->s1"));
+    assert!(vm.acknowledged_evolution_for_test("s1"));
 }
 
 #[test]
@@ -333,8 +333,8 @@ fn blocked_source_surfaces_via_source_health() {
 
 fn mech_state() -> PetState {
     let mut state = PetState::new_for_test("servo-watch-seed", "bolt");
-    state.pet.generated_species = "mech".into();
-    state.stage = "s4".into();
+    state.pet.generated_species = glorp::pet::generation::Species::Mech;
+    state.stage = glorp::game::evolution::Stage::S4;
     state.xp = 8.5;
     state.lifetime_effective_tokens = 123_456.0;
     state.vitals.fed = 88.0;

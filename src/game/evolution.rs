@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 use super::calibration::CalibrationBaseline;
+use crate::error::GlorpError;
 
 const STAGE_THRESHOLDS: [f64; 7] = [0.0, 0.04, 0.25, 1.0, 4.0, 14.0, 60.0];
 
@@ -14,6 +17,74 @@ pub enum Stage {
     S4,
     S5,
     S6,
+}
+
+impl Stage {
+    /// Stable ordinal: `S0` -> 0, `S6` -> 6. Used by anything that needs a
+    /// stage-indexed array (stage labels per species, threshold lookups).
+    pub const fn index(self) -> usize {
+        match self {
+            Stage::S0 => 0,
+            Stage::S1 => 1,
+            Stage::S2 => 2,
+            Stage::S3 => 3,
+            Stage::S4 => 4,
+            Stage::S5 => 5,
+            Stage::S6 => 6,
+        }
+    }
+
+    /// Inverse of `index`: returns `None` for any out-of-range value so
+    /// callers must handle the "unknown stage" case explicitly.
+    pub const fn from_index(index: usize) -> Option<Stage> {
+        match index {
+            0 => Some(Stage::S0),
+            1 => Some(Stage::S1),
+            2 => Some(Stage::S2),
+            3 => Some(Stage::S3),
+            4 => Some(Stage::S4),
+            5 => Some(Stage::S5),
+            6 => Some(Stage::S6),
+            _ => None,
+        }
+    }
+
+    /// Matches the serde wire format (`#[serde(rename_all = "lowercase")]`):
+    /// `"s0"`..`"s6"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Stage::S0 => "s0",
+            Stage::S1 => "s1",
+            Stage::S2 => "s2",
+            Stage::S3 => "s3",
+            Stage::S4 => "s4",
+            Stage::S5 => "s5",
+            Stage::S6 => "s6",
+        }
+    }
+}
+
+impl fmt::Display for Stage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Stage {
+    type Err = GlorpError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "s0" => Ok(Stage::S0),
+            "s1" => Ok(Stage::S1),
+            "s2" => Ok(Stage::S2),
+            "s3" => Ok(Stage::S3),
+            "s4" => Ok(Stage::S4),
+            "s5" => Ok(Stage::S5),
+            "s6" => Ok(Stage::S6),
+            other => Err(GlorpError::Message(format!("unknown stage {other:?}"))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,15 +101,7 @@ pub struct XpDeltaResult {
 }
 
 pub fn stage_for_xp(xp: f64) -> Stage {
-    match stage_index_for_xp(xp) {
-        0 => Stage::S0,
-        1 => Stage::S1,
-        2 => Stage::S2,
-        3 => Stage::S3,
-        4 => Stage::S4,
-        5 => Stage::S5,
-        _ => Stage::S6,
-    }
+    Stage::from_index(stage_index_for_xp(xp)).unwrap_or(Stage::S6)
 }
 
 pub fn apply_xp_delta(
@@ -54,8 +117,8 @@ pub fn apply_xp_delta(
 
     for stage_index in (before + 1)..=after {
         stage_transitions.push(StageTransition {
-            from: stage_from_index(stage_index - 1),
-            to: stage_from_index(stage_index),
+            from: Stage::from_index(stage_index - 1).unwrap_or(Stage::S6),
+            to: Stage::from_index(stage_index).unwrap_or(Stage::S6),
         });
     }
 
@@ -86,16 +149,4 @@ fn stage_index_for_xp(xp: f64) -> usize {
         .iter()
         .rposition(|threshold| xp >= *threshold)
         .unwrap_or(0)
-}
-
-fn stage_from_index(index: usize) -> Stage {
-    match index {
-        0 => Stage::S0,
-        1 => Stage::S1,
-        2 => Stage::S2,
-        3 => Stage::S3,
-        4 => Stage::S4,
-        5 => Stage::S5,
-        _ => Stage::S6,
-    }
 }

@@ -167,19 +167,17 @@ fn apply_idle_decay(state: &mut PetState, now: OffsetDateTime) {
 }
 
 fn record_stage_transition(state: &mut PetState, transition: StageTransition) {
-    let from = stage_name(transition.from);
-    let to = stage_name(transition.to);
-    let key = format!("{from}->{to}");
-    if state.seen_stage_transitions.iter().any(|seen| seen == &key) {
-        state.stage = to.to_string();
+    let StageTransition { from, to } = transition;
+    if state.seen_stage_transitions.contains(&to) {
+        state.stage = to;
         return;
     }
 
-    state.seen_stage_transitions.push(key);
+    state.seen_stage_transitions.push(to);
     state
         .recent_events
         .push(format!("evolved from {from} to {to}"));
-    state.stage = to.to_string();
+    state.stage = to;
 }
 
 fn trim_recent_events(state: &mut PetState) {
@@ -205,36 +203,14 @@ fn stored_vitals(result: MetabolismResult) -> StoredVitals {
     }
 }
 
-fn stage_name(stage: Stage) -> &'static str {
-    match stage {
-        Stage::S0 => "s0",
-        Stage::S1 => "s1",
-        Stage::S2 => "s2",
-        Stage::S3 => "s3",
-        Stage::S4 => "s4",
-        Stage::S5 => "s5",
-        Stage::S6 => "s6",
-    }
-}
-
-fn parse_stage_name(value: &str) -> Stage {
-    match value {
-        "s1" => Stage::S1,
-        "s2" => Stage::S2,
-        "s3" => Stage::S3,
-        "s4" => Stage::S4,
-        "s5" => Stage::S5,
-        "s6" => Stage::S6,
-        _ => Stage::S0,
-    }
-}
-
 // If saved state.xp now maps to a higher stage than state.stage records — for
 // example after a threshold curve change between runs — emit the missing
-// transitions so the pet catches up before new food gets applied.
+// transitions so the pet catches up before new food gets applied. The saved
+// stage is otherwise the source of truth; this only fires when the XP curve
+// (not the data) changes between runs.
 fn reconcile_stage_with_xp(state: &mut PetState) {
-    let saved = parse_stage_name(&state.stage) as usize;
-    let current = stage_for_xp(state.xp) as usize;
+    let saved = state.stage.index();
+    let current = stage_for_xp(state.xp).index();
     if current <= saved {
         return;
     }
@@ -242,22 +218,10 @@ fn reconcile_stage_with_xp(state: &mut PetState) {
         record_stage_transition(
             state,
             StageTransition {
-                from: stage_from_index(index - 1),
-                to: stage_from_index(index),
+                from: Stage::from_index(index - 1).unwrap_or(Stage::S6),
+                to: Stage::from_index(index).unwrap_or(Stage::S6),
             },
         );
-    }
-}
-
-fn stage_from_index(index: usize) -> Stage {
-    match index {
-        0 => Stage::S0,
-        1 => Stage::S1,
-        2 => Stage::S2,
-        3 => Stage::S3,
-        4 => Stage::S4,
-        5 => Stage::S5,
-        _ => Stage::S6,
     }
 }
 

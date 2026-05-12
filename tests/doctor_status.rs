@@ -157,7 +157,7 @@ fn status_includes_recent_evolution_event_when_present() {
     write_state_for_test(
         dir.path(),
         PetStateFixture::named("mochi")
-            .with_stage("s3")
+            .with_stage(glorp::game::evolution::Stage::S3)
             .with_recent_event("evolved from sprout to bytebuddy"),
     )
     .unwrap();
@@ -200,7 +200,7 @@ fn status_clamps_zero_usage_display() {
 fn status_persists_real_usage_delta_into_pet_state() {
     let dir = tempdir().unwrap();
     let mut state = PetState::new_for_test("fixture-seed", "mochi");
-    state.stage = "s0".into();
+    state.stage = glorp::game::evolution::Stage::S0;
     state.calibration.daily_effective_tokens = 10_000.0;
     glorp::storage::state::StateStore::new(dir.path().join("state.json"))
         .save(&state)
@@ -225,7 +225,7 @@ fn status_persists_real_usage_delta_into_pet_state() {
             .unwrap();
     assert!(state.lifetime_effective_tokens > 0.0);
     assert!(state.xp > 0.0);
-    assert_ne!(state.stage, "s0");
+    assert_ne!(state.stage, glorp::game::evolution::Stage::S0);
     assert!(state
         .recent_events
         .iter()
@@ -236,7 +236,7 @@ fn status_persists_real_usage_delta_into_pet_state() {
 fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
     let dir = tempdir().unwrap();
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
-    state.stage = "s3".into();
+    state.stage = glorp::game::evolution::Stage::S3;
     state.xp = 3.5;
     state.vitals.fed = 64.0;
     state.vitals.happiness = 65.0;
@@ -264,7 +264,7 @@ fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
     let saved: PetState =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
             .unwrap();
-    assert_eq!(saved.stage, "s3");
+    assert_eq!(saved.stage, glorp::game::evolution::Stage::S3);
     assert_eq!(saved.xp, 3.5);
     assert_eq!(saved.vitals.fed, 64.0);
     assert_eq!(saved.vitals.happiness, 65.0);

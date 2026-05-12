@@ -1,3 +1,6 @@
+use crate::game::evolution::Stage;
+use crate::game::metabolism::Mood;
+use crate::pet::generation::Species;
 use crate::tui::style::LogKind;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,9 +56,9 @@ pub struct WatchViewModel {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PetRenderModel {
     pub seed: String,
-    pub generated_species: String,
-    pub stage: String,
-    pub mood: String,
+    pub generated_species: Species,
+    pub stage: Stage,
+    pub mood: Mood,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,9 +136,9 @@ impl WatchViewModel {
             pet_spans: Vec::new(),
             pet_render: PetRenderModel {
                 seed: "fixture-seed".into(),
-                generated_species: "fuzz".into(),
-                stage: "s0".into(),
-                mood: "content".into(),
+                generated_species: Species::Fuzz,
+                stage: Stage::S0,
+                mood: Mood::Content,
             },
             pet_name: "miso".into(),
             species: "terminal sprout".into(),

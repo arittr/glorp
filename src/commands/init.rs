@@ -3,7 +3,7 @@ use crate::{
     error::{GlorpError, Result},
     game::{
         calibration::CalibrationBaseline, effective_tokens::EffectiveTokenWeights,
-        metabolism::RhythmProfile,
+        evolution::Stage, metabolism::RhythmProfile,
     },
     paths::AppPaths,
     pet::generation::{generate_pet, resolve_accepted_name},
@@ -51,10 +51,10 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
         schema_version: 1,
         pet: PetIdentity {
             seed,
-            generated_species: generated.species.as_str().to_string(),
+            generated_species: generated.species,
             accepted_name: accepted_name.clone(),
         },
-        stage: "s0".into(),
+        stage: Stage::S0,
         xp: 0.0,
         lifetime_effective_tokens: 0.0,
         vitals: Vitals {

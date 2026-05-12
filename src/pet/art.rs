@@ -1,31 +1,6 @@
 use crate::game::evolution::Stage;
 use crate::pet::generation::Species;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StageKey {
-    S0,
-    S1,
-    S2,
-    S3,
-    S4,
-    S5,
-    S6,
-}
-
-impl StageKey {
-    pub(crate) fn index(self) -> usize {
-        match self {
-            StageKey::S0 => 0,
-            StageKey::S1 => 1,
-            StageKey::S2 => 2,
-            StageKey::S3 => 3,
-            StageKey::S4 => 4,
-            StageKey::S5 => 5,
-            StageKey::S6 => 6,
-        }
-    }
-}
-
 pub fn stage_label(species: Species, stage: Stage) -> &'static str {
     let labels = match species {
         Species::Fuzz => [
@@ -65,38 +40,37 @@ pub fn stage_label(species: Species, stage: Stage) -> &'static str {
             "chip", "bolt", "rivet", "drone", "mech", "archmech", "titan",
         ],
     };
-    labels[stage_key(stage).index()]
+    labels[stage.index()]
 }
 
 pub fn morph_count(species: Species, stage: Stage) -> usize {
-    let key = stage_key(stage);
-    match key {
-        StageKey::S0 | StageKey::S1 | StageKey::S2 => 1,
-        StageKey::S3 => pup_templates(species).len(),
-        StageKey::S4 | StageKey::S5 | StageKey::S6 => adult_templates(species).len(),
+    match stage {
+        Stage::S0 | Stage::S1 | Stage::S2 => 1,
+        Stage::S3 => pup_templates(species).len(),
+        Stage::S4 | Stage::S5 | Stage::S6 => adult_templates(species).len(),
     }
 }
 
 pub(crate) fn template_lines(
     species: Species,
-    stage: StageKey,
+    stage: Stage,
     morph_index: usize,
     morph_pup_index: usize,
 ) -> Vec<&'static str> {
     match stage {
-        StageKey::S0 => tiny_template(species, 0).to_vec(),
-        StageKey::S1 => tiny_template(species, 1).to_vec(),
-        StageKey::S2 => tiny_template(species, 2).to_vec(),
-        StageKey::S3 => {
+        Stage::S0 => tiny_template(species, 0).to_vec(),
+        Stage::S1 => tiny_template(species, 1).to_vec(),
+        Stage::S2 => tiny_template(species, 2).to_vec(),
+        Stage::S3 => {
             let templates = pup_templates(species);
             templates[morph_pup_index % templates.len()].to_vec()
         }
-        StageKey::S4 => adult_templates(species)[0].to_vec(),
-        StageKey::S5 => {
+        Stage::S4 => adult_templates(species)[0].to_vec(),
+        Stage::S5 => {
             let templates = adult_templates(species);
             templates[elder_morph_index(species, morph_index, templates)].to_vec()
         }
-        StageKey::S6 => {
+        Stage::S6 => {
             let templates = adult_templates(species);
             let body = templates[elder_morph_index(species, morph_index, templates)];
             // Sage frame: top + body[1..body.len()-1] + bottom.
@@ -127,18 +101,6 @@ fn elder_morph_index(species: Species, morph_index: usize, templates: &[Template
         1 + (morph_index % (len - 1))
     } else {
         morph_index % len
-    }
-}
-
-pub(crate) fn stage_key(stage: Stage) -> StageKey {
-    match stage {
-        Stage::S0 => StageKey::S0,
-        Stage::S1 => StageKey::S1,
-        Stage::S2 => StageKey::S2,
-        Stage::S3 => StageKey::S3,
-        Stage::S4 => StageKey::S4,
-        Stage::S5 => StageKey::S5,
-        Stage::S6 => StageKey::S6,
     }
 }
 
@@ -756,14 +718,14 @@ mod tests {
             .replace("{accent}", "*")
     }
 
-    const ALL_STAGES: [StageKey; 7] = [
-        StageKey::S0,
-        StageKey::S1,
-        StageKey::S2,
-        StageKey::S3,
-        StageKey::S4,
-        StageKey::S5,
-        StageKey::S6,
+    const ALL_STAGES: [Stage; 7] = [
+        Stage::S0,
+        Stage::S1,
+        Stage::S2,
+        Stage::S3,
+        Stage::S4,
+        Stage::S5,
+        Stage::S6,
     ];
 
     #[test]

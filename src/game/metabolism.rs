@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 use time::{OffsetDateTime, Weekday};
+
+use crate::error::GlorpError;
 
 const ACTIVE_HOUR_WEIGHT: f64 = 1.0;
 const OVERNIGHT_WEIGHT: f64 = 0.35;
@@ -25,6 +29,42 @@ pub enum Mood {
     Sad,
     Sleepy,
     Wilted,
+}
+
+impl Mood {
+    /// Matches the serde wire format (`#[serde(rename_all = "lowercase")]`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Mood::Happy => "happy",
+            Mood::Content => "content",
+            Mood::Hungry => "hungry",
+            Mood::Sad => "sad",
+            Mood::Sleepy => "sleepy",
+            Mood::Wilted => "wilted",
+        }
+    }
+}
+
+impl fmt::Display for Mood {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Mood {
+    type Err = GlorpError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "happy" => Ok(Mood::Happy),
+            "content" => Ok(Mood::Content),
+            "hungry" => Ok(Mood::Hungry),
+            "sad" => Ok(Mood::Sad),
+            "sleepy" => Ok(Mood::Sleepy),
+            "wilted" => Ok(Mood::Wilted),
+            other => Err(GlorpError::Message(format!("unknown mood {other:?}"))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
