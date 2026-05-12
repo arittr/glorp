@@ -150,3 +150,91 @@ fn stage_index_for_xp(xp: f64) -> usize {
         .rposition(|threshold| xp >= *threshold)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // These properties pin the contract of `apply_xp_delta`:
+    //
+    // 1. `xp_never_decreases_for_non_negative_delta` — monotonicity. A delta of
+    //    zero or more must never reduce the pet's XP. The function explicitly
+    //    uses `.max(current_xp)` as a safety floor; this property is the
+    //    regression guard for that floor.
+    //
+    // 2. `stage_transitions_are_strictly_increasing` — when the function emits
+    //    multiple transitions (because a single XP delta crossed several stage
+    //    thresholds at once) they must be consecutive and strictly ascending
+    //    in stage index, with each `to.index() == from.index() + 1`. The runtime
+    //    feeds these to the animation queue assuming this ordering.
+    //
+    // 3. `final_stage_matches_start_plus_transitions` — the number of emitted
+    //    transitions equals `end_stage_index - start_stage_index`, and the
+    //    final stage reached (computed from `result.xp`) equals the `to` of
+    //    the last transition (or the start stage when no transitions fired).
+    //    Together these pin the relationship between XP-derived stage and the
+    //    transition stream consumers see.
+    proptest! {
+        #[test]
+        fn xp_never_decreases_for_non_negative_delta(
+            current_xp in 0.0..100.0f64,
+            delta in 0.0..1e10f64,
+            daily in 1.0..1e10f64,
+        ) {
+            let baseline = CalibrationBaseline { daily_effective_tokens: daily };
+            let result = apply_xp_delta(current_xp, delta, baseline);
+            prop_assert!(result.xp >= current_xp,
+                "xp {} regressed to {} for delta {}", current_xp, result.xp, delta);
+        }
+
+        #[test]
+        fn stage_transitions_are_strictly_increasing(
+            current_xp in 0.0..100.0f64,
+            delta in 0.0..1e10f64,
+            daily in 1.0..1e10f64,
+        ) {
+            let baseline = CalibrationBaseline { daily_effective_tokens: daily };
+            let result = apply_xp_delta(current_xp, delta, baseline);
+            for window in result.stage_transitions.windows(2) {
+                let a = window[0];
+                let b = window[1];
+                prop_assert_eq!(b.from.index(), a.to.index(),
+                    "transitions not consecutive: {:?} -> {:?}", a, b);
+                prop_assert!(b.to.index() > a.to.index(),
+                    "transition stage index not increasing");
+            }
+            for t in &result.stage_transitions {
+                prop_assert_eq!(t.to.index(), t.from.index() + 1,
+                    "single transition skipped stages: {:?}", t);
+            }
+        }
+
+        #[test]
+        fn final_stage_matches_start_plus_transitions(
+            current_xp in 0.0..100.0f64,
+            delta in 0.0..1e10f64,
+            daily in 1.0..1e10f64,
+        ) {
+            let baseline = CalibrationBaseline { daily_effective_tokens: daily };
+            let start_stage = stage_for_xp(current_xp);
+            let result = apply_xp_delta(current_xp, delta, baseline);
+            let end_stage = stage_for_xp(result.xp);
+
+            let expected_count = end_stage.index() - start_stage.index();
+            prop_assert_eq!(result.stage_transitions.len(), expected_count,
+                "expected {} transitions, got {}",
+                expected_count, result.stage_transitions.len());
+
+            if let Some(last) = result.stage_transitions.last() {
+                prop_assert_eq!(last.to.index(), end_stage.index(),
+                    "last transition's `to` does not match final stage");
+                prop_assert_eq!(result.stage_transitions[0].from.index(), start_stage.index(),
+                    "first transition's `from` does not match start stage");
+            } else {
+                prop_assert_eq!(end_stage.index(), start_stage.index(),
+                    "no transitions but stage changed");
+            }
+        }
+    }
+}

@@ -15,3 +15,71 @@ pub fn smear_catchup_delta(effective_tokens: f64, baseline: CalibrationBaseline)
     }
     buckets
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // These properties pin the contract of `smear_catchup_delta`:
+    //
+    // 1. `bucket_count_is_six_to_twelve` — for any positive delta the result has
+    //    between 6 and 12 buckets inclusive. This is the documented animation
+    //    smoothing window; a refactor that drops below 6 or balloons above 12
+    //    would break the renderer's catchup pacing.
+    //
+    // 2. `each_bucket_at_or_below_daily_cap` — every individual bucket is at
+    //    most `daily * 0.25`. This is the per-bucket clamp that prevents a
+    //    single catchup tick from exceeding a quarter of one day's calibrated
+    //    pace; downstream XP math assumes this bound.
+    //
+    // 3. `sum_at_or_below_input` — the total of all buckets never exceeds the
+    //    raw effective-token input. This documents an intentional silent
+    //    clipping behavior: for `effective_tokens > daily * 3.0` the per-bucket
+    //    cap times 12 buckets is `daily * 3.0`, so anything beyond that point
+    //    is silently dropped on the floor. Anyone changing this should know
+    //    they are changing a load-bearing semantic decision (huge backfills
+    //    cannot grant unbounded XP in one poll).
+    proptest! {
+        #[test]
+        fn bucket_count_is_six_to_twelve(
+            effective in 1.0..1e12f64,
+            daily in 1.0..1e10f64,
+        ) {
+            let baseline = CalibrationBaseline { daily_effective_tokens: daily };
+            let buckets = smear_catchup_delta(effective, baseline);
+            prop_assert!(buckets.len() >= 6 && buckets.len() <= 12,
+                "expected 6..=12 buckets, got {}", buckets.len());
+        }
+
+        #[test]
+        fn each_bucket_at_or_below_daily_cap(
+            effective in 1.0..1e12f64,
+            daily in 1.0..1e10f64,
+        ) {
+            let baseline = CalibrationBaseline { daily_effective_tokens: daily };
+            let buckets = smear_catchup_delta(effective, baseline);
+            let cap = daily * 0.25;
+            for (idx, bucket) in buckets.iter().enumerate() {
+                prop_assert!(*bucket <= cap,
+                    "bucket {} = {} exceeds daily*0.25 cap {}", idx, bucket, cap);
+                prop_assert!(*bucket >= 0.0,
+                    "bucket {} = {} is negative", idx, bucket);
+            }
+        }
+
+        #[test]
+        fn sum_at_or_below_input(
+            effective in 1.0..1e12f64,
+            daily in 1.0..1e10f64,
+        ) {
+            let baseline = CalibrationBaseline { daily_effective_tokens: daily };
+            let buckets = smear_catchup_delta(effective, baseline);
+            let sum: f64 = buckets.iter().sum();
+            // Allow a small tolerance for floating-point summation error.
+            let tolerance = (effective.abs() * 1e-9).max(1e-9);
+            prop_assert!(sum <= effective + tolerance,
+                "sum {} exceeds input {} (tolerance {})", sum, effective, tolerance);
+        }
+    }
+}

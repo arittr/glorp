@@ -281,6 +281,20 @@ fn dev_preview_does_not_use_user_config_dir() {
     );
 }
 
+// Snapshot guard for the deterministic `watch-wide-normal` preview frame. Any
+// silent rendering regression (palette swap, layout drift, off-by-one in the
+// composer, etc.) will diff the .snap file and fail the test. To accept an
+// intentional rendering change, run `cargo insta review`.
+#[test]
+fn dev_preview_watch_wide_normal_frame_snapshot() {
+    let run = PreviewRun::new();
+    run.run_success("watch");
+
+    let frame = std::fs::read_to_string(run.out.join("frames/watch-wide-normal.txt")).unwrap();
+
+    insta::assert_snapshot!("watch_wide_normal_frame", frame);
+}
+
 fn assert_scenario(
     manifest: &Value,
     id: &str,

@@ -35,3 +35,4 @@ which = "7"
 assert_cmd = "2"
 insta = { version = "1", features = ["yaml"] }
 predicates = "3"
+proptest = "1"
