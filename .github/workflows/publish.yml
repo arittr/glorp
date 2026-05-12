@@ -66,30 +66,53 @@ jobs:
         include:
           - target: darwin-arm64
             runner: macos-latest
+            rust_target: aarch64-apple-darwin
+          # Cross-compile darwin-x64 from Apple Silicon — hosted Intel mac
+          # runners (macos-13) get throttled hard and can queue indefinitely.
+          # `--target x86_64-apple-darwin` from arm64 needs no extra tooling.
           - target: darwin-x64
-            runner: macos-13
+            runner: macos-latest
+            rust_target: x86_64-apple-darwin
           - target: linux-x64
             runner: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
           - target: linux-arm64
             runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
           - target: win32-x64
             runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.target }}
       - name: cargo build --release
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+      - name: stage binary at workspace root for upload
+        # Upload-artifact preserves paths relative to the workspace, and the
+        # publish-platforms job downloads into `target/release/`. Copy the
+        # built binary to the workspace root so the artifact stays flat and
+        # the download lands at `target/release/glorp` (or .exe).
+        shell: bash
+        run: |
+          if [ -f "target/${{ matrix.rust_target }}/release/glorp" ]; then
+            cp "target/${{ matrix.rust_target }}/release/glorp" ./glorp
+          fi
+          if [ -f "target/${{ matrix.rust_target }}/release/glorp.exe" ]; then
+            cp "target/${{ matrix.rust_target }}/release/glorp.exe" ./glorp.exe
+          fi
       - name: upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: glorp-${{ matrix.target }}
           path: |
-            target/release/glorp
-            target/release/glorp.exe
+            glorp
+            glorp.exe
           if-no-files-found: error
 
   smoke:
