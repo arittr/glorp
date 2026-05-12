@@ -124,6 +124,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: release version script tests
+        run: npm run test:release-version
+      - name: assert release versions
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            node scripts/assert-release-version.mjs --tag "$GITHUB_REF_NAME"
+          else
+            node scripts/assert-release-version.mjs
+          fi
       - name: install npm package deps (ccusage helpers)
         # Run at the workspace root, not inside npm/glorp — npm 11's
         # workspace resolver chokes when invoked from a workspace child
@@ -154,6 +164,8 @@ jobs:
           # exchanges the workflow's id-token for a publish token
           # automatically. Setting registry-url leaves an empty auth
           # token in .npmrc, which short-circuits OIDC and gets 404'd.
+      - name: assert release versions match tag
+        run: node scripts/assert-release-version.mjs --tag "$GITHUB_REF_NAME"
       - name: download platform binary
         uses: actions/download-artifact@v4
         with:
@@ -163,14 +175,6 @@ jobs:
         run: |
           chmod +x target/release/glorp 2>/dev/null || true
           node scripts/build-platform-package.mjs --platform ${{ matrix.target }}
-      - name: assert package version matches tag
-        run: |
-          PKG_VERSION=$(node -p "require('./npm/platform/${{ matrix.target }}/package.json').version")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::@glorp/${{ matrix.target }} version $PKG_VERSION does not match tag $TAG_VERSION"
-            exit 1
-          fi
       - name: npm publish (platform)
         working-directory: npm/platform/${{ matrix.target }}
         run: npm publish --provenance --access public
@@ -190,14 +194,8 @@ jobs:
           # exchanges the workflow's id-token for a publish token
           # automatically. Setting registry-url leaves an empty auth
           # token in .npmrc, which short-circuits OIDC and gets 404'd.
-      - name: assert main package version matches tag
-        run: |
-          PKG_VERSION=$(node -p "require('./npm/glorp/package.json').version")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::glorp version $PKG_VERSION does not match tag $TAG_VERSION"
-            exit 1
-          fi
+      - name: assert release versions match tag
+        run: node scripts/assert-release-version.mjs --tag "$GITHUB_REF_NAME"
       - name: npm publish (main)
         working-directory: npm/glorp
         run: npm publish --provenance --access public

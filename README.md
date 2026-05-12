@@ -111,6 +111,33 @@ cache_read_weight = 0.03
 
 Glorp surfaces cost figures from helper output as **display-only metadata**. Your provider's billing dashboard remains the source of truth for invoices, credits, discounts, and final billing totals. Cost never affects food, XP, mood, or stage progression.
 
+## Releasing
+
+Glorp publishes through GitHub Actions, not from a local `npm publish` at the
+repo root. The root `package.json` is only workspace glue; the publish workflow
+builds the five native platform packages first, publishes those, then publishes
+`@arittr/glorp` after its optional dependencies can resolve.
+
+Before tagging a release:
+
+```bash
+node scripts/bump-npm-version.mjs X.Y.Z
+node scripts/assert-release-version.mjs --tag vX.Y.Z
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+npm test
+```
+
+Then commit the version bump, create an annotated `vX.Y.Z` tag, and push the
+commit and tag. Pushing the tag runs `.github/workflows/publish.yml`, which
+re-runs the release-version assertion against the tag, tests Rust on
+Ubuntu/macOS/Windows, builds the native release binaries, smoke-tests the npm
+launcher, and publishes with npm trusted publishing/provenance.
+
+For a no-publish rehearsal, run the `publish` workflow manually with the default
+`dry_run` input. That exercises the test/build/smoke matrix but skips the npm
+publish jobs.
+
 ## Acknowledgments
 
 Visual design ported from the [Tokenpet](docs/tokenpet/) mockup. Inspired by Tamagotchis, dotfiles, and the perpetual question of whether your tools are alive.

@@ -47,6 +47,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: release version script tests
+        run: npm run test:release-version
       - name: install npm package deps (ccusage helpers)
         # Run at the workspace root, not inside npm/glorp — npm 11's
         # workspace resolver chokes when invoked from a workspace child

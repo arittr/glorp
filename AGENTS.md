@@ -38,3 +38,55 @@ cargo test --test dev_preview
 cargo test dev_preview::scenarios
 cargo test dev_preview::export
 ```
+
+## Release Procedure
+
+Glorp's full npm release is CI-owned. Do not publish from the repository root:
+the root `package.json` is a workspace manifest with no package name, so
+root-level `npm publish --access public` is the wrong command. Full
+multi-platform publication must run through `.github/workflows/publish.yml`.
+
+Version surfaces must stay in lockstep:
+
+- `Cargo.toml`
+- the `glorp` package entry in `Cargo.lock`
+- `npm/glorp/package.json`
+- `package-lock.json`
+- every `npm/platform/*/package.json`
+- the platform entries in `npm/glorp`'s `optionalDependencies`
+
+Use the repo helper for release bumps:
+
+```bash
+node scripts/bump-npm-version.mjs X.Y.Z
+node scripts/assert-release-version.mjs --tag vX.Y.Z
+```
+
+The assertion script is the release contract. It must pass before tagging, and
+the publish workflow runs it again against `GITHUB_REF_NAME` before any npm
+publish step.
+
+Recommended local pre-tag checks:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+npm test
+```
+
+Release flow:
+
+1. Sync with `origin/main` before tagging so the tag points at the commit that
+   will actually publish.
+2. Run the version bump helper and local checks.
+3. Commit the release changes.
+4. Create an annotated tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
+5. Push the commit and tag.
+6. Let `.github/workflows/publish.yml` publish via npm trusted publishing. It
+   builds platform binaries, publishes platform packages sequentially, then
+   publishes `@arittr/glorp`.
+7. After the workflow finishes, verify the npm package/version is visible.
+
+For a no-publish rehearsal, manually run the `publish` workflow with the default
+`dry_run` input. This exercises the test/build/smoke matrix and skips the
+publish jobs.
