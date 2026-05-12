@@ -1,0 +1,409 @@
+use crate::dev_preview::export::{
+    copy_assets, write_cells_json, write_index_html, write_manifest, write_review_markdown,
+    write_text_frame, ArtifactType, PreviewArtifact, PreviewDimensions, PreviewManifest,
+    PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
+};
+use crate::dev_preview::frame::PreviewFrame;
+use crate::dev_preview::output::{commit_output, prepare_output};
+use crate::dev_preview::pets::pet_frames;
+use crate::dev_preview::watch::watch_frames;
+use crate::error::{GlorpError, Result};
+use crate::game::evolution::Stage;
+use crate::pet::generation::{stage_label, Species};
+use crate::tui::render_context::RenderContext;
+use crate::tui::style::ColorCapability;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewSelection {
+    All,
+    Watch,
+    Pets,
+}
+
+pub struct PreviewRenderContext {
+    pub fixed_now: OffsetDateTime,
+    pub render: RenderContext,
+}
+
+impl PreviewRenderContext {
+    pub fn deterministic() -> Self {
+        Self {
+            fixed_now: OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
+            render: RenderContext::new(ColorCapability::Truecolor),
+        }
+    }
+}
+
+pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Result<()> {
+    let ctx = PreviewRenderContext::deterministic();
+    let prepared = prepare_output(out)?;
+    let staging_dir = prepared.staging_dir.clone();
+    let frames_dir = staging_dir.join("frames");
+    let scratch_dir = staging_dir.join(".scratch");
+
+    fs::create_dir_all(&frames_dir)?;
+    fs::create_dir_all(&scratch_dir)?;
+
+    let mut frames = Vec::new();
+    match selection {
+        PreviewSelection::All => {
+            frames.extend(watch_frames(&ctx, &scratch_dir)?);
+            frames.extend(pet_frames(&ctx)?);
+        }
+        PreviewSelection::Watch => frames.extend(watch_frames(&ctx, &scratch_dir)?),
+        PreviewSelection::Pets => frames.extend(pet_frames(&ctx)?),
+    }
+
+    for frame in &frames {
+        write_text_frame(&staging_dir.join(text_path(frame)), frame)?;
+        write_cells_json(&staging_dir.join(cells_path(frame)), frame)?;
+    }
+
+    let generated_at = format_rfc3339(OffsetDateTime::now_utc())?;
+    let scenarios = frames
+        .iter()
+        .map(|frame| scenario_metadata(frame, &ctx))
+        .collect();
+    let manifest = PreviewManifest {
+        schema_version: SCHEMA_VERSION,
+        producer: PRODUCER,
+        glorp_version: env!("CARGO_PKG_VERSION"),
+        generated_at,
+        scenarios,
+        artifacts: artifacts_for_frames(&frames),
+    };
+
+    write_index_html(
+        &staging_dir.join("index.html"),
+        &frames,
+        &manifest.generated_at,
+    )?;
+    write_review_markdown(&staging_dir.join("review.md"), &manifest)?;
+    copy_assets(&staging_dir)?;
+    write_manifest(&staging_dir.join("manifest.json"), &manifest)?;
+
+    fs::remove_dir_all(&scratch_dir)?;
+    commit_output(prepared)
+}
+
+fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> PreviewScenario {
+    let (kind, intent, inputs, review_prompts) = match frame.id.as_str() {
+        "watch-wide-normal" => (
+            PreviewScenarioKind::Watch,
+            "Review the primary healthy watch layout at the standard wide terminal size.",
+            BTreeMap::from([
+                (
+                    "fixed_now".to_string(),
+                    Value::String(format_rfc3339_lossy(ctx.fixed_now)),
+                ),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+                (
+                    "fixture".to_string(),
+                    Value::String("seeded-pet-state-and-usage-sqlite".to_string()),
+                ),
+                ("species".to_string(), Value::String("fuzz".to_string())),
+                ("stage".to_string(), Value::String("s4".to_string())),
+                ("mood".to_string(), Value::String("content".to_string())),
+                ("tick".to_string(), json!(ctx.fixed_now.unix_timestamp())),
+                ("terminal_width".to_string(), json!(120)),
+                ("terminal_height".to_string(), json!(32)),
+            ]),
+            vec![
+                "Check the two-column layout hierarchy and spacing.".to_string(),
+                "Confirm source health and recent activity are readable.".to_string(),
+            ],
+        ),
+        "watch-compact-normal" => (
+            PreviewScenarioKind::Watch,
+            "Review the healthy watch layout at the compact terminal size.",
+            BTreeMap::from([
+                (
+                    "fixed_now".to_string(),
+                    Value::String(format_rfc3339_lossy(ctx.fixed_now)),
+                ),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+                (
+                    "fixture".to_string(),
+                    Value::String("seeded-pet-state-and-usage-sqlite".to_string()),
+                ),
+                ("species".to_string(), Value::String("fuzz".to_string())),
+                ("stage".to_string(), Value::String("s4".to_string())),
+                ("mood".to_string(), Value::String("content".to_string())),
+                ("tick".to_string(), json!(ctx.fixed_now.unix_timestamp())),
+                ("terminal_width".to_string(), json!(72)),
+                ("terminal_height".to_string(), json!(24)),
+            ]),
+            vec![
+                "Check compact stacking and truncation behavior.".to_string(),
+                "Confirm critical pet and usage details remain visible.".to_string(),
+            ],
+        ),
+        "pet-species-stage" => (
+            PreviewScenarioKind::PetMatrix,
+            "Review every Slice 1 pet species across all seven growth stages.",
+            BTreeMap::from([
+                ("mood".to_string(), Value::String("content".to_string())),
+                ("tick".to_string(), json!(0)),
+                ("species_count".to_string(), json!(6)),
+                ("stage_count".to_string(), json!(7)),
+                (
+                    "species".to_string(),
+                    json!(Species::all()
+                        .into_iter()
+                        .map(Species::as_str)
+                        .collect::<Vec<_>>()),
+                ),
+                ("stages".to_string(), json!(stage_inputs())),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+            ]),
+            vec![
+                "Check species silhouettes remain distinct across stages.".to_string(),
+                "Confirm stage labels and role colors line up with watch pet styling.".to_string(),
+            ],
+        ),
+        _ => (
+            PreviewScenarioKind::Watch,
+            "Review this generated preview frame.",
+            BTreeMap::new(),
+            vec!["Inspect the generated frame for obvious regressions.".to_string()],
+        ),
+    };
+
+    PreviewScenario {
+        id: frame.id.clone(),
+        kind,
+        title: frame.title.clone(),
+        intent: intent.to_string(),
+        dimensions: PreviewDimensions {
+            width: frame.width,
+            height: frame.height,
+        },
+        files: PreviewScenarioFiles {
+            text: text_path(frame),
+            cells: cells_path(frame),
+        },
+        inputs,
+        review_prompts,
+    }
+}
+
+fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
+    let mut artifacts = Vec::new();
+    for frame in frames {
+        artifacts.push(PreviewArtifact {
+            id: frame.id.clone(),
+            title: format!("{} Text", frame.title),
+            artifact_type: ArtifactType::Text,
+            path: text_path(frame),
+            width: Some(frame.width),
+            height: Some(frame.height),
+        });
+        artifacts.push(PreviewArtifact {
+            id: format!("{}-cells", frame.id),
+            title: format!("{} Cells", frame.title),
+            artifact_type: ArtifactType::Cells,
+            path: cells_path(frame),
+            width: Some(frame.width),
+            height: Some(frame.height),
+        });
+    }
+    artifacts.push(PreviewArtifact {
+        id: "index".to_string(),
+        title: "Preview Index".to_string(),
+        artifact_type: ArtifactType::Html,
+        path: PathBuf::from("index.html"),
+        width: None,
+        height: None,
+    });
+    artifacts.push(PreviewArtifact {
+        id: "review".to_string(),
+        title: "Review Checklist".to_string(),
+        artifact_type: ArtifactType::Review,
+        path: PathBuf::from("review.md"),
+        width: None,
+        height: None,
+    });
+    artifacts.push(PreviewArtifact {
+        id: "preview-css".to_string(),
+        title: "Preview CSS".to_string(),
+        artifact_type: ArtifactType::Asset,
+        path: PathBuf::from("assets/preview.css"),
+        width: None,
+        height: None,
+    });
+    artifacts.push(PreviewArtifact {
+        id: "preview-js".to_string(),
+        title: "Preview JS".to_string(),
+        artifact_type: ArtifactType::Asset,
+        path: PathBuf::from("assets/preview.js"),
+        width: None,
+        height: None,
+    });
+    artifacts
+}
+
+fn text_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.txt", frame.id))
+}
+
+fn cells_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.cells.json", frame.id))
+}
+
+fn color_capability_name(capability: ColorCapability) -> &'static str {
+    match capability {
+        ColorCapability::Truecolor => "truecolor",
+        ColorCapability::Flat => "flat",
+    }
+}
+
+fn stage_inputs() -> Vec<BTreeMap<&'static str, Value>> {
+    [
+        Stage::S0,
+        Stage::S1,
+        Stage::S2,
+        Stage::S3,
+        Stage::S4,
+        Stage::S5,
+        Stage::S6,
+    ]
+    .into_iter()
+    .map(|stage| {
+        BTreeMap::from([
+            ("id", Value::String(stage_id(stage).to_string())),
+            (
+                "labels_by_species",
+                json!(Species::all()
+                    .into_iter()
+                    .map(|species| (species.as_str(), stage_label(species, stage)))
+                    .collect::<BTreeMap<_, _>>()),
+            ),
+        ])
+    })
+    .collect()
+}
+
+fn stage_id(stage: Stage) -> &'static str {
+    match stage {
+        Stage::S0 => "s0",
+        Stage::S1 => "s1",
+        Stage::S2 => "s2",
+        Stage::S3 => "s3",
+        Stage::S4 => "s4",
+        Stage::S5 => "s5",
+        Stage::S6 => "s6",
+    }
+}
+
+fn format_rfc3339(timestamp: OffsetDateTime) -> Result<String> {
+    timestamp.format(&Rfc3339).map_err(|err| {
+        GlorpError::Message(format!(
+            "failed to format preview timestamp {timestamp:?}: {err}"
+        ))
+    })
+}
+
+fn format_rfc3339_lossy(timestamp: OffsetDateTime) -> String {
+    format_rfc3339(timestamp).unwrap_or_else(|_| timestamp.unix_timestamp().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_selection_writes_watch_and_pet_scenarios() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("preview");
+
+        generate_preview_bundle(&out, PreviewSelection::All).unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+        let ids = manifest["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|scenario| scenario["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "watch-wide-normal",
+                "watch-compact-normal",
+                "pet-species-stage"
+            ]
+        );
+    }
+
+    #[test]
+    fn scenario_metadata_includes_review_inputs_and_files() {
+        let ctx = PreviewRenderContext::deterministic();
+        let frame = PreviewFrame {
+            id: "watch-wide-normal".to_string(),
+            title: "Watch Wide Normal".to_string(),
+            width: 120,
+            height: 32,
+            cells: Vec::new(),
+        };
+
+        let scenario = scenario_metadata(&frame, &ctx);
+
+        assert_eq!(scenario.kind, PreviewScenarioKind::Watch);
+        assert_eq!(
+            scenario.files.text,
+            PathBuf::from("frames/watch-wide-normal.txt")
+        );
+        assert_eq!(
+            scenario.files.cells,
+            PathBuf::from("frames/watch-wide-normal.cells.json")
+        );
+        assert_eq!(scenario.inputs["color_capability"], "truecolor");
+        assert_eq!(scenario.inputs["species"], "fuzz");
+        assert_eq!(scenario.inputs["stage"], "s4");
+        assert!(!scenario.review_prompts.is_empty());
+    }
+
+    #[test]
+    fn pet_matrix_metadata_lists_species_and_stages() {
+        let ctx = PreviewRenderContext::deterministic();
+        let frame = PreviewFrame {
+            id: "pet-species-stage".to_string(),
+            title: "Pet Species Stage".to_string(),
+            width: 120,
+            height: 86,
+            cells: Vec::new(),
+        };
+
+        let scenario = scenario_metadata(&frame, &ctx);
+
+        assert_eq!(scenario.inputs["mood"], "content");
+        assert_eq!(scenario.inputs["tick"], 0);
+        assert_eq!(
+            scenario.inputs["species"],
+            json!(["fuzz", "blob", "ghost", "glitch", "crystal", "mech"])
+        );
+        assert_eq!(
+            scenario.inputs["stages"][0]["labels_by_species"]["fuzz"],
+            "fluff"
+        );
+        assert_eq!(
+            scenario.inputs["stages"][6]["labels_by_species"]["mech"],
+            "titan"
+        );
+    }
+}

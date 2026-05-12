@@ -24,6 +24,7 @@ pub fn run() -> Result<()> {
         Command::Rename { name } => commands::rename::run(name)?,
         Command::Reset { yes } => commands::reset::run(yes)?,
         Command::Doctor => commands::doctor::run()?,
+        Command::DevPreview { out, scenario } => commands::dev_preview::run(out, scenario)?,
         Command::Help => {
             Cli::command().print_help()?;
             println!();

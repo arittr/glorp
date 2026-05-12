@@ -1,6 +1,8 @@
 use crate::dev_preview::frame::{escape_html, PreviewCell, PreviewFrame};
 use crate::error::Result;
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +17,39 @@ pub struct PreviewManifest {
     pub producer: &'static str,
     pub glorp_version: &'static str,
     pub generated_at: String,
+    pub scenarios: Vec<PreviewScenario>,
     pub artifacts: Vec<PreviewArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewScenario {
+    pub id: String,
+    pub kind: PreviewScenarioKind,
+    pub title: String,
+    pub intent: String,
+    pub dimensions: PreviewDimensions,
+    pub files: PreviewScenarioFiles,
+    pub inputs: BTreeMap<String, Value>,
+    pub review_prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewScenarioKind {
+    Watch,
+    PetMatrix,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewDimensions {
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewScenarioFiles {
+    pub text: PathBuf,
+    pub cells: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +70,7 @@ pub enum ArtifactType {
     Cells,
     Html,
     Review,
+    Asset,
 }
 
 pub fn write_text_frame(path: &Path, frame: &PreviewFrame) -> Result<()> {
@@ -80,21 +115,47 @@ pub fn write_manifest(path: &Path, manifest: &PreviewManifest) -> Result<()> {
     Ok(())
 }
 
-pub fn write_review_markdown(path: &Path, frames: &[PreviewFrame]) -> Result<()> {
+pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<()> {
     let mut markdown = String::from("# Glorp Preview Review\n\n");
-    if frames.is_empty() {
-        markdown.push_str("No preview frames were generated.\n");
+    markdown.push_str(&format!(
+        "Generated `{}` with Glorp `{}`.\n\n",
+        manifest.generated_at, manifest.glorp_version
+    ));
+
+    if manifest.scenarios.is_empty() {
+        markdown.push_str("No preview scenarios were generated.\n");
     } else {
-        markdown.push_str("## Frames\n\n");
-        for frame in frames {
+        markdown.push_str("## Scenarios\n\n");
+        for scenario in &manifest.scenarios {
             markdown.push_str(&format!(
-                "- {} (`{}`x`{}`): `frames/{}.txt`\n",
-                frame.title, frame.width, frame.height, frame.id
+                "### {}\n\n{}\n\n",
+                scenario.title, scenario.intent
             ));
+            markdown.push_str(&format!(
+                "- ID: `{}`\n- Kind: `{}`\n- Size: `{}x{}`\n- Text: `{}`\n- Cells: `{}`\n\n",
+                scenario.id,
+                scenario_kind_label(scenario.kind),
+                scenario.dimensions.width,
+                scenario.dimensions.height,
+                scenario.files.text.display(),
+                scenario.files.cells.display()
+            ));
+            markdown.push_str("Review prompts:\n");
+            for prompt in &scenario.review_prompts {
+                markdown.push_str(&format!("- {prompt}\n"));
+            }
+            markdown.push('\n');
         }
     }
     fs::write(path, markdown)?;
     Ok(())
+}
+
+fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
+    match kind {
+        PreviewScenarioKind::Watch => "watch",
+        PreviewScenarioKind::PetMatrix => "pet-matrix",
+    }
 }
 
 pub fn write_index_html(path: &Path, frames: &[PreviewFrame], generated_at: &str) -> Result<()> {
@@ -307,6 +368,60 @@ mod tests {
         }
     }
 
+    fn sample_manifest() -> PreviewManifest {
+        PreviewManifest {
+            schema_version: SCHEMA_VERSION,
+            producer: PRODUCER,
+            glorp_version: "0.1.0",
+            generated_at: "2026-05-12T00:00:00Z".to_string(),
+            scenarios: vec![PreviewScenario {
+                id: "frame-one".to_string(),
+                kind: PreviewScenarioKind::Watch,
+                title: "Frame One".to_string(),
+                intent: "Exercise a sample watch preview.".to_string(),
+                dimensions: PreviewDimensions {
+                    width: 2,
+                    height: 2,
+                },
+                files: PreviewScenarioFiles {
+                    text: PathBuf::from("frames/frame-one.txt"),
+                    cells: PathBuf::from("frames/frame-one.cells.json"),
+                },
+                inputs: BTreeMap::from([(
+                    "fixed_now".to_string(),
+                    Value::String("2026-05-12T00:00:00Z".to_string()),
+                )]),
+                review_prompts: vec!["Check sample geometry.".to_string()],
+            }],
+            artifacts: vec![
+                PreviewArtifact {
+                    id: "frame-one".to_string(),
+                    title: "Frame One".to_string(),
+                    artifact_type: ArtifactType::Text,
+                    path: PathBuf::from("frames/frame-one.txt"),
+                    width: Some(2),
+                    height: Some(2),
+                },
+                PreviewArtifact {
+                    id: "index".to_string(),
+                    title: "Index".to_string(),
+                    artifact_type: ArtifactType::Html,
+                    path: PathBuf::from("index.html"),
+                    width: None,
+                    height: None,
+                },
+                PreviewArtifact {
+                    id: "preview-css".to_string(),
+                    title: "Preview CSS".to_string(),
+                    artifact_type: ArtifactType::Asset,
+                    path: PathBuf::from("assets/preview.css"),
+                    width: None,
+                    height: None,
+                },
+            ],
+        }
+    }
+
     #[test]
     fn text_export_preserves_terminal_geometry() {
         let dir = tempfile::tempdir().unwrap();
@@ -417,30 +532,7 @@ mod tests {
     fn manifest_has_versioned_producer_and_artifact_types() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("manifest.json");
-        let manifest = PreviewManifest {
-            schema_version: SCHEMA_VERSION,
-            producer: PRODUCER,
-            glorp_version: "0.1.0",
-            generated_at: "2026-05-12T00:00:00Z".to_string(),
-            artifacts: vec![
-                PreviewArtifact {
-                    id: "frame-one".to_string(),
-                    title: "Frame One".to_string(),
-                    artifact_type: ArtifactType::Text,
-                    path: PathBuf::from("frames/frame-one.txt"),
-                    width: Some(2),
-                    height: Some(2),
-                },
-                PreviewArtifact {
-                    id: "index".to_string(),
-                    title: "Index".to_string(),
-                    artifact_type: ArtifactType::Html,
-                    path: PathBuf::from("index.html"),
-                    width: None,
-                    height: None,
-                },
-            ],
-        };
+        let manifest = sample_manifest();
 
         write_manifest(&path, &manifest).unwrap();
 
@@ -448,7 +540,32 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["producer"], "glorp-dev-preview");
+        assert_eq!(json["scenarios"][0]["kind"], "watch");
+        assert_eq!(json["scenarios"][0]["dimensions"]["width"], 2);
+        assert_eq!(
+            json["scenarios"][0]["files"]["cells"],
+            "frames/frame-one.cells.json"
+        );
         assert_eq!(json["artifacts"][0]["type"], "text");
         assert_eq!(json["artifacts"][1]["type"], "html");
+        assert_eq!(json["artifacts"][2]["type"], "asset");
+    }
+
+    #[test]
+    fn review_markdown_lists_scenario_prompts_from_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.md");
+
+        write_review_markdown(&path, &sample_manifest()).unwrap();
+
+        let markdown = fs::read_to_string(path).unwrap();
+        assert!(markdown.contains("## Scenarios"));
+        assert!(markdown.contains("Frame One"));
+        assert!(markdown.contains("Exercise a sample watch preview."));
+        assert!(markdown.contains("- Kind: `watch`"));
+        assert!(markdown.contains("- Text: `frames/frame-one.txt`"));
+        assert!(markdown.contains("- Cells: `frames/frame-one.cells.json`"));
+        assert!(markdown.contains("Review prompts:"));
+        assert!(markdown.contains("- Check sample geometry."));
     }
 }

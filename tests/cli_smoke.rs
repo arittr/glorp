@@ -2,6 +2,15 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
+fn help_hides_dev_preview_command() {
+    let mut cmd = Command::cargo_bin("glorp").unwrap();
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev-preview").not());
+}
+
+#[test]
 fn help_lists_mvp_commands_and_no_manual_feed() {
     let mut cmd = Command::cargo_bin("glorp").unwrap();
     cmd.arg("help")

@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -39,4 +40,19 @@ pub enum Command {
     Doctor,
     /// Show command help.
     Help,
+    #[command(hide = true)]
+    DevPreview {
+        #[arg(long, default_value = "target/glorp-preview")]
+        out: PathBuf,
+
+        #[arg(long, value_enum, default_value_t = PreviewScenarioArg::All)]
+        scenario: PreviewScenarioArg,
+    },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum PreviewScenarioArg {
+    All,
+    Watch,
+    Pets,
 }
