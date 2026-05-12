@@ -70,48 +70,75 @@ pub fn render_watch_frame_with_context(
     layout_and_render(inner, mode, frame.buffer_mut(), vm, ctx);
 }
 
-/// Returns the rect within `frame.area()` that the pet panel occupies for the
-/// current mode and view model. Callers (specifically the watch loop) use this
-/// to apply tachyonfx effects onto the rendered pet panel after the dispatcher
-/// has drawn it.
+/// Strips the 1-cell rounded-border chrome from `frame_area`, returning the
+/// inner rect that layout renders into. Mirrors what `render_watch_frame_with_context`
+/// does with `Block::bordered().inner(frame_rect)`.
+pub(crate) fn inner_frame_rect(frame_area: Rect) -> Rect {
+    Block::bordered().inner(frame_area)
+}
+
+/// Returns the 13×10 sub-rect where the pet art sits within `frame.area()` for
+/// the current mode and view model. Callers (specifically the watch loop) use
+/// this to scope tachyonfx effects to the pet art, not the full (Fill-sized)
+/// pet panel which may be much taller than 10 rows.
 pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
-    use crate::tui::panels::Panel;
+    use crate::tui::panels::pet::pet_inner_rect_in_panel;
+
     let mode = if (frame_area.width as usize) >= COMPACT_THRESHOLD + 2 {
         Mode::Wide
     } else {
         Mode::Compact
     };
-    // Mirror render_watch_frame_with_capability: frame fills the terminal.
-    let outer_block = Block::bordered();
-    let inner = outer_block.inner(frame_area);
-    let pet_h = match PetPanel.preferred_constraint(vm) {
-        Constraint::Length(n) => n,
-        _ => 5,
-    };
+
+    let inner = inner_frame_rect(frame_area);
+
     match mode {
         Mode::Wide => {
-            // TODO(Task 22): update this rect calculation for the new Fill(1) pet.
-            // For now, approximate by centering based on remaining height.
-            let vitals_h = match VitalsPanel.preferred_constraint(vm) {
-                Constraint::Length(n) => n,
-                _ => 5,
-            };
-            let column_content_h = pet_h + vitals_h + COLUMN_GAP;
-            let leftover = inner.height.saturating_sub(column_content_h);
-            let top_pad = leftover / 2;
-            Rect {
-                x: inner.x,
-                y: inner.y + top_pad,
-                width: WIDE_LEFT_COL.min(inner.width),
-                height: pet_h.min(inner.height.saturating_sub(top_pad)),
-            }
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(WIDE_LEFT_COL),
+                    Constraint::Length(WIDE_GUTTER),
+                    Constraint::Min(50),
+                ])
+                .split(inner);
+            let left_col = body[0];
+
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .flex(Flex::Start)
+                .constraints([
+                    PetPanel.preferred_constraint(vm),      // Fill(1)
+                    Constraint::Length(COLUMN_GAP),
+                    VitalsPanel.preferred_constraint(vm),   // Length(4)
+                    Constraint::Length(COLUMN_GAP),
+                    BioCardPanel.preferred_constraint(vm),  // Length(3)
+                ])
+                .split(left_col);
+
+            pet_inner_rect_in_panel(left[0], vm)
         }
-        Mode::Compact => Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: pet_h.min(inner.height),
-        },
+        Mode::Compact => {
+            let stack = Layout::default()
+                .direction(Direction::Vertical)
+                .flex(Flex::Start)
+                .constraints([
+                    PetPanel.preferred_constraint(vm),      // Fill(1)
+                    Constraint::Length(COLUMN_GAP),
+                    VitalsPanel.preferred_constraint(vm),   // Length(4)
+                    Constraint::Length(COLUMN_GAP),
+                    TodayPanel.preferred_constraint(vm),    // Length(6)
+                    Constraint::Length(COLUMN_GAP),
+                    ProgressPanel.preferred_constraint(vm), // Length(3)
+                    Constraint::Length(COLUMN_GAP),
+                    FeedPanel.preferred_constraint(vm),     // Length(7)
+                    Constraint::Length(COLUMN_GAP),
+                    BioCardPanel.preferred_constraint(vm),  // Length(3)
+                ])
+                .split(inner);
+
+            pet_inner_rect_in_panel(stack[0], vm)
+        }
     }
 }
 
@@ -348,6 +375,31 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pet_panel_rect_returns_thirteen_by_ten_sub_rect() {
+        let vm = WatchViewModel::fixture();
+        let frame_area = Rect::new(0, 0, 120, 32);
+        let rect = pet_panel_rect(frame_area, &vm);
+        assert_eq!(rect.width, 13);
+        assert_eq!(rect.height, 10);
+    }
+
+    #[test]
+    fn pet_panel_rect_accounts_for_bio_panel_height() {
+        let vm = WatchViewModel::fixture();
+        let frame_area = Rect::new(0, 0, 120, 50);
+        let rect = pet_panel_rect(frame_area, &vm);
+        assert!(
+            rect.y + rect.height < frame_area.height - 3,
+            "pet sub-rect must end before bio starts"
+        );
+    }
+}
 
 #[cfg(test)]
 mod render_compact_tests {
