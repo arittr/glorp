@@ -8,6 +8,13 @@ license = "MIT"
 name = "glorp"
 path = "src/main.rs"
 
+[features]
+# `dev-preview` enables the hidden `glorp dev-preview` design-review command.
+# Default-on for local development; npm release builds pass
+# `--no-default-features` to strip it from the published binary.
+default = ["dev-preview"]
+dev-preview = []
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.28"

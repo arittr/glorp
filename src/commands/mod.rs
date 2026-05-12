@@ -1,3 +1,4 @@
+#[cfg(feature = "dev-preview")]
 pub mod dev_preview;
 pub mod doctor;
 pub mod init;

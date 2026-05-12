@@ -3,7 +3,7 @@
   "scripts": {
     "test": "cargo test && npm run test:release-version && npm --workspace @arittr/glorp test",
     "test:release-version": "node --test scripts/test/*.test.mjs",
-    "build": "cargo build --release",
+    "build": "cargo build --release --no-default-features",
     "package:smoke": "npm --workspace @arittr/glorp test"
   },
   "workspaces": [

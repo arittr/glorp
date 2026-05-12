@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+#[cfg(feature = "dev-preview")]
 pub mod dev_preview;
 pub mod error;
 pub mod game;
@@ -24,6 +25,7 @@ pub fn run() -> Result<()> {
         Command::Rename { name } => commands::rename::run(name)?,
         Command::Reset { yes } => commands::reset::run(yes)?,
         Command::Doctor => commands::doctor::run()?,
+        #[cfg(feature = "dev-preview")]
         Command::DevPreview { out, scenario } => commands::dev_preview::run(out, scenario)?,
         Command::Help => {
             Cli::command().print_help()?;
