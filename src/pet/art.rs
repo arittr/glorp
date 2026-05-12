@@ -92,11 +92,11 @@ pub(crate) fn template_lines(
         StageKey::S4 => adult_templates(species)[0].to_vec(),
         StageKey::S5 => {
             let templates = adult_templates(species);
-            templates[morph_index % templates.len()].to_vec()
+            templates[elder_morph_index(species, morph_index, templates.len())].to_vec()
         }
         StageKey::S6 => {
             let templates = adult_templates(species);
-            let body = templates[morph_index % templates.len()];
+            let body = templates[elder_morph_index(species, morph_index, templates.len())];
             // Sage frame: top + body[1..body.len()-1] + bottom.
             let mut framed: Vec<&'static str> = Vec::with_capacity(body.len());
             framed.push(SAGE_TOP);
@@ -106,6 +106,17 @@ pub(crate) fn template_lines(
             framed.push(SAGE_BOT);
             framed
         }
+    }
+}
+
+// Crystal pets evolve from a single dominant gem (S4) into clustered forms at
+// S5+. Skip the singleton morph 0 at elder stages so every elder Crystal
+// reads as a cluster while still preserving morph-driven variation.
+fn elder_morph_index(species: Species, morph_index: usize, len: usize) -> usize {
+    if matches!(species, Species::Crystal) && len > 1 {
+        1 + (morph_index % (len - 1))
+    } else {
+        morph_index % len
     }
 }
 
@@ -474,80 +485,88 @@ const GLITCH_TINY: &[Template; 3] = &[
 ];
 
 // ── Crystal ───────────────────────────────────────────────────────
+// Filled/shaded crystals using block density (\u{2588} \u{2593} \u{2592} \u{2591})
+// as facet shading. Higher stages cluster a dominant crystal with satellites.
 const CRYSTAL_PUP: &[Template] = &[[
     "           ",
-    "           ",
-    "    /\\     ",
-    "   /  \\    ",
-    "  / {eyes} \\  ",
-    "  \\  {mouth}  /  ",
-    "   \\{pattern}/   ",
-    "    \\{accent}/    ",
+    "     /\\    ",
+    "    /\u{2588}\u{2588}\\   ",
+    "   /{eyes}\\   ",
+    " /\\ \\{mouth}/ /\\ ",
+    " \u{2593}\u{2593}\\{pattern}/\u{2593}\u{2593} ",
+    " \\/ \\{accent}/ \\/ ",
+    "    \\/     ",
 ]];
 
 const CRYSTAL_ADULT: &[Template] = &[
-    [
-        "     \u{25c6}     ",
-        "    /\\     ",
-        "   /  \\    ",
-        "  / {eyes} \\  ",
-        " /  \u{25c7}{mouth}\u{25c7}  \\ ",
-        " \\  {pattern}  / ",
-        "  \\  {accent}  /  ",
-        "   \\___/   ",
-    ],
+    // Morph 0 — single dominant gem (S4 default, S5/S6 morph 0).
     [
         "    /\\     ",
-        "   /\\/\\    ",
-        "  / {eyes} \\  ",
-        " /  \u{25c7}{mouth}\u{25c7}  \\ ",
-        " \\  {pattern}  / ",
-        "  \\\\ {accent} //  ",
-        "   \\\\ //   ",
+        "   /\u{2593}\u{2588}\\    ",
+        "  /\u{2593}\u{2588}\u{2588}\u{2588}\\   ",
+        " /\u{2593}\u{2588}\u{2588}{eyes}\u{2588}\\ ",
+        " \\\u{2592}\u{2588}\u{2588}{mouth}\u{2588}\u{2588}\u{2588}/ ",
+        "  \\\u{2592}{pattern}\u{2588}/  ",
+        "   \\\u{2592}{accent}\u{2588}/   ",
         "    \\/     ",
     ],
+    // Morph 1 — dominant crystal flanked by two satellites at the base.
     [
-        "   /\\ /\\   ",
-        "  /  \u{25c7}  \\  ",
-        " / {eyes}   \\ ",
-        " \\  {mouth}    / ",
-        "  \\{pattern}  /  ",
-        "   \\.{accent}./   ",
-        "    \\\u{25c7}/    ",
-        "     v     ",
+        "    /\\     ",
+        "   /\u{2593}\u{2588}\\    ",
+        "  /\u{2593}\u{2588}\u{2588}\u{2588}\\   ",
+        " /\u{2593}\u{2588}\u{2588}{eyes}\u{2588}\\ ",
+        " \\\u{2592}\u{2588}\u{2588}{mouth}\u{2588}\u{2588}\u{2588}/ ",
+        "/\\\\\u{2592}{pattern}\u{2588}//\\",
+        "\u{2593}\u{2593} \\\u{2592}{accent}\u{2588}/ \u{2593}\u{2593}",
+        "\\/   \u{25bc}   \\/",
+    ],
+    // Morph 2 — tall asymmetric geode with one side shard.
+    [
+        "    /\\     ",
+        "   /\u{2588}\u{2588}\\    ",
+        "  /\u{2593}\u{2588}\u{2588}\\    ",
+        " /\u{2588}\u{2588}{eyes}\u{2588}\\/\\",
+        " \\\u{2592}\u{2588}{mouth}\u{2588}\u{2593}/ \\/",
+        "  \\\u{2592}{pattern}/    ",
+        "   \\\u{2592}{accent}/    ",
+        "    \\/     ",
     ],
 ];
 
 const CRYSTAL_TINY: &[Template; 3] = &[
+    // S0 grain — a tiny seed sparkle.
     [
         "           ",
         "           ",
         "           ",
         "           ",
         "           ",
-        "     \u{b7}     ",
+        "     \u{2726}     ",
         "    \u{25c6}\u{25c7}\u{25c6}    ",
         "     \u{b7}     ",
     ],
+    // S1 shard — first solid shard.
     [
         "           ",
         "           ",
         "           ",
         "           ",
         "    /\\     ",
-        "   /  \\    ",
-        "   \\\u{25c7}\u{25c7}/    ",
+        "   /\u{2588}\u{2588}\\    ",
+        "   \\\u{2593}\u{2592}/    ",
         "    \\/     ",
     ],
+    // S2 facet — eyes and mouth visible, gem proportions.
     [
         "           ",
         "           ",
         "           ",
         "    /\\     ",
-        "   /  \\    ",
-        "  /{eyes} \\   ",
-        "  \\.{mouth}./    ",
-        "   \\{pattern}/   ",
+        "   /\u{2588}\u{2588}\\    ",
+        "  /\u{2593}{eyes}\u{2593}\\  ",
+        "  \\\u{2593}\u{2593}{mouth}\u{2593}\u{2593}/  ",
+        "   \\\u{2593}\u{2593}/    ",
     ],
 ];
 
