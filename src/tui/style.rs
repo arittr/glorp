@@ -337,6 +337,39 @@ pub fn ramp_index(i: usize, n: usize) -> usize {
     raw.min(4)
 }
 
+/// Per-stat semantic color roles (revision-3 layout refresh).
+///
+/// Each function returns a single solid `Color::Rgb`; the same color paints
+/// the label, the filled bar segments, and the trailing value for that stat.
+/// Empty bar cells continue to use `SemanticStyles.empty_bar`.
+///
+/// Dark-background truecolor tuned. Color-blind / 8-color palette tuning is
+/// deferred — ratatui's color downgrade handles low-capability terminals.
+
+pub fn fed_color() -> Color {
+    Color::Rgb(0xe8, 0xc4, 0x74)
+}
+
+pub fn happy_color() -> Color {
+    Color::Rgb(0xe8, 0xa3, 0xc2)
+}
+
+pub fn energy_color() -> Color {
+    Color::Rgb(0x7f, 0xc8, 0xd6)
+}
+
+pub fn xp_color() -> Color {
+    Color::Rgb(0xef, 0x8e, 0x6c)
+}
+
+pub fn claude_color() -> Color {
+    Color::Rgb(0xb3, 0x9d, 0xf0)
+}
+
+pub fn codex_color() -> Color {
+    Color::Rgb(0x8f, 0xcf, 0x90)
+}
+
 #[cfg(test)]
 mod bar_ramp_tests {
     use super::*;
@@ -468,5 +501,45 @@ mod color_capability_tests {
         let env: [(&str, &str); 0] = [];
         let cap = ColorCapability::detect_from(|k| lookup(&env, k));
         assert_eq!(cap, ColorCapability::Flat);
+    }
+}
+
+#[cfg(test)]
+mod stat_color_tests {
+    use super::*;
+
+    #[test]
+    fn fed_color_is_amber() {
+        assert_eq!(fed_color(), Color::Rgb(0xe8, 0xc4, 0x74));
+    }
+
+    #[test]
+    fn happy_color_is_pink() {
+        assert_eq!(happy_color(), Color::Rgb(0xe8, 0xa3, 0xc2));
+    }
+
+    #[test]
+    fn energy_color_is_cyan() {
+        assert_eq!(energy_color(), Color::Rgb(0x7f, 0xc8, 0xd6));
+    }
+
+    #[test]
+    fn xp_color_is_coral() {
+        assert_eq!(xp_color(), Color::Rgb(0xef, 0x8e, 0x6c));
+    }
+
+    #[test]
+    fn claude_color_is_violet() {
+        assert_eq!(claude_color(), Color::Rgb(0xb3, 0x9d, 0xf0));
+    }
+
+    #[test]
+    fn codex_color_is_green() {
+        assert_eq!(codex_color(), Color::Rgb(0x8f, 0xcf, 0x90));
+    }
+
+    #[test]
+    fn xp_color_is_distinct_from_fed_color() {
+        assert_ne!(xp_color(), fed_color(), "xp must not collide with fed");
     }
 }
