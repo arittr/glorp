@@ -13,19 +13,15 @@ use crate::tui::view_model::WatchViewModel;
 pub mod bars;
 pub mod bio_card;
 pub mod feed;
-pub mod helpers;
 pub mod pet;
 pub mod progress;
-pub mod spark;
 pub mod today;
 pub mod vitals;
 
 pub use bio_card::BioCardPanel;
 pub use feed::FeedPanel;
-pub use helpers::HelpersPanel;
 pub use pet::PetPanel;
 pub use progress::ProgressPanel;
-pub use spark::SparkPanel;
 pub use today::TodayPanel;
 pub use vitals::VitalsPanel;
 
