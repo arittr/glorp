@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::tui::panels::{
-    FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
+    BioCardPanel, FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
 };
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
@@ -168,7 +168,7 @@ fn layout_and_render(
 
 /// Wide layout: two columns.
 ///
-/// Left column (fixed 40 cells): PetPanel (Fill) → VitalsPanel.
+/// Left column (fixed 40 cells): PetPanel (Fill) → VitalsPanel → BioCardPanel.
 /// Gutter (4 cells): empty space.
 /// Right column (remaining): TodayPanel → ProgressPanel → FeedPanel packed top,
 /// trailing slack absorbed by Min(0).
@@ -194,9 +194,11 @@ fn render_wide(
         .direction(Direction::Vertical)
         .flex(Flex::Start)
         .constraints([
-            PetPanel.preferred_constraint(vm),    // Fill(1) — expands to fill column
+            PetPanel.preferred_constraint(vm),      // Fill(1) — expands to fill column
             Constraint::Length(COLUMN_GAP),
-            VitalsPanel.preferred_constraint(vm), // Length(5) — anchored to bottom of Fill
+            VitalsPanel.preferred_constraint(vm),   // Length(4) — anchored below Fill
+            Constraint::Length(COLUMN_GAP),
+            BioCardPanel.preferred_constraint(vm),  // Length(3) — anchored at bottom
         ])
         .split(left_col);
 
@@ -205,6 +207,7 @@ fn render_wide(
         PetPanel.render(left[0], buf, vm, ctx);
     }
     VitalsPanel.render(left[2], buf, vm, ctx);
+    BioCardPanel.render(left[4], buf, vm, ctx);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
@@ -225,7 +228,8 @@ fn render_wide(
 
 /// Compact layout: single column packed from the top.
 ///
-/// Order: pet → vitals → today → progress → feed, trailing slack at bottom.
+/// Order: pet → vitals → today → progress → feed → bio, trailing slack at bottom.
+/// Bio sits at the bottom of the stack; it may be clipped off on very short terminals.
 fn render_compact(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
@@ -238,13 +242,15 @@ fn render_compact(
         .constraints([
             PetPanel.preferred_constraint(vm),      // Fill(1) — expands to fill leftover
             Constraint::Length(COLUMN_GAP),
-            VitalsPanel.preferred_constraint(vm),   // Length(5)
+            VitalsPanel.preferred_constraint(vm),   // Length(4)
             Constraint::Length(COLUMN_GAP),
             TodayPanel.preferred_constraint(vm),    // Length(6)
             Constraint::Length(COLUMN_GAP),
             ProgressPanel.preferred_constraint(vm), // Length(3)
             Constraint::Length(COLUMN_GAP),
             FeedPanel.preferred_constraint(vm),     // Length(7)
+            Constraint::Length(COLUMN_GAP),
+            BioCardPanel.preferred_constraint(vm),  // Length(3)
         ])
         .split(area);
 
@@ -256,6 +262,7 @@ fn render_compact(
     TodayPanel.render(stack[4], buf, vm, ctx);
     ProgressPanel.render(stack[6], buf, vm, ctx);
     FeedPanel.render(stack[8], buf, vm, ctx);
+    BioCardPanel.render(stack[10], buf, vm, ctx);
 }
 
 /// Gap between stacked panels in both wide and compact layouts.
@@ -543,5 +550,27 @@ mod render_wide_tests {
         assert!(s.contains("today"), "today panel must still render");
         assert!(s.contains("progress"), "progress panel must render");
         assert!(s.contains("feed"), "feed panel must render");
+        // BioCardPanel must appear in the left column.
+        assert!(s.contains("bio"), "bio panel must render in wide layout");
+    }
+
+    #[test]
+    fn render_wide_bio_panel_appears_in_left_column() {
+        let vm = WatchViewModel::fixture();
+        let ctx = RenderContext::new(crate::tui::style::ColorCapability::Truecolor);
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_watch_frame_with_context(f, &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(s.contains("bio"), "bio panel title must appear");
+        assert!(s.contains("hatched"), "bio hatched label must appear");
+        assert!(s.contains("age"), "bio age label must appear");
     }
 }
