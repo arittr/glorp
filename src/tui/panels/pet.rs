@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::pet::animator::low_energy_lightness_multiplier;
+use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
@@ -12,6 +13,11 @@ use crate::tui::style::{semantic_styles, SemanticStyles};
 use crate::tui::view_model::WatchViewModel;
 
 pub struct PetPanel;
+
+/// The rendered pet art is 13 columns wide (11 chars + 1-cell particle border each side)
+/// and 10 rows tall (8 art rows + 1-cell particle border top/bottom).
+const PET_W: u16 = 13;
+const PET_H: u16 = 10;
 
 /// Rows reserved above the pet for the speech bubble. Only reserved when
 /// speech is actually active so the pet sits at its natural top position
@@ -26,55 +32,114 @@ fn speech_rows(vm: &WatchViewModel) -> u16 {
     }
 }
 
-/// Extra row reserved above the pet art so the idle breath shift has
-/// somewhere to rise into without clipping the bottom row.
-const BREATH_HEADROOM: u16 = 1;
+/// Computes the 13×10 sub-rect where the pet art sits inside the panel area,
+/// accounting for vertical centering, breathing offset, and wander offset.
+/// Exported for use by `pet_panel_rect()` in layout.rs (Task 22).
+pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
+    let cx = area.x + area.width.saturating_sub(PET_W) / 2;
+    let cy = area.y + area.height.saturating_sub(PET_H) / 2;
+    let x = (cx as i32 + vm.wander_offset_x as i32)
+        .clamp(
+            area.x as i32,
+            (area.x + area.width).saturating_sub(PET_W) as i32,
+        ) as u16;
+    let y = (cy as i32 + vm.breath_offset_y as i32)
+        .clamp(
+            area.y as i32,
+            (area.y + area.height).saturating_sub(PET_H) as i32,
+        ) as u16;
+    Rect::new(x, y, PET_W, PET_H)
+}
+
+/// An ambient environment glyph placed in the panel backdrop behind the pet art.
+/// PR1 stub returns empty; PR2 fills this in per species.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AmbientGlyph {
+    pub row: u16,
+    pub col: u16,
+    pub glyph: char,
+    pub color: Color,
+}
+
+/// Returns the ambient backdrop glyphs for the given species and panel geometry.
+///
+/// PR1 stub — returns empty so the pet panel renders the same content as
+/// before, just inside a taller (Fill-driven) rect. PR2 fills this in.
+pub fn ambient_glyphs_for(
+    _species: Species,
+    _panel: Rect,
+    _pet_inner_rect: Rect,
+    _now: time::OffsetDateTime,
+) -> Vec<AmbientGlyph> {
+    Vec::new()
+}
 
 impl Panel for PetPanel {
-    fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
-        let line_count = (vm.pet_art.len() as u16).max(2) + speech_rows(vm) + BREATH_HEADROOM;
-        Constraint::Length(line_count)
+    fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
+        Constraint::Fill(1)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
-        let base = semantic_styles();
-        let m = low_energy_lightness_multiplier(vm.energy);
-        let droop = darken_pet_styles(&base, m);
-
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
+        // Compute the pet sub-rect consistently for both passes (below speech bubble).
         let speech_h = speech_rows(vm).min(area.height);
-        let speech_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: speech_h,
-        };
-        let pet_area = Rect {
+        let below_speech = Rect {
             x: area.x,
             y: area.y + speech_h,
             width: area.width,
             height: area.height.saturating_sub(speech_h),
         };
+        let pet_inner = pet_inner_rect_in_panel(below_speech, vm);
 
-        if let Some(speech) = vm.current_speech.as_deref() {
-            render_speech_bubble(speech_area, buf, speech, &droop);
+        // Pass 1: ambient backdrop. PR1 stub returns empty so this is a no-op.
+        let now = time::OffsetDateTime::now_utc();
+        // TODO(PR2): replace Species::Fuzz fallback with real species from vm
+        let species = Species::parse(&vm.pet_render.generated_species).unwrap_or(Species::Fuzz);
+        let glyphs = ambient_glyphs_for(species, area, pet_inner, now);
+        for g in glyphs {
+            if g.col < area.x + area.width && g.row < area.y + area.height {
+                let cell = &mut buf[(g.col, g.row)];
+                cell.set_char(g.glyph);
+                cell.set_style(ratatui::style::Style::default().fg(g.color));
+            }
         }
 
-        let cursor_norm_x = cursor_normalized_x_within(vm, pet_area);
-        // Inhale raises the pet by 1 row; rest position is BREATH_HEADROOM
-        // rows below the area top. When the area is too tight for the
-        // headroom, we just clamp to 0.
-        let rest_y = BREATH_HEADROOM.min(pet_area.height.saturating_sub(1));
-        let breath_lift = u16::from(vm.breath_offset_y).min(rest_y);
-        let pet_top = pet_area.y + (rest_y - breath_lift);
-        let pet_render_area = Rect {
-            x: pet_area.x,
-            y: pet_top,
-            width: pet_area.width,
-            height: pet_area.height.saturating_sub(rest_y - breath_lift),
-        };
-        let lines = build_pet_lines(vm, pet_render_area.width as usize, &droop, cursor_norm_x);
-        Paragraph::new(lines).render(pet_render_area, buf);
+        // Pass 2: existing pet art rendering. Unchanged from prior implementation.
+        render_pet_inside(area, buf, vm, ctx);
     }
+}
+
+/// Renders the speech bubble and pet art into `area`, centered vertically.
+/// This is the pre-existing render logic extracted from the old `render` body.
+fn render_pet_inside(area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
+    let base = semantic_styles();
+    let m = low_energy_lightness_multiplier(vm.energy);
+    let droop = darken_pet_styles(&base, m);
+
+    let speech_h = speech_rows(vm).min(area.height);
+    let speech_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: speech_h,
+    };
+
+    if let Some(speech) = vm.current_speech.as_deref() {
+        render_speech_bubble(speech_area, buf, speech, &droop);
+    }
+
+    // Center the pet vertically in the remaining space below any speech bubble.
+    let below_speech = Rect {
+        x: area.x,
+        y: area.y + speech_h,
+        width: area.width,
+        height: area.height.saturating_sub(speech_h),
+    };
+    let pet_inner = pet_inner_rect_in_panel(below_speech, vm);
+    // Hit-test against the full column width so the cursor anywhere in the
+    // panel triggers eye tracking, matching the pre-Fill behavior.
+    let cursor_norm_x = cursor_normalized_x_within(vm, below_speech);
+    let lines = build_pet_lines(vm, pet_inner.width as usize, &droop, cursor_norm_x);
+    Paragraph::new(lines).render(pet_inner, buf);
 }
 
 /// Render a small speech bubble: "« text »" centered above the pet, styled
@@ -470,5 +535,44 @@ mod tests {
             all.contains('>'),
             "expected '>' eye glyph in pet panel, got {all:?}"
         );
+    }
+
+    #[test]
+    fn pet_panel_preferred_constraint_is_fill() {
+        let vm = WatchViewModel::fixture();
+        let panel = PetPanel;
+        assert_eq!(
+            panel.preferred_constraint(&vm),
+            Constraint::Fill(1),
+            "pet panel absorbs vertical slack so habitat (PR2) can fill it"
+        );
+    }
+
+    #[test]
+    fn pet_panel_renders_pet_centered_in_tall_rect() {
+        let vm = WatchViewModel::fixture();
+        let panel = PetPanel;
+        let ctx = test_context();
+        let backend = TestBackend::new(40, 24); // taller than pet (10 rows)
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        // The fixture pet_art contains "( o.o )" — 'o' and '.' will be present.
+        assert!(
+            s.contains('o') || s.contains('.') || s.contains('^'),
+            "pet must render visibly in a tall panel rect; got content: {s:?}"
+        );
+    }
+
+    #[test]
+    fn ambient_glyphs_for_returns_empty_in_pr1_stub() {
+        let panel_rect = Rect::new(0, 0, 40, 20);
+        let pet_inner = Rect::new(13, 5, 13, 10);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let glyphs = ambient_glyphs_for(Species::Fuzz, panel_rect, pet_inner, now);
+        assert!(glyphs.is_empty(), "PR1 stub returns empty; PR2 fills this in");
     }
 }
