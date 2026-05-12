@@ -66,6 +66,42 @@ pub fn build_spark_line<'a>(
     spans
 }
 
+/// Format a token count with `k` or `M` suffix and one decimal place.
+/// Values below 1 000 are rendered as whole numbers.
+pub fn format_tokens_short(n: f64) -> String {
+    if n >= 1_000_000.0 {
+        format!("{:.1}M", n / 1_000_000.0)
+    } else if n >= 1_000.0 {
+        format!("{:.1}k", n / 1_000.0)
+    } else {
+        format!("{n:.0}")
+    }
+}
+
+/// Format a token count as a comma-separated integer string (e.g. `"16,700"`).
+pub fn format_tokens_full(n: f64) -> String {
+    let n = n.round() as i64;
+    if n.abs() >= 1_000 {
+        let mut s = String::new();
+        let neg = n < 0;
+        let mut abs = n.unsigned_abs() as i64;
+        let mut groups: Vec<String> = Vec::new();
+        while abs >= 1000 {
+            groups.push(format!("{:03}", abs % 1000));
+            abs /= 1000;
+        }
+        groups.push(abs.to_string());
+        groups.reverse();
+        if neg {
+            s.push('-');
+        }
+        s.push_str(&groups.join(","));
+        s
+    } else {
+        n.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +162,22 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         let dot_count = text.chars().filter(|c| *c == '·' || *c == '.').count();
         assert_eq!(dot_count, 7);
+    }
+
+    #[test]
+    fn format_tokens_short_rounds_to_k_with_one_decimal() {
+        assert_eq!(format_tokens_short(0.0), "0");
+        assert_eq!(format_tokens_short(950.0), "950");
+        assert_eq!(format_tokens_short(1_500.0), "1.5k");
+        assert_eq!(format_tokens_short(16_700.0), "16.7k");
+        assert_eq!(format_tokens_short(109_842.0), "109.8k");
+        assert_eq!(format_tokens_short(1_234_567.0), "1.2M");
+    }
+
+    #[test]
+    fn format_tokens_full_uses_thousands_separators() {
+        assert_eq!(format_tokens_full(0.0), "0");
+        assert_eq!(format_tokens_full(16_700.0), "16,700");
+        assert_eq!(format_tokens_full(1_234_567.0), "1,234,567");
     }
 }
