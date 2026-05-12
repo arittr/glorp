@@ -84,6 +84,24 @@ pub struct EventView {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgressView {
+    /// Current stage's species-specific label (e.g. "shard", "fractal").
+    pub stage_label: String,
+    /// Next stage's label, or "—" at S6.
+    pub next_stage_label: String,
+    /// 0.0..=1.0; saturates at 1.0.
+    pub fraction: f32,
+    /// state.xp - stage_start_xp(state.stage), in stage-progress units.
+    pub xp_in_stage: f64,
+    /// next_stage_xp_target(state.stage), in stage-progress units.
+    pub xp_to_next: f64,
+    /// 6h-half-life EMA, effective tokens / hour.
+    pub rate_per_hour: f64,
+    /// True at S6; ProgressPanel renders "max evolved" instead of a bar.
+    pub is_max_stage: bool,
+}
+
 impl WatchViewModel {
     pub fn fixture() -> Self {
         Self {
@@ -211,5 +229,41 @@ impl WatchViewModel {
     #[doc(hidden)]
     pub fn acknowledged_evolution_for_test(&self, transition: &str) -> bool {
         self.acknowledged_evolution.as_deref() == Some(transition)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_view_has_required_fields() {
+        let p = ProgressView {
+            stage_label: "shard".to_string(),
+            next_stage_label: "fractal".to_string(),
+            fraction: 0.33,
+            xp_in_stage: 0.33,
+            xp_to_next: 1.0,
+            rate_per_hour: 109_000.0,
+            is_max_stage: false,
+        };
+        assert_eq!(p.stage_label, "shard");
+        assert_eq!(p.next_stage_label, "fractal");
+        assert!((p.fraction - 0.33).abs() < 1e-6);
+        assert!(!p.is_max_stage);
+    }
+
+    #[test]
+    fn progress_view_at_max_stage() {
+        let p = ProgressView {
+            stage_label: "aurora".to_string(),
+            next_stage_label: "—".to_string(),
+            fraction: 1.0,
+            xp_in_stage: 60.0,
+            xp_to_next: 60.0,
+            rate_per_hour: 0.0,
+            is_max_stage: true,
+        };
+        assert!(p.is_max_stage);
     }
 }
