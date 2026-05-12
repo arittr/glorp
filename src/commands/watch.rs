@@ -153,10 +153,37 @@ pub(crate) fn build_watch_view_model_at(
             rate_per_hour: 0.0,
             is_max_stage: false,
         },
-        // TODO(Task 9): replace with real BioView computed from state
-        bio: BioView {
-            hatched_label: String::new(),
-            age_label: String::new(),
+        bio: {
+            let age = now - state.created_at;
+            let age_label = BioView::format_age(age);
+            let local = state.created_at.to_offset(
+                time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
+            );
+            let month_name = match local.month() {
+                time::Month::January => "jan",
+                time::Month::February => "feb",
+                time::Month::March => "mar",
+                time::Month::April => "apr",
+                time::Month::May => "may",
+                time::Month::June => "jun",
+                time::Month::July => "jul",
+                time::Month::August => "aug",
+                time::Month::September => "sep",
+                time::Month::October => "oct",
+                time::Month::November => "nov",
+                time::Month::December => "dec",
+            };
+            let hatched_label = format!(
+                "{} {:02} {:02}:{:02}",
+                month_name,
+                local.day(),
+                local.hour(),
+                local.minute(),
+            );
+            BioView {
+                hatched_label,
+                age_label,
+            }
         },
     })
 }
@@ -619,5 +646,57 @@ fn format_tokens(value: f64) -> String {
         format!("{:.1}k", value / 1_000.0)
     } else {
         format!("{value:.0}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{state::PetState, usage_store::UsageStore};
+    use tempfile::tempdir;
+    use time::{Date, Month, PrimitiveDateTime, Time};
+
+    #[test]
+    fn build_watch_view_model_populates_bio_view() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        UsageStore::open(&db_path).unwrap();
+
+        let created_at = PrimitiveDateTime::new(
+            Date::from_calendar_date(2026, Month::April, 24).unwrap(),
+            Time::from_hms(14, 32, 0).unwrap(),
+        )
+        .assume_utc();
+        let now = created_at + Duration::days(18);
+
+        let mut state = PetState::new_for_test("test", "buddy");
+        state.created_at = created_at;
+
+        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        assert_eq!(vm.bio.age_label, "18d");
+        assert!(
+            vm.bio.hatched_label.contains("apr"),
+            "got {}",
+            vm.bio.hatched_label
+        );
+        assert!(
+            vm.bio.hatched_label.contains("24"),
+            "got {}",
+            vm.bio.hatched_label
+        );
+    }
+
+    #[test]
+    fn build_watch_view_model_bio_sub_day_age() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        UsageStore::open(&db_path).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+        let mut state = PetState::new_for_test("test", "buddy");
+        state.created_at = now - Duration::hours(4);
+
+        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        assert_eq!(vm.bio.age_label, "0d 4h");
     }
 }
