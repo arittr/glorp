@@ -93,7 +93,7 @@ const isWindows = platform.startsWith("win32-");
 const exe = isWindows ? "glorp.exe" : "glorp";
 const source = path.join(repoRoot, "target/release", exe);
 if (!fs.existsSync(source)) {
-  fail(`missing release binary ${source}; run cargo build --release first`);
+  fail(`missing release binary ${source}; run \`npm run build\` first`);
 }
 
 const destDir = path.join(repoRoot, "npm/platform", platform, "bin");

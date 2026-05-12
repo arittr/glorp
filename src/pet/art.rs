@@ -94,11 +94,11 @@ pub(crate) fn template_lines(
         StageKey::S4 => adult_templates(species)[0].to_vec(),
         StageKey::S5 => {
             let templates = adult_templates(species);
-            templates[elder_morph_index(species, morph_index, templates.len())].to_vec()
+            templates[elder_morph_index(species, morph_index, templates)].to_vec()
         }
         StageKey::S6 => {
             let templates = adult_templates(species);
-            let body = templates[elder_morph_index(species, morph_index, templates.len())];
+            let body = templates[elder_morph_index(species, morph_index, templates)];
             // Sage frame: top + body[1..body.len()-1] + bottom.
             let mut framed: Vec<&'static str> = Vec::with_capacity(body.len());
             framed.push(SAGE_TOP);
@@ -116,7 +116,9 @@ pub(crate) fn template_lines(
 // Mech pets upgrade chassis. Skip the singleton morph 0 at elder stages so
 // every elder pet reads as the evolved form while still preserving
 // morph-driven variation across the remaining morphs.
-fn elder_morph_index(species: Species, morph_index: usize, len: usize) -> usize {
+fn elder_morph_index(species: Species, morph_index: usize, templates: &[Template]) -> usize {
+    debug_assert!(!templates.is_empty(), "adult templates must be non-empty");
+    let len = templates.len();
     let skip_first = matches!(
         species,
         Species::Crystal | Species::Ghost | Species::Blob | Species::Fuzz | Species::Mech
@@ -191,7 +193,7 @@ const FUZZ_PUP: &[Template] = &[[
     "  (\u{2591}{eyes}\u{2591})  ",
     "   ='{mouth}'=   ",
     " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\ ",
-    "  \\\u{2591}{accent}\u{2591}/   ",
+    "  \\\u{2591}{accent}\u{2591}/    ",
     "    d b    ",
 ]];
 
@@ -224,7 +226,7 @@ const FUZZ_ADULT: &[Template] = &[
         "  (\u{2591}{eyes}\u{2591})  ",
         "   ='{mouth}'=   ",
         " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
-        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}}",
+        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}} ",
         "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/\u{2591} ",
         "   d   b\u{2591}  ",
         "        '  ",
@@ -371,7 +373,7 @@ const BLOB_TINY: &[Template; 3] = &[
         "   .---.   ",
         "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
         "  (\u{2591}{eyes}\u{2591})  ",
-        "  (\u{2591}{mouth}\u{2591})  ",
+        "  (\u{2591}\u{2591}{mouth}\u{2591}\u{2591})  ",
         "   '___'   ",
     ],
 ];
@@ -426,7 +428,7 @@ const GHOST_ADULT: &[Template] = &[
         " |\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}| ",
         " |\u{2591}\u{2592}{pattern}\u{2592}\u{2591}| ",
         "  \u{2307} \u{2307}{accent}\u{2307} \u{2307}  ",
-        "   \u{2307}  \u{2307}   ",
+        "   \u{2307}  \u{2307}    ",
         "  \u{2307}  \u{2307}  \u{2307}  ",
     ],
     // Morph 3 — chaotic phantom: torn jagged shroud, dense ▓░ dappled body,
@@ -439,7 +441,7 @@ const GHOST_ADULT: &[Template] = &[
         " |\u{2593}\u{2591}{pattern}\u{2591}\u{2593}| ",
         "  / \\{accent}/ \\  ",
         "   \\ v /   ",
-        "    \\/    ",
+        "    \\/     ",
     ],
 ];
 
@@ -601,7 +603,7 @@ const CRYSTAL_ADULT: &[Template] = &[
         "  /\u{2593}\u{2588}\u{2588}\\    ",
         " /\u{2588}\u{2588}{eyes}\u{2588}\\/\\",
         " \\\u{2592}\u{2588}{mouth}\u{2588}\u{2593}/ \\/",
-        "  \\\u{2592}{pattern}/    ",
+        "  \\\u{2592}{pattern}/   ",
         "   \\\u{2592}{accent}/    ",
         "    \\/     ",
     ],
@@ -683,12 +685,12 @@ const MECH_ADULT: &[Template] = &[
     ],
     // Morph 2 — drone: sensor halo, narrowed neck, hover exhaust trail.
     [
-        " \u{b0} \\\u{b7}/ \u{b0}  ",
+        " \u{b0} \\\u{b7}/ \u{b0}   ",
         "   \u{2553}\u{2500}\u{2500}\u{2500}\u{2556}   ",
         "   \u{2551}{eyes}\u{2551}   ",
         "   \u{2551}\u{b7}{mouth}\u{b7}\u{2551}   ",
         "    \u{2559}\u{2565}\u{255c}    ",
-        "   \u{2503}\u{2592}{pattern}\u{2592}\u{2503}   ",
+        "  \u{2503}\u{2592}{pattern}\u{2592}\u{2503}  ",
         "  \u{2517}\u{2501}\u{2501}{accent}\u{2501}\u{2501}\u{251b}  ",
         "  \u{2591} \u{2591} \u{2591} \u{2591}  ",
     ],
@@ -700,7 +702,7 @@ const MECH_ADULT: &[Template] = &[
         "   \u{2503}\u{b7}{mouth}\u{b7}\u{2503}   ",
         " \u{250f}\u{2501}\u{2567}\u{2550}\u{2550}\u{2550}\u{2567}\u{2501}\u{2513} ",
         " \u{2503}\u{2592}\u{2591}{pattern}\u{2591}\u{2592}\u{2503} ",
-        " \u{2503}\u{2592}\u{25c9}{accent}\u{25c9}\u{2592}\u{2503} ",
+        " \u{2503}\u{2592}\u{25c9}\u{2591}{accent}\u{2591}\u{25c9}\u{2592}\u{2503} ",
         " \u{2517}\u{2501}\u{2568}\u{2550}\u{2550}\u{2550}\u{2568}\u{2501}\u{251b} ",
     ],
 ];
@@ -740,3 +742,93 @@ const MECH_TINY: &[Template; 3] = &[
         "   \u{2514}\u{2500}{mouth}\u{2500}\u{2518}   ",
     ],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Slot widths must match `visible_traits` in `src/pet/generation.rs`:
+    // eyes=3, mouth=1, pattern=3, accent=1.
+    fn substitute_slots(line: &str) -> String {
+        line.replace("{eyes}", "o o")
+            .replace("{mouth}", "w")
+            .replace("{pattern}", "...")
+            .replace("{accent}", "*")
+    }
+
+    const ALL_STAGES: [StageKey; 7] = [
+        StageKey::S0,
+        StageKey::S1,
+        StageKey::S2,
+        StageKey::S3,
+        StageKey::S4,
+        StageKey::S5,
+        StageKey::S6,
+    ];
+
+    #[test]
+    fn every_template_line_is_eleven_cells_wide() {
+        // The art renderer assumes each template line is exactly 11 chars;
+        // see the `Template` type alias and `frame_with_particles` in
+        // `src/pet/render.rs`. Drift in either direction breaks alignment.
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                for morph_index in 0..6 {
+                    for morph_pup_index in 0..6 {
+                        let lines = template_lines(species, stage, morph_index, morph_pup_index);
+                        for (row, line) in lines.iter().enumerate() {
+                            let rendered = substitute_slots(line);
+                            let width = rendered.chars().count();
+                            assert_eq!(
+                                width, 11,
+                                "template width != 11 for species={species:?} stage={stage:?} \
+                                 morph={morph_index} pup_morph={morph_pup_index} row={row}: \
+                                 {rendered:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn elder_morph_skips_singleton_for_carved_species() {
+        // Pets in this set evolve a distinct elder silhouette; the singleton
+        // morph 0 is the S4 form and must never be reused at S5/S6.
+        let carved = [
+            Species::Crystal,
+            Species::Ghost,
+            Species::Blob,
+            Species::Fuzz,
+            Species::Mech,
+        ];
+        for species in carved {
+            let templates = adult_templates(species);
+            assert!(
+                templates.len() > 1,
+                "{species:?} needs at least 2 adult morphs for elder skip to apply"
+            );
+            for morph_index in 0..6 {
+                let idx = elder_morph_index(species, morph_index, templates);
+                assert!(
+                    idx >= 1,
+                    "{species:?} elder_morph_index returned 0 for morph={morph_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn elder_morph_passes_through_for_glitch() {
+        let templates = adult_templates(Species::Glitch);
+        for morph_index in 0..6 {
+            let expected = morph_index % templates.len();
+            assert_eq!(
+                elder_morph_index(Species::Glitch, morph_index, templates),
+                expected,
+                "Glitch elder_morph_index should not skip morph 0"
+            );
+        }
+    }
+}
