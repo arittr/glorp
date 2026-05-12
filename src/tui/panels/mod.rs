@@ -7,6 +7,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 
+use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
 
 pub mod feed;
@@ -30,5 +31,5 @@ pub trait Panel {
     fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint;
 
     /// Render into the allocated rect.
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel);
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext);
 }

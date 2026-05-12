@@ -6,6 +6,7 @@ use glorp::tui::app::{
     render_help_overlay_for_test, run_single_watch_tick_for_test, WatchApp, WatchAppConfig,
     WatchTestHarness, WatchUsagePoller, WatchViewModel,
 };
+use glorp::tui::layout::render_watch_frame_with_capability;
 use glorp::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
 use glorp::tui::view_model::{SourceHealthView, SourceStatus};
 use ratatui::{
@@ -59,6 +60,49 @@ fn has_cell(buf: &Buffer, symbol: &str, fg: Color) -> bool {
                 .unwrap_or(false)
         })
     })
+}
+
+fn spark_foregrounds(buffer: &Buffer) -> Vec<Color> {
+    let area = buffer.area;
+    let mut colors = Vec::new();
+
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let cell = &buffer[Position::new(x, y)];
+            if cell.symbol() == "█" {
+                if let Some(fg) = cell.style().fg {
+                    colors.push(fg);
+                }
+            }
+        }
+    }
+
+    colors
+}
+
+#[test]
+fn render_watch_frame_honors_explicit_color_capability() {
+    let vm = WatchViewModel::fixture();
+
+    let mut truecolor_terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    truecolor_terminal
+        .draw(|frame| {
+            render_watch_frame_with_capability(frame, &vm, ColorCapability::Truecolor);
+        })
+        .unwrap();
+
+    let mut flat_terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    flat_terminal
+        .draw(|frame| {
+            render_watch_frame_with_capability(frame, &vm, ColorCapability::Flat);
+        })
+        .unwrap();
+
+    let truecolor = spark_foregrounds(truecolor_terminal.backend().buffer());
+    let flat = spark_foregrounds(flat_terminal.backend().buffer());
+
+    assert!(!truecolor.is_empty(), "fixture should render spark bars");
+    assert_ne!(truecolor, flat);
 }
 
 #[test]

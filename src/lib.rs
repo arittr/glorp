@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod dev_preview;
 pub mod error;
 pub mod game;
 pub mod paths;

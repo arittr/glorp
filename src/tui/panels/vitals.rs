@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
+use crate::tui::render_context::RenderContext;
 use crate::tui::style::{
     bar_ramp_accent, bar_ramp_good, ramp_index, semantic_styles, BarRamp, ColorCapability,
     SemanticStyles,
@@ -19,14 +20,13 @@ impl Panel for VitalsPanel {
         Constraint::Length(5)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
         let block = Block::default().borders(Borders::TOP).title(" vitals ");
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let capability = ColorCapability::detect();
         let styles = semantic_styles();
-        let lines = build_vitals_lines(vm, inner.width, capability, &styles);
+        let lines = build_vitals_lines(vm, inner.width, ctx.color_capability, &styles);
         Paragraph::new(lines).render(inner, buf);
     }
 }
@@ -97,15 +97,20 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    fn test_context() -> RenderContext {
+        RenderContext::new(ColorCapability::Truecolor)
+    }
+
     #[test]
     fn vitals_panel_renders_into_area() {
         let vm = WatchViewModel::fixture();
         let panel = VitalsPanel;
+        let ctx = test_context();
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), &vm);
+                panel.render(f.area(), f.buffer_mut(), &vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -121,11 +126,12 @@ mod tests {
     fn vitals_panel_renders_all_four_labels() {
         let vm = WatchViewModel::fixture();
         let panel = VitalsPanel;
+        let ctx = test_context();
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), &vm);
+                panel.render(f.area(), f.buffer_mut(), &vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();

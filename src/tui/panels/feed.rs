@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
+use crate::tui::render_context::RenderContext;
 use crate::tui::style::semantic_styles;
 use crate::tui::view_model::WatchViewModel;
 
@@ -20,7 +21,7 @@ impl Panel for FeedPanel {
         Constraint::Length(events + 1)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
         let block = Block::default().borders(Borders::TOP).title(" feed ");
         let inner = block.inner(area);
         block.render(area, buf);
@@ -58,11 +59,12 @@ mod tests {
 
     fn render_to_string(width: u16, height: u16, vm: &WatchViewModel) -> String {
         let panel = FeedPanel;
+        let ctx = RenderContext::new(crate::tui::style::ColorCapability::Truecolor);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), vm);
+                panel.render(f.area(), f.buffer_mut(), vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -97,11 +99,12 @@ mod tests {
         // If build_feed_lines didn't clamp, Paragraph would still truncate,
         // but we assert on the constraint and that this doesn't panic.
         let panel = FeedPanel;
+        let ctx = RenderContext::new(crate::tui::style::ColorCapability::Truecolor);
         let backend = TestBackend::new(50, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), &vm);
+                panel.render(f.area(), f.buffer_mut(), &vm, &ctx);
             })
             .unwrap();
         // No panic means the clamp held; also verify the border appears.

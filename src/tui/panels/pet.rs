@@ -7,6 +7,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::pet::animator::low_energy_lightness_multiplier;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::panels::Panel;
+use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, SemanticStyles};
 use crate::tui::view_model::WatchViewModel;
 
@@ -35,7 +36,7 @@ impl Panel for PetPanel {
         Constraint::Length(line_count)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
         let base = semantic_styles();
         let m = low_energy_lightness_multiplier(vm.energy);
         let droop = darken_pet_styles(&base, m);
@@ -197,7 +198,7 @@ fn build_pet_lines<'a>(
             // line index.
             let _ = line_index;
             let eye_override = cursor_eye;
-            spans.extend(role_spans_for_line(
+            spans.extend(pet_role_spans_for_line(
                 art_line,
                 line_index,
                 &vm.pet_spans,
@@ -209,7 +210,7 @@ fn build_pet_lines<'a>(
         .collect()
 }
 
-fn role_spans_for_line<'a>(
+pub(crate) fn pet_role_spans_for_line<'a>(
     art_line: &'a str,
     line_index: usize,
     pet_spans: &'a [crate::pet::render::StyledSegment],
@@ -245,7 +246,7 @@ fn role_spans_for_line<'a>(
             let body = char_slice(art_line, &char_indices, cursor, start);
             spans.push(Span::styled(body, styles.pet_body));
         }
-        let style = role_style(segment.role, styles);
+        let style = pet_role_style(segment.role, styles);
         if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
             (eye_override, segment.role)
         {
@@ -283,7 +284,7 @@ fn char_slice<'a>(line: &'a str, indices: &[usize], start_char: usize, end_char:
     &line[start..end]
 }
 
-fn role_style(role: PaletteRoleName, styles: &SemanticStyles) -> ratatui::style::Style {
+pub(crate) fn pet_role_style(role: PaletteRoleName, styles: &SemanticStyles) -> Style {
     match role {
         PaletteRoleName::Body => styles.pet_body,
         PaletteRoleName::Eye => styles.pet_eye,
@@ -299,6 +300,10 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    fn test_context() -> RenderContext {
+        RenderContext::new(crate::tui::style::ColorCapability::Truecolor)
+    }
 
     fn vm_with_real_pet() -> WatchViewModel {
         use crate::game::evolution::Stage;
@@ -323,14 +328,24 @@ mod tests {
     }
 
     #[test]
+    fn pet_role_style_maps_eye_role_to_eye_style() {
+        let styles = semantic_styles();
+        assert_eq!(
+            pet_role_style(PaletteRoleName::Eye, &styles),
+            styles.pet_eye
+        );
+    }
+
+    #[test]
     fn pet_panel_renders_some_braille_into_area() {
         let vm = vm_with_real_pet();
         let panel = PetPanel;
+        let ctx = test_context();
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), &vm);
+                panel.render(f.area(), f.buffer_mut(), &vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -353,11 +368,12 @@ mod tests {
     fn pet_panel_centers_narrow_art_in_wide_area() {
         let vm = vm_with_real_pet();
         let panel = PetPanel;
+        let ctx = test_context();
         let backend = TestBackend::new(80, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), &vm);
+                panel.render(f.area(), f.buffer_mut(), &vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -435,11 +451,12 @@ mod tests {
         // Cursor inside the pet area (after the SPEECH_ROWS=2 offset).
         vm.cursor_screen = Some((38, 4));
         let panel = PetPanel;
+        let ctx = test_context();
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), &vm);
+                panel.render(f.area(), f.buffer_mut(), &vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();

@@ -9,6 +9,7 @@ use ratatui::{
 use crate::tui::panels::{
     FeedPanel, HelpersPanel, Panel, PetPanel, SparkPanel, TodayPanel, VitalsPanel,
 };
+use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
 use crate::tui::view_model::WatchViewModel;
 
@@ -31,7 +32,16 @@ enum Mode {
 pub fn render_watch_frame_with_capability(
     frame: &mut Frame<'_>,
     vm: &WatchViewModel,
-    _capability: ColorCapability,
+    capability: ColorCapability,
+) {
+    let ctx = RenderContext::new(capability);
+    render_watch_frame_with_context(frame, vm, &ctx);
+}
+
+pub fn render_watch_frame_with_context(
+    frame: &mut Frame<'_>,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
 ) {
     let styles = semantic_styles();
     let p = tokenpet_palette();
@@ -57,7 +67,7 @@ pub fn render_watch_frame_with_capability(
     let inner = outer.inner(frame_rect);
     frame.render_widget(outer, frame_rect);
 
-    layout_and_render(inner, mode, frame.buffer_mut(), vm);
+    layout_and_render(inner, mode, frame.buffer_mut(), vm, ctx);
 }
 
 /// Returns the rect within `frame.area()` that the pet panel occupies for the
@@ -149,10 +159,11 @@ fn layout_and_render(
     mode: Mode,
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
+    ctx: &RenderContext,
 ) {
     match mode {
-        Mode::Wide => render_wide(inner, buf, vm),
-        Mode::Compact => render_compact(inner, buf, vm),
+        Mode::Wide => render_wide(inner, buf, vm, ctx),
+        Mode::Compact => render_compact(inner, buf, vm, ctx),
     }
 }
 
@@ -166,7 +177,12 @@ fn layout_and_render(
 /// and below the content. The taller column already fills the frame (set by
 /// `natural_inner_height`), so centering is a no-op for it. The shorter column
 /// gets its content centered vertically rather than crammed at the top.
-fn render_wide(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewModel) {
+fn render_wide(
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+) {
     let right_col = area.width.saturating_sub(WIDE_LEFT_COL + WIDE_GUTTER);
     let [left_area, _, right_area] = Layout::horizontal([
         Constraint::Length(WIDE_LEFT_COL),
@@ -179,7 +195,13 @@ fn render_wide(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewMode
 
     // Left column: PetPanel + VitalsPanel — centered so the shorter column's
     // content sits vertically in the middle of the frame.
-    render_centered_column(left_area, &[&PetPanel as &dyn Panel, &VitalsPanel], buf, vm);
+    render_centered_column(
+        left_area,
+        &[&PetPanel as &dyn Panel, &VitalsPanel],
+        buf,
+        vm,
+        ctx,
+    );
 
     // Right column: TodayPanel + SparkPanel + FeedPanel + HelpersPanel.
     render_centered_column(
@@ -192,11 +214,17 @@ fn render_wide(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewMode
         ],
         buf,
         vm,
+        ctx,
     );
 }
 
 /// Compact layout: all six panels stacked vertically with 1-cell spacing.
-fn render_compact(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewModel) {
+fn render_compact(
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+) {
     render_column_with_spacing(
         area,
         &[
@@ -210,6 +238,7 @@ fn render_compact(area: Rect, buf: &mut ratatui::buffer::Buffer, vm: &WatchViewM
         1,
         buf,
         vm,
+        ctx,
     );
 }
 
@@ -221,6 +250,7 @@ fn render_column_with_spacing(
     spacing: u16,
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
+    ctx: &RenderContext,
 ) {
     let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
 
@@ -230,7 +260,7 @@ fn render_column_with_spacing(
         .split(area);
 
     for (panel, rect) in panels.iter().zip(rects.iter()) {
-        panel.render(*rect, buf, vm);
+        panel.render(*rect, buf, vm, ctx);
     }
 }
 
@@ -245,6 +275,7 @@ fn render_centered_column(
     panels: &[&dyn Panel],
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
+    ctx: &RenderContext,
 ) {
     let constraints: Vec<Constraint> = panels.iter().map(|p| p.preferred_constraint(vm)).collect();
 
@@ -254,7 +285,7 @@ fn render_centered_column(
         .split(area);
 
     for (panel, rect) in panels.iter().zip(rects.iter()) {
-        panel.render(*rect, buf, vm);
+        panel.render(*rect, buf, vm, ctx);
     }
 }
 

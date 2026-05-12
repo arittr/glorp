@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
+use crate::tui::render_context::RenderContext;
 use crate::tui::style::{
     bar_ramp_good, ramp_index, semantic_styles, tokenpet_palette, ColorCapability,
 };
@@ -18,14 +19,17 @@ impl Panel for SparkPanel {
         Constraint::Length(2)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
         let block = Block::default().borders(Borders::TOP).title(" 7-day ");
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let capability = ColorCapability::detect();
         let styles = semantic_styles();
-        let lines = build_spark_lines(&vm.recent_daily_effective_tokens, capability, &styles);
+        let lines = build_spark_lines(
+            &vm.recent_daily_effective_tokens,
+            ctx.color_capability,
+            &styles,
+        );
         Paragraph::new(lines).render(inner, buf);
     }
 }
@@ -96,11 +100,12 @@ mod tests {
 
     fn render_to_string(width: u16, height: u16, vm: &WatchViewModel) -> String {
         let panel = SparkPanel;
+        let ctx = RenderContext::new(ColorCapability::Truecolor);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), vm);
+                panel.render(f.area(), f.buffer_mut(), vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();

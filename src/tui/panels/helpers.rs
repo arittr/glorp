@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::panels::Panel;
+use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
 
@@ -20,7 +21,7 @@ impl Panel for HelpersPanel {
         Constraint::Length(2)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel) {
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
         let block = Block::default().borders(Borders::TOP).title(" helpers ");
         let inner = block.inner(area);
         block.render(area, buf);
@@ -70,11 +71,12 @@ mod tests {
 
     fn render_to_string(width: u16, height: u16, vm: &WatchViewModel) -> String {
         let panel = HelpersPanel;
+        let ctx = RenderContext::new(crate::tui::style::ColorCapability::Truecolor);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                panel.render(f.area(), f.buffer_mut(), vm);
+                panel.render(f.area(), f.buffer_mut(), vm, &ctx);
             })
             .unwrap();
         let buf = terminal.backend().buffer();

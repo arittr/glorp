@@ -22,8 +22,9 @@ use crate::{
     tui::{
         layout::{
             pet_panel_rect, render_evolution_overlay, render_hatch_overlay, render_help_overlay,
-            render_watch_frame_with_capability,
+            render_watch_frame_with_capability, render_watch_frame_with_context,
         },
+        render_context::RenderContext,
         style::LogKind,
         view_model::{EventView, SourceUsageView},
     },
@@ -181,12 +182,12 @@ impl WatchApp {
             let render_evolution = self.update_evolution_overlay();
             let stage_label = self.vm.stage.clone();
             let vm_ref = &self.vm;
-            let capability = self.config.color_capability;
+            let ctx = RenderContext::new(self.config.color_capability);
             let overlay = self.overlay;
             let animator = &mut self.pet_animator;
             terminal.draw(|frame| {
                 let frame_area = frame.area();
-                render_watch_frame_with_capability(frame, vm_ref, capability);
+                render_watch_frame_with_context(frame, vm_ref, &ctx);
                 // Apply tachyonfx effects on top of the rendered pet panel.
                 let pet_rect = pet_panel_rect(frame_area, vm_ref);
                 animator.apply(pet_rect, frame.buffer_mut(), elapsed_ms);
