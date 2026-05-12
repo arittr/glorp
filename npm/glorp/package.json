@@ -12,11 +12,11 @@
     "ccusage": "^18.0.11"
   },
   "optionalDependencies": {
-    "@glorp/darwin-arm64": "0.1.0",
-    "@glorp/darwin-x64": "0.1.0",
-    "@glorp/linux-arm64": "0.1.0",
-    "@glorp/linux-x64": "0.1.0",
-    "@glorp/win32-x64": "0.1.0"
+    "@arittr/glorp-darwin-arm64": "0.1.0",
+    "@arittr/glorp-darwin-x64": "0.1.0",
+    "@arittr/glorp-linux-arm64": "0.1.0",
+    "@arittr/glorp-linux-x64": "0.1.0",
+    "@arittr/glorp-win32-x64": "0.1.0"
   },
   "scripts": {
     "test": "node test/smoke.mjs"

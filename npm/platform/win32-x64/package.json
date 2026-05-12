@@ -1,5 +1,5 @@
 {
-  "name": "@glorp/win32-x64",
+  "name": "@arittr/glorp-win32-x64",
   "version": "0.1.0",
   "license": "MIT",
   "os": [

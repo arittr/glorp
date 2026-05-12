@@ -1,0 +1,148 @@
+name: publish
+
+# Publishes glorp + its five platform subpackages to npm on a v* tag.
+# Uses npm Trusted Publishers (OIDC) — no NPM_TOKEN secret required.
+#
+# One-time setup on npmjs.com (per package, all six):
+#   Account → Trusted Publishers → Add
+#     Publisher: GitHub Actions
+#     Repo: arittr/glorp
+#     Workflow filename: publish.yml
+#     Environment (optional): leave blank, or "release"
+#
+# After tagging:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Publish order is enforced by job dependencies:
+#   build → publish-platforms → publish-main
+# so the main package's optionalDependencies resolve at install time.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build but skip publish (matrix smoke test)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write   # required for npm OIDC trusted publishing
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-latest
+          - target: darwin-x64
+            runner: macos-13
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: win32-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+      - name: cargo build --release
+        run: cargo build --release --locked
+      - name: upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glorp-${{ matrix.target }}
+          path: |
+            target/release/glorp
+            target/release/glorp.exe
+          if-no-files-found: error
+
+  smoke:
+    name: smoke test (launcher)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: install npm package deps (ccusage helpers)
+        working-directory: npm/glorp
+        run: npm install --no-audit --no-fund
+      - name: launcher smoke test
+        working-directory: npm/glorp
+        run: npm test
+
+  publish-platforms:
+    name: publish platform packages
+    needs: [build, smoke]
+    if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      # Sequential so a transient npm registry hiccup doesn't half-publish.
+      max-parallel: 1
+      matrix:
+        target: [darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: install npm 11 (for trusted publishing)
+        run: npm install -g npm@latest
+      - name: download platform binary
+        uses: actions/download-artifact@v4
+        with:
+          name: glorp-${{ matrix.target }}
+          path: target/release/
+      - name: stage binary into platform package
+        run: |
+          chmod +x target/release/glorp 2>/dev/null || true
+          node scripts/build-platform-package.mjs --platform ${{ matrix.target }}
+      - name: assert package version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./npm/platform/${{ matrix.target }}/package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::@glorp/${{ matrix.target }} version $PKG_VERSION does not match tag $TAG_VERSION"
+            exit 1
+          fi
+      - name: npm publish (platform)
+        working-directory: npm/platform/${{ matrix.target }}
+        run: npm publish --provenance --access public
+
+  publish-main:
+    name: publish glorp
+    needs: publish-platforms
+    if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: install npm 11 (for trusted publishing)
+        run: npm install -g npm@latest
+      - name: assert main package version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./npm/glorp/package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::glorp version $PKG_VERSION does not match tag $TAG_VERSION"
+            exit 1
+          fi
+      - name: npm publish (main)
+        working-directory: npm/glorp
+        run: npm publish --provenance --access public
