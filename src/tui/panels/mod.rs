@@ -10,6 +10,7 @@ use ratatui::layout::{Constraint, Rect};
 use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
 
+pub mod bars;
 pub mod feed;
 pub mod helpers;
 pub mod pet;
