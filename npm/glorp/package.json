@@ -1,6 +1,6 @@
 {
   "name": "@arittr/glorp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "A terminal pet fed by real AI coding token usage",
   "license": "MIT",
   "bin": {
@@ -12,11 +12,11 @@
     "ccusage": "^18.0.11"
   },
   "optionalDependencies": {
-    "@arittr/glorp-darwin-arm64": "0.1.3",
-    "@arittr/glorp-darwin-x64": "0.1.3",
-    "@arittr/glorp-linux-arm64": "0.1.3",
-    "@arittr/glorp-linux-x64": "0.1.3",
-    "@arittr/glorp-win32-x64": "0.1.3"
+    "@arittr/glorp-darwin-arm64": "0.1.4",
+    "@arittr/glorp-darwin-x64": "0.1.4",
+    "@arittr/glorp-linux-arm64": "0.1.4",
+    "@arittr/glorp-linux-x64": "0.1.4",
+    "@arittr/glorp-win32-x64": "0.1.4"
   },
   "scripts": {
     "test": "node test/smoke.mjs"
