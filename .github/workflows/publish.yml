@@ -92,7 +92,9 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
       - name: cargo build --release
-        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+        # --no-default-features strips the hidden dev-preview command so it
+        # does not ship in the published npm binaries.
+        run: cargo build --release --locked --no-default-features --target ${{ matrix.rust_target }}
       - name: stage binary at workspace root for upload
         # Upload-artifact preserves paths relative to the workspace, and the
         # publish-platforms job downloads into `target/release/`. Copy the
