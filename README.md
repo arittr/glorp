@@ -55,6 +55,20 @@ glorp status                  # one-shot summary, pipe-friendly
 | `glorp reset --yes` | Clear pet state after confirmation. Usage DB is preserved. |
 | `glorp doctor` | Check config paths, helper availability, parser health, recent diagnostics. |
 
+### Design previews
+
+For local design review, Glorp has a hidden preview lab command:
+
+```bash
+cargo run -- dev-preview --scenario all --out target/glorp-preview
+open target/glorp-preview/index.html
+```
+
+Use `--scenario watch` for the wide/compact watch layouts, `--scenario pets`
+for the all-species/all-stage pet matrix, or `--scenario all` for both. The
+bundle also writes `manifest.json`, `review.md`, local assets, and
+`frames/*.txt` / `frames/*.cells.json` captures for agent review.
+
 ### Watch keys
 
 - `q` quit

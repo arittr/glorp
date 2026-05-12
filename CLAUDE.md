@@ -16,6 +16,8 @@ cargo build --release                                       # release binary at 
 cargo run -- watch                                          # live TUI against your real ccusage helpers
 cargo run -- init --yes --seed test --name buddy            # create local state from a deterministic seed
 GLORP_CONFIG_DIR=/tmp/x cargo run -- status                 # isolate config from your real pet
+cargo run -- dev-preview --scenario all --out target/glorp-preview
+open target/glorp-preview/index.html                        # inspect deterministic design previews
 ```
 
 Test & lint:
@@ -26,6 +28,7 @@ cargo test --lib parse_period_start_tests                   # just unit tests in
 cargo test -- forty_nine_daily_catchups                     # filter by test name
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings    # CI gate; must stay clean
+cargo test --test dev_preview                               # preview-lab integration coverage
 ```
 
 npm packaging (rarely touched):
@@ -68,6 +71,39 @@ S0 → S1: 0.04   S1 → S2: 0.25   S2 → S3: 1.0   S3 → S4: 4.0   S4 → S5:
 - `view_model.rs` is the snapshot passed to layout. Built in `src/commands/watch.rs::build_watch_view_model` from `PetState` + recent usage events + diagnostics.
 
 Animation acknowledgement (evolution overlay) lives on `WatchApp`, not on `WatchViewModel`, because the worker poll replaces vm wholesale every ~10s.
+
+### Preview Lab (`glorp dev-preview`)
+
+`glorp dev-preview` is a hidden local-development command for deterministic
+design review. It does not appear in normal help output.
+
+```bash
+cargo run -- dev-preview --scenario all --out target/glorp-preview
+open target/glorp-preview/index.html
+```
+
+Scenarios:
+
+- `all` renders watch + pet previews.
+- `watch` renders `watch-wide-normal` (`120x32`) and
+  `watch-compact-normal` (`72x24`).
+- `pets` renders `pet-species-stage`, covering all six species across all
+  seven stages.
+
+The preview bundle contains:
+
+- `index.html` — static contact sheet.
+- `review.md` — manifest-driven checklist with scenario prompts.
+- `manifest.json` — review contract with scenario ids, kinds, intents,
+  dimensions, files, inputs, and artifact inventory.
+- `frames/*.txt` — plain visible terminal cells.
+- `frames/*.cells.json` — per-cell geometry/style data.
+
+Output safety is deliberate: preview generation only overwrites a missing,
+empty, or previously owned preview directory marked by `.glorp-preview` and a
+manifest producer of `glorp-dev-preview`. The command builds seeded watch usage
+fixtures in a scratch SQLite database under the staging directory and does not
+read or write real user pet state.
 
 ### Pet rendering (`src/pet/`)
 
