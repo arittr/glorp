@@ -109,11 +109,13 @@ pub(crate) fn template_lines(
     }
 }
 
-// Crystal pets evolve from a single dominant gem (S4) into clustered forms at
-// S5+. Skip the singleton morph 0 at elder stages so every elder Crystal
-// reads as a cluster while still preserving morph-driven variation.
+// Some species visibly transform at S5+: Crystal pets cluster, Ghost pets grow
+// longer tentacles. Skip the singleton morph 0 at elder stages for those
+// species so every elder pet reads as the evolved form while still preserving
+// morph-driven variation across the remaining morphs.
 fn elder_morph_index(species: Species, morph_index: usize, len: usize) -> usize {
-    if matches!(species, Species::Crystal) && len > 1 {
+    let skip_first = matches!(species, Species::Crystal | Species::Ghost) && len > 1;
+    if skip_first {
         1 + (morph_index % (len - 1))
     } else {
         morph_index % len
@@ -329,80 +331,90 @@ const BLOB_TINY: &[Template; 3] = &[
 ];
 
 // ── Ghost ─────────────────────────────────────────────────────────
+// Chunky filled bodies (\u{2588} outline + \u{2592}/\u{2591} two-tone interior
+// shimmer) with dangling tentacles below. Older stages keep the same body
+// silhouette but trade head rows for longer tentacles with varied style
+// and count per morph.
 const GHOST_PUP: &[Template] = &[[
     "           ",
-    "           ",
-    "    ___    ",
-    "   /   \\   ",
-    "  | {eyes} |  ",
-    "  |  {mouth}  |  ",
-    "   \\{pattern}/   ",
-    "   ~ {accent} ~   ",
+    "   _____   ",
+    "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
+    " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
+    " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
+    " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+    "   \\\u{2588}{accent}\u{2588}/   ",
+    "   . . .   ",
 ]];
 
 const GHOST_ADULT: &[Template] = &[
+    // Morph 0 — chunky S4 ghost with four short tentacle stubs.
     [
-        "    ___    ",
-        "   /   \\   ",
-        "  / {eyes} \\  ",
-        " |  .{mouth}.  | ",
-        " |  {pattern}  | ",
-        "  \\  {accent}  /  ",
-        "   \\___/   ",
-        "  ~ . ~ .  ",
+        "   _____   ",
+        "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
+        " |\u{2588}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2588}| ",
+        " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
+        " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
+        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+        "  | |{accent}| |  ",
+        "  ' ' ' '  ",
     ],
+    // Morph 1 — wraith: compact head, three curled tentacles.
     [
-        "     _     ",
-        "    / \\    ",
-        "   /{eyes}\\   ",
-        "  | .{mouth}. |  ",
-        "  | {pattern} |  ",
-        "  \\\\ {accent} //  ",
-        "   \\___/   ",
-        "  ~ . . ~  ",
+        "   _____   ",
+        "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
+        " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
+        " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
+        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+        "   | | |   ",
+        "   ) {accent} (   ",
+        "   ' ~ '   ",
     ],
+    // Morph 2 — wraith with four wavy tendrils (experimental U+2307).
     [
-        "    ___    ",
-        "   /   \\   ",
-        "  |     |  ",
-        "  | {eyes} |  ",
-        "  |  {mouth}  |  ",
-        "   \\{pattern}/   ",
-        "   ~ {accent} ~   ",
-        "    ~ ~    ",
+        "   _____   ",
+        "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
+        " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
+        " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
+        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
+        "  \u{2307} \u{2307}{accent}\u{2307} \u{2307}  ",
+        "   \u{2307} \u{2307} \u{2307}   ",
+        "    \u{2307} \u{2307}    ",
     ],
 ];
 
 const GHOST_TINY: &[Template; 3] = &[
+    // S0 whisper — just a wispy mark drifting.
     [
         "           ",
         "           ",
         "           ",
         "           ",
-        "    . .    ",
+        "           ",
         "     '     ",
         "    . .    ",
-        "           ",
+        "     ~     ",
     ],
+    // S1 wisp — small forming shape, two-tone shimmer.
     [
         "           ",
         "           ",
         "           ",
+        "           ",
         "    ___    ",
-        "   /   \\   ",
-        "  | {eyes} |  ",
-        "   \\_{mouth}_/   ",
+        "   /\u{2588}\u{2588}\u{2588}\\   ",
+        "   \\\u{2591}\u{2592}\u{2591}/   ",
         "    ~ ~    ",
     ],
+    // S2 shade — small chunky ghost with eyes and mouth.
     [
         "           ",
         "           ",
         "           ",
         "    ___    ",
-        "   /   \\   ",
-        "  | {eyes} |  ",
-        "  | {pattern} |  ",
-        "   ~ {mouth} ~   ",
+        "   /\u{2588}\u{2588}\u{2588}\\   ",
+        "  |\u{2588}{eyes}\u{2588}|  ",
+        "  |\u{2588}\u{2591}{mouth}\u{2591}\u{2588}|  ",
+        "   \\\u{2588}\u{2592}\u{2588}/   ",
     ],
 ];
 
