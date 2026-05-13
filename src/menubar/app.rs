@@ -15,9 +15,11 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSColor, NSPopover, NSPopoverBehavior,
-    NSRectEdgeMinY, NSStatusBar, NSStatusItem, NSTextView, NSView, NSViewController,
+    NSStatusBar, NSStatusItem, NSTextView, NSView, NSViewController,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{
+    MainThreadMarker, NSPoint, NSRange, NSRect, NSRectEdge, NSSize, NSString, NSTimer,
+};
 
 use crate::commands::watch::{build_watch_view_model, poll_usage_and_apply};
 use crate::error::{GlorpError, Result};
@@ -84,7 +86,7 @@ pub fn run() -> Result<()> {
     })?;
     let initial_vm = build_watch_view_model(&initial_pet, &paths.usage_db)?;
 
-    let app: Retained<NSApplication> = unsafe { NSApplication::sharedApplication(mtm) };
+    let app: Retained<NSApplication> = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let controller: Retained<Controller> = unsafe { msg_send_id![Controller::class(), new] };
@@ -93,7 +95,7 @@ pub fn run() -> Result<()> {
         (render::POPOVER_COLUMNS as f64) * APPROX_CELL_WIDTH + 24.0,
         (render::POPOVER_ROWS as f64) * APPROX_CELL_HEIGHT + 16.0,
     );
-    let (popover, text_view) = build_popover(popover_size);
+    let (popover, text_view) = build_popover(mtm, popover_size);
     update_text_view(&text_view, &initial_vm);
 
     let status_item = build_status_item(mtm, &controller, &initial_pet)?;
@@ -110,7 +112,7 @@ pub fn run() -> Result<()> {
     let _timer: Retained<NSTimer> = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
             POLL_INTERVAL_SECS,
-            &*controller,
+            &controller,
             sel!(pollTick:),
             None,
             true,
@@ -121,18 +123,16 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn build_popover(size: NSSize) -> (Retained<NSPopover>, Retained<NSTextView>) {
+fn build_popover(
+    mtm: MainThreadMarker,
+    size: NSSize,
+) -> (Retained<NSPopover>, Retained<NSTextView>) {
     let view_frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
 
-    let view: Retained<NSView> = unsafe {
-        let alloc = NSView::alloc();
-        NSView::initWithFrame(alloc, view_frame)
-    };
+    let view: Retained<NSView> = unsafe { NSView::initWithFrame(mtm.alloc(), view_frame) };
 
-    let text_view: Retained<NSTextView> = unsafe {
-        let alloc = NSTextView::alloc();
-        NSTextView::initWithFrame(alloc, view_frame)
-    };
+    let text_view: Retained<NSTextView> =
+        unsafe { NSTextView::initWithFrame(mtm.alloc(), view_frame) };
     unsafe {
         text_view.setEditable(false);
         text_view.setSelectable(true);
@@ -188,7 +188,7 @@ fn status_item_title(state: &PetState) -> String {
 fn update_text_view(text_view: &NSTextView, vm: &WatchViewModel) {
     let attr = render::render(vm);
     unsafe {
-        let storage = text_view
+        let mut storage = text_view
             .textStorage()
             .expect("NSTextView always has a text storage");
         let length = storage.length();
@@ -219,11 +219,13 @@ fn toggle_popover() {
     let Some(button) = (unsafe { handles.status_item.button(mtm) }) else {
         return;
     };
-    let bounds: NSRect = unsafe { button.bounds() };
+    let bounds: NSRect = button.bounds();
     unsafe {
-        handles
-            .popover
-            .showRelativeToRect_ofView_preferredEdge(bounds, &button, NSRectEdgeMinY);
+        handles.popover.showRelativeToRect_ofView_preferredEdge(
+            bounds,
+            &button,
+            NSRectEdge::NSMinYEdge,
+        );
     }
 }
 

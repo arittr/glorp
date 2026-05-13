@@ -185,18 +185,16 @@ fn materialize(runs: Vec<StyledRun>) -> Retained<NSMutableAttributedString> {
         }
     }
     let ns_text = NSString::from_str(&full_text);
-    let attr_str = unsafe {
-        NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &ns_text)
-    };
+    let mut attr_str = NSMutableAttributedString::from_nsstring(&ns_text);
 
     let font = monospace_font();
     let total_chars = full_text.chars().count();
     let full_range = NSRange::from(0..total_chars);
     unsafe {
-        attr_str.addAttribute_value_range(NSFontAttributeName, &*font, full_range);
+        attr_str.addAttribute_value_range(NSFontAttributeName, &font, full_range);
         attr_str.addAttribute_value_range(
             NSForegroundColorAttributeName,
-            &*color_for(COLOR_FG),
+            &color_for(COLOR_FG),
             full_range,
         );
         for (start, end, rgb) in intervals {
@@ -206,7 +204,7 @@ fn materialize(runs: Vec<StyledRun>) -> Retained<NSMutableAttributedString> {
             let range = NSRange::from(start..end);
             attr_str.addAttribute_value_range(
                 NSForegroundColorAttributeName,
-                &*color_for(rgb),
+                &color_for(rgb),
                 range,
             );
         }
