@@ -9,7 +9,7 @@ use crate::storage::{
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
 use crate::tui::layout::render_watch_frame_with_layout;
-use crate::tui::{component::layout_watch, component::preview_layout};
+use crate::tui::{component::layout_watch_with_context, component::preview_layout};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
@@ -51,7 +51,7 @@ fn render_watch_frame(
     let usage_path = scratch_dir.join(format!("{id}.sqlite"));
     seed_usage_store(&usage_path, ctx)?;
     let vm = build_watch_view_model_at(&state, &usage_path, ctx.fixed_now)?;
-    let layout = layout_watch(Rect::new(0, 0, width, height), &vm);
+    let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &ctx.render);
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     terminal.draw(|frame| {

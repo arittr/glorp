@@ -115,6 +115,7 @@ pub enum TargetRole {
     PetArt,
     PetSpeech,
     Habitat,
+    HitArea,
     Effect,
 }
 

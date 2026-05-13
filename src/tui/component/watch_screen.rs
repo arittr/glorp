@@ -1,12 +1,12 @@
 use crate::tui::component::{
-    ComponentLayout, ComponentNodeLayout, ComponentPath, GeometryTarget, LayoutDecision,
-    LayoutDecisionReason, LayoutMode, TargetPath, TargetRole, VisibilityState, WatchComponentId,
+    ComponentLayout, ComponentNodeLayout, ComponentPath, LayoutDecision, LayoutDecisionReason,
+    LayoutMode, PetScene, TargetPath, VisibilityState, WatchComponentId,
 };
-use crate::tui::panels::pet::pet_inner_rect_in_panel;
 use crate::tui::panels::{
     BioCardPanel, FeedPanel, Panel as LegacyPanel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
 };
 use crate::tui::render_context::RenderContext;
+use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
@@ -45,6 +45,15 @@ pub const RIGHT_MIN_WIDTH: u16 = 50;
 pub const PET_RENDER_MIN_HEIGHT: u16 = 10;
 
 pub fn layout_watch(terminal_area: Rect, vm: &WatchViewModel) -> ComponentLayout {
+    let ctx = RenderContext::new(ColorCapability::Truecolor);
+    layout_watch_with_context(terminal_area, vm, &ctx)
+}
+
+pub fn layout_watch_with_context(
+    terminal_area: Rect,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+) -> ComponentLayout {
     let frame = bounded_frame_rect(terminal_area);
     let mode = if (frame.width as usize) >= COMPACT_THRESHOLD + 2 {
         LayoutMode::Wide
@@ -56,8 +65,8 @@ pub fn layout_watch(terminal_area: Rect, vm: &WatchViewModel) -> ComponentLayout
     insert_root_node(&mut layout, frame, content);
 
     match mode {
-        LayoutMode::Wide => layout_wide(content, vm, &mut layout),
-        LayoutMode::Compact => layout_compact(content, vm, &mut layout),
+        LayoutMode::Wide => layout_wide(content, vm, ctx, &mut layout),
+        LayoutMode::Compact => layout_compact(content, vm, ctx, &mut layout),
     }
 
     layout
@@ -166,7 +175,7 @@ pub fn bounded_frame_rect(terminal_area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-fn layout_wide(area: Rect, vm: &WatchViewModel, layout: &mut ComponentLayout) {
+fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mut ComponentLayout) {
     let padded = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -200,7 +209,7 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, layout: &mut ComponentLayout) {
         .constraints(band_constraints)
         .split(body[2]);
 
-    insert_pet_node(layout, left[0], vm);
+    insert_pet_node(layout, left[0], vm, ctx);
 
     let right_top = Layout::default()
         .direction(Direction::Vertical)
@@ -229,7 +238,12 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, layout: &mut ComponentLayout) {
     insert_visible_node(layout, WatchComponentId::Feed, right[2]);
 }
 
-fn layout_compact(area: Rect, vm: &WatchViewModel, layout: &mut ComponentLayout) {
+fn layout_compact(
+    area: Rect,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+    layout: &mut ComponentLayout,
+) {
     let stack = Layout::default()
         .direction(Direction::Vertical)
         .flex(Flex::Start)
@@ -245,7 +259,7 @@ fn layout_compact(area: Rect, vm: &WatchViewModel, layout: &mut ComponentLayout)
         ])
         .split(area);
 
-    insert_pet_node(layout, stack[0], vm);
+    insert_pet_node(layout, stack[0], vm, ctx);
     insert_visible_node(layout, WatchComponentId::Vitals, stack[1]);
     insert_visible_node(layout, WatchComponentId::Today, stack[3]);
     insert_visible_node(layout, WatchComponentId::Progress, stack[5]);
@@ -275,7 +289,12 @@ fn insert_visible_node(layout: &mut ComponentLayout, id: WatchComponentId, bound
         .expect("component id is unique in watch layout");
 }
 
-fn insert_pet_node(layout: &mut ComponentLayout, bounds: Rect, vm: &WatchViewModel) {
+fn insert_pet_node(
+    layout: &mut ComponentLayout,
+    bounds: Rect,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+) {
     let owner = WatchComponentId::Pet.path();
     let mut node = ComponentNodeLayout::leaf(owner, bounds);
     if bounds.height < PET_RENDER_MIN_HEIGHT {
@@ -297,32 +316,12 @@ fn insert_pet_node(layout: &mut ComponentLayout, bounds: Rect, vm: &WatchViewMod
         .insert_node(node)
         .expect("pet component id is unique in watch layout");
 
-    layout
-        .insert_target(
-            TargetPath::new("watch.pet.panel"),
-            GeometryTarget {
-                owner,
-                rect: bounds,
-                z: 0,
-                clip: bounds,
-                role: TargetRole::PetPanel,
-            },
-        )
-        .expect("pet panel target id is unique");
-
-    let art = pet_inner_rect_in_panel(bounds, vm);
-    layout
-        .insert_target(
-            TargetPath::new("watch.pet.art"),
-            GeometryTarget {
-                owner,
-                rect: art,
-                z: 10,
-                clip: bounds,
-                role: TargetRole::PetArt,
-            },
-        )
-        .expect("pet art target id is unique");
+    let scene = PetScene::compute_layout(WatchComponentId::Pet, bounds, vm, ctx);
+    for (path, target) in scene.targets {
+        layout
+            .insert_target(path, target)
+            .expect("pet scene target id is unique");
+    }
 }
 
 fn insert_hidden_bio(layout: &mut ComponentLayout, content: Rect) {

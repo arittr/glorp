@@ -7,6 +7,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::pet::animator::low_energy_lightness_multiplier;
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
+use crate::tui::component::{PetScene, PetSceneLayout, WatchComponentId};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, SemanticStyles};
@@ -18,19 +19,6 @@ pub struct PetPanel;
 /// and 10 rows tall (8 art rows + 1-cell particle border top/bottom).
 const PET_W: u16 = 13;
 const PET_H: u16 = 10;
-
-/// Rows reserved above the pet for the speech bubble. Only reserved when
-/// speech is actually active so the pet sits at its natural top position
-/// in the column most of the time. The bubble cycles ~5s on / ~25s off, so
-/// brief layout shifts on the appearance/disappearance are tolerable and
-/// far better than permanently moving the pet down.
-fn speech_rows(vm: &WatchViewModel) -> u16 {
-    if vm.current_speech.is_some() {
-        1
-    } else {
-        0
-    }
-}
 
 /// Computes the 13×10 sub-rect where the pet art sits inside the panel area,
 /// accounting for vertical centering, breathing offset, and wander offset.
@@ -84,22 +72,14 @@ impl Panel for PetPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
-        // Compute the pet sub-rect consistently for both passes (below speech bubble).
-        let speech_h = speech_rows(vm).min(area.height);
-        let below_speech = Rect {
-            x: area.x,
-            y: area.y + speech_h,
-            width: area.width,
-            height: area.height.saturating_sub(speech_h),
-        };
-        let pet_inner = pet_inner_rect_in_panel(below_speech, vm);
+        let scene = PetScene::compute_layout(WatchComponentId::Pet, area, vm, ctx);
 
         // Pass 1: ambient backdrop. PR1 stub returns empty so this is a no-op.
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
-        let glyphs = ambient_glyphs_for(species, area, pet_inner, now);
+        let glyphs = ambient_glyphs_for(species, scene.habitat, scene.pet_art, now);
         for g in glyphs {
-            if ambient_glyph_is_inside_area(&g, area) {
+            if ambient_glyph_is_inside_area(&g, scene.habitat) {
                 let cell = &mut buf[(g.col, g.row)];
                 cell.set_char(g.glyph);
                 cell.set_style(ratatui::style::Style::default().fg(g.color));
@@ -107,42 +87,26 @@ impl Panel for PetPanel {
         }
 
         // Pass 2: existing pet art rendering. Unchanged from prior implementation.
-        render_pet_inside(area, buf, vm, ctx);
+        render_pet_inside(buf, vm, &scene);
     }
 }
 
 /// Renders the speech bubble and pet art into `area`, centered vertically.
 /// This is the pre-existing render logic extracted from the old `render` body.
-fn render_pet_inside(area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
+fn render_pet_inside(buf: &mut Buffer, vm: &WatchViewModel, scene: &PetSceneLayout) {
     let base = semantic_styles();
     let m = low_energy_lightness_multiplier(vm.energy);
     let droop = darken_pet_styles(&base, m);
 
-    let speech_h = speech_rows(vm).min(area.height);
-    let speech_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: speech_h,
-    };
-
-    if let Some(speech) = vm.current_speech.as_deref() {
+    if let (Some(speech_area), Some(speech)) = (scene.speech, vm.current_speech.as_deref()) {
         render_speech_bubble(speech_area, buf, speech, &droop);
     }
 
-    // Center the pet vertically in the remaining space below any speech bubble.
-    let below_speech = Rect {
-        x: area.x,
-        y: area.y + speech_h,
-        width: area.width,
-        height: area.height.saturating_sub(speech_h),
-    };
-    let pet_inner = pet_inner_rect_in_panel(below_speech, vm);
     // Hit-test against the full column width so the cursor anywhere in the
     // panel triggers eye tracking, matching the pre-Fill behavior.
-    let cursor_norm_x = cursor_normalized_x_within(vm, below_speech);
-    let lines = build_pet_lines(vm, pet_inner.width as usize, &droop, cursor_norm_x);
-    Paragraph::new(lines).render(pet_inner, buf);
+    let cursor_norm_x = cursor_normalized_x_within(vm, scene.hit_area);
+    let lines = build_pet_lines(vm, scene.pet_art.width as usize, &droop, cursor_norm_x);
+    Paragraph::new(lines).render(scene.pet_art, buf);
 }
 
 /// Render a small speech bubble: "« text »" centered above the pet, styled

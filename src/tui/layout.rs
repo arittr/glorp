@@ -6,7 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::component::{layout_watch, render_watch_layout, ComponentLayout, TargetPath};
+use crate::tui::component::{
+    layout_watch, layout_watch_with_context, render_watch_layout, ComponentLayout, TargetPath,
+};
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
 use crate::tui::view_model::WatchViewModel;
@@ -25,7 +27,7 @@ pub fn render_watch_frame_with_context(
     vm: &WatchViewModel,
     ctx: &RenderContext,
 ) {
-    let layout = layout_watch(frame.area(), vm);
+    let layout = layout_watch_with_context(frame.area(), vm, ctx);
     render_watch_frame_with_layout(frame, vm, ctx, &layout);
 }
 
@@ -58,7 +60,8 @@ pub fn pet_effect_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
 
 pub(crate) fn pet_effect_rect_from_layout(layout: &ComponentLayout) -> Rect {
     layout
-        .target(TargetPath::new("watch.pet.art"))
+        .target(TargetPath::new("watch.pet.effect"))
+        .or_else(|| layout.target(TargetPath::new("watch.pet.art")))
         .map(|target| target.rect)
         .unwrap_or_else(|| Rect::new(layout.frame.x, layout.frame.y, 0, 0))
 }

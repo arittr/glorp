@@ -21,7 +21,7 @@ use crate::{
     format::format_tokens,
     pet::animator::PetAnimator,
     tui::{
-        component::layout_watch,
+        component::layout_watch_with_context,
         layout::{
             pet_effect_rect_from_layout, render_evolution_overlay, render_hatch_overlay,
             render_help_overlay, render_watch_frame_with_capability,
@@ -190,7 +190,7 @@ impl WatchApp {
             let animator = &mut self.pet_animator;
             terminal.draw(|frame| {
                 let frame_area = frame.area();
-                let layout = layout_watch(frame_area, vm_ref);
+                let layout = layout_watch_with_context(frame_area, vm_ref, &ctx);
                 render_watch_frame_with_layout(frame, vm_ref, &ctx, &layout);
                 // Apply tachyonfx effects on top of the rendered pet panel.
                 let pet_rect = pet_effect_rect_from_layout(&layout);
