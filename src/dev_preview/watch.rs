@@ -9,7 +9,9 @@ use crate::storage::{
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
 use crate::tui::layout::render_watch_frame_with_context;
+use crate::tui::{component::layout_watch, component::preview_layout};
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use std::path::Path;
 use time::Duration;
@@ -49,13 +51,16 @@ fn render_watch_frame(
     let usage_path = scratch_dir.join(format!("{id}.sqlite"));
     seed_usage_store(&usage_path, ctx)?;
     let vm = build_watch_view_model_at(&state, &usage_path, ctx.fixed_now)?;
+    let layout = layout_watch(Rect::new(0, 0, width, height), &vm);
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     terminal.draw(|frame| {
         render_watch_frame_with_context(frame, &vm, &ctx.render);
     })?;
 
-    Ok(frame_from_buffer(id, title, terminal.backend().buffer()))
+    let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
+    frame.layout = Some(preview_layout(id, &layout));
+    Ok(frame)
 }
 
 fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {

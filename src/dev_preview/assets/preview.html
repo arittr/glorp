@@ -12,6 +12,10 @@
     <header class="preview-header">
       <h1>Glorp Preview</h1>
       <p>Generated {{GENERATED_AT}}</p>
+      <div class="preview-controls" aria-label="Layout overlays">
+        <button type="button" data-overlay-toggle="components" aria-pressed="false">Components</button>
+        <button type="button" data-overlay-toggle="targets" aria-pressed="false">Targets</button>
+      </div>
     </header>
     <section class="preview-frames">
       {{FRAMES}}

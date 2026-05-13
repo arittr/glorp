@@ -1,5 +1,6 @@
 use crate::dev_preview::frame::{escape_html, PreviewCell, PreviewFrame};
 use crate::error::Result;
+use crate::tui::component::PreviewLayout;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -7,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const PRODUCER: &str = "glorp-dev-preview";
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -50,6 +51,8 @@ pub struct PreviewDimensions {
 pub struct PreviewScenarioFiles {
     pub text: PathBuf,
     pub cells: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +71,7 @@ pub struct PreviewArtifact {
 pub enum ArtifactType {
     Text,
     Cells,
+    Layout,
     Html,
     Review,
     Asset,
@@ -110,6 +114,11 @@ pub fn write_cells_json(path: &Path, frame: &PreviewFrame) -> Result<()> {
     Ok(())
 }
 
+pub fn write_layout_json(path: &Path, layout: &PreviewLayout) -> Result<()> {
+    fs::write(path, serde_json::to_string_pretty(layout)?)?;
+    Ok(())
+}
+
 pub fn write_manifest(path: &Path, manifest: &PreviewManifest) -> Result<()> {
     fs::write(path, serde_json::to_string_pretty(manifest)?)?;
     Ok(())
@@ -132,7 +141,7 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
                 scenario.title, scenario.intent
             ));
             markdown.push_str(&format!(
-                "- ID: `{}`\n- Kind: `{}`\n- Size: `{}x{}`\n- Text: `{}`\n- Cells: `{}`\n\n",
+                "- ID: `{}`\n- Kind: `{}`\n- Size: `{}x{}`\n- Text: `{}`\n- Cells: `{}`\n",
                 scenario.id,
                 scenario_kind_label(scenario.kind),
                 scenario.dimensions.width,
@@ -140,6 +149,10 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
                 scenario.files.text.display(),
                 scenario.files.cells.display()
             ));
+            if let Some(layout) = &scenario.files.layout {
+                markdown.push_str(&format!("- Layout: `{}`\n", layout.display()));
+            }
+            markdown.push('\n');
             markdown.push_str("Review prompts:\n");
             for prompt in &scenario.review_prompts {
                 markdown.push_str(&format!("- {prompt}\n"));
@@ -193,6 +206,7 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
         r#"<p class="frame-meta">{} x {} cells</p>"#,
         frame.width, frame.height
     ));
+    html.push_str(r#"<div class="preview-grid-shell">"#);
     html.push_str(&format!(
         r#"<div class="preview-grid" style="--cols: {}; --rows: {}">"#,
         frame.width, frame.height
@@ -202,6 +216,13 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
         html.push_str(&render_cell_html(cell));
     }
 
+    html.push_str("</div>");
+    if frame.layout.is_some() {
+        html.push_str(&format!(
+            r#"<div class="layout-overlay" data-layout-for="{}" hidden></div>"#,
+            escape_html(&frame.id)
+        ));
+    }
     html.push_str("</div></article>");
     html
 }
@@ -324,6 +345,7 @@ mod tests {
                     modifiers: vec![],
                 },
             ],
+            layout: None,
         }
     }
 
@@ -365,6 +387,7 @@ mod tests {
                     modifiers: vec![],
                 },
             ],
+            layout: None,
         }
     }
 
@@ -386,6 +409,7 @@ mod tests {
                 files: PreviewScenarioFiles {
                     text: PathBuf::from("frames/frame-one.txt"),
                     cells: PathBuf::from("frames/frame-one.cells.json"),
+                    layout: None,
                 },
                 inputs: BTreeMap::from([(
                     "fixed_now".to_string(),
@@ -538,7 +562,7 @@ mod tests {
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["producer"], "glorp-dev-preview");
         assert_eq!(json["scenarios"][0]["kind"], "watch");
         assert_eq!(json["scenarios"][0]["dimensions"]["width"], 2);

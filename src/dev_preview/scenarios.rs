@@ -1,7 +1,8 @@
 use crate::dev_preview::export::{
-    copy_assets, write_cells_json, write_index_html, write_manifest, write_review_markdown,
-    write_text_frame, ArtifactType, PreviewArtifact, PreviewDimensions, PreviewManifest,
-    PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
+    copy_assets, write_cells_json, write_index_html, write_layout_json, write_manifest,
+    write_review_markdown, write_text_frame, ArtifactType, PreviewArtifact, PreviewDimensions,
+    PreviewManifest, PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER,
+    SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::output::{commit_output, prepare_output};
@@ -63,6 +64,9 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
     for frame in &frames {
         write_text_frame(&staging_dir.join(text_path(frame)), frame)?;
         write_cells_json(&staging_dir.join(cells_path(frame)), frame)?;
+        if let Some(layout) = &frame.layout {
+            write_layout_json(&staging_dir.join(layout_path(frame)), layout)?;
+        }
     }
 
     let generated_at = format_rfc3339(OffsetDateTime::now_utc())?;
@@ -196,6 +200,7 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
         files: PreviewScenarioFiles {
             text: text_path(frame),
             cells: cells_path(frame),
+            layout: frame.layout.as_ref().map(|_| layout_path(frame)),
         },
         inputs,
         review_prompts,
@@ -221,6 +226,16 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
             width: Some(frame.width),
             height: Some(frame.height),
         });
+        if frame.layout.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-layout", frame.id),
+                title: format!("{} Layout", frame.title),
+                artifact_type: ArtifactType::Layout,
+                path: layout_path(frame),
+                width: Some(frame.width),
+                height: Some(frame.height),
+            });
+        }
     }
     artifacts.push(PreviewArtifact {
         id: "index".to_string(),
@@ -263,6 +278,10 @@ fn text_path(frame: &PreviewFrame) -> PathBuf {
 
 fn cells_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.cells.json", frame.id))
+}
+
+fn layout_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.layout.json", frame.id))
 }
 
 fn color_capability_name(capability: ColorCapability) -> &'static str {
@@ -360,6 +379,7 @@ mod tests {
             width: 120,
             height: 32,
             cells: Vec::new(),
+            layout: None,
         };
 
         let scenario = scenario_metadata(&frame, &ctx);
@@ -373,6 +393,7 @@ mod tests {
             scenario.files.cells,
             PathBuf::from("frames/watch-wide-normal.cells.json")
         );
+        assert_eq!(scenario.files.layout, None);
         assert_eq!(scenario.inputs["color_capability"], "truecolor");
         assert_eq!(scenario.inputs["species"], "fuzz");
         assert_eq!(scenario.inputs["stage"], "s4");
@@ -388,6 +409,7 @@ mod tests {
             width: 120,
             height: 86,
             cells: Vec::new(),
+            layout: None,
         };
 
         let scenario = scenario_metadata(&frame, &ctx);

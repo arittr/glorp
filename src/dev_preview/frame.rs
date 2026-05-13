@@ -1,3 +1,4 @@
+use crate::tui::component::PreviewLayout;
 use ratatui::{
     buffer::Buffer,
     layout::Position,
@@ -13,6 +14,7 @@ pub struct PreviewFrame {
     pub width: u16,
     pub height: u16,
     pub cells: Vec<PreviewCell>,
+    pub layout: Option<PreviewLayout>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -61,6 +63,7 @@ pub fn frame_from_buffer(
         width: area.width,
         height: area.height,
         cells,
+        layout: None,
     }
 }
 

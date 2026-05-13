@@ -91,14 +91,22 @@ fn dev_preview_watch_writes_expected_artifacts() {
         .out
         .join("frames/watch-wide-normal.cells.json")
         .is_file());
+    assert!(run
+        .out
+        .join("frames/watch-wide-normal.layout.json")
+        .is_file());
     assert!(run.out.join("frames/watch-compact-normal.txt").is_file());
     assert!(run
         .out
         .join("frames/watch-compact-normal.cells.json")
         .is_file());
+    assert!(run
+        .out
+        .join("frames/watch-compact-normal.layout.json")
+        .is_file());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["schema_version"], 2);
     assert_eq!(manifest["producer"], "glorp-dev-preview");
     assert!(!manifest["glorp_version"].as_str().unwrap().is_empty());
     assert!(manifest["generated_at"].as_str().unwrap().ends_with('Z'));
@@ -106,22 +114,85 @@ fn dev_preview_watch_writes_expected_artifacts() {
         &manifest,
         "watch-wide-normal",
         "watch",
-        120,
-        32,
-        "frames/watch-wide-normal.txt",
-        "frames/watch-wide-normal.cells.json",
+        (120, 32),
+        (
+            "frames/watch-wide-normal.txt",
+            "frames/watch-wide-normal.cells.json",
+            Some("frames/watch-wide-normal.layout.json"),
+        ),
     );
     assert_scenario(
         &manifest,
         "watch-compact-normal",
         "watch",
-        72,
-        24,
-        "frames/watch-compact-normal.txt",
-        "frames/watch-compact-normal.cells.json",
+        (72, 24),
+        (
+            "frames/watch-compact-normal.txt",
+            "frames/watch-compact-normal.cells.json",
+            Some("frames/watch-compact-normal.layout.json"),
+        ),
     );
     assert_artifact_type(&manifest, "watch-wide-normal", "text");
     assert_artifact_type(&manifest, "watch-wide-normal-cells", "cells");
+    assert_artifact_type(&manifest, "watch-wide-normal-layout", "layout");
+}
+
+#[test]
+fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    assert!(run
+        .out
+        .join("frames/watch-wide-normal.layout.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/watch-compact-normal.layout.json")
+        .is_file());
+
+    let manifest = run.manifest();
+    assert_eq!(manifest["schema_version"], 2);
+    let wide = scenario(&manifest, "watch-wide-normal");
+    assert_eq!(
+        wide["files"]["layout"],
+        "frames/watch-wide-normal.layout.json"
+    );
+    assert_artifact_type(&manifest, "watch-wide-normal-layout", "layout");
+
+    let layout: Value = serde_json::from_str(
+        &std::fs::read_to_string(run.out.join("frames/watch-wide-normal.layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(layout["schema_version"], 1);
+    assert_eq!(layout["components"]["watch.pet"]["width"], 40);
+    assert!(layout["components"]["watch.pet"].is_object());
+    assert!(layout["targets"]["watch.pet.art"].is_object());
+
+    let compact_layout: Value = serde_json::from_str(
+        &std::fs::read_to_string(run.out.join("frames/watch-compact-normal.layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(compact_layout["targets"].get("watch.pet.art").is_none());
+    assert!(compact_layout["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| decision["path"] == "watch.pet"
+            && decision["reason"] == "InsufficientHeight"));
+}
+
+#[test]
+fn dev_preview_html_contains_layout_overlay_controls() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+    assert!(html.contains("data-overlay-toggle=\"components\""));
+    assert!(html.contains("data-overlay-toggle=\"targets\""));
+    assert!(html.contains("data-layout-for=\"watch-wide-normal\""));
 }
 
 #[test]
@@ -156,10 +227,12 @@ fn dev_preview_pets_writes_species_stage_matrix() {
         &manifest,
         "pet-species-stage",
         "pet-matrix",
-        120,
-        86,
-        "frames/pet-species-stage.txt",
-        "frames/pet-species-stage.cells.json",
+        (120, 86),
+        (
+            "frames/pet-species-stage.txt",
+            "frames/pet-species-stage.cells.json",
+            None,
+        ),
     );
     let scenario = scenario(&manifest, "pet-species-stage");
     assert_eq!(scenario["inputs"]["species"][0], "fuzz");
@@ -299,10 +372,8 @@ fn assert_scenario(
     manifest: &Value,
     id: &str,
     kind: &str,
-    width: u64,
-    height: u64,
-    text_path: &str,
-    cells_path: &str,
+    dimensions: (u64, u64),
+    files: (&str, &str, Option<&str>),
 ) {
     let scenario = manifest["scenarios"]
         .as_array()
@@ -314,10 +385,14 @@ fn assert_scenario(
     assert_eq!(scenario["kind"], kind);
     assert!(!scenario["title"].as_str().unwrap().is_empty());
     assert!(!scenario["intent"].as_str().unwrap().is_empty());
-    assert_eq!(scenario["dimensions"]["width"], width);
-    assert_eq!(scenario["dimensions"]["height"], height);
-    assert_eq!(scenario["files"]["text"], text_path);
-    assert_eq!(scenario["files"]["cells"], cells_path);
+    assert_eq!(scenario["dimensions"]["width"], dimensions.0);
+    assert_eq!(scenario["dimensions"]["height"], dimensions.1);
+    assert_eq!(scenario["files"]["text"], files.0);
+    assert_eq!(scenario["files"]["cells"], files.1);
+    match files.2 {
+        Some(path) => assert_eq!(scenario["files"]["layout"], path),
+        None => assert!(scenario["files"].get("layout").is_none()),
+    }
     assert!(scenario["inputs"].is_object());
     assert!(!scenario["review_prompts"].as_array().unwrap().is_empty());
 }
