@@ -38,14 +38,15 @@ fn speech_rows(vm: &WatchViewModel) -> u16 {
 pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     let cx = area.x + area.width.saturating_sub(PET_W) / 2;
     let cy = area.y + area.height.saturating_sub(PET_H) / 2;
-    let x = (cx as i32 + vm.wander_offset_x as i32).clamp(
-        area.x as i32,
-        (area.x + area.width).saturating_sub(PET_W) as i32,
-    ) as u16;
-    let y = (cy as i32 + vm.breath_offset_y as i32).clamp(
-        area.y as i32,
-        (area.y + area.height).saturating_sub(PET_H) as i32,
-    ) as u16;
+    // When `area` is smaller than the pet, the upper clamp bound would fall
+    // below `area.x` / `area.y`, which makes `i32::clamp` panic. `.max(...)`
+    // ensures min ≤ max so the rect collapses to `area`'s origin instead.
+    let max_x = (area.x + area.width).saturating_sub(PET_W).max(area.x);
+    let max_y = (area.y + area.height).saturating_sub(PET_H).max(area.y);
+    let x =
+        (cx as i32 + vm.wander_offset_x as i32).clamp(area.x as i32, max_x as i32) as u16;
+    let y =
+        (cy as i32 + vm.breath_offset_y as i32).clamp(area.y as i32, max_y as i32) as u16;
     Rect::new(x, y, PET_W, PET_H)
 }
 
@@ -579,5 +580,22 @@ mod tests {
             glyphs.is_empty(),
             "PR1 stub returns empty; PR2 fills this in"
         );
+    }
+
+    #[test]
+    fn pet_inner_rect_in_panel_does_not_panic_when_area_is_smaller_than_pet() {
+        // Regression: when the layout allocates an area smaller than PET_W/PET_H
+        // (e.g. compact mode where Fill collapses to 0 height), the previous
+        // implementation's i32::clamp had min > max and panicked. The helper
+        // must return a degenerate Rect cleanly.
+        let vm = WatchViewModel::fixture();
+        // 0×0 area (extreme — Fill collapsed entirely).
+        let _ = pet_inner_rect_in_panel(Rect::new(0, 0, 0, 0), &vm);
+        // Area narrower than PET_W.
+        let _ = pet_inner_rect_in_panel(Rect::new(2, 2, 5, 5), &vm);
+        // Area shorter than PET_H (the actual compact crash scenario).
+        let _ = pet_inner_rect_in_panel(Rect::new(0, 0, 40, 3), &vm);
+        // Offset rect that previously made max < min on the y axis.
+        let _ = pet_inner_rect_in_panel(Rect::new(0, 5, 40, 3), &vm);
     }
 }

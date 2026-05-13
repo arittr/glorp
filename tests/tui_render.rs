@@ -969,7 +969,8 @@ fn watch_compact_72x24_panels_in_order() {
     let buf = terminal.backend().buffer();
 
     // For each section header, capture its row index. Order must be:
-    // pet (no title) -> vitals -> today -> progress -> feed -> bio
+    // pet (no title) -> vitals -> today -> progress -> feed
+    // Bio is omitted from compact mode (age is already in the title bar).
     let row_of = |needle: &str| -> Option<u16> {
         (0..buf.area.height).find(|&y| {
             let line: String = (0..buf.area.width)
@@ -982,11 +983,9 @@ fn watch_compact_72x24_panels_in_order() {
     let today_y = row_of("today").expect("today");
     let progress_y = row_of("progress").expect("progress");
     let feed_y = row_of("feed").expect("feed");
-    let bio_y = row_of("bio").expect("bio");
     assert!(vitals_y < today_y, "vitals before today");
     assert!(today_y < progress_y, "today before progress");
     assert!(progress_y < feed_y, "progress before feed");
-    assert!(feed_y < bio_y, "feed before bio");
 
     let s: String = buf
         .content()
@@ -994,6 +993,25 @@ fn watch_compact_72x24_panels_in_order() {
         .map(|c| c.symbol().to_string())
         .collect();
     assert!(!s.contains("helpers"));
+    // Bio must not appear in compact mode.
+    assert!(
+        !s.contains("bio"),
+        "bio panel must not render in compact mode"
+    );
+}
+
+#[test]
+fn render_does_not_panic_at_tiny_sizes() {
+    // Regression: resizing into compact mode panicked because
+    // `pet_inner_rect_in_panel` ran `i32::clamp` with min > max when the
+    // PetPanel's Fill(1) collapsed to less than PET_W × PET_H.
+    let vm = WatchViewModel::fixture();
+    for (w, h) in [(80, 6), (72, 10), (50, 12), (40, 8), (30, 30)] {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // Must not panic for any of these.
+        terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    }
 }
 
 #[test]
