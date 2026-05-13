@@ -1,0 +1,358 @@
+use crate::tui::component::{
+    ComponentLayout, ComponentNodeLayout, GeometryTarget, LayoutDecision, LayoutDecisionReason,
+    LayoutMode, TargetPath, TargetRole, VisibilityState, WatchComponentId,
+};
+use crate::tui::panels::pet::pet_inner_rect_in_panel;
+use crate::tui::panels::{
+    BioCardPanel, FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
+};
+use crate::tui::view_model::WatchViewModel;
+use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
+use ratatui::widgets::Block;
+
+/// Smallest terminal width that uses the wide two-column layout.
+/// Below this threshold we fall back to the single-column compact layout.
+pub const COMPACT_THRESHOLD: usize = 104;
+
+/// Left column width in the wide layout (pet + vitals column).
+pub const WIDE_LEFT_COL: u16 = 40;
+
+/// Gutter width between left and right columns in the wide layout.
+pub const WIDE_GUTTER: u16 = 4;
+
+/// Maximum frame dimensions. Mirrors the current watch layout exactly for
+/// the adapter phase.
+pub const MAX_FRAME_WIDTH: u16 = 110;
+pub const MAX_FRAME_HEIGHT: u16 = 23;
+
+/// Vertical padding inside the rounded frame, between the chrome border and
+/// the first/last panel.
+pub const INNER_VPAD: u16 = 1;
+
+/// Current wide-mode row bands.
+pub const WIDE_BAND_1: u16 = 10;
+pub const WIDE_BAND_2: u16 = 8;
+
+/// Gap between stacked panels in both wide and compact layouts.
+pub const COLUMN_GAP: u16 = 1;
+
+const RIGHT_MIN_WIDTH: u16 = 50;
+
+pub fn layout_watch(terminal_area: Rect, vm: &WatchViewModel) -> ComponentLayout {
+    let frame = bounded_frame_rect(terminal_area);
+    let mode = if (frame.width as usize) >= COMPACT_THRESHOLD + 2 {
+        LayoutMode::Wide
+    } else {
+        LayoutMode::Compact
+    };
+    let content = Block::bordered().inner(frame);
+    let mut layout = ComponentLayout::new(frame, mode).with_content(content);
+    insert_root_node(&mut layout, frame, content);
+
+    match mode {
+        LayoutMode::Wide => layout_wide(content, vm, &mut layout),
+        LayoutMode::Compact => layout_compact(content, vm, &mut layout),
+    }
+
+    layout
+}
+
+/// Returns a sub-rect of `terminal_area` that is at most the current watch
+/// frame cap, centered within the terminal.
+pub fn bounded_frame_rect(terminal_area: Rect) -> Rect {
+    let width = terminal_area.width.min(MAX_FRAME_WIDTH);
+    let is_wide = (width as usize) >= COMPACT_THRESHOLD + 2;
+    let height = if is_wide {
+        terminal_area.height.min(MAX_FRAME_HEIGHT)
+    } else {
+        terminal_area.height
+    };
+    let x = terminal_area.x + terminal_area.width.saturating_sub(width) / 2;
+    let y = terminal_area.y + terminal_area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width, height)
+}
+
+fn layout_wide(area: Rect, vm: &WatchViewModel, layout: &mut ComponentLayout) {
+    let padded = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(INNER_VPAD),
+            Constraint::Min(0),
+            Constraint::Length(INNER_VPAD),
+        ])
+        .split(area)[1];
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(WIDE_LEFT_COL),
+            Constraint::Length(WIDE_GUTTER),
+            Constraint::Min(RIGHT_MIN_WIDTH),
+        ])
+        .split(padded);
+
+    let band_constraints = [
+        Constraint::Length(WIDE_BAND_1),
+        Constraint::Length(COLUMN_GAP),
+        Constraint::Length(WIDE_BAND_2),
+        Constraint::Min(0),
+    ];
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(band_constraints)
+        .split(body[0]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(band_constraints)
+        .split(body[2]);
+
+    insert_pet_node(layout, left[0], vm);
+
+    let right_top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            TodayPanel.preferred_constraint(vm),
+            Constraint::Length(COLUMN_GAP),
+            Constraint::Min(0),
+            ProgressPanel.preferred_constraint(vm),
+        ])
+        .split(right[0]);
+    insert_visible_node(layout, WatchComponentId::Today, right_top[0]);
+    insert_visible_node(layout, WatchComponentId::Progress, right_top[3]);
+
+    let left_bottom = Layout::default()
+        .direction(Direction::Vertical)
+        .flex(Flex::Start)
+        .constraints([
+            VitalsPanel.preferred_constraint(vm),
+            Constraint::Length(COLUMN_GAP),
+            BioCardPanel.preferred_constraint(vm),
+        ])
+        .split(left[2]);
+    insert_visible_node(layout, WatchComponentId::Vitals, left_bottom[0]);
+    insert_visible_node(layout, WatchComponentId::Bio, left_bottom[2]);
+
+    insert_visible_node(layout, WatchComponentId::Feed, right[2]);
+}
+
+fn layout_compact(area: Rect, vm: &WatchViewModel, layout: &mut ComponentLayout) {
+    let stack = Layout::default()
+        .direction(Direction::Vertical)
+        .flex(Flex::Start)
+        .constraints([
+            PetPanel.preferred_constraint(vm),
+            VitalsPanel.preferred_constraint(vm),
+            Constraint::Length(COLUMN_GAP),
+            TodayPanel.preferred_constraint(vm),
+            Constraint::Length(COLUMN_GAP),
+            ProgressPanel.preferred_constraint(vm),
+            Constraint::Length(COLUMN_GAP),
+            FeedPanel.preferred_constraint(vm),
+        ])
+        .split(area);
+
+    insert_pet_node(layout, stack[0], vm);
+    insert_visible_node(layout, WatchComponentId::Vitals, stack[1]);
+    insert_visible_node(layout, WatchComponentId::Today, stack[3]);
+    insert_visible_node(layout, WatchComponentId::Progress, stack[5]);
+    insert_visible_node(layout, WatchComponentId::Feed, stack[7]);
+    insert_hidden_bio(layout, area);
+}
+
+fn insert_root_node(layout: &mut ComponentLayout, frame: Rect, content: Rect) {
+    let mut root = ComponentNodeLayout::leaf(WatchComponentId::Root.path(), frame);
+    root.content = content;
+    root.children = vec![
+        WatchComponentId::Pet.path(),
+        WatchComponentId::Vitals.path(),
+        WatchComponentId::Bio.path(),
+        WatchComponentId::Today.path(),
+        WatchComponentId::Progress.path(),
+        WatchComponentId::Feed.path(),
+    ];
+    layout
+        .insert_node(root)
+        .expect("root component id is unique in watch layout");
+}
+
+fn insert_visible_node(layout: &mut ComponentLayout, id: WatchComponentId, bounds: Rect) {
+    layout
+        .insert_node(ComponentNodeLayout::leaf(id.path(), bounds))
+        .expect("component id is unique in watch layout");
+}
+
+fn insert_pet_node(layout: &mut ComponentLayout, bounds: Rect, vm: &WatchViewModel) {
+    insert_visible_node(layout, WatchComponentId::Pet, bounds);
+
+    let owner = WatchComponentId::Pet.path();
+    layout
+        .insert_target(
+            TargetPath::new("watch.pet.panel"),
+            GeometryTarget {
+                owner,
+                rect: bounds,
+                z: 0,
+                clip: bounds,
+                role: TargetRole::PetPanel,
+            },
+        )
+        .expect("pet panel target id is unique");
+
+    let art = pet_inner_rect_in_panel(bounds, vm);
+    layout
+        .insert_target(
+            TargetPath::new("watch.pet.art"),
+            GeometryTarget {
+                owner,
+                rect: art,
+                z: 10,
+                clip: bounds,
+                role: TargetRole::PetArt,
+            },
+        )
+        .expect("pet art target id is unique");
+}
+
+fn insert_hidden_bio(layout: &mut ComponentLayout, content: Rect) {
+    let bounds = Rect::new(content.x, content.y, 0, 0);
+    let mut bio = ComponentNodeLayout::leaf(WatchComponentId::Bio.path(), bounds);
+    bio.visibility = VisibilityState::Hidden {
+        reason: LayoutDecisionReason::CompactMode,
+    };
+    layout
+        .insert_node(bio)
+        .expect("bio component id is unique in watch layout");
+    layout.decisions.push(LayoutDecision {
+        path: WatchComponentId::Bio.path(),
+        reason: LayoutDecisionReason::CompactMode,
+        message: "bio hidden in compact mode",
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::component::{
+        LayoutDecisionReason, LayoutMode, TargetPath, VisibilityState, WatchComponentId,
+    };
+    use crate::tui::view_model::WatchViewModel;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn layout_watch_wide_exports_required_nodes_and_pet_targets() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
+
+        assert_eq!(layout.mode, LayoutMode::Wide);
+        assert_eq!(layout.frame, Rect::new(5, 4, 110, 23));
+        assert_eq!(layout.content, Rect::new(6, 5, 108, 21));
+        for id in [
+            WatchComponentId::Root,
+            WatchComponentId::Pet,
+            WatchComponentId::Vitals,
+            WatchComponentId::Bio,
+            WatchComponentId::Today,
+            WatchComponentId::Progress,
+            WatchComponentId::Feed,
+        ] {
+            assert!(
+                layout.node(id.path()).is_some(),
+                "missing node {}",
+                id.path()
+            );
+        }
+
+        assert_eq!(
+            layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
+            Rect::new(6, 6, 40, 10)
+        );
+        assert_eq!(
+            layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
+            Rect::new(6, 17, 40, 4)
+        );
+        assert_eq!(
+            layout.node(WatchComponentId::Bio.path()).unwrap().bounds,
+            Rect::new(6, 22, 40, 3)
+        );
+        assert_eq!(
+            layout.node(WatchComponentId::Today.path()).unwrap().bounds,
+            Rect::new(50, 6, 64, 6)
+        );
+        assert_eq!(
+            layout
+                .node(WatchComponentId::Progress.path())
+                .unwrap()
+                .bounds,
+            Rect::new(50, 14, 64, 2)
+        );
+        assert_eq!(
+            layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
+            Rect::new(50, 17, 64, 8)
+        );
+
+        let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
+        assert_eq!(pet_panel.rect, Rect::new(6, 6, 40, 10));
+
+        let pet_node = layout.node(WatchComponentId::Pet.path()).unwrap();
+        assert!(pet_node
+            .targets
+            .contains_key(&TargetPath::new("watch.pet.panel")));
+        assert!(pet_node
+            .targets
+            .contains_key(&TargetPath::new("watch.pet.art")));
+
+        let pet_art = layout.target(TargetPath::new("watch.pet.art")).unwrap();
+        assert_eq!(pet_art.rect.width, 13);
+        assert_eq!(pet_art.rect.height, 10);
+        assert_eq!(pet_art.rect, Rect::new(19, 6, 13, 10));
+    }
+
+    #[test]
+    fn layout_watch_compact_records_bio_hidden_decision() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 72, 24), &vm);
+
+        assert_eq!(layout.mode, LayoutMode::Compact);
+        assert_eq!(layout.frame, Rect::new(0, 0, 72, 24));
+        assert_eq!(layout.content, Rect::new(1, 1, 70, 22));
+        assert_eq!(
+            layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
+            Rect::new(1, 1, 70, 4)
+        );
+        assert_eq!(
+            layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
+            Rect::new(1, 5, 70, 4)
+        );
+        assert_eq!(
+            layout.node(WatchComponentId::Today.path()).unwrap().bounds,
+            Rect::new(1, 10, 70, 6)
+        );
+        assert_eq!(
+            layout
+                .node(WatchComponentId::Progress.path())
+                .unwrap()
+                .bounds,
+            Rect::new(1, 17, 70, 2)
+        );
+        assert_eq!(
+            layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
+            Rect::new(1, 20, 70, 3)
+        );
+
+        let bio = layout.node(WatchComponentId::Bio.path()).unwrap();
+        assert!(matches!(
+            bio.visibility,
+            VisibilityState::Hidden {
+                reason: LayoutDecisionReason::CompactMode
+            }
+        ));
+        assert!(
+            layout
+                .decisions
+                .iter()
+                .any(|d| d.path == WatchComponentId::Bio.path()
+                    && d.reason == LayoutDecisionReason::CompactMode),
+            "compact bio hide decision missing"
+        );
+    }
+}

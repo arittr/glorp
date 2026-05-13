@@ -6,6 +6,10 @@ use ratatui::{
     Frame,
 };
 
+use crate::tui::component::watch_screen::{
+    bounded_frame_rect, COLUMN_GAP, COMPACT_THRESHOLD, INNER_VPAD, WIDE_BAND_1, WIDE_BAND_2,
+    WIDE_GUTTER, WIDE_LEFT_COL,
+};
 use crate::tui::panels::{
     BioCardPanel, FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
 };
@@ -13,56 +17,12 @@ use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
 use crate::tui::view_model::WatchViewModel;
 
-/// Smallest terminal width that uses the wide two-column layout.
-/// Below this threshold we fall back to the single-column compact layout.
-const COMPACT_THRESHOLD: usize = 104;
-
-/// Left column width in the wide layout (pet + vitals column).
-const WIDE_LEFT_COL: u16 = 40;
-
-/// Gutter width between left and right columns in the wide layout.
-const WIDE_GUTTER: u16 = 4;
-
-/// Maximum frame dimensions. The layout is designed against these sizes;
-/// terminals larger than this center the frame and leave the surrounding
-/// space empty rather than stretching panels into unbalanced negative space.
-/// Sized to wrap snug around content (pet ~10 rows + vitals 4 + bio 3 + gaps,
-/// plus breathing room) so the inner area doesn't develop large dead bands.
-const MAX_FRAME_WIDTH: u16 = 110;
-const MAX_FRAME_HEIGHT: u16 = 23;
-
-/// Vertical padding inside the rounded frame, between the chrome border and
-/// the first/last panel. Keeps the today/bio rows from kissing the border.
-const INNER_VPAD: u16 = 1;
-
 /// Wide mode is a 2-band grid. Both columns split at the same row, so vitals
 /// (left band 2) aligns with feed (right band 2) at the top and bio/feed
 /// align at the bottom.
 ///
 /// Band 1: pet (10 rows of art) | today (6 rows) + COLUMN_GAP + progress (3 rows) = 10.
 /// Band 2: vitals (4) + COLUMN_GAP + bio (3) = 8 | feed (header + 7 events) = 8.
-const WIDE_BAND_1: u16 = 10;
-const WIDE_BAND_2: u16 = 8;
-
-/// Returns a sub-rect of `terminal_area` that is at most
-/// `MAX_FRAME_WIDTH` × `MAX_FRAME_HEIGHT`, centered within the terminal.
-///
-/// The height cap only applies in wide mode (when the bounded width allows
-/// the two-column layout). Compact mode needs the full terminal height so
-/// the stacked panels can fit without clipping vitals/today content.
-pub(crate) fn bounded_frame_rect(terminal_area: Rect) -> Rect {
-    let width = terminal_area.width.min(MAX_FRAME_WIDTH);
-    let is_wide = (width as usize) >= COMPACT_THRESHOLD + 2;
-    let height = if is_wide {
-        terminal_area.height.min(MAX_FRAME_HEIGHT)
-    } else {
-        terminal_area.height
-    };
-    let x = terminal_area.x + terminal_area.width.saturating_sub(width) / 2;
-    let y = terminal_area.y + terminal_area.height.saturating_sub(height) / 2;
-    Rect::new(x, y, width, height)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Wide,
@@ -374,9 +334,6 @@ fn render_compact(
     ProgressPanel.render(stack[5], buf, vm, ctx);
     FeedPanel.render(stack[7], buf, vm, ctx);
 }
-
-/// Gap between stacked panels in both wide and compact layouts.
-const COLUMN_GAP: u16 = 1;
 
 // ── Overlay popups ───────────────────────────────────────────────────────────
 
