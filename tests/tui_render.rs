@@ -878,10 +878,10 @@ fn wide_layout_section_dividers_all_end_at_same_right_column() {
 
 #[test]
 fn watch_wide_bio_bottom_aligns_with_feed_bottom() {
-    // The wide layout anchors both bio and feed to the bottom of their columns,
-    // so the last bio row (age) sits on the same terminal row as the last feed
-    // event. Regression guard.
-    let vm = WatchViewModel::fixture_with_n_events(3);
+    // The wide layout uses a 2-row grid; band 2 (vitals/bio left, feed right)
+    // is 8 rows tall, fitting a header + 7 events. When the feed is full (≥7
+    // events), the last event sits on the same terminal row as bio's age line.
+    let vm = WatchViewModel::fixture_with_n_events(7);
     let backend = TestBackend::new(110, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();

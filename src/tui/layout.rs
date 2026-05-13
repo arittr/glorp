@@ -29,16 +29,20 @@ const WIDE_GUTTER: u16 = 4;
 /// Sized to wrap snug around content (pet ~10 rows + vitals 4 + bio 3 + gaps,
 /// plus breathing room) so the inner area doesn't develop large dead bands.
 const MAX_FRAME_WIDTH: u16 = 110;
-const MAX_FRAME_HEIGHT: u16 = 24;
+const MAX_FRAME_HEIGHT: u16 = 23;
 
 /// Vertical padding inside the rounded frame, between the chrome border and
 /// the first/last panel. Keeps the today/bio rows from kissing the border.
 const INNER_VPAD: u16 = 1;
 
-/// Height of the top band in wide mode: pet column on the left, today +
-/// progress on the right. Sized to fit today(6) + gap(1) + progress(3) + 2
-/// rows of breathing room, matching the pet (10 rows of art).
-const WIDE_TOP_BAND: u16 = 12;
+/// Wide mode is a 2-band grid. Both columns split at the same row, so vitals
+/// (left band 2) aligns with feed (right band 2) at the top and bio/feed
+/// align at the bottom.
+///
+/// Band 1: pet (10 rows of art) | today (6 rows) + COLUMN_GAP + progress (3 rows) = 10.
+/// Band 2: vitals (4) + COLUMN_GAP + bio (3) = 8 | feed (header + 7 events) = 8.
+const WIDE_BAND_1: u16 = 10;
+const WIDE_BAND_2: u16 = 8;
 
 /// Returns a sub-rect of `terminal_area` that is at most
 /// `MAX_FRAME_WIDTH` × `MAX_FRAME_HEIGHT`, centered within the terminal.
@@ -155,7 +159,12 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
 
             let left_bands = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(WIDE_TOP_BAND), Constraint::Min(0)])
+                .constraints([
+                    Constraint::Length(WIDE_BAND_1),
+                    Constraint::Length(COLUMN_GAP),
+                    Constraint::Length(WIDE_BAND_2),
+                    Constraint::Min(0),
+                ])
                 .split(left_col);
 
             pet_inner_rect_in_panel(left_bands[0], vm)
@@ -232,22 +241,25 @@ fn layout_and_render(
     }
 }
 
-/// Wide layout: two columns with bio + feed both anchored to the column bottom.
+/// Wide layout: a 2-column × 2-row grid. Both columns split at the same row,
+/// so vitals (left band 2) aligns with feed (right band 2) at the top, and
+/// bio bottom aligns with feed bottom.
 ///
 /// ```text
-/// ╭ title ──────────────────────────────────────╮
-/// │                                              │  ← INNER_VPAD
-/// │ [pet]              today                     │
-/// │ [pet]              progress                  │
-/// │ vitals             ...                       │
-/// │ bio (bottom)       feed (bottom)             │  ← bio.bottom == feed.bottom
-/// │                                              │  ← INNER_VPAD
-/// ╰ footer ──────────────────────────────────────╯
+/// ╭ title ─────────────────────────────────────╮
+/// │                                             │  ← INNER_VPAD
+/// │ [pet]            today                      │
+/// │ [pet]            ...                        │  band 1 (10 rows)
+/// │ [pet]            progress                   │
+/// │ [pet]            xp bar                     │
+/// │                                             │  inter-band gap (1 row)
+/// │ vitals           feed                       │  band 2 (8 rows)
+/// │ ...              event 1                    │  ← vitals.top == feed.top
+/// │ bio              ...                        │
+/// │ age              event 7                    │  ← bio.bottom == feed.bottom
+/// │                                             │  ← INNER_VPAD
+/// ╰ footer ─────────────────────────────────────╯
 /// ```
-///
-/// Bio anchors at the bottom of the left column; feed anchors at the bottom
-/// of the right column. Their bottoms always align (the column heights match).
-/// Trailing slack absorbs the difference between the columns' content heights.
 fn render_wide(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
@@ -272,46 +284,58 @@ fn render_wide(
         ])
         .split(padded);
 
-    let left_col = body[0];
-    let right_col = body[2];
-
-    // Left column: pet (Fill, takes leftover at top) → vitals → bio (anchored
-    // at the very bottom of the column).
+    let band_constraints = [
+        Constraint::Length(WIDE_BAND_1),
+        Constraint::Length(COLUMN_GAP),
+        Constraint::Length(WIDE_BAND_2),
+        Constraint::Min(0),
+    ];
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .flex(Flex::Start)
-        .constraints([
-            PetPanel.preferred_constraint(vm),    // Fill(1)
-            VitalsPanel.preferred_constraint(vm), // Length(4)
-            Constraint::Length(COLUMN_GAP),
-            BioCardPanel.preferred_constraint(vm), // Length(3) — bottom anchor
-        ])
-        .split(left_col);
+        .constraints(band_constraints)
+        .split(body[0]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(band_constraints)
+        .split(body[2]);
 
+    // Band 1 left: pet (10 rows of art fits exactly).
     if left[0].height >= 10 {
         PetPanel.render(left[0], buf, vm, ctx);
     }
-    VitalsPanel.render(left[1], buf, vm, ctx);
-    BioCardPanel.render(left[3], buf, vm, ctx);
 
-    // Right column: today + progress packed top, Min(0) absorbs slack,
-    // feed (Length-sized to its event count) anchored at the bottom so its
-    // last visible row aligns with bio's last visible row.
-    let right = Layout::default()
+    // Band 1 right: today packed top, progress anchored at the bottom of the
+    // band. With today(6) + gap(1) + progress(2) = 9 in a 10-row band, the
+    // single row of slack lands between today and progress (via Min(0)) so
+    // progress sits one row above band 2 — the same one-row gap that
+    // separates bio from vitals on the left.
+    let right_top = Layout::default()
         .direction(Direction::Vertical)
-        .flex(Flex::Start)
         .constraints([
             TodayPanel.preferred_constraint(vm), // Length(6)
             Constraint::Length(COLUMN_GAP),
-            ProgressPanel.preferred_constraint(vm), // Length(3)
-            Constraint::Min(0),                     // slack between progress and feed
-            FeedPanel.preferred_constraint(vm),     // Length(events+1) — bottom anchor
+            Constraint::Min(0), // slack lives between today and progress
+            ProgressPanel.preferred_constraint(vm), // Length(2)
         ])
-        .split(right_col);
+        .split(right[0]);
+    TodayPanel.render(right_top[0], buf, vm, ctx);
+    ProgressPanel.render(right_top[3], buf, vm, ctx);
 
-    TodayPanel.render(right[0], buf, vm, ctx);
-    ProgressPanel.render(right[2], buf, vm, ctx);
-    FeedPanel.render(right[4], buf, vm, ctx);
+    // Band 2 left: vitals (4) + gap (1) + bio (3) = 8. Packed top.
+    let left_bottom = Layout::default()
+        .direction(Direction::Vertical)
+        .flex(Flex::Start)
+        .constraints([
+            VitalsPanel.preferred_constraint(vm),  // Length(4)
+            Constraint::Length(COLUMN_GAP),
+            BioCardPanel.preferred_constraint(vm), // Length(3)
+        ])
+        .split(left[2]);
+    VitalsPanel.render(left_bottom[0], buf, vm, ctx);
+    BioCardPanel.render(left_bottom[2], buf, vm, ctx);
+
+    // Band 2 right: feed fills the entire band (header + 7 events).
+    FeedPanel.render(right[2], buf, vm, ctx);
 }
 
 /// Compact layout: single column packed from the top.
@@ -574,7 +598,7 @@ mod render_wide_tests {
 
     // Height ≤ MAX_FRAME_HEIGHT keeps the frame matching the terminal exactly
     // (no centering padding) so corner-position assertions stay simple.
-    const TEST_HEIGHT: u16 = 24;
+    const TEST_HEIGHT: u16 = 23;
 
     fn render_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
@@ -632,13 +656,13 @@ mod render_wide_tests {
 
     #[test]
     fn render_wide_frame_spans_bounded_width_and_terminal_height() {
-        // 110 == MAX_FRAME_WIDTH; 24 == MAX_FRAME_HEIGHT. Frame matches the
+        // 110 == MAX_FRAME_WIDTH; 23 == MAX_FRAME_HEIGHT. Frame matches the
         // terminal exactly so corners sit at (0,0) and bottom.
-        let buf = render_buffer(110, 24);
+        let buf = render_buffer(110, 23);
         assert_eq!(buf[(0u16, 0u16)].symbol(), "╭");
         assert_eq!(buf[(110 - 1, 0u16)].symbol(), "╮");
-        assert_eq!(buf[(0u16, 24 - 1)].symbol(), "╰");
-        assert_eq!(buf[(110 - 1, 24 - 1)].symbol(), "╯");
+        assert_eq!(buf[(0u16, 23 - 1)].symbol(), "╰");
+        assert_eq!(buf[(110 - 1, 23 - 1)].symbol(), "╯");
     }
 
     #[test]
@@ -649,7 +673,7 @@ mod render_wide_tests {
         // The top-left cell of the terminal is empty (padding), not a corner.
         assert_eq!(buf[(0u16, 0u16)].symbol(), " ");
         // The frame's actual top-left corner sits at x = (160 - 110) / 2 = 25
-        // and y = (50 - 24) / 2 = 13.
+        // and y = (50 - 23) / 2 = 13.
         assert_eq!(buf[(25u16, 13u16)].symbol(), "╭");
     }
 
@@ -758,9 +782,12 @@ mod render_wide_tests {
     /// In wide mode the feed panel must be anchored toward the bottom of the
     /// right column (Min(0) spacer between progress and feed absorbs the slack).
     /// Concretely: the row containing "feed" must appear after the midpoint of
-    /// the inner area, not packed immediately below "progress".
+    /// Progress and feed live in separate row bands; feed starts on the same
+    /// terminal row as vitals (band 2 top). Exactly one row separates the end
+    /// of progress (band 1) from the feed header (band 2) — matching the
+    /// 1-row gap between bio and vitals.
     #[test]
-    fn render_wide_feed_anchored_at_bottom_of_right_column() {
+    fn vitals_and_feed_start_on_the_same_row() {
         let backend = TestBackend::new(120, 32);
         let mut terminal = Terminal::new(backend).unwrap();
         let vm = WatchViewModel::fixture();
@@ -769,29 +796,19 @@ mod render_wide_tests {
             .unwrap();
         let buf = terminal.backend().buffer().clone();
 
-        let height = 32u16;
-        // Find the row where "feed" section header appears.
-        let feed_row = (0..height).find(|&y| {
-            let row: String = (0..120u16)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect();
-            row.contains("feed")
-        });
-        // Find the row where "progress" section header appears.
-        let progress_row = (0..height).find(|&y| {
-            let row: String = (0..120u16)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect();
-            row.contains("progress")
-        });
-
-        let feed_row = feed_row.expect("feed section must appear in wide render");
-        let progress_row = progress_row.expect("progress section must appear in wide render");
-
-        // Feed must appear at least 3 rows below progress (gap + spacer).
-        assert!(
-            feed_row > progress_row + 3,
-            "feed (row {feed_row}) must be pushed below progress (row {progress_row}) with slack absorbed between them"
+        let height = buf.area.height;
+        let row_string = |y: u16| -> String {
+            (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect()
+        };
+        let vitals_row = (0..height)
+            .find(|&y| row_string(y).contains("vitals"))
+            .expect("vitals section must appear");
+        let feed_row = (0..height)
+            .find(|&y| row_string(y).contains("feed"))
+            .expect("feed section must appear");
+        assert_eq!(
+            vitals_row, feed_row,
+            "vitals and feed must start on the same terminal row (band 2 top)"
         );
     }
 }

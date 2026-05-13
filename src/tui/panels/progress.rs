@@ -14,8 +14,9 @@ pub struct ProgressPanel;
 
 impl Panel for ProgressPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
-        // 1 border row + 2 content rows (stage line + xp bar).
-        Constraint::Length(3)
+        // 1 border row + 1 xp bar row. The next stage stays a surprise — no
+        // "current ➜ next" hint, just the bar and current pace.
+        Constraint::Length(2)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
@@ -34,24 +35,11 @@ fn build_progress_lines<'a>(
     styles: &'a SemanticStyles,
 ) -> Vec<Line<'a>> {
     if progress.is_max_stage {
-        return vec![
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled(progress.stage_label.clone(), styles.primary_text),
-                Span::raw("  "),
-                Span::styled("✦ max evolved", styles.section_header),
-            ]),
-            Line::from(Span::raw("")),
-        ];
+        return vec![Line::from(vec![
+            Span::raw("  "),
+            Span::styled("✦ max evolved", styles.section_header),
+        ])];
     }
-    let stage_line = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(progress.stage_label.clone(), styles.primary_text),
-        Span::raw(" "),
-        Span::styled("➜", styles.section_header),
-        Span::raw(" "),
-        Span::styled(progress.next_stage_label.clone(), styles.primary_text),
-    ]);
     let mut xp_spans = bar_spans_solid("xp", progress.fraction as f64, xp_color(), styles);
     if progress.rate_per_hour > 0.0 {
         xp_spans.push(Span::raw("   "));
@@ -62,7 +50,7 @@ fn build_progress_lines<'a>(
             Style::default().fg(xp_color()),
         ));
     }
-    vec![stage_line, Line::from(xp_spans)]
+    vec![Line::from(xp_spans)]
 }
 
 #[cfg(test)]
@@ -93,17 +81,18 @@ mod tests {
     }
 
     #[test]
-    fn progress_panel_renders_stage_and_next_stage_label() {
+    fn progress_panel_renders_title_and_xp_bar_without_stage_arrow() {
+        // The next stage is meant to be a surprise — no "current ➜ next"
+        // line. Just the section title and the xp bar.
         let mut vm = WatchViewModel::fixture();
         vm.progress.stage_label = "fuzz".to_string();
         vm.progress.next_stage_label = "archfuzz".to_string();
         vm.progress.is_max_stage = false;
         let s = render(&vm);
         assert!(s.contains("progress"), "section title");
-        assert!(s.contains("fuzz"), "stage label");
-        assert!(s.contains("archfuzz"), "next stage label");
-        assert!(s.contains("➜"), "stage arrow");
         assert!(s.contains("xp"), "xp bar label");
+        assert!(!s.contains("➜"), "stage transition must not be revealed");
+        assert!(!s.contains("archfuzz"), "next-stage label must not be revealed");
     }
 
     #[test]
@@ -112,7 +101,6 @@ mod tests {
         vm.progress.is_max_stage = true;
         vm.progress.stage_label = "mythic-fuzz".to_string();
         let s = render(&vm);
-        assert!(s.contains("mythic-fuzz"));
         assert!(s.contains("max evolved"));
         assert!(!s.contains("➜"), "no arrow at max stage");
     }
@@ -127,9 +115,9 @@ mod tests {
     }
 
     #[test]
-    fn progress_panel_preferred_constraint_is_three() {
+    fn progress_panel_preferred_constraint_is_two() {
         let vm = WatchViewModel::fixture();
         let panel = ProgressPanel;
-        assert_eq!(panel.preferred_constraint(&vm), Constraint::Length(3));
+        assert_eq!(panel.preferred_constraint(&vm), Constraint::Length(2));
     }
 }

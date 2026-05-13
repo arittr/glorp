@@ -22,8 +22,10 @@ pub fn bar_spans_solid<'a>(
 
     let mut spans: Vec<Span<'a>> = Vec::with_capacity(BAR_CELLS + 6);
     spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("{label:<6}"), stat_style));
-    spans.push(Span::raw(" "));
+    // Label padded to 8 cells + a 3-space gap so even short labels (xp = 2
+    // chars) keep visible breathing room between the text and the bar.
+    spans.push(Span::styled(format!("{label:<8}"), stat_style));
+    spans.push(Span::raw("   "));
     if n_filled > 0 {
         spans.push(Span::styled("█".repeat(n_filled), stat_style));
     }
