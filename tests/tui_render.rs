@@ -938,6 +938,56 @@ fn watch_wide_120x32_feed_bounded_at_seven_rows() {
 }
 
 #[test]
+fn watch_wide_180x50_left_column_still_full() {
+    let vm = WatchViewModel::fixture();
+    let backend = TestBackend::new(180, 50);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &vm))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+    assert!(s.contains("bio"), "bio panel must render at 180x50");
+    assert!(s.contains("vitals"), "vitals must render");
+    assert!(s.contains("progress"), "progress must render");
+    assert!(s.contains("feed"), "feed must render");
+}
+
+#[test]
+fn watch_compact_72x24_panels_in_order() {
+    let vm = WatchViewModel::fixture();
+    let backend = TestBackend::new(72, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_frame_for_test(f, &vm))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+
+    // For each section header, capture its row index. Order must be:
+    // pet (no title) -> vitals -> today -> progress -> feed -> bio
+    let row_of = |needle: &str| -> Option<u16> {
+        (0..buf.area.height).find(|&y| {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            line.contains(needle)
+        })
+    };
+    let vitals_y = row_of("vitals").expect("vitals");
+    let today_y = row_of("today").expect("today");
+    let progress_y = row_of("progress").expect("progress");
+    let feed_y = row_of("feed").expect("feed");
+    let bio_y = row_of("bio").expect("bio");
+    assert!(vitals_y < today_y, "vitals before today");
+    assert!(today_y < progress_y, "today before progress");
+    assert!(progress_y < feed_y, "progress before feed");
+    assert!(feed_y < bio_y, "feed before bio");
+
+    let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+    assert!(!s.contains("helpers"));
+}
+
+#[test]
 fn wide_layout_pet_art_fits_inside_left_column() {
     let mut vm = WatchViewModel::fixture();
     vm.pet_art = vec![
