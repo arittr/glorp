@@ -15,17 +15,17 @@ use ratatui::widgets::Block;
 
 /// Smallest terminal width that uses the wide two-column layout.
 /// Below this threshold we fall back to the single-column compact layout.
-pub const COMPACT_THRESHOLD: usize = 104;
+pub const COMPACT_THRESHOLD: usize = 116;
 
 /// Left column width in the wide layout (pet + vitals column).
-pub const WIDE_LEFT_COL: u16 = 40;
+pub const WIDE_LEFT_COL: u16 = 52;
 
 /// Gutter width between left and right columns in the wide layout.
 pub const WIDE_GUTTER: u16 = 4;
 
 /// Maximum frame width. Wide mode centers this width inside oversized
 /// terminals while using the terminal's full height.
-pub const MAX_FRAME_WIDTH: u16 = 110;
+pub const MAX_FRAME_WIDTH: u16 = 124;
 
 /// Vertical padding inside the rounded frame, between the chrome border and
 /// the first/last panel.
@@ -495,8 +495,8 @@ mod tests {
         let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
 
         assert_eq!(layout.mode, LayoutMode::Wide);
-        assert_eq!(layout.frame, Rect::new(5, 0, 110, 32));
-        assert_eq!(layout.content, Rect::new(6, 1, 108, 30));
+        assert_eq!(layout.frame, Rect::new(0, 0, 120, 32));
+        assert_eq!(layout.content, Rect::new(1, 1, 118, 30));
         for id in [
             WatchComponentId::Root,
             WatchComponentId::Pet,
@@ -515,34 +515,34 @@ mod tests {
 
         assert_eq!(
             layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
-            Rect::new(6, 2, 40, 19)
+            Rect::new(1, 2, 52, 19)
         );
         assert_eq!(
             layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
-            Rect::new(6, 22, 40, 4)
+            Rect::new(1, 22, 52, 4)
         );
         assert_eq!(
             layout.node(WatchComponentId::Bio.path()).unwrap().bounds,
-            Rect::new(6, 27, 40, 3)
+            Rect::new(1, 27, 52, 3)
         );
         assert_eq!(
             layout.node(WatchComponentId::Today.path()).unwrap().bounds,
-            Rect::new(50, 2, 64, 6)
+            Rect::new(57, 2, 62, 6)
         );
         assert_eq!(
             layout
                 .node(WatchComponentId::Progress.path())
                 .unwrap()
                 .bounds,
-            Rect::new(50, 9, 64, 2)
+            Rect::new(57, 9, 62, 2)
         );
         assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(50, 22, 64, 8)
+            Rect::new(57, 22, 62, 8)
         );
 
         let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
-        assert_eq!(pet_panel.rect, Rect::new(6, 2, 40, 19));
+        assert_eq!(pet_panel.rect, Rect::new(1, 2, 52, 19));
 
         let pet_node = layout.node(WatchComponentId::Pet.path()).unwrap();
         assert!(pet_node
@@ -555,7 +555,7 @@ mod tests {
         let pet_art = layout.target(TargetPath::new("watch.pet.art")).unwrap();
         assert_eq!(pet_art.rect.width, 13);
         assert_eq!(pet_art.rect.height, 10);
-        assert_eq!(pet_art.rect, Rect::new(19, 6, 13, 10));
+        assert_eq!(pet_art.rect, Rect::new(20, 6, 13, 10));
     }
 
     #[test]
@@ -690,6 +690,26 @@ mod tests {
                 && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
                 && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height),
             "expected {outer:?} to contain {inner:?}"
+        );
+    }
+
+    #[test]
+    fn compact_threshold_boundary() {
+        use crate::tui::component::LayoutMode;
+        let vm = crate::tui::view_model::WatchViewModel::fixture();
+
+        let just_below = layout_watch(Rect::new(0, 0, 117, 30), &vm);
+        assert_eq!(
+            just_below.mode,
+            LayoutMode::Compact,
+            "117 cols should be compact"
+        );
+
+        let at_threshold = layout_watch(Rect::new(0, 0, 118, 30), &vm);
+        assert_eq!(
+            at_threshold.mode,
+            LayoutMode::Wide,
+            "118 cols should be wide"
         );
     }
 }

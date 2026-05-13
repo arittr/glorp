@@ -185,7 +185,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
     )
     .unwrap();
     assert_eq!(layout["schema_version"], 1);
-    assert_eq!(layout["components"]["watch.pet"]["width"], 40);
+    assert_eq!(layout["components"]["watch.pet"]["width"], 52);
     assert!(layout["components"]["watch.pet"].is_object());
     assert!(layout["targets"]["watch.pet.art"].is_object());
 

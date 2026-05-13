@@ -431,9 +431,9 @@ mod render_wide_tests {
         let buf = render_buffer(160, 50);
         // The top-left cell of the terminal is empty (padding), not a corner.
         assert_eq!(buf[(0u16, 0u16)].symbol(), " ");
-        // The frame's actual top-left corner sits at x = (160 - 110) / 2 = 25
+        // The frame's actual top-left corner sits at x = (160 - 124) / 2 = 18
         // and y = 0 because wide mode uses the full terminal height.
-        assert_eq!(buf[(25u16, 0u16)].symbol(), "╭");
+        assert_eq!(buf[(18u16, 0u16)].symbol(), "╭");
     }
 
     #[test]

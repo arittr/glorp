@@ -996,7 +996,7 @@ fn drop_does_not_block_on_in_flight_poll() {
 /// path under test.
 // Matches the layout's MAX_FRAME_WIDTH so the frame fills the terminal exactly
 // — keeps existing corner-position assertions valid without centering padding.
-const WIDE_TEST_WIDTH: u16 = 110;
+const WIDE_TEST_WIDTH: u16 = 124;
 
 #[test]
 fn wide_layout_every_row_fills_full_terminal_width() {
@@ -1146,11 +1146,11 @@ fn wide_layout_pet_art_fits_inside_left_column() {
     let rows = buffer_rows(buf);
 
     // In the native-Layout wide path the outer frame takes 1 cell, then the
-    // left column occupies 40 cells (cols 1–40), the gutter takes 4 cells
-    // (cols 41–44), and the right column starts at col 45.
-    // Pet art must never bleed past col 40 into the gutter.
-    let left_col_end: usize = 40; // last left-column cell (0-indexed, inclusive)
-    let gutter_start: usize = left_col_end + 1; // col 41
+    // left column occupies 52 cells (cols 1–52), the gutter takes 4 cells
+    // (cols 53–56), and the right column starts at col 57.
+    // Pet art must never bleed past col 52 into the gutter.
+    let left_col_end: usize = 52; // last left-column cell (0-indexed, inclusive)
+    let gutter_start: usize = left_col_end + 1; // col 53
 
     for (y, row) in rows.iter().enumerate().take(23).skip(1) {
         let chars: Vec<char> = row.chars().collect();
