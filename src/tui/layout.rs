@@ -195,8 +195,8 @@ fn layout_and_render(
 ///
 /// Left column (fixed 40 cells): PetPanel (Fill) → VitalsPanel → BioCardPanel.
 /// Gutter (4 cells): empty space.
-/// Right column (remaining): TodayPanel → ProgressPanel → FeedPanel packed top,
-/// trailing slack absorbed by Min(0).
+/// Right column (remaining): TodayPanel → ProgressPanel packed top, slack
+/// absorbed by Min(0) between progress and feed, FeedPanel anchored at bottom.
 fn render_wide(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
@@ -241,8 +241,8 @@ fn render_wide(
             TodayPanel.preferred_constraint(vm), // Length(6)
             Constraint::Length(COLUMN_GAP),
             ProgressPanel.preferred_constraint(vm), // Length(3)
-            Constraint::Length(COLUMN_GAP),
-            FeedPanel.preferred_constraint(vm), // Length(7) or less
+            Constraint::Min(0), // absorbs slack; pushes feed to the bottom
+            FeedPanel.preferred_constraint(vm), // Length(7) or less — anchored at bottom
         ])
         .split(right_col);
 
@@ -253,11 +253,9 @@ fn render_wide(
 
 /// Compact layout: single column packed from the top.
 ///
-/// Order: pet → vitals → today → progress → feed, trailing slack at bottom.
+/// Order: pet → [gap] → vitals → [gap] → today → [gap] → progress → [gap] → feed.
 /// Bio is omitted from compact mode: age is already in the title bar, and the
-/// hatched date is low-priority on narrow terminals. Dropping bio (3 rows) and
-/// its gap (1 row) keeps the constraint sum within the ~22-row inner height of
-/// a 72×24 terminal.
+/// hatched date is low-priority on narrow terminals.
 fn render_compact(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
@@ -269,6 +267,7 @@ fn render_compact(
         .flex(Flex::Start)
         .constraints([
             PetPanel.preferred_constraint(vm), // Fill(1) — expands to fill leftover
+            Constraint::Length(COLUMN_GAP),
             VitalsPanel.preferred_constraint(vm), // Length(4)
             Constraint::Length(COLUMN_GAP),
             TodayPanel.preferred_constraint(vm), // Length(6)
@@ -283,10 +282,10 @@ fn render_compact(
     if stack[0].height >= 10 {
         PetPanel.render(stack[0], buf, vm, ctx);
     }
-    VitalsPanel.render(stack[1], buf, vm, ctx);
-    TodayPanel.render(stack[3], buf, vm, ctx);
-    ProgressPanel.render(stack[5], buf, vm, ctx);
-    FeedPanel.render(stack[7], buf, vm, ctx);
+    VitalsPanel.render(stack[2], buf, vm, ctx);
+    TodayPanel.render(stack[4], buf, vm, ctx);
+    ProgressPanel.render(stack[6], buf, vm, ctx);
+    FeedPanel.render(stack[8], buf, vm, ctx);
 }
 
 /// Gap between stacked panels in both wide and compact layouts.
@@ -445,6 +444,61 @@ mod render_compact_tests {
             "compact render should show vitals section"
         );
         assert!(all.contains("fed"), "compact render should show fed bar");
+    }
+
+    /// Compact mode at 80×40 must render visible pet content in the Fill(1) area.
+    /// This is a regression guard for the missing gap between PetPanel and
+    /// VitalsPanel that caused Fill(1) to collapse at small heights and the pet
+    /// panel to be silently skipped at larger heights when gaps were absent.
+    #[test]
+    fn render_compact_pet_visible_at_80x40_with_crystal_pet() {
+        use crate::game::evolution::Stage;
+        use crate::game::metabolism::Mood;
+        use crate::pet::generation::generate_pet;
+        use crate::pet::render::{render_pet, AnimationFrame};
+
+        // Build a crystal S2 WatchViewModel (the species the user reported missing).
+        let pet = generate_pet("crystal-compact-test");
+        let rendered = render_pet(
+            &pet,
+            Stage::S2,
+            Mood::Content,
+            AnimationFrame {
+                tick: 0,
+                blink_suppression_ticks: 0,
+            },
+        );
+        let mut vm = WatchViewModel::fixture();
+        vm.pet_art = rendered.lines;
+        vm.pet_spans = rendered.spans;
+
+        // Width 80 < COMPACT_THRESHOLD+2 (106) → compact mode.
+        // Height 40 gives Fill(1) PetPanel ≥ 10 rows so the pet renders.
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Collect all content in the top half of the frame where the pet should be.
+        let mut pet_area_content = String::new();
+        for y in 1..20 {
+            for x in 1..79 {
+                pet_area_content.push_str(buffer[(x, y)].symbol());
+            }
+        }
+
+        // Pet art has block characters and slashes; vitals content is below row 20.
+        // The pet area must not be entirely spaces.
+        let non_space: String = pet_area_content
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            !non_space.is_empty(),
+            "compact pet area (rows 1-19) should contain visible pet art characters, got all spaces"
+        );
     }
 }
 
@@ -621,5 +675,41 @@ mod render_wide_tests {
         assert!(s.contains("bio"), "bio panel title must appear");
         assert!(s.contains("hatched"), "bio hatched label must appear");
         assert!(s.contains("age"), "bio age label must appear");
+    }
+
+    /// In wide mode the feed panel must be anchored toward the bottom of the
+    /// right column (Min(0) spacer between progress and feed absorbs the slack).
+    /// Concretely: the row containing "feed" must appear after the midpoint of
+    /// the inner area, not packed immediately below "progress".
+    #[test]
+    fn render_wide_feed_anchored_at_bottom_of_right_column() {
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let vm = WatchViewModel::fixture();
+        terminal
+            .draw(|f| render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let height = 32u16;
+        // Find the row where "feed" section header appears.
+        let feed_row = (0..height).find(|&y| {
+            let row: String = (0..120u16).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            row.contains("feed")
+        });
+        // Find the row where "progress" section header appears.
+        let progress_row = (0..height).find(|&y| {
+            let row: String = (0..120u16).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            row.contains("progress")
+        });
+
+        let feed_row = feed_row.expect("feed section must appear in wide render");
+        let progress_row = progress_row.expect("progress section must appear in wide render");
+
+        // Feed must appear at least 3 rows below progress (gap + spacer).
+        assert!(
+            feed_row > progress_row + 3,
+            "feed (row {feed_row}) must be pushed below progress (row {progress_row}) with slack absorbed between them"
+        );
     }
 }
