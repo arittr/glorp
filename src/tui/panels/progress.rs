@@ -1,14 +1,13 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
-use crate::tui::panels::bars::{bar_spans, format_tokens_short};
+use crate::tui::component::{
+    BorderTone, ComponentPanel, ComponentStyle, GradientToken, Insets, ProgressBar, Surface,
+    TextRow, TextTone,
+};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{semantic_styles, xp_color, ColorCapability, SemanticStyles};
-use crate::tui::view_model::{ProgressView, WatchViewModel};
+use crate::tui::view_model::WatchViewModel;
 
 pub struct ProgressPanel;
 
@@ -20,44 +19,26 @@ impl Panel for ProgressPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
-        let block = Block::default().borders(Borders::TOP).title(" progress ");
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        let styles = semantic_styles();
-        let lines = build_progress_lines(&vm.progress, ctx.color_capability, &styles);
-        Paragraph::new(lines).render(inner, buf);
+        let panel = ComponentPanel::new("progress").style(
+            ComponentStyle::new()
+                .surface(Surface::Elevated)
+                .border(BorderTone::Accent)
+                .padding(Insets::horizontal(1)),
+        );
+        panel.render(area, buf, ctx, |content, buf| {
+            if vm.progress.is_max_stage {
+                TextRow::new("stage", "max evolved")
+                    .tone(TextTone::Accent)
+                    .render(content, buf, ctx);
+            } else {
+                ProgressBar::new(vm.progress.fraction as f64)
+                    .gradient(GradientToken::Xp)
+                    .empty_tone(TextTone::Subtle)
+                    .rate_per_hour(vm.progress.rate_per_hour)
+                    .render(content, buf, ctx);
+            }
+        });
     }
-}
-
-fn build_progress_lines<'a>(
-    progress: &'a ProgressView,
-    capability: ColorCapability,
-    styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    if progress.is_max_stage {
-        return vec![Line::from(vec![
-            Span::raw("  "),
-            Span::styled("✦ max evolved", styles.section_header),
-        ])];
-    }
-    let mut xp_spans = bar_spans(
-        "xp",
-        progress.fraction as f64,
-        xp_color(),
-        capability,
-        styles,
-    );
-    if progress.rate_per_hour > 0.0 {
-        xp_spans.push(Span::raw("   "));
-        xp_spans.push(Span::styled("↑", styles.section_header));
-        xp_spans.push(Span::raw(" "));
-        xp_spans.push(Span::styled(
-            format!("{}/hr", format_tokens_short(progress.rate_per_hour)),
-            Style::default().fg(xp_color()),
-        ));
-    }
-    vec![Line::from(xp_spans)]
 }
 
 #[cfg(test)]

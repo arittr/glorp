@@ -63,6 +63,14 @@ fn has_cell(buf: &Buffer, symbol: &str, fg: Color) -> bool {
 }
 
 #[test]
+fn progress_panel_uses_component_style_facade() {
+    let source = std::fs::read_to_string("src/tui/panels/progress.rs").unwrap();
+    assert!(source.contains("ComponentPanel::new(\"progress\")"));
+    assert!(source.contains("GradientToken::Xp"));
+    assert!(!source.contains("Block::"));
+}
+
+#[test]
 fn render_context_clock_controls_pet_scene_time() {
     let first = glorp::tui::render_context::WatchClock::fixed(
         time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),

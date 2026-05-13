@@ -1,5 +1,5 @@
 use crate::tui::component::{ComponentStyle, GradientToken, TextTone};
-use crate::tui::panels::bars::{bar_spans, build_spark_line};
+use crate::tui::panels::bars::{bar_spans, build_spark_line, format_tokens_short};
 use crate::tui::panels::feed::build_feed_lines;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, xp_color};
@@ -7,7 +7,7 @@ use crate::tui::view_model::WatchViewModel;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Color,
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
@@ -148,6 +148,7 @@ pub struct ProgressBar {
     fraction: f64,
     gradient: GradientToken,
     empty_tone: TextTone,
+    rate_per_hour: Option<f64>,
 }
 
 impl ProgressBar {
@@ -156,6 +157,7 @@ impl ProgressBar {
             fraction,
             gradient: GradientToken::Good,
             empty_tone: TextTone::Subtle,
+            rate_per_hour: None,
         }
     }
 
@@ -169,6 +171,11 @@ impl ProgressBar {
         self
     }
 
+    pub const fn rate_per_hour(mut self, rate_per_hour: f64) -> Self {
+        self.rate_per_hour = Some(rate_per_hour);
+        self
+    }
+
     pub fn spans(&self, ctx: &RenderContext) -> Vec<Span<'static>> {
         let mut styles = semantic_styles();
         styles.empty_bar = ComponentStyle::new().text(self.empty_tone).text_style();
@@ -176,7 +183,17 @@ impl ProgressBar {
             GradientToken::Xp => ("xp", xp_color()),
             GradientToken::Good => ("good", tokenpet_palette().good.rgb),
         };
-        bar_spans(label, self.fraction, color, ctx.color_capability, &styles)
+        let mut spans = bar_spans(label, self.fraction, color, ctx.color_capability, &styles);
+        if let Some(rate_per_hour) = self.rate_per_hour.filter(|rate| *rate > 0.0) {
+            spans.push(Span::raw("   "));
+            spans.push(Span::styled("↑", styles.section_header));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{}/hr", format_tokens_short(rate_per_hour)),
+                Style::default().fg(color),
+            ));
+        }
+        spans
     }
 
     pub fn line(&self, ctx: &RenderContext) -> Line<'static> {
@@ -287,6 +304,16 @@ mod tests {
         let text: String = bar.spans(&ctx).iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("xp"));
         assert!(text.contains("25"));
+    }
+
+    #[test]
+    fn progress_bar_can_append_rate_segment() {
+        let ctx = RenderContext::new(ColorCapability::Truecolor);
+        let bar = ProgressBar::new(0.25)
+            .gradient(GradientToken::Xp)
+            .rate_per_hour(109_000.0);
+        let text: String = bar.spans(&ctx).iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("↑ 109.0k/hr"));
     }
 
     #[test]
