@@ -131,7 +131,12 @@ pub fn ambient_glyphs_for(
     habitat: Rect,
     exclusions: &[Rect],
     now: time::OffsetDateTime,
+    color_capability: crate::tui::style::ColorCapability,
 ) -> Vec<AmbientGlyph> {
+    if matches!(color_capability, crate::tui::style::ColorCapability::Flat) {
+        return Vec::new();
+    }
+
     // height < 2 means there's no room for both a sky row and a floor row;
     // the sky-row range would be 0..0 and rng.gen_range would panic.
     if habitat.width == 0 || habitat.height < 2 {
@@ -231,7 +236,14 @@ impl LegacyPanel for PetPanel {
             .iter()
             .map(|&r| if r == scene.pet_art { inflated_pet } else { r })
             .collect();
-        let glyphs = ambient_glyphs_for(species, stage, scene.habitat, &inflated_exclusions, now);
+        let glyphs = ambient_glyphs_for(
+            species,
+            stage,
+            scene.habitat,
+            &inflated_exclusions,
+            now,
+            ctx.color_capability,
+        );
         for g in glyphs {
             if ambient_glyph_is_inside_area(&g, scene.habitat) {
                 let cell = &mut buf[(g.col, g.row)];
@@ -484,6 +496,7 @@ pub(crate) fn pet_role_style(role: PaletteRoleName, styles: &SemanticStyles) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::style::ColorCapability;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -703,13 +716,21 @@ mod tests {
         let t_same_minute = t0 + time::Duration::seconds(15);
         let t_next_minute = t0 + time::Duration::minutes(1);
 
-        let a = ambient_glyphs_for(Species::Fuzz, Stage::S4, habitat, &exclusions, t0);
+        let a = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            habitat,
+            &exclusions,
+            t0,
+            ColorCapability::Truecolor,
+        );
         let b = ambient_glyphs_for(
             Species::Fuzz,
             Stage::S4,
             habitat,
             &exclusions,
             t_same_minute,
+            ColorCapability::Truecolor,
         );
         let c = ambient_glyphs_for(
             Species::Fuzz,
@@ -717,6 +738,7 @@ mod tests {
             habitat,
             &exclusions,
             t_next_minute,
+            ColorCapability::Truecolor,
         );
 
         assert_eq!(a, b, "same minute should yield identical glyphs");
@@ -740,7 +762,14 @@ mod tests {
             Species::Mech,
         ] {
             for stage in [Stage::S0, Stage::S2, Stage::S4, Stage::S6] {
-                let glyphs = ambient_glyphs_for(species, stage, habitat, &exclusions, now);
+                let glyphs = ambient_glyphs_for(
+                    species,
+                    stage,
+                    habitat,
+                    &exclusions,
+                    now,
+                    ColorCapability::Truecolor,
+                );
                 for g in &glyphs {
                     let in_exclusion = g.col >= pet_inner.x
                         && g.col < pet_inner.x + pet_inner.width
@@ -762,7 +791,14 @@ mod tests {
         let habitat = Rect::new(5, 10, 52, 20);
         let pet_inner = Rect::new(25, 16, 13, 10);
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let glyphs = ambient_glyphs_for(Species::Crystal, Stage::S5, habitat, &[pet_inner], now);
+        let glyphs = ambient_glyphs_for(
+            Species::Crystal,
+            Stage::S5,
+            habitat,
+            &[pet_inner],
+            now,
+            ColorCapability::Truecolor,
+        );
         for g in glyphs {
             assert!(
                 g.col >= habitat.x && g.col < habitat.x + habitat.width,
@@ -783,7 +819,14 @@ mod tests {
         let habitat = Rect::new(0, 0, 52, 20);
         let pet_inner = Rect::new(20, 6, 13, 10);
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, habitat, &[pet_inner], now);
+        let glyphs = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            habitat,
+            &[pet_inner],
+            now,
+            ColorCapability::Truecolor,
+        );
         // 8 sky glyphs (S4) + 52-cell floor minus the exclusion overlap (none, since pet is mid-panel).
         assert!(
             glyphs.len() >= 8 + 30,
@@ -850,7 +893,14 @@ mod tests {
         // panic on `rng.gen_range(0..0)`. Returning empty is the contracted behavior.
         let habitat = Rect::new(0, 0, 52, 1);
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, habitat, &[], now);
+        let glyphs = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+        );
         assert!(
             glyphs.is_empty(),
             "habitat too short for both sky and floor — painter should return empty, got {} glyphs",
@@ -865,11 +915,25 @@ mod tests {
 
         // Normal-wide pet panel: ~52 × 14 = 728 cells, well above the 200 threshold.
         let normal = Rect::new(0, 0, 52, 14);
-        let normal_glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, normal, &[], now);
+        let normal_glyphs = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            normal,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+        );
 
         // Tall-wide pet panel: ~52 × 35 = 1820 cells.
         let tall = Rect::new(0, 0, 52, 35);
-        let tall_glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, tall, &[], now);
+        let tall_glyphs = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            tall,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+        );
 
         let normal_sky_count = normal_glyphs
             .iter()
@@ -885,6 +949,25 @@ mod tests {
         assert!(
             tall_sky_count > normal_sky_count + 10,
             "tall habitat should produce noticeably more sky glyphs; normal={normal_sky_count} tall={tall_sky_count}"
+        );
+    }
+
+    #[test]
+    fn ambient_glyphs_empty_on_flat_color() {
+        use crate::game::evolution::Stage;
+        let habitat = Rect::new(0, 0, 52, 20);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let glyphs = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Flat,
+        );
+        assert!(
+            glyphs.is_empty(),
+            "Flat color should disable habitat (dim-without-color is just noise)"
         );
     }
 
