@@ -48,8 +48,9 @@ impl Panel {
     where
         F: FnOnce(Rect, &mut Buffer),
     {
+        let title = format!(" {} ", self.title);
         let block = Block::default()
-            .title(self.title)
+            .title(title)
             .borders(Borders::TOP)
             .border_style(self.style.border_style())
             .style(self.style.surface_style());
@@ -282,7 +283,7 @@ mod tests {
                     .render(content, buf, &ctx);
             });
         let text = buffer_text(&buf);
-        assert!(text.contains("today"));
+        assert!(text.contains(" today "));
         assert!(text.contains("tokens"));
         assert!(text.contains("18.4k"));
     }

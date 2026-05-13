@@ -21,9 +21,9 @@ impl Panel for ProgressPanel {
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
         let panel = ComponentPanel::new("progress").style(
             ComponentStyle::new()
-                .surface(Surface::Elevated)
-                .border(BorderTone::Accent)
-                .padding(Insets::horizontal(1)),
+                .surface(Surface::Empty)
+                .border(BorderTone::None)
+                .padding(Insets::all(0)),
         );
         panel.render(area, buf, ctx, |content, buf| {
             if vm.progress.is_max_stage {
