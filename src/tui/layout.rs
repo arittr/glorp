@@ -326,7 +326,7 @@ fn render_wide(
         .direction(Direction::Vertical)
         .flex(Flex::Start)
         .constraints([
-            VitalsPanel.preferred_constraint(vm),  // Length(4)
+            VitalsPanel.preferred_constraint(vm), // Length(4)
             Constraint::Length(COLUMN_GAP),
             BioCardPanel.preferred_constraint(vm), // Length(3)
         ])
@@ -798,7 +798,9 @@ mod render_wide_tests {
 
         let height = buf.area.height;
         let row_string = |y: u16| -> String {
-            (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect()
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
         };
         let vitals_row = (0..height)
             .find(|&y| row_string(y).contains("vitals"))

@@ -783,6 +783,39 @@ impl UsageStore {
             .map_err(Into::into)
     }
 
+    /// Sum effective tokens per provider_surface for events whose bucket_at
+    /// falls in the closed interval `[start, end]`. Uses a single SQL
+    /// aggregate so callers don't have to fetch + filter rows in memory
+    /// (the watch view previously clipped the slice to 500 rows and silently
+    /// undercounted today).
+    ///
+    /// Inclusive on both sides on purpose: RFC3339 timestamps without
+    /// fractional seconds (`...:00Z`) lexically sort AFTER values with
+    /// fractional seconds (`...:00.001Z`) because `Z` > `.`. A half-open
+    /// `< end` filter would silently drop events whose bucket_at lands
+    /// exactly at the caller's "now".
+    pub fn token_totals_by_source_between(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> crate::error::Result<Vec<(String, f64)>> {
+        let start_text = format_time(start)?;
+        let end_text = format_time(end)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT provider_surface, COALESCE(SUM(effective_tokens), 0.0) AS total
+             FROM usage_events
+             WHERE bucket_at >= ?1 AND bucket_at <= ?2
+             GROUP BY provider_surface
+             ORDER BY provider_surface",
+        )?;
+        let rows = stmt
+            .query_map(params![start_text, end_text], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn seven_day_token_history(
         &self,
         now_utc_date: time::Date,
@@ -1051,6 +1084,84 @@ mod tests {
             bucket_at: observed_at,
             ..NormalizedUsageEvent::for_test_at(observed_at, tokens)
         }
+    }
+
+    #[test]
+    fn token_totals_by_source_between_groups_and_sums_unbounded() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let start = now - time::Duration::hours(2);
+        let end = now + time::Duration::seconds(1);
+        let inside_claude_a = NormalizedUsageEvent {
+            provider_surface: "claude-code".to_string(),
+            ..sample_event_at(now - time::Duration::minutes(5), 100.0)
+        };
+        let inside_claude_b = NormalizedUsageEvent {
+            provider_surface: "claude-code".to_string(),
+            ..sample_event_at(now - time::Duration::minutes(30), 250.0)
+        };
+        let inside_codex = NormalizedUsageEvent {
+            provider_surface: "codex".to_string(),
+            ..sample_event_at(now - time::Duration::minutes(10), 400.0)
+        };
+        let before_window = NormalizedUsageEvent {
+            provider_surface: "claude-code".to_string(),
+            ..sample_event_at(now - time::Duration::hours(3), 9_999.0)
+        };
+        for e in [
+            &inside_claude_a,
+            &inside_claude_b,
+            &inside_codex,
+            &before_window,
+        ] {
+            store.insert_event(e).unwrap();
+        }
+        // Stress the unbounded contract: 600 tiny rows from one source must
+        // all be summed, not clipped to a 500-row recent-events limit.
+        for i in 0..600 {
+            let e = NormalizedUsageEvent {
+                provider_surface: "codex".to_string(),
+                ..sample_event_at(now - time::Duration::seconds(i), 1.0)
+            };
+            store.insert_event(&e).unwrap();
+        }
+
+        let totals = store.token_totals_by_source_between(start, end).unwrap();
+        let map: std::collections::BTreeMap<String, f64> = totals.into_iter().collect();
+        assert_eq!(map.get("claude-code").copied().unwrap(), 350.0);
+        assert_eq!(map.get("codex").copied().unwrap(), 400.0 + 600.0);
+    }
+
+    #[test]
+    fn token_totals_by_source_between_includes_both_boundaries() {
+        // Inclusive on both sides — RFC3339 lexical sort (`Z` > `.`) makes
+        // half-open `< end` filters drop events whose timestamp lacks
+        // fractional seconds, which silently undercounts.
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let one_hour_ago = now - time::Duration::hours(1);
+        store.insert_event(&sample_event_at(now, 5_555.0)).unwrap();
+        store
+            .insert_event(&sample_event_at(one_hour_ago, 1_111.0))
+            .unwrap();
+        let totals = store
+            .token_totals_by_source_between(one_hour_ago, now)
+            .unwrap();
+        let sum: f64 = totals.iter().map(|(_, v)| v).sum();
+        assert_eq!(sum, 5_555.0 + 1_111.0);
+    }
+
+    #[test]
+    fn token_totals_by_source_between_excludes_outside_window() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store
+            .insert_event(&sample_event_at(now - time::Duration::hours(2), 9_999.0))
+            .unwrap();
+        let totals = store
+            .token_totals_by_source_between(now - time::Duration::hours(1), now)
+            .unwrap();
+        assert!(totals.is_empty(), "outside-window event must be excluded");
     }
 
     #[test]

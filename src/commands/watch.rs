@@ -26,7 +26,7 @@ use crate::{
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 use time::{Duration, OffsetDateTime};
 
 pub fn run() -> Result<()> {
@@ -76,7 +76,31 @@ pub(crate) fn build_watch_view_model_at(
         },
     );
 
-    let source_breakdown = source_breakdown(&recent_usage, now);
+    // All "today" / "last 10m" framing uses local time. `now` arrives in UTC;
+    // here we resolve the user's local offset once and derive every boundary
+    // from it so the watch view matches what the user reads on the wall clock.
+    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let now_local = now.to_offset(local_offset);
+    let today_start = time::PrimitiveDateTime::new(now_local.date(), time::Time::MIDNIGHT)
+        .assume_offset(local_offset);
+    let last_10m_start = now - Duration::minutes(10);
+
+    let today_totals = usage_store
+        .token_totals_by_source_between(today_start, now)
+        .unwrap_or_default();
+    let last_10m_totals = usage_store
+        .token_totals_by_source_between(last_10m_start, now)
+        .unwrap_or_default();
+    let today_total_tokens: f64 = today_totals.iter().map(|(_, v)| *v).sum();
+    let last_10m_total_tokens: f64 = last_10m_totals.iter().map(|(_, v)| *v).sum();
+    let source_breakdown: Vec<SourceUsageView> = today_totals
+        .iter()
+        .map(|(name, v)| SourceUsageView {
+            name: name.clone(),
+            effective_tokens: *v,
+        })
+        .collect();
+
     // Stale diagnostics shouldn't keep a source marked broken forever.
     // After STALE_DIAGNOSTIC_CUTOFF without a fresh failure, treat the
     // diagnostic as resolved and let the source go back to healthy idle.
@@ -87,7 +111,7 @@ pub(crate) fn build_watch_view_model_at(
         .into_iter()
         .filter(|d| d.recorded_at >= cutoff)
         .collect();
-    let source_health = source_health(&recent_usage, &all_diagnostics, now);
+    let source_health = source_health(&today_totals, &last_10m_totals, &all_diagnostics);
     let diagnostics = active_diagnostics(&source_breakdown, all_diagnostics);
     let helper_status = helper_status(&usage_store, &source_breakdown, &diagnostics)?;
     let pet_activities = crate::pet::activity::derive_pet_activities(
@@ -123,13 +147,13 @@ pub(crate) fn build_watch_view_model_at(
         fed: state.vitals.fed / 100.0,
         happiness: state.vitals.happiness / 100.0,
         energy: state.vitals.energy / 100.0,
-        today_effective_tokens: today_effective_tokens(&recent_usage, now),
+        today_effective_tokens: today_total_tokens,
         recent_daily_effective_tokens: usage_store
-            .seven_day_token_history(now.date())
+            .seven_day_token_history(now_local.date())
             .unwrap_or_else(|_| vec![0.0; 7]),
         source_breakdown,
         source_health,
-        current_bucket_effective_tokens: current_bucket_effective_tokens(&recent_usage, now),
+        current_bucket_effective_tokens: last_10m_total_tokens,
         recent_events,
         helper_status,
         errors,
@@ -147,8 +171,8 @@ pub(crate) fn build_watch_view_model_at(
         wander_offset_x: crate::pet::animator::compute_wander_offset(now),
         breath_offset_y: crate::pet::animator::compute_breath_offset(Some(species), now),
         progress: {
-            let ema_events = usage_store.events_within(Duration::hours(48), now)?;
-            let rate_per_hour = progress_rate_ema(&ema_events, now);
+            let rate_events = usage_store.events_within(Duration::hours(1), now)?;
+            let rate_per_hour = progress_rate_per_hour(&rate_events, now);
             let is_max = matches!(stage, Stage::S6);
             let xp_to_next = next_stage_xp_target(stage);
             let xp_in_stage = state.xp;
@@ -184,9 +208,7 @@ pub(crate) fn build_watch_view_model_at(
         bio: {
             let age = now - state.created_at;
             let age_label = BioView::format_age(age);
-            let local = state
-                .created_at
-                .to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC));
+            let local = state.created_at.to_offset(local_offset);
             let month_name = match local.month() {
                 time::Month::January => "jan",
                 time::Month::February => "feb",
@@ -342,88 +364,49 @@ fn next_stage_xp_target(stage: Stage) -> f64 {
     }
 }
 
-fn today_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
-    let today = now.date();
+/// Effective tokens observed in the trailing 60 minutes, expressed as a rate
+/// in tokens/hour. Simple sum (not an EMA): the display matches the user's
+/// mental model — "how much I've burned recently" — and decays to zero one
+/// hour after the user actually stops, instead of staying high for many
+/// hours after a heavy session ends.
+fn progress_rate_per_hour(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
+    let cutoff = now - Duration::hours(1);
     events
         .iter()
-        .filter(|event| event.bucket_at.date() == today)
-        .map(|event| event.effective_tokens)
+        .filter(|e| e.observed_at >= cutoff)
+        .map(|e| e.effective_tokens)
         .sum()
-}
-
-fn current_bucket_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
-    let cutoff = now - Duration::minutes(10);
-    events
-        .iter()
-        .filter(|event| event.bucket_at >= cutoff)
-        .map(|event| event.effective_tokens)
-        .sum()
-}
-
-/// 6h-half-life EMA of effective tokens, returned in tokens/hour.
-///
-/// Properties: monotonic increase during active use, smooth decay during idle,
-/// no persisted state. See spec "EMA rate" for burst-behavior caveat.
-fn progress_rate_ema(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
-    const TAU_HOURS: f64 = 6.0 / std::f64::consts::LN_2;
-    let weighted: f64 = events
-        .iter()
-        .map(|e| {
-            let dt_h = (now - e.observed_at).as_seconds_f64() / 3600.0;
-            e.effective_tokens * (-dt_h / TAU_HOURS).exp()
-        })
-        .sum();
-    weighted / TAU_HOURS
-}
-
-fn source_breakdown(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec<SourceUsageView> {
-    let today = now.date();
-    let mut by_source = BTreeMap::new();
-    for event in events
-        .iter()
-        .filter(|event| event.bucket_at.date() == today)
-    {
-        *by_source
-            .entry(event.provider_surface.clone())
-            .or_insert(0.0) += event.effective_tokens;
-    }
-    by_source
-        .into_iter()
-        .map(|(name, effective_tokens)| SourceUsageView {
-            name,
-            effective_tokens,
-        })
-        .collect()
 }
 
 fn source_health(
-    events: &[NormalizedUsageEvent],
+    today_totals: &[(String, f64)],
+    last_10m_totals: &[(String, f64)],
     diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
-    now: OffsetDateTime,
 ) -> Vec<SourceHealthView> {
     let mut names = std::collections::BTreeSet::new();
-    for event in events {
-        names.insert(event.provider_surface.clone());
+    for (name, _) in today_totals {
+        names.insert(name.clone());
+    }
+    for (name, _) in last_10m_totals {
+        names.insert(name.clone());
     }
     for diagnostic in diagnostics {
         names.insert(diagnostic.provider_surface.clone());
     }
 
-    let bucket_cutoff = now - Duration::minutes(10);
-    let today = now.date();
+    let lookup = |totals: &[(String, f64)], target: &str| -> f64 {
+        totals
+            .iter()
+            .find(|(name, _)| name == target)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0)
+    };
+
     names
         .into_iter()
         .map(|name| {
-            let today_effective_tokens = events
-                .iter()
-                .filter(|event| event.provider_surface == name && event.bucket_at.date() == today)
-                .map(|event| event.effective_tokens)
-                .sum::<f64>();
-            let bucket_effective_tokens = events
-                .iter()
-                .filter(|event| event.provider_surface == name && event.bucket_at >= bucket_cutoff)
-                .map(|event| event.effective_tokens)
-                .sum::<f64>();
+            let today_effective_tokens = lookup(today_totals, &name);
+            let bucket_effective_tokens = lookup(last_10m_totals, &name);
             let diagnostic = diagnostics
                 .iter()
                 .find(|diagnostic| diagnostic.provider_surface == name);
@@ -743,47 +726,36 @@ mod tests {
     }
 
     #[test]
-    fn progress_rate_ema_empty_returns_zero() {
+    fn progress_rate_per_hour_empty_returns_zero() {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        assert_eq!(progress_rate_ema(&[], now), 0.0);
+        assert_eq!(progress_rate_per_hour(&[], now), 0.0);
     }
 
     #[test]
-    fn progress_rate_ema_single_event_at_now_is_tokens_over_tau() {
+    fn progress_rate_per_hour_sums_events_in_last_hour() {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let event = sample_event_at_for_test(now, 100_000.0);
-        let rate = progress_rate_ema(&[event], now);
-        // tau ≈ 6h / ln(2) ≈ 8.656h, so rate ≈ 100k / 8.656 ≈ 11.5k
-        let tau = 6.0 / 2.0_f64.ln();
-        let expected = 100_000.0 / tau;
-        assert!(
-            (rate - expected).abs() < 1e-3,
-            "got {rate}, want {expected}"
-        );
+        let recent_a = sample_event_at_for_test(now - Duration::minutes(5), 30_000.0);
+        let recent_b = sample_event_at_for_test(now - Duration::minutes(45), 70_000.0);
+        let rate = progress_rate_per_hour(&[recent_a, recent_b], now);
+        assert_eq!(rate, 100_000.0);
     }
 
     #[test]
-    fn progress_rate_ema_event_six_hours_old_is_weighted_half() {
+    fn progress_rate_per_hour_excludes_events_older_than_one_hour() {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let recent = sample_event_at_for_test(now, 100_000.0);
-        let aged = sample_event_at_for_test(now - Duration::hours(6), 100_000.0);
-        let rate_recent_only = progress_rate_ema(std::slice::from_ref(&recent), now);
-        let rate_both = progress_rate_ema(&[recent, aged], now);
-        let aged_contribution = rate_both - rate_recent_only;
-        let expected_half = rate_recent_only * 0.5;
-        assert!(
-            (aged_contribution - expected_half).abs() / expected_half < 0.05,
-            "6h-old contribution should be ~half (within 5%): got {aged_contribution}, want {expected_half}"
-        );
+        // Two hours ago is outside the 60-minute window — even though the
+        // old EMA would have weighted this at ~80%, the new rate ignores it
+        // entirely so the display decays to zero an hour after activity stops.
+        let aged = sample_event_at_for_test(now - Duration::hours(2), 1_000_000.0);
+        let rate = progress_rate_per_hour(&[aged], now);
+        assert_eq!(rate, 0.0);
     }
 
     #[test]
-    fn progress_rate_ema_50k_events_does_not_overflow() {
+    fn progress_rate_per_hour_boundary_event_is_included() {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let events: Vec<NormalizedUsageEvent> = (0..50_000)
-            .map(|i| sample_event_at_for_test(now - Duration::seconds(i), 100.0))
-            .collect();
-        let rate = progress_rate_ema(&events, now);
-        assert!(rate.is_finite() && rate > 0.0);
+        let on_boundary = sample_event_at_for_test(now - Duration::hours(1), 12_345.0);
+        let rate = progress_rate_per_hour(&[on_boundary], now);
+        assert_eq!(rate, 12_345.0);
     }
 }
