@@ -54,3 +54,24 @@ fn bar_ramp_accent_middle_stop_matches_palette_accent() {
     let palette = tokenpet_palette();
     assert_eq!(BAR_RAMP_ACCENT.stops[2], palette.accent.rgb);
 }
+
+#[test]
+fn component_style_facade_maps_semantic_tokens_to_ratatui_styles() {
+    use glorp::tui::component::{
+        BorderTone, ComponentStyle, GradientToken, Insets, Surface, TextTone,
+    };
+    use glorp::tui::style::tokenpet_palette;
+
+    let p = tokenpet_palette();
+    let style = ComponentStyle::new()
+        .surface(Surface::Elevated)
+        .border(BorderTone::Accent)
+        .padding(Insets::horizontal(2))
+        .text(TextTone::Primary)
+        .gradient(GradientToken::Xp);
+
+    assert_eq!(style.surface_style().bg, Some(p.surface.rgb));
+    assert_eq!(style.border_style().fg, Some(p.accent.rgb));
+    assert_eq!(style.text_style().fg, Some(p.fg.rgb));
+    assert_eq!(style.insets().left, 2);
+}
