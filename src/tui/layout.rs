@@ -132,8 +132,6 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
                     ProgressPanel.preferred_constraint(vm), // Length(3)
                     Constraint::Length(COLUMN_GAP),
                     FeedPanel.preferred_constraint(vm), // Length(7)
-                    Constraint::Length(COLUMN_GAP),
-                    BioCardPanel.preferred_constraint(vm), // Length(3)
                 ])
                 .split(inner);
 
@@ -255,8 +253,11 @@ fn render_wide(
 
 /// Compact layout: single column packed from the top.
 ///
-/// Order: pet → vitals → today → progress → feed → bio, trailing slack at bottom.
-/// Bio sits at the bottom of the stack; it may be clipped off on very short terminals.
+/// Order: pet → vitals → today → progress → feed, trailing slack at bottom.
+/// Bio is omitted from compact mode: age is already in the title bar, and the
+/// hatched date is low-priority on narrow terminals. Dropping bio (3 rows) and
+/// its gap (1 row) keeps the constraint sum within the ~22-row inner height of
+/// a 72×24 terminal.
 fn render_compact(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
@@ -268,7 +269,6 @@ fn render_compact(
         .flex(Flex::Start)
         .constraints([
             PetPanel.preferred_constraint(vm), // Fill(1) — expands to fill leftover
-            Constraint::Length(COLUMN_GAP),
             VitalsPanel.preferred_constraint(vm), // Length(4)
             Constraint::Length(COLUMN_GAP),
             TodayPanel.preferred_constraint(vm), // Length(6)
@@ -276,8 +276,6 @@ fn render_compact(
             ProgressPanel.preferred_constraint(vm), // Length(3)
             Constraint::Length(COLUMN_GAP),
             FeedPanel.preferred_constraint(vm), // Length(7)
-            Constraint::Length(COLUMN_GAP),
-            BioCardPanel.preferred_constraint(vm), // Length(3)
         ])
         .split(area);
 
@@ -285,11 +283,10 @@ fn render_compact(
     if stack[0].height >= 10 {
         PetPanel.render(stack[0], buf, vm, ctx);
     }
-    VitalsPanel.render(stack[2], buf, vm, ctx);
-    TodayPanel.render(stack[4], buf, vm, ctx);
-    ProgressPanel.render(stack[6], buf, vm, ctx);
-    FeedPanel.render(stack[8], buf, vm, ctx);
-    BioCardPanel.render(stack[10], buf, vm, ctx);
+    VitalsPanel.render(stack[1], buf, vm, ctx);
+    TodayPanel.render(stack[3], buf, vm, ctx);
+    ProgressPanel.render(stack[5], buf, vm, ctx);
+    FeedPanel.render(stack[7], buf, vm, ctx);
 }
 
 /// Gap between stacked panels in both wide and compact layouts.
