@@ -85,10 +85,7 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state.created_at = ctx.fixed_now - Duration::days(18);
     state.last_updated_at = ctx.fixed_now;
     state.last_usage_poll_at = Some(ctx.fixed_now - Duration::minutes(5));
-    state.recent_events = vec![
-        "Mochi inspected a fresh diff".to_string(),
-        "Mochi found a warm token cache".to_string(),
-    ];
+    state.recent_events = Vec::new();
     state
 }
 

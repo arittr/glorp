@@ -1,5 +1,6 @@
 ---
 source: tests/dev_preview.rs
+assertion_line: 454
 expression: frame
 ---
      ╭ glorp · Mochi · fuzz · 18d · content ──────────────────────────────────────────────────────────────────────╮     
@@ -25,11 +26,11 @@ expression: frame
      │                                                                                                            │     
      │                                                                                                            │     
      │ vitals ────────────────────────────────     feed ──────────────────────────────────────────────────────────│     
-     │  fed        ████████░░░░  70                 --:--  Mochi inspected a fresh diff                           │     
-     │  happy      █████████░░░  72                 --:--  Mochi found a warm token cache                         │     
-     │  energy     ████████░░░░  68                 08:53  claude-code added 8.8k effective tokens                │     
-     │                                              08:45  codex added 4.2k effective tokens                      │     
-     │ bio ───────────────────────────────────      08:48  claude-code added 12.5k effective tokens               │     
+     │  fed        ████████░░░░  70                 08:53  claude-code added 8.8k effective tokens                │     
+     │  happy      █████████░░░  72                 08:45  codex added 4.2k effective tokens                      │     
+     │  energy     ████████░░░░  68                 08:48  claude-code added 12.5k effective tokens               │     
+     │                                                                                                            │     
+     │ bio ───────────────────────────────────                                                                    │     
      │  hatched   sep 21 08:53                                                                                    │     
      │  age       18d                                                                                             │     
      │                                                                                                            │     
