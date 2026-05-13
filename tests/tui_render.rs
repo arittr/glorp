@@ -63,6 +63,17 @@ fn has_cell(buf: &Buffer, symbol: &str, fg: Color) -> bool {
 }
 
 #[test]
+fn render_context_clock_controls_pet_scene_time() {
+    let first = glorp::tui::render_context::WatchClock::fixed(
+        time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
+    );
+    let second = glorp::tui::render_context::WatchClock::fixed(
+        time::OffsetDateTime::from_unix_timestamp(1_760_000_064).unwrap(),
+    );
+    assert_ne!(first.now_utc(), second.now_utc());
+}
+
+#[test]
 fn pet_effect_target_matches_component_layout_pet_art_target() {
     let vm = WatchViewModel::fixture();
     let area = ratatui::layout::Rect::new(0, 0, 120, 32);

@@ -88,7 +88,7 @@ impl Panel for PetPanel {
         let pet_inner = pet_inner_rect_in_panel(below_speech, vm);
 
         // Pass 1: ambient backdrop. PR1 stub returns empty so this is a no-op.
-        let now = time::OffsetDateTime::now_utc();
+        let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let glyphs = ambient_glyphs_for(species, area, pet_inner, now);
         for g in glyphs {

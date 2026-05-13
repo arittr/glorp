@@ -12,7 +12,7 @@ use crate::error::{GlorpError, Result};
 use crate::game::evolution::Stage;
 use crate::pet::art::stage_label;
 use crate::pet::generation::Species;
-use crate::tui::render_context::RenderContext;
+use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -34,9 +34,13 @@ pub struct PreviewRenderContext {
 
 impl PreviewRenderContext {
     pub fn deterministic() -> Self {
+        let fixed_now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         Self {
-            fixed_now: OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
-            render: RenderContext::new(ColorCapability::Truecolor),
+            fixed_now,
+            render: RenderContext::with_clock(
+                ColorCapability::Truecolor,
+                WatchClock::fixed(fixed_now),
+            ),
         }
     }
 }
