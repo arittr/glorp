@@ -4,6 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use crate::game::evolution::Stage;
 use crate::pet::animator::low_energy_lightness_multiplier;
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
@@ -51,8 +52,9 @@ pub struct AmbientGlyph {
 /// before, just inside a taller (Fill-driven) rect. PR2 fills this in.
 pub fn ambient_glyphs_for(
     _species: Species,
-    _panel: Rect,
-    _pet_inner_rect: Rect,
+    _stage: Stage,
+    _habitat: Rect,
+    _exclusions: &[Rect],
     _now: time::OffsetDateTime,
 ) -> Vec<AmbientGlyph> {
     Vec::new()
@@ -76,7 +78,8 @@ impl LegacyPanel for PetPanel {
         // Pass 1: ambient backdrop. PR1 stub returns empty so this is a no-op.
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
-        let glyphs = ambient_glyphs_for(species, scene.habitat, scene.pet_art, now);
+        let stage = vm.pet_render.stage;
+        let glyphs = ambient_glyphs_for(species, stage, scene.habitat, &scene.exclusions, now);
         for g in glyphs {
             if ambient_glyph_is_inside_area(&g, scene.habitat) {
                 let cell = &mut buf[(g.col, g.row)];
@@ -538,14 +541,15 @@ mod tests {
     }
 
     #[test]
-    fn ambient_glyphs_for_returns_empty_in_pr1_stub() {
-        let panel_rect = Rect::new(0, 0, 40, 20);
-        let pet_inner = Rect::new(13, 5, 13, 10);
-        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let glyphs = ambient_glyphs_for(Species::Fuzz, panel_rect, pet_inner, now);
+    fn ambient_glyphs_for_returns_empty_until_implemented() {
+        use crate::game::evolution::Stage;
+        let panel_rect = Rect::new(0, 0, 26, 12);
+        let pet_inner = Rect::new(7, 2, 11, 8);
+        let now = time::OffsetDateTime::UNIX_EPOCH;
+        let glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, panel_rect, &[pet_inner], now);
         assert!(
             glyphs.is_empty(),
-            "PR1 stub returns empty; PR2 fills this in"
+            "painter still stubbed; will fill in Task 6"
         );
     }
 
