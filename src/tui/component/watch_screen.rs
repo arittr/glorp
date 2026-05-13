@@ -316,7 +316,7 @@ fn insert_pet_node(
         .insert_node(node)
         .expect("pet component id is unique in watch layout");
 
-    let scene = PetScene::compute_layout(WatchComponentId::Pet, bounds, vm, ctx);
+    let scene = PetScene::compute_layout(bounds, vm, ctx);
     for (path, target) in scene.targets {
         layout
             .insert_target(path, target)
@@ -495,6 +495,35 @@ mod tests {
                 .any(|d| d.path == WatchComponentId::Pet.path()
                     && d.reason == LayoutDecisionReason::InsufficientHeight),
             "compact pet insufficient-height decision missing"
+        );
+    }
+
+    #[test]
+    fn layout_watch_wide_speech_active_pet_targets_stay_inside_pet_node() {
+        let mut vm = WatchViewModel::fixture();
+        vm.current_speech = Some("hello".into());
+        let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
+        let pet = layout.node(WatchComponentId::Pet.path()).unwrap();
+
+        for target in [
+            TargetPath::new("watch.pet.art"),
+            TargetPath::new("watch.pet.effect"),
+            TargetPath::new("watch.pet.hit"),
+            TargetPath::new("watch.pet.speech"),
+        ] {
+            let target = layout.target(target).unwrap();
+            assert_rect_contains(pet.bounds, target.rect);
+            assert_rect_contains(target.clip, target.rect);
+        }
+    }
+
+    fn assert_rect_contains(outer: Rect, inner: Rect) {
+        assert!(
+            inner.x >= outer.x
+                && inner.y >= outer.y
+                && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
+                && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height),
+            "expected {outer:?} to contain {inner:?}"
         );
     }
 }

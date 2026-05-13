@@ -30,13 +30,8 @@ impl PetSceneLayout {
 pub struct PetScene;
 
 impl PetScene {
-    pub fn compute_layout(
-        id: WatchComponentId,
-        area: Rect,
-        vm: &WatchViewModel,
-        _ctx: &RenderContext,
-    ) -> PetSceneLayout {
-        let owner = id.path();
+    pub fn compute_layout(area: Rect, vm: &WatchViewModel, _ctx: &RenderContext) -> PetSceneLayout {
+        let owner = WatchComponentId::Pet.path();
         let speech_h = speech_rows(vm).min(area.height);
         let speech = if speech_h > 0 {
             Some(Rect::new(area.x, area.y, area.width, speech_h))
@@ -49,7 +44,7 @@ impl PetScene {
             area.width,
             area.height.saturating_sub(speech_h),
         );
-        let pet_art = pet_inner_rect_in_panel(content, vm);
+        let pet_art = clip_rect_to_area(pet_inner_rect_in_panel(content, vm), content);
         let habitat = area;
         let hit_area = content;
         let mut exclusions = Vec::new();
@@ -82,8 +77,8 @@ impl PetScene {
             TargetPath::new("watch.pet.hit"),
             owner,
             hit_area,
-            5,
-            area,
+            30,
+            content,
             TargetRole::HitArea,
         );
         insert_target(
@@ -91,8 +86,8 @@ impl PetScene {
             TargetPath::new("watch.pet.art"),
             owner,
             pet_art,
-            10,
-            area,
+            20,
+            content,
             TargetRole::PetArt,
         );
         insert_target(
@@ -101,7 +96,7 @@ impl PetScene {
             owner,
             pet_art,
             10,
-            area,
+            content,
             TargetRole::Effect,
         );
         if let Some(speech) = speech {
@@ -111,7 +106,7 @@ impl PetScene {
                 owner,
                 speech,
                 20,
-                area,
+                speech,
                 TargetRole::PetSpeech,
             );
         }
@@ -129,6 +124,23 @@ impl PetScene {
             effect_targets: vec![TargetPath::new("watch.pet.effect")],
         }
     }
+}
+
+fn clip_rect_to_area(rect: Rect, area: Rect) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::new(area.x, area.y, 0, 0);
+    }
+    let x = rect.x.clamp(area.x, area.x.saturating_add(area.width));
+    let y = rect.y.clamp(area.y, area.y.saturating_add(area.height));
+    let right = rect
+        .x
+        .saturating_add(rect.width)
+        .min(area.x.saturating_add(area.width));
+    let bottom = rect
+        .y
+        .saturating_add(rect.height)
+        .min(area.y.saturating_add(area.height));
+    Rect::new(x, y, right.saturating_sub(x), bottom.saturating_sub(y))
 }
 
 fn speech_rows(vm: &WatchViewModel) -> u16 {
@@ -163,11 +175,13 @@ fn insert_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::component::{TargetPath, TargetRole, WatchComponentId};
+    use crate::tui::component::{
+        hit_test, ComponentLayout, ComponentNodeLayout, TargetPath, TargetRole, WatchComponentId,
+    };
     use crate::tui::render_context::{RenderContext, WatchClock};
     use crate::tui::style::ColorCapability;
     use crate::tui::view_model::WatchViewModel;
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
 
     fn test_context() -> RenderContext {
         RenderContext::with_clock(
@@ -182,7 +196,7 @@ mod tests {
         let ctx = test_context();
         let area = Rect::new(10, 5, 40, 14);
 
-        let scene = PetScene::compute_layout(WatchComponentId::Pet, area, &vm, &ctx);
+        let scene = PetScene::compute_layout(area, &vm, &ctx);
 
         assert_eq!(scene.panel, area);
         assert_eq!(scene.speech, None);
@@ -224,7 +238,7 @@ mod tests {
         let ctx = test_context();
         let area = Rect::new(10, 5, 40, 14);
 
-        let scene = PetScene::compute_layout(WatchComponentId::Pet, area, &vm, &ctx);
+        let scene = PetScene::compute_layout(area, &vm, &ctx);
 
         assert_eq!(scene.speech, Some(Rect::new(10, 5, 40, 1)));
         assert_eq!(scene.content, Rect::new(10, 6, 40, 13));
@@ -235,5 +249,78 @@ mod tests {
         let speech = scene.target(TargetPath::new("watch.pet.speech")).unwrap();
         assert_eq!(speech.rect, scene.speech.unwrap());
         assert_eq!(speech.role, TargetRole::PetSpeech);
+    }
+
+    #[test]
+    fn pet_scene_layout_clips_art_inside_speech_active_min_height_panel() {
+        let mut vm = WatchViewModel::fixture();
+        vm.current_speech = Some("hello".into());
+        let ctx = test_context();
+        let area = Rect::new(6, 6, 40, 10);
+
+        let scene = PetScene::compute_layout(area, &vm, &ctx);
+
+        assert_eq!(scene.speech, Some(Rect::new(6, 6, 40, 1)));
+        assert_eq!(scene.content, Rect::new(6, 7, 40, 9));
+        assert_rect_contains(scene.panel, scene.pet_art);
+        assert_rect_contains(scene.content, scene.pet_art);
+
+        for target in [
+            TargetPath::new("watch.pet.art"),
+            TargetPath::new("watch.pet.effect"),
+        ] {
+            let target = scene.target(target).unwrap();
+            assert_rect_contains(scene.panel, target.rect);
+            assert_rect_contains(target.clip, target.rect);
+        }
+    }
+
+    #[test]
+    fn pet_scene_hit_target_wins_over_art_and_effect_targets() {
+        let vm = WatchViewModel::fixture();
+        let ctx = test_context();
+        let area = Rect::new(10, 5, 40, 14);
+        let scene = PetScene::compute_layout(area, &vm, &ctx);
+        let mut layout = ComponentLayout::new(area, crate::tui::component::LayoutMode::Wide);
+        layout
+            .insert_node(ComponentNodeLayout::leaf(
+                WatchComponentId::Pet.path(),
+                area,
+            ))
+            .unwrap();
+        for (path, target) in scene.targets {
+            layout.insert_target(path, target).unwrap();
+        }
+
+        let hit = hit_test(
+            &layout,
+            Position::new(scene.pet_art.x + 1, scene.pet_art.y + 1),
+        )
+        .unwrap();
+
+        assert_eq!(hit.target, TargetPath::new("watch.pet.hit"));
+    }
+
+    #[test]
+    fn pet_scene_layout_uses_stable_pet_owner_and_paths() {
+        let vm = WatchViewModel::fixture();
+        let ctx = test_context();
+        let scene = PetScene::compute_layout(Rect::new(10, 5, 40, 14), &vm, &ctx);
+
+        assert_eq!(scene.id, WatchComponentId::Pet.path());
+        assert!(scene
+            .targets
+            .values()
+            .all(|target| target.owner == scene.id));
+    }
+
+    fn assert_rect_contains(outer: Rect, inner: Rect) {
+        assert!(
+            inner.x >= outer.x
+                && inner.y >= outer.y
+                && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
+                && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height),
+            "expected {outer:?} to contain {inner:?}"
+        );
     }
 }

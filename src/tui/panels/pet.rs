@@ -7,7 +7,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::pet::animator::low_energy_lightness_multiplier;
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
-use crate::tui::component::{PetScene, PetSceneLayout, WatchComponentId};
+use crate::tui::component::{PetScene, PetSceneLayout};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, SemanticStyles};
@@ -72,7 +72,7 @@ impl Panel for PetPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
-        let scene = PetScene::compute_layout(WatchComponentId::Pet, area, vm, ctx);
+        let scene = PetScene::compute_layout(area, vm, ctx);
 
         // Pass 1: ambient backdrop. PR1 stub returns empty so this is a no-op.
         let now = ctx.clock.now_utc();
