@@ -1,7 +1,9 @@
 use crate::tui::component::{ComponentStyle, GradientToken, TextTone};
 use crate::tui::panels::bars::{bar_spans, build_spark_line};
+use crate::tui::panels::feed::build_feed_lines;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, xp_color};
+use crate::tui::view_model::WatchViewModel;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -224,6 +226,10 @@ impl<'a> FeedList<'a> {
         Self::new(lines)
     }
 
+    pub fn from_watch(vm: &'a WatchViewModel, max_rows: u16) -> Self {
+        Self::new(build_feed_lines(vm, max_rows))
+    }
+
     pub fn lines(&self) -> Vec<Line<'a>> {
         self.lines.clone()
     }
@@ -308,6 +314,31 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("first event"));
         assert!(!text.contains("second event"));
+    }
+
+    #[test]
+    fn feed_list_from_watch_uses_existing_feed_formatting() {
+        use crate::tui::style::{claude_color, codex_color};
+        use crate::tui::view_model::WatchViewModel;
+
+        let vm = WatchViewModel::fixture_with_events();
+        let lines = FeedList::from_watch(&vm, 3).lines();
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(text.contains("13:42"));
+        assert!(lines.iter().any(|line| line.spans.iter().any(|span| {
+            span.content.contains("claude-code") && span.style.fg == Some(claude_color())
+        })));
+
+        let vm = WatchViewModel::fixture_with_n_events(2);
+        let lines = FeedList::from_watch(&vm, 2).lines();
+        assert!(lines.iter().any(|line| line.spans.iter().any(|span| {
+            span.content.contains("codex") && span.style.fg == Some(codex_color())
+        })));
     }
 
     fn buffer_text(buf: &Buffer) -> String {
