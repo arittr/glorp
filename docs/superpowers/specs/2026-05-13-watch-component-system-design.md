@@ -89,6 +89,42 @@ renderer, habitat, speech, and effect targets.
 Taffy remains likely, but it is not the API. The first migration proves the
 backend-independent `ComponentLayout` contract before adding Taffy.
 
+## Styling Ergonomics
+
+The component system should provide Lip Gloss-class authoring ergonomics while
+remaining Ratatui-buffer-native underneath.
+
+The goal is declarative, composable styling for ordinary components: semantic
+surfaces, text roles, borders, padding, alignment, adaptive colors, gradients,
+and background policies. Future panel code should describe visual intent,
+instead of manually stitching together Ratatui `Style`, `Block`, `Paragraph`,
+and per-cell fill logic at every callsite.
+
+The style layer is a Glorp facade, not a second renderer. It may borrow ideas
+or helpers from `lipgloss-rs`, but ordinary watch rendering must still write to
+Ratatui buffers through `ComponentNodeLayout` and `GeometryTarget`s. That keeps
+Preview Lab, `tachyonfx`, mouse hit testing, and layout JSON grounded in the
+same geometry artifact.
+
+Expected authoring shape:
+
+```rust
+Panel::new("today")
+    .surface(Surface::Elevated)
+    .border(BorderTone::Accent)
+    .padding(Insets::horizontal(2))
+    .child(TextRow::new("tokens", vm.today.tokens).tone(TextTone::Primary));
+
+ProgressBar::new(vm.progress.stage_fraction)
+    .gradient(GradientToken::Xp)
+    .empty_tone(TextTone::Subtle);
+```
+
+The exact API can change, but the implementation plan should include a proof
+task: migrate one ordinary panel so borders, padding, background, text tone, and
+gradient intent are expressed through the Glorp style facade rather than
+callsite-level Ratatui plumbing.
+
 ## Architecture
 
 The watch pipeline becomes:
