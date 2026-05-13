@@ -198,14 +198,28 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
         ],
     );
 
+    let vitals_height = intrinsic_height(VitalsPanel.preferred_constraint(vm));
+    let bio_height = intrinsic_height(BioCardPanel.preferred_constraint(vm));
+    let lower_left_height = vitals_height
+        .saturating_add(COLUMN_GAP)
+        .saturating_add(bio_height);
+    let lower_band_height = lower_left_height.max(bounded_feed_height(vm));
+
     let left = taffy_backend::allocate_stack(
         body[0],
         &[
             RowSpec::fill(1),
             RowSpec::fixed(COLUMN_GAP),
-            RowSpec::fixed(intrinsic_height(VitalsPanel.preferred_constraint(vm))),
+            RowSpec::fixed(lower_band_height),
+        ],
+    );
+    let left_info = taffy_backend::allocate_stack(
+        left[2],
+        &[
+            RowSpec::fixed(vitals_height),
             RowSpec::fixed(COLUMN_GAP),
-            RowSpec::fixed(intrinsic_height(BioCardPanel.preferred_constraint(vm))),
+            RowSpec::fixed(bio_height),
+            RowSpec::fill(1),
         ],
     );
     let right = taffy_backend::allocate_stack(
@@ -214,18 +228,18 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
             RowSpec::fixed(intrinsic_height(TodayPanel.preferred_constraint(vm))),
             RowSpec::fixed(COLUMN_GAP),
             RowSpec::fixed(intrinsic_height(ProgressPanel.preferred_constraint(vm))),
-            RowSpec::fixed(COLUMN_GAP),
-            RowSpec::fixed(bounded_feed_height(vm)),
             RowSpec::fill(1),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(lower_band_height),
         ],
     );
 
     insert_pet_node(layout, left[0], vm, ctx);
-    insert_visible_node(layout, WatchComponentId::Vitals, left[2]);
-    insert_visible_node(layout, WatchComponentId::Bio, left[4]);
+    insert_visible_node(layout, WatchComponentId::Vitals, left_info[0]);
+    insert_visible_node(layout, WatchComponentId::Bio, left_info[2]);
     insert_visible_node(layout, WatchComponentId::Today, right[0]);
     insert_visible_node(layout, WatchComponentId::Progress, right[2]);
-    insert_visible_node(layout, WatchComponentId::Feed, right[4]);
+    insert_visible_node(layout, WatchComponentId::Feed, right[5]);
 }
 
 fn layout_compact(
@@ -524,7 +538,7 @@ mod tests {
         );
         assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(50, 12, 64, 3)
+            Rect::new(50, 22, 64, 8)
         );
 
         let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
@@ -542,6 +556,25 @@ mod tests {
         assert_eq!(pet_art.rect.width, 13);
         assert_eq!(pet_art.rect.height, 10);
         assert_eq!(pet_art.rect, Rect::new(19, 6, 13, 10));
+    }
+
+    #[test]
+    fn layout_watch_wide_aligns_feed_with_left_info_stack() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 180, 50), &vm);
+        let vitals = layout.node(WatchComponentId::Vitals.path()).unwrap().bounds;
+        let bio = layout.node(WatchComponentId::Bio.path()).unwrap().bounds;
+        let feed = layout.node(WatchComponentId::Feed.path()).unwrap().bounds;
+
+        assert_eq!(
+            feed.y, vitals.y,
+            "feed should start on the same row as the lower-left pane stack"
+        );
+        assert_eq!(
+            feed.y.saturating_add(feed.height),
+            bio.y.saturating_add(bio.height),
+            "feed should end on the same row as the lower-left pane stack"
+        );
     }
 
     #[test]
