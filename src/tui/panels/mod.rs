@@ -25,6 +25,9 @@ pub use progress::ProgressPanel;
 pub use today::TodayPanel;
 pub use vitals::VitalsPanel;
 
+/// Compatibility trait for panels that have not moved fully into component
+/// widgets. The old public `Panel` name is intentionally gone so this cannot
+/// be confused with `component::ComponentPanel`.
 pub trait LegacyPanel {
     /// Preferred layout constraint for this panel given the current view
     /// model. Panels that need exact sizing return `Constraint::Length(n)`;

@@ -111,7 +111,6 @@ fn row_rect(area: Rect, index: u16) -> Rect {
     Rect::new(area.x, area.y + index, area.width, 1)
 }
 
-/// Duplicated from `layout::format_tokens_full` — T7 will deduplicate when the old path is deleted.
 fn format_tokens_full(n: f64) -> String {
     let n = n.round() as i64;
     if n.abs() >= 1_000 {
@@ -135,7 +134,6 @@ fn format_tokens_full(n: f64) -> String {
     }
 }
 
-/// Duplicated from `layout::format_signed_tokens_short` — T7 will deduplicate when the old path is deleted.
 fn format_signed_tokens_short(n: f64) -> String {
     let abs = n.abs();
     let unit = if abs >= 1_000_000.0 {

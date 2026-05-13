@@ -112,12 +112,20 @@ fn ordinary_panels_use_component_widgets_instead_of_ratatui_blocks() {
 
 #[test]
 fn watch_layout_no_longer_contains_manual_render_wide_or_pet_panel_rect() {
-    let source = std::fs::read_to_string("src/tui/layout.rs").unwrap();
-    assert!(!source.contains("fn render_wide("));
-    assert!(!source.contains("fn render_compact("));
-    assert!(!source.contains("pub fn pet_panel_rect("));
-    assert!(source.contains("layout_watch("));
-    assert!(source.contains("render_watch_layout("));
+    let layout_source = std::fs::read_to_string("src/tui/layout.rs").unwrap();
+    assert!(!layout_source.contains("fn render_wide("));
+    assert!(!layout_source.contains("fn render_compact("));
+    assert!(!layout_source.contains("pub fn pet_panel_rect("));
+    assert!(layout_source.contains("layout_watch("));
+    assert!(layout_source.contains("render_watch_layout("));
+
+    let today_source = std::fs::read_to_string("src/tui/panels/today.rs").unwrap();
+    assert!(!today_source.contains("layout::format_tokens_full"));
+    assert!(!today_source.contains("layout::format_signed_tokens_short"));
+
+    let legacy_panel_source = std::fs::read_to_string("src/tui/panels/mod.rs").unwrap();
+    assert!(!legacy_panel_source.contains("pub trait Panel"));
+    assert!(legacy_panel_source.contains("pub trait LegacyPanel"));
 }
 
 #[test]

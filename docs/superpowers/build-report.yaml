@@ -171,7 +171,7 @@ acceptance_audit:
         code:
           - src/commands/watch.rs starts the Rust TUI.
           - src/tui/app.rs handles q/help/refresh, roughly one-minute usage polling, animation ticks, poll/render separation, and terminal restore guard.
-          - src/tui/layout.rs renders wide side-by-side and compact layouts with pet/vitals/activity/helper/error surfaces.
+          - src/tui/layout.rs renders the outer frame/overlays and delegates watch geometry/rendering through component layout/render paths with pet, vitals, today, progress, feed, and bio surfaces.
         tests:
           - tests/watch_integration.rs covers real PetState/UsageStore watch view models and refresh polling instead of fixture activity.
           - tests/tui_render.rs covers wide/compact/small-height rendering, blocked provider state, polling updates, help/evolution/hatch overlays, and refresh/interval polling path.
