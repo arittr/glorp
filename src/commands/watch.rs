@@ -143,15 +143,40 @@ pub(crate) fn build_watch_view_model_at(
         ),
         wander_offset_x: crate::pet::animator::compute_wander_offset(now),
         breath_offset_y: crate::pet::animator::compute_breath_offset(Some(species), now),
-        // TODO(Task 8): replace with real ProgressView computed from state
-        progress: ProgressView {
-            stage_label: stage_label(species, stage).to_string(),
-            next_stage_label: String::new(),
-            fraction: 0.0,
-            xp_in_stage: 0.0,
-            xp_to_next: 1.0,
-            rate_per_hour: 0.0,
-            is_max_stage: false,
+        progress: {
+            let ema_events = usage_store.events_within(Duration::hours(48), now)?;
+            let rate_per_hour = progress_rate_ema(&ema_events, now);
+            let is_max = matches!(stage, Stage::S6);
+            let xp_to_next = next_stage_xp_target(stage);
+            let xp_in_stage = state.xp;
+            let fraction = if xp_to_next <= 0.0 || is_max {
+                1.0
+            } else {
+                (xp_in_stage / xp_to_next).clamp(0.0, 1.0) as f32
+            };
+            let next_stage_label = if is_max {
+                "—".to_string()
+            } else {
+                let next = match stage {
+                    Stage::S0 => Stage::S1,
+                    Stage::S1 => Stage::S2,
+                    Stage::S2 => Stage::S3,
+                    Stage::S3 => Stage::S4,
+                    Stage::S4 => Stage::S5,
+                    Stage::S5 => Stage::S6,
+                    Stage::S6 => Stage::S6,
+                };
+                stage_label(species, next).to_string()
+            };
+            ProgressView {
+                stage_label: stage_label(species, stage).to_string(),
+                next_stage_label,
+                fraction,
+                xp_in_stage,
+                xp_to_next,
+                rate_per_hour,
+                is_max_stage: is_max,
+            }
         },
         bio: {
             let age = now - state.created_at;
@@ -722,6 +747,55 @@ mod tests {
 
         let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
         assert_eq!(vm.bio.age_label, "0d 4h");
+    }
+
+    #[test]
+    fn build_watch_view_model_populates_progress_view() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut store = UsageStore::open(&db_path).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store
+            .insert_event(&sample_event_at_for_test(now, 50_000.0))
+            .unwrap();
+        drop(store);
+
+        let mut state = PetState::new_for_test("test", "Mochi");
+        state.pet.generated_species = "fuzz".to_string();
+        state.stage = "s4".to_string();
+        state.xp = 8.5; // 61% toward S4 target of 14.0
+
+        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        assert_eq!(vm.progress.stage_label, "fuzz");
+        assert_eq!(vm.progress.next_stage_label, "archfuzz");
+        assert!(
+            vm.progress.fraction > 0.5 && vm.progress.fraction < 0.7,
+            "expected fraction in (0.5, 0.7), got {}",
+            vm.progress.fraction
+        );
+        assert!(
+            vm.progress.rate_per_hour > 0.0,
+            "expected positive rate, got {}",
+            vm.progress.rate_per_hour
+        );
+        assert!(!vm.progress.is_max_stage);
+    }
+
+    #[test]
+    fn build_watch_view_model_progress_at_s6_is_max_stage() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        UsageStore::open(&db_path).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+        let mut state = PetState::new_for_test("test", "Mochi");
+        state.pet.generated_species = "fuzz".to_string();
+        state.stage = "s6".to_string();
+        state.xp = 100.0;
+
+        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        assert!(vm.progress.is_max_stage);
+        assert_eq!(vm.progress.next_stage_label, "—");
     }
 
     #[test]
