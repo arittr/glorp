@@ -762,7 +762,9 @@ fn shutdown_drops_worker_thread_cleanly() {
 /// terminal width and section dividers fully filling the right column.
 /// Anchored well above `COMPACT_THRESHOLD` so the wide composition is the
 /// path under test.
-const WIDE_TEST_WIDTH: u16 = 140;
+// Matches the layout's MAX_FRAME_WIDTH so the frame fills the terminal exactly
+// — keeps existing corner-position assertions valid without centering padding.
+const WIDE_TEST_WIDTH: u16 = 110;
 
 #[test]
 fn wide_layout_every_row_fills_full_terminal_width() {
@@ -875,70 +877,39 @@ fn wide_layout_section_dividers_all_end_at_same_right_column() {
 }
 
 #[test]
-fn watch_wide_120x32_has_no_left_column_dead_bands() {
-    let vm = WatchViewModel::fixture();
-    let backend = TestBackend::new(120, 32);
+fn watch_wide_bio_bottom_aligns_with_feed_bottom() {
+    // The wide layout anchors both bio and feed to the bottom of their columns,
+    // so the last bio row (age) sits on the same terminal row as the last feed
+    // event. Regression guard.
+    let vm = WatchViewModel::fixture_with_n_events(3);
+    let backend = TestBackend::new(110, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let buf = terminal.backend().buffer();
 
-    // Find the row that contains "bio" to anchor the dead-band check.
-    let mut bio_y: Option<u16> = None;
-    for y in 1..buf.area.height {
-        let row: String = (0..buf.area.width)
+    let row_string = |y: u16| -> String {
+        (0..buf.area.width)
             .filter_map(|x| buf.cell(Position::new(x, y)))
             .map(|c| c.symbol().to_string())
-            .collect();
-        if row.contains("bio") {
-            bio_y = Some(y);
-            break;
+            .collect()
+    };
+
+    let mut age_y: Option<u16> = None;
+    let mut last_feed_event_y: Option<u16> = None;
+    for y in 1..buf.area.height - 1 {
+        let row = row_string(y);
+        if row.contains("age") && row.contains("d") {
+            age_y = Some(y);
+        }
+        if row.contains("added") {
+            last_feed_event_y = Some(y);
         }
     }
-
-    if let Some(bio_y) = bio_y {
-        // For each row below bio (excluding the outer frame), scan the left-
-        // column cells (cols 1..=39 inside the frame). A "dead row" is one where
-        // every cell in that range is whitespace.
-        let dead_rows: Vec<u16> = (bio_y + 1..buf.area.height - 1)
-            .filter(|&y| {
-                (1u16..=39).all(|x| {
-                    buf.cell(Position::new(x, y))
-                        .map(|c| c.symbol().chars().all(|ch| ch == ' ' || ch == '·'))
-                        .unwrap_or(true)
-                })
-            })
-            .collect();
-        assert!(
-            dead_rows.is_empty(),
-            "left column must have no dead rows below bio panel (got rows {dead_rows:?})"
-        );
-    }
-}
-
-#[test]
-fn watch_wide_120x32_feed_bounded_at_seven_rows() {
-    let vm = WatchViewModel::fixture_with_n_events(20); // way more than the cap
-    let backend = TestBackend::new(120, 32);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
-    let buf = terminal.backend().buffer();
-
-    // Count rows that look like feed event rows. The fixture text is
-    // "<source> added 1.0k effective tokens"; use "added" as the
-    // discriminator so we don't accidentally count TodayPanel source rows
-    // that also contain "claude-code" / "codex".
-    let feed_rows = (0..buf.area.height)
-        .filter(|&y| {
-            let line: String = (0..buf.area.width)
-                .filter_map(|x| buf.cell(Position::new(x, y)))
-                .map(|c| c.symbol().to_string())
-                .collect();
-            line.contains("added")
-        })
-        .count();
-    assert!(
-        feed_rows <= 6,
-        "feed must not render more than 6 events, got {feed_rows}"
+    let age_y = age_y.expect("bio age row");
+    let last_feed_event_y = last_feed_event_y.expect("last feed event row");
+    assert_eq!(
+        age_y, last_feed_event_y,
+        "bio's age row and the last feed event must sit on the same terminal row"
     );
 }
 

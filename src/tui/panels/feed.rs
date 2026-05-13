@@ -13,22 +13,21 @@ pub struct FeedPanel;
 
 impl Panel for FeedPanel {
     fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
-        // 1 row for the TOP border/title + one row per event, capped so the
-        // panel doesn't hog vertical space when there are many events. Extra
-        // space goes to the trailing spacer in render_column_with_spacing,
-        // pushing helpers + empty area to the bottom of the column.
-        const MAX_EVENT_ROWS: u16 = 6;
-        let events = (vm.recent_events.len() as u16).clamp(2, MAX_EVENT_ROWS);
+        // Minimum height that shows the title + at least 2 events. The
+        // wide-mode layout passes a Min(0) constraint that grows the feed
+        // rect to fill the entire band, so this only matters in compact mode.
+        let events = (vm.recent_events.len() as u16).max(2);
         Constraint::Length(events + 1)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
-        const MAX_EVENT_ROWS: u16 = 6;
         let block = Block::default().borders(Borders::TOP).title(" feed ");
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let lines = build_feed_lines(vm, inner.height.min(MAX_EVENT_ROWS));
+        // Render whatever fits in the allocated rect — feed grows to fill
+        // its rect in wide mode and shrinks to fit the event count in compact.
+        let lines = build_feed_lines(vm, inner.height);
         Paragraph::new(lines).render(inner, buf);
     }
 }
@@ -182,17 +181,12 @@ mod tests {
     }
 
     #[test]
-    fn feed_panel_caps_at_six_events() {
+    fn feed_panel_clamps_to_allocated_rect_height() {
+        // Feed no longer has a hard event cap; it renders whatever fits in the
+        // allocated rect. With 12 events and a 7-row terminal (inner.height=6),
+        // we expect ≤ 6 events to render — the rect, not a const, is the limit.
         let vm = WatchViewModel::fixture_with_n_events(12);
         let panel = FeedPanel;
-        // Constraint must be 1 border + 6 events regardless of vm size.
-        assert_eq!(
-            panel.preferred_constraint(&vm),
-            Constraint::Length(7),
-            "1 border + 6 events, even when vm has 12"
-        );
-        // Render into a terminal sized to match the constraint (7 rows).
-        // inner.height = 6, so build_feed_lines receives max_rows=6.
         let backend = TestBackend::new(60, 7);
         let mut terminal = Terminal::new(backend).unwrap();
         let ctx = test_context();
@@ -200,7 +194,6 @@ mod tests {
             .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
-        // Count rows that look like event rows (contain "13:" timestamp pattern).
         let event_rows = (0..buf.area().height)
             .filter(|&y| {
                 let line: String = (0..buf.area().width)
@@ -211,7 +204,7 @@ mod tests {
             .count();
         assert!(
             event_rows <= 6,
-            "feed must not render more than 6 events, got {event_rows}"
+            "feed must not render more events than fit; got {event_rows} in a 6-row inner"
         );
     }
 

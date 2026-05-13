@@ -23,6 +23,42 @@ const WIDE_LEFT_COL: u16 = 40;
 /// Gutter width between left and right columns in the wide layout.
 const WIDE_GUTTER: u16 = 4;
 
+/// Maximum frame dimensions. The layout is designed against these sizes;
+/// terminals larger than this center the frame and leave the surrounding
+/// space empty rather than stretching panels into unbalanced negative space.
+/// Sized to wrap snug around content (pet ~10 rows + vitals 4 + bio 3 + gaps,
+/// plus breathing room) so the inner area doesn't develop large dead bands.
+const MAX_FRAME_WIDTH: u16 = 110;
+const MAX_FRAME_HEIGHT: u16 = 24;
+
+/// Vertical padding inside the rounded frame, between the chrome border and
+/// the first/last panel. Keeps the today/bio rows from kissing the border.
+const INNER_VPAD: u16 = 1;
+
+/// Height of the top band in wide mode: pet column on the left, today +
+/// progress on the right. Sized to fit today(6) + gap(1) + progress(3) + 2
+/// rows of breathing room, matching the pet (10 rows of art).
+const WIDE_TOP_BAND: u16 = 12;
+
+/// Returns a sub-rect of `terminal_area` that is at most
+/// `MAX_FRAME_WIDTH` × `MAX_FRAME_HEIGHT`, centered within the terminal.
+///
+/// The height cap only applies in wide mode (when the bounded width allows
+/// the two-column layout). Compact mode needs the full terminal height so
+/// the stacked panels can fit without clipping vitals/today content.
+pub(crate) fn bounded_frame_rect(terminal_area: Rect) -> Rect {
+    let width = terminal_area.width.min(MAX_FRAME_WIDTH);
+    let is_wide = (width as usize) >= COMPACT_THRESHOLD + 2;
+    let height = if is_wide {
+        terminal_area.height.min(MAX_FRAME_HEIGHT)
+    } else {
+        terminal_area.height
+    };
+    let x = terminal_area.x + terminal_area.width.saturating_sub(width) / 2;
+    let y = terminal_area.y + terminal_area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width, height)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Wide,
@@ -52,17 +88,16 @@ pub fn render_watch_frame_with_context(
         .border_style(Style::default().fg(p.accent.rgb))
         .style(styles.body);
 
-    // Decide mode by terminal width (after subtracting frame borders).
-    let mode = if (frame.area().width as usize) >= COMPACT_THRESHOLD + 2 {
+    // Pin the frame to MAX_FRAME_WIDTH × MAX_FRAME_HEIGHT; oversized terminals
+    // get padding around the centered frame so panel proportions stay tuned.
+    let frame_rect = bounded_frame_rect(frame.area());
+
+    // Decide mode by the bounded frame width (after subtracting borders).
+    let mode = if (frame_rect.width as usize) >= COMPACT_THRESHOLD + 2 {
         Mode::Wide
     } else {
         Mode::Compact
     };
-
-    // Fill the full terminal height with the outer chrome so resizing the
-    // terminal extends the frame to the bottom of the window. Trailing
-    // space inside the frame is absorbed by the layout's bottom spacer.
-    let frame_rect = frame.area();
 
     let inner = outer.inner(frame_rect);
     frame.render_widget(outer, frame_rect);
@@ -84,16 +119,30 @@ pub(crate) fn inner_frame_rect(frame_area: Rect) -> Rect {
 pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
     use crate::tui::panels::pet::pet_inner_rect_in_panel;
 
-    let mode = if (frame_area.width as usize) >= COMPACT_THRESHOLD + 2 {
+    // Mirror render_watch_frame_with_context: pin the chrome to the bounded
+    // rect before splitting, so tachyonfx scopes to where the pet actually lives.
+    let bounded = bounded_frame_rect(frame_area);
+    let mode = if (bounded.width as usize) >= COMPACT_THRESHOLD + 2 {
         Mode::Wide
     } else {
         Mode::Compact
     };
 
-    let inner = inner_frame_rect(frame_area);
+    let raw_inner = inner_frame_rect(bounded);
 
     match mode {
         Mode::Wide => {
+            // Mirror render_wide: strip the top/bottom INNER_VPAD, split into
+            // body columns, then take band 1 of the left column.
+            let padded = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(INNER_VPAD),
+                    Constraint::Min(0),
+                    Constraint::Length(INNER_VPAD),
+                ])
+                .split(raw_inner)[1];
+
             let body = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -101,39 +150,31 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
                     Constraint::Length(WIDE_GUTTER),
                     Constraint::Min(50),
                 ])
-                .split(inner);
+                .split(padded);
             let left_col = body[0];
 
-            let left = Layout::default()
+            let left_bands = Layout::default()
                 .direction(Direction::Vertical)
-                .flex(Flex::Start)
-                .constraints([
-                    PetPanel.preferred_constraint(vm), // Fill(1)
-                    Constraint::Length(COLUMN_GAP),
-                    VitalsPanel.preferred_constraint(vm), // Length(4)
-                    Constraint::Length(COLUMN_GAP),
-                    BioCardPanel.preferred_constraint(vm), // Length(3)
-                ])
+                .constraints([Constraint::Length(WIDE_TOP_BAND), Constraint::Min(0)])
                 .split(left_col);
 
-            pet_inner_rect_in_panel(left[0], vm)
+            pet_inner_rect_in_panel(left_bands[0], vm)
         }
         Mode::Compact => {
             let stack = Layout::default()
                 .direction(Direction::Vertical)
                 .flex(Flex::Start)
                 .constraints([
-                    PetPanel.preferred_constraint(vm), // Fill(1)
-                    Constraint::Length(COLUMN_GAP),
+                    PetPanel.preferred_constraint(vm),    // Fill(1)
                     VitalsPanel.preferred_constraint(vm), // Length(4)
                     Constraint::Length(COLUMN_GAP),
                     TodayPanel.preferred_constraint(vm), // Length(6)
                     Constraint::Length(COLUMN_GAP),
                     ProgressPanel.preferred_constraint(vm), // Length(3)
                     Constraint::Length(COLUMN_GAP),
-                    FeedPanel.preferred_constraint(vm), // Length(7)
+                    FeedPanel.preferred_constraint(vm), // Length(events+1)
                 ])
-                .split(inner);
+                .split(raw_inner);
 
             pet_inner_rect_in_panel(stack[0], vm)
         }
@@ -191,18 +232,37 @@ fn layout_and_render(
     }
 }
 
-/// Wide layout: two columns.
+/// Wide layout: two columns with bio + feed both anchored to the column bottom.
 ///
-/// Left column (fixed 40 cells): PetPanel (Fill) → VitalsPanel → BioCardPanel.
-/// Gutter (4 cells): empty space.
-/// Right column (remaining): TodayPanel → ProgressPanel packed top, slack
-/// absorbed by Min(0) between progress and feed, FeedPanel anchored at bottom.
+/// ```text
+/// ╭ title ──────────────────────────────────────╮
+/// │                                              │  ← INNER_VPAD
+/// │ [pet]              today                     │
+/// │ [pet]              progress                  │
+/// │ vitals             ...                       │
+/// │ bio (bottom)       feed (bottom)             │  ← bio.bottom == feed.bottom
+/// │                                              │  ← INNER_VPAD
+/// ╰ footer ──────────────────────────────────────╯
+/// ```
+///
+/// Bio anchors at the bottom of the left column; feed anchors at the bottom
+/// of the right column. Their bottoms always align (the column heights match).
+/// Trailing slack absorbs the difference between the columns' content heights.
 fn render_wide(
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
     vm: &WatchViewModel,
     ctx: &RenderContext,
 ) {
+    let padded = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(INNER_VPAD),
+            Constraint::Min(0),
+            Constraint::Length(INNER_VPAD),
+        ])
+        .split(area)[1];
+
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -210,30 +270,33 @@ fn render_wide(
             Constraint::Length(WIDE_GUTTER),
             Constraint::Min(50),
         ])
-        .split(area);
+        .split(padded);
 
     let left_col = body[0];
     let right_col = body[2];
 
+    // Left column: pet (Fill, takes leftover at top) → vitals → bio (anchored
+    // at the very bottom of the column).
     let left = Layout::default()
         .direction(Direction::Vertical)
         .flex(Flex::Start)
         .constraints([
-            PetPanel.preferred_constraint(vm), // Fill(1) — expands to fill column
+            PetPanel.preferred_constraint(vm),    // Fill(1)
+            VitalsPanel.preferred_constraint(vm), // Length(4)
             Constraint::Length(COLUMN_GAP),
-            VitalsPanel.preferred_constraint(vm), // Length(4) — anchored below Fill
-            Constraint::Length(COLUMN_GAP),
-            BioCardPanel.preferred_constraint(vm), // Length(3) — anchored at bottom
+            BioCardPanel.preferred_constraint(vm), // Length(3) — bottom anchor
         ])
         .split(left_col);
 
-    // PetPanel assumes its area is at least PET_H (10) rows tall; skip if too small.
     if left[0].height >= 10 {
         PetPanel.render(left[0], buf, vm, ctx);
     }
-    VitalsPanel.render(left[2], buf, vm, ctx);
-    BioCardPanel.render(left[4], buf, vm, ctx);
+    VitalsPanel.render(left[1], buf, vm, ctx);
+    BioCardPanel.render(left[3], buf, vm, ctx);
 
+    // Right column: today + progress packed top, Min(0) absorbs slack,
+    // feed (Length-sized to its event count) anchored at the bottom so its
+    // last visible row aligns with bio's last visible row.
     let right = Layout::default()
         .direction(Direction::Vertical)
         .flex(Flex::Start)
@@ -241,8 +304,8 @@ fn render_wide(
             TodayPanel.preferred_constraint(vm), // Length(6)
             Constraint::Length(COLUMN_GAP),
             ProgressPanel.preferred_constraint(vm), // Length(3)
-            Constraint::Min(0), // absorbs slack; pushes feed to the bottom
-            FeedPanel.preferred_constraint(vm), // Length(7) or less — anchored at bottom
+            Constraint::Min(0),                     // slack between progress and feed
+            FeedPanel.preferred_constraint(vm),     // Length(events+1) — bottom anchor
         ])
         .split(right_col);
 
@@ -406,8 +469,9 @@ mod render_compact_tests {
     #[test]
     fn render_compact_draws_rounded_frame() {
         // Width 60 < COMPACT_THRESHOLD (104) → compact mode.
-        // Height 40 gives Fill(1) PetPanel ≥ 10 rows so pet.rs clamp is safe.
-        let backend = TestBackend::new(60, 40);
+        // Height 30 ≤ MAX_FRAME_HEIGHT (34) so the frame fills the terminal
+        // (no centering padding) and the rounded corner sits at row 0.
+        let backend = TestBackend::new(60, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let vm = WatchViewModel::fixture();
         terminal
@@ -508,7 +572,9 @@ mod render_wide_tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    const TEST_HEIGHT: u16 = 30;
+    // Height ≤ MAX_FRAME_HEIGHT keeps the frame matching the terminal exactly
+    // (no centering padding) so corner-position assertions stay simple.
+    const TEST_HEIGHT: u16 = 24;
 
     fn render_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
@@ -565,15 +631,26 @@ mod render_wide_tests {
     }
 
     #[test]
-    fn render_wide_frame_spans_full_width_and_terminal_height() {
-        let test_width: u16 = 140;
-        let buf = render_buffer(test_width, TEST_HEIGHT);
+    fn render_wide_frame_spans_bounded_width_and_terminal_height() {
+        // 110 == MAX_FRAME_WIDTH; 24 == MAX_FRAME_HEIGHT. Frame matches the
+        // terminal exactly so corners sit at (0,0) and bottom.
+        let buf = render_buffer(110, 24);
         assert_eq!(buf[(0u16, 0u16)].symbol(), "╭");
-        assert_eq!(buf[(test_width - 1, 0u16)].symbol(), "╮");
-        // Frame fills the full terminal height: bottom border sits on the
-        // last row of the terminal.
-        assert_eq!(buf[(0u16, TEST_HEIGHT - 1)].symbol(), "╰");
-        assert_eq!(buf[(test_width - 1, TEST_HEIGHT - 1)].symbol(), "╯");
+        assert_eq!(buf[(110 - 1, 0u16)].symbol(), "╮");
+        assert_eq!(buf[(0u16, 24 - 1)].symbol(), "╰");
+        assert_eq!(buf[(110 - 1, 24 - 1)].symbol(), "╯");
+    }
+
+    #[test]
+    fn oversized_terminal_pads_around_centered_frame() {
+        // Terminals larger than MAX_FRAME_WIDTH × MAX_FRAME_HEIGHT center the
+        // frame and leave the outer cells blank instead of stretching panels.
+        let buf = render_buffer(160, 50);
+        // The top-left cell of the terminal is empty (padding), not a corner.
+        assert_eq!(buf[(0u16, 0u16)].symbol(), " ");
+        // The frame's actual top-left corner sits at x = (160 - 110) / 2 = 25
+        // and y = (50 - 24) / 2 = 13.
+        assert_eq!(buf[(25u16, 13u16)].symbol(), "╭");
     }
 
     #[test]
@@ -616,9 +693,10 @@ mod render_wide_tests {
     #[test]
     fn compact_threshold_switches_modes() {
         // Just below threshold: compact; at threshold: wide.
-        // Use height 40 so Fill(1) PetPanel gets ≥ PET_H rows in compact mode.
-        let compact_buf = render_buffer((COMPACT_THRESHOLD - 1) as u16 + 2, 40); // +2 for outer frame
-        let wide_buf = render_buffer((COMPACT_THRESHOLD + 2) as u16 + 2, 40);
+        // Use height ≤ MAX_FRAME_HEIGHT so the frame matches the terminal and
+        // corners sit at (0, 0) without centering padding.
+        let compact_buf = render_buffer((COMPACT_THRESHOLD - 1) as u16 + 2, 24); // +2 for outer frame
+        let wide_buf = render_buffer((COMPACT_THRESHOLD + 2) as u16 + 2, 24);
 
         // Both should have a frame (╭ corner).
         assert_eq!(compact_buf[(0u16, 0u16)].symbol(), "╭");
@@ -694,12 +772,16 @@ mod render_wide_tests {
         let height = 32u16;
         // Find the row where "feed" section header appears.
         let feed_row = (0..height).find(|&y| {
-            let row: String = (0..120u16).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            let row: String = (0..120u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
             row.contains("feed")
         });
         // Find the row where "progress" section header appears.
         let progress_row = (0..height).find(|&y| {
-            let row: String = (0..120u16).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            let row: String = (0..120u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
             row.contains("progress")
         });
 

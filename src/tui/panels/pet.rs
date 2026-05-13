@@ -43,10 +43,8 @@ pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     // ensures min ≤ max so the rect collapses to `area`'s origin instead.
     let max_x = (area.x + area.width).saturating_sub(PET_W).max(area.x);
     let max_y = (area.y + area.height).saturating_sub(PET_H).max(area.y);
-    let x =
-        (cx as i32 + vm.wander_offset_x as i32).clamp(area.x as i32, max_x as i32) as u16;
-    let y =
-        (cy as i32 + vm.breath_offset_y as i32).clamp(area.y as i32, max_y as i32) as u16;
+    let x = (cx as i32 + vm.wander_offset_x as i32).clamp(area.x as i32, max_x as i32) as u16;
+    let y = (cy as i32 + vm.breath_offset_y as i32).clamp(area.y as i32, max_y as i32) as u16;
     Rect::new(x, y, PET_W, PET_H)
 }
 
