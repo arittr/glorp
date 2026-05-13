@@ -309,6 +309,32 @@ fn bio_view_renders_from_real_pet_state() {
     assert_eq!(vm.bio.age_label, "7d");
 }
 
+#[test]
+fn blocked_source_surfaces_via_source_health() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let usage_store = UsageStore::open(&usage_db).unwrap();
+    let now = OffsetDateTime::now_utc();
+    usage_store
+        .insert_diagnostic(&ProviderDiagnostic {
+            provider_surface: "codex".into(),
+            code: "blocked".into(),
+            message: "binary missing".into(),
+            recorded_at: now,
+        })
+        .unwrap();
+    drop(usage_store);
+
+    let state = PetState::new_for_test("test", "buddy");
+    let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
+    let codex_health = vm
+        .source_health
+        .iter()
+        .find(|s| s.name == "codex")
+        .unwrap();
+    assert_ne!(codex_health.status, SourceStatus::Ready);
+}
+
 fn mech_state() -> PetState {
     let mut state = PetState::new_for_test("servo-watch-seed", "bolt");
     state.pet.generated_species = "mech".into();
