@@ -284,7 +284,7 @@ mod render_compact_tests {
 
     #[test]
     fn render_compact_draws_rounded_frame() {
-        // Width 60 < COMPACT_THRESHOLD (104) → compact mode.
+        // Width 60 < COMPACT_THRESHOLD+2 (118) → compact mode.
         // Compact mode fills terminal height (no vertical centering padding)
         // and the rounded corner sits at row 0.
         let backend = TestBackend::new(60, 30);
@@ -352,7 +352,7 @@ mod render_compact_tests {
         vm.pet_art = rendered.lines;
         vm.pet_spans = rendered.spans;
 
-        // Width 80 < COMPACT_THRESHOLD+2 (106) → compact mode.
+        // Width 80 < COMPACT_THRESHOLD+2 (118) → compact mode.
         // Height 40 gives Fill(1) PetPanel ≥ 10 rows so the pet renders.
         let backend = TestBackend::new(80, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -424,8 +424,8 @@ mod render_wide_tests {
 
     #[test]
     fn render_wide_draws_rounded_frame() {
-        // Width 110 >= COMPACT_THRESHOLD (104) → wide mode.
-        let buf = render_buffer(110, TEST_HEIGHT);
+        // Width 124 >= COMPACT_THRESHOLD+2 (118) → wide mode.
+        let buf = render_buffer(124, TEST_HEIGHT);
         let top = row_string(&buf, 0);
         assert!(
             top.contains("╭"),
@@ -449,13 +449,13 @@ mod render_wide_tests {
 
     #[test]
     fn render_wide_frame_spans_bounded_width_and_terminal_height() {
-        // 110 == MAX_FRAME_WIDTH. Frame matches the
+        // 124 == MAX_FRAME_WIDTH. Frame matches the
         // terminal exactly so corners sit at (0,0) and bottom.
-        let buf = render_buffer(110, 23);
+        let buf = render_buffer(124, 23);
         assert_eq!(buf[(0u16, 0u16)].symbol(), "╭");
-        assert_eq!(buf[(110 - 1, 0u16)].symbol(), "╮");
+        assert_eq!(buf[(124 - 1, 0u16)].symbol(), "╮");
         assert_eq!(buf[(0u16, 23 - 1)].symbol(), "╰");
-        assert_eq!(buf[(110 - 1, 23 - 1)].symbol(), "╯");
+        assert_eq!(buf[(124 - 1, 23 - 1)].symbol(), "╯");
     }
 
     #[test]

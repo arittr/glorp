@@ -29,7 +29,7 @@ Six decisions locked during the brainstorm:
 
 1. **Habitat is an ambient scene.** Per-species sky glyphs + a floor row, painted behind the pet art, scaled in density by stage.
 2. **Pet column grows.** `WIDE_LEFT_COL: 40 → 52`. `MAX_FRAME_WIDTH: 110 → 124`. `COMPACT_THRESHOLD: 104 → 118`. Right column width unchanged.
-3. **Stage is visible in the frame chrome.** The outer frame fill character varies by stage tier: S0–S1 dotted, S2–S3 default, S4–S5 heavy, S6 alternating sparkle. Density of habitat glyphs also scales with stage.
+3. **Stage is visible in the frame chrome.** The outer frame fill character varies by stage tier: S0–S1 dotted, S2–S3 default, S4–S5 heavy, S6 sparkle. Density of habitat glyphs also scales with stage.
 4. **Chrome row drops the duplicate `fuzz · fuzz`.** New format: `glorp · {name} · {species} · {age} · {mood}`. Removes BOTH the inline "the {species}" suffix on the name AND the standalone stage-label span. At S4 of the fuzz species both span values rendered the literal word "fuzz", producing visible repetition. Stage information is already conveyed by the pet art and (per decision #3) the per-stage frame fill character — the textual stage label is redundant.
 5. **Feed shows only real events.** The two preview-fixture narrative lines are removed; the feed renders provider events only.
 6. **Other panels' rules stay uniform.** Only the outer frame chrome reflects stage. Today / progress / vitals / bio / feed all keep plain `─` rules.
@@ -161,11 +161,11 @@ The outer rounded frame's top and bottom edges' fill character varies by stage:
 | S0–S1 | `┄` | `╭ glorp · Mochi · fuzz · 1d · content ┄┄┄┄┄┄┄┄┄┄┄┄┄╮` |
 | S2–S3 | `─` | `╭ glorp · Mochi · fuzz · 12d · content ──────────────╮` |
 | S4–S5 | `━` | `╭ glorp · Mochi · fuzz · 18d · content ━━━━━━━━━━━━━╮` |
-| S6 | `✦✧` | `╭ glorp · Mochi · fuzz · 90d · content ✦✧✦✧✦✧✦✧✦✧✦✧✦╮` |
+| S6 | `✦` | `╭ glorp · Mochi · fuzz · 90d · content ✦✦✦✦✦✦✦✦✦✦✦✦✦╮` |
 
 The progression is intentionally non-linear: `┄` and `─` are deliberately close (early stages should feel quiet, almost interchangeable), while `━` and `✦✧` are dramatic jumps (mature stages should feel substantial, then mythic). The four tiers are not a smooth ramp — they are two registers of "quiet" and two of "loud", reinforcing the pet-art evolution rather than competing with it.
 
-Both top and bottom edges use the same character. S6's alternation always starts with `✦` and pads to even length; if width is odd, the leading char repeats once.
+Both top and bottom edges use the same character. (The original brainstorm sketched alternating `✦✧` for S6 — ratatui's Block border_set takes a single character per cell, so the implementation lands single-character `✦` and the alternating treatment becomes a follow-up requiring custom top/bottom rendering.)
 
 The corner glyphs (`╭`, `╮`, `╰`, `╯`) do not change. The title and footer text spans do not change beyond decision #4 (chrome row format).
 

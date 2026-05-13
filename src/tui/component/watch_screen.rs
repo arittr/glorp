@@ -13,8 +13,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Block;
 
-/// Smallest terminal width that uses the wide two-column layout.
-/// Below this threshold we fall back to the single-column compact layout.
+/// Smallest *terminal width* that uses the wide two-column layout is
+/// `COMPACT_THRESHOLD + 2` (the +2 accounts for the outer rounded-border cells).
+/// Below the resulting threshold of 118 cells we fall back to the single-column
+/// compact layout.
 pub const COMPACT_THRESHOLD: usize = 116;
 
 /// Left column width in the wide layout (pet + vitals column).
