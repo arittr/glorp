@@ -171,8 +171,12 @@ pub(crate) fn build_watch_view_model_at(
         wander_offset_x: crate::pet::animator::compute_wander_offset(now),
         breath_offset_y: crate::pet::animator::compute_breath_offset(Some(species), now),
         progress: {
-            let rate_events = usage_store.events_within(Duration::hours(1), now)?;
-            let rate_per_hour = progress_rate_per_hour(&rate_events, now);
+            let rate_per_hour: f64 = usage_store
+                .token_totals_by_source_between(now - Duration::hours(1), now)
+                .unwrap_or_default()
+                .iter()
+                .map(|(_, v)| *v)
+                .sum();
             let is_max = matches!(stage, Stage::S6);
             let xp_to_next = next_stage_xp_target(stage);
             let xp_in_stage = state.xp;
@@ -362,20 +366,6 @@ fn next_stage_xp_target(stage: Stage) -> f64 {
         Stage::S4 => 14.0,
         Stage::S5 | Stage::S6 => 60.0,
     }
-}
-
-/// Effective tokens observed in the trailing 60 minutes, expressed as a rate
-/// in tokens/hour. Simple sum (not an EMA): the display matches the user's
-/// mental model — "how much I've burned recently" — and decays to zero one
-/// hour after the user actually stops, instead of staying high for many
-/// hours after a heavy session ends.
-fn progress_rate_per_hour(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
-    let cutoff = now - Duration::hours(1);
-    events
-        .iter()
-        .filter(|e| e.observed_at >= cutoff)
-        .map(|e| e.effective_tokens)
-        .sum()
 }
 
 fn source_health(
@@ -726,36 +716,42 @@ mod tests {
     }
 
     #[test]
-    fn progress_rate_per_hour_empty_returns_zero() {
+    fn watch_progress_rate_attributes_to_bucket_at_not_observed_at() {
+        // Catchup smear: a delta polled "now" smears bucket_at back over 110
+        // minutes. The rate must reflect when the activity actually happened
+        // (bucket_at), not when the helper noticed it (observed_at) —
+        // otherwise a fat trailing report inflates the rate for an hour even
+        // though no new tokens are being burned.
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut store = UsageStore::open(&db_path).unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        assert_eq!(progress_rate_per_hour(&[], now), 0.0);
-    }
+        let catchup_observed_now_but_old_activity = NormalizedUsageEvent {
+            observed_at: now,
+            bucket_at: now - Duration::hours(3),
+            effective_tokens: 1_000_000.0,
+            ..NormalizedUsageEvent::for_test_at(now - Duration::hours(3), 1_000_000.0)
+        };
+        let recent = NormalizedUsageEvent {
+            observed_at: now,
+            bucket_at: now - Duration::minutes(15),
+            effective_tokens: 42_000.0,
+            ..NormalizedUsageEvent::for_test_at(now - Duration::minutes(15), 42_000.0)
+        };
+        store
+            .insert_event(&catchup_observed_now_but_old_activity)
+            .unwrap();
+        store.insert_event(&recent).unwrap();
+        drop(store);
 
-    #[test]
-    fn progress_rate_per_hour_sums_events_in_last_hour() {
-        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let recent_a = sample_event_at_for_test(now - Duration::minutes(5), 30_000.0);
-        let recent_b = sample_event_at_for_test(now - Duration::minutes(45), 70_000.0);
-        let rate = progress_rate_per_hour(&[recent_a, recent_b], now);
-        assert_eq!(rate, 100_000.0);
-    }
-
-    #[test]
-    fn progress_rate_per_hour_excludes_events_older_than_one_hour() {
-        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        // Two hours ago is outside the 60-minute window — even though the
-        // old EMA would have weighted this at ~80%, the new rate ignores it
-        // entirely so the display decays to zero an hour after activity stops.
-        let aged = sample_event_at_for_test(now - Duration::hours(2), 1_000_000.0);
-        let rate = progress_rate_per_hour(&[aged], now);
-        assert_eq!(rate, 0.0);
-    }
-
-    #[test]
-    fn progress_rate_per_hour_boundary_event_is_included() {
-        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let on_boundary = sample_event_at_for_test(now - Duration::hours(1), 12_345.0);
-        let rate = progress_rate_per_hour(&[on_boundary], now);
-        assert_eq!(rate, 12_345.0);
+        let mut state = PetState::new_for_test("test", "Mochi");
+        state.pet.generated_species = Species::Fuzz;
+        state.stage = Stage::S4;
+        state.xp = 5.0;
+        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        assert_eq!(
+            vm.progress.rate_per_hour, 42_000.0,
+            "catchup row with bucket_at 3h ago must NOT contribute to the rate"
+        );
     }
 }
