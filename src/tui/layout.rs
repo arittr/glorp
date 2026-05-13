@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn pet_effect_rect_returns_empty_rect_when_pet_art_target_is_absent() {
         let vm = WatchViewModel::fixture();
-        let rect = pet_effect_rect(Rect::new(0, 0, 72, 12), &vm);
+        let rect = pet_effect_rect(Rect::new(0, 0, 72, 9), &vm);
 
         assert_eq!(rect, Rect::new(0, 0, 0, 0));
     }

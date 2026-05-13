@@ -174,13 +174,37 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         &std::fs::read_to_string(run.out.join("frames/watch-compact-normal.layout.json")).unwrap(),
     )
     .unwrap();
-    assert!(compact_layout["targets"].get("watch.pet.art").is_none());
+    assert!(compact_layout["targets"]["watch.pet.art"].is_object());
+    assert!(
+        compact_layout["components"]["watch.feed"]["height"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "compact feed should have drawable height in the preview layout"
+    );
     assert!(compact_layout["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| decision["path"] == "watch.bio" && decision["reason"] == "CompactMode"));
+    assert!(compact_layout["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| decision["path"] == "watch.feed" && decision["reason"] == "RowLimit"));
+    assert!(!compact_layout["decisions"]
         .as_array()
         .unwrap()
         .iter()
         .any(|decision| decision["path"] == "watch.pet"
             && decision["reason"] == "InsufficientHeight"));
+
+    let compact_text =
+        std::fs::read_to_string(run.out.join("frames/watch-compact-normal.txt")).unwrap();
+    assert!(
+        compact_text.contains("feed"),
+        "compact preview text should include feed"
+    );
 }
 
 #[test]

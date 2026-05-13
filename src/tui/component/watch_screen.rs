@@ -41,6 +41,8 @@ pub const RIGHT_MIN_WIDTH: u16 = 50;
 pub const PET_RENDER_MIN_HEIGHT: u16 = 10;
 
 pub const FEED_MAX_HEIGHT: u16 = 8;
+pub const COMPACT_TODAY_MIN_HEIGHT: u16 = 4;
+pub const COMPACT_FEED_MIN_HEIGHT: u16 = 2;
 
 pub fn layout_watch(terminal_area: Rect, vm: &WatchViewModel) -> ComponentLayout {
     let ctx = RenderContext::new(ColorCapability::Truecolor);
@@ -236,14 +238,23 @@ fn layout_compact(
     layout: &mut ComponentLayout,
 ) {
     let vitals_height = intrinsic_height(VitalsPanel.preferred_constraint(vm));
-    let today_height = intrinsic_height(TodayPanel.preferred_constraint(vm));
+    let today_preferred_height = intrinsic_height(TodayPanel.preferred_constraint(vm));
     let progress_height = intrinsic_height(ProgressPanel.preferred_constraint(vm));
     let feed_preferred_height = bounded_feed_height(vm);
-    let fixed_critical_height = PET_RENDER_MIN_HEIGHT
-        .saturating_add(vitals_height)
-        .saturating_add(today_height)
-        .saturating_add(progress_height);
-    let mut remaining = area.height.saturating_sub(fixed_critical_height);
+    let today_min_height = today_preferred_height.min(COMPACT_TODAY_MIN_HEIGHT);
+    let feed_min_height = feed_preferred_height.min(COMPACT_FEED_MIN_HEIGHT);
+
+    let mut remaining = area.height;
+    let base_pet_height = PET_RENDER_MIN_HEIGHT.min(remaining);
+    remaining = remaining.saturating_sub(base_pet_height);
+    let vitals_height = vitals_height.min(remaining);
+    remaining = remaining.saturating_sub(vitals_height);
+    let mut today_height = today_min_height.min(remaining);
+    remaining = remaining.saturating_sub(today_height);
+    let progress_height = progress_height.min(remaining);
+    remaining = remaining.saturating_sub(progress_height);
+    let mut feed_height = feed_min_height.min(remaining);
+    remaining = remaining.saturating_sub(feed_height);
 
     let gap_height = if remaining >= COLUMN_GAP * 3 {
         remaining = remaining.saturating_sub(COLUMN_GAP * 3);
@@ -252,8 +263,17 @@ fn layout_compact(
         0
     };
 
-    let feed_height = feed_preferred_height.min(remaining);
-    remaining = remaining.saturating_sub(feed_height);
+    let today_extra = today_preferred_height
+        .saturating_sub(today_height)
+        .min(remaining);
+    today_height = today_height.saturating_add(today_extra);
+    remaining = remaining.saturating_sub(today_extra);
+
+    let feed_extra = feed_preferred_height
+        .saturating_sub(feed_height)
+        .min(remaining);
+    feed_height = feed_height.saturating_add(feed_extra);
+    remaining = remaining.saturating_sub(feed_extra);
 
     let hide_speech = vm.current_speech.is_some() && remaining == 0;
     let speech_extra = if vm.current_speech.is_some() && !hide_speech && remaining > 0 {
@@ -263,7 +283,7 @@ fn layout_compact(
         0
     };
 
-    let pet_height = PET_RENDER_MIN_HEIGHT
+    let pet_height = base_pet_height
         .saturating_add(speech_extra)
         .saturating_add(remaining);
 
@@ -282,6 +302,13 @@ fn layout_compact(
         .split(area);
 
     insert_hidden_bio(layout, area);
+    if today_preferred_height > today_height {
+        layout.decisions.push(LayoutDecision {
+            path: WatchComponentId::Today.path(),
+            reason: LayoutDecisionReason::RowLimit,
+            message: "today rows limited by compact layout height",
+        });
+    }
     if feed_preferred_height > feed_height {
         layout.decisions.push(LayoutDecision {
             path: WatchComponentId::Feed.path(),
@@ -301,7 +328,7 @@ fn layout_compact(
     insert_visible_node(layout, WatchComponentId::Vitals, stack[1]);
     insert_visible_node(layout, WatchComponentId::Today, stack[3]);
     insert_visible_node(layout, WatchComponentId::Progress, stack[5]);
-    insert_visible_node(layout, WatchComponentId::Feed, stack[7]);
+    insert_feed_node(layout, stack[7]);
 }
 
 fn insert_root_node(layout: &mut ComponentLayout, frame: Rect, content: Rect) {
@@ -324,6 +351,23 @@ fn insert_visible_node(layout: &mut ComponentLayout, id: WatchComponentId, bound
     layout
         .insert_node(ComponentNodeLayout::leaf(id.path(), bounds))
         .expect("component id is unique in watch layout");
+}
+
+fn insert_feed_node(layout: &mut ComponentLayout, bounds: Rect) {
+    let mut node = ComponentNodeLayout::leaf(WatchComponentId::Feed.path(), bounds);
+    if bounds.height == 0 {
+        node.visibility = VisibilityState::Hidden {
+            reason: LayoutDecisionReason::InsufficientHeight,
+        };
+        layout.decisions.push(LayoutDecision {
+            path: WatchComponentId::Feed.path(),
+            reason: LayoutDecisionReason::InsufficientHeight,
+            message: "feed hidden because compact layout has no drawable rows left",
+        });
+    }
+    layout
+        .insert_node(node)
+        .expect("feed component id is unique in watch layout");
 }
 
 fn insert_pet_node(
@@ -521,18 +565,18 @@ mod tests {
         );
         assert_eq!(
             layout.node(WatchComponentId::Today.path()).unwrap().bounds,
-            Rect::new(1, 15, 70, 6)
+            Rect::new(1, 15, 70, 4)
         );
         assert_eq!(
             layout
                 .node(WatchComponentId::Progress.path())
                 .unwrap()
                 .bounds,
-            Rect::new(1, 21, 70, 2)
+            Rect::new(1, 19, 70, 2)
         );
         assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(1, 23, 70, 0)
+            Rect::new(1, 21, 70, 2)
         );
 
         let bio = layout.node(WatchComponentId::Bio.path()).unwrap();
@@ -552,12 +596,18 @@ mod tests {
                         ..
                     },
                     LayoutDecision {
+                        path: today_path,
+                        reason: LayoutDecisionReason::RowLimit,
+                        ..
+                    },
+                    LayoutDecision {
                         path: feed_path,
                         reason: LayoutDecisionReason::RowLimit,
                         ..
                     },
                     ..
                 ] if *path == WatchComponentId::Bio.path()
+                    && *today_path == WatchComponentId::Today.path()
                     && *feed_path == WatchComponentId::Feed.path()
             ),
             "compact bio hide decision missing"

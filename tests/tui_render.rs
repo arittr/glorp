@@ -156,10 +156,22 @@ fn wide_layout_preserves_asymmetric_pet_hero_policy() {
 fn compact_layout_records_ordered_degradation_decisions() {
     let vm = WatchViewModel::fixture();
     let layout = glorp::tui::component::layout_watch(ratatui::layout::Rect::new(0, 0, 72, 24), &vm);
+    let feed = layout
+        .node(glorp::tui::component::WatchComponentId::Feed.path())
+        .expect("feed node");
+
     assert!(layout
         .decisions
         .iter()
         .any(|d| d.path.as_str() == "watch.bio"));
+    assert!(
+        feed.bounds.height > 0,
+        "compact feed should remain drawable at 72x24"
+    );
+    assert!(matches!(
+        feed.visibility,
+        glorp::tui::component::VisibilityState::Visible
+    ));
     assert!(layout
         .target(glorp::tui::component::TargetPath::new("watch.pet.art"))
         .is_some());
