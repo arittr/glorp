@@ -2,6 +2,7 @@
 pub mod dev_preview;
 pub mod doctor;
 pub mod init;
+pub mod menubar;
 pub mod rename;
 pub mod reset;
 pub mod status;

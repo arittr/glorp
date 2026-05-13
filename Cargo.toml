@@ -32,6 +32,42 @@ toml = "0.8"
 wait-timeout = "0.2"
 which = "7"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = [
+    "NSAttributedString",
+    "NSDictionary",
+    "NSGeometry",
+    "NSRunLoop",
+    "NSString",
+    "NSTimer",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.2", features = [
+    "NSAppearance",
+    "NSApplication",
+    "NSAttributedString",
+    "NSButton",
+    "NSColor",
+    "NSControl",
+    "NSFont",
+    "NSGraphics",
+    "NSImage",
+    "NSPopover",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScrollView",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSText",
+    "NSTextContainer",
+    "NSTextView",
+    "NSView",
+    "NSViewController",
+    "NSWindow",
+] }
+
 [dev-dependencies]
 assert_cmd = "2"
 insta = { version = "1", features = ["yaml"] }
