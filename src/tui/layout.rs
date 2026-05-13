@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::tui::component::watch_screen::{
-    bounded_frame_rect, COLUMN_GAP, COMPACT_THRESHOLD, INNER_VPAD, WIDE_BAND_1, WIDE_BAND_2,
-    WIDE_GUTTER, WIDE_LEFT_COL,
+    bounded_frame_rect, COLUMN_GAP, COMPACT_THRESHOLD, INNER_VPAD, PET_RENDER_MIN_HEIGHT,
+    RIGHT_MIN_WIDTH, WIDE_BAND_1, WIDE_BAND_2, WIDE_GUTTER, WIDE_LEFT_COL,
 };
 use crate::tui::panels::{
     BioCardPanel, FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
@@ -112,7 +112,7 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
                 .constraints([
                     Constraint::Length(WIDE_LEFT_COL),
                     Constraint::Length(WIDE_GUTTER),
-                    Constraint::Min(50),
+                    Constraint::Min(RIGHT_MIN_WIDTH),
                 ])
                 .split(padded);
             let left_col = body[0];
@@ -240,7 +240,7 @@ fn render_wide(
         .constraints([
             Constraint::Length(WIDE_LEFT_COL),
             Constraint::Length(WIDE_GUTTER),
-            Constraint::Min(50),
+            Constraint::Min(RIGHT_MIN_WIDTH),
         ])
         .split(padded);
 
@@ -260,7 +260,7 @@ fn render_wide(
         .split(body[2]);
 
     // Band 1 left: pet (10 rows of art fits exactly).
-    if left[0].height >= 10 {
+    if left[0].height >= PET_RENDER_MIN_HEIGHT {
         PetPanel.render(left[0], buf, vm, ctx);
     }
 
@@ -325,8 +325,8 @@ fn render_compact(
         ])
         .split(area);
 
-    // PetPanel assumes its area is at least PET_H (10) rows tall; skip if too small.
-    if stack[0].height >= 10 {
+    // PetPanel assumes its area is at least PET_RENDER_MIN_HEIGHT rows tall; skip if too small.
+    if stack[0].height >= PET_RENDER_MIN_HEIGHT {
         PetPanel.render(stack[0], buf, vm, ctx);
     }
     VitalsPanel.render(stack[1], buf, vm, ctx);

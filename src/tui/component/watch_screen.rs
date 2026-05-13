@@ -36,7 +36,11 @@ pub const WIDE_BAND_2: u16 = 8;
 /// Gap between stacked panels in both wide and compact layouts.
 pub const COLUMN_GAP: u16 = 1;
 
-const RIGHT_MIN_WIDTH: u16 = 50;
+pub const RIGHT_MIN_WIDTH: u16 = 50;
+
+/// Current renderer only draws the pet panel when the allocated area can hold
+/// the 13x10 pet art.
+pub const PET_RENDER_MIN_HEIGHT: u16 = 10;
 
 pub fn layout_watch(terminal_area: Rect, vm: &WatchViewModel) -> ComponentLayout {
     let frame = bounded_frame_rect(terminal_area);
@@ -182,9 +186,27 @@ fn insert_visible_node(layout: &mut ComponentLayout, id: WatchComponentId, bound
 }
 
 fn insert_pet_node(layout: &mut ComponentLayout, bounds: Rect, vm: &WatchViewModel) {
-    insert_visible_node(layout, WatchComponentId::Pet, bounds);
-
     let owner = WatchComponentId::Pet.path();
+    let mut node = ComponentNodeLayout::leaf(owner, bounds);
+    if bounds.height < PET_RENDER_MIN_HEIGHT {
+        node.visibility = VisibilityState::Degraded {
+            reason: LayoutDecisionReason::InsufficientHeight,
+        };
+        layout
+            .insert_node(node)
+            .expect("pet component id is unique in watch layout");
+        layout.decisions.push(LayoutDecision {
+            path: owner,
+            reason: LayoutDecisionReason::InsufficientHeight,
+            message: "pet degraded because allocated height is below renderer minimum",
+        });
+        return;
+    }
+
+    layout
+        .insert_node(node)
+        .expect("pet component id is unique in watch layout");
+
     layout
         .insert_target(
             TargetPath::new("watch.pet.panel"),
@@ -235,6 +257,7 @@ mod tests {
     use crate::tui::component::{
         LayoutDecisionReason, LayoutMode, TargetPath, VisibilityState, WatchComponentId,
     };
+    use crate::tui::layout::pet_panel_rect;
     use crate::tui::view_model::WatchViewModel;
     use ratatui::layout::Rect;
 
@@ -354,5 +377,57 @@ mod tests {
                     && d.reason == LayoutDecisionReason::CompactMode),
             "compact bio hide decision missing"
         );
+    }
+
+    #[test]
+    fn layout_watch_compact_omits_pet_targets_when_renderer_skips_pet() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 72, 24), &vm);
+
+        let pet = layout.node(WatchComponentId::Pet.path()).unwrap();
+        assert_eq!(pet.bounds, Rect::new(1, 1, 70, 4));
+        assert!(matches!(
+            pet.visibility,
+            VisibilityState::Degraded {
+                reason: LayoutDecisionReason::InsufficientHeight
+            } | VisibilityState::Hidden {
+                reason: LayoutDecisionReason::InsufficientHeight
+            }
+        ));
+        assert!(
+            pet.targets.is_empty(),
+            "skipped pet should export no targets"
+        );
+        assert!(layout.target(TargetPath::new("watch.pet.panel")).is_none());
+        assert!(layout.target(TargetPath::new("watch.pet.art")).is_none());
+        assert!(
+            layout
+                .decisions
+                .iter()
+                .any(|d| d.path == WatchComponentId::Pet.path()
+                    && d.reason == LayoutDecisionReason::InsufficientHeight),
+            "compact pet insufficient-height decision missing"
+        );
+    }
+
+    #[test]
+    fn layout_watch_pet_art_targets_match_legacy_effect_rect_while_adapter_exists() {
+        let vm = WatchViewModel::fixture();
+
+        for (label, area) in [
+            ("wide", Rect::new(0, 0, 120, 32)),
+            ("compact-visible", Rect::new(0, 0, 72, 36)),
+            ("compact-visible-threshold", Rect::new(0, 0, 72, 30)),
+        ] {
+            let layout = layout_watch(area, &vm);
+            let target = layout
+                .target(TargetPath::new("watch.pet.art"))
+                .unwrap_or_else(|| panic!("missing pet art target for {label}"));
+            assert_eq!(
+                target.rect,
+                pet_panel_rect(area, &vm),
+                "pet art target drifted from legacy effect rect for {label}"
+            );
+        }
     }
 }
