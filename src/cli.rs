@@ -30,6 +30,8 @@ pub enum Command {
     },
     /// Run the live terminal pet beside your coding session.
     Watch,
+    /// Run as a macOS menu bar app (status item + popover).
+    Menubar,
     /// Print a compact non-interactive pet and usage summary.
     Status,
     /// Rename the current pet without changing its seed-derived traits.

@@ -6,6 +6,8 @@ pub mod dev_preview;
 pub mod error;
 pub mod format;
 pub mod game;
+#[cfg(target_os = "macos")]
+pub mod menubar;
 pub mod paths;
 pub mod pet;
 pub mod storage;
@@ -22,6 +24,7 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Init { seed, name, yes } => commands::init::run(seed, name, yes)?,
         Command::Watch => commands::watch::run()?,
+        Command::Menubar => commands::menubar::run()?,
         Command::Status => commands::status::run()?,
         Command::Rename { name } => commands::rename::run(name)?,
         Command::Reset { yes } => commands::reset::run(yes)?,

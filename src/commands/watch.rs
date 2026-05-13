@@ -302,7 +302,7 @@ impl WatchUsagePoller for RealWatchPoller {
     }
 }
 
-fn poll_usage_and_apply(
+pub(crate) fn poll_usage_and_apply(
     state_store: &StateStore,
     usage_db: &Path,
     config_file: &Path,
