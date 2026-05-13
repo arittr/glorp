@@ -130,6 +130,36 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Confirm source health and recent activity are readable.".to_string(),
             ],
         ),
+        "watch-tall-wide" => (
+            PreviewScenarioKind::Watch,
+            "Review the healthy watch layout on a tall wide terminal with the pet scene absorbing vertical slack.",
+            BTreeMap::from([
+                (
+                    "fixed_now".to_string(),
+                    Value::String(format_rfc3339_lossy(ctx.fixed_now)),
+                ),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+                (
+                    "fixture".to_string(),
+                    Value::String("seeded-pet-state-and-usage-sqlite".to_string()),
+                ),
+                ("species".to_string(), Value::String("fuzz".to_string())),
+                ("stage".to_string(), Value::String("s4".to_string())),
+                ("mood".to_string(), Value::String("content".to_string())),
+                ("tick".to_string(), json!(ctx.fixed_now.unix_timestamp())),
+                ("terminal_width".to_string(), json!(180)),
+                ("terminal_height".to_string(), json!(50)),
+            ]),
+            vec![
+                "Check that width is centered while the frame uses the full terminal height."
+                    .to_string(),
+                "Confirm the pet scene absorbs vertical slack without crowding usage details."
+                    .to_string(),
+            ],
+        ),
         "watch-compact-normal" => (
             PreviewScenarioKind::Watch,
             "Review the healthy watch layout at the compact terminal size.",
@@ -368,6 +398,7 @@ mod tests {
             ids,
             vec![
                 "watch-wide-normal",
+                "watch-tall-wide",
                 "watch-compact-normal",
                 "pet-species-stage"
             ]

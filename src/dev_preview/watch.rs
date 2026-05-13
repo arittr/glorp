@@ -29,6 +29,14 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
             scratch_dir,
         )?,
         render_watch_frame(
+            "watch-tall-wide",
+            "Watch Tall Wide",
+            180,
+            50,
+            ctx,
+            scratch_dir,
+        )?,
+        render_watch_frame(
             "watch-compact-normal",
             "Watch Compact Normal",
             72,
@@ -121,17 +129,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn watch_frames_include_wide_and_compact() {
+    fn watch_frames_include_wide_tall_wide_and_compact() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = PreviewRenderContext::deterministic();
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 2);
+        assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
-        assert_eq!(frames[1].id, "watch-compact-normal");
-        assert_eq!((frames[1].width, frames[1].height), (72, 24));
+        assert_eq!(frames[1].id, "watch-tall-wide");
+        assert_eq!((frames[1].width, frames[1].height), (180, 50));
+        assert_eq!(frames[2].id, "watch-compact-normal");
+        assert_eq!((frames[2].width, frames[2].height), (72, 24));
     }
 
     #[test]

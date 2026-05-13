@@ -22,10 +22,9 @@ pub const WIDE_LEFT_COL: u16 = 40;
 /// Gutter width between left and right columns in the wide layout.
 pub const WIDE_GUTTER: u16 = 4;
 
-/// Maximum frame dimensions. Mirrors the current watch layout exactly for
-/// the adapter phase.
+/// Maximum frame width. Wide mode centers this width inside oversized
+/// terminals while using the terminal's full height.
 pub const MAX_FRAME_WIDTH: u16 = 110;
-pub const MAX_FRAME_HEIGHT: u16 = 23;
 
 /// Vertical padding inside the rounded frame, between the chrome border and
 /// the first/last panel.
@@ -167,16 +166,13 @@ fn render_if_visible<P: LegacyPanel>(
     }
 }
 
-/// Returns a sub-rect of `terminal_area` that is at most the current watch
-/// frame cap, centered within the terminal.
+/// Returns the watch frame rect inside `terminal_area`.
+///
+/// Wide terminals cap and center the frame width, while both wide and compact
+/// modes use the terminal's full available height.
 pub fn bounded_frame_rect(terminal_area: Rect) -> Rect {
     let width = terminal_area.width.min(MAX_FRAME_WIDTH);
-    let is_wide = (width as usize) >= COMPACT_THRESHOLD + 2;
-    let height = if is_wide {
-        terminal_area.height.min(MAX_FRAME_HEIGHT)
-    } else {
-        terminal_area.height
-    };
+    let height = terminal_area.height;
     let x = terminal_area.x + terminal_area.width.saturating_sub(width) / 2;
     let y = terminal_area.y + terminal_area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
@@ -484,8 +480,8 @@ mod tests {
         let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
 
         assert_eq!(layout.mode, LayoutMode::Wide);
-        assert_eq!(layout.frame, Rect::new(5, 4, 110, 23));
-        assert_eq!(layout.content, Rect::new(6, 5, 108, 21));
+        assert_eq!(layout.frame, Rect::new(5, 0, 110, 32));
+        assert_eq!(layout.content, Rect::new(6, 1, 108, 30));
         for id in [
             WatchComponentId::Root,
             WatchComponentId::Pet,
@@ -504,34 +500,34 @@ mod tests {
 
         assert_eq!(
             layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
-            Rect::new(6, 6, 40, 10)
+            Rect::new(6, 2, 40, 19)
         );
         assert_eq!(
             layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
-            Rect::new(6, 17, 40, 4)
+            Rect::new(6, 22, 40, 4)
         );
         assert_eq!(
             layout.node(WatchComponentId::Bio.path()).unwrap().bounds,
-            Rect::new(6, 22, 40, 3)
+            Rect::new(6, 27, 40, 3)
         );
         assert_eq!(
             layout.node(WatchComponentId::Today.path()).unwrap().bounds,
-            Rect::new(50, 6, 64, 6)
+            Rect::new(50, 2, 64, 6)
         );
         assert_eq!(
             layout
                 .node(WatchComponentId::Progress.path())
                 .unwrap()
                 .bounds,
-            Rect::new(50, 13, 64, 2)
+            Rect::new(50, 9, 64, 2)
         );
         assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(50, 16, 64, 3)
+            Rect::new(50, 12, 64, 3)
         );
 
         let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
-        assert_eq!(pet_panel.rect, Rect::new(6, 6, 40, 10));
+        assert_eq!(pet_panel.rect, Rect::new(6, 2, 40, 19));
 
         let pet_node = layout.node(WatchComponentId::Pet.path()).unwrap();
         assert!(pet_node

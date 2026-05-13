@@ -69,6 +69,7 @@ fn dev_preview_defaults_to_target_output_and_all_scenario() {
 
     let out = dir.path().join("target/glorp-preview");
     assert!(out.join("frames/watch-wide-normal.txt").is_file());
+    assert!(out.join("frames/watch-tall-wide.txt").is_file());
     assert!(out.join("frames/watch-compact-normal.txt").is_file());
     assert!(out.join("frames/pet-species-stage.txt").is_file());
     assert!(!config_dir.exists());
@@ -95,6 +96,9 @@ fn dev_preview_watch_writes_expected_artifacts() {
         .out
         .join("frames/watch-wide-normal.layout.json")
         .is_file());
+    assert!(run.out.join("frames/watch-tall-wide.txt").is_file());
+    assert!(run.out.join("frames/watch-tall-wide.cells.json").is_file());
+    assert!(run.out.join("frames/watch-tall-wide.layout.json").is_file());
     assert!(run.out.join("frames/watch-compact-normal.txt").is_file());
     assert!(run
         .out
@@ -123,6 +127,17 @@ fn dev_preview_watch_writes_expected_artifacts() {
     );
     assert_scenario(
         &manifest,
+        "watch-tall-wide",
+        "watch",
+        (180, 50),
+        (
+            "frames/watch-tall-wide.txt",
+            "frames/watch-tall-wide.cells.json",
+            Some("frames/watch-tall-wide.layout.json"),
+        ),
+    );
+    assert_scenario(
+        &manifest,
         "watch-compact-normal",
         "watch",
         (72, 24),
@@ -135,6 +150,9 @@ fn dev_preview_watch_writes_expected_artifacts() {
     assert_artifact_type(&manifest, "watch-wide-normal", "text");
     assert_artifact_type(&manifest, "watch-wide-normal-cells", "cells");
     assert_artifact_type(&manifest, "watch-wide-normal-layout", "layout");
+    assert_artifact_type(&manifest, "watch-tall-wide", "text");
+    assert_artifact_type(&manifest, "watch-tall-wide-cells", "cells");
+    assert_artifact_type(&manifest, "watch-tall-wide-layout", "layout");
 }
 
 #[test]
@@ -147,6 +165,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         .out
         .join("frames/watch-wide-normal.layout.json")
         .is_file());
+    assert!(run.out.join("frames/watch-tall-wide.layout.json").is_file());
     assert!(run
         .out
         .join("frames/watch-compact-normal.layout.json")
@@ -204,6 +223,47 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
     assert!(
         compact_text.contains("feed"),
         "compact preview text should include feed"
+    );
+}
+
+#[test]
+fn dev_preview_watch_includes_real_tall_wide_frame() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    assert!(run.out.join("frames/watch-tall-wide.txt").is_file());
+    assert!(run.out.join("frames/watch-tall-wide.cells.json").is_file());
+    assert!(run.out.join("frames/watch-tall-wide.layout.json").is_file());
+
+    let manifest = run.manifest();
+    assert_scenario(
+        &manifest,
+        "watch-tall-wide",
+        "watch",
+        (180, 50),
+        (
+            "frames/watch-tall-wide.txt",
+            "frames/watch-tall-wide.cells.json",
+            Some("frames/watch-tall-wide.layout.json"),
+        ),
+    );
+
+    let scenario = scenario(&manifest, "watch-tall-wide");
+    assert_eq!(scenario["inputs"]["terminal_width"], 180);
+    assert_eq!(scenario["inputs"]["terminal_height"], 50);
+
+    let layout: Value = serde_json::from_str(
+        &std::fs::read_to_string(run.out.join("frames/watch-tall-wide.layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(layout["frame"]["height"], 50);
+    assert!(
+        layout["components"]["watch.pet"]["height"]
+            .as_u64()
+            .unwrap()
+            > 18,
+        "tall-wide pet component should absorb vertical slack"
     );
 }
 
@@ -274,6 +334,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
 
     for file in [
         "frames/watch-wide-normal.txt",
+        "frames/watch-tall-wide.txt",
         "frames/watch-compact-normal.txt",
         "frames/pet-species-stage.txt",
     ] {
@@ -286,6 +347,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         ids,
         vec![
             "watch-wide-normal".to_string(),
+            "watch-tall-wide".to_string(),
             "watch-compact-normal".to_string(),
             "pet-species-stage".to_string(),
         ]

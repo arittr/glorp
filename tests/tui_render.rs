@@ -153,6 +153,23 @@ fn wide_layout_preserves_asymmetric_pet_hero_policy() {
 }
 
 #[test]
+fn wide_frame_height_grows_on_tall_terminals() {
+    let vm = WatchViewModel::fixture();
+    let layout =
+        glorp::tui::component::layout_watch(ratatui::layout::Rect::new(0, 0, 180, 50), &vm);
+    let pet = layout
+        .node(glorp::tui::component::WatchComponentId::Pet.path())
+        .expect("pet node");
+
+    assert_eq!(layout.frame.height, 50);
+    assert!(
+        pet.bounds.height > 18,
+        "pet node should absorb tall-wide vertical slack, got {:?}",
+        pet.bounds
+    );
+}
+
+#[test]
 fn compact_layout_records_ordered_degradation_decisions() {
     let vm = WatchViewModel::fixture();
     let layout = glorp::tui::component::layout_watch(ratatui::layout::Rect::new(0, 0, 72, 24), &vm);
@@ -968,9 +985,8 @@ fn wide_layout_outer_frame_uses_rounded_box_drawing() {
     );
     assert!(top.ends_with('╮'), "top row should end with ╮; got {top:?}");
 
-    // Find the bottom-corner row — the frame shrinks to natural content
-    // height instead of filling the terminal, so the bottom border can sit
-    // well above row 23.
+    // Find the bottom-corner row so the rail assertions follow the layout's
+    // actual frame height.
     let bottom_idx = rows
         .iter()
         .position(|r| r.starts_with('╰'))

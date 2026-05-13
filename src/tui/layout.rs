@@ -222,8 +222,8 @@ mod render_compact_tests {
     #[test]
     fn render_compact_draws_rounded_frame() {
         // Width 60 < COMPACT_THRESHOLD (104) → compact mode.
-        // Height 30 ≤ MAX_FRAME_HEIGHT (34) so the frame fills the terminal
-        // (no centering padding) and the rounded corner sits at row 0.
+        // Compact mode fills terminal height (no vertical centering padding)
+        // and the rounded corner sits at row 0.
         let backend = TestBackend::new(60, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let vm = WatchViewModel::fixture();
@@ -326,8 +326,8 @@ mod render_wide_tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    // Height ≤ MAX_FRAME_HEIGHT keeps the frame matching the terminal exactly
-    // (no centering padding) so corner-position assertions stay simple.
+    // Wide mode uses full terminal height, so these assertions can read the
+    // frame rails directly without vertical centering padding.
     const TEST_HEIGHT: u16 = 23;
 
     fn render_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
@@ -386,7 +386,7 @@ mod render_wide_tests {
 
     #[test]
     fn render_wide_frame_spans_bounded_width_and_terminal_height() {
-        // 110 == MAX_FRAME_WIDTH; 23 == MAX_FRAME_HEIGHT. Frame matches the
+        // 110 == MAX_FRAME_WIDTH. Frame matches the
         // terminal exactly so corners sit at (0,0) and bottom.
         let buf = render_buffer(110, 23);
         assert_eq!(buf[(0u16, 0u16)].symbol(), "╭");
@@ -397,14 +397,14 @@ mod render_wide_tests {
 
     #[test]
     fn oversized_terminal_pads_around_centered_frame() {
-        // Terminals larger than MAX_FRAME_WIDTH × MAX_FRAME_HEIGHT center the
-        // frame and leave the outer cells blank instead of stretching panels.
+        // Terminals wider than MAX_FRAME_WIDTH center the frame horizontally
+        // and leave outer columns blank while filling the terminal height.
         let buf = render_buffer(160, 50);
         // The top-left cell of the terminal is empty (padding), not a corner.
         assert_eq!(buf[(0u16, 0u16)].symbol(), " ");
         // The frame's actual top-left corner sits at x = (160 - 110) / 2 = 25
-        // and y = (50 - 23) / 2 = 13.
-        assert_eq!(buf[(25u16, 13u16)].symbol(), "╭");
+        // and y = 0 because wide mode uses the full terminal height.
+        assert_eq!(buf[(25u16, 0u16)].symbol(), "╭");
     }
 
     #[test]
@@ -447,8 +447,8 @@ mod render_wide_tests {
     #[test]
     fn compact_threshold_switches_modes() {
         // Just below threshold: compact; at threshold: wide.
-        // Use height ≤ MAX_FRAME_HEIGHT so the frame matches the terminal and
-        // corners sit at (0, 0) without centering padding.
+        // Wide mode fills terminal height, so corners sit at (0, 0) without
+        // vertical centering padding.
         let compact_buf = render_buffer((COMPACT_THRESHOLD - 1) as u16 + 2, 24); // +2 for outer frame
         let wide_buf = render_buffer((COMPACT_THRESHOLD + 2) as u16 + 2, 24);
 

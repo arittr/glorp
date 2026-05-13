@@ -1,30 +1,35 @@
 ---
 source: tests/dev_preview.rs
-assertion_line: 368
+assertion_line: 469
 expression: frame
 ---
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
      ╭ glorp · Mochi the fuzz · fuzz · 18d · content ─────────────────────────────────────────────────────────────╮     
      │                                                                                                            │     
      │                                             today ─────────────────────────────────────────────────────────│     
      │                                              tokens            16,700                                      │     
-     │                 /\_/\                        claude            12,500    75%                               │     
-     │                (░* *░)                       codex              4,200    25%                               │     
-     │                 ='3'=                        last 10m          +16.7k    this 10m                          │     
-     │               /░▒ ✦ ▒░\                      ·  ·  ·  ·  ·  ▅  █         ← 7-day                           │     
-     │               (░▒░✦░▒░)                                                                                    │     
-     │                \░░░░░/                      progress ──────────────────────────────────────────────────────│     
-     │                 d   b                        xp         ███████░░░░░  61   ↑ 16.7k/hr                      │     
+     │                                              claude            12,500    75%                               │     
+     │                                              codex              4,200    25%                               │     
+     │                                              last 10m          +16.7k    this 10m                          │     
+     │                                              ·  ·  ·  ·  ·  ▅  █         ← 7-day                           │     
      │                                                                                                            │     
-     │                                             feed ──────────────────────────────────────────────────────────│     
-     │ vitals ────────────────────────────────      --:--  Mochi inspected a fresh diff                           │     
-     │  fed        ████████░░░░  70                 --:--  Mochi found a warm token cache                         │     
-     │  happy      █████████░░░  72                 08:53  claude-code added 8.8k effective tokens                │     
-     │  energy     ████████░░░░  68                 08:45  codex added 4.2k effective tokens                      │     
+     │                 /\_/\                       progress ──────────────────────────────────────────────────────│     
+     │                (░* *░)                       xp         ███████░░░░░  61   ↑ 16.7k/hr                      │     
+     │                 ='3'=                                                                                      │     
+     │               /░▒ ✦ ▒░\                     feed ──────────────────────────────────────────────────────────│     
+     │               (░▒░✦░▒░)                      --:--  Mochi inspected a fresh diff                           │     
+     │                \░░░░░/                       --:--  Mochi found a warm token cache                         │     
+     │                 d   b                        08:53  claude-code added 8.8k effective tokens                │     
+     │                                              08:45  codex added 4.2k effective tokens                      │     
      │                                              08:48  claude-code added 12.5k effective tokens               │     
+     │                                                                                                            │     
+     │                                                                                                            │     
+     │                                                                                                            │     
+     │                                                                                                            │     
+     │ vitals ────────────────────────────────                                                                    │     
+     │  fed        ████████░░░░  70                                                                               │     
+     │  happy      █████████░░░  72                                                                               │     
+     │  energy     ████████░░░░  68                                                                               │     
+     │                                                                                                            │     
      │ bio ───────────────────────────────────                                                                    │     
      │  hatched   sep 21 01:53                                                                                    │     
      │  age       18d                                                                                             │     
