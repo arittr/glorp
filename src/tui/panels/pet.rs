@@ -1,3 +1,6 @@
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
+use rand_pcg::Pcg32;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Style};
@@ -37,7 +40,8 @@ pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
 }
 
 /// An ambient environment glyph placed in the panel backdrop behind the pet art.
-/// PR1 stub returns empty; PR2 fills this in per species.
+/// Produced by [`ambient_glyphs_for`] and rendered in pass 1 of the pet panel,
+/// behind the pet art.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AmbientGlyph {
     pub row: u16,
@@ -46,18 +50,155 @@ pub struct AmbientGlyph {
     pub color: Color,
 }
 
-/// Returns the ambient backdrop glyphs for the given species and panel geometry.
+/// Per-species sky-glyph palette.
+fn sky_palette_for(species: Species) -> &'static [char] {
+    match species {
+        Species::Fuzz => &['·', ',', '\'', '*'],
+        Species::Blob => &['°', 'o', '.', '·'],
+        Species::Ghost => &['~', '\'', ',', '*'],
+        Species::Glitch => &['▒', '▓', '░', '▪'],
+        Species::Crystal => &['✦', '✧', '·', '◆'],
+        Species::Mech => &['~', '°', '·', '●'],
+    }
+}
+
+/// Per-species floor-glyph palette (each cell of the floor row is drawn from this).
+fn floor_palette_for(species: Species) -> &'static [char] {
+    match species {
+        Species::Fuzz => &['·', ',', '.', ' ', ' '],
+        Species::Blob => &['~', '.', ',', ' '],
+        Species::Ghost => &['\'', ' ', ' ', ' '],
+        Species::Glitch => &['▒', '░', '▓', ' '],
+        Species::Crystal => &['·', '.', ' ', ' ', ' '],
+        Species::Mech => &['─', '·', '.', ' '],
+    }
+}
+
+/// Sky-glyph count by stage tier.
+fn stage_base_count(stage: Stage) -> usize {
+    match stage {
+        Stage::S0 | Stage::S1 => 4,
+        Stage::S2 | Stage::S3 => 6,
+        Stage::S4 | Stage::S5 => 8,
+        Stage::S6 => 10,
+    }
+}
+
+/// Seed discriminant for species, avoiding `as u64` on an enum without repr.
+fn species_seed(species: Species) -> u64 {
+    match species {
+        Species::Fuzz => 0,
+        Species::Blob => 1,
+        Species::Ghost => 2,
+        Species::Glitch => 3,
+        Species::Crystal => 4,
+        Species::Mech => 5,
+    }
+}
+
+/// Seed discriminant for stage.
+fn stage_seed(stage: Stage) -> u64 {
+    match stage {
+        Stage::S0 => 0,
+        Stage::S1 => 1,
+        Stage::S2 => 2,
+        Stage::S3 => 3,
+        Stage::S4 => 4,
+        Stage::S5 => 5,
+        Stage::S6 => 6,
+    }
+}
+
+fn overlaps_any(g: &AmbientGlyph, exclusions: &[Rect]) -> bool {
+    exclusions.iter().any(|r| {
+        g.col >= r.x
+            && g.col < r.x.saturating_add(r.width)
+            && g.row >= r.y
+            && g.row < r.y.saturating_add(r.height)
+    })
+}
+
+/// Returns ambient backdrop glyphs for the habitat area behind the pet art.
 ///
-/// PR1 stub — returns empty so the pet panel renders the same content as
-/// before, just inside a taller (Fill-driven) rect. PR2 fills this in.
+/// Positions are seeded by `(species, stage, minute_floor)` so output is stable
+/// within a minute and drifts across minutes. Any glyph that would land inside
+/// an exclusion rect is rejected; the caller is responsible for inflating
+/// exclusions to enforce a desired margin. A floor row fills the bottom of the
+/// habitat with species-appropriate ground cover.
 pub fn ambient_glyphs_for(
-    _species: Species,
-    _stage: Stage,
-    _habitat: Rect,
-    _exclusions: &[Rect],
-    _now: time::OffsetDateTime,
+    species: Species,
+    stage: Stage,
+    habitat: Rect,
+    exclusions: &[Rect],
+    now: time::OffsetDateTime,
 ) -> Vec<AmbientGlyph> {
-    Vec::new()
+    if habitat.width == 0 || habitat.height == 0 {
+        return Vec::new();
+    }
+
+    // Seed: (species, stage, minute-floor). Same minute → identical positions.
+    let s_seed = species_seed(species);
+    let st_seed = stage_seed(stage);
+    let minute_floor = (now.unix_timestamp() / 60) as u64;
+    let seed = s_seed
+        .wrapping_mul(0x9E37_79B1_7F4A_7C15)
+        .wrapping_add(st_seed.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(minute_floor.wrapping_mul(0x94D0_49BB_1331_11EB));
+    let mut rng = Pcg32::seed_from_u64(seed);
+
+    let sky = sky_palette_for(species);
+    let floor = floor_palette_for(species);
+
+    let p = crate::tui::style::tokenpet_palette();
+    let sky_color = p.dim.rgb;
+    let floor_color = p.dim.rgb;
+
+    let mut glyphs = Vec::new();
+
+    let count = stage_base_count(stage);
+
+    for _ in 0..count {
+        // Reject-sample up to N times to find a free cell.
+        for _attempt in 0..16 {
+            let col = habitat.x + rng.gen_range(0..habitat.width);
+            let row = habitat.y + rng.gen_range(0..habitat.height.saturating_sub(1)); // leave bottom row for floor
+            let candidate = AmbientGlyph {
+                row,
+                col,
+                glyph: *sky.choose(&mut rng).unwrap_or(&' '),
+                color: sky_color,
+            };
+            if !overlaps_any(&candidate, exclusions) {
+                glyphs.push(candidate);
+                break;
+            }
+        }
+    }
+
+    // Floor row: anchored to the bottom of habitat.
+    let floor_row = habitat.y + habitat.height.saturating_sub(1);
+    for dx in 0..habitat.width {
+        let col = habitat.x + dx;
+        let candidate = AmbientGlyph {
+            row: floor_row,
+            col,
+            glyph: *floor.choose(&mut rng).unwrap_or(&' '),
+            color: floor_color,
+        };
+        if !overlaps_any(&candidate, exclusions) {
+            glyphs.push(candidate);
+        }
+    }
+
+    glyphs
+}
+
+fn inflate_rect(r: Rect, by: u16) -> Rect {
+    let x = r.x.saturating_sub(by);
+    let y = r.y.saturating_sub(by);
+    let width = r.width.saturating_add(2 * by);
+    let height = r.height.saturating_add(2 * by);
+    Rect::new(x, y, width, height)
 }
 
 fn ambient_glyph_is_inside_area(glyph: &AmbientGlyph, area: Rect) -> bool {
@@ -75,11 +216,18 @@ impl LegacyPanel for PetPanel {
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
         let scene = PetScene::compute_layout(area, vm, ctx);
 
-        // Pass 1: ambient backdrop. PR1 stub returns empty so this is a no-op.
+        // Pass 1: ambient backdrop. Inflate the pet art rect by 1 cell to
+        // create a respect ring before passing exclusions to the painter.
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let stage = vm.pet_render.stage;
-        let glyphs = ambient_glyphs_for(species, stage, scene.habitat, &scene.exclusions, now);
+        let inflated_pet = inflate_rect(scene.pet_art, 1);
+        let inflated_exclusions: Vec<Rect> = scene
+            .exclusions
+            .iter()
+            .map(|&r| if r == scene.pet_art { inflated_pet } else { r })
+            .collect();
+        let glyphs = ambient_glyphs_for(species, stage, scene.habitat, &inflated_exclusions, now);
         for g in glyphs {
             if ambient_glyph_is_inside_area(&g, scene.habitat) {
                 let cell = &mut buf[(g.col, g.row)];
@@ -541,15 +689,102 @@ mod tests {
     }
 
     #[test]
-    fn ambient_glyphs_for_returns_empty_until_implemented() {
+    fn ambient_glyphs_are_deterministic_per_minute() {
         use crate::game::evolution::Stage;
-        let panel_rect = Rect::new(0, 0, 26, 12);
-        let pet_inner = Rect::new(7, 2, 11, 8);
-        let now = time::OffsetDateTime::UNIX_EPOCH;
-        let glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, panel_rect, &[pet_inner], now);
+        let habitat = Rect::new(0, 0, 52, 20);
+        let pet_inner = Rect::new(20, 6, 13, 10);
+        let exclusions = vec![pet_inner];
+
+        let t0 = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let t_same_minute = t0 + time::Duration::seconds(15);
+        let t_next_minute = t0 + time::Duration::minutes(1);
+
+        let a = ambient_glyphs_for(Species::Fuzz, Stage::S4, habitat, &exclusions, t0);
+        let b = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            habitat,
+            &exclusions,
+            t_same_minute,
+        );
+        let c = ambient_glyphs_for(
+            Species::Fuzz,
+            Stage::S4,
+            habitat,
+            &exclusions,
+            t_next_minute,
+        );
+
+        assert_eq!(a, b, "same minute should yield identical glyphs");
+        assert_ne!(a, c, "next minute should yield different glyphs");
+    }
+
+    #[test]
+    fn ambient_glyphs_never_overlap_exclusions() {
+        use crate::game::evolution::Stage;
+        let habitat = Rect::new(0, 0, 52, 20);
+        let pet_inner = Rect::new(20, 6, 13, 10);
+        let exclusions = vec![pet_inner];
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+        for species in [
+            Species::Fuzz,
+            Species::Blob,
+            Species::Ghost,
+            Species::Glitch,
+            Species::Crystal,
+            Species::Mech,
+        ] {
+            for stage in [Stage::S0, Stage::S2, Stage::S4, Stage::S6] {
+                let glyphs = ambient_glyphs_for(species, stage, habitat, &exclusions, now);
+                for g in &glyphs {
+                    let in_exclusion = g.col >= pet_inner.x
+                        && g.col < pet_inner.x + pet_inner.width
+                        && g.row >= pet_inner.y
+                        && g.row < pet_inner.y + pet_inner.height;
+                    assert!(
+                        !in_exclusion,
+                        "species {species:?} stage {stage:?} glyph at ({},{}) is inside exclusion {pet_inner:?}",
+                        g.col, g.row
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ambient_glyphs_within_habitat_bounds() {
+        use crate::game::evolution::Stage;
+        let habitat = Rect::new(5, 10, 52, 20);
+        let pet_inner = Rect::new(25, 16, 13, 10);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let glyphs = ambient_glyphs_for(Species::Crystal, Stage::S5, habitat, &[pet_inner], now);
+        for g in glyphs {
+            assert!(
+                g.col >= habitat.x && g.col < habitat.x + habitat.width,
+                "col {} outside habitat",
+                g.col
+            );
+            assert!(
+                g.row >= habitat.y && g.row < habitat.y + habitat.height,
+                "row {} outside habitat",
+                g.row
+            );
+        }
+    }
+
+    #[test]
+    fn ambient_glyphs_present_with_floor_row() {
+        use crate::game::evolution::Stage;
+        let habitat = Rect::new(0, 0, 52, 20);
+        let pet_inner = Rect::new(20, 6, 13, 10);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, habitat, &[pet_inner], now);
+        // 8 sky glyphs (S4) + 52-cell floor minus the exclusion overlap (none, since pet is mid-panel).
         assert!(
-            glyphs.is_empty(),
-            "painter still stubbed; will fill in Task 6"
+            glyphs.len() >= 8 + 30,
+            "expected ≥ stage_base + most of the floor row, got {}",
+            glyphs.len()
         );
     }
 

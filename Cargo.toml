@@ -27,6 +27,8 @@ taffy = { version = "0.10.1", default-features = false, features = ["std", "taff
 terminal-light = "1"
 thiserror = "1"
 tempfile = "3"
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }
+rand_pcg = "0.3"
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "local-offset", "macros"] }
 toml = "0.8"
 wait-timeout = "0.2"
