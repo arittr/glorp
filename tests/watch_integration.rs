@@ -282,6 +282,33 @@ fn diagnostic_log_dedupes_by_surface_and_code() {
     );
 }
 
+#[test]
+fn bio_view_renders_from_real_pet_state() {
+    use time::{Date, Duration, Month, PrimitiveDateTime, Time};
+
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let _store = UsageStore::open(&usage_db).unwrap();
+
+    let base = PrimitiveDateTime::new(
+        Date::from_calendar_date(2026, Month::May, 11).unwrap(),
+        Time::from_hms(4, 0, 0).unwrap(),
+    )
+    .assume_utc();
+
+    let mut state = PetState::new_for_test("test", "buddy");
+    state.created_at = base;
+    let now = base + Duration::days(7) + Duration::hours(13);
+
+    let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
+    assert!(
+        vm.bio.hatched_label.contains("may"),
+        "expected hatched_label to contain 'may', got {}",
+        vm.bio.hatched_label
+    );
+    assert_eq!(vm.bio.age_label, "7d");
+}
+
 fn mech_state() -> PetState {
     let mut state = PetState::new_for_test("servo-watch-seed", "bolt");
     state.pet.generated_species = "mech".into();
