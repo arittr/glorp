@@ -30,7 +30,7 @@ Six decisions locked during the brainstorm:
 1. **Habitat is an ambient scene.** Per-species sky glyphs + a floor row, painted behind the pet art, scaled in density by stage.
 2. **Pet column grows.** `WIDE_LEFT_COL: 40 → 52`. `MAX_FRAME_WIDTH: 110 → 124`. `COMPACT_THRESHOLD: 104 → 118`. Right column width unchanged.
 3. **Stage is visible in the frame chrome.** The outer frame fill character varies by stage tier: S0–S1 dotted, S2–S3 default, S4–S5 heavy, S6 alternating sparkle. Density of habitat glyphs also scales with stage.
-4. **Chrome row drops the duplicate species.** `glorp · {name} · {species} · {age} · {mood}`. The "the {species}" inline tag is removed.
+4. **Chrome row drops the duplicate `fuzz · fuzz`.** New format: `glorp · {name} · {species} · {age} · {mood}`. Removes BOTH the inline "the {species}" suffix on the name AND the standalone stage-label span. At S4 of the fuzz species both span values rendered the literal word "fuzz", producing visible repetition. Stage information is already conveyed by the pet art and (per decision #3) the per-stage frame fill character — the textual stage label is redundant.
 5. **Feed shows only real events.** The two preview-fixture narrative lines are removed; the feed renders provider events only.
 6. **Other panels' rules stay uniform.** Only the outer frame chrome reflects stage. Today / progress / vitals / bio / feed all keep plain `─` rules.
 
