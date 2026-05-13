@@ -9,7 +9,10 @@
 #![cfg(target_os = "macos")]
 
 use objc2::rc::Retained;
-use objc2_app_kit::{NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName};
+use objc2_app_kit::{
+    NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSTextAlignment,
+};
 use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 
 use crate::format::format_tokens;
@@ -23,10 +26,29 @@ pub const POPOVER_COLUMNS: usize = 36;
 pub const POPOVER_ROWS: usize = 22;
 pub const FONT_POINT_SIZE: f64 = 13.0;
 
-pub fn render(vm: &WatchViewModel) -> Retained<NSMutableAttributedString> {
+pub struct RenderedBlock {
+    pub attr: Retained<NSMutableAttributedString>,
+    pub char_len: usize,
+}
+
+/// Render the pet region (framed art + trailing newline). Returned `char_len`
+/// is the count of `char` codepoints in the attributed string; callers use it
+/// as the upper bound of the `NSRange` to replace when animating just the pet.
+///
+/// The pet block is center-aligned via a paragraph-style attribute so the
+/// 13-char art rows sit centered in the wider popover instead of pinned to
+/// the left text-container inset.
+pub fn render_pet_block(vm: &WatchViewModel) -> RenderedBlock {
     let mut runs: Vec<StyledRun> = Vec::new();
     append_pet(&mut runs, vm);
     runs.push(StyledRun::plain("\n"));
+    let mut block = materialize(runs);
+    apply_paragraph_alignment(&mut block, NSTextAlignment::Center);
+    block
+}
+
+pub fn render_stats_block(vm: &WatchViewModel) -> RenderedBlock {
+    let mut runs: Vec<StyledRun> = Vec::new();
     append_stats(&mut runs, vm);
     materialize(runs)
 }
@@ -173,7 +195,7 @@ fn percent(fraction: f64) -> String {
     format!("{v}%")
 }
 
-fn materialize(runs: Vec<StyledRun>) -> Retained<NSMutableAttributedString> {
+fn materialize(runs: Vec<StyledRun>) -> RenderedBlock {
     let mut full_text = String::new();
     let mut intervals: Vec<(usize, usize, Rgb)> = Vec::with_capacity(runs.len());
     for run in runs {
@@ -209,13 +231,31 @@ fn materialize(runs: Vec<StyledRun>) -> Retained<NSMutableAttributedString> {
             );
         }
     }
-    attr_str
+    RenderedBlock {
+        attr: attr_str,
+        char_len: total_chars,
+    }
 }
 
 fn monospace_font() -> Retained<NSFont> {
     // `monospacedSystemFontOfSize:weight:` requires macOS 10.15+. Weight 0.0
     // == NSFontWeightRegular.
     unsafe { NSFont::monospacedSystemFontOfSize_weight(FONT_POINT_SIZE, 0.0) }
+}
+
+fn apply_paragraph_alignment(block: &mut RenderedBlock, alignment: NSTextAlignment) {
+    if block.char_len == 0 {
+        return;
+    }
+    unsafe {
+        let style: Retained<NSMutableParagraphStyle> = NSMutableParagraphStyle::new();
+        style.setAlignment(alignment);
+        block.attr.addAttribute_value_range(
+            NSParagraphStyleAttributeName,
+            &style,
+            NSRange::from(0..block.char_len),
+        );
+    }
 }
 
 fn color_for(rgb: Rgb) -> Retained<NSColor> {
@@ -227,5 +267,34 @@ fn color_for(rgb: Rgb) -> Retained<NSColor> {
             f64::from(b) / 255.0,
             1.0,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::view_model::WatchViewModel;
+
+    /// The animation tick uses `pet_block.char_len` as the upper bound of the
+    /// `NSRange` it replaces in the text storage. If that count ever drifts
+    /// from the actual UTF-16 length of the materialized attributed string,
+    /// the popover will slice the stats block on every frame. This test pins
+    /// the invariant for the standard 13×10 framed pet (10 framed rows + a
+    /// trailing blank line).
+    #[test]
+    fn pet_block_char_len_matches_attributed_string_length() {
+        let mut vm = WatchViewModel::fixture();
+        vm.pet_art = (0..10).map(|_| "             ".to_string()).collect(); // 13 spaces
+        vm.pet_spans = Vec::new();
+
+        let block = render_pet_block(&vm);
+
+        let expected = 13 * 10 + 10 + 1; // 10 rows of 13 chars + 10 row newlines + 1 trailing newline
+        assert_eq!(block.char_len, expected);
+        let ns_len = block.attr.length();
+        assert_eq!(
+            ns_len, block.char_len,
+            "BMP-only content should keep NSString UTF-16 length in sync with char count"
+        );
     }
 }

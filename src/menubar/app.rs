@@ -6,6 +6,9 @@
 #![cfg(target_os = "macos")]
 
 use std::cell::RefCell;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use objc2::declare_class;
 use objc2::msg_send_id;
@@ -21,7 +24,9 @@ use objc2_foundation::{
     MainThreadMarker, NSPoint, NSRange, NSRect, NSRectEdge, NSSize, NSString, NSTimer,
 };
 
-use crate::commands::watch::{build_watch_view_model, poll_usage_and_apply};
+use crate::commands::watch::{
+    build_watch_view_model, poll_usage_and_apply, rerender_pet_for_view_model,
+};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
 use crate::storage::state::{PetState, StateStore};
@@ -32,7 +37,12 @@ use super::render;
 /// `NSStatusItem.length` value meaning "size to fit content". Apple's header
 /// declares `NSVariableStatusItemLength = -1.0`.
 const NS_VARIABLE_STATUS_ITEM_LENGTH: f64 = -1.0;
-const POLL_INTERVAL_SECS: f64 = 10.0;
+const POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// UI tick rate. Drives both pet animation (when popover is shown) and draining
+/// any PollResult delivered by the worker thread. Matches the watch TUI's idle
+/// tick (`Duration::from_millis(250)` in `crate::tui::app`) so a menubar
+/// session and a watch session breathe in sync.
+const UI_TICK_INTERVAL_SECS: f64 = 0.25;
 // Approximate cell width/height for the 13pt monospaced system font. Tuned
 // visually so the popover sizes roughly to the content; real text measurement
 // can replace this later.
@@ -40,10 +50,30 @@ const APPROX_CELL_WIDTH: f64 = 7.6;
 const APPROX_CELL_HEIGHT: f64 = 17.0;
 
 struct AppState {
-    paths: AppPaths,
     popover: Retained<NSPopover>,
     text_view: Retained<NSTextView>,
     status_item: Retained<NSStatusItem>,
+    /// Last view model written to the text view. The UI tick mutates a clone
+    /// of this to advance pet animation without re-reading from disk; the
+    /// worker thread's PollResult replaces it wholesale.
+    vm: WatchViewModel,
+    animation_frame: u64,
+    /// Character length of the pet block region at the start of the text
+    /// storage. Used as the `NSRange` upper bound when replacing only the
+    /// pet rows during an animation frame.
+    pet_block_char_len: usize,
+    /// Drained on each UI tick. The worker thread pushes a new PollResult
+    /// roughly every `POLL_INTERVAL`; the main thread applies the most
+    /// recent one and discards stale ones.
+    poll_rx: mpsc::Receiver<PollResult>,
+}
+
+/// Snapshot of fresh provider data computed on the worker thread. All fields
+/// are owned and `Send`, so the worker can build them off-main-thread and ship
+/// them through the channel.
+struct PollResult {
+    pet_state: PetState,
+    vm: WatchViewModel,
 }
 
 thread_local! {
@@ -67,9 +97,9 @@ declare_class!(
             toggle_popover();
         }
 
-        #[method(pollTick:)]
-        fn poll_tick(&self, _sender: Option<&AnyObject>) {
-            poll_tick();
+        #[method(uiTick:)]
+        fn ui_tick(&self, _sender: Option<&AnyObject>) {
+            ui_tick();
         }
     }
 );
@@ -96,24 +126,29 @@ pub fn run() -> Result<()> {
         (render::POPOVER_ROWS as f64) * APPROX_CELL_HEIGHT + 16.0,
     );
     let (popover, text_view) = build_popover(mtm, popover_size);
-    update_text_view(&text_view, &initial_vm);
+    let pet_block_char_len = write_full_text(&text_view, &initial_vm);
 
     let status_item = build_status_item(mtm, &controller, &initial_pet)?;
 
+    let poll_rx = spawn_poll_worker(paths);
+
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
-            paths,
             popover,
             text_view,
             status_item,
+            vm: initial_vm,
+            animation_frame: 0,
+            pet_block_char_len,
+            poll_rx,
         });
     });
 
-    let _timer: Retained<NSTimer> = unsafe {
+    let _ui_timer: Retained<NSTimer> = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-            POLL_INTERVAL_SECS,
+            UI_TICK_INTERVAL_SECS,
             &controller,
-            sel!(pollTick:),
+            sel!(uiTick:),
             None,
             true,
         )
@@ -121,6 +156,37 @@ pub fn run() -> Result<()> {
 
     unsafe { app.run() };
     Ok(())
+}
+
+/// Spawn the background poll worker. It runs `poll_usage_and_apply` and
+/// `build_watch_view_model` off the main thread — those calls shell out to
+/// ccusage / ccusage-codex (subprocess + JSON parse) and hit SQLite, which
+/// must never run on the run loop. The returned receiver is drained from
+/// the UI tick.
+fn spawn_poll_worker(paths: AppPaths) -> mpsc::Receiver<PollResult> {
+    let (tx, rx) = mpsc::channel::<PollResult>();
+    thread::Builder::new()
+        .name("glorp-menubar-poll".into())
+        .spawn(move || {
+            let state_store = StateStore::new(paths.state_file.clone());
+            loop {
+                thread::sleep(POLL_INTERVAL);
+                let pet_state =
+                    match poll_usage_and_apply(&state_store, &paths.usage_db, &paths.config_file) {
+                        Ok(Some(state)) => state,
+                        Ok(None) | Err(_) => continue,
+                    };
+                let vm = match build_watch_view_model(&pet_state, &paths.usage_db) {
+                    Ok(vm) => vm,
+                    Err(_) => continue,
+                };
+                if tx.send(PollResult { pet_state, vm }).is_err() {
+                    return;
+                }
+            }
+        })
+        .expect("spawn glorp-menubar-poll worker");
+    rx
 }
 
 fn build_popover(
@@ -134,8 +200,27 @@ fn build_popover(
     let text_view: Retained<NSTextView> =
         unsafe { NSTextView::initWithFrame(mtm.alloc(), view_frame) };
     unsafe {
+        // We render attributed strings as a static display surface. Everything
+        // NSTextView offers beyond that — selection, undo, find, automatic
+        // text substitutions, spell/grammar checking — adds per-edit work in
+        // the layout manager. At 4 Hz that work piles up faster than ticks
+        // drain and the main thread beachballs. Strip it all.
         text_view.setEditable(false);
-        text_view.setSelectable(true);
+        text_view.setSelectable(false);
+        text_view.setRichText(false);
+        text_view.setAllowsUndo(false);
+        text_view.setUsesFindBar(false);
+        text_view.setUsesFindPanel(false);
+        text_view.setUsesFontPanel(false);
+        text_view.setAutomaticDashSubstitutionEnabled(false);
+        text_view.setAutomaticDataDetectionEnabled(false);
+        text_view.setAutomaticLinkDetectionEnabled(false);
+        text_view.setAutomaticQuoteSubstitutionEnabled(false);
+        text_view.setAutomaticSpellingCorrectionEnabled(false);
+        text_view.setAutomaticTextCompletionEnabled(false);
+        text_view.setAutomaticTextReplacementEnabled(false);
+        text_view.setContinuousSpellCheckingEnabled(false);
+        text_view.setGrammarCheckingEnabled(false);
         text_view.setDrawsBackground(true);
         text_view.setBackgroundColor(&dark_surface_color());
         text_view.setTextContainerInset(NSSize::new(12.0, 12.0));
@@ -185,15 +270,46 @@ fn status_item_title(state: &PetState) -> String {
     format!("· {} ·", state.pet.accepted_name)
 }
 
-fn update_text_view(text_view: &NSTextView, vm: &WatchViewModel) {
-    let attr = render::render(vm);
+/// Replace the entire text storage with a freshly rendered pet block + stats
+/// block. Returns the char length of the pet block region, which the animation
+/// tick uses as the upper bound of the range it overwrites.
+fn write_full_text(text_view: &NSTextView, vm: &WatchViewModel) -> usize {
+    let mut pet = render::render_pet_block(vm);
+    let stats = render::render_stats_block(vm);
     unsafe {
+        pet.attr.appendAttributedString(&stats.attr);
         let mut storage = text_view
             .textStorage()
             .expect("NSTextView always has a text storage");
         let length = storage.length();
-        storage.replaceCharactersInRange_withAttributedString(NSRange::from(0..length), &attr);
+        storage.beginEditing();
+        storage.replaceCharactersInRange_withAttributedString(NSRange::from(0..length), &pet.attr);
+        storage.endEditing();
+        text_view.setNeedsDisplay(true);
     }
+    pet.char_len
+}
+
+/// Replace only the pet region of the text storage. `prev_pet_char_len` is the
+/// range that the previous frame occupied; the new pet block goes in its place
+/// and shifts the stats block by the difference. Wrapped in
+/// `beginEditing`/`endEditing` so NSTextStorage coalesces fix-up and the
+/// layout manager runs at most one relayout pass per tick.
+fn write_pet_block(text_view: &NSTextView, vm: &WatchViewModel, prev_pet_char_len: usize) -> usize {
+    let pet = render::render_pet_block(vm);
+    unsafe {
+        let mut storage = text_view
+            .textStorage()
+            .expect("NSTextView always has a text storage");
+        storage.beginEditing();
+        storage.replaceCharactersInRange_withAttributedString(
+            NSRange::from(0..prev_pet_char_len),
+            &pet.attr,
+        );
+        storage.endEditing();
+        text_view.setNeedsDisplay(true);
+    }
+    pet.char_len
 }
 
 fn toggle_popover() {
@@ -229,27 +345,94 @@ fn toggle_popover() {
     }
 }
 
-fn poll_tick() {
-    let snapshot = APP_STATE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|s| (s.paths.clone(), s.text_view.clone(), s.status_item.clone()))
+/// Main-thread UI tick. Drains any pending worker PollResults (applying the
+/// most recent one to the text view + status item title) and then advances
+/// the pet animation frame if the popover is shown. Never blocks on disk or
+/// subprocesses — those run on the worker thread spawned by
+/// `spawn_poll_worker`.
+///
+/// Animation writes are guarded by a `pet_art`/`pet_spans` diff so frames where
+/// the rendered pet is bit-for-bit identical produce zero AppKit work. Most
+/// 250ms ticks fall in this bucket (blinks fire every ~50 ticks, glitch every
+/// 37, particles intermittently).
+fn ui_tick() {
+    drain_poll_results();
+    animate_pet();
+}
+
+fn drain_poll_results() {
+    let mut latest: Option<PollResult> = None;
+    APP_STATE.with(|cell| {
+        if let Some(state) = cell.borrow().as_ref() {
+            while let Ok(result) = state.poll_rx.try_recv() {
+                latest = Some(result);
+            }
+        }
     });
-    let Some((paths, text_view, status_item)) = snapshot else {
+    let Some(result) = latest else {
         return;
     };
-    let state_store = StateStore::new(paths.state_file.clone());
-    let pet_state = match poll_usage_and_apply(&state_store, &paths.usage_db, &paths.config_file) {
-        Ok(Some(state)) => state,
-        Ok(None) | Err(_) => return,
+    let (text_view, status_item) = match APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|s| (s.text_view.clone(), s.status_item.clone()))
+    }) {
+        Some(pair) => pair,
+        None => return,
     };
-    if let Ok(vm) = build_watch_view_model(&pet_state, &paths.usage_db) {
-        update_text_view(&text_view, &vm);
-        let mtm = MainThreadMarker::new().expect("poll on non-main thread");
-        if let Some(button) = unsafe { status_item.button(mtm) } {
-            unsafe { button.setTitle(&NSString::from_str(&status_item_title(&pet_state))) };
-        }
+    let pet_len = write_full_text(&text_view, &result.vm);
+    let mtm = MainThreadMarker::new().expect("ui_tick on non-main thread");
+    if let Some(button) = unsafe { status_item.button(mtm) } {
+        unsafe { button.setTitle(&NSString::from_str(&status_item_title(&result.pet_state))) };
     }
+    APP_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            state.vm = result.vm;
+            state.pet_block_char_len = pet_len;
+        }
+    });
+}
+
+fn animate_pet() {
+    let snapshot = APP_STATE.with(|cell| {
+        cell.borrow().as_ref().map(|s| {
+            (
+                s.popover.clone(),
+                s.text_view.clone(),
+                s.animation_frame,
+                s.vm.clone(),
+                s.pet_block_char_len,
+            )
+        })
+    });
+    let Some((popover, text_view, frame, mut vm, prev_pet_len)) = snapshot else {
+        return;
+    };
+    if !unsafe { popover.isShown() } {
+        return;
+    }
+    let next_frame = frame.wrapping_add(1);
+    let prev_pet_art = vm.pet_art.clone();
+    let prev_pet_spans = vm.pet_spans.clone();
+    if rerender_pet_for_view_model(&mut vm, next_frame).is_err() {
+        return;
+    }
+    if vm.pet_art == prev_pet_art && vm.pet_spans == prev_pet_spans {
+        APP_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.animation_frame = next_frame;
+            }
+        });
+        return;
+    }
+    let new_pet_len = write_pet_block(&text_view, &vm, prev_pet_len);
+    APP_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            state.vm = vm;
+            state.animation_frame = next_frame;
+            state.pet_block_char_len = new_pet_len;
+        }
+    });
 }
 
 struct AppStateHandles {
