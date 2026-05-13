@@ -2,13 +2,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 
 use crate::tui::component::{ComponentPanel, FeedList};
-use crate::tui::panels::Panel;
+use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
 
 pub struct FeedPanel;
 
-impl Panel for FeedPanel {
+impl LegacyPanel for FeedPanel {
     fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
         // Minimum height that shows the title + at least 2 events. The
         // wide-mode layout passes a Min(0) constraint that grows the feed

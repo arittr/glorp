@@ -8,7 +8,7 @@ use crate::pet::animator::low_energy_lightness_multiplier;
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{PetScene, PetSceneLayout};
-use crate::tui::panels::Panel;
+use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, SemanticStyles};
 use crate::tui::view_model::WatchViewModel;
@@ -22,7 +22,6 @@ const PET_H: u16 = 10;
 
 /// Computes the 13×10 sub-rect where the pet art sits inside the panel area,
 /// accounting for vertical centering, breathing offset, and wander offset.
-/// Exported for use by `pet_panel_rect()` in layout.rs (Task 22).
 pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     let cx = area.x + area.width.saturating_sub(PET_W) / 2;
     let cy = area.y + area.height.saturating_sub(PET_H) / 2;
@@ -66,7 +65,7 @@ fn ambient_glyph_is_inside_area(glyph: &AmbientGlyph, area: Rect) -> bool {
         && glyph.row < area.y.saturating_add(area.height)
 }
 
-impl Panel for PetPanel {
+impl LegacyPanel for PetPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         Constraint::Fill(1)
     }

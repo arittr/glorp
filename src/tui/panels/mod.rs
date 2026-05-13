@@ -1,8 +1,8 @@
-//! Panel trait and concrete panel implementations.
+//! Legacy panel trait and concrete panel implementations.
 //!
 //! Each panel owns its rendering, its preferred sizing, and its honest
-//! minimum height. The dispatcher in `tui::layout` builds a panel list per
-//! frame and lays them out via ratatui `Layout`.
+//! minimum height. The watch component layout allocates panel bounds and
+//! renders these compatibility panels through `render_watch_layout`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
@@ -25,7 +25,7 @@ pub use progress::ProgressPanel;
 pub use today::TodayPanel;
 pub use vitals::VitalsPanel;
 
-pub trait Panel {
+pub trait LegacyPanel {
     /// Preferred layout constraint for this panel given the current view
     /// model. Panels that need exact sizing return `Constraint::Length(n)`;
     /// flexible panels return `Constraint::Min(n)`.

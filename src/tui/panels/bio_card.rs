@@ -2,13 +2,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 
 use crate::tui::component::{ComponentPanel, TextRow};
-use crate::tui::panels::Panel;
+use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
 
 pub struct BioCardPanel;
 
-impl Panel for BioCardPanel {
+impl LegacyPanel for BioCardPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         // 1 border row + 2 content rows (hatched, age).
         Constraint::Length(3)

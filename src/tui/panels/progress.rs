@@ -5,13 +5,13 @@ use crate::tui::component::{
     BorderTone, ComponentPanel, ComponentStyle, GradientToken, Insets, ProgressBar, Surface,
     TextRow, TextTone,
 };
-use crate::tui::panels::Panel;
+use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
 
 pub struct ProgressPanel;
 
-impl Panel for ProgressPanel {
+impl LegacyPanel for ProgressPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         // 1 border row + 1 xp bar row. The next stage stays a surprise — no
         // "current ➜ next" hint, just the bar and current pace.

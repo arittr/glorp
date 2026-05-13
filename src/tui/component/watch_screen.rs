@@ -4,7 +4,7 @@ use crate::tui::component::{
     LayoutMode, PetScene, TargetPath, VisibilityState, WatchComponentId,
 };
 use crate::tui::panels::{
-    BioCardPanel, FeedPanel, Panel as LegacyPanel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
+    BioCardPanel, FeedPanel, LegacyPanel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
 };
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::ColorCapability;

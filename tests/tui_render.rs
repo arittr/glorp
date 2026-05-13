@@ -111,6 +111,16 @@ fn ordinary_panels_use_component_widgets_instead_of_ratatui_blocks() {
 }
 
 #[test]
+fn watch_layout_no_longer_contains_manual_render_wide_or_pet_panel_rect() {
+    let source = std::fs::read_to_string("src/tui/layout.rs").unwrap();
+    assert!(!source.contains("fn render_wide("));
+    assert!(!source.contains("fn render_compact("));
+    assert!(!source.contains("pub fn pet_panel_rect("));
+    assert!(source.contains("layout_watch("));
+    assert!(source.contains("render_watch_layout("));
+}
+
+#[test]
 fn render_context_clock_controls_pet_scene_time() {
     let first = glorp::tui::render_context::WatchClock::fixed(
         time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),

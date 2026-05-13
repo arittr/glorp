@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 
 use crate::tui::component::{ComponentPanel, StatRow};
-use crate::tui::panels::Panel;
+use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 #[cfg(test)]
 use crate::tui::style::ColorCapability;
@@ -11,7 +11,7 @@ use crate::tui::view_model::WatchViewModel;
 
 pub struct VitalsPanel;
 
-impl Panel for VitalsPanel {
+impl LegacyPanel for VitalsPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         // 1 border row + 3 bar rows (fed, happy, energy). xp moved to ProgressPanel.
         Constraint::Length(4)

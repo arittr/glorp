@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 
 use crate::tui::component::{ComponentPanel, InlineSparkline, MetricRow};
-use crate::tui::panels::Panel;
+use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{claude_color, codex_color};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
@@ -12,7 +12,7 @@ const EXPECTED_SOURCES: &[(&str, &str)] = &[("claude-code", "claude"), ("codex",
 
 pub struct TodayPanel;
 
-impl Panel for TodayPanel {
+impl LegacyPanel for TodayPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         // 1 row for the TOP border/title + 5 data rows (tokens, claude, codex, last_10m, 7-day).
         Constraint::Length(6)
