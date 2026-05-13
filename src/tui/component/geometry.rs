@@ -52,7 +52,18 @@ impl ComponentLayout {
         if self.targets.contains_key(&path) {
             return Err(LayoutBuildError::DuplicateTarget(path));
         }
+        let Some(owner_node) = self.nodes.get(&target.owner) else {
+            return Err(LayoutBuildError::UnknownTargetOwner(target.owner));
+        };
+        if owner_node.targets.contains_key(&path) {
+            return Err(LayoutBuildError::DuplicateTarget(path));
+        }
         self.targets.insert(path, target);
+        let owner_node = self
+            .nodes
+            .get_mut(&target.owner)
+            .expect("target owner was validated before insertion");
+        owner_node.targets.insert(path, target);
         Ok(())
     }
 
@@ -141,7 +152,9 @@ pub fn hit_test(layout: &ComponentLayout, point: Position) -> Option<HitResult> 
     layout
         .targets
         .iter()
-        .filter(|(_, target)| rect_contains(target.rect, point))
+        .filter(|(_, target)| {
+            rect_contains(target.rect, point) && rect_contains(target.clip, point)
+        })
         .max_by_key(|(_, target)| target.z)
         .map(|(path, target)| HitResult {
             target: *path,
@@ -162,6 +175,7 @@ fn rect_contains(rect: Rect, point: Position) -> bool {
 pub enum LayoutBuildError {
     DuplicateComponent(ComponentPath),
     DuplicateTarget(TargetPath),
+    UnknownTargetOwner(ComponentPath),
 }
 
 impl fmt::Display for LayoutBuildError {
@@ -171,6 +185,9 @@ impl fmt::Display for LayoutBuildError {
                 write!(f, "duplicate component path {path}")
             }
             LayoutBuildError::DuplicateTarget(path) => write!(f, "duplicate target path {path}"),
+            LayoutBuildError::UnknownTargetOwner(path) => {
+                write!(f, "unknown target owner {path}")
+            }
         }
     }
 }
@@ -225,6 +242,97 @@ mod tests {
     }
 
     #[test]
+    fn component_layout_populates_owner_node_targets() {
+        let mut layout = ComponentLayout::new(Rect::new(0, 0, 80, 24), LayoutMode::Compact);
+        layout
+            .insert_node(ComponentNodeLayout::leaf(
+                ComponentPath::new("watch.pet"),
+                Rect::new(1, 2, 20, 10),
+            ))
+            .unwrap();
+        layout
+            .insert_target(
+                TargetPath::new("watch.pet.art"),
+                GeometryTarget {
+                    owner: ComponentPath::new("watch.pet"),
+                    rect: Rect::new(5, 4, 13, 10),
+                    z: 10,
+                    clip: Rect::new(1, 2, 20, 10),
+                    role: TargetRole::PetArt,
+                },
+            )
+            .unwrap();
+
+        let node = layout.node(ComponentPath::new("watch.pet")).unwrap();
+        assert_eq!(
+            node.targets
+                .get(&TargetPath::new("watch.pet.art"))
+                .unwrap()
+                .rect,
+            Rect::new(5, 4, 13, 10)
+        );
+    }
+
+    #[test]
+    fn component_layout_rejects_duplicate_targets_without_mutating_owner_node() {
+        let mut layout = ComponentLayout::new(Rect::new(0, 0, 80, 24), LayoutMode::Compact);
+        layout
+            .insert_node(ComponentNodeLayout::leaf(
+                ComponentPath::new("watch.pet"),
+                Rect::new(1, 2, 20, 10),
+            ))
+            .unwrap();
+        let target = GeometryTarget {
+            owner: ComponentPath::new("watch.pet"),
+            rect: Rect::new(5, 4, 13, 10),
+            z: 10,
+            clip: Rect::new(1, 2, 20, 10),
+            role: TargetRole::PetArt,
+        };
+        layout
+            .insert_target(TargetPath::new("watch.pet.art"), target)
+            .unwrap();
+
+        let err = layout
+            .insert_target(
+                TargetPath::new("watch.pet.art"),
+                GeometryTarget { z: 20, ..target },
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate target path"));
+        let node = layout.node(ComponentPath::new("watch.pet")).unwrap();
+        assert_eq!(node.targets.len(), 1);
+        assert_eq!(
+            node.targets
+                .get(&TargetPath::new("watch.pet.art"))
+                .unwrap()
+                .z,
+            10
+        );
+    }
+
+    #[test]
+    fn component_layout_rejects_targets_with_unknown_owner() {
+        let mut layout = ComponentLayout::new(Rect::new(0, 0, 80, 24), LayoutMode::Compact);
+        let err = layout
+            .insert_target(
+                TargetPath::new("watch.pet.art"),
+                GeometryTarget {
+                    owner: ComponentPath::new("watch.pet"),
+                    rect: Rect::new(5, 4, 13, 10),
+                    z: 10,
+                    clip: Rect::new(1, 2, 20, 10),
+                    role: TargetRole::PetArt,
+                },
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unknown target owner"));
+        assert!(layout.target(TargetPath::new("watch.pet.art")).is_none());
+    }
+
+    #[test]
     fn component_layout_hit_test_returns_highest_z_target_containing_point() {
         let mut layout = ComponentLayout::new(Rect::new(0, 0, 80, 24), LayoutMode::Compact);
         layout
@@ -261,5 +369,34 @@ mod tests {
         let hit = hit_test(&layout, Position::new(6, 6)).unwrap();
         assert_eq!(hit.target, TargetPath::new("watch.pet.art"));
         assert_eq!(hit.local_position, Position::new(2, 1));
+    }
+
+    #[test]
+    fn component_layout_hit_test_ignores_unclipped_target_area() {
+        let mut layout = ComponentLayout::new(Rect::new(0, 0, 80, 24), LayoutMode::Compact);
+        layout
+            .insert_node(ComponentNodeLayout::leaf(
+                ComponentPath::new("watch.pet"),
+                Rect::new(0, 0, 20, 20),
+            ))
+            .unwrap();
+        layout
+            .insert_target(
+                TargetPath::new("watch.pet.art"),
+                GeometryTarget {
+                    owner: ComponentPath::new("watch.pet"),
+                    rect: Rect::new(0, 0, 20, 20),
+                    z: 10,
+                    clip: Rect::new(0, 0, 10, 10),
+                    role: TargetRole::PetArt,
+                },
+            )
+            .unwrap();
+
+        assert!(hit_test(&layout, Position::new(12, 5)).is_none());
+        assert_eq!(
+            hit_test(&layout, Position::new(5, 5)).unwrap().target,
+            TargetPath::new("watch.pet.art")
+        );
     }
 }
