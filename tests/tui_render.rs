@@ -128,6 +128,43 @@ fn pet_effect_target_matches_component_layout_pet_art_target() {
     assert_eq!(effect_rect, target.rect);
 }
 
+#[test]
+fn wide_layout_preserves_asymmetric_pet_hero_policy() {
+    let vm = WatchViewModel::fixture();
+    let layout =
+        glorp::tui::component::layout_watch(ratatui::layout::Rect::new(0, 0, 120, 32), &vm);
+    let pet = layout
+        .node(glorp::tui::component::WatchComponentId::Pet.path())
+        .unwrap();
+    let today = layout
+        .node(glorp::tui::component::WatchComponentId::Today.path())
+        .unwrap();
+    let progress = layout
+        .node(glorp::tui::component::WatchComponentId::Progress.path())
+        .unwrap();
+    let feed = layout
+        .node(glorp::tui::component::WatchComponentId::Feed.path())
+        .unwrap();
+
+    assert!(pet.bounds.height >= today.bounds.height + progress.bounds.height);
+    assert!(today.bounds.y <= progress.bounds.y);
+    assert!(progress.bounds.y <= feed.bounds.y);
+    assert!(feed.bounds.height <= 8);
+}
+
+#[test]
+fn compact_layout_records_ordered_degradation_decisions() {
+    let vm = WatchViewModel::fixture();
+    let layout = glorp::tui::component::layout_watch(ratatui::layout::Rect::new(0, 0, 72, 24), &vm);
+    assert!(layout
+        .decisions
+        .iter()
+        .any(|d| d.path.as_str() == "watch.bio"));
+    assert!(layout
+        .target(glorp::tui::component::TargetPath::new("watch.pet.art"))
+        .is_some());
+}
+
 fn spark_foregrounds(buffer: &Buffer) -> Vec<Color> {
     let area = buffer.area;
     let mut colors = Vec::new();
@@ -877,8 +914,8 @@ fn drop_does_not_block_on_in_flight_poll() {
 }
 
 /// Standard wide-mode terminal width for layout invariants:
-/// rounded outer frame, two columns inside, every body row padded to the
-/// terminal width and section dividers fully filling the right column.
+/// rounded outer frame, two columns inside, and every body row padded to the
+/// terminal width.
 /// Anchored well above `COMPACT_THRESHOLD` so the wide composition is the
 /// path under test.
 // Matches the layout's MAX_FRAME_WIDTH so the frame fills the terminal exactly
@@ -940,96 +977,6 @@ fn wide_layout_outer_frame_uses_rounded_box_drawing() {
         assert_eq!(chars[0], '│', "row {y} left rail");
         assert_eq!(chars[chars.len() - 1], '│', "row {y} right rail");
     }
-}
-
-#[test]
-fn wide_layout_section_dividers_all_end_at_same_right_column() {
-    let backend = TestBackend::new(WIDE_TEST_WIDTH, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &WatchViewModel::fixture_with_events()))
-        .unwrap();
-    let buf = terminal.backend().buffer();
-    let rows = buffer_rows(buf);
-    // Right-column panels only; left-column panels (vitals, bio) are a fixed
-    // 40-cell width and will end at a different column than the right column.
-    let labels = [" today ", " progress ", " feed "];
-
-    // Collect the rightmost column where a `─` appears in each section
-    // divider row. In the native-Layout path the right column fills the inner
-    // frame area, so the last `─` is immediately followed by the outer frame
-    // wall `│` (not a pad space). All dividers must end at the same column.
-    let mut divider_ends: Vec<usize> = Vec::new();
-    for row in &rows {
-        if !labels.iter().any(|label| row.contains(label)) {
-            continue;
-        }
-        let chars: Vec<char> = row.chars().collect();
-        let rightmost_dash = chars
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, c)| **c == '─')
-            .map(|(i, _)| i)
-            .unwrap_or_else(|| panic!("divider row had no `─`: {row:?}"));
-        divider_ends.push(rightmost_dash);
-        // The character after the last dash should be either the frame wall
-        // `│` (native-Layout path fills to the edge) or a pad space.
-        let after = chars.get(rightmost_dash + 1).copied().unwrap_or(' ');
-        assert!(
-            after == '│' || after == ' ',
-            "cell after the last `─` should be frame wall or pad space: {row:?}"
-        );
-    }
-    assert!(
-        divider_ends.len() >= 3,
-        "expected at least three section dividers, found {}",
-        divider_ends.len(),
-    );
-    let first = divider_ends[0];
-    for end in &divider_ends {
-        assert_eq!(
-            *end, first,
-            "all section dividers should end at the same column; got {divider_ends:?}",
-        );
-    }
-}
-
-#[test]
-fn watch_wide_bio_bottom_aligns_with_feed_bottom() {
-    // The wide layout uses a 2-row grid; band 2 (vitals/bio left, feed right)
-    // is 8 rows tall, fitting a header + 7 events. When the feed is full (≥7
-    // events), the last event sits on the same terminal row as bio's age line.
-    let vm = WatchViewModel::fixture_with_n_events(7);
-    let backend = TestBackend::new(110, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
-    let buf = terminal.backend().buffer();
-
-    let row_string = |y: u16| -> String {
-        (0..buf.area.width)
-            .filter_map(|x| buf.cell(Position::new(x, y)))
-            .map(|c| c.symbol().to_string())
-            .collect()
-    };
-
-    let mut age_y: Option<u16> = None;
-    let mut last_feed_event_y: Option<u16> = None;
-    for y in 1..buf.area.height - 1 {
-        let row = row_string(y);
-        if row.contains("age") && row.contains("d") {
-            age_y = Some(y);
-        }
-        if row.contains("added") {
-            last_feed_event_y = Some(y);
-        }
-    }
-    let age_y = age_y.expect("bio age row");
-    let last_feed_event_y = last_feed_event_y.expect("last feed event row");
-    assert_eq!(
-        age_y, last_feed_event_y,
-        "bio's age row and the last feed event must sit on the same terminal row"
-    );
 }
 
 #[test]

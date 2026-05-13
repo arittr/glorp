@@ -9,7 +9,7 @@ use crate::tui::render_context::RenderContext;
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Block;
 
 /// Smallest terminal width that uses the wide two-column layout.
@@ -31,10 +31,6 @@ pub const MAX_FRAME_HEIGHT: u16 = 23;
 /// the first/last panel.
 pub const INNER_VPAD: u16 = 1;
 
-/// Current wide-mode row bands.
-pub const WIDE_BAND_1: u16 = 10;
-pub const WIDE_BAND_2: u16 = 8;
-
 /// Gap between stacked panels in both wide and compact layouts.
 pub const COLUMN_GAP: u16 = 1;
 
@@ -43,6 +39,8 @@ pub const RIGHT_MIN_WIDTH: u16 = 50;
 /// Current renderer only draws the pet panel when the allocated area can hold
 /// the 13x10 pet art.
 pub const PET_RENDER_MIN_HEIGHT: u16 = 10;
+
+pub const FEED_MAX_HEIGHT: u16 = 8;
 
 pub fn layout_watch(terminal_area: Rect, vm: &WatchViewModel) -> ComponentLayout {
     let ctx = RenderContext::new(ColorCapability::Truecolor);
@@ -78,11 +76,18 @@ pub fn render_watch_layout(
     vm: &WatchViewModel,
     ctx: &RenderContext,
 ) {
+    let pet_vm;
+    let pet_vm_ref = if speech_hidden_by_layout(layout) {
+        pet_vm = vm_without_speech(vm);
+        &pet_vm
+    } else {
+        vm
+    };
     render_if_visible(
         layout,
         WatchComponentId::Pet.path(),
         buf,
-        vm,
+        pet_vm_ref,
         ctx,
         PetPanel,
         Some(TargetPath::new("watch.pet.art")),
@@ -194,48 +199,34 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
         ])
         .split(padded);
 
-    let band_constraints = [
-        Constraint::Length(WIDE_BAND_1),
-        Constraint::Length(COLUMN_GAP),
-        Constraint::Length(WIDE_BAND_2),
-        Constraint::Min(0),
-    ];
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(band_constraints)
-        .split(body[0]);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(band_constraints)
-        .split(body[2]);
-
-    insert_pet_node(layout, left[0], vm, ctx);
-
-    let right_top = Layout::default()
-        .direction(Direction::Vertical)
         .constraints([
-            TodayPanel.preferred_constraint(vm),
+            PetPanel.preferred_constraint(vm),
             Constraint::Length(COLUMN_GAP),
-            Constraint::Min(0),
-            ProgressPanel.preferred_constraint(vm),
-        ])
-        .split(right[0]);
-    insert_visible_node(layout, WatchComponentId::Today, right_top[0]);
-    insert_visible_node(layout, WatchComponentId::Progress, right_top[3]);
-
-    let left_bottom = Layout::default()
-        .direction(Direction::Vertical)
-        .flex(Flex::Start)
-        .constraints([
             VitalsPanel.preferred_constraint(vm),
             Constraint::Length(COLUMN_GAP),
             BioCardPanel.preferred_constraint(vm),
         ])
-        .split(left[2]);
-    insert_visible_node(layout, WatchComponentId::Vitals, left_bottom[0]);
-    insert_visible_node(layout, WatchComponentId::Bio, left_bottom[2]);
+        .split(body[0]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            TodayPanel.preferred_constraint(vm),
+            Constraint::Length(COLUMN_GAP),
+            ProgressPanel.preferred_constraint(vm),
+            Constraint::Length(COLUMN_GAP),
+            Constraint::Length(bounded_feed_height(vm)),
+            Constraint::Min(0),
+        ])
+        .split(body[2]);
 
-    insert_visible_node(layout, WatchComponentId::Feed, right[2]);
+    insert_pet_node(layout, left[0], vm, ctx);
+    insert_visible_node(layout, WatchComponentId::Vitals, left[2]);
+    insert_visible_node(layout, WatchComponentId::Bio, left[4]);
+    insert_visible_node(layout, WatchComponentId::Today, right[0]);
+    insert_visible_node(layout, WatchComponentId::Progress, right[2]);
+    insert_visible_node(layout, WatchComponentId::Feed, right[4]);
 }
 
 fn layout_compact(
@@ -244,27 +235,73 @@ fn layout_compact(
     ctx: &RenderContext,
     layout: &mut ComponentLayout,
 ) {
+    let vitals_height = intrinsic_height(VitalsPanel.preferred_constraint(vm));
+    let today_height = intrinsic_height(TodayPanel.preferred_constraint(vm));
+    let progress_height = intrinsic_height(ProgressPanel.preferred_constraint(vm));
+    let feed_preferred_height = bounded_feed_height(vm);
+    let fixed_critical_height = PET_RENDER_MIN_HEIGHT
+        .saturating_add(vitals_height)
+        .saturating_add(today_height)
+        .saturating_add(progress_height);
+    let mut remaining = area.height.saturating_sub(fixed_critical_height);
+
+    let gap_height = if remaining >= COLUMN_GAP * 3 {
+        remaining = remaining.saturating_sub(COLUMN_GAP * 3);
+        COLUMN_GAP
+    } else {
+        0
+    };
+
+    let feed_height = feed_preferred_height.min(remaining);
+    remaining = remaining.saturating_sub(feed_height);
+
+    let hide_speech = vm.current_speech.is_some() && remaining == 0;
+    let speech_extra = if vm.current_speech.is_some() && !hide_speech && remaining > 0 {
+        remaining = remaining.saturating_sub(1);
+        1
+    } else {
+        0
+    };
+
+    let pet_height = PET_RENDER_MIN_HEIGHT
+        .saturating_add(speech_extra)
+        .saturating_add(remaining);
+
     let stack = Layout::default()
         .direction(Direction::Vertical)
-        .flex(Flex::Start)
         .constraints([
-            PetPanel.preferred_constraint(vm),
-            VitalsPanel.preferred_constraint(vm),
-            Constraint::Length(COLUMN_GAP),
-            TodayPanel.preferred_constraint(vm),
-            Constraint::Length(COLUMN_GAP),
-            ProgressPanel.preferred_constraint(vm),
-            Constraint::Length(COLUMN_GAP),
-            FeedPanel.preferred_constraint(vm),
+            Constraint::Length(pet_height),
+            Constraint::Length(vitals_height),
+            Constraint::Length(gap_height),
+            Constraint::Length(today_height),
+            Constraint::Length(gap_height),
+            Constraint::Length(progress_height),
+            Constraint::Length(gap_height),
+            Constraint::Length(feed_height),
         ])
         .split(area);
 
-    insert_pet_node(layout, stack[0], vm, ctx);
+    insert_hidden_bio(layout, area);
+    if feed_preferred_height > feed_height {
+        layout.decisions.push(LayoutDecision {
+            path: WatchComponentId::Feed.path(),
+            reason: LayoutDecisionReason::RowLimit,
+            message: "feed rows limited by compact layout height",
+        });
+    }
+    if hide_speech {
+        layout.decisions.push(LayoutDecision {
+            path: ComponentPath::new("watch.pet.speech"),
+            reason: LayoutDecisionReason::InsufficientHeight,
+            message: "pet speech hidden to preserve pet art in compact layout",
+        });
+    }
+
+    insert_pet_node_with_speech_policy(layout, stack[0], vm, ctx, hide_speech);
     insert_visible_node(layout, WatchComponentId::Vitals, stack[1]);
     insert_visible_node(layout, WatchComponentId::Today, stack[3]);
     insert_visible_node(layout, WatchComponentId::Progress, stack[5]);
     insert_visible_node(layout, WatchComponentId::Feed, stack[7]);
-    insert_hidden_bio(layout, area);
 }
 
 fn insert_root_node(layout: &mut ComponentLayout, frame: Rect, content: Rect) {
@@ -295,6 +332,16 @@ fn insert_pet_node(
     vm: &WatchViewModel,
     ctx: &RenderContext,
 ) {
+    insert_pet_node_with_speech_policy(layout, bounds, vm, ctx, false);
+}
+
+fn insert_pet_node_with_speech_policy(
+    layout: &mut ComponentLayout,
+    bounds: Rect,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+    hide_speech: bool,
+) {
     let owner = WatchComponentId::Pet.path();
     let mut node = ComponentNodeLayout::leaf(owner, bounds);
     if bounds.height < PET_RENDER_MIN_HEIGHT {
@@ -316,7 +363,14 @@ fn insert_pet_node(
         .insert_node(node)
         .expect("pet component id is unique in watch layout");
 
-    let scene = PetScene::compute_layout(bounds, vm, ctx);
+    let speechless_vm;
+    let scene_vm = if hide_speech {
+        speechless_vm = vm_without_speech(vm);
+        &speechless_vm
+    } else {
+        vm
+    };
+    let scene = PetScene::compute_layout(bounds, scene_vm, ctx);
     for (path, target) in scene.targets {
         layout
             .insert_target(path, target)
@@ -338,6 +392,37 @@ fn insert_hidden_bio(layout: &mut ComponentLayout, content: Rect) {
         reason: LayoutDecisionReason::CompactMode,
         message: "bio hidden in compact mode",
     });
+}
+
+fn bounded_feed_height(vm: &WatchViewModel) -> u16 {
+    intrinsic_height(FeedPanel.preferred_constraint(vm)).min(FEED_MAX_HEIGHT)
+}
+
+fn intrinsic_height(constraint: Constraint) -> u16 {
+    match constraint {
+        Constraint::Length(height)
+        | Constraint::Min(height)
+        | Constraint::Max(height)
+        | Constraint::Percentage(height)
+        | Constraint::Fill(height) => height,
+        Constraint::Ratio(numerator, denominator) => numerator
+            .checked_div(denominator)
+            .unwrap_or(0)
+            .min(u16::MAX as u32) as u16,
+    }
+}
+
+fn speech_hidden_by_layout(layout: &ComponentLayout) -> bool {
+    layout.decisions.iter().any(|decision| {
+        decision.path == ComponentPath::new("watch.pet.speech")
+            && decision.reason == LayoutDecisionReason::InsufficientHeight
+    })
+}
+
+fn vm_without_speech(vm: &WatchViewModel) -> WatchViewModel {
+    let mut vm = vm.clone();
+    vm.current_speech = None;
+    vm
 }
 
 #[cfg(test)]
@@ -394,11 +479,11 @@ mod tests {
                 .node(WatchComponentId::Progress.path())
                 .unwrap()
                 .bounds,
-            Rect::new(50, 14, 64, 2)
+            Rect::new(50, 13, 64, 2)
         );
         assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(50, 17, 64, 8)
+            Rect::new(50, 16, 64, 3)
         );
 
         let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
@@ -428,26 +513,26 @@ mod tests {
         assert_eq!(layout.content, Rect::new(1, 1, 70, 22));
         assert_eq!(
             layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
-            Rect::new(1, 1, 70, 4)
+            Rect::new(1, 1, 70, 10)
         );
         assert_eq!(
             layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
-            Rect::new(1, 5, 70, 4)
+            Rect::new(1, 11, 70, 4)
         );
         assert_eq!(
             layout.node(WatchComponentId::Today.path()).unwrap().bounds,
-            Rect::new(1, 10, 70, 6)
+            Rect::new(1, 15, 70, 6)
         );
         assert_eq!(
             layout
                 .node(WatchComponentId::Progress.path())
                 .unwrap()
                 .bounds,
-            Rect::new(1, 17, 70, 2)
+            Rect::new(1, 21, 70, 2)
         );
         assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(1, 20, 70, 3)
+            Rect::new(1, 23, 70, 0)
         );
 
         let bio = layout.node(WatchComponentId::Bio.path()).unwrap();
@@ -458,43 +543,44 @@ mod tests {
             }
         ));
         assert!(
-            layout
-                .decisions
-                .iter()
-                .any(|d| d.path == WatchComponentId::Bio.path()
-                    && d.reason == LayoutDecisionReason::CompactMode),
+            matches!(
+                layout.decisions.as_slice(),
+                [
+                    LayoutDecision {
+                        path,
+                        reason: LayoutDecisionReason::CompactMode,
+                        ..
+                    },
+                    LayoutDecision {
+                        path: feed_path,
+                        reason: LayoutDecisionReason::RowLimit,
+                        ..
+                    },
+                    ..
+                ] if *path == WatchComponentId::Bio.path()
+                    && *feed_path == WatchComponentId::Feed.path()
+            ),
             "compact bio hide decision missing"
         );
     }
 
     #[test]
-    fn layout_watch_compact_omits_pet_targets_when_renderer_skips_pet() {
+    fn layout_watch_compact_preserves_pet_targets_at_default_height() {
         let vm = WatchViewModel::fixture();
         let layout = layout_watch(Rect::new(0, 0, 72, 24), &vm);
 
         let pet = layout.node(WatchComponentId::Pet.path()).unwrap();
-        assert_eq!(pet.bounds, Rect::new(1, 1, 70, 4));
-        assert!(matches!(
-            pet.visibility,
-            VisibilityState::Degraded {
-                reason: LayoutDecisionReason::InsufficientHeight
-            } | VisibilityState::Hidden {
-                reason: LayoutDecisionReason::InsufficientHeight
-            }
-        ));
-        assert!(
-            pet.targets.is_empty(),
-            "skipped pet should export no targets"
-        );
-        assert!(layout.target(TargetPath::new("watch.pet.panel")).is_none());
-        assert!(layout.target(TargetPath::new("watch.pet.art")).is_none());
+        assert_eq!(pet.bounds, Rect::new(1, 1, 70, 10));
+        assert_eq!(pet.visibility, VisibilityState::Visible);
+        assert!(layout.target(TargetPath::new("watch.pet.panel")).is_some());
+        assert!(layout.target(TargetPath::new("watch.pet.art")).is_some());
         assert!(
             layout
                 .decisions
                 .iter()
-                .any(|d| d.path == WatchComponentId::Pet.path()
-                    && d.reason == LayoutDecisionReason::InsufficientHeight),
-            "compact pet insufficient-height decision missing"
+                .any(|d| d.path == WatchComponentId::Feed.path()
+                    && d.reason == LayoutDecisionReason::RowLimit),
+            "compact feed row-limit decision missing"
         );
     }
 

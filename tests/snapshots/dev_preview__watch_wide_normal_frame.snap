@@ -1,6 +1,6 @@
 ---
 source: tests/dev_preview.rs
-assertion_line: 295
+assertion_line: 368
 expression: frame
 ---
                                                                                                                         
@@ -16,16 +16,16 @@ expression: frame
      │                 ='3'=                        last 10m          +16.7k    this 10m                          │     
      │               /░▒ ✦ ▒░\                      ·  ·  ·  ·  ·  ▅  █         ← 7-day                           │     
      │               (░▒░✦░▒░)                                                                                    │     
-     │                \░░░░░/                                                                                     │     
-     │                 d   b                       progress ──────────────────────────────────────────────────────│     
-     │                                              xp         ███████░░░░░  61   ↑ 16.7k/hr                      │     
+     │                \░░░░░/                      progress ──────────────────────────────────────────────────────│     
+     │                 d   b                        xp         ███████░░░░░  61   ↑ 16.7k/hr                      │     
      │                                                                                                            │     
-     │ vitals ────────────────────────────────     feed ──────────────────────────────────────────────────────────│     
-     │  fed        ████████░░░░  70                 --:--  Mochi inspected a fresh diff                           │     
-     │  happy      █████████░░░  72                 --:--  Mochi found a warm token cache                         │     
-     │  energy     ████████░░░░  68                 08:53  claude-code added 8.8k effective tokens                │     
-     │                                              08:45  codex added 4.2k effective tokens                      │     
-     │ bio ───────────────────────────────────      08:48  claude-code added 12.5k effective tokens               │     
+     │                                             feed ──────────────────────────────────────────────────────────│     
+     │ vitals ────────────────────────────────      --:--  Mochi inspected a fresh diff                           │     
+     │  fed        ████████░░░░  70                 --:--  Mochi found a warm token cache                         │     
+     │  happy      █████████░░░  72                 08:53  claude-code added 8.8k effective tokens                │     
+     │  energy     ████████░░░░  68                 08:45  codex added 4.2k effective tokens                      │     
+     │                                              08:48  claude-code added 12.5k effective tokens               │     
+     │ bio ───────────────────────────────────                                                                    │     
      │  hatched   sep 21 01:53                                                                                    │     
      │  age       18d                                                                                             │     
      │                                                                                                            │     

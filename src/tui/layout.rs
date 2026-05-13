@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn pet_effect_rect_returns_empty_rect_when_pet_art_target_is_absent() {
         let vm = WatchViewModel::fixture();
-        let rect = pet_effect_rect(Rect::new(0, 0, 72, 24), &vm);
+        let rect = pet_effect_rect(Rect::new(0, 0, 72, 12), &vm);
 
         assert_eq!(rect, Rect::new(0, 0, 0, 0));
     }
@@ -507,40 +507,5 @@ mod render_wide_tests {
         assert!(s.contains("bio"), "bio panel title must appear");
         assert!(s.contains("hatched"), "bio hatched label must appear");
         assert!(s.contains("age"), "bio age label must appear");
-    }
-
-    /// In wide mode the feed panel must be anchored toward the bottom of the
-    /// right column (Min(0) spacer between progress and feed absorbs the slack).
-    /// Concretely: the row containing "feed" must appear after the midpoint of
-    /// Progress and feed live in separate row bands; feed starts on the same
-    /// terminal row as vitals (band 2 top). Exactly one row separates the end
-    /// of progress (band 1) from the feed header (band 2) — matching the
-    /// 1-row gap between bio and vitals.
-    #[test]
-    fn vitals_and_feed_start_on_the_same_row() {
-        let backend = TestBackend::new(120, 32);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let vm = WatchViewModel::fixture();
-        terminal
-            .draw(|f| render_watch_frame_with_capability(f, &vm, ColorCapability::Truecolor))
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-
-        let height = buf.area.height;
-        let row_string = |y: u16| -> String {
-            (0..buf.area.width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect()
-        };
-        let vitals_row = (0..height)
-            .find(|&y| row_string(y).contains("vitals"))
-            .expect("vitals section must appear");
-        let feed_row = (0..height)
-            .find(|&y| row_string(y).contains("feed"))
-            .expect("feed section must appear");
-        assert_eq!(
-            vitals_row, feed_row,
-            "vitals and feed must start on the same terminal row (band 2 top)"
-        );
     }
 }
