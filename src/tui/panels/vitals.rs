@@ -3,7 +3,7 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
-use crate::tui::panels::bars::bar_spans_solid;
+use crate::tui::panels::bars::bar_spans;
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{
@@ -33,18 +33,25 @@ impl Panel for VitalsPanel {
 pub(crate) fn build_vitals_lines<'a>(
     vm: &'a WatchViewModel,
     _width: u16,
-    _capability: ColorCapability,
+    capability: ColorCapability,
     styles: &'a SemanticStyles,
 ) -> Vec<Line<'a>> {
     vec![
-        Line::from(bar_spans_solid("fed", vm.fed, fed_color(), styles)),
-        Line::from(bar_spans_solid(
+        Line::from(bar_spans("fed", vm.fed, fed_color(), capability, styles)),
+        Line::from(bar_spans(
             "happy",
             vm.happiness,
             happy_color(),
+            capability,
             styles,
         )),
-        Line::from(bar_spans_solid("energy", vm.energy, energy_color(), styles)),
+        Line::from(bar_spans(
+            "energy",
+            vm.energy,
+            energy_color(),
+            capability,
+            styles,
+        )),
     ]
 }
 
@@ -120,15 +127,36 @@ mod tests {
         let vm = WatchViewModel::fixture();
         let lines = build_vitals_lines(&vm, 40, ColorCapability::Truecolor, &styles);
         assert_eq!(lines.len(), 3);
-        // First filled span on each line should carry that stat's color.
-        let line_fg = |line: &Line| {
+        // The stat color is the gradient's mid stop, so it must appear among
+        // the filled cells of each row.
+        let row_has_color = |line: &Line, color| {
             line.spans
                 .iter()
-                .find(|s| s.content.contains('█'))
-                .and_then(|s| s.style.fg)
+                .any(|s| s.content.contains('█') && s.style.fg == Some(color))
         };
-        assert_eq!(line_fg(&lines[0]), Some(fed_color()));
-        assert_eq!(line_fg(&lines[1]), Some(happy_color()));
-        assert_eq!(line_fg(&lines[2]), Some(energy_color()));
+        assert!(row_has_color(&lines[0], fed_color()));
+        assert!(row_has_color(&lines[1], happy_color()));
+        assert!(row_has_color(&lines[2], energy_color()));
+    }
+
+    #[test]
+    fn vitals_panel_rows_render_a_gradient_in_truecolor() {
+        use crate::tui::style::semantic_styles;
+        let styles = semantic_styles();
+        let vm = WatchViewModel::fixture();
+        let lines = build_vitals_lines(&vm, 40, ColorCapability::Truecolor, &styles);
+        for line in &lines {
+            let distinct: std::collections::HashSet<_> = line
+                .spans
+                .iter()
+                .filter(|s| s.content.contains('█'))
+                .map(|s| s.style.fg)
+                .collect();
+            assert!(
+                distinct.len() >= 2,
+                "expected a gradient across filled cells, got {} distinct colors",
+                distinct.len()
+            );
+        }
     }
 }

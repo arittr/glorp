@@ -4,10 +4,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
-use crate::tui::panels::bars::{bar_spans_solid, format_tokens_short};
+use crate::tui::panels::bars::{bar_spans, format_tokens_short};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{semantic_styles, xp_color, SemanticStyles};
+use crate::tui::style::{semantic_styles, xp_color, ColorCapability, SemanticStyles};
 use crate::tui::view_model::{ProgressView, WatchViewModel};
 
 pub struct ProgressPanel;
@@ -19,19 +19,20 @@ impl Panel for ProgressPanel {
         Constraint::Length(2)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
         let block = Block::default().borders(Borders::TOP).title(" progress ");
         let inner = block.inner(area);
         block.render(area, buf);
 
         let styles = semantic_styles();
-        let lines = build_progress_lines(&vm.progress, &styles);
+        let lines = build_progress_lines(&vm.progress, ctx.color_capability, &styles);
         Paragraph::new(lines).render(inner, buf);
     }
 }
 
 fn build_progress_lines<'a>(
     progress: &'a ProgressView,
+    capability: ColorCapability,
     styles: &'a SemanticStyles,
 ) -> Vec<Line<'a>> {
     if progress.is_max_stage {
@@ -40,7 +41,13 @@ fn build_progress_lines<'a>(
             Span::styled("✦ max evolved", styles.section_header),
         ])];
     }
-    let mut xp_spans = bar_spans_solid("xp", progress.fraction as f64, xp_color(), styles);
+    let mut xp_spans = bar_spans(
+        "xp",
+        progress.fraction as f64,
+        xp_color(),
+        capability,
+        styles,
+    );
     if progress.rate_per_hour > 0.0 {
         xp_spans.push(Span::raw("   "));
         xp_spans.push(Span::styled("↑", styles.section_header));
@@ -92,7 +99,10 @@ mod tests {
         assert!(s.contains("progress"), "section title");
         assert!(s.contains("xp"), "xp bar label");
         assert!(!s.contains("➜"), "stage transition must not be revealed");
-        assert!(!s.contains("archfuzz"), "next-stage label must not be revealed");
+        assert!(
+            !s.contains("archfuzz"),
+            "next-stage label must not be revealed"
+        );
     }
 
     #[test]

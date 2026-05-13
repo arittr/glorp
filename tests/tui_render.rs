@@ -497,7 +497,7 @@ fn question_mark_toggles_help_overlay() {
 #[test]
 fn xp_display_caps_at_max_when_xp_overshoots_target() {
     let mut vm = WatchViewModel::fixture();
-    // fraction > 1.0 should be clamped to 100% by bar_spans_solid.
+    // fraction > 1.0 should be clamped to 100% by bar_spans.
     vm.progress.fraction = 113.0 / 49.0;
     let backend = TestBackend::new(120, 32);
     let mut terminal = Terminal::new(backend).unwrap();

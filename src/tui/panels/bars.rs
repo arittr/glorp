@@ -1,17 +1,19 @@
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
-use crate::tui::style::SemanticStyles;
+use crate::tui::style::{gradient_ramp, ramp_index, ColorCapability, SemanticStyles};
 
 pub const BAR_CELLS: usize = 12;
 
-/// Render a single-color bar row: `  <label:<6> <bar> <value>`.
-/// Used by VitalsPanel rows and ProgressPanel's xp bar. The same color paints
-/// the label, the filled cells, and the value. Empty cells use `empty_bar`.
-pub fn bar_spans_solid<'a>(
+/// Render a bar row: `  <label:<8>   <bar>  <value>`.
+/// Label and value carry the per-stat color. On truecolor, filled cells fade
+/// dim→bright through a ramp derived from `color`; on flat terminals, every
+/// filled cell uses `color` directly. Empty cells use `empty_bar`.
+pub fn bar_spans<'a>(
     label: &'a str,
     fill_fraction: f64,
     color: Color,
+    capability: ColorCapability,
     styles: &'a SemanticStyles,
 ) -> Vec<Span<'a>> {
     let clamped = fill_fraction.clamp(0.0, 1.0);
@@ -26,8 +28,19 @@ pub fn bar_spans_solid<'a>(
     // chars) keep visible breathing room between the text and the bar.
     spans.push(Span::styled(format!("{label:<8}"), stat_style));
     spans.push(Span::raw("   "));
-    if n_filled > 0 {
-        spans.push(Span::styled("█".repeat(n_filled), stat_style));
+    match capability {
+        ColorCapability::Truecolor => {
+            let ramp = gradient_ramp(color);
+            for i in 0..n_filled {
+                let idx = ramp_index(i, n_filled);
+                spans.push(Span::styled("█", Style::default().fg(ramp.stops[idx])));
+            }
+        }
+        ColorCapability::Flat => {
+            if n_filled > 0 {
+                spans.push(Span::styled("█".repeat(n_filled), stat_style));
+            }
+        }
     }
     if n_empty > 0 {
         spans.push(Span::styled("░".repeat(n_empty), styles.empty_bar));
@@ -106,27 +119,29 @@ mod tests {
     use super::*;
     use crate::tui::style::{fed_color, semantic_styles};
 
+    use crate::tui::style::ColorCapability;
+
     #[test]
-    fn bar_spans_solid_zero_fill_renders_twelve_empty_cells() {
+    fn bar_spans_zero_fill_renders_twelve_empty_cells() {
         let styles = semantic_styles();
-        let spans = bar_spans_solid("fed", 0.0, fed_color(), &styles);
+        let spans = bar_spans("fed", 0.0, fed_color(), ColorCapability::Truecolor, &styles);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().filter(|c| *c == '░').count(), 12);
         assert_eq!(text.chars().filter(|c| *c == '█').count(), 0);
     }
 
     #[test]
-    fn bar_spans_solid_full_fill_renders_twelve_solid_cells() {
+    fn bar_spans_full_fill_renders_twelve_solid_cells() {
         let styles = semantic_styles();
-        let spans = bar_spans_solid("fed", 1.0, fed_color(), &styles);
+        let spans = bar_spans("fed", 1.0, fed_color(), ColorCapability::Truecolor, &styles);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().filter(|c| *c == '█').count(), 12);
     }
 
     #[test]
-    fn bar_spans_solid_label_and_value_share_stat_color() {
+    fn bar_spans_label_and_value_share_stat_color() {
         let styles = semantic_styles();
-        let spans = bar_spans_solid("fed", 0.5, fed_color(), &styles);
+        let spans = bar_spans("fed", 0.5, fed_color(), ColorCapability::Truecolor, &styles);
         let label_style = spans[1].style;
         let value_style = spans.last().unwrap().style;
         assert_eq!(label_style.fg, Some(fed_color()));
@@ -134,9 +149,32 @@ mod tests {
     }
 
     #[test]
-    fn bar_spans_solid_filled_cells_share_stat_color() {
+    fn bar_spans_truecolor_filled_cells_span_a_gradient() {
         let styles = semantic_styles();
-        let spans = bar_spans_solid("fed", 0.5, fed_color(), &styles);
+        let spans = bar_spans("fed", 1.0, fed_color(), ColorCapability::Truecolor, &styles);
+        let filled_colors: Vec<_> = spans
+            .iter()
+            .filter(|s| s.content.contains('█'))
+            .map(|s| s.style.fg)
+            .collect();
+        assert_eq!(filled_colors.len(), 12, "12 filled cells");
+        let distinct: std::collections::HashSet<_> = filled_colors.iter().collect();
+        assert!(
+            distinct.len() >= 4,
+            "expected gradient across filled cells, got {} distinct colors",
+            distinct.len()
+        );
+        // The mid stop must equal the stat color so per-stat identity is preserved.
+        assert!(
+            filled_colors.iter().any(|c| *c == Some(fed_color())),
+            "stat color must appear at the mid stop of the ramp"
+        );
+    }
+
+    #[test]
+    fn bar_spans_flat_filled_cells_share_stat_color() {
+        let styles = semantic_styles();
+        let spans = bar_spans("fed", 0.5, fed_color(), ColorCapability::Flat, &styles);
         let filled_span = spans.iter().find(|s| s.content.contains('█')).unwrap();
         assert_eq!(filled_span.style.fg, Some(fed_color()));
     }

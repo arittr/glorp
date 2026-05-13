@@ -337,6 +337,39 @@ pub fn ramp_index(i: usize, n: usize) -> usize {
     raw.min(4)
 }
 
+/// Derive a 5-stop bar ramp from a single mid color. The mid color sits at
+/// stop 2; lower stops scale toward black, higher stops blend toward white.
+/// Mirrors the dim→bright shape of the hand-tuned `BAR_RAMP_GOOD` ramp so
+/// per-stat gradient bars share visual weight regardless of which color drives
+/// them. Non-RGB inputs degrade to a flat ramp.
+pub fn gradient_ramp(mid: Color) -> BarRamp {
+    let Color::Rgb(r, g, b) = mid else {
+        return BarRamp { stops: [mid; 5] };
+    };
+    let scale = |c: u8, f: f32| (c as f32 * f).round().clamp(0.0, 255.0) as u8;
+    let toward_white = |c: u8, f: f32| {
+        let lifted = c as f32 + (255.0 - c as f32) * f;
+        lifted.round().clamp(0.0, 255.0) as u8
+    };
+    BarRamp {
+        stops: [
+            Color::Rgb(scale(r, 0.45), scale(g, 0.45), scale(b, 0.45)),
+            Color::Rgb(scale(r, 0.70), scale(g, 0.70), scale(b, 0.70)),
+            Color::Rgb(r, g, b),
+            Color::Rgb(
+                toward_white(r, 0.30),
+                toward_white(g, 0.30),
+                toward_white(b, 0.30),
+            ),
+            Color::Rgb(
+                toward_white(r, 0.55),
+                toward_white(g, 0.55),
+                toward_white(b, 0.55),
+            ),
+        ],
+    }
+}
+
 /// Per-stat semantic color roles (revision-3 layout refresh).
 ///
 /// Each function returns a single solid `Color::Rgb`; the same color paints
