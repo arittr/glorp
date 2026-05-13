@@ -202,15 +202,14 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
     let today_height = intrinsic_height(TodayPanel.preferred_constraint(vm));
     let feed_height = bounded_feed_height(vm);
 
-    let left_stack_height = vitals_height
-        .saturating_add(COLUMN_GAP)
-        .saturating_add(progress_height)
+    let lane1_height = vitals_height.max(today_height);
+    let lane2_left_height = progress_height
         .saturating_add(COLUMN_GAP)
         .saturating_add(bio_height);
-    let right_stack_height = today_height
+    let lane2_height = lane2_left_height.max(feed_height);
+    let info_band_height = lane1_height
         .saturating_add(COLUMN_GAP)
-        .saturating_add(feed_height);
-    let info_band_height = left_stack_height.max(right_stack_height);
+        .saturating_add(lane2_height);
 
     let body = taffy_backend::allocate_stack(
         padded,
@@ -221,8 +220,17 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
         ],
     );
 
-    let info = taffy_backend::allocate_columns(
+    let info_lanes = taffy_backend::allocate_stack(
         body[2],
+        &[
+            RowSpec::fixed(lane1_height),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(lane2_height),
+        ],
+    );
+
+    let lane1_cols = taffy_backend::allocate_columns(
+        info_lanes[0],
         &[
             ColumnSpec::fixed(WIDE_INFO_LEFT_COL),
             ColumnSpec::fixed(WIDE_GUTTER),
@@ -230,11 +238,31 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
         ],
     );
 
-    let left_info = taffy_backend::allocate_stack(
-        info[0],
+    let lane2_cols = taffy_backend::allocate_columns(
+        info_lanes[2],
         &[
-            RowSpec::fixed(vitals_height),
-            RowSpec::fixed(COLUMN_GAP),
+            ColumnSpec::fixed(WIDE_INFO_LEFT_COL),
+            ColumnSpec::fixed(WIDE_GUTTER),
+            ColumnSpec::fill(1),
+        ],
+    );
+
+    // Lane 1: vitals top-aligned in left, today top-aligned in right.
+    // Each panel takes its natural height; lane1_height may exceed individual
+    // panel heights, leaving blank space below the shorter one (here, vitals).
+    let lane1_left = taffy_backend::allocate_stack(
+        lane1_cols[0],
+        &[RowSpec::fixed(vitals_height), RowSpec::fill(1)],
+    );
+    let lane1_right = taffy_backend::allocate_stack(
+        lane1_cols[2],
+        &[RowSpec::fixed(today_height), RowSpec::fill(1)],
+    );
+
+    // Lane 2 left: progress, gap, bio, fill.
+    let lane2_left = taffy_backend::allocate_stack(
+        lane2_cols[0],
+        &[
             RowSpec::fixed(progress_height),
             RowSpec::fixed(COLUMN_GAP),
             RowSpec::fixed(bio_height),
@@ -242,21 +270,13 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
         ],
     );
 
-    let right_info = taffy_backend::allocate_stack(
-        info[2],
-        &[
-            RowSpec::fixed(today_height),
-            RowSpec::fixed(COLUMN_GAP),
-            RowSpec::fill(1),
-        ],
-    );
-
+    // Lane 2 right: feed fills the whole right-column lane.
     insert_pet_node(layout, body[0], vm, ctx);
-    insert_visible_node(layout, WatchComponentId::Vitals, left_info[0]);
-    insert_visible_node(layout, WatchComponentId::Progress, left_info[2]);
-    insert_visible_node(layout, WatchComponentId::Bio, left_info[4]);
-    insert_visible_node(layout, WatchComponentId::Today, right_info[0]);
-    insert_visible_node(layout, WatchComponentId::Feed, right_info[2]);
+    insert_visible_node(layout, WatchComponentId::Vitals, lane1_left[0]);
+    insert_visible_node(layout, WatchComponentId::Today, lane1_right[0]);
+    insert_visible_node(layout, WatchComponentId::Progress, lane2_left[0]);
+    insert_visible_node(layout, WatchComponentId::Bio, lane2_left[2]);
+    insert_visible_node(layout, WatchComponentId::Feed, lane2_cols[2]);
 }
 
 fn layout_compact(
@@ -531,18 +551,20 @@ mod tests {
         }
 
         // Pet spans full body width at the top.
-        // fixture feed_height=3 (2 events + 1 header), so:
-        //   left_stack=4+1+2+1+3=11, right_stack=6+1+3=10, info_band=11
-        //   padded height=28, pet = 28-1-11=16
+        // fixture: vitals=4, progress=2, bio=3, today=6, feed=3
+        // lane1_height=max(4,6)=6, lane2_left=2+1+3=6, lane2=max(6,3)=6
+        // info_band=6+1+6=13, padded height=28, pet=28-1-13=14
         assert_eq!(
             layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
-            Rect::new(1, 2, 118, 16)
+            Rect::new(1, 2, 118, 14)
         );
-        // Left info column: x=1, w=48. Info band starts at y=19 (2+16+1).
+        // Info band starts at y=17 (2+14+1).
+        // Left info column: x=1, w=48.
         assert_eq!(
             layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
-            Rect::new(1, 19, 48, 4)
+            Rect::new(1, 17, 48, 4)
         );
+        // Progress at lane2 top: y=17+6+1=24.
         assert_eq!(
             layout
                 .node(WatchComponentId::Progress.path())
@@ -550,6 +572,7 @@ mod tests {
                 .bounds,
             Rect::new(1, 24, 48, 2)
         );
+        // Bio below progress: y=24+2+1=27.
         assert_eq!(
             layout.node(WatchComponentId::Bio.path()).unwrap().bounds,
             Rect::new(1, 27, 48, 3)
@@ -557,16 +580,16 @@ mod tests {
         // Right info column: x=53 (1+48+4), w=66 (118-48-4).
         assert_eq!(
             layout.node(WatchComponentId::Today.path()).unwrap().bounds,
-            Rect::new(53, 19, 66, 6)
+            Rect::new(53, 17, 66, 6)
         );
-        // Feed fills right col remainder: 11-6-1=4 rows.
+        // Feed fills full lane2 right column: y=24 (same as progress), h=lane2_height=6.
         assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(53, 26, 66, 4)
+            Rect::new(53, 24, 66, 6)
         );
 
         let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
-        assert_eq!(pet_panel.rect, Rect::new(1, 2, 118, 16));
+        assert_eq!(pet_panel.rect, Rect::new(1, 2, 118, 14));
 
         let pet_node = layout.node(WatchComponentId::Pet.path()).unwrap();
         assert!(pet_node
@@ -579,8 +602,8 @@ mod tests {
         let pet_art = layout.target(TargetPath::new("watch.pet.art")).unwrap();
         assert_eq!(pet_art.rect.width, 13);
         assert_eq!(pet_art.rect.height, 10);
-        // Art centered in 118×16 panel: cx=1+(118-13)/2=53, cy=2+(16-10)/2=5.
-        assert_eq!(pet_art.rect, Rect::new(53, 5, 13, 10));
+        // Art centered in 118×14 panel: cx=1+(118-13)/2=53, cy=2+(14-10)/2=4.
+        assert_eq!(pet_art.rect, Rect::new(53, 4, 13, 10));
     }
 
     #[test]
@@ -761,6 +784,34 @@ mod tests {
         assert!(
             vitals.bounds.y >= pet.bounds.y + pet.bounds.height,
             "vitals below pet"
+        );
+    }
+
+    #[test]
+    fn wide_layout_progress_and_feed_share_top_y() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
+        let progress = layout
+            .node(WatchComponentId::Progress.path())
+            .expect("progress");
+        let feed = layout.node(WatchComponentId::Feed.path()).expect("feed");
+        assert_eq!(
+            progress.bounds.y, feed.bounds.y,
+            "progress and feed should share their top-Y (visually aligned headings)"
+        );
+    }
+
+    #[test]
+    fn wide_layout_vitals_and_today_share_top_y() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
+        let vitals = layout
+            .node(WatchComponentId::Vitals.path())
+            .expect("vitals");
+        let today = layout.node(WatchComponentId::Today.path()).expect("today");
+        assert_eq!(
+            vitals.bounds.y, today.bounds.y,
+            "vitals and today should share their top-Y"
         );
     }
 
