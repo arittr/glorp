@@ -1,8 +1,9 @@
 use ratatui::{
     layout::{Alignment, Rect},
     style::Style,
+    symbols::border,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -39,8 +40,13 @@ pub fn render_watch_frame_with_layout(
 ) {
     let styles = semantic_styles();
     let p = tokenpet_palette();
-    let outer = Block::bordered()
-        .border_type(BorderType::Rounded)
+    let fill = frame_fill_for_stage(vm.pet_render.stage);
+    let mut border_set = border::ROUNDED;
+    border_set.horizontal_top = fill;
+    border_set.horizontal_bottom = fill;
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_set(border_set)
         .title(Line::from(frame_title(vm)))
         .title_bottom(Line::from(frame_footer()))
         .border_style(Style::default().fg(p.accent.rgb))
@@ -69,6 +75,19 @@ pub(crate) fn pet_effect_rect_from_layout(layout: &ComponentLayout) -> Rect {
 #[doc(hidden)]
 pub fn pet_effect_rect_for_test(frame_area: Rect, vm: &WatchViewModel) -> Rect {
     pet_effect_rect(frame_area, vm)
+}
+
+/// Returns the horizontal border fill character for the outer frame, picked
+/// per stage tier. S0–S1 use a dotted line, S2–S3 the default rounded fill,
+/// S4–S5 a heavy line, S6 a sparkle. See the watch-visual-polish design.
+pub(crate) fn frame_fill_for_stage(stage: crate::game::evolution::Stage) -> &'static str {
+    use crate::game::evolution::Stage;
+    match stage {
+        Stage::S0 | Stage::S1 => "┄",
+        Stage::S2 | Stage::S3 => "─",
+        Stage::S4 | Stage::S5 => "━",
+        Stage::S6 => "✦",
+    }
 }
 
 /// Produces the styled title spans for the outer frame.
@@ -185,6 +204,21 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod frame_fill_tests {
+    #[test]
+    fn frame_fill_for_stage_returns_expected_char() {
+        use crate::game::evolution::Stage;
+        assert_eq!(super::frame_fill_for_stage(Stage::S0), "┄");
+        assert_eq!(super::frame_fill_for_stage(Stage::S1), "┄");
+        assert_eq!(super::frame_fill_for_stage(Stage::S2), "─");
+        assert_eq!(super::frame_fill_for_stage(Stage::S3), "─");
+        assert_eq!(super::frame_fill_for_stage(Stage::S4), "━");
+        assert_eq!(super::frame_fill_for_stage(Stage::S5), "━");
+        assert_eq!(super::frame_fill_for_stage(Stage::S6), "✦");
+    }
+}
 
 #[cfg(test)]
 mod frame_title_tests {
