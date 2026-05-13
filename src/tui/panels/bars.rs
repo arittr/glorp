@@ -59,7 +59,7 @@ pub fn build_spark_line<'a>(history: &[f64], styles: &'a SemanticStyles) -> Vec<
     let mut spans: Vec<Span<'a>> = Vec::with_capacity(history.len() * 2);
     for (i, &v) in history.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("   "));
+            spans.push(Span::raw("  "));
         }
         if v <= 0.0 || max <= 0.0 {
             spans.push(Span::styled("·".to_string(), styles.sparkline_past));

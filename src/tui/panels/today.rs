@@ -103,11 +103,14 @@ pub(crate) fn build_today_lines<'a>(
         styles,
     )));
 
-    // Row 5: 7-day inline sparkline footer
+    // Row 5: 7-day inline sparkline footer. The `←` tip is positioned at the
+    // annotation column (col 30 in the row layout, where "this 10m" starts on
+    // the row above) so the legend visually anchors to the data labels.
+    //   2 leading + sparkline(7 bars × 1 + 6 separators × 2 = 19) + 9 trailing = 30.
     let spark_spans = build_spark_line(&vm.recent_daily_effective_tokens, styles);
     let mut footer: Vec<Span<'a>> = vec![Span::raw("  ")];
     footer.extend(spark_spans);
-    footer.push(Span::raw("          "));
+    footer.push(Span::raw("         "));
     footer.push(Span::styled("← 7-day", styles.section_header));
     lines.push(Line::from(footer));
 
@@ -316,6 +319,55 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect();
         assert!(s.contains("7-day"), "footer row must carry '7-day' label");
+    }
+
+    #[test]
+    fn today_panel_seven_day_arrow_aligns_with_annotation_column() {
+        // The `←` legend tip must land at the same column as the `t` in
+        // "this 10m" on the row above so the spark line visually anchors
+        // to the data labels rather than drifting right.
+        //
+        // Note: we compare TERMINAL CELLS, not byte indexes — spark glyphs
+        // (`·`, `▁`..`█`) are 3-byte UTF-8 per cell, so `str::find` on the
+        // joined row would return a byte offset that disagrees with the
+        // column the user sees.
+        let vm = WatchViewModel::fixture();
+        let panel = TodayPanel;
+        let ctx = test_context();
+        let backend = TestBackend::new(70, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let find_col = |y: u16, needle: &str| -> Option<u16> {
+            (0..buf.area.width).find(|&x| buf[(x, y)].symbol() == needle)
+        };
+        let height = buf.area.height;
+        let last_10m_y = (0..height)
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("this 10m")
+            })
+            .expect("expected to find the 'this 10m' row");
+        let footer_y = (0..height)
+            .find(|&y| find_col(y, "←").is_some())
+            .expect("expected to find the '←' footer row");
+        // The `t` of "this 10m" sits one cell after the column whose only
+        // earlier `t` neighbor is also part of the same word; the simplest
+        // reliable anchor is the column of the LITERAL `t` followed by `h`.
+        let this_t_col = (0..buf.area.width - 1)
+            .find(|&x| {
+                buf[(x, last_10m_y)].symbol() == "t" && buf[(x + 1, last_10m_y)].symbol() == "h"
+            })
+            .expect("expected `th` in 'this 10m'");
+        let arrow_col = find_col(footer_y, "←").unwrap();
+        assert_eq!(
+            this_t_col, arrow_col,
+            "← (col {arrow_col}) must align with the 't' of 'this 10m' (col {this_t_col})"
+        );
     }
 
     #[test]
