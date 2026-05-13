@@ -381,6 +381,22 @@ fn current_bucket_effective_tokens(events: &[NormalizedUsageEvent], now: OffsetD
         .sum()
 }
 
+/// 6h-half-life EMA of effective tokens, returned in tokens/hour.
+///
+/// Properties: monotonic increase during active use, smooth decay during idle,
+/// no persisted state. See spec "EMA rate" for burst-behavior caveat.
+fn progress_rate_ema(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
+    const TAU_HOURS: f64 = 6.0 / std::f64::consts::LN_2;
+    let weighted: f64 = events
+        .iter()
+        .map(|e| {
+            let dt_h = (now - e.observed_at).as_seconds_f64() / 3600.0;
+            e.effective_tokens * (-dt_h / TAU_HOURS).exp()
+        })
+        .sum();
+    weighted / TAU_HOURS
+}
+
 fn source_breakdown(events: &[NormalizedUsageEvent], now: OffsetDateTime) -> Vec<SourceUsageView> {
     let today = now.date();
     let mut by_source = BTreeMap::new();
@@ -656,6 +672,14 @@ mod tests {
     use tempfile::tempdir;
     use time::{Date, Month, PrimitiveDateTime, Time};
 
+    fn sample_event_at_for_test(observed_at: OffsetDateTime, tokens: f64) -> NormalizedUsageEvent {
+        NormalizedUsageEvent {
+            observed_at,
+            bucket_at: observed_at,
+            ..NormalizedUsageEvent::for_test_at(observed_at, tokens)
+        }
+    }
+
     #[test]
     fn build_watch_view_model_populates_bio_view() {
         let dir = tempdir().unwrap();
@@ -698,5 +722,47 @@ mod tests {
 
         let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
         assert_eq!(vm.bio.age_label, "0d 4h");
+    }
+
+    #[test]
+    fn progress_rate_ema_empty_returns_zero() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        assert_eq!(progress_rate_ema(&[], now), 0.0);
+    }
+
+    #[test]
+    fn progress_rate_ema_single_event_at_now_is_tokens_over_tau() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let event = sample_event_at_for_test(now, 100_000.0);
+        let rate = progress_rate_ema(&[event], now);
+        // tau ≈ 6h / ln(2) ≈ 8.656h, so rate ≈ 100k / 8.656 ≈ 11.5k
+        let tau = 6.0 / 2.0_f64.ln();
+        let expected = 100_000.0 / tau;
+        assert!((rate - expected).abs() < 1e-3, "got {rate}, want {expected}");
+    }
+
+    #[test]
+    fn progress_rate_ema_event_six_hours_old_is_weighted_half() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let recent = sample_event_at_for_test(now, 100_000.0);
+        let aged = sample_event_at_for_test(now - Duration::hours(6), 100_000.0);
+        let rate_recent_only = progress_rate_ema(&[recent.clone()], now);
+        let rate_both = progress_rate_ema(&[recent, aged], now);
+        let aged_contribution = rate_both - rate_recent_only;
+        let expected_half = rate_recent_only * 0.5;
+        assert!(
+            (aged_contribution - expected_half).abs() / expected_half < 0.05,
+            "6h-old contribution should be ~half (within 5%): got {aged_contribution}, want {expected_half}"
+        );
+    }
+
+    #[test]
+    fn progress_rate_ema_50k_events_does_not_overflow() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let events: Vec<NormalizedUsageEvent> = (0..50_000)
+            .map(|i| sample_event_at_for_test(now - Duration::seconds(i), 100.0))
+            .collect();
+        let rate = progress_rate_ema(&events, now);
+        assert!(rate.is_finite() && rate > 0.0);
     }
 }
