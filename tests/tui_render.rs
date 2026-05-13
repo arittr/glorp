@@ -1127,7 +1127,7 @@ fn render_does_not_panic_at_tiny_sizes() {
 }
 
 #[test]
-fn wide_layout_pet_art_fits_inside_left_column() {
+fn wide_layout_pet_art_stays_inside_full_width_panel() {
     let mut vm = WatchViewModel::fixture();
     vm.pet_art = vec![
         "    /\\     ".into(),
@@ -1139,28 +1139,40 @@ fn wide_layout_pet_art_fits_inside_left_column() {
         "   \\___/   ".into(),
     ];
 
-    let backend = TestBackend::new(WIDE_TEST_WIDTH, 24);
+    // Use a tall-enough terminal so the pet panel gets ≥ PET_RENDER_MIN_HEIGHT
+    // rows and the pet art target is inserted (new layout needs more vertical
+    // space than the old left-column layout did at 24 rows).
+    let backend = TestBackend::new(WIDE_TEST_WIDTH, 32);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
-    let buf = terminal.backend().buffer();
-    let rows = buffer_rows(buf);
 
-    // In the native-Layout wide path the outer frame takes 1 cell, then the
-    // left column occupies 52 cells (cols 1–52), the gutter takes 4 cells
-    // (cols 53–56), and the right column starts at col 57.
-    // Pet art must never bleed past col 52 into the gutter.
-    let left_col_end: usize = 52; // last left-column cell (0-indexed, inclusive)
-    let gutter_start: usize = left_col_end + 1; // col 53
+    // Pet spans the full body width (cols 1..WIDE_TEST_WIDTH-2).
+    // The art (11 chars wide) is centered, so it must not bleed into the
+    // outer frame border at col 0 or the right border at col WIDE_TEST_WIDTH-1.
+    let layout = glorp::tui::component::layout_watch(
+        ratatui::layout::Rect::new(0, 0, WIDE_TEST_WIDTH, 32),
+        &vm,
+    );
+    let pet = layout
+        .node(glorp::tui::component::WatchComponentId::Pet.path())
+        .unwrap();
+    let art = layout
+        .target(glorp::tui::component::TargetPath::new("watch.pet.art"))
+        .unwrap();
 
-    for (y, row) in rows.iter().enumerate().take(23).skip(1) {
-        let chars: Vec<char> = row.chars().collect();
-        for offset in 0..4usize {
-            let col = gutter_start + offset;
-            assert!(
-                chars[col] == ' ' || chars[col] == '─',
-                "row {y} gutter col {col} should be space or dash; got {:?}",
-                chars[col],
-            );
-        }
-    }
+    // Art must fit entirely inside the pet node bounds.
+    assert!(
+        art.rect.x >= pet.bounds.x,
+        "art left must be inside pet panel"
+    );
+    assert!(
+        art.rect.x + art.rect.width <= pet.bounds.x + pet.bounds.width,
+        "art right must be inside pet panel"
+    );
+    // Art must not bleed into the outer frame border.
+    assert!(art.rect.x > 0, "art must not start at col 0 (frame border)");
+    assert!(
+        art.rect.x + art.rect.width < WIDE_TEST_WIDTH,
+        "art must not reach the right frame border"
+    );
 }

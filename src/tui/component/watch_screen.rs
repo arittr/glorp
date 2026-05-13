@@ -19,7 +19,12 @@ use ratatui::widgets::Block;
 /// compact layout.
 pub const COMPACT_THRESHOLD: usize = 116;
 
+/// Width of the left info column (vitals/progress/bio) in the wide layout's
+/// info band. The right info column (today/feed) fills the remaining space.
+pub const WIDE_INFO_LEFT_COL: u16 = 48;
+
 /// Left column width in the wide layout (pet + vitals column).
+/// Kept for any external references; the layout now uses WIDE_INFO_LEFT_COL.
 pub const WIDE_LEFT_COL: u16 = 52;
 
 /// Gutter width between left and right columns in the wide layout.
@@ -191,57 +196,67 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
         ])
         .split(area)[1];
 
-    let body = taffy_backend::allocate_columns(
+    let vitals_height = intrinsic_height(VitalsPanel.preferred_constraint(vm));
+    let progress_height = intrinsic_height(ProgressPanel.preferred_constraint(vm));
+    let bio_height = intrinsic_height(BioCardPanel.preferred_constraint(vm));
+    let today_height = intrinsic_height(TodayPanel.preferred_constraint(vm));
+    let feed_height = bounded_feed_height(vm);
+
+    let left_stack_height = vitals_height
+        .saturating_add(COLUMN_GAP)
+        .saturating_add(progress_height)
+        .saturating_add(COLUMN_GAP)
+        .saturating_add(bio_height);
+    let right_stack_height = today_height
+        .saturating_add(COLUMN_GAP)
+        .saturating_add(feed_height);
+    let info_band_height = left_stack_height.max(right_stack_height);
+
+    let body = taffy_backend::allocate_stack(
         padded,
         &[
-            ColumnSpec::fixed(WIDE_LEFT_COL),
+            RowSpec::fill(1),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(info_band_height),
+        ],
+    );
+
+    let info = taffy_backend::allocate_columns(
+        body[2],
+        &[
+            ColumnSpec::fixed(WIDE_INFO_LEFT_COL),
             ColumnSpec::fixed(WIDE_GUTTER),
             ColumnSpec::fill(1),
         ],
     );
 
-    let vitals_height = intrinsic_height(VitalsPanel.preferred_constraint(vm));
-    let bio_height = intrinsic_height(BioCardPanel.preferred_constraint(vm));
-    let lower_left_height = vitals_height
-        .saturating_add(COLUMN_GAP)
-        .saturating_add(bio_height);
-    let lower_band_height = lower_left_height.max(bounded_feed_height(vm));
-
-    let left = taffy_backend::allocate_stack(
-        body[0],
-        &[
-            RowSpec::fill(1),
-            RowSpec::fixed(COLUMN_GAP),
-            RowSpec::fixed(lower_band_height),
-        ],
-    );
     let left_info = taffy_backend::allocate_stack(
-        left[2],
+        info[0],
         &[
             RowSpec::fixed(vitals_height),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(progress_height),
             RowSpec::fixed(COLUMN_GAP),
             RowSpec::fixed(bio_height),
             RowSpec::fill(1),
         ],
     );
-    let right = taffy_backend::allocate_stack(
-        body[2],
+
+    let right_info = taffy_backend::allocate_stack(
+        info[2],
         &[
-            RowSpec::fixed(intrinsic_height(TodayPanel.preferred_constraint(vm))),
+            RowSpec::fixed(today_height),
             RowSpec::fixed(COLUMN_GAP),
-            RowSpec::fixed(intrinsic_height(ProgressPanel.preferred_constraint(vm))),
             RowSpec::fill(1),
-            RowSpec::fixed(COLUMN_GAP),
-            RowSpec::fixed(lower_band_height),
         ],
     );
 
-    insert_pet_node(layout, left[0], vm, ctx);
+    insert_pet_node(layout, body[0], vm, ctx);
     insert_visible_node(layout, WatchComponentId::Vitals, left_info[0]);
-    insert_visible_node(layout, WatchComponentId::Bio, left_info[2]);
-    insert_visible_node(layout, WatchComponentId::Today, right[0]);
-    insert_visible_node(layout, WatchComponentId::Progress, right[2]);
-    insert_visible_node(layout, WatchComponentId::Feed, right[5]);
+    insert_visible_node(layout, WatchComponentId::Progress, left_info[2]);
+    insert_visible_node(layout, WatchComponentId::Bio, left_info[4]);
+    insert_visible_node(layout, WatchComponentId::Today, right_info[0]);
+    insert_visible_node(layout, WatchComponentId::Feed, right_info[2]);
 }
 
 fn layout_compact(
@@ -515,36 +530,43 @@ mod tests {
             );
         }
 
+        // Pet spans full body width at the top.
+        // fixture feed_height=3 (2 events + 1 header), so:
+        //   left_stack=4+1+2+1+3=11, right_stack=6+1+3=10, info_band=11
+        //   padded height=28, pet = 28-1-11=16
         assert_eq!(
             layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
-            Rect::new(1, 2, 52, 19)
+            Rect::new(1, 2, 118, 16)
         );
+        // Left info column: x=1, w=48. Info band starts at y=19 (2+16+1).
         assert_eq!(
             layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
-            Rect::new(1, 22, 52, 4)
-        );
-        assert_eq!(
-            layout.node(WatchComponentId::Bio.path()).unwrap().bounds,
-            Rect::new(1, 27, 52, 3)
-        );
-        assert_eq!(
-            layout.node(WatchComponentId::Today.path()).unwrap().bounds,
-            Rect::new(57, 2, 62, 6)
+            Rect::new(1, 19, 48, 4)
         );
         assert_eq!(
             layout
                 .node(WatchComponentId::Progress.path())
                 .unwrap()
                 .bounds,
-            Rect::new(57, 9, 62, 2)
+            Rect::new(1, 24, 48, 2)
         );
         assert_eq!(
+            layout.node(WatchComponentId::Bio.path()).unwrap().bounds,
+            Rect::new(1, 27, 48, 3)
+        );
+        // Right info column: x=53 (1+48+4), w=66 (118-48-4).
+        assert_eq!(
+            layout.node(WatchComponentId::Today.path()).unwrap().bounds,
+            Rect::new(53, 19, 66, 6)
+        );
+        // Feed fills right col remainder: 11-6-1=4 rows.
+        assert_eq!(
             layout.node(WatchComponentId::Feed.path()).unwrap().bounds,
-            Rect::new(57, 22, 62, 8)
+            Rect::new(53, 26, 66, 4)
         );
 
         let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
-        assert_eq!(pet_panel.rect, Rect::new(1, 2, 52, 19));
+        assert_eq!(pet_panel.rect, Rect::new(1, 2, 118, 16));
 
         let pet_node = layout.node(WatchComponentId::Pet.path()).unwrap();
         assert!(pet_node
@@ -557,25 +579,37 @@ mod tests {
         let pet_art = layout.target(TargetPath::new("watch.pet.art")).unwrap();
         assert_eq!(pet_art.rect.width, 13);
         assert_eq!(pet_art.rect.height, 10);
-        assert_eq!(pet_art.rect, Rect::new(20, 6, 13, 10));
+        // Art centered in 118×16 panel: cx=1+(118-13)/2=53, cy=2+(16-10)/2=5.
+        assert_eq!(pet_art.rect, Rect::new(53, 5, 13, 10));
     }
 
     #[test]
-    fn layout_watch_wide_aligns_feed_with_left_info_stack() {
+    fn layout_watch_wide_info_columns_share_band_top_and_bottom() {
         let vm = WatchViewModel::fixture();
         let layout = layout_watch(Rect::new(0, 0, 180, 50), &vm);
         let vitals = layout.node(WatchComponentId::Vitals.path()).unwrap().bounds;
+        let today = layout.node(WatchComponentId::Today.path()).unwrap().bounds;
         let bio = layout.node(WatchComponentId::Bio.path()).unwrap().bounds;
         let feed = layout.node(WatchComponentId::Feed.path()).unwrap().bounds;
 
+        // Both columns start at the same y (top of info band).
         assert_eq!(
-            feed.y, vitals.y,
-            "feed should start on the same row as the lower-left pane stack"
+            vitals.y, today.y,
+            "left and right info columns should start at the same y"
         );
+        // Feed fills the right column below today; feed is the last right-column
+        // item and absorbs any slack, so right column bottom = today + gap + feed.
+        assert!(
+            feed.y > today.y,
+            "feed should be below today in the right column"
+        );
+        // Left column: bio is the last pinned item; right column: feed is the last item.
+        // Both column bottoms should be within the same info band.
+        let left_col_bottom = bio.y.saturating_add(bio.height);
+        let right_col_bottom = feed.y.saturating_add(feed.height);
         assert_eq!(
-            feed.y.saturating_add(feed.height),
-            bio.y.saturating_add(bio.height),
-            "feed should end on the same row as the lower-left pane stack"
+            left_col_bottom, right_col_bottom,
+            "left and right info column bottoms should align (same info band height)"
         );
     }
 
@@ -692,6 +726,41 @@ mod tests {
                 && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
                 && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height),
             "expected {outer:?} to contain {inner:?}"
+        );
+    }
+
+    #[test]
+    fn wide_layout_pet_panel_spans_body_width() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
+        let pet = layout.node(WatchComponentId::Pet.path()).expect("pet node");
+        assert_eq!(pet.bounds.x, 1, "pet should start at body left edge");
+        assert!(
+            pet.bounds.width >= 110,
+            "pet should span ~full body width; got width={}",
+            pet.bounds.width
+        );
+    }
+
+    #[test]
+    fn wide_layout_info_band_is_two_columns_below_pet() {
+        let vm = WatchViewModel::fixture();
+        let layout = layout_watch(Rect::new(0, 0, 120, 32), &vm);
+        let vitals = layout
+            .node(WatchComponentId::Vitals.path())
+            .expect("vitals");
+        let today = layout.node(WatchComponentId::Today.path()).expect("today");
+        let pet = layout.node(WatchComponentId::Pet.path()).expect("pet");
+
+        // Vitals on left, today on right, both below pet.
+        assert_eq!(vitals.bounds.x, 1, "vitals on left edge");
+        assert!(
+            today.bounds.x > vitals.bounds.x + vitals.bounds.width,
+            "today to the right of vitals with gutter"
+        );
+        assert!(
+            vitals.bounds.y >= pet.bounds.y + pet.bounds.height,
+            "vitals below pet"
         );
     }
 

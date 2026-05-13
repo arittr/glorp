@@ -185,7 +185,8 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
     )
     .unwrap();
     assert_eq!(layout["schema_version"], 1);
-    assert_eq!(layout["components"]["watch.pet"]["width"], 52);
+    // Pet now spans the full body width (118 on a 120-col terminal).
+    assert_eq!(layout["components"]["watch.pet"]["width"], 118);
     assert!(layout["components"]["watch.pet"].is_object());
     assert!(layout["targets"]["watch.pet.art"].is_object());
 
