@@ -4,6 +4,7 @@ pub mod pet_scene;
 pub mod preview;
 pub mod sizing;
 pub mod style;
+pub mod taffy_backend;
 pub mod watch_screen;
 pub mod widgets;
 

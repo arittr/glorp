@@ -92,6 +92,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+
+[[package]]
 name = "assert_cmd"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -549,6 +555,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tachyonfx",
+ "taffy",
  "tempfile",
  "terminal-light",
  "thiserror 1.0.69",
@@ -557,6 +564,12 @@ dependencies = [
  "wait-timeout",
  "which",
 ]
+
+[[package]]
+name = "grid"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
 
 [[package]]
 name = "hashbrown"
@@ -1245,6 +1258,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c82d449ab1bccfeec125893c6875008206f038d4eb8a09e1e10caf86f44d574e"
 
 [[package]]
+name = "slotmap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
+dependencies = [
+ "version_check",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1308,6 +1330,18 @@ dependencies = [
  "simple-easing",
  "thiserror 2.0.18",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "taffy"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aea22054047c16c3f34d3ac473a2170be1424b1115b2a3adcf28cfb067c88859"
+dependencies = [
+ "arrayvec",
+ "grid",
+ "serde",
+ "slotmap",
 ]
 
 [[package]]

@@ -23,6 +23,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tachyonfx = "0.18"
+taffy = { version = "0.10.1", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
 terminal-light = "1"
 thiserror = "1"
 tempfile = "3"
