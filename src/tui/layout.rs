@@ -76,7 +76,6 @@ fn frame_title(vm: &WatchViewModel) -> Vec<Span<'_>> {
     const NAME_MAX: usize = 16;
     let styles = semantic_styles();
     let p = tokenpet_palette();
-    let stage_style = Style::default().fg(p.accent.rgb);
     let mood_style = Style::default().fg(p.good.rgb);
 
     let display_name: String = if vm.pet_name.chars().count() > NAME_MAX {
@@ -88,11 +87,9 @@ fn frame_title(vm: &WatchViewModel) -> Vec<Span<'_>> {
     let age_label = format!("{}d", vm.age_days);
     vec![
         Span::styled(
-            format!(" glorp · {display_name} · {} · ", vm.species),
+            format!(" glorp · {display_name} · {} · {age_label} · ", vm.species),
             styles.label,
         ),
-        Span::styled(vm.stage.clone(), stage_style),
-        Span::styled(format!(" · {age_label} · "), styles.label),
         Span::styled(vm.mood.clone(), mood_style),
         Span::raw(" "),
     ]
@@ -198,14 +195,25 @@ mod frame_title_tests {
         let spans = super::frame_title(&vm);
         let rendered: String = spans.iter().map(|s| s.content.as_ref()).collect::<String>();
 
-        // The species token appears once (as a standalone field), not as part of "the {species}".
+        // The species token appears once (as a standalone field).
         assert!(
-            !rendered.contains("the terminal sprout"),
+            !rendered.contains("the "),
             "frame title should not contain the inline 'the {{species}}' phrasing; got: {rendered:?}"
         );
+        // The stage label is dropped — stage info comes from pet art + per-stage frame fill.
         assert!(
-            rendered.contains(" terminal sprout "),
-            "species token should still appear as a standalone field"
+            !rendered.contains(&vm.stage),
+            "frame title should not contain the textual stage label '{}'; got: {rendered:?}",
+            vm.stage
+        );
+        // Species and mood still appear.
+        assert!(
+            rendered.contains(&vm.species),
+            "species token should still appear"
+        );
+        assert!(
+            rendered.contains(&vm.mood),
+            "mood token should still appear"
         );
     }
 }
