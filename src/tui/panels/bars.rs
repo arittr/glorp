@@ -38,10 +38,7 @@ pub fn bar_spans_solid<'a>(
 /// Render a 7-day token history as a row of height-quantized block glyphs.
 /// Ports SparkPanel's quantization so the visual is byte-identical when this
 /// is rendered inside TodayPanel's footer (Task 18).
-pub fn build_spark_line<'a>(
-    history: &[f64],
-    styles: &'a SemanticStyles,
-) -> Vec<Span<'a>> {
+pub fn build_spark_line<'a>(history: &[f64], styles: &'a SemanticStyles) -> Vec<Span<'a>> {
     const GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let max = history.iter().copied().fold(0.0_f64, f64::max);
     let mut spans: Vec<Span<'a>> = Vec::with_capacity(history.len() * 2);

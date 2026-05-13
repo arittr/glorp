@@ -181,9 +181,9 @@ pub(crate) fn build_watch_view_model_at(
         bio: {
             let age = now - state.created_at;
             let age_label = BioView::format_age(age);
-            let local = state.created_at.to_offset(
-                time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
-            );
+            let local = state
+                .created_at
+                .to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC));
             let month_name = match local.month() {
                 time::Month::January => "jan",
                 time::Month::February => "feb",
@@ -812,7 +812,10 @@ mod tests {
         // tau ≈ 6h / ln(2) ≈ 8.656h, so rate ≈ 100k / 8.656 ≈ 11.5k
         let tau = 6.0 / 2.0_f64.ln();
         let expected = 100_000.0 / tau;
-        assert!((rate - expected).abs() < 1e-3, "got {rate}, want {expected}");
+        assert!(
+            (rate - expected).abs() < 1e-3,
+            "got {rate}, want {expected}"
+        );
     }
 
     #[test]

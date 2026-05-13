@@ -96,7 +96,10 @@ fn render_watch_frame_honors_explicit_color_capability() {
         .unwrap();
 
     let truecolor = spark_foregrounds(truecolor_terminal.backend().buffer());
-    assert!(!truecolor.is_empty(), "fixture should render spark bar cells");
+    assert!(
+        !truecolor.is_empty(),
+        "fixture should render spark bar cells"
+    );
 }
 
 #[test]
@@ -428,8 +431,14 @@ fn source_health_rows_render_ready_and_diagnostic_states_together() {
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let text = buffer_text(terminal.backend().buffer());
     // TodayPanel shows source display names and ⚠ for unhealthy sources.
-    assert!(text.contains("claude"), "ready source should appear in today panel");
-    assert!(text.contains("codex"), "diagnostic source should appear in today panel");
+    assert!(
+        text.contains("claude"),
+        "ready source should appear in today panel"
+    );
+    assert!(
+        text.contains("codex"),
+        "diagnostic source should appear in today panel"
+    );
     assert!(text.contains("⚠"), "diagnostic source should show ⚠ marker");
 }
 
@@ -870,9 +879,7 @@ fn watch_wide_120x32_has_no_left_column_dead_bands() {
     let vm = WatchViewModel::fixture();
     let backend = TestBackend::new(120, 32);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &vm))
-        .unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let buf = terminal.backend().buffer();
 
     // Find the row that contains "bio" to anchor the dead-band check.
@@ -913,9 +920,7 @@ fn watch_wide_120x32_feed_bounded_at_seven_rows() {
     let vm = WatchViewModel::fixture_with_n_events(20); // way more than the cap
     let backend = TestBackend::new(120, 32);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &vm))
-        .unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let buf = terminal.backend().buffer();
 
     // Count rows that look like feed event rows. The fixture text is
@@ -942,11 +947,13 @@ fn watch_wide_180x50_left_column_still_full() {
     let vm = WatchViewModel::fixture();
     let backend = TestBackend::new(180, 50);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &vm))
-        .unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let buf = terminal.backend().buffer();
-    let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+    let s: String = buf
+        .content()
+        .iter()
+        .map(|c| c.symbol().to_string())
+        .collect();
     assert!(s.contains("bio"), "bio panel must render at 180x50");
     assert!(s.contains("vitals"), "vitals must render");
     assert!(s.contains("progress"), "progress must render");
@@ -958,9 +965,7 @@ fn watch_compact_72x24_panels_in_order() {
     let vm = WatchViewModel::fixture();
     let backend = TestBackend::new(72, 24);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| render_frame_for_test(f, &vm))
-        .unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
     let buf = terminal.backend().buffer();
 
     // For each section header, capture its row index. Order must be:
@@ -983,7 +988,11 @@ fn watch_compact_72x24_panels_in_order() {
     assert!(progress_y < feed_y, "progress before feed");
     assert!(feed_y < bio_y, "feed before bio");
 
-    let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+    let s: String = buf
+        .content()
+        .iter()
+        .map(|c| c.symbol().to_string())
+        .collect();
     assert!(!s.contains("helpers"));
 }
 

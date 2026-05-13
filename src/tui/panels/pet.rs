@@ -38,16 +38,14 @@ fn speech_rows(vm: &WatchViewModel) -> u16 {
 pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     let cx = area.x + area.width.saturating_sub(PET_W) / 2;
     let cy = area.y + area.height.saturating_sub(PET_H) / 2;
-    let x = (cx as i32 + vm.wander_offset_x as i32)
-        .clamp(
-            area.x as i32,
-            (area.x + area.width).saturating_sub(PET_W) as i32,
-        ) as u16;
-    let y = (cy as i32 + vm.breath_offset_y as i32)
-        .clamp(
-            area.y as i32,
-            (area.y + area.height).saturating_sub(PET_H) as i32,
-        ) as u16;
+    let x = (cx as i32 + vm.wander_offset_x as i32).clamp(
+        area.x as i32,
+        (area.x + area.width).saturating_sub(PET_W) as i32,
+    ) as u16;
+    let y = (cy as i32 + vm.breath_offset_y as i32).clamp(
+        area.y as i32,
+        (area.y + area.height).saturating_sub(PET_H) as i32,
+    ) as u16;
     Rect::new(x, y, PET_W, PET_H)
 }
 
@@ -559,7 +557,11 @@ mod tests {
             .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         // The fixture pet_art contains "( o.o )" — 'o' and '.' will be present.
         assert!(
             s.contains('o') || s.contains('.') || s.contains('^'),
@@ -573,6 +575,9 @@ mod tests {
         let pet_inner = Rect::new(13, 5, 13, 10);
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let glyphs = ambient_glyphs_for(Species::Fuzz, panel_rect, pet_inner, now);
-        assert!(glyphs.is_empty(), "PR1 stub returns empty; PR2 fills this in");
+        assert!(
+            glyphs.is_empty(),
+            "PR1 stub returns empty; PR2 fills this in"
+        );
     }
 }

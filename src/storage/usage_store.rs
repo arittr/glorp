@@ -823,11 +823,8 @@ impl UsageStore {
                     parts[2].parse::<u8>(),
                 ) {
                     if let Ok(month) = time::Month::try_from(m_u8) {
-                        if let Ok(date) =
-                            time::Date::from_calendar_date(y, month, d)
-                        {
-                            let days_ago =
-                                (now_utc_date - date).whole_days();
+                        if let Ok(date) = time::Date::from_calendar_date(y, month, d) {
+                            let days_ago = (now_utc_date - date).whole_days();
                             if (0..=6).contains(&days_ago) {
                                 let idx = (6 - days_ago) as usize;
                                 out[idx] = total;
@@ -1074,9 +1071,7 @@ mod tests {
         for e in [&inside_a, &inside_b, &outside] {
             store.insert_event(e).unwrap();
         }
-        let got = store
-            .events_within(time::Duration::hours(2), now)
-            .unwrap();
+        let got = store.events_within(time::Duration::hours(2), now).unwrap();
         let totals: Vec<f64> = got.iter().map(|e| e.effective_tokens).collect();
         assert!(totals.contains(&1_000.0), "inside_a must be present");
         assert!(totals.contains(&2_000.0), "inside_b must be present");
@@ -1089,10 +1084,12 @@ mod tests {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let on_boundary = sample_event_at(now - time::Duration::hours(2), 5_555.0);
         store.insert_event(&on_boundary).unwrap();
-        let got = store
-            .events_within(time::Duration::hours(2), now)
-            .unwrap();
-        assert_eq!(got.len(), 1, "boundary event must be included (>= comparison)");
+        let got = store.events_within(time::Duration::hours(2), now).unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "boundary event must be included (>= comparison)"
+        );
     }
 
     #[test]
@@ -1159,9 +1156,7 @@ mod tests {
             )
             .unwrap();
         // Today only in usage_events.
-        store
-            .insert_event(&sample_event_at(now, 1_234.0))
-            .unwrap();
+        store.insert_event(&sample_event_at(now, 1_234.0)).unwrap();
         let history = store.seven_day_token_history(now.date()).unwrap();
         assert_eq!(history.len(), 7);
         assert!(
@@ -1180,17 +1175,10 @@ mod tests {
     fn best_day_returns_largest_daily_total_from_events_only() {
         let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store.insert_event(&sample_event_at(now, 3_000.0)).unwrap();
+        store.insert_event(&sample_event_at(now, 2_000.0)).unwrap();
         store
-            .insert_event(&sample_event_at(now, 3_000.0))
-            .unwrap();
-        store
-            .insert_event(&sample_event_at(now, 2_000.0))
-            .unwrap();
-        store
-            .insert_event(&sample_event_at(
-                now - time::Duration::days(1),
-                4_000.0,
-            ))
+            .insert_event(&sample_event_at(now - time::Duration::days(1), 4_000.0))
             .unwrap();
         let best = store.best_day_effective_tokens().unwrap();
         assert_eq!(best, 5_000.0, "today sums to 5k, beats yesterday's 4k");
@@ -1208,9 +1196,7 @@ mod tests {
         let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let period_date = now.date().to_string();
-        store
-            .insert_event(&sample_event_at(now, 1_000.0))
-            .unwrap();
+        store.insert_event(&sample_event_at(now, 1_000.0)).unwrap();
         store
             .conn
             .execute(

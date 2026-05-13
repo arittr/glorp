@@ -38,7 +38,12 @@ pub(crate) fn build_vitals_lines<'a>(
 ) -> Vec<Line<'a>> {
     vec![
         Line::from(bar_spans_solid("fed", vm.fed, fed_color(), styles)),
-        Line::from(bar_spans_solid("happy", vm.happiness, happy_color(), styles)),
+        Line::from(bar_spans_solid(
+            "happy",
+            vm.happiness,
+            happy_color(),
+            styles,
+        )),
         Line::from(bar_spans_solid("energy", vm.energy, energy_color(), styles)),
     ]
 }
@@ -67,7 +72,11 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         assert!(s.contains("vitals"), "expected vitals divider title");
     }
 
@@ -82,7 +91,11 @@ mod tests {
             .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         assert!(s.contains("fed"));
         assert!(s.contains("happy"));
         assert!(s.contains("energy"));

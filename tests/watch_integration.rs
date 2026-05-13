@@ -327,11 +327,7 @@ fn blocked_source_surfaces_via_source_health() {
 
     let state = PetState::new_for_test("test", "buddy");
     let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
-    let codex_health = vm
-        .source_health
-        .iter()
-        .find(|s| s.name == "codex")
-        .unwrap();
+    let codex_health = vm.source_health.iter().find(|s| s.name == "codex").unwrap();
     assert_ne!(codex_health.status, SourceStatus::Ready);
 }
 

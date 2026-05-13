@@ -108,11 +108,11 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
                 .direction(Direction::Vertical)
                 .flex(Flex::Start)
                 .constraints([
-                    PetPanel.preferred_constraint(vm),      // Fill(1)
+                    PetPanel.preferred_constraint(vm), // Fill(1)
                     Constraint::Length(COLUMN_GAP),
-                    VitalsPanel.preferred_constraint(vm),   // Length(4)
+                    VitalsPanel.preferred_constraint(vm), // Length(4)
                     Constraint::Length(COLUMN_GAP),
-                    BioCardPanel.preferred_constraint(vm),  // Length(3)
+                    BioCardPanel.preferred_constraint(vm), // Length(3)
                 ])
                 .split(left_col);
 
@@ -123,17 +123,17 @@ pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
                 .direction(Direction::Vertical)
                 .flex(Flex::Start)
                 .constraints([
-                    PetPanel.preferred_constraint(vm),      // Fill(1)
+                    PetPanel.preferred_constraint(vm), // Fill(1)
                     Constraint::Length(COLUMN_GAP),
-                    VitalsPanel.preferred_constraint(vm),   // Length(4)
+                    VitalsPanel.preferred_constraint(vm), // Length(4)
                     Constraint::Length(COLUMN_GAP),
-                    TodayPanel.preferred_constraint(vm),    // Length(6)
+                    TodayPanel.preferred_constraint(vm), // Length(6)
                     Constraint::Length(COLUMN_GAP),
                     ProgressPanel.preferred_constraint(vm), // Length(3)
                     Constraint::Length(COLUMN_GAP),
-                    FeedPanel.preferred_constraint(vm),     // Length(7)
+                    FeedPanel.preferred_constraint(vm), // Length(7)
                     Constraint::Length(COLUMN_GAP),
-                    BioCardPanel.preferred_constraint(vm),  // Length(3)
+                    BioCardPanel.preferred_constraint(vm), // Length(3)
                 ])
                 .split(inner);
 
@@ -221,11 +221,11 @@ fn render_wide(
         .direction(Direction::Vertical)
         .flex(Flex::Start)
         .constraints([
-            PetPanel.preferred_constraint(vm),      // Fill(1) — expands to fill column
+            PetPanel.preferred_constraint(vm), // Fill(1) — expands to fill column
             Constraint::Length(COLUMN_GAP),
-            VitalsPanel.preferred_constraint(vm),   // Length(4) — anchored below Fill
+            VitalsPanel.preferred_constraint(vm), // Length(4) — anchored below Fill
             Constraint::Length(COLUMN_GAP),
-            BioCardPanel.preferred_constraint(vm),  // Length(3) — anchored at bottom
+            BioCardPanel.preferred_constraint(vm), // Length(3) — anchored at bottom
         ])
         .split(left_col);
 
@@ -240,11 +240,11 @@ fn render_wide(
         .direction(Direction::Vertical)
         .flex(Flex::Start)
         .constraints([
-            TodayPanel.preferred_constraint(vm),    // Length(6)
+            TodayPanel.preferred_constraint(vm), // Length(6)
             Constraint::Length(COLUMN_GAP),
             ProgressPanel.preferred_constraint(vm), // Length(3)
             Constraint::Length(COLUMN_GAP),
-            FeedPanel.preferred_constraint(vm),     // Length(7) or less
+            FeedPanel.preferred_constraint(vm), // Length(7) or less
         ])
         .split(right_col);
 
@@ -267,17 +267,17 @@ fn render_compact(
         .direction(Direction::Vertical)
         .flex(Flex::Start)
         .constraints([
-            PetPanel.preferred_constraint(vm),      // Fill(1) — expands to fill leftover
+            PetPanel.preferred_constraint(vm), // Fill(1) — expands to fill leftover
             Constraint::Length(COLUMN_GAP),
-            VitalsPanel.preferred_constraint(vm),   // Length(4)
+            VitalsPanel.preferred_constraint(vm), // Length(4)
             Constraint::Length(COLUMN_GAP),
-            TodayPanel.preferred_constraint(vm),    // Length(6)
+            TodayPanel.preferred_constraint(vm), // Length(6)
             Constraint::Length(COLUMN_GAP),
             ProgressPanel.preferred_constraint(vm), // Length(3)
             Constraint::Length(COLUMN_GAP),
-            FeedPanel.preferred_constraint(vm),     // Length(7)
+            FeedPanel.preferred_constraint(vm), // Length(7)
             Constraint::Length(COLUMN_GAP),
-            BioCardPanel.preferred_constraint(vm),  // Length(3)
+            BioCardPanel.preferred_constraint(vm), // Length(3)
         ])
         .split(area);
 

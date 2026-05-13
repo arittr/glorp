@@ -47,9 +47,9 @@ fn build_bio_lines<'a>(bio: &'a BioView, styles: &'a SemanticStyles) -> Vec<Line
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::style::ColorCapability;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use crate::tui::style::ColorCapability;
 
     fn ctx() -> RenderContext {
         RenderContext::new(ColorCapability::Truecolor)
@@ -59,9 +59,16 @@ mod tests {
         let panel = BioCardPanel;
         let backend = TestBackend::new(40, 4);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| panel.render(f.area(), f.buffer_mut(), vm, &ctx())).unwrap();
-        terminal.backend().buffer().content().iter()
-            .map(|c| c.symbol().to_string()).collect()
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), vm, &ctx()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect()
     }
 
     #[test]

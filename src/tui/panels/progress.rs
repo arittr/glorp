@@ -68,9 +68,9 @@ fn build_progress_lines<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::style::ColorCapability;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use crate::tui::style::ColorCapability;
 
     fn ctx() -> RenderContext {
         RenderContext::new(ColorCapability::Truecolor)
@@ -80,7 +80,9 @@ mod tests {
         let panel = ProgressPanel;
         let backend = TestBackend::new(60, 4);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| panel.render(f.area(), f.buffer_mut(), vm, &ctx())).unwrap();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), vm, &ctx()))
+            .unwrap();
         terminal
             .backend()
             .buffer()

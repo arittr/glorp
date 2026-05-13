@@ -342,7 +342,13 @@ mod tests {
     #[test]
     fn watch_view_model_fixture_has_progress_and_bio() {
         let vm = WatchViewModel::fixture();
-        assert!(!vm.progress.stage_label.is_empty(), "progress.stage_label must be non-empty in fixture");
-        assert!(!vm.bio.hatched_label.is_empty(), "bio.hatched_label must be non-empty in fixture");
+        assert!(
+            !vm.progress.stage_label.is_empty(),
+            "progress.stage_label must be non-empty in fixture"
+        );
+        assert!(
+            !vm.bio.hatched_label.is_empty(),
+            "bio.hatched_label must be non-empty in fixture"
+        );
     }
 }

@@ -32,7 +32,10 @@ impl Panel for TodayPanel {
     }
 }
 
-pub(crate) fn build_today_lines<'a>(vm: &'a WatchViewModel, styles: &'a SemanticStyles) -> Vec<Line<'a>> {
+pub(crate) fn build_today_lines<'a>(
+    vm: &'a WatchViewModel,
+    styles: &'a SemanticStyles,
+) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::with_capacity(5);
 
     // Row 1: total tokens today
@@ -308,7 +311,11 @@ mod tests {
             .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         assert!(s.contains("7-day"), "footer row must carry '7-day' label");
     }
 
@@ -342,7 +349,11 @@ mod tests {
             .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
-        let s: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let s: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
         assert!(s.contains("⚠"), "blocked source must render the marker");
     }
 
