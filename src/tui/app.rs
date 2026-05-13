@@ -14,14 +14,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::Position, Terminal};
 
 use crate::{
     error::{GlorpError, Result},
     format::format_tokens,
     pet::animator::PetAnimator,
     tui::{
-        component::layout_watch_with_context,
+        component::{self, layout_watch_with_context, ComponentLayout, TargetPath, TargetRole},
         layout::{
             pet_effect_rect_from_layout, render_evolution_overlay, render_hatch_overlay,
             render_help_overlay, render_watch_frame_with_capability,
@@ -188,6 +188,7 @@ impl WatchApp {
             let ctx = RenderContext::new(self.config.color_capability);
             let overlay = self.overlay;
             let animator = &mut self.pet_animator;
+            let mut rendered_layout = None;
             terminal.draw(|frame| {
                 let frame_area = frame.area();
                 let layout = layout_watch_with_context(frame_area, vm_ref, &ctx);
@@ -195,6 +196,7 @@ impl WatchApp {
                 // Apply tachyonfx effects on top of the rendered pet panel.
                 let pet_rect = pet_effect_rect_from_layout(&layout);
                 animator.apply(pet_rect, frame.buffer_mut(), elapsed_ms);
+                rendered_layout = Some(layout);
                 match overlay {
                     Some(Overlay::Help) => render_help_overlay(frame),
                     None => {}
@@ -203,6 +205,8 @@ impl WatchApp {
                     render_evolution_overlay(frame, Some(stage_label.as_str()));
                 }
             })?;
+            let rendered_layout =
+                rendered_layout.expect("terminal draw closure always records watch layout");
 
             // Two-rate tick: while effects are active, poll at 60 fps so the
             // animation looks smooth. Otherwise use the configured idle tick.
@@ -214,7 +218,7 @@ impl WatchApp {
             if event::poll(tick)? {
                 match event::read()? {
                     Event::Key(key) if self.handle_key(key)? => break,
-                    Event::Mouse(mouse) => self.handle_mouse(mouse),
+                    Event::Mouse(mouse) => self.handle_mouse(mouse, &rendered_layout),
                     _ => {}
                 }
             }
@@ -342,11 +346,9 @@ impl WatchApp {
     }
 
     /// Update vm.cursor_screen from a crossterm MouseEvent so PetPanel can
-    /// swap to cursor-tracked eyes on its next render. Drag/scroll/release
-    /// events all update position; explicit Up events with no recorded
-    /// position would be impossible from crossterm so we just take whatever
-    /// coordinates the event carries.
-    fn handle_mouse(&mut self, mouse: MouseEvent) {
+    /// swap to cursor-tracked eyes on its next render, but only while the
+    /// pointer is over the pet scene's declared hit target.
+    fn handle_mouse(&mut self, mouse: MouseEvent, layout: &ComponentLayout) {
         if !self.vm.mouse_tracking_enabled {
             return;
         }
@@ -355,7 +357,20 @@ impl WatchApp {
             | MouseEventKind::Drag(_)
             | MouseEventKind::Down(_)
             | MouseEventKind::Up(_) => {
-                self.vm.cursor_screen = Some((mouse.column, mouse.row));
+                let point = Position::new(mouse.column, mouse.row);
+                let over_pet_hit_area = component::hit_test(layout, point)
+                    .and_then(|hit| layout.target(hit.target).map(|target| (hit, target)))
+                    .map(|(hit, target)| {
+                        hit.target == TargetPath::new("watch.pet.hit")
+                            && target.role == TargetRole::HitArea
+                    })
+                    .unwrap_or(false);
+
+                self.vm.cursor_screen = if over_pet_hit_area {
+                    Some((mouse.column, mouse.row))
+                } else {
+                    None
+                };
             }
             _ => {}
         }
@@ -629,4 +644,78 @@ fn timestamp_column(timestamp: &str) -> String {
         .and_then(|time| time.get(0..5))
         .unwrap_or("--:--")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::component::{
+        ComponentLayout, ComponentNodeLayout, GeometryTarget, LayoutMode, TargetPath, TargetRole,
+        WatchComponentId,
+    };
+    use crossterm::event::KeyModifiers;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn handle_mouse_tracks_cursor_only_over_pet_hit_area() {
+        let layout = test_layout_with_pet_hit_area();
+        let mut app = WatchApp::new(WatchViewModel::fixture());
+
+        app.handle_mouse(mouse_event(MouseEventKind::Moved, 14, 9), &layout);
+
+        assert_eq!(app.view_model_for_test().cursor_screen, Some((14, 9)));
+    }
+
+    #[test]
+    fn handle_mouse_clears_cursor_when_mouse_moves_outside_pet_hit_area() {
+        let layout = test_layout_with_pet_hit_area();
+        let mut app = WatchApp::new(WatchViewModel::fixture());
+
+        app.handle_mouse(mouse_event(MouseEventKind::Moved, 14, 9), &layout);
+        app.handle_mouse(mouse_event(MouseEventKind::Moved, 10, 5), &layout);
+
+        assert_eq!(app.view_model_for_test().cursor_screen, None);
+    }
+
+    fn test_layout_with_pet_hit_area() -> ComponentLayout {
+        let owner = WatchComponentId::Pet.path();
+        let mut layout = ComponentLayout::new(Rect::new(0, 0, 80, 24), LayoutMode::Wide);
+        layout
+            .insert_node(ComponentNodeLayout::leaf(owner, Rect::new(10, 5, 20, 10)))
+            .unwrap();
+        layout
+            .insert_target(
+                TargetPath::new("watch.pet.panel"),
+                GeometryTarget {
+                    owner,
+                    rect: Rect::new(10, 5, 20, 10),
+                    z: 0,
+                    clip: Rect::new(10, 5, 20, 10),
+                    role: TargetRole::PetPanel,
+                },
+            )
+            .unwrap();
+        layout
+            .insert_target(
+                TargetPath::new("watch.pet.hit"),
+                GeometryTarget {
+                    owner,
+                    rect: Rect::new(12, 7, 6, 5),
+                    z: 30,
+                    clip: Rect::new(12, 7, 6, 5),
+                    role: TargetRole::HitArea,
+                },
+            )
+            .unwrap();
+        layout
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
 }
