@@ -132,7 +132,9 @@ pub fn ambient_glyphs_for(
     exclusions: &[Rect],
     now: time::OffsetDateTime,
 ) -> Vec<AmbientGlyph> {
-    if habitat.width == 0 || habitat.height == 0 {
+    // height < 2 means there's no room for both a sky row and a floor row;
+    // the sky-row range would be 0..0 and rng.gen_range would panic.
+    if habitat.width == 0 || habitat.height < 2 {
         return Vec::new();
     }
 
@@ -837,6 +839,21 @@ mod tests {
             },
             area
         ));
+    }
+
+    #[test]
+    fn ambient_glyphs_handle_one_row_habitat_without_panic() {
+        use crate::game::evolution::Stage;
+        // Height = 1 means there's no row above the floor; the painter must not
+        // panic on `rng.gen_range(0..0)`. Returning empty is the contracted behavior.
+        let habitat = Rect::new(0, 0, 52, 1);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, habitat, &[], now);
+        assert!(
+            glyphs.is_empty(),
+            "habitat too short for both sky and floor — painter should return empty, got {} glyphs",
+            glyphs.len()
+        );
     }
 
     #[test]
