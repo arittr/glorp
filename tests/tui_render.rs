@@ -87,6 +87,19 @@ fn ordinary_panels_use_component_widgets_instead_of_ratatui_blocks() {
             !source.contains("Block::"),
             "{path} should not create Ratatui blocks directly"
         );
+        for forbidden in [
+            "Lines",
+            "ratatui::text",
+            "Line::",
+            "Vec<Line",
+            "Span::",
+            "Paragraph",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} should not use raw Ratatui line rendering through {forbidden}"
+            );
+        }
     }
 }
 

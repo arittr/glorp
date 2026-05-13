@@ -1,8 +1,7 @@
 use crate::tui::component::{ComponentStyle, GradientToken, TextTone};
 use crate::tui::panels::bars::{bar_spans, build_spark_line, format_tokens_short};
-use crate::tui::panels::feed::build_feed_lines;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{semantic_styles, tokenpet_palette, xp_color};
+use crate::tui::style::{claude_color, codex_color, semantic_styles, tokenpet_palette, xp_color};
 use crate::tui::view_model::WatchViewModel;
 use ratatui::{
     buffer::Buffer,
@@ -64,6 +63,8 @@ pub struct TextRow<'a> {
     label: &'a str,
     value: String,
     tone: TextTone,
+    label_width: usize,
+    gap_width: usize,
 }
 
 impl<'a> TextRow<'a> {
@@ -72,6 +73,8 @@ impl<'a> TextRow<'a> {
             label,
             value: value.to_string(),
             tone: TextTone::Label,
+            label_width: 8,
+            gap_width: 3,
         }
     }
 
@@ -80,19 +83,112 @@ impl<'a> TextRow<'a> {
         self
     }
 
+    pub const fn label_width(mut self, width: usize) -> Self {
+        self.label_width = width;
+        self
+    }
+
+    pub const fn gap_width(mut self, width: usize) -> Self {
+        self.gap_width = width;
+        self
+    }
+
     pub fn line(&self) -> Line<'_> {
         Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                format!("{:<8}", self.label),
+                format!("{:<width$}", self.label, width = self.label_width),
                 ComponentStyle::new().text(self.tone).text_style(),
             ),
-            Span::raw("   "),
+            Span::raw(" ".repeat(self.gap_width)),
             Span::styled(
                 self.value.clone(),
                 ComponentStyle::new().text(TextTone::Primary).text_style(),
             ),
         ])
+    }
+
+    pub fn render(&self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        Paragraph::new(self.line()).render(area, buf);
+    }
+}
+
+pub struct MetricRow<'a> {
+    label: &'a str,
+    value: String,
+    annotation: Option<String>,
+    label_color: Option<Color>,
+    diagnostic: bool,
+    label_width: usize,
+    value_width: usize,
+}
+
+impl<'a> MetricRow<'a> {
+    pub fn new(label: &'a str, value: impl ToString) -> Self {
+        Self {
+            label,
+            value: value.to_string(),
+            annotation: None,
+            label_color: None,
+            diagnostic: false,
+            label_width: 8,
+            value_width: 13,
+        }
+    }
+
+    pub fn annotation(mut self, annotation: impl ToString) -> Self {
+        self.annotation = Some(annotation.to_string());
+        self
+    }
+
+    pub const fn label_color(mut self, color: Color) -> Self {
+        self.label_color = Some(color);
+        self
+    }
+
+    pub const fn diagnostic_marker(mut self, diagnostic: bool) -> Self {
+        self.diagnostic = diagnostic;
+        self
+    }
+
+    pub const fn label_width(mut self, width: usize) -> Self {
+        self.label_width = width;
+        self
+    }
+
+    pub const fn value_width(mut self, width: usize) -> Self {
+        self.value_width = width;
+        self
+    }
+
+    pub fn line(&self) -> Line<'_> {
+        let styles = semantic_styles();
+        let label_style = self
+            .label_color
+            .map(|color| Style::default().fg(color))
+            .unwrap_or(styles.label);
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<width$}", self.label, width = self.label_width),
+                label_style,
+            ),
+        ];
+        if self.diagnostic {
+            spans.push(Span::styled("⚠", styles.event_rail_diagnostic));
+            spans.push(Span::raw("  "));
+        } else {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(
+            format!("{:>width$}", self.value, width = self.value_width),
+            styles.primary_text,
+        ));
+        if let Some(annotation) = &self.annotation {
+            spans.push(Span::raw("    "));
+            spans.push(Span::styled(annotation.clone(), styles.label));
+        }
+        Line::from(spans)
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
@@ -208,16 +304,48 @@ impl ProgressBar {
 
 pub struct InlineSparkline<'a> {
     history: &'a [f64],
+    leading_width: usize,
+    annotation_gap: usize,
+    annotation: Option<String>,
 }
 
 impl<'a> InlineSparkline<'a> {
     pub const fn new(history: &'a [f64]) -> Self {
-        Self { history }
+        Self {
+            history,
+            leading_width: 0,
+            annotation_gap: 0,
+            annotation: None,
+        }
+    }
+
+    pub const fn leading_width(mut self, width: usize) -> Self {
+        self.leading_width = width;
+        self
+    }
+
+    pub const fn annotation_gap(mut self, width: usize) -> Self {
+        self.annotation_gap = width;
+        self
+    }
+
+    pub fn annotation(mut self, annotation: impl ToString) -> Self {
+        self.annotation = Some(annotation.to_string());
+        self
     }
 
     pub fn spans(&self) -> Vec<Span<'static>> {
         let styles = semantic_styles();
-        build_spark_line(self.history, &styles)
+        let mut spans = Vec::new();
+        if self.leading_width > 0 {
+            spans.push(Span::raw(" ".repeat(self.leading_width)));
+        }
+        spans.extend(build_spark_line(self.history, &styles));
+        if let Some(annotation) = &self.annotation {
+            spans.push(Span::raw(" ".repeat(self.annotation_gap)));
+            spans.push(Span::styled(annotation.clone(), styles.section_header));
+        }
+        spans
     }
 
     pub fn line(&self) -> Line<'static> {
@@ -231,27 +359,6 @@ impl<'a> InlineSparkline<'a> {
 
 pub struct FeedList<'a> {
     lines: Vec<Line<'a>>,
-}
-
-pub struct Lines<'a> {
-    lines: Vec<Line<'a>>,
-}
-
-impl<'a> Lines<'a> {
-    pub fn new(lines: impl IntoIterator<Item = Line<'a>>) -> Self {
-        Self {
-            lines: lines.into_iter().collect(),
-        }
-    }
-
-    pub fn from_lines(lines: impl IntoIterator<Item = Line<'a>>) -> Self {
-        Self::new(lines)
-    }
-
-    pub fn render(&self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        let lines = self.lines.iter().take(area.height as usize).cloned();
-        Paragraph::new(lines.collect::<Vec<_>>()).render(area, buf);
-    }
 }
 
 impl<'a> FeedList<'a> {
@@ -277,6 +384,48 @@ impl<'a> FeedList<'a> {
         let lines = self.lines.iter().take(area.height as usize).cloned();
         Paragraph::new(lines.collect::<Vec<_>>()).render(area, buf);
     }
+}
+
+fn build_feed_lines(vm: &WatchViewModel, max_rows: u16) -> Vec<Line<'_>> {
+    let styles = semantic_styles();
+    vm.recent_events
+        .iter()
+        .take(max_rows as usize)
+        .map(|event| {
+            let text_style = styles.log(event.kind);
+            let (source_span, rest_span) = extract_source_span(&event.text, text_style);
+            let mut spans = vec![
+                Span::raw("  "),
+                Span::styled(event.timestamp.as_str(), styles.timestamp),
+                Span::raw("  "),
+                source_span,
+            ];
+            if let Some(rest) = rest_span {
+                spans.push(rest);
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn extract_source_span(text: &str, fallback_style: Style) -> (Span<'_>, Option<Span<'_>>) {
+    for name in &["claude-code", "codex"] {
+        if let Some(rest) = text.strip_prefix(name) {
+            let color = if *name == "claude-code" {
+                claude_color()
+            } else {
+                codex_color()
+            };
+            let source_span = Span::styled(&text[..name.len()], Style::default().fg(color));
+            let rest_span = if rest.is_empty() {
+                None
+            } else {
+                Some(Span::styled(rest, fallback_style))
+            };
+            return (source_span, rest_span);
+        }
+    }
+    (Span::styled(text, fallback_style), None)
 }
 
 #[cfg(test)]

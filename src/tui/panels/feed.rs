@@ -1,12 +1,9 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 
 use crate::tui::component::{ComponentPanel, FeedList};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{claude_color, codex_color, semantic_styles};
 use crate::tui::view_model::WatchViewModel;
 
 pub struct FeedPanel;
@@ -28,57 +25,6 @@ impl Panel for FeedPanel {
             FeedList::from_watch(vm, content.height).render(content, buf, ctx);
         });
     }
-}
-
-/// Build the event lines for the feed panel.
-///
-/// Clamps the number of events to `max_rows` so the content never overflows
-/// the allocated rect. Source names ("claude-code", "codex") at the start of
-/// event text are extracted as separately-colored spans.
-pub(crate) fn build_feed_lines(vm: &WatchViewModel, max_rows: u16) -> Vec<Line<'_>> {
-    let styles = semantic_styles();
-    vm.recent_events
-        .iter()
-        .take(max_rows as usize)
-        .map(|event| {
-            let text_style = styles.log(event.kind);
-            let (source_span, rest_span) = extract_source_span(&event.text, text_style);
-            let mut spans = vec![
-                Span::raw("  "),
-                Span::styled(event.timestamp.as_str(), styles.timestamp),
-                Span::raw("  "),
-                source_span,
-            ];
-            if let Some(rest) = rest_span {
-                spans.push(rest);
-            }
-            Line::from(spans)
-        })
-        .collect()
-}
-
-/// If `text` starts with a known source name ("claude-code" or "codex"),
-/// returns a colored span for the source name and an optional span for the
-/// remainder. Otherwise returns a single span for the full text with
-/// `fallback_style`.
-fn extract_source_span(text: &str, fallback_style: Style) -> (Span<'_>, Option<Span<'_>>) {
-    for name in &["claude-code", "codex"] {
-        if let Some(rest) = text.strip_prefix(name) {
-            let color = if *name == "claude-code" {
-                claude_color()
-            } else {
-                codex_color()
-            };
-            let source_span = Span::styled(&text[..name.len()], Style::default().fg(color));
-            let rest_span = if rest.is_empty() {
-                None
-            } else {
-                Some(Span::styled(rest, fallback_style))
-            };
-            return (source_span, rest_span);
-        }
-    }
-    (Span::styled(text, fallback_style), None)
 }
 
 #[cfg(test)]
@@ -126,8 +72,8 @@ mod tests {
         // Give it only 2 rows (1 border + 1 inner). With 3 events in the
         // fixture the panel must silently clamp to fit.
         let vm = WatchViewModel::fixture_with_events();
-        // If build_feed_lines didn't clamp, Paragraph would still truncate,
-        // but we assert on the constraint and that this doesn't panic.
+        // If FeedList did not clamp, rendering would spill past the content
+        // rect; this also asserts the panel still renders without panicking.
         let panel = FeedPanel;
         let ctx = RenderContext::new(crate::tui::style::ColorCapability::Truecolor);
         let backend = TestBackend::new(50, 2);
@@ -210,7 +156,7 @@ mod tests {
     fn feed_panel_source_label_colors() {
         use crate::tui::style::{claude_color, codex_color};
         let vm = WatchViewModel::fixture_with_n_events(3);
-        let lines = build_feed_lines(&vm, 6);
+        let lines = FeedList::from_watch(&vm, 6).lines();
         let find_source = |needle: &str, color: ratatui::style::Color| {
             lines.iter().any(|l| {
                 l.spans

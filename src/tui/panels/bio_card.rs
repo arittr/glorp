@@ -1,12 +1,10 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::text::{Line, Span};
 
-use crate::tui::component::{ComponentPanel, Lines};
+use crate::tui::component::{ComponentPanel, TextRow};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{semantic_styles, SemanticStyles};
-use crate::tui::view_model::{BioView, WatchViewModel};
+use crate::tui::view_model::WatchViewModel;
 
 pub struct BioCardPanel;
 
@@ -19,27 +17,22 @@ impl Panel for BioCardPanel {
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
         let panel = ComponentPanel::new("bio");
         panel.render(area, buf, ctx, |content, buf| {
-            let styles = semantic_styles();
-            Lines::from_lines(build_bio_lines(&vm.bio, &styles)).render(content, buf, ctx);
+            if content.height > 0 {
+                TextRow::new("hatched", vm.bio.hatched_label.clone())
+                    .gap_width(2)
+                    .render(row_rect(content, 0), buf, ctx);
+            }
+            if content.height > 1 {
+                TextRow::new("age", vm.bio.age_label.clone())
+                    .gap_width(2)
+                    .render(row_rect(content, 1), buf, ctx);
+            }
         });
     }
 }
 
-fn build_bio_lines<'a>(bio: &'a BioView, styles: &'a SemanticStyles) -> Vec<Line<'a>> {
-    vec![
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{:<8}", "hatched"), styles.label),
-            Span::raw("  "),
-            Span::styled(bio.hatched_label.clone(), styles.primary_text),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{:<8}", "age"), styles.label),
-            Span::raw("  "),
-            Span::styled(bio.age_label.clone(), styles.primary_text),
-        ]),
-    ]
+fn row_rect(area: Rect, index: u16) -> Rect {
+    Rect::new(area.x, area.y + index, area.width, 1)
 }
 
 #[cfg(test)]

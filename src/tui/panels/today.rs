@@ -1,12 +1,10 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::text::{Line, Span};
 
-use crate::tui::component::{ComponentPanel, Lines};
-use crate::tui::panels::bars::build_spark_line;
+use crate::tui::component::{ComponentPanel, InlineSparkline, MetricRow};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{claude_color, codex_color, semantic_styles, SemanticStyles};
+use crate::tui::style::{claude_color, codex_color};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
 
 /// Expected source surfaces and their display names.
@@ -23,143 +21,94 @@ impl Panel for TodayPanel {
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
         let panel = ComponentPanel::new("today");
         panel.render(area, buf, ctx, |content, buf| {
-            let styles = semantic_styles();
-            Lines::from_lines(build_today_lines(vm, &styles)).render(content, buf, ctx);
+            render_today_rows(content, buf, vm, ctx);
         });
     }
 }
 
-pub(crate) fn build_today_lines<'a>(
-    vm: &'a WatchViewModel,
-    styles: &'a SemanticStyles,
-) -> Vec<Line<'a>> {
-    let mut lines: Vec<Line<'a>> = Vec::with_capacity(5);
-
-    // Row 1: total tokens today
-    lines.push(Line::from(today_spans(
-        "tokens",
-        &format_tokens_full(vm.today_effective_tokens),
-        None,
-        None,
-        styles,
-    )));
-
-    // Rows 2–3: per-source breakdown with percentage share
-    let total = vm.today_effective_tokens.max(0.0);
-    for (surface, display) in EXPECTED_SOURCES {
-        let value_opt = vm
-            .source_breakdown
-            .iter()
-            .find(|s| s.name == *surface)
-            .map(|s| s.effective_tokens);
-        let (value_str, share) = match value_opt {
-            Some(v) => {
-                let pct = if total > 0.0 {
-                    (v / total) * 100.0
-                } else {
-                    0.0
-                };
-                (
-                    format_tokens_full(v),
-                    Some(format!("{}%", pct.round() as u32)),
-                )
-            }
-            None => ("—".to_string(), Some("—".to_string())),
-        };
-        // Determine health status for this source's ⚠ marker.
-        let health_status = vm
-            .source_health
-            .iter()
-            .find(|h| h.name == *surface)
-            .map(|h| h.status);
-        let blocked = matches!(
-            health_status,
-            Some(SourceStatus::Blocked) | Some(SourceStatus::Diagnostic)
+fn render_today_rows(area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
+    if area.height > 0 {
+        MetricRow::new("tokens", format_tokens_full(vm.today_effective_tokens)).render(
+            row_rect(area, 0),
+            buf,
+            ctx,
         );
-        // Resolve the label color by provider role.
-        let label_color = match *surface {
-            "claude-code" => Some(claude_color()),
-            "codex" => Some(codex_color()),
-            _ => None,
-        };
-        lines.push(Line::from(today_spans(
-            display,
-            &value_str,
-            share,
-            Some((label_color, blocked)),
-            styles,
-        )));
     }
 
-    // Row 4: current 10-minute window
-    let bucket_str = format_signed_tokens_short(vm.current_bucket_effective_tokens);
-    lines.push(Line::from(today_spans(
-        "last 10m",
-        &bucket_str,
-        Some("this 10m".to_string()),
-        None,
-        styles,
-    )));
+    let total = vm.today_effective_tokens.max(0.0);
+    for (index, (surface, display)) in EXPECTED_SOURCES.iter().enumerate() {
+        let row = 1 + index as u16;
+        if area.height <= row {
+            continue;
+        }
+        source_row(vm, surface, display, total).render(row_rect(area, row), buf, ctx);
+    }
 
-    // Row 5: 7-day inline sparkline footer. The `←` tip is positioned at the
-    // annotation column (col 30 in the row layout, where "this 10m" starts on
-    // the row above) so the legend visually anchors to the data labels.
-    //   2 leading + sparkline(7 bars × 1 + 6 separators × 2 = 19) + 9 trailing = 30.
-    let spark_spans = build_spark_line(&vm.recent_daily_effective_tokens, styles);
-    let mut footer: Vec<Span<'a>> = vec![Span::raw("  ")];
-    footer.extend(spark_spans);
-    footer.push(Span::raw("         "));
-    footer.push(Span::styled("← 7-day", styles.section_header));
-    lines.push(Line::from(footer));
+    if area.height > 3 {
+        MetricRow::new(
+            "last 10m",
+            format_signed_tokens_short(vm.current_bucket_effective_tokens),
+        )
+        .annotation("this 10m")
+        .render(row_rect(area, 3), buf, ctx);
+    }
 
-    lines
+    if area.height > 4 {
+        InlineSparkline::new(&vm.recent_daily_effective_tokens)
+            .leading_width(2)
+            .annotation_gap(9)
+            .annotation("← 7-day")
+            .render(row_rect(area, 4), buf, ctx);
+    }
 }
 
-/// Duplicated from `layout::today_row` — T7 will deduplicate when the old path is deleted.
-///
-/// Fixed-column layout so values and annotations stay aligned across rows
-/// even when token magnitudes differ by orders of magnitude.
-///   2 sp + label(8) + gutter(3) + value(right-aligned, 13) + 4 sp + annotation
-///
-/// `source_meta` carries `(label_color_override, blocked)` for source rows:
-/// - `label_color_override`: replaces the default label style foreground.
-/// - `blocked`: when true, renders `⚠` in the 3-cell gutter; otherwise pads 3 spaces.
-fn today_spans<'a>(
-    label: &'a str,
-    value: &str,
-    annotation: Option<String>,
-    source_meta: Option<(Option<ratatui::style::Color>, bool)>,
-    styles: &'a SemanticStyles,
-) -> Vec<Span<'a>> {
-    const VALUE_WIDTH: usize = 13;
-    let value_owned = format!("{value:>VALUE_WIDTH$}");
-    let mut spans: Vec<Span<'a>> = Vec::new();
-    spans.push(Span::raw("  "));
+fn source_row<'a>(
+    vm: &WatchViewModel,
+    surface: &str,
+    display: &'a str,
+    total: f64,
+) -> MetricRow<'a> {
+    let value_opt = vm
+        .source_breakdown
+        .iter()
+        .find(|s| s.name == surface)
+        .map(|s| s.effective_tokens);
+    let (value, share) = match value_opt {
+        Some(tokens) => {
+            let pct = if total > 0.0 {
+                (tokens / total) * 100.0
+            } else {
+                0.0
+            };
+            (
+                format_tokens_full(tokens),
+                format!("{}%", pct.round() as u32),
+            )
+        }
+        None => ("—".to_string(), "—".to_string()),
+    };
+    let status = vm
+        .source_health
+        .iter()
+        .find(|health| health.name == surface)
+        .map(|health| health.status);
+    let diagnostic = matches!(
+        status,
+        Some(SourceStatus::Blocked) | Some(SourceStatus::Diagnostic)
+    );
+    let color = match surface {
+        "claude-code" => claude_color(),
+        "codex" => codex_color(),
+        _ => claude_color(),
+    };
+    MetricRow::new(display, value)
+        .annotation(share)
+        .label_color(color)
+        .diagnostic_marker(diagnostic)
+}
 
-    // Label: optionally colored for source rows.
-    if let Some((Some(color), _)) = source_meta {
-        spans.push(Span::styled(
-            format!("{label:<8}"),
-            ratatui::style::Style::default().fg(color),
-        ));
-    } else {
-        spans.push(Span::styled(format!("{label:<8}"), styles.label));
-    }
-
-    // 3-cell gutter: either ⚠ + 2 spaces (blocked) or 3 spaces (healthy / non-source).
-    if matches!(source_meta, Some((_, true))) {
-        spans.push(Span::styled("⚠", styles.event_rail_diagnostic));
-        spans.push(Span::raw("  "));
-    } else {
-        spans.push(Span::raw("   "));
-    }
-
-    spans.push(Span::styled(value_owned, styles.primary_text));
-    if let Some(ann) = annotation {
-        spans.push(Span::raw("    "));
-        spans.push(Span::styled(ann, styles.label));
-    }
-    spans
+fn row_rect(area: Rect, index: u16) -> Rect {
+    Rect::new(area.x, area.y + index, area.width, 1)
 }
 
 /// Duplicated from `layout::format_tokens_full` — T7 will deduplicate when the old path is deleted.
@@ -410,17 +359,16 @@ mod tests {
     fn today_panel_source_labels_use_source_colors() {
         use crate::tui::style::{claude_color, codex_color};
         let vm = WatchViewModel::fixture();
-        let styles = semantic_styles();
-        let lines = build_today_lines(&vm, &styles);
-        let has_color = |needle: &str, color: ratatui::style::Color| {
-            lines.iter().any(|l| {
-                l.spans
-                    .iter()
-                    .any(|s| s.content.trim() == needle && s.style.fg == Some(color))
-            })
-        };
-        assert!(has_color("claude", claude_color()));
-        assert!(has_color("codex", codex_color()));
+        let panel = TodayPanel;
+        let ctx = test_context();
+        let backend = TestBackend::new(70, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert!(has_colored_word(buf, "claude", claude_color()));
+        assert!(has_colored_word(buf, "codex", codex_color()));
     }
 
     #[test]
@@ -432,5 +380,21 @@ mod tests {
             Constraint::Length(6),
             "1 border + tokens + claude + codex + last_10m + 7-day footer"
         );
+    }
+
+    fn has_colored_word(
+        buf: &ratatui::buffer::Buffer,
+        word: &str,
+        color: ratatui::style::Color,
+    ) -> bool {
+        let chars: Vec<String> = word.chars().map(|ch| ch.to_string()).collect();
+        (0..buf.area.height).any(|y| {
+            (0..=buf.area.width.saturating_sub(chars.len() as u16)).any(|x| {
+                chars.iter().enumerate().all(|(offset, expected)| {
+                    let cell = &buf[(x + offset as u16, y)];
+                    cell.symbol() == expected && cell.style().fg == Some(color)
+                })
+            })
+        })
     }
 }
