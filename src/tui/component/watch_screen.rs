@@ -1,4 +1,5 @@
 use crate::tui::component::{
+    taffy_backend::{self, ColumnSpec, RowSpec},
     ComponentLayout, ComponentNodeLayout, ComponentPath, LayoutDecision, LayoutDecisionReason,
     LayoutMode, PetScene, TargetPath, VisibilityState, WatchComponentId,
 };
@@ -188,36 +189,36 @@ fn layout_wide(area: Rect, vm: &WatchViewModel, ctx: &RenderContext, layout: &mu
         ])
         .split(area)[1];
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(WIDE_LEFT_COL),
-            Constraint::Length(WIDE_GUTTER),
-            Constraint::Min(RIGHT_MIN_WIDTH),
-        ])
-        .split(padded);
+    let body = taffy_backend::allocate_columns(
+        padded,
+        &[
+            ColumnSpec::fixed(WIDE_LEFT_COL),
+            ColumnSpec::fixed(WIDE_GUTTER),
+            ColumnSpec::fill(1),
+        ],
+    );
 
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            PetPanel.preferred_constraint(vm),
-            Constraint::Length(COLUMN_GAP),
-            VitalsPanel.preferred_constraint(vm),
-            Constraint::Length(COLUMN_GAP),
-            BioCardPanel.preferred_constraint(vm),
-        ])
-        .split(body[0]);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            TodayPanel.preferred_constraint(vm),
-            Constraint::Length(COLUMN_GAP),
-            ProgressPanel.preferred_constraint(vm),
-            Constraint::Length(COLUMN_GAP),
-            Constraint::Length(bounded_feed_height(vm)),
-            Constraint::Min(0),
-        ])
-        .split(body[2]);
+    let left = taffy_backend::allocate_stack(
+        body[0],
+        &[
+            RowSpec::fill(1),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(intrinsic_height(VitalsPanel.preferred_constraint(vm))),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(intrinsic_height(BioCardPanel.preferred_constraint(vm))),
+        ],
+    );
+    let right = taffy_backend::allocate_stack(
+        body[2],
+        &[
+            RowSpec::fixed(intrinsic_height(TodayPanel.preferred_constraint(vm))),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(intrinsic_height(ProgressPanel.preferred_constraint(vm))),
+            RowSpec::fixed(COLUMN_GAP),
+            RowSpec::fixed(bounded_feed_height(vm)),
+            RowSpec::fill(1),
+        ],
+    );
 
     insert_pet_node(layout, left[0], vm, ctx);
     insert_visible_node(layout, WatchComponentId::Vitals, left[2]);
@@ -283,19 +284,19 @@ fn layout_compact(
         .saturating_add(speech_extra)
         .saturating_add(remaining);
 
-    let stack = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(pet_height),
-            Constraint::Length(vitals_height),
-            Constraint::Length(gap_height),
-            Constraint::Length(today_height),
-            Constraint::Length(gap_height),
-            Constraint::Length(progress_height),
-            Constraint::Length(gap_height),
-            Constraint::Length(feed_height),
-        ])
-        .split(area);
+    let stack = taffy_backend::allocate_stack(
+        area,
+        &[
+            RowSpec::fixed(pet_height),
+            RowSpec::fixed(vitals_height),
+            RowSpec::fixed(gap_height),
+            RowSpec::fixed(today_height),
+            RowSpec::fixed(gap_height),
+            RowSpec::fixed(progress_height),
+            RowSpec::fixed(gap_height),
+            RowSpec::fixed(feed_height),
+        ],
+    );
 
     insert_hidden_bio(layout, area);
     if today_preferred_height > today_height {

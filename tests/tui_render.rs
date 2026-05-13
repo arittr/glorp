@@ -62,6 +62,13 @@ fn has_cell(buf: &Buffer, symbol: &str, fg: Color) -> bool {
     })
 }
 
+fn rects_overlap(a: ratatui::layout::Rect, b: ratatui::layout::Rect) -> bool {
+    a.x < b.x.saturating_add(b.width)
+        && b.x < a.x.saturating_add(a.width)
+        && a.y < b.y.saturating_add(b.height)
+        && b.y < a.y.saturating_add(a.height)
+}
+
 #[test]
 fn progress_panel_uses_component_style_facade() {
     let source = std::fs::read_to_string("src/tui/panels/progress.rs").unwrap();
@@ -126,6 +133,28 @@ fn pet_effect_target_matches_component_layout_pet_art_target() {
     let effect_rect = glorp::tui::layout::pet_effect_rect_for_test(area, &vm);
 
     assert_eq!(effect_rect, target.rect);
+}
+
+#[test]
+fn component_layout_has_no_overlapping_required_components() {
+    let vm = WatchViewModel::fixture();
+    let layout =
+        glorp::tui::component::layout_watch(ratatui::layout::Rect::new(0, 0, 120, 32), &vm);
+    let ids = [
+        glorp::tui::component::WatchComponentId::Pet.path(),
+        glorp::tui::component::WatchComponentId::Vitals.path(),
+        glorp::tui::component::WatchComponentId::Today.path(),
+        glorp::tui::component::WatchComponentId::Progress.path(),
+        glorp::tui::component::WatchComponentId::Feed.path(),
+    ];
+
+    for (i, a) in ids.iter().enumerate() {
+        for b in ids.iter().skip(i + 1) {
+            let a = layout.node(*a).unwrap().bounds;
+            let b = layout.node(*b).unwrap().bounds;
+            assert!(!rects_overlap(a, b), "components overlap: {a:?} and {b:?}");
+        }
+    }
 }
 
 #[test]
