@@ -375,6 +375,13 @@ mod tests {
     }
 
     #[test]
+    fn preview_render_context_uses_fixed_watch_clock() {
+        let ctx = PreviewRenderContext::deterministic();
+
+        assert_eq!(ctx.render.clock.now_utc(), ctx.fixed_now);
+    }
+
+    #[test]
     fn scenario_metadata_includes_review_inputs_and_files() {
         let ctx = PreviewRenderContext::deterministic();
         let frame = PreviewFrame {

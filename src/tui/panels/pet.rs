@@ -71,6 +71,13 @@ pub fn ambient_glyphs_for(
     Vec::new()
 }
 
+fn ambient_glyph_is_inside_area(glyph: &AmbientGlyph, area: Rect) -> bool {
+    glyph.col >= area.x
+        && glyph.row >= area.y
+        && glyph.col < area.x.saturating_add(area.width)
+        && glyph.row < area.y.saturating_add(area.height)
+}
+
 impl Panel for PetPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         Constraint::Fill(1)
@@ -92,7 +99,7 @@ impl Panel for PetPanel {
         let species = vm.pet_render.generated_species;
         let glyphs = ambient_glyphs_for(species, area, pet_inner, now);
         for g in glyphs {
-            if g.col < area.x + area.width && g.row < area.y + area.height {
+            if ambient_glyph_is_inside_area(&g, area) {
                 let cell = &mut buf[(g.col, g.row)];
                 cell.set_char(g.glyph);
                 cell.set_style(ratatui::style::Style::default().fg(g.color));
@@ -577,6 +584,57 @@ mod tests {
             glyphs.is_empty(),
             "PR1 stub returns empty; PR2 fills this in"
         );
+    }
+
+    #[test]
+    fn ambient_glyph_must_be_fully_inside_panel_area() {
+        let area = Rect::new(10, 20, 5, 4);
+
+        assert!(ambient_glyph_is_inside_area(
+            &AmbientGlyph {
+                row: 20,
+                col: 10,
+                glyph: '*',
+                color: Color::White,
+            },
+            area
+        ));
+        assert!(!ambient_glyph_is_inside_area(
+            &AmbientGlyph {
+                row: 19,
+                col: 10,
+                glyph: '*',
+                color: Color::White,
+            },
+            area
+        ));
+        assert!(!ambient_glyph_is_inside_area(
+            &AmbientGlyph {
+                row: 20,
+                col: 9,
+                glyph: '*',
+                color: Color::White,
+            },
+            area
+        ));
+        assert!(!ambient_glyph_is_inside_area(
+            &AmbientGlyph {
+                row: 24,
+                col: 10,
+                glyph: '*',
+                color: Color::White,
+            },
+            area
+        ));
+        assert!(!ambient_glyph_is_inside_area(
+            &AmbientGlyph {
+                row: 20,
+                col: 15,
+                glyph: '*',
+                color: Color::White,
+            },
+            area
+        ));
     }
 
     #[test]
