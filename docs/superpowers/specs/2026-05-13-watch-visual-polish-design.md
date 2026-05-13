@@ -106,18 +106,26 @@ The committed snapshots that change in this PR:
 | Ghost | `~` `'` `,` `*` | `' ' '   '   '   '   '` |
 | Glitch | `▒` `▓` `░` `▪` | `▒░▒  ░▓ ░░ ▒░ ░ ▒░ ▒░ ░░ ▒` |
 | Crystal | `✦` `✧` `·` `◆` | `·.·   ·  .   ·.  · ·  .` |
-| Mech | `~` `°` `·` `~●` | `─·─ ─ ─.─ ─ ─·─` |
+| Mech | `~` `°` `·` `●` | `─·─ ─ ─.─ ─ ─·─` |
 
-All glyphs are strictly single-column. No emoji-width characters. Specific glyph picks may shift slightly during implementation; the species feel does not.
+All glyphs are strictly single-column. No emoji-width characters, and no multi-character "glyphs" — each palette entry is a single cell. Specific glyph picks may shift slightly during implementation; the species feel does not.
 
-### Stage drives density
+### Stage and habitat area drive density
 
-| Stage | Sky-glyph count |
+Sky-glyph count is the sum of a stage baseline and an area-scaled term:
+
+```
+count = stage_base + max(0, (habitat_cells - 200) / 60)
+```
+
+| Stage | `stage_base` |
 |---|---|
 | S0–S1 | 4 |
 | S2–S3 | 6 |
 | S4–S5 | 8 |
 | S6 | 10 |
+
+The 200-cell threshold corresponds to roughly the panel size on a normal-wide terminal. Above it, every additional ~60 habitat cells adds one sky glyph. On a tall-wide 180×50 preview the pet panel is ≈ 52 × 35 ≈ 1820 cells, which adds ~27 glyphs on top of the stage baseline — enough that the panel reads as inhabited rather than as a sparse pet floating in dead air. On normal-wide and compact-but-still-wide terminals the area term is small or zero, so density stays restrained.
 
 The floor row is always present, anchored to the bottom of the `habitat` rect. S6's existing top and bottom sparkle frame in `src/pet/render.rs` is unchanged — habitat layers underneath it.
 
@@ -136,7 +144,7 @@ The painter takes `exclusions: &[Rect]` and rejects any candidate position that 
 
 ### Color
 
-A new `StyleRole::HabitatAmbient` maps to a muted variant (~35% lightness) of the species' role color in `src/tui/style.rs`. The floor row uses a slightly stronger variant. Stage does not affect color.
+A new `StyleRole::HabitatAmbient` resolves to a muted version of the species' role color. The exact derivation is left to implementation: prefer the codebase's existing dim/muted color mechanism in `src/tui/style.rs` if one exists; if no such mechanism is in place, the implementation plan introduces one (HSL desaturation, a hand-tuned dim color token, or a small color-mix helper — whichever fits the existing palette code). Floor uses a slightly stronger variant of the same muted role. Stage does not affect color.
 
 Color capability:
 
@@ -154,6 +162,8 @@ The outer rounded frame's top and bottom edges' fill character varies by stage:
 | S2–S3 | `─` | `╭ glorp · Mochi · fuzz · 12d · content ──────────────╮` |
 | S4–S5 | `━` | `╭ glorp · Mochi · fuzz · 18d · content ━━━━━━━━━━━━━╮` |
 | S6 | `✦✧` | `╭ glorp · Mochi · fuzz · 90d · content ✦✧✦✧✦✧✦✧✦✧✦✧✦╮` |
+
+The progression is intentionally non-linear: `┄` and `─` are deliberately close (early stages should feel quiet, almost interchangeable), while `━` and `✦✧` are dramatic jumps (mature stages should feel substantial, then mythic). The four tiers are not a smooth ramp — they are two registers of "quiet" and two of "loud", reinforcing the pet-art evolution rather than competing with it.
 
 Both top and bottom edges use the same character. S6's alternation always starts with `✦` and pads to even length; if width is odd, the leading char repeats once.
 
@@ -189,7 +199,7 @@ The five committed snapshots listed under `tests/snapshots/` are regenerated as 
 
 ## Risks
 
-1. **Habitat noise vs readability.** Glyphs near the pet outline can crowd it. Mitigated by the 1-cell respect ring around the pet-art exclusion. If review still finds it noisy, the sky-glyph counts can drop by 2 per tier without revisiting the painter shape.
+1. **Habitat noise vs readability.** Glyphs near the pet outline can crowd it. Mitigated by the 1-cell respect ring around the pet-art exclusion. If review still finds it noisy, two tuning knobs are available without revisiting the painter shape: drop `stage_base` by 2 per tier, or raise the area-scaling divisor (60 → 80 or higher) to slow the density growth on large habitats.
 
 2. **Cell width assumptions.** The painter assumes 1 cell per glyph slot. All palette entries are strictly single-column ASCII or single-width Unicode. No `✨`-class emoji. Adding multi-cell glyphs later requires painter changes; not in scope.
 
