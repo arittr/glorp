@@ -348,3 +348,46 @@ fn mech_state() -> PetState {
     state.recent_events = vec!["bolt tightened a tiny gear".into()];
     state
 }
+
+#[test]
+fn ema_rate_grows_with_more_recent_events() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let mut store = UsageStore::open(&db_path).unwrap();
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+    for i in 0..10_i64 {
+        let observed_at = now - Duration::minutes(15 * i + 5);
+        store
+            .insert_event(&NormalizedUsageEvent {
+                observed_at,
+                bucket_at: observed_at,
+                effective_tokens: 10_000.0,
+                ..NormalizedUsageEvent::for_test_at(observed_at, 10_000.0)
+            })
+            .unwrap();
+    }
+
+    let state = PetState::new_for_test("test", "buddy");
+    let vm_a = build_watch_view_model_for_test_at(&state, &db_path, now).unwrap();
+    let rate_a = vm_a.progress.rate_per_hour;
+
+    // Add one large event right at now — it carries maximum EMA weight.
+    store
+        .insert_event(&NormalizedUsageEvent {
+            observed_at: now,
+            bucket_at: now,
+            effective_tokens: 50_000.0,
+            provider_surface: "codex".to_string(),
+            ..NormalizedUsageEvent::for_test_at(now, 50_000.0)
+        })
+        .unwrap();
+    drop(store);
+
+    let vm_b = build_watch_view_model_for_test_at(&state, &db_path, now).unwrap();
+    let rate_b = vm_b.progress.rate_per_hour;
+    assert!(
+        rate_b > rate_a,
+        "ema must grow with more recent contribution (a={rate_a}, b={rate_b})"
+    );
+}

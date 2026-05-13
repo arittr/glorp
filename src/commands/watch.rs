@@ -820,7 +820,7 @@ mod tests {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let recent = sample_event_at_for_test(now, 100_000.0);
         let aged = sample_event_at_for_test(now - Duration::hours(6), 100_000.0);
-        let rate_recent_only = progress_rate_ema(&[recent.clone()], now);
+        let rate_recent_only = progress_rate_ema(std::slice::from_ref(&recent), now);
         let rate_both = progress_rate_ema(&[recent, aged], now);
         let aged_contribution = rate_both - rate_recent_only;
         let expected_half = rate_recent_only * 0.5;
