@@ -88,7 +88,7 @@ fn frame_title(vm: &WatchViewModel) -> Vec<Span<'_>> {
     let age_label = format!("{}d", vm.age_days);
     vec![
         Span::styled(
-            format!(" glorp · {display_name} the {} · ", vm.species),
+            format!(" glorp · {display_name} · {} · ", vm.species),
             styles.label,
         ),
         Span::styled(vm.stage.clone(), stage_style),
@@ -188,6 +188,27 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod frame_title_tests {
+    #[test]
+    fn frame_title_does_not_repeat_species() {
+        use crate::tui::view_model::WatchViewModel;
+        let vm = WatchViewModel::fixture();
+        let spans = super::frame_title(&vm);
+        let rendered: String = spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+
+        // The species token appears once (as a standalone field), not as part of "the {species}".
+        assert!(
+            !rendered.contains("the terminal sprout"),
+            "frame title should not contain the inline 'the {{species}}' phrasing; got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(" terminal sprout "),
+            "species token should still appear as a standalone field"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
