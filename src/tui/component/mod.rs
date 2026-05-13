@@ -11,4 +11,4 @@ pub use geometry::{
 pub use ids::{ComponentPath, TargetPath, WatchComponentId};
 pub use preview::{preview_layout, PreviewLayout, PreviewLayoutDecision, PreviewRect};
 pub use sizing::{AxisSize, ComponentSizing, DegradeRule};
-pub use watch_screen::layout_watch;
+pub use watch_screen::{layout_watch, render_watch_layout};

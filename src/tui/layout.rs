@@ -1,33 +1,15 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
+    layout::{Alignment, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
 
-use crate::tui::component::watch_screen::{
-    bounded_frame_rect, COLUMN_GAP, COMPACT_THRESHOLD, INNER_VPAD, PET_RENDER_MIN_HEIGHT,
-    RIGHT_MIN_WIDTH, WIDE_BAND_1, WIDE_BAND_2, WIDE_GUTTER, WIDE_LEFT_COL,
-};
-use crate::tui::panels::{
-    BioCardPanel, FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
-};
+use crate::tui::component::{layout_watch, render_watch_layout, ComponentLayout, TargetPath};
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
 use crate::tui::view_model::WatchViewModel;
-
-/// Wide mode is a 2-band grid. Both columns split at the same row, so vitals
-/// (left band 2) aligns with feed (right band 2) at the top and bio/feed
-/// align at the bottom.
-///
-/// Band 1: pet (10 rows of art) | today (6 rows) + COLUMN_GAP + progress (3 rows) = 10.
-/// Band 2: vitals (4) + COLUMN_GAP + bio (3) = 8 | feed (header + 7 events) = 8.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Wide,
-    Compact,
-}
 
 pub fn render_watch_frame_with_capability(
     frame: &mut Frame<'_>,
@@ -43,6 +25,16 @@ pub fn render_watch_frame_with_context(
     vm: &WatchViewModel,
     ctx: &RenderContext,
 ) {
+    let layout = layout_watch(frame.area(), vm);
+    render_watch_frame_with_layout(frame, vm, ctx, &layout);
+}
+
+pub fn render_watch_frame_with_layout(
+    frame: &mut Frame<'_>,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+    layout: &ComponentLayout,
+) {
     let styles = semantic_styles();
     let p = tokenpet_palette();
     let outer = Block::bordered()
@@ -52,102 +44,28 @@ pub fn render_watch_frame_with_context(
         .border_style(Style::default().fg(p.accent.rgb))
         .style(styles.body);
 
-    // Pin the frame to MAX_FRAME_WIDTH × MAX_FRAME_HEIGHT; oversized terminals
-    // get padding around the centered frame so panel proportions stay tuned.
-    let frame_rect = bounded_frame_rect(frame.area());
-
-    // Decide mode by the bounded frame width (after subtracting borders).
-    let mode = if (frame_rect.width as usize) >= COMPACT_THRESHOLD + 2 {
-        Mode::Wide
-    } else {
-        Mode::Compact
-    };
-
-    let inner = outer.inner(frame_rect);
-    frame.render_widget(outer, frame_rect);
-
-    layout_and_render(inner, mode, frame.buffer_mut(), vm, ctx);
+    frame.render_widget(outer, layout.frame);
+    render_watch_layout(layout, frame.buffer_mut(), vm, ctx);
 }
 
-/// Strips the 1-cell rounded-border chrome from `frame_area`, returning the
-/// inner rect that layout renders into. Mirrors what `render_watch_frame_with_context`
-/// does with `Block::bordered().inner(frame_rect)`.
-pub(crate) fn inner_frame_rect(frame_area: Rect) -> Rect {
-    Block::bordered().inner(frame_area)
+/// Returns the current pet art target from the shared component-layout artifact.
+/// Tachyonfx effects use this target so they cover the rendered pet art, not
+/// a separately computed copy of the watch geometry.
+pub fn pet_effect_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
+    let layout = layout_watch(frame_area, vm);
+    pet_effect_rect_from_layout(&layout)
 }
 
-/// Returns the 13×10 sub-rect where the pet art sits within `frame.area()` for
-/// the current mode and view model. Callers (specifically the watch loop) use
-/// this to scope tachyonfx effects to the pet art, not the full (Fill-sized)
-/// pet panel which may be much taller than 10 rows.
-pub fn pet_panel_rect(frame_area: Rect, vm: &WatchViewModel) -> Rect {
-    use crate::tui::panels::pet::pet_inner_rect_in_panel;
+pub(crate) fn pet_effect_rect_from_layout(layout: &ComponentLayout) -> Rect {
+    layout
+        .target(TargetPath::new("watch.pet.art"))
+        .map(|target| target.rect)
+        .unwrap_or_else(|| Rect::new(layout.frame.x, layout.frame.y, 0, 0))
+}
 
-    // Mirror render_watch_frame_with_context: pin the chrome to the bounded
-    // rect before splitting, so tachyonfx scopes to where the pet actually lives.
-    let bounded = bounded_frame_rect(frame_area);
-    let mode = if (bounded.width as usize) >= COMPACT_THRESHOLD + 2 {
-        Mode::Wide
-    } else {
-        Mode::Compact
-    };
-
-    let raw_inner = inner_frame_rect(bounded);
-
-    match mode {
-        Mode::Wide => {
-            // Mirror render_wide: strip the top/bottom INNER_VPAD, split into
-            // body columns, then take band 1 of the left column.
-            let padded = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(INNER_VPAD),
-                    Constraint::Min(0),
-                    Constraint::Length(INNER_VPAD),
-                ])
-                .split(raw_inner)[1];
-
-            let body = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(WIDE_LEFT_COL),
-                    Constraint::Length(WIDE_GUTTER),
-                    Constraint::Min(RIGHT_MIN_WIDTH),
-                ])
-                .split(padded);
-            let left_col = body[0];
-
-            let left_bands = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(WIDE_BAND_1),
-                    Constraint::Length(COLUMN_GAP),
-                    Constraint::Length(WIDE_BAND_2),
-                    Constraint::Min(0),
-                ])
-                .split(left_col);
-
-            pet_inner_rect_in_panel(left_bands[0], vm)
-        }
-        Mode::Compact => {
-            let stack = Layout::default()
-                .direction(Direction::Vertical)
-                .flex(Flex::Start)
-                .constraints([
-                    PetPanel.preferred_constraint(vm),    // Fill(1)
-                    VitalsPanel.preferred_constraint(vm), // Length(4)
-                    Constraint::Length(COLUMN_GAP),
-                    TodayPanel.preferred_constraint(vm), // Length(6)
-                    Constraint::Length(COLUMN_GAP),
-                    ProgressPanel.preferred_constraint(vm), // Length(3)
-                    Constraint::Length(COLUMN_GAP),
-                    FeedPanel.preferred_constraint(vm), // Length(events+1)
-                ])
-                .split(raw_inner);
-
-            pet_inner_rect_in_panel(stack[0], vm)
-        }
-    }
+#[doc(hidden)]
+pub fn pet_effect_rect_for_test(frame_area: Rect, vm: &WatchViewModel) -> Rect {
+    pet_effect_rect(frame_area, vm)
 }
 
 /// Produces the styled title spans for the outer frame.
@@ -185,154 +103,6 @@ fn frame_footer() -> Vec<Span<'static>> {
         Span::styled("q quit · r refresh · m mouse · ? help", styles.label),
         Span::raw(" "),
     ]
-}
-
-/// Lays out and renders all panels into the inner area of the outer frame.
-fn layout_and_render(
-    inner: Rect,
-    mode: Mode,
-    buf: &mut ratatui::buffer::Buffer,
-    vm: &WatchViewModel,
-    ctx: &RenderContext,
-) {
-    match mode {
-        Mode::Wide => render_wide(inner, buf, vm, ctx),
-        Mode::Compact => render_compact(inner, buf, vm, ctx),
-    }
-}
-
-/// Wide layout: a 2-column × 2-row grid. Both columns split at the same row,
-/// so vitals (left band 2) aligns with feed (right band 2) at the top, and
-/// bio bottom aligns with feed bottom.
-///
-/// ```text
-/// ╭ title ─────────────────────────────────────╮
-/// │                                             │  ← INNER_VPAD
-/// │ [pet]            today                      │
-/// │ [pet]            ...                        │  band 1 (10 rows)
-/// │ [pet]            progress                   │
-/// │ [pet]            xp bar                     │
-/// │                                             │  inter-band gap (1 row)
-/// │ vitals           feed                       │  band 2 (8 rows)
-/// │ ...              event 1                    │  ← vitals.top == feed.top
-/// │ bio              ...                        │
-/// │ age              event 7                    │  ← bio.bottom == feed.bottom
-/// │                                             │  ← INNER_VPAD
-/// ╰ footer ─────────────────────────────────────╯
-/// ```
-fn render_wide(
-    area: Rect,
-    buf: &mut ratatui::buffer::Buffer,
-    vm: &WatchViewModel,
-    ctx: &RenderContext,
-) {
-    let padded = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(INNER_VPAD),
-            Constraint::Min(0),
-            Constraint::Length(INNER_VPAD),
-        ])
-        .split(area)[1];
-
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(WIDE_LEFT_COL),
-            Constraint::Length(WIDE_GUTTER),
-            Constraint::Min(RIGHT_MIN_WIDTH),
-        ])
-        .split(padded);
-
-    let band_constraints = [
-        Constraint::Length(WIDE_BAND_1),
-        Constraint::Length(COLUMN_GAP),
-        Constraint::Length(WIDE_BAND_2),
-        Constraint::Min(0),
-    ];
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(band_constraints)
-        .split(body[0]);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(band_constraints)
-        .split(body[2]);
-
-    // Band 1 left: pet (10 rows of art fits exactly).
-    if left[0].height >= PET_RENDER_MIN_HEIGHT {
-        PetPanel.render(left[0], buf, vm, ctx);
-    }
-
-    // Band 1 right: today packed top, progress anchored at the bottom of the
-    // band. With today(6) + gap(1) + progress(2) = 9 in a 10-row band, the
-    // single row of slack lands between today and progress (via Min(0)) so
-    // progress sits one row above band 2 — the same one-row gap that
-    // separates bio from vitals on the left.
-    let right_top = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            TodayPanel.preferred_constraint(vm), // Length(6)
-            Constraint::Length(COLUMN_GAP),
-            Constraint::Min(0), // slack lives between today and progress
-            ProgressPanel.preferred_constraint(vm), // Length(2)
-        ])
-        .split(right[0]);
-    TodayPanel.render(right_top[0], buf, vm, ctx);
-    ProgressPanel.render(right_top[3], buf, vm, ctx);
-
-    // Band 2 left: vitals (4) + gap (1) + bio (3) = 8. Packed top.
-    let left_bottom = Layout::default()
-        .direction(Direction::Vertical)
-        .flex(Flex::Start)
-        .constraints([
-            VitalsPanel.preferred_constraint(vm), // Length(4)
-            Constraint::Length(COLUMN_GAP),
-            BioCardPanel.preferred_constraint(vm), // Length(3)
-        ])
-        .split(left[2]);
-    VitalsPanel.render(left_bottom[0], buf, vm, ctx);
-    BioCardPanel.render(left_bottom[2], buf, vm, ctx);
-
-    // Band 2 right: feed fills the entire band (header + 7 events).
-    FeedPanel.render(right[2], buf, vm, ctx);
-}
-
-/// Compact layout: single column packed from the top.
-///
-/// Order: pet → [gap] → vitals → [gap] → today → [gap] → progress → [gap] → feed.
-/// Bio is omitted from compact mode: age is already in the title bar, and the
-/// hatched date is low-priority on narrow terminals.
-fn render_compact(
-    area: Rect,
-    buf: &mut ratatui::buffer::Buffer,
-    vm: &WatchViewModel,
-    ctx: &RenderContext,
-) {
-    let stack = Layout::default()
-        .direction(Direction::Vertical)
-        .flex(Flex::Start)
-        .constraints([
-            PetPanel.preferred_constraint(vm), // Fill(1) — expands to fill leftover
-            VitalsPanel.preferred_constraint(vm), // Length(4); no gap above (pet is empty
-            // when guarded out at small heights — keeps 72×24 within budget).
-            Constraint::Length(COLUMN_GAP),
-            TodayPanel.preferred_constraint(vm), // Length(6)
-            Constraint::Length(COLUMN_GAP),
-            ProgressPanel.preferred_constraint(vm), // Length(3)
-            Constraint::Length(COLUMN_GAP),
-            FeedPanel.preferred_constraint(vm), // Length(7)
-        ])
-        .split(area);
-
-    // PetPanel assumes its area is at least PET_RENDER_MIN_HEIGHT rows tall; skip if too small.
-    if stack[0].height >= PET_RENDER_MIN_HEIGHT {
-        PetPanel.render(stack[0], buf, vm, ctx);
-    }
-    VitalsPanel.render(stack[1], buf, vm, ctx);
-    TodayPanel.render(stack[3], buf, vm, ctx);
-    ProgressPanel.render(stack[5], buf, vm, ctx);
-    FeedPanel.render(stack[7], buf, vm, ctx);
 }
 
 // ── Overlay popups ───────────────────────────────────────────────────────────
@@ -419,25 +189,24 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::component::{layout_watch, TargetPath};
 
     #[test]
-    fn pet_panel_rect_returns_thirteen_by_ten_sub_rect() {
+    fn pet_effect_rect_returns_component_layout_pet_art_target() {
         let vm = WatchViewModel::fixture();
         let frame_area = Rect::new(0, 0, 120, 32);
-        let rect = pet_panel_rect(frame_area, &vm);
-        assert_eq!(rect.width, 13);
-        assert_eq!(rect.height, 10);
+        let layout = layout_watch(frame_area, &vm);
+        let target = layout.target(TargetPath::new("watch.pet.art")).unwrap();
+
+        assert_eq!(pet_effect_rect(frame_area, &vm), target.rect);
     }
 
     #[test]
-    fn pet_panel_rect_accounts_for_bio_panel_height() {
+    fn pet_effect_rect_returns_empty_rect_when_pet_art_target_is_absent() {
         let vm = WatchViewModel::fixture();
-        let frame_area = Rect::new(0, 0, 120, 50);
-        let rect = pet_panel_rect(frame_area, &vm);
-        assert!(
-            rect.y + rect.height < frame_area.height - 3,
-            "pet sub-rect must end before bio starts"
-        );
+        let rect = pet_effect_rect(Rect::new(0, 0, 72, 24), &vm);
+
+        assert_eq!(rect, Rect::new(0, 0, 0, 0));
     }
 }
 
@@ -550,6 +319,7 @@ mod render_compact_tests {
 #[cfg(test)]
 mod render_wide_tests {
     use super::*;
+    use crate::tui::component::watch_screen::COMPACT_THRESHOLD;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

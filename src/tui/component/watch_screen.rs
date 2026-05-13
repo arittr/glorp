@@ -1,12 +1,14 @@
 use crate::tui::component::{
-    ComponentLayout, ComponentNodeLayout, GeometryTarget, LayoutDecision, LayoutDecisionReason,
-    LayoutMode, TargetPath, TargetRole, VisibilityState, WatchComponentId,
+    ComponentLayout, ComponentNodeLayout, ComponentPath, GeometryTarget, LayoutDecision,
+    LayoutDecisionReason, LayoutMode, TargetPath, TargetRole, VisibilityState, WatchComponentId,
 };
 use crate::tui::panels::pet::pet_inner_rect_in_panel;
 use crate::tui::panels::{
-    BioCardPanel, FeedPanel, Panel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
+    BioCardPanel, FeedPanel, Panel as LegacyPanel, PetPanel, ProgressPanel, TodayPanel, VitalsPanel,
 };
+use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::widgets::Block;
 
@@ -59,6 +61,94 @@ pub fn layout_watch(terminal_area: Rect, vm: &WatchViewModel) -> ComponentLayout
     }
 
     layout
+}
+
+pub fn render_watch_layout(
+    layout: &ComponentLayout,
+    buf: &mut Buffer,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+) {
+    render_if_visible(
+        layout,
+        WatchComponentId::Pet.path(),
+        buf,
+        vm,
+        ctx,
+        PetPanel,
+        Some(TargetPath::new("watch.pet.art")),
+    );
+    render_if_visible(
+        layout,
+        WatchComponentId::Vitals.path(),
+        buf,
+        vm,
+        ctx,
+        VitalsPanel,
+        None,
+    );
+    render_if_visible(
+        layout,
+        WatchComponentId::Bio.path(),
+        buf,
+        vm,
+        ctx,
+        BioCardPanel,
+        None,
+    );
+    render_if_visible(
+        layout,
+        WatchComponentId::Today.path(),
+        buf,
+        vm,
+        ctx,
+        TodayPanel,
+        None,
+    );
+    render_if_visible(
+        layout,
+        WatchComponentId::Progress.path(),
+        buf,
+        vm,
+        ctx,
+        ProgressPanel,
+        None,
+    );
+    render_if_visible(
+        layout,
+        WatchComponentId::Feed.path(),
+        buf,
+        vm,
+        ctx,
+        FeedPanel,
+        None,
+    );
+}
+
+fn render_if_visible<P: LegacyPanel>(
+    layout: &ComponentLayout,
+    id: ComponentPath,
+    buf: &mut Buffer,
+    vm: &WatchViewModel,
+    ctx: &RenderContext,
+    panel: P,
+    required_target: Option<TargetPath>,
+) {
+    let Some(node) = layout.node(id) else {
+        return;
+    };
+    if required_target
+        .map(|target| layout.target(target).is_none())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if matches!(
+        node.visibility,
+        VisibilityState::Visible | VisibilityState::Degraded { .. }
+    ) {
+        panel.render(node.bounds, buf, vm, ctx);
+    }
 }
 
 /// Returns a sub-rect of `terminal_area` that is at most the current watch
@@ -257,7 +347,6 @@ mod tests {
     use crate::tui::component::{
         LayoutDecisionReason, LayoutMode, TargetPath, VisibilityState, WatchComponentId,
     };
-    use crate::tui::layout::pet_panel_rect;
     use crate::tui::view_model::WatchViewModel;
     use ratatui::layout::Rect;
 
@@ -408,26 +497,5 @@ mod tests {
                     && d.reason == LayoutDecisionReason::InsufficientHeight),
             "compact pet insufficient-height decision missing"
         );
-    }
-
-    #[test]
-    fn layout_watch_pet_art_targets_match_legacy_effect_rect_while_adapter_exists() {
-        let vm = WatchViewModel::fixture();
-
-        for (label, area) in [
-            ("wide", Rect::new(0, 0, 120, 32)),
-            ("compact-visible", Rect::new(0, 0, 72, 36)),
-            ("compact-visible-threshold", Rect::new(0, 0, 72, 30)),
-        ] {
-            let layout = layout_watch(area, &vm);
-            let target = layout
-                .target(TargetPath::new("watch.pet.art"))
-                .unwrap_or_else(|| panic!("missing pet art target for {label}"));
-            assert_eq!(
-                target.rect,
-                pet_panel_rect(area, &vm),
-                "pet art target drifted from legacy effect rect for {label}"
-            );
-        }
     }
 }

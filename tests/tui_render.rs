@@ -62,6 +62,20 @@ fn has_cell(buf: &Buffer, symbol: &str, fg: Color) -> bool {
     })
 }
 
+#[test]
+fn pet_effect_target_matches_component_layout_pet_art_target() {
+    let vm = WatchViewModel::fixture();
+    let area = ratatui::layout::Rect::new(0, 0, 120, 32);
+    let layout = glorp::tui::component::layout_watch(area, &vm);
+    let target = layout
+        .target(glorp::tui::component::TargetPath::new("watch.pet.art"))
+        .expect("pet art target");
+
+    let effect_rect = glorp::tui::layout::pet_effect_rect_for_test(area, &vm);
+
+    assert_eq!(effect_rect, target.rect);
+}
+
 fn spark_foregrounds(buffer: &Buffer) -> Vec<Color> {
     let area = buffer.area;
     let mut colors = Vec::new();

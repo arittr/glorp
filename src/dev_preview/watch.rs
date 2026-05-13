@@ -8,7 +8,7 @@ use crate::storage::{
     state::{PetState, Vitals},
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
-use crate::tui::layout::render_watch_frame_with_context;
+use crate::tui::layout::render_watch_frame_with_layout;
 use crate::tui::{component::layout_watch, component::preview_layout};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -55,7 +55,7 @@ fn render_watch_frame(
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     terminal.draw(|frame| {
-        render_watch_frame_with_context(frame, &vm, &ctx.render);
+        render_watch_frame_with_layout(frame, &vm, &ctx.render, &layout);
     })?;
 
     let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
