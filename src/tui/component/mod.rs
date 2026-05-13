@@ -18,5 +18,5 @@ pub use sizing::{AxisSize, ComponentSizing, DegradeRule};
 pub use style::{BorderTone, ComponentStyle, GradientToken, Insets, Surface, TextTone};
 pub use watch_screen::{layout_watch, layout_watch_with_context, render_watch_layout};
 pub use widgets::{
-    FeedList, InlineSparkline, Panel as ComponentPanel, ProgressBar, StatRow, TextRow,
+    FeedList, InlineSparkline, Lines, Panel as ComponentPanel, ProgressBar, StatRow, TextRow,
 };

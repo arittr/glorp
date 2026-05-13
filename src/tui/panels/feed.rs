@@ -2,8 +2,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use crate::tui::component::{ComponentPanel, FeedList};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{claude_color, codex_color, semantic_styles};
@@ -20,15 +20,13 @@ impl Panel for FeedPanel {
         Constraint::Length(events + 1)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
-        let block = Block::default().borders(Borders::TOP).title(" feed ");
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        // Render whatever fits in the allocated rect — feed grows to fill
-        // its rect in wide mode and shrinks to fit the event count in compact.
-        let lines = build_feed_lines(vm, inner.height);
-        Paragraph::new(lines).render(inner, buf);
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
+        let panel = ComponentPanel::new("feed");
+        panel.render(area, buf, ctx, |content, buf| {
+            // Render whatever fits in the allocated rect — feed grows to fill
+            // its rect in wide mode and shrinks to fit the event count in compact.
+            FeedList::from_watch(vm, content.height).render(content, buf, ctx);
+        });
     }
 }
 

@@ -233,6 +233,27 @@ pub struct FeedList<'a> {
     lines: Vec<Line<'a>>,
 }
 
+pub struct Lines<'a> {
+    lines: Vec<Line<'a>>,
+}
+
+impl<'a> Lines<'a> {
+    pub fn new(lines: impl IntoIterator<Item = Line<'a>>) -> Self {
+        Self {
+            lines: lines.into_iter().collect(),
+        }
+    }
+
+    pub fn from_lines(lines: impl IntoIterator<Item = Line<'a>>) -> Self {
+        Self::new(lines)
+    }
+
+    pub fn render(&self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        let lines = self.lines.iter().take(area.height as usize).cloned();
+        Paragraph::new(lines.collect::<Vec<_>>()).render(area, buf);
+    }
+}
+
 impl<'a> FeedList<'a> {
     pub fn new(lines: impl IntoIterator<Item = Line<'a>>) -> Self {
         Self {

@@ -71,6 +71,26 @@ fn progress_panel_uses_component_style_facade() {
 }
 
 #[test]
+fn ordinary_panels_use_component_widgets_instead_of_ratatui_blocks() {
+    for path in [
+        "src/tui/panels/vitals.rs",
+        "src/tui/panels/today.rs",
+        "src/tui/panels/feed.rs",
+        "src/tui/panels/bio_card.rs",
+    ] {
+        let source = std::fs::read_to_string(path).unwrap();
+        assert!(
+            source.contains("ComponentPanel::new"),
+            "{path} should use ComponentPanel"
+        );
+        assert!(
+            !source.contains("Block::"),
+            "{path} should not create Ratatui blocks directly"
+        );
+    }
+}
+
+#[test]
 fn render_context_clock_controls_pet_scene_time() {
     let first = glorp::tui::render_context::WatchClock::fixed(
         time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),

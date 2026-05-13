@@ -1,14 +1,16 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
+#[cfg(test)]
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use crate::tui::component::{ComponentPanel, StatRow};
+#[cfg(test)]
 use crate::tui::panels::bars::bar_spans;
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{
-    energy_color, fed_color, happy_color, semantic_styles, ColorCapability, SemanticStyles,
-};
+use crate::tui::style::{energy_color, fed_color, happy_color};
+#[cfg(test)]
+use crate::tui::style::{ColorCapability, SemanticStyles};
 use crate::tui::view_model::WatchViewModel;
 
 pub struct VitalsPanel;
@@ -20,16 +22,25 @@ impl Panel for VitalsPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
-        let block = Block::default().borders(Borders::TOP).title(" vitals ");
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        let styles = semantic_styles();
-        let lines = build_vitals_lines(vm, inner.width, ctx.color_capability, &styles);
-        Paragraph::new(lines).render(inner, buf);
+        let panel = ComponentPanel::new("vitals");
+        panel.render(area, buf, ctx, |content, buf| {
+            let rows = [
+                StatRow::new("fed", vm.fed, fed_color()),
+                StatRow::new("happy", vm.happiness, happy_color()),
+                StatRow::new("energy", vm.energy, energy_color()),
+            ];
+            for (index, row) in rows.iter().enumerate().take(content.height as usize) {
+                row.render(
+                    Rect::new(content.x, content.y + index as u16, content.width, 1),
+                    buf,
+                    ctx,
+                );
+            }
+        });
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_vitals_lines<'a>(
     vm: &'a WatchViewModel,
     _width: u16,

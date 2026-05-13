@@ -1,8 +1,8 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use crate::tui::component::{ComponentPanel, Lines};
 use crate::tui::panels::Panel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, SemanticStyles};
@@ -16,14 +16,12 @@ impl Panel for BioCardPanel {
         Constraint::Length(3)
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, _ctx: &RenderContext) {
-        let block = Block::default().borders(Borders::TOP).title(" bio ");
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        let styles = semantic_styles();
-        let lines = build_bio_lines(&vm.bio, &styles);
-        Paragraph::new(lines).render(inner, buf);
+    fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
+        let panel = ComponentPanel::new("bio");
+        panel.render(area, buf, ctx, |content, buf| {
+            let styles = semantic_styles();
+            Lines::from_lines(build_bio_lines(&vm.bio, &styles)).render(content, buf, ctx);
+        });
     }
 }
 
