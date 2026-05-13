@@ -157,7 +157,9 @@ pub fn ambient_glyphs_for(
 
     let mut glyphs = Vec::new();
 
-    let count = stage_base_count(stage);
+    let habitat_cells = (habitat.width as usize) * (habitat.height as usize);
+    let area_term = habitat_cells.saturating_sub(200) / 60;
+    let count = stage_base_count(stage) + area_term;
 
     for _ in 0..count {
         // Reject-sample up to N times to find a free cell.
@@ -853,6 +855,36 @@ mod tests {
             glyphs.is_empty(),
             "habitat too short for both sky and floor — painter should return empty, got {} glyphs",
             glyphs.len()
+        );
+    }
+
+    #[test]
+    fn ambient_glyph_count_scales_with_habitat_area() {
+        use crate::game::evolution::Stage;
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+        // Normal-wide pet panel: ~52 × 14 = 728 cells, well above the 200 threshold.
+        let normal = Rect::new(0, 0, 52, 14);
+        let normal_glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, normal, &[], now);
+
+        // Tall-wide pet panel: ~52 × 35 = 1820 cells.
+        let tall = Rect::new(0, 0, 52, 35);
+        let tall_glyphs = ambient_glyphs_for(Species::Fuzz, Stage::S4, tall, &[], now);
+
+        let normal_sky_count = normal_glyphs
+            .iter()
+            .filter(|g| g.row < normal.height - 1)
+            .count();
+        let tall_sky_count = tall_glyphs
+            .iter()
+            .filter(|g| g.row < tall.height - 1)
+            .count();
+
+        // Normal: 8 (S4 base) + (728 - 200) / 60 = 8 + 8 = 16.
+        // Tall: 8 + (1820 - 200) / 60 = 8 + 27 = 35.
+        assert!(
+            tall_sky_count > normal_sky_count + 10,
+            "tall habitat should produce noticeably more sky glyphs; normal={normal_sky_count} tall={tall_sky_count}"
         );
     }
 
