@@ -14,7 +14,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 use std::path::Path;
-use time::Duration;
+use time::{Duration, UtcOffset};
 
 pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Vec<PreviewFrame>> {
     std::fs::create_dir_all(scratch_dir)?;
@@ -58,7 +58,7 @@ fn render_watch_frame(
     let state = seeded_pet_state(ctx);
     let usage_path = scratch_dir.join(format!("{id}.sqlite"));
     seed_usage_store(&usage_path, ctx)?;
-    let vm = build_watch_view_model_at(&state, &usage_path, ctx.fixed_now)?;
+    let vm = build_watch_view_model_at(&state, &usage_path, ctx.fixed_now, UtcOffset::UTC)?;
     let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &ctx.render);
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;

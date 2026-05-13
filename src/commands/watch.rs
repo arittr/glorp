@@ -52,13 +52,15 @@ pub fn run() -> Result<()> {
 }
 
 pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<WatchViewModel> {
-    build_watch_view_model_at(state, usage_db, OffsetDateTime::now_utc())
+    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    build_watch_view_model_at(state, usage_db, OffsetDateTime::now_utc(), local_offset)
 }
 
 pub(crate) fn build_watch_view_model_at(
     state: &PetState,
     usage_db: &Path,
     now: OffsetDateTime,
+    local_offset: time::UtcOffset,
 ) -> Result<WatchViewModel> {
     let usage_store = UsageStore::open(usage_db)?;
     let recent_usage = usage_store.recent_events(500)?;
@@ -76,10 +78,9 @@ pub(crate) fn build_watch_view_model_at(
         },
     );
 
-    // All "today" / "last 10m" framing uses local time. `now` arrives in UTC;
-    // here we resolve the user's local offset once and derive every boundary
-    // from it so the watch view matches what the user reads on the wall clock.
-    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    // Callers pass `local_offset` explicitly so the view is deterministic for
+    // dev-preview/tests (which pass UTC) without depending on the OS at render
+    // time. The production wrapper supplies the user's resolved local offset.
     let now_local = now.to_offset(local_offset);
     let today_start = time::PrimitiveDateTime::new(now_local.date(), time::Time::MIDNIGHT)
         .assume_offset(local_offset);
@@ -266,7 +267,7 @@ pub fn build_watch_view_model_for_test_at(
     usage_db: &Path,
     now: OffsetDateTime,
 ) -> Result<WatchViewModel> {
-    build_watch_view_model_at(state, usage_db, now)
+    build_watch_view_model_at(state, usage_db, now, time::UtcOffset::UTC)
 }
 
 struct RealWatchPoller {
@@ -638,7 +639,7 @@ mod tests {
         let mut state = PetState::new_for_test("test", "buddy");
         state.created_at = created_at;
 
-        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
         assert_eq!(vm.bio.age_label, "18d");
         assert!(
             vm.bio.hatched_label.contains("apr"),
@@ -662,7 +663,7 @@ mod tests {
         let mut state = PetState::new_for_test("test", "buddy");
         state.created_at = now - Duration::hours(4);
 
-        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
         assert_eq!(vm.bio.age_label, "0d 4h");
     }
 
@@ -682,7 +683,7 @@ mod tests {
         state.stage = Stage::S4;
         state.xp = 8.5; // 61% toward S4 target of 14.0
 
-        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
         assert_eq!(vm.progress.stage_label, "fuzz");
         assert_eq!(vm.progress.next_stage_label, "archfuzz");
         assert!(
@@ -710,7 +711,7 @@ mod tests {
         state.stage = Stage::S6;
         state.xp = 100.0;
 
-        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
         assert!(vm.progress.is_max_stage);
         assert_eq!(vm.progress.next_stage_label, "—");
     }
@@ -748,7 +749,7 @@ mod tests {
         state.pet.generated_species = Species::Fuzz;
         state.stage = Stage::S4;
         state.xp = 5.0;
-        let vm = build_watch_view_model_at(&state, &db_path, now).unwrap();
+        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
         assert_eq!(
             vm.progress.rate_per_hour, 42_000.0,
             "catchup row with bucket_at 3h ago must NOT contribute to the rate"
