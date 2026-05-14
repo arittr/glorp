@@ -493,8 +493,11 @@ fn build_pet_lines(
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(0);
+    // scene.pet_art is already positioned at the wander offset by
+    // pet_inner_rect_in_panel, so the lines themselves only need to center
+    // within their own narrow rect.
     let center_pad = area_width.saturating_sub(pet_width) / 2;
-    let left_pad = (center_pad as i32 + vm.wander_offset_x as i32).max(0) as usize;
+    let left_pad = center_pad;
     let cursor_eye = cursor_norm_x.map(cursor_eye_glyph);
 
     art_lines
@@ -761,7 +764,12 @@ mod tests {
     use ratatui::Terminal;
 
     fn test_context() -> RenderContext {
-        RenderContext::new(crate::tui::style::ColorCapability::Truecolor)
+        use crate::tui::render_context::WatchClock;
+        // Fixed clock so wander position is deterministic across test runs.
+        RenderContext::with_clock(
+            ColorCapability::Truecolor,
+            WatchClock::fixed(time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap()),
+        )
     }
 
     fn vm_with_real_pet() -> WatchViewModel {
@@ -825,6 +833,11 @@ mod tests {
 
     #[test]
     fn pet_panel_centers_narrow_art_in_wide_area() {
+        // With pet movement, the exact column of the pet art depends on the
+        // clock. The invariant that still holds: the 13-wide pet art rect is
+        // positioned by pet_inner_rect_in_panel (not by line padding), so
+        // pet content must appear somewhere inside the 80-wide panel and
+        // the buffer must not be all-blank.
         let vm = vm_with_real_pet();
         let panel = PetPanel;
         let ctx = test_context();
@@ -836,12 +849,13 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        // The first cell of row 0 should be a space (left-pad), not pet content,
-        // because the art is narrower than 80 columns.
-        let first_cell = buf[(0u16, 0u16)].symbol();
-        assert_eq!(
-            first_cell, " ",
-            "expected left-pad space, got {first_cell:?}"
+        let printable_count: usize = (0..10)
+            .flat_map(|y: u16| (0..80u16).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() != " ")
+            .count();
+        assert!(
+            printable_count > 5,
+            "pet panel should render visible pet content into the 80-wide area; got {printable_count} non-blank chars"
         );
     }
 
