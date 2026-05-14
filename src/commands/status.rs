@@ -78,7 +78,7 @@ pub fn run() -> Result<()> {
     println!("{provider_health_line}");
     println!("cost: local-derived display metadata only");
     if let Some(event) = state.recent_events.last() {
-        println!("event: {event}");
+        println!("event: {}", event.text);
     }
     if let Some(line) = diagnostic_line {
         println!("{line}");

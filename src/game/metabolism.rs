@@ -222,6 +222,10 @@ fn decay_weight(timestamp: OffsetDateTime, rhythm: &RhythmProfile) -> f64 {
     ACTIVE_HOUR_WEIGHT
 }
 
+pub fn mood_for_vitals(vitals: Vitals) -> Mood {
+    mood_for(vitals)
+}
+
 fn mood_for(vitals: Vitals) -> Mood {
     if vitals.fed < 12.0 && vitals.happiness < 20.0 {
         Mood::Wilted

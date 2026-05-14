@@ -1,7 +1,7 @@
 use glorp::{
     commands::watch::{build_watch_view_model_for_test, build_watch_view_model_for_test_at},
     storage::{
-        state::PetState,
+        state::{NarrativeEvent, PetState},
         usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, ProviderDiagnostic, UsageStore},
     },
     tui::{style::LogKind, view_model::SourceStatus},
@@ -338,7 +338,10 @@ fn mech_state() -> PetState {
     state.vitals.happiness = 82.0;
     state.vitals.energy = 61.0;
     state.created_at = datetime!(2026-05-01 12:00 UTC);
-    state.recent_events = vec!["bolt tightened a tiny gear".into()];
+    state.recent_events = vec![NarrativeEvent {
+        observed_at: time::OffsetDateTime::UNIX_EPOCH,
+        text: "bolt tightened a tiny gear".into(),
+    }];
     state
 }
 

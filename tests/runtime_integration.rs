@@ -43,19 +43,16 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     assert!(state.vitals.fed > 40.0);
     assert_eq!(state.last_usage_poll_at, Some(now));
     assert_eq!(state.last_updated_at, now);
-    for transition in [
-        "evolved from s0 to s1",
-        "evolved from s1 to s2",
-        "evolved from s2 to s3",
-    ] {
+    for stage in ["s1", "s2", "s3"] {
+        let expected_text = format!("mochi evolved into {stage}");
         assert_eq!(
             state
                 .recent_events
                 .iter()
-                .filter(|event| event.contains(transition))
+                .filter(|event| event.text.contains(&expected_text))
                 .count(),
             1,
-            "expected {transition} recorded once",
+            "expected '{expected_text}' recorded once",
         );
     }
     assert_eq!(

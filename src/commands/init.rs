@@ -8,7 +8,7 @@ use crate::{
     paths::AppPaths,
     pet::generation::{generate_pet, resolve_accepted_name},
     storage::{
-        state::{PetIdentity, PetState, StateStore, Vitals},
+        state::{NarrativeEvent, PetIdentity, PetState, StateStore, Vitals},
         usage_store::UsageStore,
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
@@ -65,7 +65,13 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
         calibration,
         rhythm,
         seen_stage_transitions: Vec::new(),
-        recent_events: vec![format!("{accepted_name} has hatched")],
+        recent_events: vec![NarrativeEvent {
+            observed_at: now,
+            text: format!("{accepted_name} has hatched"),
+        }],
+        last_seen_mood: None,
+        previous_vitals: None,
+        last_idle_narration_at: None,
         created_at: now,
         last_updated_at: now,
         last_usage_poll_at: None,

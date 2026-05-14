@@ -442,10 +442,17 @@ fn build_recent_events(
 ) -> Vec<EventView> {
     let mut events = Vec::new();
     for event in state.recent_events.iter().rev().take(3).rev() {
+        // Use the real observed_at from the narrative event for timestamps.
+        // UNIX_EPOCH is the sentinel for legacy entries — keep showing "--:--".
+        let timestamp = if event.observed_at == time::OffsetDateTime::UNIX_EPOCH {
+            "--:--".into()
+        } else {
+            timestamp_column(event.observed_at)
+        };
         events.push(EventView {
-            timestamp: "--:--".into(),
-            kind: LogKind::Normal,
-            text: event.clone(),
+            timestamp,
+            kind: LogKind::Narrative,
+            text: event.text.clone(),
         });
     }
     for usage_event in aggregated_recent_usage(usage_events, 4) {

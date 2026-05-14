@@ -2,14 +2,14 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{
     error::Result,
-    format::format_tokens,
     game::{
         calibration::CalibrationBaseline,
         evolution::{apply_xp_delta, stage_for_xp, Stage, StageTransition},
-        metabolism::{apply_decay, apply_food, MetabolismResult},
+        metabolism::{apply_decay, apply_food, mood_for_vitals, MetabolismResult},
     },
+    pet::narration,
     storage::{
-        state::{PetState, Vitals as StoredVitals},
+        state::{NarrativeEvent, PetState, Vitals as StoredVitals},
         usage_store::{NormalizedUsageEvent, UsageStore},
     },
     usage::provider::{UsageDelta, UsagePollResult},
@@ -93,17 +93,80 @@ pub fn apply_unapplied_usage(
         .map(|row| row.event.effective_tokens.max(0.0))
         .sum::<f64>();
 
+    let initial_stage = state.stage;
+    let initial_vitals = state.vitals;
+
     if recent_effective_tokens > 0.0 {
         for row in &rows {
             apply_effective_delta(state, row.event.effective_tokens.max(0.0));
         }
-        state.recent_events.push(format!(
-            "gained {} effective tokens",
-            format_tokens(recent_effective_tokens)
-        ));
+
+        // Poll cycle narration: token rate bucket.
+        if let Some(bucket) = narration::poll_bucket(recent_effective_tokens) {
+            let text = narration::poll_phrase(&state.pet.accepted_name.clone(), bucket, now);
+            state.recent_events.push(NarrativeEvent {
+                observed_at: now,
+                text,
+            });
+        }
     } else {
         apply_idle_decay(state, now);
+
+        // Idle narration: fires if idle ≥ 30 min and no idle narration in the last 6 hours.
+        if let Some(last_poll) = state.last_usage_poll_at {
+            let idle_for = now - last_poll;
+            let last_narration_age = state.last_idle_narration_at.map(|t| now - t);
+            if idle_for >= Duration::minutes(30)
+                && last_narration_age.is_none_or(|age| age >= Duration::hours(6))
+            {
+                let text = narration::idle_phrase(&state.pet.accepted_name.clone(), now);
+                state.recent_events.push(NarrativeEvent {
+                    observed_at: now,
+                    text,
+                });
+                state.last_idle_narration_at = Some(now);
+            }
+        }
     }
+
+    // Stage transition narration: narrate any stages crossed during this poll.
+    if state.stage != initial_stage {
+        // Find transitions that were added during this apply pass.
+        let new_stage_idx = state.stage.index();
+        let old_stage_idx = initial_stage.index();
+        for idx in (old_stage_idx + 1)..=new_stage_idx {
+            if let Some(new_stage) = Stage::from_index(idx) {
+                let text = narration::stage_phrase(&state.pet.accepted_name.clone(), new_stage);
+                state.recent_events.push(NarrativeEvent {
+                    observed_at: now,
+                    text,
+                });
+            }
+        }
+    }
+
+    // Mood transition narration.
+    let new_mood = mood_for_vitals(game_vitals(state.vitals));
+    if state.last_seen_mood != Some(new_mood) {
+        let text = narration::mood_phrase(&state.pet.accepted_name.clone(), new_mood, now);
+        state.recent_events.push(NarrativeEvent {
+            observed_at: now,
+            text,
+        });
+    }
+    state.last_seen_mood = Some(new_mood);
+
+    // Vital threshold crossing narration.
+    if let Some(prev) = state.previous_vitals {
+        if let Some(crossing) = narration::vital_crossing(prev, state.vitals) {
+            let text = narration::vital_phrase(&state.pet.accepted_name.clone(), crossing);
+            state.recent_events.push(NarrativeEvent {
+                observed_at: now,
+                text,
+            });
+        }
+    }
+    state.previous_vitals = Some(initial_vitals);
 
     state.last_usage_poll_at = Some(now);
     state.last_updated_at = now;
@@ -168,16 +231,13 @@ fn apply_idle_decay(state: &mut PetState, now: OffsetDateTime) {
 }
 
 fn record_stage_transition(state: &mut PetState, transition: StageTransition) {
-    let StageTransition { from, to } = transition;
+    let StageTransition { from: _, to } = transition;
     if state.seen_stage_transitions.contains(&to) {
         state.stage = to;
         return;
     }
 
     state.seen_stage_transitions.push(to);
-    state
-        .recent_events
-        .push(format!("evolved from {from} to {to}"));
     state.stage = to;
 }
 
