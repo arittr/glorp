@@ -147,7 +147,7 @@ pub fn apply_unapplied_usage(
 
     // Mood transition narration.
     let new_mood = mood_for_vitals(game_vitals(state.vitals));
-    if state.last_seen_mood != Some(new_mood) {
+    if state.last_seen_mood.is_some() && state.last_seen_mood != Some(new_mood) {
         let text = narration::mood_phrase(&state.pet.accepted_name.clone(), new_mood, now);
         state.recent_events.push(NarrativeEvent {
             observed_at: now,

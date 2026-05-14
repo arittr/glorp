@@ -169,6 +169,54 @@ fn empty_poll() -> UsagePollResult {
 }
 
 #[test]
+fn cold_start_does_not_narrate_initial_mood() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    // Precondition: fresh state has no prior mood recorded.
+    assert!(state.last_seen_mood.is_none());
+
+    // Apply one poll with tokens so the mood-comparison code path executes.
+    let poll = poll_with_delta(1_000.0, now);
+    apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
+
+    // After the first poll, mood should be recorded.
+    assert!(
+        state.last_seen_mood.is_some(),
+        "should have recorded the mood"
+    );
+
+    // No mood narration should have fired because there was no prior mood to
+    // transition *from*.
+    let mood_narrations: Vec<_> = state
+        .recent_events
+        .iter()
+        .filter(|e| {
+            e.text.contains("brightened")
+                || e.text.contains("settled")
+                || e.text.contains("drowsy")
+                || e.text.contains("hungry")
+                || e.text.contains("slumped")
+                || e.text.contains("faded")
+                || e.text.contains("yawned")
+                || e.text.contains("peckish")
+                || e.text.contains("looks down")
+                || e.text.contains("dimmed")
+                || e.text.contains("looks great")
+                || e.text.contains("relaxed")
+        })
+        .collect();
+    assert!(
+        mood_narrations.is_empty(),
+        "cold start should not produce mood narration, got: {:?}",
+        mood_narrations.iter().map(|e| &e.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn catchup_application_records_each_stage_transition_once() {
     let dir = tempdir().unwrap();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
