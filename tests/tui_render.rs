@@ -553,12 +553,23 @@ fn pet_renderer_roles_reach_tui_cells() {
     ];
 
     // Tall enough for compact layout to allocate PetPanel its required 10 rows.
+    // Pin the clock so the pet's wander offset and facing are deterministic —
+    // facing == -1 would mirror "{" to "}" and break the assertions below.
     let backend = TestBackend::new(80, 50);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let ctx = glorp::tui::render_context::RenderContext::with_clock(
+        ColorCapability::Truecolor,
+        glorp::tui::render_context::WatchClock::fixed(
+            time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
+        ),
+    );
+    terminal
+        .draw(|f| glorp::tui::layout::render_watch_frame_with_context(f, &vm, &ctx))
+        .unwrap();
     let buf = terminal.backend().buffer();
     let styles = semantic_styles();
 
+    // The pet renders right-facing at this fixed time, so "{" stays "{".
     assert!(has_cell(buf, "{", styles.pet_eye.fg.unwrap()));
     assert!(has_cell(buf, "e", styles.pet_body.fg.unwrap()));
     assert!(has_cell(buf, "y", styles.pet_accent.fg.unwrap()));
