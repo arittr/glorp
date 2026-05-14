@@ -169,8 +169,10 @@ pub(crate) fn build_watch_view_model_at(
             recent_tokens_per_min(&recent_usage, now),
             now,
         ),
-        wander_offset_x: crate::pet::animator::compute_wander_offset(now),
+        wander_offset_x: 0, // computed at render time by the panel from area.width
         breath_offset_y: crate::pet::animator::compute_breath_offset(Some(species), now),
+        facing: crate::pet::animator::compute_facing(species, now),
+        last_feed_pulse_at: None, // populated by WatchApp when a token spike fires
         progress: {
             let rate_per_hour: f64 = usage_store
                 .token_totals_by_source_between(now - Duration::hours(1), now)

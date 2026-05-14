@@ -34,7 +34,19 @@ fn ms(n: u32) -> FxDuration {
 }
 
 use crate::pet::generation::Species;
+use crate::pet::render::PaletteRoleName;
 use crate::tui::view_model::WatchViewModel;
+
+/// PET_W must match the constant in `tui/panels/pet.rs`.
+const PET_W: u16 = 13;
+/// How many seconds to hold each drift target before picking a new one.
+const TARGET_HOLD_SECS: i64 = 12;
+/// How many seconds of shimmer per period.
+const SHIMMER_DURATION_SECS: i64 = 1;
+/// Shimmer period: a brief tint fires for ~1s every 22s.
+const SHIMMER_PERIOD_SECS: i64 = 22;
+/// Twinkle period: a sparkle glyph fires for ~1 frame every 7s.
+const TWINKLE_PERIOD_SECS: i64 = 7;
 
 /// Threshold (in tokens) above which a single tick of usage growth is
 /// treated as a "feed event" and triggers a pulse effect.
@@ -77,6 +89,9 @@ pub struct PetAnimator {
     idle_ms: u32,
     /// True once at least one effect has been enqueued.
     has_run: bool,
+    /// Wall-clock time of the most recent feed pulse detected in `update`.
+    /// Exposed so `WatchApp` can forward it to `vm.last_feed_pulse_at`.
+    pub last_feed_pulse_at: Option<time::OffsetDateTime>,
 }
 
 impl PetAnimator {
@@ -89,6 +104,7 @@ impl PetAnimator {
             first_update: true,
             idle_ms: MAX_EFFECT_RUNTIME_MS,
             has_run: false,
+            last_feed_pulse_at: None,
         }
     }
 
@@ -148,6 +164,7 @@ impl PetAnimator {
                         ms(400),
                     ),
                 );
+                self.last_feed_pulse_at = Some(time::OffsetDateTime::now_utc());
             }
         }
 
@@ -292,6 +309,9 @@ fn species_breath_rhythm_decis(species: Option<Species>) -> (i64, i64) {
 /// steps are 0 (rest), one is +1, one is -1, so the pet is centered ~75%
 /// of the time and the excursions feel like gentle floating rather than
 /// rhythmic hops.
+///
+/// Retained for tests that assert its behavior. Production code now uses
+/// `compute_wander_position_x` computed directly in the panel renderer.
 pub fn compute_wander_offset(now: time::OffsetDateTime) -> i8 {
     let step = now.unix_timestamp().rem_euclid(64) / 8;
     match step {
@@ -299,6 +319,158 @@ pub fn compute_wander_offset(now: time::OffsetDateTime) -> i8 {
         6 => -1,
         _ => 0,
     }
+}
+
+/// Returns the pet's signed column offset from habitat center, clamped to
+/// `[-half_range, +half_range]` where `half_range = (habitat_width - PET_W) / 2`.
+/// Uses smoothstep interpolation between randomly-chosen target columns that
+/// change every `TARGET_HOLD_SECS`, so the pet drifts edge-to-edge instead of
+/// staying near center.
+///
+/// Deterministic function of `(habitat_width, species, now)` — no state needed.
+pub fn compute_wander_position_x(
+    habitat_width: u16,
+    species: Species,
+    now: time::OffsetDateTime,
+) -> i16 {
+    let half_range = (habitat_width.saturating_sub(PET_W) / 2) as i32;
+    if half_range == 0 {
+        return 0;
+    }
+    let ts = now.unix_timestamp();
+    let period = ts / TARGET_HOLD_SECS;
+    let t_in_period = (ts.rem_euclid(TARGET_HOLD_SECS)) as f32 / TARGET_HOLD_SECS as f32;
+    let prev_target = wander_deterministic_target(period - 1, species, half_range);
+    let curr_target = wander_deterministic_target(period, species, half_range);
+    let ease = wander_ease_in_out(t_in_period);
+    let position = prev_target as f32 * (1.0 - ease) + curr_target as f32 * ease;
+    (position as i32).clamp(-half_range, half_range) as i16
+}
+
+/// Deterministic target column in `[-half_range, +half_range]` for a given
+/// drift period. Uses a splitmix64-style hash of `(period, species_seed)`.
+fn wander_deterministic_target(period: i64, species: Species, half_range: i32) -> i32 {
+    let species_seed = match species {
+        Species::Fuzz => 0u64,
+        Species::Blob => 1,
+        Species::Ghost => 2,
+        Species::Glitch => 3,
+        Species::Crystal => 4,
+        Species::Mech => 5,
+    };
+    let h = splitmix64(period as u64 ^ species_seed.wrapping_mul(0x9E3779B97F4A7C15));
+    // Map [0, u64::MAX] to [-half_range, +half_range].
+    let range = (2 * half_range + 1) as u64;
+    let bucket = h % range;
+    bucket as i32 - half_range
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E3779B97F4A7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+    x ^ (x >> 31)
+}
+
+fn wander_ease_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Returns `+1` if the pet's current drift target is to the right of the
+/// previous period's target, `-1` if to the left, or `+1` as a default when
+/// there is no movement.
+pub fn compute_facing(species: Species, now: time::OffsetDateTime) -> i8 {
+    let period = now.unix_timestamp() / TARGET_HOLD_SECS;
+    // Use a large but finite range so sign comparison is meaningful.
+    let half_range = 1_000_000_i32;
+    let prev = wander_deterministic_target(period - 1, species, half_range);
+    let curr = wander_deterministic_target(period, species, half_range);
+    match (curr - prev).signum() {
+        1 => 1,
+        -1 => -1,
+        _ => 1, // no movement — default right-facing
+    }
+}
+
+/// Returns `Some(role)` for ~1 second every 22 seconds, rotating through body,
+/// accent, and pattern roles. The renderer brightens that role's foreground for
+/// the shimmer window. Returns `None` outside the shimmer window.
+pub fn compute_shimmer_role(
+    species: Species,
+    now: time::OffsetDateTime,
+) -> Option<PaletteRoleName> {
+    let pos = now.unix_timestamp().rem_euclid(SHIMMER_PERIOD_SECS);
+    if pos >= SHIMMER_DURATION_SECS {
+        return None;
+    }
+    let period = now.unix_timestamp() / SHIMMER_PERIOD_SECS;
+    let roles = [
+        PaletteRoleName::Body,
+        PaletteRoleName::Accent,
+        PaletteRoleName::Pattern,
+    ];
+    let idx = splitmix64(period as u64 ^ species as u64) as usize % roles.len();
+    Some(roles[idx])
+}
+
+/// A sparkle glyph overlaid on a single pet-art cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwinkleSpec {
+    /// Row inside the 11×8 art grid (0-based).
+    pub row: u8,
+    /// Column inside the 11×8 art grid (0-based).
+    pub col: u8,
+    pub glyph: char,
+}
+
+/// Returns a twinkle spec for ~1 frame every `TWINKLE_PERIOD_SECS` seconds.
+/// Position and glyph are deterministic per `(species, period)`.
+pub fn compute_twinkle(species: Species, now: time::OffsetDateTime) -> Option<TwinkleSpec> {
+    // Only active during the first half-second of the period.
+    let ts_ds = now.unix_timestamp() * 10 + i64::from(now.millisecond() / 100);
+    let period_ds = TWINKLE_PERIOD_SECS * 10;
+    let pos_ds = ts_ds.rem_euclid(period_ds);
+    if pos_ds >= 5 {
+        return None;
+    }
+    let period = now.unix_timestamp() / TWINKLE_PERIOD_SECS;
+    let h = splitmix64(period as u64 ^ species as u64 ^ 0xDEADBEEF_CAFEBABE);
+    let row = (h % 8) as u8;
+    let col = ((h >> 8) % 11) as u8;
+    let glyph = twinkle_glyph_for(species, (h >> 16) as usize);
+    Some(TwinkleSpec { row, col, glyph })
+}
+
+fn twinkle_glyph_for(species: Species, idx: usize) -> char {
+    let glyphs: &[char] = match species {
+        Species::Glitch => &['\u{2592}', '\u{2591}', '\u{2593}', '*'],
+        _ => &['\u{2726}', '\u{2727}', '*', '\u{b7}'],
+    };
+    glyphs[idx % glyphs.len()]
+}
+
+/// Brief visual pop that fires for 2 seconds after a feed pulse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenPop {
+    /// How many whole seconds remain in the 2-second pop window.
+    pub duration_remaining_secs: i64,
+}
+
+/// Returns `Some(TokenPop)` within 2 seconds of `last_feed_pulse_at`, `None`
+/// before or after that window.
+pub fn compute_token_pop(
+    last_feed_pulse_at: Option<time::OffsetDateTime>,
+    now: time::OffsetDateTime,
+) -> Option<TokenPop> {
+    let pulse = last_feed_pulse_at?;
+    let elapsed = (now - pulse).whole_seconds();
+    if !(0..=2).contains(&elapsed) {
+        return None;
+    }
+    Some(TokenPop {
+        duration_remaining_secs: 2 - elapsed,
+    })
 }
 
 /// Multiplier applied to the body palette role lightness when energy is low.
@@ -484,6 +656,199 @@ mod tests {
             rest_seconds >= 48,
             "expected ≥75% rest, got {rest_seconds}/64"
         );
+    }
+
+    // ── compute_wander_position_x ─────────────────────────────────────────
+
+    #[test]
+    fn wander_position_returns_zero_when_habitat_too_narrow() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        // habitat_width == PET_W: no room to drift.
+        assert_eq!(compute_wander_position_x(PET_W, Species::Fuzz, now), 0);
+        // habitat_width < PET_W: saturating_sub gives 0.
+        assert_eq!(compute_wander_position_x(0, Species::Fuzz, now), 0);
+    }
+
+    #[test]
+    fn wander_position_stays_within_half_range() {
+        use time::macros::datetime;
+        let start = datetime!(2026-05-11 12:00:00 UTC);
+        let habitat_width: u16 = 52;
+        let half_range = ((habitat_width - PET_W) / 2) as i16;
+        for s in 0..=TARGET_HOLD_SECS * 4 {
+            let now = start + time::Duration::seconds(s);
+            let pos = compute_wander_position_x(habitat_width, Species::Fuzz, now);
+            assert!(
+                pos >= -half_range && pos <= half_range,
+                "pos {pos} outside [-{half_range}, {half_range}] at s={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn wander_position_is_deterministic() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_042).unwrap();
+        let a = compute_wander_position_x(52, Species::Crystal, now);
+        let b = compute_wander_position_x(52, Species::Crystal, now);
+        assert_eq!(a, b, "same inputs must give same output");
+    }
+
+    #[test]
+    fn wander_position_starts_near_prev_target_and_ends_near_curr_target() {
+        // Pick a timestamp at the exact start of a period (ts divisible by TARGET_HOLD_SECS).
+        // At t=0 within a period: ease = 0.0, position = prev.
+        // At t≈1 within a period: ease ≈ 1.0, position ≈ curr.
+        let period_start_ts = 1_700_000_000i64 - (1_700_000_000i64 % TARGET_HOLD_SECS);
+        let base = time::OffsetDateTime::from_unix_timestamp(period_start_ts).unwrap();
+        let period = base.unix_timestamp() / TARGET_HOLD_SECS;
+        let half_range = (52 - PET_W as i32) / 2;
+        let prev = wander_deterministic_target(period - 1, Species::Blob, half_range);
+        let curr = wander_deterministic_target(period, Species::Blob, half_range);
+
+        // At t=0 the position equals prev exactly.
+        let at_start = compute_wander_position_x(52, Species::Blob, base);
+        assert_eq!(
+            at_start as i32, prev,
+            "at t=0 position should equal prev {prev}"
+        );
+
+        // Near end of period: position should be closer to curr than prev.
+        // Only meaningful when prev != curr.
+        if prev != curr {
+            let near_end = base + time::Duration::seconds(TARGET_HOLD_SECS - 1);
+            let at_end = compute_wander_position_x(52, Species::Blob, near_end);
+            assert!(
+                (at_end as i32 - curr).abs() <= (at_end as i32 - prev).abs(),
+                "at_end {at_end} should be closer to curr {curr} than prev {prev}"
+            );
+        }
+    }
+
+    // ── compute_facing ────────────────────────────────────────────────────
+
+    #[test]
+    fn facing_returns_plus_or_minus_one() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        for species in Species::all() {
+            let f = compute_facing(species, now);
+            assert!(f == 1 || f == -1, "got {f} for {species:?}");
+        }
+    }
+
+    #[test]
+    fn facing_is_deterministic() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let a = compute_facing(Species::Ghost, now);
+        let b = compute_facing(Species::Ghost, now);
+        assert_eq!(a, b);
+    }
+
+    // ── compute_shimmer_role ──────────────────────────────────────────────
+
+    #[test]
+    fn shimmer_is_none_outside_window() {
+        use time::macros::datetime;
+        let base = datetime!(2026-05-11 12:00:00 UTC);
+        // After the first second, shimmer should be off for most of the period.
+        let mut none_count = 0;
+        for s in 0..(SHIMMER_PERIOD_SECS * 2) {
+            let now = base + time::Duration::seconds(s);
+            if compute_shimmer_role(Species::Fuzz, now).is_none() {
+                none_count += 1;
+            }
+        }
+        // At most SHIMMER_DURATION_SECS per SHIMMER_PERIOD_SECS should be Some.
+        let total = SHIMMER_PERIOD_SECS * 2;
+        let max_some = SHIMMER_DURATION_SECS * 2 + 1;
+        assert!(
+            none_count >= total - max_some,
+            "shimmer should be None most of the time, was None {none_count}/{total}"
+        );
+    }
+
+    #[test]
+    fn shimmer_is_some_at_period_start() {
+        // Timestamp 0 is at the start of a period for any SHIMMER_PERIOD_SECS.
+        let now = time::OffsetDateTime::from_unix_timestamp(0).unwrap();
+        assert!(
+            compute_shimmer_role(Species::Crystal, now).is_some(),
+            "shimmer should fire at period start"
+        );
+    }
+
+    #[test]
+    fn shimmer_role_is_body_accent_or_pattern() {
+        let now = time::OffsetDateTime::from_unix_timestamp(0).unwrap();
+        let role = compute_shimmer_role(Species::Mech, now).unwrap();
+        assert!(
+            matches!(
+                role,
+                PaletteRoleName::Body | PaletteRoleName::Accent | PaletteRoleName::Pattern
+            ),
+            "shimmer role must be Body, Accent, or Pattern, got {role:?}"
+        );
+    }
+
+    // ── compute_twinkle ───────────────────────────────────────────────────
+
+    #[test]
+    fn twinkle_position_within_art_bounds() {
+        let now = time::OffsetDateTime::from_unix_timestamp(0).unwrap();
+        if let Some(t) = compute_twinkle(Species::Crystal, now) {
+            assert!(t.row < 8, "twinkle row {} out of art bounds", t.row);
+            assert!(t.col < 11, "twinkle col {} out of art bounds", t.col);
+        }
+    }
+
+    #[test]
+    fn twinkle_fires_at_period_start() {
+        let now = time::OffsetDateTime::from_unix_timestamp(0).unwrap();
+        assert!(
+            compute_twinkle(Species::Fuzz, now).is_some(),
+            "twinkle should fire at period start (unix ts 0)"
+        );
+    }
+
+    #[test]
+    fn twinkle_is_none_outside_window() {
+        // Milliseconds 500+ in the period should be None.
+        let now = time::OffsetDateTime::from_unix_timestamp(1).unwrap();
+        // 1 second into a 7-second period, > 500ms into the period.
+        assert!(
+            compute_twinkle(Species::Fuzz, now).is_none(),
+            "twinkle should be None outside the half-second window"
+        );
+    }
+
+    // ── compute_token_pop ─────────────────────────────────────────────────
+
+    #[test]
+    fn token_pop_none_when_no_pulse() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        assert!(compute_token_pop(None, now).is_none());
+    }
+
+    #[test]
+    fn token_pop_some_within_two_seconds() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let pulse = now - time::Duration::seconds(1);
+        let pop = compute_token_pop(Some(pulse), now);
+        assert!(pop.is_some(), "should be Some within 2s of pulse");
+        assert_eq!(pop.unwrap().duration_remaining_secs, 1);
+    }
+
+    #[test]
+    fn token_pop_none_after_two_seconds() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let pulse = now - time::Duration::seconds(3);
+        assert!(compute_token_pop(Some(pulse), now).is_none());
+    }
+
+    #[test]
+    fn token_pop_none_before_pulse() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let pulse = now + time::Duration::seconds(1);
+        assert!(compute_token_pop(Some(pulse), now).is_none());
     }
 
     #[test]

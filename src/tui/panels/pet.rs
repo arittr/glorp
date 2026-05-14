@@ -8,7 +8,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::game::evolution::Stage;
-use crate::pet::animator::low_energy_lightness_multiplier;
+use crate::pet::animator::{
+    compute_shimmer_role, compute_token_pop, compute_twinkle, compute_wander_position_x,
+    low_energy_lightness_multiplier,
+};
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{PetScene, PetSceneLayout};
@@ -26,6 +29,11 @@ const PET_H: u16 = 10;
 
 /// Computes the 13×10 sub-rect where the pet art sits inside the panel area,
 /// accounting for vertical centering, breathing offset, and wander offset.
+///
+/// The horizontal wander position is computed directly from `area.width` so
+/// the pet drifts across the full habitat regardless of where `vm.wander_offset_x`
+/// is set. `vm.wander_offset_x` is ignored at render time; it's only for test
+/// inspection.
 pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     let cx = area.x + area.width.saturating_sub(PET_W) / 2;
     let cy = area.y + area.height.saturating_sub(PET_H) / 2;
@@ -34,7 +42,11 @@ pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     // ensures min ≤ max so the rect collapses to `area`'s origin instead.
     let max_x = (area.x + area.width).saturating_sub(PET_W).max(area.x);
     let max_y = (area.y + area.height).saturating_sub(PET_H).max(area.y);
-    let x = (cx as i32 + vm.wander_offset_x as i32).clamp(area.x as i32, max_x as i32) as u16;
+    // Use a dummy "no species" clock time if we can't infer it here; callers
+    // that need an exact position for tests can override via vm.wander_offset_x.
+    // For rendering we always compute from area width and vm's species/clock.
+    let wander_x = vm.wander_offset_x as i32;
+    let x = (cx as i32 + wander_x).clamp(area.x as i32, max_x as i32) as u16;
     let y = (cy as i32 + vm.breath_offset_y as i32).clamp(area.y as i32, max_y as i32) as u16;
     Rect::new(x, y, PET_W, PET_H)
 }
@@ -223,6 +235,22 @@ impl LegacyPanel for PetPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
+        // Compute the wander position from the live area width and wall clock so
+        // the pet drifts edge-to-edge regardless of what vm.wander_offset_x carries.
+        let now = ctx.clock.now_utc();
+        let species = vm.pet_render.generated_species;
+        let wander_x = compute_wander_position_x(area.width, species, now);
+        let vm = if wander_x != vm.wander_offset_x {
+            // Build a local copy with the computed offset rather than mutating.
+            std::borrow::Cow::Owned({
+                let mut v = vm.clone();
+                v.wander_offset_x = wander_x;
+                v
+            })
+        } else {
+            std::borrow::Cow::Borrowed(vm)
+        };
+        let vm = vm.as_ref();
         let scene = PetScene::compute_layout(area, vm, ctx);
 
         // Pass 1: ambient backdrop. Inflate the pet art rect by 1 cell to
@@ -252,14 +280,19 @@ impl LegacyPanel for PetPanel {
             }
         }
 
-        // Pass 2: existing pet art rendering. Unchanged from prior implementation.
-        render_pet_inside(buf, vm, &scene);
+        // Pass 2: pet art with shimmer, twinkle, and token-pop overlays.
+        render_pet_inside(buf, vm, &scene, now);
     }
 }
 
 /// Renders the speech bubble and pet art into `area`, centered vertically.
 /// This is the pre-existing render logic extracted from the old `render` body.
-fn render_pet_inside(buf: &mut Buffer, vm: &WatchViewModel, scene: &PetSceneLayout) {
+fn render_pet_inside(
+    buf: &mut Buffer,
+    vm: &WatchViewModel,
+    scene: &PetSceneLayout,
+    now: time::OffsetDateTime,
+) {
     let base = semantic_styles();
     let m = low_energy_lightness_multiplier(vm.energy);
     let droop = darken_pet_styles(&base, m);
@@ -268,10 +301,48 @@ fn render_pet_inside(buf: &mut Buffer, vm: &WatchViewModel, scene: &PetSceneLayo
         render_speech_bubble(speech_area, buf, speech, &droop);
     }
 
+    let species = vm.pet_render.generated_species;
+    let shimmer_role = compute_shimmer_role(species, now);
+    let twinkle = compute_twinkle(species, now);
+    let token_pop = compute_token_pop(vm.last_feed_pulse_at, now);
+
+    // When the token-pop is active, override shimmer to Pattern for extra flash.
+    let effective_shimmer_role = if token_pop.is_some() {
+        Some(PaletteRoleName::Pattern)
+    } else {
+        shimmer_role
+    };
+
+    // Brighten multiplier: shimmer/pop boost lightness ~1.4×, clamped to 1.0
+    // on the u8 channel (we apply it in brighten_style).
+    let shimmer_m = if effective_shimmer_role.is_some() {
+        1.4f32
+    } else {
+        1.0
+    };
+    let shimmer_styles = brighten_pet_role(&droop, effective_shimmer_role, shimmer_m);
+
+    // Twinkle: also place a sparkle at the token-pop center when pop is active.
+    let effective_twinkle = if token_pop.is_some() {
+        Some(crate::pet::animator::TwinkleSpec {
+            row: 4,
+            col: 5,
+            glyph: '\u{2726}',
+        })
+    } else {
+        twinkle
+    };
+
     // Hit-test against the full column width so the cursor anywhere in the
     // panel triggers eye tracking, matching the pre-Fill behavior.
     let cursor_norm_x = cursor_normalized_x_within(vm, scene.hit_area);
-    let lines = build_pet_lines(vm, scene.pet_art.width as usize, &droop, cursor_norm_x);
+    let lines = build_pet_lines(
+        vm,
+        scene.pet_art.width as usize,
+        &shimmer_styles,
+        cursor_norm_x,
+        effective_twinkle,
+    );
     Paragraph::new(lines).render(scene.pet_art, buf);
 }
 
@@ -302,6 +373,41 @@ fn darken_pet_styles(base: &SemanticStyles, multiplier: f32) -> SemanticStyles {
     s.pet_accent = darken_style(s.pet_accent, multiplier);
     s.pet_pattern = darken_style(s.pet_pattern, multiplier);
     s
+}
+
+/// Returns a copy of `base` where the style for `role` has its foreground
+/// brightened by `multiplier`. Other roles are returned unchanged.
+/// A multiplier > 1.0 brightens; use this for shimmer/token-pop effects.
+fn brighten_pet_role(
+    base: &SemanticStyles,
+    role: Option<PaletteRoleName>,
+    multiplier: f32,
+) -> SemanticStyles {
+    let Some(role) = role else {
+        return base.clone();
+    };
+    let mut s = base.clone();
+    match role {
+        PaletteRoleName::Body => s.pet_body = brighten_style(s.pet_body, multiplier),
+        PaletteRoleName::Accent => s.pet_accent = brighten_style(s.pet_accent, multiplier),
+        PaletteRoleName::Pattern => s.pet_pattern = brighten_style(s.pet_pattern, multiplier),
+        PaletteRoleName::Eye => s.pet_eye = brighten_style(s.pet_eye, multiplier),
+        PaletteRoleName::Mouth => s.pet_mouth = brighten_style(s.pet_mouth, multiplier),
+        PaletteRoleName::Particle => s.pet_accent = brighten_style(s.pet_accent, multiplier),
+    }
+    s
+}
+
+fn brighten_style(style: Style, multiplier: f32) -> Style {
+    if let Some(Color::Rgb(r, g, b)) = style.fg {
+        let m = multiplier.max(0.0);
+        let r = (r as f32 * m).min(255.0) as u8;
+        let g = (g as f32 * m).min(255.0) as u8;
+        let b = (b as f32 * m).min(255.0) as u8;
+        style.fg(Color::Rgb(r, g, b))
+    } else {
+        style
+    }
 }
 
 fn darken_style(style: Style, multiplier: f32) -> Style {
@@ -364,14 +470,25 @@ fn build_cursor_eye_string(glyph: char, span_width: usize) -> String {
     }
 }
 
-fn build_pet_lines<'a>(
-    vm: &'a WatchViewModel,
+fn build_pet_lines(
+    vm: &WatchViewModel,
     area_width: usize,
-    styles: &'a SemanticStyles,
+    styles: &SemanticStyles,
     cursor_norm_x: Option<f32>,
-) -> Vec<Line<'a>> {
-    let pet_width = vm
-        .pet_art
+    twinkle: Option<crate::pet::animator::TwinkleSpec>,
+) -> Vec<Line<'static>> {
+    let mirror = vm.facing == -1;
+
+    // Build the (possibly mirrored) art lines and spans as owned Strings.
+    let (art_lines, art_spans): (Vec<String>, Vec<crate::pet::render::StyledSegment>) = if mirror {
+        let mirrored_lines: Vec<String> = vm.pet_art.iter().map(|l| mirror_line(l)).collect();
+        let mirrored_spans = mirror_spans(&vm.pet_spans, &mirrored_lines);
+        (mirrored_lines, mirrored_spans)
+    } else {
+        (vm.pet_art.clone(), vm.pet_spans.clone())
+    };
+
+    let pet_width = art_lines
         .iter()
         .map(|l| l.chars().count())
         .max()
@@ -380,32 +497,175 @@ fn build_pet_lines<'a>(
     let left_pad = (center_pad as i32 + vm.wander_offset_x as i32).max(0) as usize;
     let cursor_eye = cursor_norm_x.map(cursor_eye_glyph);
 
-    vm.pet_art
-        .iter()
+    art_lines
+        .into_iter()
         .enumerate()
         .map(|(line_index, art_line)| {
-            let mut spans: Vec<Span<'a>> = Vec::new();
+            // Apply twinkle: if this line/col matches, substitute the glyph.
+            // The framed art is 13×10 so art_line is a frame line.
+            // twinkle.row is 0-based within the 11×8 art grid; frame adds 1 to row.
+            let twinkle_col = twinkle.and_then(|t| {
+                if t.row as usize + 1 == line_index {
+                    Some((t.col as usize + 1, t.glyph))
+                } else {
+                    None
+                }
+            });
+
+            let mut spans: Vec<Span<'static>> = Vec::new();
             if left_pad > 0 {
                 spans.push(Span::raw(" ".repeat(left_pad)));
             }
-            // Cursor-tracked eye swap: apply on any line containing a
-            // PaletteRoleName::Eye segment. Authored templates place eyes
-            // wherever the species' template draws them (Fuzz's `/\_/\` ears
-            // sit on line 0 with eyes on line 1, Mech has eyes on line 2 or
-            // 3 after the head plate, etc.), so we can't pin to a fixed
-            // line index.
-            let _ = line_index;
             let eye_override = cursor_eye;
-            spans.extend(pet_role_spans_for_line(
-                art_line,
+            spans.extend(build_owned_spans_for_line(
+                &art_line,
                 line_index,
-                &vm.pet_spans,
+                &art_spans,
                 styles,
                 eye_override,
+                twinkle_col,
             ));
             Line::from(spans)
         })
         .collect()
+}
+
+/// Mirrors an art line: reverses characters and substitutes directional glyphs.
+pub(crate) fn mirror_line(line: &str) -> String {
+    line.chars().rev().map(mirror_char).collect()
+}
+
+fn mirror_char(c: char) -> char {
+    match c {
+        '(' => ')',
+        ')' => '(',
+        '/' => '\\',
+        '\\' => '/',
+        '<' => '>',
+        '>' => '<',
+        'd' => 'b',
+        'b' => 'd',
+        '{' => '}',
+        '}' => '{',
+        '[' => ']',
+        ']' => '[',
+        _ => c,
+    }
+}
+
+/// Re-build StyledSegments for mirrored lines by mirroring each span's
+/// start/end positions within its line.
+fn mirror_spans(
+    spans: &[crate::pet::render::StyledSegment],
+    mirrored_lines: &[String],
+) -> Vec<crate::pet::render::StyledSegment> {
+    spans
+        .iter()
+        .map(|seg| {
+            let line_len = mirrored_lines
+                .get(seg.line)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
+            let span_width = seg.end.saturating_sub(seg.start);
+            // Mirror: new_start = line_len - seg.end, new_end = line_len - seg.start
+            let new_start = line_len.saturating_sub(seg.end);
+            let new_end = new_start + span_width;
+            crate::pet::render::StyledSegment {
+                line: seg.line,
+                start: new_start,
+                end: new_end,
+                role: seg.role,
+            }
+        })
+        .collect()
+}
+
+/// Build owned `Vec<Span<'static>>` for one art line, applying eye override
+/// and optional twinkle glyph injection.
+fn build_owned_spans_for_line(
+    art_line: &str,
+    line_index: usize,
+    pet_spans: &[crate::pet::render::StyledSegment],
+    styles: &SemanticStyles,
+    eye_override: Option<char>,
+    twinkle_col: Option<(usize, char)>,
+) -> Vec<Span<'static>> {
+    let total_chars = art_line.chars().count();
+    if total_chars == 0 {
+        return Vec::new();
+    }
+
+    let mut segments: Vec<&crate::pet::render::StyledSegment> = pet_spans
+        .iter()
+        .filter(|s| s.line == line_index && s.start < s.end && s.start < total_chars)
+        .collect();
+    segments.sort_by_key(|s| s.start);
+
+    let char_indices = char_byte_indices(art_line);
+
+    if segments.is_empty() {
+        let body = char_slice(art_line, &char_indices, 0, total_chars).to_string();
+        let body = apply_twinkle_in_range(body, 0, total_chars, twinkle_col);
+        return vec![Span::styled(body, styles.pet_body)];
+    }
+
+    // Build owned spans. Each "slot" is: optional body-gap, then the styled segment.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+
+    for segment in &segments {
+        let start = segment.start.max(cursor).min(total_chars);
+        let end = segment.end.min(total_chars);
+        if end <= cursor {
+            continue;
+        }
+        if start > cursor {
+            let body_text = char_slice(art_line, &char_indices, cursor, start).to_string();
+            let body_text = apply_twinkle_in_range(body_text, cursor, start, twinkle_col);
+            spans.push(Span::styled(body_text, styles.pet_body));
+        }
+        let style = pet_role_style(segment.role, styles);
+        let value = if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
+            (eye_override, segment.role)
+        {
+            let span_width = end - start;
+            build_cursor_eye_string(glyph, span_width)
+        } else {
+            char_slice(art_line, &char_indices, start, end).to_string()
+        };
+        let value = apply_twinkle_in_range(value, start, end, twinkle_col);
+        spans.push(Span::styled(value, style));
+        cursor = end;
+    }
+    if cursor < total_chars {
+        let tail = char_slice(art_line, &char_indices, cursor, total_chars).to_string();
+        let tail = apply_twinkle_in_range(tail, cursor, total_chars, twinkle_col);
+        spans.push(Span::styled(tail, styles.pet_body));
+    }
+
+    spans
+}
+
+/// If `twinkle_col` falls within `[start, end)`, substitute that character in
+/// `text` with the twinkle glyph. Otherwise returns `text` unchanged.
+fn apply_twinkle_in_range(
+    text: String,
+    start: usize,
+    end: usize,
+    twinkle_col: Option<(usize, char)>,
+) -> String {
+    let Some((col, glyph)) = twinkle_col else {
+        return text;
+    };
+    if col < start || col >= end {
+        return text;
+    }
+    let local = col - start;
+    let mut chars: Vec<char> = text.chars().collect();
+    if local < chars.len() {
+        chars[local] = glyph;
+    }
+    chars.into_iter().collect()
 }
 
 pub(crate) fn pet_role_spans_for_line<'a>(

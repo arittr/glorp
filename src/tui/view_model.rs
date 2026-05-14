@@ -37,15 +37,25 @@ pub struct WatchViewModel {
     /// Computed deterministically from mood + recent token activity + wall
     /// clock; cycles ~5s visible / ~25s hidden.
     pub current_speech: Option<String>,
-    /// Column offset for the idle-wander animation. -1, 0, or +1 — applied
-    /// on top of the panel's center-pad so the pet appears to drift slowly
-    /// rather than sit rigidly. Updated each frame from wall clock by the
-    /// watch app; fixtures default to 0 to keep snapshot tests stable.
-    pub wander_offset_x: i8,
+    /// Column offset for the idle-wander animation. In the renderer the panel
+    /// calls `compute_wander_position_x` using the live `area.width`, so this
+    /// field is not used for real rendering. It is set in the view model for
+    /// integration tests that need to inspect or override the position.
+    /// Updated each frame from wall clock by the watch app; fixtures default
+    /// to 0 to keep snapshot tests stable.
+    pub wander_offset_x: i16,
     /// Row offset for the idle-breathing animation. 0 = resting (lower
     /// position), 1 = peak inhale (raised one row). PetPanel reserves a
     /// fixed extra row above the art so the shift fits without clipping.
     pub breath_offset_y: u8,
+    /// Facing direction: +1 = facing right (default), -1 = facing left.
+    /// Derived from the sign of the drift target's velocity. The renderer
+    /// horizontally mirrors the pet art when this is -1.
+    pub facing: i8,
+    /// Wall-clock time of the most recent feed pulse (token spike above
+    /// the feed threshold). Drives the 2-second token-gain pop overlay.
+    /// None until the first qualifying poll tick.
+    pub last_feed_pulse_at: Option<time::OffsetDateTime>,
     /// Stage progress data for the progress panel.
     pub progress: ProgressView,
     /// Birth / age metadata for the bio card panel.
@@ -202,6 +212,8 @@ impl WatchViewModel {
             current_speech: None,
             wander_offset_x: 0,
             breath_offset_y: 0,
+            facing: 1,
+            last_feed_pulse_at: None,
             progress: ProgressView {
                 stage_label: "fuzz".to_string(),
                 next_stage_label: "archfuzz".to_string(),
