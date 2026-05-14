@@ -241,9 +241,9 @@ impl WatchApp {
             crate::commands::watch::rerender_pet_for_view_model(&mut self.vm, self.animation_frame);
         let now = time::OffsetDateTime::now_utc();
         let species = self.vm.pet_render.generated_species;
-        // wander_offset_x is computed at render time in the panel from area.width.
-        // We still update facing, breath, and feed-pulse timestamp each frame.
-        self.vm.facing = crate::pet::animator::compute_facing(species, now);
+        // wander_offset_x and facing are computed at render time in the panel
+        // from area.width so they stay mutually consistent. We only update
+        // breath and feed-pulse timestamp here.
         self.vm.breath_offset_y = crate::pet::animator::compute_breath_offset(Some(species), now);
         self.vm.last_feed_pulse_at = self.pet_animator.last_feed_pulse_at;
     }

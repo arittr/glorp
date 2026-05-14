@@ -9,8 +9,8 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::game::evolution::Stage;
 use crate::pet::animator::{
-    compute_shimmer_role, compute_token_pop, compute_twinkle, compute_wander_position_x,
-    low_energy_lightness_multiplier,
+    compute_facing, compute_shimmer_role, compute_token_pop, compute_twinkle,
+    compute_wander_position_x, low_energy_lightness_multiplier,
 };
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
@@ -235,16 +235,19 @@ impl LegacyPanel for PetPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
-        // Compute the wander position from the live area width and wall clock so
-        // the pet drifts edge-to-edge regardless of what vm.wander_offset_x carries.
+        // Compute the wander position and facing from the live area width and
+        // wall clock so both stay consistent with each other regardless of what
+        // vm.wander_offset_x or vm.facing carry.
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let wander_x = compute_wander_position_x(area.width, species, now);
-        let vm = if wander_x != vm.wander_offset_x {
-            // Build a local copy with the computed offset rather than mutating.
+        let facing = compute_facing(area.width, species, now);
+        let vm = if wander_x != vm.wander_offset_x || facing != vm.facing {
+            // Build a local copy with the computed values rather than mutating.
             std::borrow::Cow::Owned({
                 let mut v = vm.clone();
                 v.wander_offset_x = wander_x;
+                v.facing = facing;
                 v
             })
         } else {

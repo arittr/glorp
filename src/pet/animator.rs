@@ -40,7 +40,7 @@ use crate::tui::view_model::WatchViewModel;
 /// PET_W must match the constant in `tui/panels/pet.rs`.
 const PET_W: u16 = 13;
 /// How many seconds to hold each drift target before picking a new one.
-const TARGET_HOLD_SECS: i64 = 12;
+const TARGET_HOLD_SECS: i64 = 30;
 /// How many seconds of shimmer per period.
 const SHIMMER_DURATION_SECS: i64 = 1;
 /// Shimmer period: a brief tint fires for ~1s every 22s.
@@ -379,16 +379,20 @@ fn wander_ease_in_out(t: f32) -> f32 {
 
 /// Returns `+1` if the pet's current drift target is to the right of the
 /// previous period's target, `-1` if to the left, or `+1` as a default when
-/// there is no movement.
-pub fn compute_facing(species: Species, now: time::OffsetDateTime) -> i8 {
+/// there is no movement. Uses the same `half_range` as
+/// `compute_wander_position_x` so the sign of position change and the facing
+/// value are always consistent.
+pub fn compute_facing(habitat_width: u16, species: Species, now: time::OffsetDateTime) -> i8 {
+    let half_range = (habitat_width.saturating_sub(PET_W) / 2) as i32;
+    if half_range == 0 {
+        return 1;
+    }
     let period = now.unix_timestamp() / TARGET_HOLD_SECS;
-    // Use a large but finite range so sign comparison is meaningful.
-    let half_range = 1_000_000_i32;
     let prev = wander_deterministic_target(period - 1, species, half_range);
     let curr = wander_deterministic_target(period, species, half_range);
     match (curr - prev).signum() {
-        1 => 1,
-        -1 => -1,
+        s if s > 0 => 1,
+        s if s < 0 => -1,
         _ => 1, // no movement — default right-facing
     }
 }
@@ -730,7 +734,7 @@ mod tests {
     fn facing_returns_plus_or_minus_one() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         for species in Species::all() {
-            let f = compute_facing(species, now);
+            let f = compute_facing(120, species, now);
             assert!(f == 1 || f == -1, "got {f} for {species:?}");
         }
     }
@@ -738,9 +742,48 @@ mod tests {
     #[test]
     fn facing_is_deterministic() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let a = compute_facing(Species::Ghost, now);
-        let b = compute_facing(Species::Ghost, now);
+        let a = compute_facing(120, Species::Ghost, now);
+        let b = compute_facing(120, Species::Ghost, now);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn facing_matches_actual_drift_direction() {
+        // For each species and each of several periods, the sign of
+        // (wander_position_x at period_end) - (wander_position_x at prev_period_end)
+        // should match compute_facing's output for that period.
+        let habitat_width = 120u16;
+        for species in [
+            Species::Fuzz,
+            Species::Blob,
+            Species::Ghost,
+            Species::Glitch,
+            Species::Crystal,
+            Species::Mech,
+        ] {
+            for period_index in 0..20i64 {
+                let base_ts = period_index * TARGET_HOLD_SECS;
+                let end_of_prev_period =
+                    time::OffsetDateTime::from_unix_timestamp(base_ts - 1).unwrap();
+                let end_of_curr_period =
+                    time::OffsetDateTime::from_unix_timestamp(base_ts + TARGET_HOLD_SECS - 1)
+                        .unwrap();
+                let pos_prev =
+                    compute_wander_position_x(habitat_width, species, end_of_prev_period);
+                let pos_curr =
+                    compute_wander_position_x(habitat_width, species, end_of_curr_period);
+                let actual_sign = (pos_curr as i32 - pos_prev as i32).signum();
+                let claimed_facing = compute_facing(habitat_width, species, end_of_curr_period);
+                if actual_sign != 0 {
+                    let expected = if actual_sign > 0 { 1 } else { -1 };
+                    assert_eq!(
+                        claimed_facing,
+                        expected,
+                        "species {species:?} period {period_index}: pos {pos_prev}→{pos_curr} but facing says {claimed_facing}"
+                    );
+                }
+            }
+        }
     }
 
     // ── compute_shimmer_role ──────────────────────────────────────────────
