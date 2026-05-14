@@ -134,9 +134,11 @@ pub fn apply_unapplied_usage(
         // Find transitions that were added during this apply pass.
         let new_stage_idx = state.stage.index();
         let old_stage_idx = initial_stage.index();
+        let species = state.pet.generated_species;
         for idx in (old_stage_idx + 1)..=new_stage_idx {
             if let Some(new_stage) = Stage::from_index(idx) {
-                let text = narration::stage_phrase(&state.pet.accepted_name.clone(), new_stage);
+                let text =
+                    narration::stage_phrase(&state.pet.accepted_name.clone(), species, new_stage);
                 state.recent_events.push(NarrativeEvent {
                     observed_at: now,
                     text,

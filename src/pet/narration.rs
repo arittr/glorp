@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
+use crate::pet::generation::Species;
 use crate::storage::state::Vitals;
 
 /// Token volume bucket for a single poll cycle.
@@ -46,8 +47,9 @@ pub fn poll_phrase(name: &str, bucket: PollBucket, now: OffsetDateTime) -> Strin
 }
 
 /// Produce an evolution line for a stage transition.
-pub fn stage_phrase(name: &str, new_stage: Stage) -> String {
-    format!("{name} evolved into {}", new_stage.as_str())
+pub fn stage_phrase(name: &str, species: Species, new_stage: Stage) -> String {
+    let label = crate::pet::art::stage_label(species, new_stage);
+    format!("{name} evolved into {label}")
 }
 
 /// Produce a mood-change narration line.
@@ -204,9 +206,15 @@ mod tests {
 
     #[test]
     fn stage_phrase_includes_stage_label() {
-        let phrase = stage_phrase("buddy", Stage::S4);
-        assert!(phrase.contains("s4"), "phrase: {phrase}");
+        let phrase = stage_phrase("buddy", Species::Crystal, Stage::S4);
+        assert!(phrase.contains("crystal"), "phrase: {phrase}");
         assert!(phrase.contains("buddy"), "phrase: {phrase}");
+    }
+
+    #[test]
+    fn stage_phrase_fuzz_s5_is_archfuzz() {
+        let phrase = stage_phrase("buddy", Species::Fuzz, Stage::S5);
+        assert!(phrase.contains("archfuzz"), "phrase: {phrase}");
     }
 
     // ── mood_phrase ──────────────────────────────────────────────────────────

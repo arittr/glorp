@@ -440,24 +440,40 @@ fn build_recent_events(
     diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
     pet_activities: Vec<EventView>,
 ) -> Vec<EventView> {
-    let mut events = Vec::new();
+    // Merge narrative and usage events by observed_at so the feed reads as a
+    // single chronological timeline (oldest at top, newest at bottom).
+    struct Timestamped {
+        observed_at: OffsetDateTime,
+        view: EventView,
+    }
+
+    let mut merged: Vec<Timestamped> = Vec::new();
+
     for event in state.recent_events.iter().rev().take(3).rev() {
-        // Use the real observed_at from the narrative event for timestamps.
         // UNIX_EPOCH is the sentinel for legacy entries — keep showing "--:--".
         let timestamp = if event.observed_at == time::OffsetDateTime::UNIX_EPOCH {
             "--:--".into()
         } else {
             timestamp_column(event.observed_at)
         };
-        events.push(EventView {
-            timestamp,
-            kind: LogKind::Narrative,
-            text: event.text.clone(),
+        merged.push(Timestamped {
+            observed_at: event.observed_at,
+            view: EventView {
+                timestamp,
+                kind: LogKind::Narrative,
+                text: event.text.clone(),
+            },
         });
     }
-    for usage_event in aggregated_recent_usage(usage_events, 4) {
-        events.push(usage_event);
+
+    for (observed_at, view) in aggregated_recent_usage_with_time(usage_events, 4) {
+        merged.push(Timestamped { observed_at, view });
     }
+
+    merged.sort_by_key(|m| m.observed_at);
+
+    let mut events: Vec<EventView> = merged.into_iter().map(|m| m.view).collect();
+
     for diagnostic_event in deduped_recent_diagnostics(diagnostics, 2) {
         events.push(diagnostic_event);
     }
@@ -469,8 +485,12 @@ fn build_recent_events(
 
 /// Group rows that share a `provider_delta_id` so a single smeared real
 /// delta surfaces as one log entry. Rows with no `provider_delta_id`
-/// stay ungrouped, one entry per row.
-fn aggregated_recent_usage(usage_events: &[NormalizedUsageEvent], take: usize) -> Vec<EventView> {
+/// stay ungrouped, one entry per row. Returns `(observed_at, EventView)` pairs
+/// so callers can merge by timestamp before rendering.
+fn aggregated_recent_usage_with_time(
+    usage_events: &[NormalizedUsageEvent],
+    take: usize,
+) -> Vec<(OffsetDateTime, EventView)> {
     #[derive(Default)]
     struct Group {
         observed_at: Option<OffsetDateTime>,
@@ -516,18 +536,20 @@ fn aggregated_recent_usage(usage_events: &[NormalizedUsageEvent], take: usize) -
     groups
         .into_iter()
         .take(take)
-        .rev()
         .filter_map(|group| {
             let observed_at = group.observed_at?;
-            Some(EventView {
-                timestamp: timestamp_column(observed_at),
-                kind: LogKind::Usage,
-                text: format!(
-                    "{} added {} effective tokens",
-                    group.provider_surface,
-                    format_tokens(group.effective_tokens)
-                ),
-            })
+            Some((
+                observed_at,
+                EventView {
+                    timestamp: timestamp_column(observed_at),
+                    kind: LogKind::Usage,
+                    text: format!(
+                        "{} added {} effective tokens",
+                        group.provider_surface,
+                        format_tokens(group.effective_tokens)
+                    ),
+                },
+            ))
         })
         .collect()
 }
@@ -760,6 +782,67 @@ mod tests {
         assert_eq!(
             vm.progress.rate_per_hour, 42_000.0,
             "catchup row with bucket_at 3h ago must NOT contribute to the rate"
+        );
+    }
+
+    #[test]
+    fn build_recent_events_interleaves_narrative_and_usage_by_timestamp() {
+        use crate::storage::state::NarrativeEvent;
+
+        let base = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        // narrative at T+0 and T+20m; usage at T+10m and T+30m
+        let t0 = base;
+        let t10 = base + Duration::minutes(10);
+        let t20 = base + Duration::minutes(20);
+        let t30 = base + Duration::minutes(30);
+
+        let mut state = PetState::new_for_test("test", "Buddy");
+        state.recent_events = vec![
+            NarrativeEvent {
+                observed_at: t0,
+                text: "Buddy brightened".into(),
+            },
+            NarrativeEvent {
+                observed_at: t20,
+                text: "Buddy munched".into(),
+            },
+        ];
+
+        // Two usage events that interleave with the narrative entries.
+        let usage_events = vec![
+            NormalizedUsageEvent {
+                provider_delta_id: Some("delta-a".into()),
+                ..NormalizedUsageEvent::for_test_at(t10, 5_000.0)
+            },
+            NormalizedUsageEvent {
+                provider_delta_id: Some("delta-b".into()),
+                ..NormalizedUsageEvent::for_test_at(t30, 8_000.0)
+            },
+        ];
+
+        let events = build_recent_events(&state, &usage_events, &[], vec![]);
+
+        // Verify chronological order: T+0, T+10, T+20, T+30
+        assert_eq!(events.len(), 4);
+        assert!(
+            events[0].text.contains("brightened"),
+            "first: {}",
+            events[0].text
+        );
+        assert!(
+            events[1].text.contains("5.0k"),
+            "second should be usage 5k: {}",
+            events[1].text
+        );
+        assert!(
+            events[2].text.contains("munched"),
+            "third: {}",
+            events[2].text
+        );
+        assert!(
+            events[3].text.contains("8.0k"),
+            "fourth should be usage 8k: {}",
+            events[3].text
         );
     }
 }

@@ -99,7 +99,11 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
         },
         NarrativeEvent {
             observed_at: ctx.fixed_now - Duration::minutes(2),
-            text: format!("{} evolved into s4", state.pet.accepted_name),
+            text: format!(
+                "{} evolved into {}",
+                state.pet.accepted_name,
+                crate::pet::art::stage_label(state.pet.generated_species, state.stage)
+            ),
         },
     ];
     state
