@@ -86,6 +86,36 @@ fn no_delta_poll_applies_rhythm_decay_without_granting_xp() {
 }
 
 #[test]
+fn rapid_token_polls_do_not_narrate_every_feed() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let start = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    for tick in 0..6 {
+        let now = start + Duration::seconds(tick * 10);
+        let poll = poll_with_delta(2_000.0, now);
+        apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
+    }
+
+    let eating_narrations = state
+        .recent_events
+        .iter()
+        .filter(|event| is_eating_narration(&event.text, "mochi"))
+        .count();
+
+    assert!(
+        eating_narrations <= 1,
+        "rapid token polls should not narrate every feed, got {eating_narrations}: {:?}",
+        state
+            .recent_events
+            .iter()
+            .map(|event| &event.text)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn apply_reconciles_saved_stage_when_xp_outranks_it() {
     let dir = tempdir().unwrap();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
@@ -167,6 +197,15 @@ fn empty_poll() -> UsagePollResult {
         diagnostics: Vec::new(),
         total_effective_tokens: 0.0,
     }
+}
+
+fn is_eating_narration(text: &str, pet_name: &str) -> bool {
+    text.starts_with(&format!("{pet_name} "))
+        && [
+            "feasted", "devoured", "munched", "gobbled", "nibbled", "snacked", "sipped", "tasted",
+        ]
+        .iter()
+        .any(|verb| text.contains(verb))
 }
 
 #[test]

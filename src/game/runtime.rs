@@ -17,6 +17,7 @@ use crate::{
 
 const USAGE_RETENTION_DAYS: i64 = 90;
 const RECENT_EVENT_LIMIT: usize = 20;
+const POLL_NARRATION_COOLDOWN: Duration = Duration::minutes(5);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeUpdate {
@@ -103,11 +104,13 @@ pub fn apply_unapplied_usage(
 
         // Poll cycle narration: token rate bucket.
         if let Some(bucket) = narration::poll_bucket(recent_effective_tokens) {
-            let text = narration::poll_phrase(&state.pet.accepted_name.clone(), bucket, now);
-            state.recent_events.push(NarrativeEvent {
-                observed_at: now,
-                text,
-            });
+            if should_narrate_poll_cycle(state, bucket, recent_effective_tokens, now) {
+                let text = narration::poll_phrase(&state.pet.accepted_name, bucket, now);
+                state.recent_events.push(NarrativeEvent {
+                    observed_at: now,
+                    text,
+                });
+            }
         }
     } else {
         apply_idle_decay(state, now);
@@ -248,6 +251,27 @@ fn trim_recent_events(state: &mut PetState) {
     if extra > 0 {
         state.recent_events.drain(0..extra);
     }
+}
+
+fn should_narrate_poll_cycle(
+    state: &PetState,
+    bucket: narration::PollBucket,
+    effective_tokens: f64,
+    now: OffsetDateTime,
+) -> bool {
+    let recently_narrated = state
+        .recent_events
+        .iter()
+        .rev()
+        .find(|event| narration::is_poll_phrase(&state.pet.accepted_name, &event.text))
+        .map(|event| now - event.observed_at)
+        .is_some_and(|age| age < POLL_NARRATION_COOLDOWN);
+
+    if recently_narrated {
+        return false;
+    }
+
+    narration::should_sample_poll_phrase(&state.pet.seed, bucket, effective_tokens, now)
 }
 
 fn game_vitals(vitals: StoredVitals) -> crate::game::metabolism::Vitals {

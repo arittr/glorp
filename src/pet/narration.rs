@@ -8,10 +8,14 @@ use time::OffsetDateTime;
 
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
-use crate::pet::generation::Species;
+use crate::pet::generation::{fnv1a64, Species};
 use crate::storage::state::Vitals;
 
+const POLL_SAMPLE_WINDOW_SECONDS: i64 = 10;
+const POLL_SAMPLE_DENOMINATOR: u64 = 4;
+
 /// Token volume bucket for a single poll cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollBucket {
     Feast,
     Munch,
@@ -34,6 +38,17 @@ pub fn poll_bucket(effective_tokens: f64) -> Option<PollBucket> {
     }
 }
 
+impl PollBucket {
+    fn sample_key(self) -> &'static str {
+        match self {
+            PollBucket::Feast => "feast",
+            PollBucket::Munch => "munch",
+            PollBucket::Nibble => "nibble",
+            PollBucket::Sip => "sip",
+        }
+    }
+}
+
 /// Produce a narrated eating line for a poll cycle.
 pub fn poll_phrase(name: &str, bucket: PollBucket, now: OffsetDateTime) -> String {
     let variants: &[&str] = match bucket {
@@ -44,6 +59,43 @@ pub fn poll_phrase(name: &str, bucket: PollBucket, now: OffsetDateTime) -> Strin
     };
     let idx = pick_idx(now, variants.len());
     variants[idx].replace("{name}", name)
+}
+
+/// Deterministically sample poll-cycle eating narration so token bursts feel
+/// alive without echoing every usage delta into the feed.
+pub fn should_sample_poll_phrase(
+    seed: &str,
+    bucket: PollBucket,
+    effective_tokens: f64,
+    now: OffsetDateTime,
+) -> bool {
+    if effective_tokens <= 0.0 || !effective_tokens.is_finite() {
+        return false;
+    }
+
+    let slot = now.unix_timestamp().div_euclid(POLL_SAMPLE_WINDOW_SECONDS);
+    let key = format!(
+        "poll:{}:{}:{}:{}",
+        seed,
+        bucket.sample_key(),
+        effective_tokens.round() as i64,
+        slot
+    );
+    fnv1a64(&key).is_multiple_of(POLL_SAMPLE_DENOMINATOR)
+}
+
+/// Check whether text is one of this module's poll-cycle eating lines.
+pub fn is_poll_phrase(name: &str, text: &str) -> bool {
+    text.strip_prefix(&format!("{name} ")).is_some_and(|rest| {
+        rest == "feasted"
+            || rest == "devoured a token cache"
+            || rest == "munched"
+            || rest == "gobbled"
+            || rest == "nibbled"
+            || rest == "snacked"
+            || rest == "sipped"
+            || rest == "tasted"
+    })
 }
 
 /// Produce an evolution line for a stage transition.
@@ -200,6 +252,43 @@ mod tests {
             2,
             "both feast variants should appear across ticks"
         );
+    }
+
+    #[test]
+    fn poll_phrase_sampling_is_deterministic_for_same_inputs() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let a = should_sample_poll_phrase("seed", PollBucket::Munch, 10_000.0, now);
+        let b = should_sample_poll_phrase("seed", PollBucket::Munch, 10_000.0, now);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn poll_phrase_sampling_keeps_some_slots_not_all_slots() {
+        let base = datetime!(2026-05-11 12:00 UTC);
+        let sampled = (0..120)
+            .filter(|tick| {
+                should_sample_poll_phrase(
+                    "seed",
+                    PollBucket::Munch,
+                    10_000.0,
+                    base + time::Duration::seconds(tick * 10),
+                )
+            })
+            .count();
+        assert!(sampled > 0, "sampler should allow occasional narration");
+        assert!(
+            sampled < 120,
+            "sampler should suppress some narration, got {sampled}"
+        );
+    }
+
+    #[test]
+    fn is_poll_phrase_matches_generated_eating_lines() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let phrase = poll_phrase("buddy", PollBucket::Munch, now);
+        assert!(is_poll_phrase("buddy", &phrase), "phrase: {phrase}");
+        assert!(!is_poll_phrase("other", &phrase), "phrase: {phrase}");
+        assert!(!is_poll_phrase("buddy", "buddy evolved into fuzzling"));
     }
 
     // ── stage_phrase ─────────────────────────────────────────────────────────
