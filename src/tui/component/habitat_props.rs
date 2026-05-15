@@ -166,7 +166,7 @@ fn trophy_sprite(id: &str, _species: Species, now: time::OffsetDateTime) -> &'st
                 glyph: '╵',
             },
         ],
-        "heavy_session_planter" => &[
+        "heavy_session_planter" if phase < 4 => &[
             SpriteCell {
                 dx: 1,
                 dy: 0,
@@ -193,7 +193,34 @@ fn trophy_sprite(id: &str, _species: Species, now: time::OffsetDateTime) -> &'st
                 glyph: '◌',
             },
         ],
-        "wilt_recovery_sprout" => &[
+        "heavy_session_planter" => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: 'ѱ',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '◌',
+            },
+        ],
+        "wilt_recovery_sprout" if phase < 4 => &[
             SpriteCell {
                 dx: 1,
                 dy: 0,
@@ -213,6 +240,28 @@ fn trophy_sprite(id: &str, _species: Species, now: time::OffsetDateTime) -> &'st
                 dx: 2,
                 dy: 1,
                 glyph: '╱',
+            },
+        ],
+        "wilt_recovery_sprout" => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╲',
             },
         ],
         _ => &[
@@ -240,16 +289,17 @@ fn render_sprite(
     let mut cells = Vec::new();
     for cell in sprite {
         let Some(pos) = offset_position(anchor, cell.dx, cell.dy) else {
-            continue;
+            return Vec::new();
         };
-        if habitat.contains(pos) && !exclusions.iter().any(|rect| rect.contains(pos)) {
-            cells.push(HabitatPropCell {
-                row: pos.y,
-                col: pos.x,
-                glyph: cell.glyph,
-                style,
-            });
+        if !habitat.contains(pos) || exclusions.iter().any(|rect| rect.contains(pos)) {
+            return Vec::new();
         }
+        cells.push(HabitatPropCell {
+            row: pos.y,
+            col: pos.x,
+            glyph: cell.glyph,
+            style,
+        });
     }
     cells
 }
@@ -282,12 +332,22 @@ fn render_accent(
     let glyph = accent_glyph(id, now);
     let width_span = habitat.width.saturating_sub(3);
     let row_span = habitat.height.saturating_sub(2);
-    let base = prop_hash(seed, id, index, now.unix_timestamp() / ACCENT_ROTATION_SECS);
+    let base = prop_hash(seed, id, index);
+    let motion = accent_motion_offset(id, now);
 
     for attempt in 0..ACCENT_CANDIDATES {
-        let phase = base.wrapping_add(attempt.wrapping_mul(17));
-        let col = habitat.x + 2 + (phase % width_span);
-        let row = habitat.y + 1 + ((phase / 3 + attempt.wrapping_mul(5)) % row_span);
+        let phase = base.wrapping_add(
+            attempt
+                .wrapping_mul(37)
+                .wrapping_add(attempt.wrapping_mul(attempt).wrapping_mul(11)),
+        );
+        let col = habitat.x
+            + 2
+            + ((phase as i32 + i32::from(motion.0)).rem_euclid(i32::from(width_span)) as u16);
+        let row_phase = phase / 3 + attempt.wrapping_mul(23);
+        let row = habitat.y
+            + 1
+            + ((i32::from(row_phase) + i32::from(motion.1)).rem_euclid(i32::from(row_span)) as u16);
         let pos = Position::new(col, row);
         if habitat.contains(pos) && !exclusions.iter().any(|rect| rect.contains(pos)) {
             return Some(HabitatPropCell {
@@ -302,12 +362,22 @@ fn render_accent(
     None
 }
 
-fn prop_hash(seed: &str, id: &str, index: usize, window: i64) -> u16 {
+fn prop_hash(seed: &str, id: &str, index: usize) -> u16 {
     let mut hash = index as u16;
-    for byte in seed.bytes().chain(id.bytes()).chain(window.to_le_bytes()) {
+    for byte in seed.bytes().chain(id.bytes()) {
         hash = hash.wrapping_mul(31).wrapping_add(u16::from(byte));
     }
     hash
+}
+
+fn accent_motion_offset(id: &str, now: time::OffsetDateTime) -> (i8, i8) {
+    let phase = now.unix_timestamp().rem_euclid(20);
+    match id {
+        "token_pebble_25k" | "token_shell_100k" => (0, if phase < 10 { 0 } else { -1 }),
+        "token_orbit_5m" => (if phase < 10 { -1 } else { 1 }, 0),
+        "token_lantern_10m" => (0, if phase < 10 { -1 } else { 0 }),
+        _ => (0, 0),
+    }
 }
 
 fn accent_glyph(id: &str, now: time::OffsetDateTime) -> char {
@@ -361,7 +431,10 @@ mod tests {
     use crate::tui::render_context::{RenderContext, WatchClock};
     use crate::tui::style::ColorCapability;
     use crate::tui::view_model::{EarnedHabitatPropView, HabitatView};
-    use ratatui::layout::Rect;
+    use ratatui::{
+        layout::{Position, Rect},
+        style::Style,
+    };
     use std::collections::BTreeMap;
     use time::macros::datetime;
 
@@ -487,12 +560,122 @@ mod tests {
     }
 
     #[test]
+    fn accent_motion_never_jumps_more_than_one_cell() {
+        let habitat = HabitatView {
+            earned_props: vec![earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0)],
+        };
+        let mut scene = scene();
+        scene.exclusions.clear();
+        let first_time = datetime!(2026-05-11 12:00:00 UTC);
+        let second_time = first_time + time::Duration::seconds(10);
+
+        let first = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(first_time),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '▲')
+        .expect("first accent");
+        let second = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(second_time),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '▲')
+        .expect("second accent");
+
+        assert!((i32::from(first.col) - i32::from(second.col)).abs() <= 1);
+        assert!((i32::from(first.row) - i32::from(second.row)).abs() <= 1);
+    }
+
+    #[test]
+    fn accent_retry_escapes_blocked_first_column() {
+        let habitat = Rect::new(0, 0, 20, 8);
+        let blocked_col = habitat.x
+            + 2
+            + (prop_hash("fixture-seed", "token_pebble_25k", 0) % habitat.width.saturating_sub(3));
+        let exclusions = [Rect::new(
+            blocked_col,
+            1,
+            1,
+            habitat.height.saturating_sub(2),
+        )];
+
+        let cell = render_accent(
+            "token_pebble_25k",
+            0,
+            habitat,
+            &exclusions,
+            Species::Fuzz,
+            "fixture-seed",
+            datetime!(2026-05-11 12:00 UTC),
+        )
+        .expect("accent should find another free column");
+
+        assert_ne!(cell.col, blocked_col);
+    }
+
+    #[test]
+    fn trophy_sprites_render_all_or_nothing() {
+        let cells = render_sprite(
+            Position::new(3, 2),
+            trophy_sprite(
+                "codex_signal_lamp",
+                Species::Fuzz,
+                datetime!(2026-05-11 12:00 UTC),
+            ),
+            Rect::new(0, 0, 8, 4),
+            &[],
+            Style::default(),
+        );
+
+        assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn planter_and_sprout_sway_with_clock() {
+        let first_time = datetime!(2026-05-11 12:00:00 UTC);
+        let second_time = first_time + time::Duration::seconds(4);
+
+        let planter_a = trophy_sprite("heavy_session_planter", Species::Fuzz, first_time)
+            .iter()
+            .map(|cell| cell.glyph)
+            .collect::<Vec<_>>();
+        let planter_b = trophy_sprite("heavy_session_planter", Species::Fuzz, second_time)
+            .iter()
+            .map(|cell| cell.glyph)
+            .collect::<Vec<_>>();
+        let sprout_a = trophy_sprite("wilt_recovery_sprout", Species::Fuzz, first_time)
+            .iter()
+            .map(|cell| cell.glyph)
+            .collect::<Vec<_>>();
+        let sprout_b = trophy_sprite("wilt_recovery_sprout", Species::Fuzz, second_time)
+            .iter()
+            .map(|cell| cell.glyph)
+            .collect::<Vec<_>>();
+
+        assert_ne!(planter_a, planter_b);
+        assert_ne!(sprout_a, sprout_b);
+    }
+
+    #[test]
     fn prop_visual_glyphs_are_single_scalar_values() {
         for glyph in prop_visual_glyphs_for_test() {
             assert_eq!(
                 glyph.to_string().chars().count(),
                 1,
                 "{glyph} must be one char"
+            );
+            assert_eq!(
+                ratatui::text::Span::raw(glyph.to_string()).width(),
+                1,
+                "{glyph} must be one terminal cell under ratatui width"
             );
         }
     }
