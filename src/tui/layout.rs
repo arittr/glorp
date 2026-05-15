@@ -150,8 +150,8 @@ pub fn render_evolution_overlay(frame: &mut Frame<'_>, stage_label: Option<&str>
         "glorp evolution",
         &[
             label_line.as_str(),
-            "new stage art appears after the next settled tick",
-            "keep feeding it real work",
+            "new shape, same companion",
+            "more work, more glorp",
         ],
     );
 }

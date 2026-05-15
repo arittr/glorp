@@ -62,7 +62,7 @@ enum PollRequest {
     Shutdown,
 }
 
-const EVOLUTION_OVERLAY_HOLD: Duration = Duration::from_secs(3);
+const EVOLUTION_OVERLAY_HOLD: Duration = Duration::from_secs(6);
 
 pub struct WatchApp {
     vm: WatchViewModel,
@@ -656,6 +656,17 @@ mod tests {
     };
     use crossterm::event::KeyModifiers;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn evolution_overlay_hold_is_long_enough_to_read_three_lines() {
+        // 3s wasn't enough to read three lines of celebratory copy in casual
+        // testing. ≥5s gives the overlay time to land before it vanishes.
+        assert!(
+            EVOLUTION_OVERLAY_HOLD >= Duration::from_secs(5),
+            "EVOLUTION_OVERLAY_HOLD is {:?}; needs ≥5s to read",
+            EVOLUTION_OVERLAY_HOLD
+        );
+    }
 
     #[test]
     fn handle_mouse_tracks_cursor_only_over_pet_hit_area() {

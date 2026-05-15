@@ -512,6 +512,24 @@ fn repeat_key_events_drive_watch_controls_and_release_events_do_not() {
 }
 
 #[test]
+fn evolution_overlay_copy_avoids_dev_jargon() {
+    // "settled tick" leaked the internal poll-cycle name and read as gibberish.
+    // The overlay copy should describe what just happened in plain language.
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(render_evolution_overlay_for_test).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(
+        !text.contains("settled tick"),
+        "evolution overlay still uses 'settled tick' jargon; copy was {text:?}"
+    );
+    assert!(
+        text.contains("evolved into"),
+        "evolution overlay should announce what the pet evolved into; copy was {text:?}"
+    );
+}
+
+#[test]
 fn help_evolution_and_hatch_overlays_use_tokenpet_surface_and_accent() {
     let p = tokenpet_palette();
     fn assert_overlay(render: fn(&mut Frame<'_>), accent: Color) {
