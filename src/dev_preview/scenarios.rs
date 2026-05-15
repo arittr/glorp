@@ -122,6 +122,7 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 ("stage".to_string(), Value::String("s4".to_string())),
                 ("mood".to_string(), Value::String("content".to_string())),
                 ("tick".to_string(), json!(ctx.fixed_now.unix_timestamp())),
+                ("habitat_props".to_string(), preview_habitat_props()),
                 ("terminal_width".to_string(), json!(120)),
                 ("terminal_height".to_string(), json!(32)),
             ]),
@@ -150,6 +151,7 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 ("stage".to_string(), Value::String("s4".to_string())),
                 ("mood".to_string(), Value::String("content".to_string())),
                 ("tick".to_string(), json!(ctx.fixed_now.unix_timestamp())),
+                ("habitat_props".to_string(), preview_habitat_props()),
                 ("terminal_width".to_string(), json!(180)),
                 ("terminal_height".to_string(), json!(50)),
             ]),
@@ -180,6 +182,7 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 ("stage".to_string(), Value::String("s4".to_string())),
                 ("mood".to_string(), Value::String("content".to_string())),
                 ("tick".to_string(), json!(ctx.fixed_now.unix_timestamp())),
+                ("habitat_props".to_string(), preview_habitat_props()),
                 ("terminal_width".to_string(), json!(72)),
                 ("terminal_height".to_string(), json!(24)),
             ]),
@@ -304,6 +307,15 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
         height: None,
     });
     artifacts
+}
+
+fn preview_habitat_props() -> Value {
+    json!([
+        "codex_signal_lamp",
+        "heavy_session_planter",
+        "token_pebble_25k",
+        "token_shell_100k"
+    ])
 }
 
 fn text_path(frame: &PreviewFrame) -> PathBuf {

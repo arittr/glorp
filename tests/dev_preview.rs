@@ -156,6 +156,26 @@ fn dev_preview_watch_writes_expected_artifacts() {
 }
 
 #[test]
+fn dev_preview_watch_manifest_lists_habitat_prop_fixture_ids() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    let wide = scenario(&manifest, "watch-wide-normal");
+    let prop_ids = wide["inputs"]["habitat_props"]
+        .as_array()
+        .expect("habitat_props input should be an array")
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(prop_ids.contains(&"codex_signal_lamp"));
+    assert!(prop_ids.contains(&"heavy_session_planter"));
+    assert!(prop_ids.contains(&"token_pebble_25k"));
+}
+
+#[test]
 fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
     let run = PreviewRun::new();
 

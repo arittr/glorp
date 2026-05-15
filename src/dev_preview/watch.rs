@@ -5,7 +5,9 @@ use crate::error::Result;
 use crate::game::evolution::Stage;
 use crate::pet::generation::Species;
 use crate::storage::{
-    state::{NarrativeEvent, PetState, Vitals},
+    state::{
+        EarnedHabitatProp, HabitatPropId, HabitatPropSource, NarrativeEvent, PetState, Vitals,
+    },
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
 use crate::tui::layout::render_watch_frame_with_layout;
@@ -76,7 +78,7 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state.pet.generated_species = Species::Fuzz;
     state.stage = Stage::S4;
     state.xp = 8.5;
-    state.lifetime_effective_tokens = 52_000.0;
+    state.lifetime_effective_tokens = 125_000.0;
     state.vitals = Vitals {
         fed: 70.0,
         happiness: 72.0,
@@ -104,6 +106,34 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
                 state.pet.accepted_name,
                 crate::pet::art::stage_label(state.pet.generated_species, state.stage)
             ),
+        },
+    ];
+    state.habitat.earned_props = vec![
+        EarnedHabitatProp {
+            id: HabitatPropId::new("codex_signal_lamp"),
+            earned_at: ctx.fixed_now - Duration::days(12),
+            source: HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+        },
+        EarnedHabitatProp {
+            id: HabitatPropId::new("heavy_session_planter"),
+            earned_at: ctx.fixed_now - Duration::days(6),
+            source: HabitatPropSource::HeavySession,
+        },
+        EarnedHabitatProp {
+            id: HabitatPropId::new("token_pebble_25k"),
+            earned_at: ctx.fixed_now - Duration::days(10),
+            source: HabitatPropSource::LifetimeTokens {
+                threshold: 25_000.0,
+            },
+        },
+        EarnedHabitatProp {
+            id: HabitatPropId::new("token_shell_100k"),
+            earned_at: ctx.fixed_now - Duration::days(4),
+            source: HabitatPropSource::LifetimeTokens {
+                threshold: 100_000.0,
+            },
         },
     ];
     state
