@@ -1,4 +1,5 @@
 pub mod geometry;
+pub mod habitat_props;
 pub mod ids;
 pub mod pet_scene;
 pub mod preview;
@@ -12,6 +13,7 @@ pub use geometry::{
     hit_test, ComponentLayout, ComponentNodeLayout, GeometryTarget, HitResult, LayoutDecision,
     LayoutDecisionReason, LayoutMode, TargetRole, VisibilityState,
 };
+pub use habitat_props::{habitat_props_for, HabitatPropCell};
 pub use ids::{ComponentPath, TargetPath, WatchComponentId};
 pub use pet_scene::{PetScene, PetSceneLayout};
 pub use preview::{preview_layout, PreviewLayout, PreviewLayoutDecision, PreviewRect};
