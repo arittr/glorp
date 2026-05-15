@@ -121,6 +121,11 @@ impl WatchApp {
                 }
             }
         });
+        // Treat the stage the pet starts at as already-acknowledged so the
+        // overlay only fires for evolutions that happen during this session.
+        // Otherwise re-opening the app shows the popup every time for a pet
+        // that evolved long ago.
+        let last_acknowledged_evolution = vm.latest_evolution.clone();
         Self {
             vm,
             config,
@@ -132,7 +137,7 @@ impl WatchApp {
             poll_count: 0,
             animation_frame: 0,
             last_poll: None,
-            last_acknowledged_evolution: None,
+            last_acknowledged_evolution,
             evolution_overlay_started_at: None,
             pet_animator: PetAnimator::new(),
             last_frame_time: None,
@@ -656,6 +661,21 @@ mod tests {
     };
     use crossterm::event::KeyModifiers;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn evolution_overlay_does_not_fire_for_stage_that_predates_app_launch() {
+        // vm.latest_evolution carries the pet's current stage, not "an evolution
+        // just happened". On app startup an existing stage must be treated as
+        // already-acknowledged so the overlay doesn't fire every time you open
+        // the app for a pet that evolved sessions ago.
+        let mut vm = WatchViewModel::fixture();
+        vm.latest_evolution = Some("fuzz".into());
+        let mut app = WatchApp::new(vm);
+        assert!(
+            !app.update_evolution_overlay(),
+            "overlay must not fire on launch for a stage the user has already seen"
+        );
+    }
 
     #[test]
     fn evolution_overlay_hold_is_long_enough_to_read_three_lines() {
