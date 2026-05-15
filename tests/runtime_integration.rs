@@ -391,7 +391,7 @@ fn fresh_pet_state_starts_with_empty_habitat_state() {
 
 #[test]
 fn habitat_catalog_exposes_v1_prop_ids_and_kinds() {
-    use glorp::game::habitat::{catalog_prop, HabitatPropKind};
+    use glorp::game::habitat::{catalog_prop, HabitatPropKind, HabitatPropZone};
     use glorp::storage::state::HabitatPropId;
 
     let codex = catalog_prop(&HabitatPropId::new("codex_signal_lamp")).unwrap();
@@ -401,6 +401,18 @@ fn habitat_catalog_exposes_v1_prop_ids_and_kinds() {
     let pebble = catalog_prop(&HabitatPropId::new("token_pebble_25k")).unwrap();
     assert_eq!(pebble.kind, HabitatPropKind::Accent);
     assert_eq!(pebble.lifetime_threshold, Some(25_000.0));
+
+    for (id, zone) in [
+        ("token_moss_tuft_250k", HabitatPropZone::FloorMid),
+        ("token_friendly_cloud_750k", HabitatPropZone::AirMid),
+        ("token_treasure_chest_2m", HabitatPropZone::FloorMid),
+        ("token_hanging_vine_25m", HabitatPropZone::Ceiling),
+    ] {
+        let prop = catalog_prop(&HabitatPropId::new(id)).unwrap();
+        assert_eq!(prop.kind, HabitatPropKind::Trophy);
+        assert_eq!(prop.zone, zone);
+        assert!(prop.lifetime_threshold.is_some());
+    }
 
     assert!(catalog_prop(&HabitatPropId::new("non_catalog_prop_for_filter_test")).is_none());
 }
@@ -453,7 +465,9 @@ fn one_large_poll_unlocks_ladder_props_in_threshold_order() {
         vec![
             "token_pebble_25k",
             "token_shell_100k",
+            "token_moss_tuft_250k",
             "token_spark_500k",
+            "token_friendly_cloud_750k",
             "token_shard_1m",
         ]
     );

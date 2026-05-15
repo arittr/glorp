@@ -5,6 +5,9 @@ use crate::dev_preview::export::{
     SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
+use crate::dev_preview::habitat_props::{
+    habitat_prop_frames, habitat_prop_ids, habitat_prop_motion_phase_timestamps,
+};
 use crate::dev_preview::output::{commit_output, prepare_output};
 use crate::dev_preview::pets::pet_frames;
 use crate::dev_preview::watch::watch_frames;
@@ -25,6 +28,7 @@ pub enum PreviewSelection {
     All,
     Watch,
     Pets,
+    Props,
 }
 
 pub struct PreviewRenderContext {
@@ -59,10 +63,12 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
     match selection {
         PreviewSelection::All => {
             frames.extend(watch_frames(&ctx, &scratch_dir)?);
+            frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?);
             frames.extend(pet_frames(&ctx)?);
         }
         PreviewSelection::Watch => frames.extend(watch_frames(&ctx, &scratch_dir)?),
         PreviewSelection::Pets => frames.extend(pet_frames(&ctx)?),
+        PreviewSelection::Props => frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?),
     }
 
     for frame in &frames {
@@ -215,6 +221,55 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
             vec![
                 "Check species silhouettes remain distinct across stages.".to_string(),
                 "Confirm stage labels and role colors line up with watch pet styling.".to_string(),
+            ],
+        ),
+        "habitat-props-catalog" => (
+            PreviewScenarioKind::HabitatProps,
+            "Review every habitat prop in isolated tanks across three deterministic motion phases.",
+            BTreeMap::from([
+                (
+                    "fixed_now".to_string(),
+                    Value::String(format_rfc3339_lossy(ctx.fixed_now)),
+                ),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+                ("prop_count".to_string(), json!(habitat_prop_ids().len())),
+                ("props".to_string(), json!(habitat_prop_ids())),
+                (
+                    "motion_phases".to_string(),
+                    json!(habitat_prop_motion_phase_timestamps(ctx)),
+                ),
+            ]),
+            vec![
+                "Check that each prop reads as a discrete object rather than ambient texture."
+                    .to_string(),
+                "Compare the three phase columns for subtle motion without distracting jumps."
+                    .to_string(),
+            ],
+        ),
+        id if id.starts_with("watch-habitat-") => (
+            PreviewScenarioKind::HabitatProps,
+            "Review habitat props inside realistic watch frames at different earned-state densities.",
+            BTreeMap::from([
+                (
+                    "fixed_now".to_string(),
+                    Value::String(format_rfc3339_lossy(ctx.fixed_now)),
+                ),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+                ("props".to_string(), json!(habitat_prop_ids())),
+                ("terminal_width".to_string(), json!(frame.width)),
+                ("terminal_height".to_string(), json!(frame.height)),
+            ]),
+            vec![
+                "Check whether props feel integrated with the pet scene instead of pasted on."
+                    .to_string(),
+                "Compare early, lived-in, and full states for density and object legibility."
+                    .to_string(),
             ],
         ),
         _ => (
@@ -412,6 +467,11 @@ mod tests {
                 "watch-wide-normal",
                 "watch-tall-wide",
                 "watch-compact-normal",
+                "habitat-props-catalog",
+                "watch-habitat-early",
+                "watch-habitat-lived-in",
+                "watch-habitat-full-phase-a",
+                "watch-habitat-full-phase-b",
                 "pet-species-stage"
             ]
         );

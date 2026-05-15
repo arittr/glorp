@@ -362,6 +362,61 @@ fn dev_preview_pets_writes_species_stage_matrix() {
 }
 
 #[test]
+fn dev_preview_props_writes_habitat_prop_gallery_and_watch_variants() {
+    let run = PreviewRun::new();
+
+    run.run_success("props");
+
+    for file in [
+        "frames/habitat-props-catalog.txt",
+        "frames/watch-habitat-early.txt",
+        "frames/watch-habitat-lived-in.txt",
+        "frames/watch-habitat-full-phase-a.txt",
+        "frames/watch-habitat-full-phase-b.txt",
+    ] {
+        assert!(run.out.join(file).is_file(), "missing {file}");
+    }
+
+    let catalog =
+        std::fs::read_to_string(run.out.join("frames/habitat-props-catalog.txt")).unwrap();
+    for prop_id in [
+        "token_pebble_25k",
+        "token_shell_100k",
+        "token_moss_tuft_250k",
+        "token_spark_500k",
+        "token_friendly_cloud_750k",
+        "token_shard_1m",
+        "token_treasure_chest_2m",
+        "token_orbit_5m",
+        "token_hanging_vine_25m",
+        "token_lantern_10m",
+        "codex_signal_lamp",
+        "heavy_session_planter",
+        "wilt_recovery_sprout",
+    ] {
+        assert!(catalog.contains(prop_id), "missing prop id {prop_id}");
+    }
+
+    let manifest = run.manifest();
+    assert_scenario(
+        &manifest,
+        "habitat-props-catalog",
+        "habitat-props",
+        (120, 50),
+        (
+            "frames/habitat-props-catalog.txt",
+            "frames/habitat-props-catalog.cells.json",
+            None,
+        ),
+    );
+    let scenario = scenario(&manifest, "habitat-props-catalog");
+    assert_eq!(scenario["inputs"]["prop_count"], 13);
+    assert_eq!(scenario["inputs"]["motion_phases"][0], 1_760_000_000i64);
+    assert_eq!(scenario["inputs"]["motion_phases"][1], 1_760_000_004i64);
+    assert_eq!(scenario["inputs"]["motion_phases"][2], 1_760_000_010i64);
+}
+
+#[test]
 fn dev_preview_all_writes_watch_and_pet_artifacts() {
     let run = PreviewRun::new();
 
@@ -371,6 +426,11 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-wide-normal.txt",
         "frames/watch-tall-wide.txt",
         "frames/watch-compact-normal.txt",
+        "frames/habitat-props-catalog.txt",
+        "frames/watch-habitat-early.txt",
+        "frames/watch-habitat-lived-in.txt",
+        "frames/watch-habitat-full-phase-a.txt",
+        "frames/watch-habitat-full-phase-b.txt",
         "frames/pet-species-stage.txt",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
@@ -384,6 +444,11 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-wide-normal".to_string(),
             "watch-tall-wide".to_string(),
             "watch-compact-normal".to_string(),
+            "habitat-props-catalog".to_string(),
+            "watch-habitat-early".to_string(),
+            "watch-habitat-lived-in".to_string(),
+            "watch-habitat-full-phase-a".to_string(),
+            "watch-habitat-full-phase-b".to_string(),
             "pet-species-stage".to_string(),
         ]
     );

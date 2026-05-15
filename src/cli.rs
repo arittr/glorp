@@ -62,4 +62,5 @@ pub enum PreviewScenarioArg {
     All,
     Watch,
     Pets,
+    Props,
 }

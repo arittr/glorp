@@ -11,12 +11,13 @@ use crate::storage::{
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
 use crate::tui::layout::render_watch_frame_with_layout;
+use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::{component::layout_watch_with_context, component::preview_layout};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 use std::path::Path;
-use time::{Duration, UtcOffset};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Vec<PreviewFrame>> {
     std::fs::create_dir_all(scratch_dir)?;
@@ -49,6 +50,15 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
     ])
 }
 
+pub(crate) struct WatchFrameFixture<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub width: u16,
+    pub height: u16,
+    pub state: &'a PetState,
+    pub now: OffsetDateTime,
+}
+
 fn render_watch_frame(
     id: &str,
     title: &str,
@@ -58,14 +68,42 @@ fn render_watch_frame(
     scratch_dir: &Path,
 ) -> Result<PreviewFrame> {
     let state = seeded_pet_state(ctx);
+    render_watch_frame_from_state(
+        ctx,
+        scratch_dir,
+        WatchFrameFixture {
+            id,
+            title,
+            width,
+            height,
+            state: &state,
+            now: ctx.fixed_now,
+        },
+    )
+}
+
+pub(crate) fn render_watch_frame_from_state(
+    ctx: &PreviewRenderContext,
+    scratch_dir: &Path,
+    fixture: WatchFrameFixture<'_>,
+) -> Result<PreviewFrame> {
+    let WatchFrameFixture {
+        id,
+        title,
+        width,
+        height,
+        state,
+        now,
+    } = fixture;
     let usage_path = scratch_dir.join(format!("{id}.sqlite"));
-    seed_usage_store(&usage_path, ctx)?;
-    let vm = build_watch_view_model_at(&state, &usage_path, ctx.fixed_now, UtcOffset::UTC)?;
-    let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &ctx.render);
+    seed_usage_store(&usage_path, now)?;
+    let render = RenderContext::with_clock(ctx.render.color_capability, WatchClock::fixed(now));
+    let vm = build_watch_view_model_at(state, &usage_path, now, UtcOffset::UTC)?;
+    let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &render);
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     terminal.draw(|frame| {
-        render_watch_frame_with_layout(frame, &vm, &ctx.render, &layout);
+        render_watch_frame_with_layout(frame, &vm, &render, &layout);
     })?;
 
     let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
@@ -139,24 +177,19 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state
 }
 
-fn seed_usage_store(path: &Path, ctx: &PreviewRenderContext) -> Result<()> {
+fn seed_usage_store(path: &Path, now: OffsetDateTime) -> Result<()> {
     let mut usage = UsageStore::open(path)?;
     for (surface, observed_at, effective_tokens, model) in [
         (
             "claude-code",
-            ctx.fixed_now - Duration::minutes(5),
+            now - Duration::minutes(5),
             12_500.0,
             "claude-sonnet",
         ),
-        (
-            "codex",
-            ctx.fixed_now - Duration::minutes(8),
-            4_200.0,
-            "gpt-5-codex",
-        ),
+        ("codex", now - Duration::minutes(8), 4_200.0, "gpt-5-codex"),
         (
             "claude-code",
-            ctx.fixed_now - Duration::days(1),
+            now - Duration::days(1),
             8_800.0,
             "claude-sonnet",
         ),

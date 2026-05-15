@@ -14,9 +14,12 @@ open target/glorp-preview/index.html
 
 Scenario options:
 
-- `--scenario all` renders both watch frames and the pet matrix.
+- `--scenario all` renders watch frames, the habitat prop QA frames, and the
+  pet matrix.
 - `--scenario watch` renders `watch-wide-normal` at `120x32` and
-  `watch-compact-normal` at `72x24`.
+  `watch-tall-wide` at `180x50`, and `watch-compact-normal` at `72x24`.
+- `--scenario props` renders `habitat-props-catalog` plus early, lived-in, and
+  full watch frames for prop-density review.
 - `--scenario pets` renders `pet-species-stage`, covering all six species
   across all seven growth stages.
 
@@ -37,6 +40,7 @@ Useful checks after preview changes:
 cargo test --test dev_preview
 cargo test dev_preview::scenarios
 cargo test dev_preview::export
+cargo test dev_preview::habitat_props
 ```
 
 ## Release Procedure

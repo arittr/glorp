@@ -39,6 +39,7 @@ pub struct PreviewScenario {
 pub enum PreviewScenarioKind {
     Watch,
     PetMatrix,
+    HabitatProps,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,6 +169,7 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
     match kind {
         PreviewScenarioKind::Watch => "watch",
         PreviewScenarioKind::PetMatrix => "pet-matrix",
+        PreviewScenarioKind::HabitatProps => "habitat-props",
     }
 }
 

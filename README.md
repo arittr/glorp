@@ -64,8 +64,9 @@ cargo run -- dev-preview --scenario all --out target/glorp-preview
 open target/glorp-preview/index.html
 ```
 
-Use `--scenario watch` for the wide/compact watch layouts, `--scenario pets`
-for the all-species/all-stage pet matrix, or `--scenario all` for both. The
+Use `--scenario watch` for the watch layouts, `--scenario props` for the habitat
+prop catalog and prop-density watch variants, `--scenario pets` for the
+all-species/all-stage pet matrix, or `--scenario all` for the whole bundle. The
 bundle also writes `manifest.json`, `review.md`, local assets, and
 `frames/*.txt` / `frames/*.cells.json` captures for agent review.
 

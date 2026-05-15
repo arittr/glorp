@@ -1,4 +1,4 @@
-use crate::game::habitat::HabitatPropKind;
+use crate::game::habitat::{catalog_prop_by_str, HabitatPropKind, HabitatPropZone};
 use crate::pet::generation::Species;
 use crate::tui::component::PetSceneLayout;
 use crate::tui::render_context::RenderContext;
@@ -8,7 +8,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
 
-const MAX_TROPHIES: usize = 3;
+const MAX_TROPHIES: usize = 6;
 const MAX_ACCENTS: usize = 4;
 const ACCENT_ROTATION_SECS: i64 = 600;
 const ACCENT_CANDIDATES: u16 = 16;
@@ -28,6 +28,24 @@ struct SpriteCell {
     glyph: char,
 }
 
+#[derive(Clone, Copy)]
+struct SpriteFootprint {
+    min_dx: i16,
+    max_dx: i16,
+    min_dy: i16,
+    max_dy: i16,
+}
+
+impl SpriteFootprint {
+    fn width(self) -> u16 {
+        (self.max_dx - self.min_dx + 1).max(1) as u16
+    }
+
+    fn height(self) -> u16 {
+        (self.max_dy - self.min_dy + 1).max(1) as u16
+    }
+}
+
 pub fn habitat_props_for(
     habitat: &HabitatView,
     scene: &PetSceneLayout,
@@ -40,17 +58,20 @@ pub fn habitat_props_for(
     let mut cells = Vec::new();
 
     for id in visible_trophy_ids(habitat) {
-        if let Some(anchor) = trophy_anchor(id, scene.habitat) {
+        let sprite = trophy_sprite(id, species, now);
+        let exclusions = trophy_exclusions(id, scene, &occupied);
+        for anchor in trophy_anchor_candidates(id, scene.habitat, sprite) {
             let rendered = render_sprite(
                 anchor,
-                trophy_sprite(id, species, now),
+                sprite,
                 scene.habitat,
-                &occupied,
+                &exclusions,
                 trophy_style(ctx.color_capability, species),
             );
             if !rendered.is_empty() {
                 occupied.push(bounds_for_cells(&rendered));
                 cells.extend(rendered);
+                break;
             }
         }
     }
@@ -115,28 +136,372 @@ fn sorted_accent_ids(habitat: &HabitatView) -> Vec<&str> {
     props.into_iter().map(|prop| prop.id.as_str()).collect()
 }
 
-fn trophy_anchor(id: &str, habitat: Rect) -> Option<Position> {
-    if habitat.width < 8 || habitat.height < 4 {
-        return None;
+fn trophy_anchor_candidates(
+    id: &str,
+    habitat: Rect,
+    sprite: &'static [SpriteCell],
+) -> Vec<Position> {
+    if habitat.width < 8 || habitat.height < 4 || sprite.is_empty() {
+        return Vec::new();
     }
-    let bottom = habitat.y + habitat.height.saturating_sub(2);
-    match id {
-        "wilt_recovery_sprout" => Some(Position::new(habitat.x + 2, bottom.saturating_sub(2))),
-        "heavy_session_planter" => Some(Position::new(
-            habitat.x + habitat.width.saturating_sub(8),
-            bottom.saturating_sub(2),
-        )),
-        "codex_signal_lamp" => Some(Position::new(
-            habitat.x + habitat.width.saturating_sub(5),
-            habitat.y + 2,
-        )),
-        _ => Some(Position::new(habitat.x + 3, bottom.saturating_sub(2))),
+
+    let zone = catalog_prop_by_str(id)
+        .map(|prop| prop.zone)
+        .unwrap_or(HabitatPropZone::FloorLeft);
+    let footprint = sprite_footprint(sprite);
+    zone_anchor_candidates(zone, habitat, footprint)
+}
+
+fn trophy_exclusions(id: &str, scene: &PetSceneLayout, occupied: &[Rect]) -> Vec<Rect> {
+    if trophy_can_sit_behind_pet(id) {
+        occupied
+            .iter()
+            .copied()
+            .filter(|rect| *rect != scene.pet_art)
+            .collect()
+    } else {
+        occupied.to_vec()
+    }
+}
+
+fn trophy_can_sit_behind_pet(id: &str) -> bool {
+    matches!(id, "token_friendly_cloud_750k" | "token_hanging_vine_25m")
+}
+
+fn sprite_footprint(sprite: &'static [SpriteCell]) -> SpriteFootprint {
+    let mut min_dx = 0;
+    let mut max_dx = 0;
+    let mut min_dy = 0;
+    let mut max_dy = 0;
+    for cell in sprite {
+        min_dx = min_dx.min(cell.dx);
+        max_dx = max_dx.max(cell.dx);
+        min_dy = min_dy.min(cell.dy);
+        max_dy = max_dy.max(cell.dy);
+    }
+    SpriteFootprint {
+        min_dx,
+        max_dx,
+        min_dy,
+        max_dy,
+    }
+}
+
+fn zone_anchor_candidates(
+    zone: HabitatPropZone,
+    habitat: Rect,
+    footprint: SpriteFootprint,
+) -> Vec<Position> {
+    let width = footprint.width();
+    let height = footprint.height();
+    if width > habitat.width || height > habitat.height {
+        return Vec::new();
+    }
+
+    let left = i32::from(habitat.x);
+    let right = i32::from(habitat.x + habitat.width - width);
+    let top = i32::from(habitat.y);
+    let bottom = i32::from(habitat.y + habitat.height - height);
+    let floor = (bottom - 1).max(top);
+    let air = (top + 2).min(bottom);
+    let ceiling = (top + 1).min(bottom);
+    let middle_x = left + (right - left) / 2;
+    let middle_y = top + (bottom - top) / 2;
+
+    let raw = match zone {
+        HabitatPropZone::FloorLeft => {
+            vec![(left + 2, floor), (left + 4, floor), (left + 2, floor - 1)]
+        }
+        HabitatPropZone::FloorMid => vec![
+            (middle_x, floor),
+            (middle_x - 7, floor),
+            (middle_x + 7, floor),
+            (middle_x, floor - 1),
+        ],
+        HabitatPropZone::FloorRight => vec![
+            (right - 5, floor),
+            (right - 3, floor),
+            (right - 7, floor - 1),
+        ],
+        HabitatPropZone::WallLeft => vec![
+            (left + 2, middle_y),
+            (left + 2, middle_y - 2),
+            (left + 4, middle_y + 2),
+        ],
+        HabitatPropZone::WallRight => vec![
+            (right - 2, middle_y),
+            (right - 4, middle_y - 2),
+            (right - 2, middle_y + 2),
+        ],
+        HabitatPropZone::AirLeft => vec![(left + 3, air), (left + 6, air + 2), (left + 2, air + 4)],
+        HabitatPropZone::AirMid => vec![
+            (middle_x, air),
+            (middle_x - 6, air + 1),
+            (middle_x + 6, air + 2),
+            (middle_x, middle_y - 2),
+        ],
+        HabitatPropZone::AirRight => {
+            vec![(right - 4, air), (right - 2, air + 2), (right - 7, air + 4)]
+        }
+        HabitatPropZone::Ceiling => vec![
+            (middle_x, ceiling),
+            (middle_x - 8, ceiling),
+            (middle_x + 8, ceiling),
+            (left + 3, ceiling),
+            (right - 3, ceiling),
+        ],
+    };
+
+    let mut anchors = Vec::new();
+    for (candidate_left, candidate_top) in raw {
+        push_anchor_candidate(
+            &mut anchors,
+            habitat,
+            footprint,
+            candidate_left,
+            candidate_top,
+        );
+    }
+    anchors
+}
+
+fn push_anchor_candidate(
+    anchors: &mut Vec<Position>,
+    habitat: Rect,
+    footprint: SpriteFootprint,
+    left: i32,
+    top: i32,
+) {
+    let max_left = i32::from(habitat.x + habitat.width - footprint.width());
+    let max_top = i32::from(habitat.y + habitat.height - footprint.height());
+    let left = left.clamp(i32::from(habitat.x), max_left);
+    let top = top.clamp(i32::from(habitat.y), max_top);
+    let anchor_x = left - i32::from(footprint.min_dx);
+    let anchor_y = top - i32::from(footprint.min_dy);
+    if anchor_x < 0 || anchor_y < 0 {
+        return;
+    }
+    let Ok(anchor_x) = u16::try_from(anchor_x) else {
+        return;
+    };
+    let Ok(anchor_y) = u16::try_from(anchor_y) else {
+        return;
+    };
+    let anchor = Position::new(anchor_x, anchor_y);
+    if !anchors.contains(&anchor) {
+        anchors.push(anchor);
     }
 }
 
 fn trophy_sprite(id: &str, _species: Species, now: time::OffsetDateTime) -> &'static [SpriteCell] {
     let phase = now.unix_timestamp().rem_euclid(8);
     match id {
+        "token_moss_tuft_250k" if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '▂',
+            },
+        ],
+        "token_moss_tuft_250k" => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '▂',
+            },
+        ],
+        "token_friendly_cloud_750k" if phase < 4 => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '☁',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '◦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◡',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '◦',
+            },
+        ],
+        "token_friendly_cloud_750k" => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '☁',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '˙',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◡',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '˙',
+            },
+        ],
+        "token_treasure_chest_2m" if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '╭',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '╮',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '▣',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◇',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '▣',
+            },
+        ],
+        "token_treasure_chest_2m" => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '╭',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '╮',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '▣',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◆',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '▣',
+            },
+        ],
+        "token_hanging_vine_25m" if phase < 4 => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╽',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '╲',
+            },
+        ],
+        "token_hanging_vine_25m" => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╽',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '╱',
+            },
+        ],
         "codex_signal_lamp" if phase < 4 => &[
             SpriteCell {
                 dx: 0,
@@ -501,6 +866,7 @@ fn accent_glyph(id: &str, now: time::OffsetDateTime) -> char {
 fn prop_visual_glyphs_for_test() -> &'static [char] {
     &[
         '╷', '◉', '○', '╵', 'ѱ', '╲', '┃', '╱', '◌', '╿', '◈', '▝', '▲', '✦', '·', '◆', '°', '☼',
+        '▂', '☁', '◦', '◡', '˙', '╭', '─', '╮', '▣', '◇', '╽',
     ]
 }
 
@@ -609,13 +975,16 @@ mod tests {
     }
 
     #[test]
-    fn trophy_selection_caps_at_three_by_priority_then_age() {
+    fn trophy_selection_caps_at_six_by_priority_then_age() {
         let habitat = HabitatView {
             earned_props: vec![
                 earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
                 earned("heavy_session_planter", HabitatPropKind::Trophy, 80, 1),
                 earned("wilt_recovery_sprout", HabitatPropKind::Trophy, 90, 2),
                 earned("extra_trophy_for_cap_test", HabitatPropKind::Trophy, 95, 3),
+                earned("token_treasure_chest_2m", HabitatPropKind::Trophy, 100, 4),
+                earned("token_friendly_cloud_750k", HabitatPropKind::Trophy, 110, 5),
+                earned("token_hanging_vine_25m", HabitatPropKind::Trophy, 120, 6),
             ],
         };
 
@@ -624,10 +993,55 @@ mod tests {
         assert_eq!(
             selected,
             vec![
+                "token_hanging_vine_25m",
+                "token_friendly_cloud_750k",
+                "token_treasure_chest_2m",
                 "extra_trophy_for_cap_test",
                 "wilt_recovery_sprout",
-                "heavy_session_planter"
+                "heavy_session_planter",
             ]
+        );
+    }
+
+    #[test]
+    fn trophy_zones_place_objects_in_floor_air_and_center_areas() {
+        let habitat = HabitatView {
+            earned_props: vec![
+                earned("token_treasure_chest_2m", HabitatPropKind::Trophy, 100, 0),
+                earned("token_friendly_cloud_750k", HabitatPropKind::Trophy, 110, 1),
+                earned("token_hanging_vine_25m", HabitatPropKind::Trophy, 120, 2),
+            ],
+        };
+        let mut scene = scene();
+        scene.exclusions.clear();
+
+        let cells = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00 UTC)),
+        );
+
+        assert!(
+            cells.iter().any(|cell| cell.glyph == '▣'),
+            "treasure chest should render"
+        );
+        assert!(
+            cells.iter().any(|cell| cell.glyph == '☁'),
+            "friendly cloud should render"
+        );
+        assert!(
+            cells.iter().any(|cell| cell.glyph == '╽'),
+            "hanging vine should render"
+        );
+        assert!(
+            cells.iter().any(|cell| cell.col >= 16 && cell.col <= 23),
+            "at least one sprite should occupy the middle habitat columns: {cells:?}"
+        );
+        assert!(
+            cells.iter().any(|cell| cell.row <= 3),
+            "at least one sprite should occupy air or ceiling rows: {cells:?}"
         );
     }
 
