@@ -150,6 +150,7 @@ fn render_single_prop(
     for cell in habitat_props_for(
         &habitat_view,
         &scene,
+        &[],
         Species::Fuzz,
         "glorp-preview-props",
         &render_ctx,

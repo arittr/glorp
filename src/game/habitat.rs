@@ -17,6 +17,24 @@ pub enum HabitatPropKind {
     Accent,
 }
 
+/// Determines whether a prop renders before or after the pet, and whether it
+/// avoids the pet's silhouette + halo when placing.
+///
+/// - `Background`: rendered before pet, avoids silhouette+halo. The vast
+///   majority of props — they stay clear of the pet entirely.
+/// - `Behind`: rendered before pet, no silhouette exclusion. The pet's
+///   non-space glyphs paint over the prop where they overlap, so the prop
+///   appears to sit *behind* the pet (parts visible in the diamond's
+///   negative space).
+/// - `Foreground`: rendered after pet, paints over the pet's silhouette.
+///   The prop appears *in front of* the pet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HabitatPetLayer {
+    Background,
+    Behind,
+    Foreground,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HabitatPropZone {
     FloorLeft,
@@ -37,6 +55,7 @@ pub struct HabitatPropSpec {
     pub zone: HabitatPropZone,
     pub display_priority: i16,
     pub lifetime_threshold: Option<f64>,
+    pub pet_layer: HabitatPetLayer,
 }
 
 pub const TOKEN_PEBBLE_25K: &str = "token_pebble_25k";
@@ -60,6 +79,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorLeft,
         display_priority: 10,
         lifetime_threshold: Some(25_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_SHELL_100K,
@@ -67,6 +87,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorRight,
         display_priority: 20,
         lifetime_threshold: Some(100_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_MOSS_TUFT_250K,
@@ -74,6 +95,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorMid,
         display_priority: 25,
         lifetime_threshold: Some(250_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_SPARK_500K,
@@ -81,6 +103,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::AirLeft,
         display_priority: 30,
         lifetime_threshold: Some(500_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_FRIENDLY_CLOUD_750K,
@@ -88,6 +111,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::AirMid,
         display_priority: 45,
         lifetime_threshold: Some(750_000.0),
+        pet_layer: HabitatPetLayer::Behind,
     },
     HabitatPropSpec {
         id: TOKEN_SHARD_1M,
@@ -95,6 +119,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::WallRight,
         display_priority: 40,
         lifetime_threshold: Some(1_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_TREASURE_CHEST_2M,
@@ -102,6 +127,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorMid,
         display_priority: 55,
         lifetime_threshold: Some(2_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_ORBIT_5M,
@@ -109,6 +135,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::AirRight,
         display_priority: 50,
         lifetime_threshold: Some(5_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_LANTERN_10M,
@@ -116,6 +143,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::Ceiling,
         display_priority: 60,
         lifetime_threshold: Some(10_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: TOKEN_HANGING_VINE_25M,
@@ -123,6 +151,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::Ceiling,
         display_priority: 65,
         lifetime_threshold: Some(25_000_000.0),
+        pet_layer: HabitatPetLayer::Behind,
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
@@ -130,6 +159,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::AirRight,
         display_priority: 70,
         lifetime_threshold: None,
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: HEAVY_SESSION_PLANTER,
@@ -137,6 +167,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorRight,
         display_priority: 80,
         lifetime_threshold: None,
+        pet_layer: HabitatPetLayer::Background,
     },
     HabitatPropSpec {
         id: WILT_RECOVERY_SPROUT,
@@ -144,6 +175,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorLeft,
         display_priority: 90,
         lifetime_threshold: None,
+        pet_layer: HabitatPetLayer::Background,
     },
 ];
 
@@ -274,4 +306,48 @@ fn record_prop(
         source,
     });
     unlocked.push(id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloud_and_vine_are_behind_pet_layer() {
+        assert_eq!(
+            catalog_prop_by_str(TOKEN_FRIENDLY_CLOUD_750K)
+                .unwrap()
+                .pet_layer,
+            HabitatPetLayer::Behind
+        );
+        assert_eq!(
+            catalog_prop_by_str(TOKEN_HANGING_VINE_25M)
+                .unwrap()
+                .pet_layer,
+            HabitatPetLayer::Behind
+        );
+    }
+
+    #[test]
+    fn other_props_default_to_background_pet_layer() {
+        for id in [
+            TOKEN_PEBBLE_25K,
+            TOKEN_SHELL_100K,
+            TOKEN_MOSS_TUFT_250K,
+            TOKEN_SPARK_500K,
+            TOKEN_SHARD_1M,
+            TOKEN_TREASURE_CHEST_2M,
+            TOKEN_ORBIT_5M,
+            TOKEN_LANTERN_10M,
+            CODEX_SIGNAL_LAMP,
+            HEAVY_SESSION_PLANTER,
+            WILT_RECOVERY_SPROUT,
+        ] {
+            assert_eq!(
+                catalog_prop_by_str(id).unwrap().pet_layer,
+                HabitatPetLayer::Background,
+                "{id} should default to Background"
+            );
+        }
+    }
 }

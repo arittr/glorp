@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::game::evolution::Stage;
+use crate::game::habitat::HabitatPetLayer;
 use crate::pet::animator::{
     compute_facing, compute_shimmer_role, compute_token_pop, compute_twinkle,
     compute_wander_position_x, low_energy_lightness_multiplier,
@@ -296,22 +297,25 @@ impl LegacyPanel for PetPanel {
         let vm = vm.as_ref();
         let scene = PetScene::compute_layout(area, vm, ctx);
 
-        // Pass 1: ambient backdrop. Replace the pet's bounding-rect exclusion
-        // with a per-cell silhouette + 1-cell halo so habitat glyphs can fill
-        // the diamond's negative space (corners, frame padding rows) while
-        // still keeping a breathing margin around the pet itself.
+        // Per-cell pet silhouette + 1-cell halo, shared by every pass that
+        // wants pet avoidance. Replaces the inflated bounding rect so habitat
+        // content can fill the diamond's negative space while keeping a
+        // breathing margin around the actual pet outline.
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let stage = vm.pet_render.stage;
         let mirror = vm.facing == -1;
         let silhouette_halo = pet_silhouette_halo_rects(&vm.pet_art, scene.pet_art, mirror);
+
+        // Pass 1: ambient backdrop — uses the silhouette halo as a per-cell
+        // exclusion so dots/sparkles flow through the rect's negative space.
         let mut ambient_exclusions: Vec<Rect> = scene
             .exclusions
             .iter()
             .copied()
             .filter(|r| *r != scene.pet_art)
             .collect();
-        ambient_exclusions.extend(silhouette_halo);
+        ambient_exclusions.extend_from_slice(&silhouette_halo);
         let glyphs = ambient_glyphs_for(
             species,
             stage,
@@ -328,11 +332,23 @@ impl LegacyPanel for PetPanel {
             }
         }
 
-        for prop in habitat_props_for(&vm.habitat, &scene, species, &vm.pet_render.seed, ctx) {
-            if prop.col >= scene.habitat.x
-                && prop.row >= scene.habitat.y
-                && prop.col < scene.habitat.x.saturating_add(scene.habitat.width)
-                && prop.row < scene.habitat.y.saturating_add(scene.habitat.height)
+        // Trophies + accents, classified by their pet-layer from the catalog.
+        // Background avoids the silhouette halo; Behind ignores it (renders
+        // pre-pet to sit visually behind); Foreground ignores it and renders
+        // post-pet to sit visually in front.
+        let prop_cells = habitat_props_for(
+            &vm.habitat,
+            &scene,
+            &silhouette_halo,
+            species,
+            &vm.pet_render.seed,
+            ctx,
+        );
+        for prop in &prop_cells {
+            if matches!(
+                prop.pet_layer,
+                HabitatPetLayer::Background | HabitatPetLayer::Behind
+            ) && habitat_contains(&scene, prop)
             {
                 let cell = &mut buf[(prop.col, prop.row)];
                 cell.set_char(prop.glyph);
@@ -340,9 +356,30 @@ impl LegacyPanel for PetPanel {
             }
         }
 
-        // Pass 3: pet art with shimmer, twinkle, and token-pop overlays.
+        // Pet art with shimmer, twinkle, and token-pop overlays — paints over
+        // any Background / Behind cells it touches via the silhouette.
         render_pet_inside(buf, vm, &scene, now);
+
+        // Foreground props paint on top of the pet, for whenever depth in
+        // front of the pet is wanted (no foreground props in the catalog
+        // today; the pass exists so adding one only requires a catalog flip).
+        for prop in &prop_cells {
+            if matches!(prop.pet_layer, HabitatPetLayer::Foreground)
+                && habitat_contains(&scene, prop)
+            {
+                let cell = &mut buf[(prop.col, prop.row)];
+                cell.set_char(prop.glyph);
+                cell.set_style(prop.style);
+            }
+        }
     }
+}
+
+fn habitat_contains(scene: &PetSceneLayout, prop: &crate::tui::component::HabitatPropCell) -> bool {
+    prop.col >= scene.habitat.x
+        && prop.row >= scene.habitat.y
+        && prop.col < scene.habitat.x.saturating_add(scene.habitat.width)
+        && prop.row < scene.habitat.y.saturating_add(scene.habitat.height)
 }
 
 /// Renders the speech bubble and pet art into `area`, centered vertically.

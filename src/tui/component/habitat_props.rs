@@ -1,4 +1,6 @@
-use crate::game::habitat::{catalog_prop_by_str, HabitatPropKind, HabitatPropZone};
+use crate::game::habitat::{
+    catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone,
+};
 use crate::pet::generation::Species;
 use crate::tui::component::PetSceneLayout;
 use crate::tui::render_context::RenderContext;
@@ -19,6 +21,7 @@ pub struct HabitatPropCell {
     pub col: u16,
     pub glyph: char,
     pub style: Style,
+    pub pet_layer: HabitatPetLayer,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +52,7 @@ impl SpriteFootprint {
 pub fn habitat_props_for(
     habitat: &HabitatView,
     scene: &PetSceneLayout,
+    silhouette_halo: &[Rect],
     species: Species,
     seed: &str,
     ctx: &RenderContext,
@@ -58,8 +62,9 @@ pub fn habitat_props_for(
     let mut cells = Vec::new();
 
     for id in visible_trophy_ids(habitat) {
+        let layer = prop_pet_layer(id);
         let sprite = trophy_sprite(id, species, now);
-        let exclusions = trophy_exclusions(id, scene, &occupied);
+        let exclusions = exclusions_for_layer(layer, scene, &occupied, silhouette_halo);
         for anchor in trophy_anchor_candidates(id, scene.habitat, sprite) {
             let rendered = render_sprite(
                 anchor,
@@ -67,6 +72,7 @@ pub fn habitat_props_for(
                 scene.habitat,
                 &exclusions,
                 trophy_style(ctx.color_capability, species),
+                layer,
             );
             if !rendered.is_empty() {
                 occupied.push(bounds_for_cells(&rendered));
@@ -77,7 +83,8 @@ pub fn habitat_props_for(
     }
 
     if matches!(ctx.color_capability, ColorCapability::Truecolor) {
-        let accent_cells = stable_accent_cells_by_id(habitat, scene.habitat, &occupied, seed, now);
+        let accent_cells =
+            stable_accent_cells_by_id(habitat, scene, &occupied, silhouette_halo, seed, now);
         for id in visible_accent_ids(habitat, now) {
             if let Some(cell) = accent_cells.get(id) {
                 cells.push(cell.clone());
@@ -86,6 +93,36 @@ pub fn habitat_props_for(
     }
 
     cells
+}
+
+fn prop_pet_layer(id: &str) -> HabitatPetLayer {
+    catalog_prop_by_str(id)
+        .map(|spec| spec.pet_layer)
+        .unwrap_or(HabitatPetLayer::Background)
+}
+
+/// Drops the pet's bounding rect from the inherited `occupied` set and adds
+/// the silhouette halo for layers that should avoid the pet. The 13×10
+/// bounding rect is the rough box used for layout, but for placement we want
+/// the precise per-cell silhouette + halo — replacing it gives Background
+/// props access to the diamond's negative space while still respecting the
+/// actual pet outline. Behind / Foreground props drop the rect and skip the
+/// halo, so they can overlap with the pet's silhouette directly.
+fn exclusions_for_layer(
+    layer: HabitatPetLayer,
+    scene: &PetSceneLayout,
+    occupied: &[Rect],
+    silhouette_halo: &[Rect],
+) -> Vec<Rect> {
+    let mut without_pet_rect: Vec<Rect> = occupied
+        .iter()
+        .copied()
+        .filter(|rect| *rect != scene.pet_art)
+        .collect();
+    if matches!(layer, HabitatPetLayer::Background) {
+        without_pet_rect.extend_from_slice(silhouette_halo);
+    }
+    without_pet_rect
 }
 
 pub(crate) fn visible_trophy_ids(habitat: &HabitatView) -> Vec<&str> {
@@ -150,22 +187,6 @@ fn trophy_anchor_candidates(
         .unwrap_or(HabitatPropZone::FloorLeft);
     let footprint = sprite_footprint(sprite);
     zone_anchor_candidates(zone, habitat, footprint)
-}
-
-fn trophy_exclusions(id: &str, scene: &PetSceneLayout, occupied: &[Rect]) -> Vec<Rect> {
-    if trophy_can_sit_behind_pet(id) {
-        occupied
-            .iter()
-            .copied()
-            .filter(|rect| *rect != scene.pet_art)
-            .collect()
-    } else {
-        occupied.to_vec()
-    }
-}
-
-fn trophy_can_sit_behind_pet(id: &str) -> bool {
-    matches!(id, "token_friendly_cloud_750k" | "token_hanging_vine_25m")
 }
 
 fn sprite_footprint(sprite: &'static [SpriteCell]) -> SpriteFootprint {
@@ -655,6 +676,7 @@ fn render_sprite(
     habitat: Rect,
     exclusions: &[Rect],
     style: Style,
+    pet_layer: HabitatPetLayer,
 ) -> Vec<HabitatPropCell> {
     let mut cells = Vec::new();
     for cell in sprite {
@@ -669,6 +691,7 @@ fn render_sprite(
             col: pos.x,
             glyph: cell.glyph,
             style,
+            pet_layer,
         });
     }
     cells
@@ -688,22 +711,26 @@ fn offset_position(anchor: Position, dx: i16, dy: i16) -> Option<Position> {
 
 fn stable_accent_cells_by_id<'a>(
     habitat: &'a HabitatView,
-    area: Rect,
-    exclusions: &[Rect],
+    scene: &PetSceneLayout,
+    occupied: &[Rect],
+    silhouette_halo: &[Rect],
     seed: &str,
     now: time::OffsetDateTime,
 ) -> HashMap<&'a str, HabitatPropCell> {
-    let anchors = stable_accent_anchors_by_id(habitat, area, exclusions, seed);
-    let mut rendered = exclusions.to_vec();
+    let anchors = stable_accent_anchors_by_id(habitat, scene, occupied, silhouette_halo, seed);
+    let mut rendered = occupied.to_vec();
     let mut cells = HashMap::new();
 
     for id in sorted_accent_ids(habitat) {
         let Some(anchor) = anchors.get(id).copied() else {
             continue;
         };
-        let mut blocked = rendered.clone();
+        let layer = prop_pet_layer(id);
+        let layer_excl = exclusions_for_layer(layer, scene, &rendered, silhouette_halo);
+        let mut blocked = layer_excl;
         blocked.extend(anchor_exclusions_except(&anchors, id));
-        if let Some(cell) = accent_cell_from_anchor(id, anchor, area, &blocked, now) {
+        if let Some(cell) = accent_cell_from_anchor(id, anchor, scene.habitat, &blocked, layer, now)
+        {
             rendered.push(Rect::new(cell.col, cell.row, 1, 1));
             cells.insert(id, cell);
         }
@@ -727,15 +754,18 @@ fn anchor_exclusions_except(anchors: &HashMap<&str, Position>, id: &str) -> Vec<
 
 fn stable_accent_anchors_by_id<'a>(
     habitat: &'a HabitatView,
-    area: Rect,
-    exclusions: &[Rect],
+    scene: &PetSceneLayout,
+    occupied_base: &[Rect],
+    silhouette_halo: &[Rect],
     seed: &str,
 ) -> HashMap<&'a str, Position> {
-    let mut occupied = exclusions.to_vec();
+    let mut occupied = occupied_base.to_vec();
     let mut anchors = HashMap::new();
 
     for id in sorted_accent_ids(habitat) {
-        if let Some(anchor) = accent_anchor_for(id, area, &occupied, seed) {
+        let layer = prop_pet_layer(id);
+        let layer_excl = exclusions_for_layer(layer, scene, &occupied, silhouette_halo);
+        if let Some(anchor) = accent_anchor_for(id, scene.habitat, &layer_excl, seed) {
             occupied.push(Rect::new(anchor.x, anchor.y, 1, 1));
             anchors.insert(id, anchor);
         }
@@ -753,7 +783,7 @@ fn render_accent(
     now: time::OffsetDateTime,
 ) -> Option<HabitatPropCell> {
     let anchor = accent_anchor_for(id, habitat, exclusions, seed)?;
-    accent_cell_from_anchor(id, anchor, habitat, exclusions, now)
+    accent_cell_from_anchor(id, anchor, habitat, exclusions, prop_pet_layer(id), now)
 }
 
 fn accent_anchor_for(id: &str, habitat: Rect, exclusions: &[Rect], seed: &str) -> Option<Position> {
@@ -792,6 +822,7 @@ fn accent_cell_from_anchor(
     anchor: Position,
     habitat: Rect,
     exclusions: &[Rect],
+    pet_layer: HabitatPetLayer,
     now: time::OffsetDateTime,
 ) -> Option<HabitatPropCell> {
     if habitat.width < 4 || habitat.height < 3 {
@@ -822,6 +853,7 @@ fn accent_cell_from_anchor(
         col: pos.x,
         glyph: accent_glyph(id, now),
         style: accent_style(),
+        pet_layer,
     })
 }
 
@@ -903,7 +935,9 @@ fn bounds_for_cells(cells: &[HabitatPropCell]) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::habitat::HabitatPropKind;
+    use crate::game::habitat::{
+        HabitatPetLayer, HabitatPropKind, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_PEBBLE_25K,
+    };
     use crate::pet::generation::Species;
     use crate::storage::state::HabitatPropId;
     use crate::tui::component::{ComponentPath, PetSceneLayout, TargetPath};
@@ -946,6 +980,112 @@ mod tests {
     }
 
     #[test]
+    fn habitat_props_attach_pet_layer_from_catalog() {
+        let habitat = HabitatView {
+            earned_props: vec![
+                earned(TOKEN_FRIENDLY_CLOUD_750K, HabitatPropKind::Trophy, 45, 0),
+                earned(TOKEN_PEBBLE_25K, HabitatPropKind::Accent, 10, 1),
+            ],
+        };
+        let mut scene = scene();
+        scene.exclusions.clear();
+
+        let cells = habitat_props_for(
+            &habitat,
+            &scene,
+            &[],
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00 UTC)),
+        );
+
+        let cloud_cell = cells
+            .iter()
+            .find(|cell| cell.glyph == '☁')
+            .expect("cloud rendered");
+        assert_eq!(cloud_cell.pet_layer, HabitatPetLayer::Behind);
+
+        let pebble_cell = cells
+            .iter()
+            .find(|cell| cell.glyph == '▲')
+            .expect("pebble rendered");
+        assert_eq!(pebble_cell.pet_layer, HabitatPetLayer::Background);
+    }
+
+    #[test]
+    fn background_props_avoid_silhouette_halo_rects() {
+        // A 1×1 silhouette cell at the pebble's expected anchor area should
+        // push the pebble (Background layer) to a different cell. The cell
+        // explicitly covered by silhouette_halo must not appear in any
+        // Background prop's output.
+        let habitat_view = HabitatView {
+            earned_props: vec![earned(TOKEN_PEBBLE_25K, HabitatPropKind::Accent, 10, 0)],
+        };
+        let mut scene = scene();
+        scene.exclusions.clear();
+        // Cover most of the habitat with a per-cell silhouette except a small
+        // free strip on the right side. The pebble must land on a free cell.
+        let blocked: Vec<Rect> = (0..scene.habitat.width.saturating_sub(4))
+            .flat_map(|dx| (0..scene.habitat.height).map(move |dy| Rect::new(dx, dy, 1, 1)))
+            .collect();
+
+        let cells = habitat_props_for(
+            &habitat_view,
+            &scene,
+            &blocked,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00 UTC)),
+        );
+
+        let pebble = cells
+            .iter()
+            .find(|cell| cell.glyph == '▲')
+            .expect("pebble should still render in the free strip");
+        assert!(
+            pebble.col >= scene.habitat.width - 4,
+            "Background pebble must avoid blocked silhouette region; landed at col {}",
+            pebble.col
+        );
+    }
+
+    #[test]
+    fn behind_props_ignore_silhouette_halo_rects() {
+        // Even if the silhouette halo covers a Behind prop's anchor zone,
+        // the prop must still render — it renders before the pet pass and
+        // gets visually layered behind the pet's silhouette.
+        let habitat_view = HabitatView {
+            earned_props: vec![earned(
+                TOKEN_FRIENDLY_CLOUD_750K,
+                HabitatPropKind::Trophy,
+                45,
+                0,
+            )],
+        };
+        let mut scene = scene();
+        scene.exclusions.clear();
+        // Block the entire habitat at the cell level. A Background prop
+        // would be unable to render anywhere; a Behind prop must ignore it.
+        let blocked: Vec<Rect> = (0..scene.habitat.width)
+            .flat_map(|dx| (0..scene.habitat.height).map(move |dy| Rect::new(dx, dy, 1, 1)))
+            .collect();
+
+        let cells = habitat_props_for(
+            &habitat_view,
+            &scene,
+            &blocked,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00 UTC)),
+        );
+
+        assert!(
+            cells.iter().any(|cell| cell.glyph == '☁'),
+            "Behind cloud must render even when silhouette covers its anchor zone"
+        );
+    }
+
+    #[test]
     fn prop_cells_stay_inside_habitat_and_outside_exclusions() {
         let habitat = HabitatView {
             earned_props: vec![
@@ -957,6 +1097,7 @@ mod tests {
         let cells = habitat_props_for(
             &habitat,
             &scene(),
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:10 UTC)),
@@ -1018,6 +1159,7 @@ mod tests {
         let cells = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:00 UTC)),
@@ -1079,7 +1221,14 @@ mod tests {
             WatchClock::fixed(datetime!(2026-05-11 12:10 UTC)),
         );
 
-        let cells = habitat_props_for(&habitat, &scene(), Species::Fuzz, "fixture-seed", &flat_ctx);
+        let cells = habitat_props_for(
+            &habitat,
+            &scene(),
+            &[],
+            Species::Fuzz,
+            "fixture-seed",
+            &flat_ctx,
+        );
         let glyphs = cells.iter().map(|cell| cell.glyph).collect::<Vec<_>>();
 
         assert!(glyphs.iter().any(|glyph| *glyph == '◉' || *glyph == '○'));
@@ -1099,6 +1248,7 @@ mod tests {
         let first = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(first_time),
@@ -1109,6 +1259,7 @@ mod tests {
         let second = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(second_time),
@@ -1138,6 +1289,7 @@ mod tests {
         let before_rotation = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:21 UTC)),
@@ -1148,6 +1300,7 @@ mod tests {
         let after_rotation = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:31 UTC)),
@@ -1180,6 +1333,7 @@ mod tests {
         let before_rotation = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:21 UTC)),
@@ -1190,6 +1344,7 @@ mod tests {
         let after_rotation = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:31 UTC)),
@@ -1221,6 +1376,7 @@ mod tests {
         let before_phase = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:00:09 UTC)),
@@ -1231,6 +1387,7 @@ mod tests {
         let after_phase = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:00:10 UTC)),
@@ -1263,6 +1420,7 @@ mod tests {
             let before = habitat_props_for(
                 &habitat,
                 &scene,
+                &[],
                 Species::Fuzz,
                 seed,
                 &ctx(datetime!(2026-05-11 12:00:09 UTC)),
@@ -1273,6 +1431,7 @@ mod tests {
             let after = habitat_props_for(
                 &habitat,
                 &scene,
+                &[],
                 Species::Fuzz,
                 seed,
                 &ctx(datetime!(2026-05-11 12:00:10 UTC)),
@@ -1302,6 +1461,7 @@ mod tests {
         let fuzz = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Fuzz,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:00 UTC)),
@@ -1312,6 +1472,7 @@ mod tests {
         let mech = habitat_props_for(
             &habitat,
             &scene,
+            &[],
             Species::Mech,
             "fixture-seed",
             &ctx(datetime!(2026-05-11 12:00 UTC)),
@@ -1361,6 +1522,7 @@ mod tests {
             Rect::new(0, 0, 8, 4),
             &[],
             Style::default(),
+            HabitatPetLayer::Background,
         );
 
         assert!(cells.is_empty());
