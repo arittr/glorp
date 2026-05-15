@@ -56,6 +56,11 @@ pub struct HabitatPropSpec {
     pub display_priority: i16,
     pub lifetime_threshold: Option<f64>,
     pub pet_layer: HabitatPetLayer,
+    /// Natural rendering color for this prop's glyphs. Picked to read as
+    /// the real-world thing (mossy green for plants, amber for chests,
+    /// warm orange for lanterns) rather than tinted to match the pet —
+    /// the habitat is a place, the pet is a creature in it.
+    pub color: (u8, u8, u8),
 }
 
 pub const TOKEN_PEBBLE_25K: &str = "token_pebble_25k";
@@ -80,6 +85,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 10,
         lifetime_threshold: Some(25_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        color: (0xa8, 0xa4, 0x9c), // weathered stone
     },
     HabitatPropSpec {
         id: TOKEN_SHELL_100K,
@@ -88,6 +94,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 20,
         lifetime_threshold: Some(100_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        color: (0xe8, 0xc8, 0xa8), // pearly cream
     },
     HabitatPropSpec {
         id: TOKEN_MOSS_TUFT_250K,
@@ -96,6 +103,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 25,
         lifetime_threshold: Some(250_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        color: (0x6f, 0xb0, 0x60), // moss green
     },
     HabitatPropSpec {
         id: TOKEN_SPARK_500K,
@@ -104,6 +112,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 30,
         lifetime_threshold: Some(500_000.0),
         pet_layer: HabitatPetLayer::Background,
+        color: (0xff, 0xee, 0x9c), // soft spark yellow
     },
     HabitatPropSpec {
         id: TOKEN_FRIENDLY_CLOUD_750K,
@@ -112,6 +121,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 45,
         lifetime_threshold: Some(750_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        color: (0xe8, 0xed, 0xf2), // soft cloud white
     },
     HabitatPropSpec {
         id: TOKEN_SHARD_1M,
@@ -120,6 +130,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 40,
         lifetime_threshold: Some(1_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        color: (0x82, 0xcc, 0xd8), // crystal teal
     },
     HabitatPropSpec {
         id: TOKEN_TREASURE_CHEST_2M,
@@ -128,6 +139,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 55,
         lifetime_threshold: Some(2_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        color: (0xd8, 0xa4, 0x4c), // antique gold
     },
     HabitatPropSpec {
         id: TOKEN_ORBIT_5M,
@@ -136,6 +148,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 50,
         lifetime_threshold: Some(5_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        color: (0xb0, 0x9c, 0xe8), // pale violet
     },
     HabitatPropSpec {
         id: TOKEN_LANTERN_10M,
@@ -144,6 +157,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 60,
         lifetime_threshold: Some(10_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        color: (0xf0, 0xb4, 0x60), // lantern glow
     },
     HabitatPropSpec {
         id: TOKEN_HANGING_VINE_25M,
@@ -152,6 +166,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 65,
         lifetime_threshold: Some(25_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        color: (0x7a, 0xb8, 0x80), // leafy green
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
@@ -160,6 +175,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 70,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Background,
+        color: (0xd8, 0x6c, 0x5c), // signal-lamp red
     },
     HabitatPropSpec {
         id: HEAVY_SESSION_PLANTER,
@@ -168,6 +184,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 80,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Behind,
+        color: (0x6f, 0xb0, 0x60), // potted foliage
     },
     HabitatPropSpec {
         id: WILT_RECOVERY_SPROUT,
@@ -176,6 +193,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 90,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Behind,
+        color: (0x88, 0xc8, 0x78), // tender sprout
     },
 ];
 
@@ -311,6 +329,57 @@ fn record_prop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moss_tuft_and_planter_render_in_green() {
+        for id in [
+            TOKEN_MOSS_TUFT_250K,
+            HEAVY_SESSION_PLANTER,
+            WILT_RECOVERY_SPROUT,
+        ] {
+            let (r, g, b) = catalog_prop_by_str(id).unwrap().color;
+            assert!(
+                g > r && g > b,
+                "{id} should be green-dominant; got rgb({r}, {g}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn treasure_chest_renders_in_warm_amber() {
+        let (r, g, b) = catalog_prop_by_str(TOKEN_TREASURE_CHEST_2M).unwrap().color;
+        assert!(
+            r > 180 && r > b && g > b,
+            "treasure chest should be warm/amber; got rgb({r}, {g}, {b})"
+        );
+    }
+
+    #[test]
+    fn lantern_and_signal_lamp_render_in_warm_red_to_orange() {
+        for id in [TOKEN_LANTERN_10M, CODEX_SIGNAL_LAMP] {
+            let (r, g, b) = catalog_prop_by_str(id).unwrap().color;
+            assert!(
+                r > g && r > b,
+                "{id} should read warm (r dominant); got rgb({r}, {g}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn props_have_distinct_colors() {
+        // Catch the regression where every prop shared the species tint and
+        // came through as the same shade. Distinct colors per prop is the
+        // visible payoff of having per-prop styling.
+        let colors: std::collections::HashSet<(u8, u8, u8)> =
+            HABITAT_PROP_CATALOG.iter().map(|spec| spec.color).collect();
+        // Allow some sharing (e.g. moss and planter both green) but not all
+        // identical.
+        assert!(
+            colors.len() >= 8,
+            "expected at least 8 distinct prop colors; got {}",
+            colors.len()
+        );
+    }
 
     #[test]
     fn cloud_and_vine_are_behind_pet_layer() {

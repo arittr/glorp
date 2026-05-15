@@ -71,7 +71,7 @@ pub fn habitat_props_for(
                 sprite,
                 scene.habitat,
                 &exclusions,
-                trophy_style(ctx.color_capability, species),
+                trophy_style(ctx.color_capability, id),
                 layer,
             );
             if !rendered.is_empty() {
@@ -852,7 +852,7 @@ fn accent_cell_from_anchor(
         row: pos.y,
         col: pos.x,
         glyph: accent_glyph(id, now),
-        style: accent_style(),
+        style: accent_style(id),
         pet_layer,
     })
 }
@@ -902,26 +902,24 @@ fn prop_visual_glyphs_for_test() -> &'static [char] {
     ]
 }
 
-fn trophy_style(color_capability: ColorCapability, species: Species) -> Style {
+fn trophy_style(color_capability: ColorCapability, id: &str) -> Style {
     match color_capability {
-        ColorCapability::Truecolor => Style::default().fg(species_trophy_color(species)),
+        ColorCapability::Truecolor => Style::default().fg(prop_color(id)),
         ColorCapability::Flat => Style::default(),
     }
 }
 
-fn species_trophy_color(species: Species) -> Color {
-    match species {
-        Species::Fuzz => Color::Rgb(0xff, 0xc8, 0x96),
-        Species::Blob => Color::Rgb(0x8c, 0xdc, 0xa0),
-        Species::Ghost => Color::Rgb(0xbe, 0xaa, 0xf0),
-        Species::Glitch => Color::Rgb(0x78, 0xff, 0xb4),
-        Species::Crystal => Color::Rgb(0xaa, 0xdc, 0xff),
-        Species::Mech => Color::Rgb(0xff, 0xdc, 0x64),
-    }
+fn accent_style(id: &str) -> Style {
+    Style::default().fg(prop_color(id))
 }
 
-fn accent_style() -> Style {
-    Style::default().fg(tokenpet_palette().dim.rgb)
+fn prop_color(id: &str) -> Color {
+    catalog_prop_by_str(id)
+        .map(|spec| {
+            let (r, g, b) = spec.color;
+            Color::Rgb(r, g, b)
+        })
+        .unwrap_or_else(|| tokenpet_palette().dim.rgb)
 }
 
 fn bounds_for_cells(cells: &[HabitatPropCell]) -> Rect {
@@ -1450,7 +1448,10 @@ mod tests {
     }
 
     #[test]
-    fn trophy_color_uses_species_tint_not_global_accent() {
+    fn trophy_color_comes_from_catalog_not_species() {
+        // The habitat is a place; the pet is a creature in it. Props should
+        // look like themselves (signal lamps are red, moss is green) and
+        // stay the same color across every species.
         let habitat = HabitatView {
             earned_props: vec![earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0)],
         };
@@ -1479,8 +1480,11 @@ mod tests {
         .find(|cell| cell.glyph == '◉')
         .expect("mech lamp lit cell");
 
-        assert_ne!(fuzz.style.fg, mech.style.fg);
-        assert_ne!(fuzz.style.fg, Some(tokenpet_palette().accent.rgb));
+        let (r, g, b) = crate::game::habitat::catalog_prop_by_str("codex_signal_lamp")
+            .unwrap()
+            .color;
+        assert_eq!(fuzz.style.fg, Some(Color::Rgb(r, g, b)));
+        assert_eq!(mech.style.fg, Some(Color::Rgb(r, g, b)));
     }
 
     #[test]
