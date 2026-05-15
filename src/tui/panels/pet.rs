@@ -214,12 +214,52 @@ pub fn ambient_glyphs_for(
     glyphs
 }
 
-fn inflate_rect(r: Rect, by: u16) -> Rect {
-    let x = r.x.saturating_sub(by);
-    let y = r.y.saturating_sub(by);
-    let width = r.width.saturating_add(2 * by);
-    let height = r.height.saturating_add(2 * by);
-    Rect::new(x, y, width, height)
+/// Returns 1×1 exclusion rects covering every non-space pet cell plus an
+/// 8-neighbor halo around each, in absolute terminal coordinates anchored to
+/// `pet_rect`. Used in place of an inflated bounding rect so habitat glyphs
+/// can fill the diamond's negative space while still keeping a one-cell
+/// breathing margin around the pet itself.
+///
+/// `mirror` should match the orientation `build_pet_lines` will draw with
+/// (true when the pet faces left), so the halo aligns with the rendered art.
+pub(crate) fn pet_silhouette_halo_rects(
+    art_lines: &[String],
+    pet_rect: Rect,
+    mirror: bool,
+) -> Vec<Rect> {
+    let mut cells: std::collections::HashSet<(u16, u16)> = std::collections::HashSet::new();
+    for (row_idx, line) in art_lines.iter().enumerate() {
+        let row_offset = row_idx as u16;
+        let line_width = line.chars().count();
+        for (col_idx, ch) in line.chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let col_in_frame: u16 = if mirror {
+                (line_width.saturating_sub(1).saturating_sub(col_idx)) as u16
+            } else {
+                col_idx as u16
+            };
+            let col_base = i32::from(pet_rect.x) + i32::from(col_in_frame);
+            let row_base = i32::from(pet_rect.y) + i32::from(row_offset);
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let nx = col_base + dx;
+                    let ny = row_base + dy;
+                    if nx < 0 || ny < 0 {
+                        continue;
+                    }
+                    if let (Ok(x), Ok(y)) = (u16::try_from(nx), u16::try_from(ny)) {
+                        cells.insert((x, y));
+                    }
+                }
+            }
+        }
+    }
+    cells
+        .into_iter()
+        .map(|(x, y)| Rect::new(x, y, 1, 1))
+        .collect()
 }
 
 fn ambient_glyph_is_inside_area(glyph: &AmbientGlyph, area: Rect) -> bool {
@@ -256,22 +296,27 @@ impl LegacyPanel for PetPanel {
         let vm = vm.as_ref();
         let scene = PetScene::compute_layout(area, vm, ctx);
 
-        // Pass 1: ambient backdrop. Inflate the pet art rect by 1 cell to
-        // create a respect ring before passing exclusions to the painter.
+        // Pass 1: ambient backdrop. Replace the pet's bounding-rect exclusion
+        // with a per-cell silhouette + 1-cell halo so habitat glyphs can fill
+        // the diamond's negative space (corners, frame padding rows) while
+        // still keeping a breathing margin around the pet itself.
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let stage = vm.pet_render.stage;
-        let inflated_pet = inflate_rect(scene.pet_art, 1);
-        let inflated_exclusions: Vec<Rect> = scene
+        let mirror = vm.facing == -1;
+        let silhouette_halo = pet_silhouette_halo_rects(&vm.pet_art, scene.pet_art, mirror);
+        let mut ambient_exclusions: Vec<Rect> = scene
             .exclusions
             .iter()
-            .map(|&r| if r == scene.pet_art { inflated_pet } else { r })
+            .copied()
+            .filter(|r| *r != scene.pet_art)
             .collect();
+        ambient_exclusions.extend(silhouette_halo);
         let glyphs = ambient_glyphs_for(
             species,
             stage,
             scene.habitat,
-            &inflated_exclusions,
+            &ambient_exclusions,
             now,
             ctx.color_capability,
         );
@@ -358,7 +403,38 @@ fn render_pet_inside(
         cursor_norm_x,
         effective_twinkle,
     );
-    Paragraph::new(lines).render(scene.pet_art, buf);
+    render_pet_lines_sparse(buf, scene.pet_art, &lines);
+}
+
+/// Draws `lines` into `area`, writing only non-space glyphs. Whitespace cells
+/// pass through, leaving whatever the habitat / props passes wrote underneath
+/// visible — so the pet's bounding rectangle no longer occludes the backdrop.
+fn render_pet_lines_sparse(buf: &mut Buffer, area: Rect, lines: &[Line<'_>]) {
+    let right = area.x.saturating_add(area.width);
+    let bottom = area.y.saturating_add(area.height);
+    for (row_idx, line) in lines.iter().enumerate() {
+        let y = area.y.saturating_add(row_idx as u16);
+        if y >= bottom {
+            break;
+        }
+        let mut x = area.x;
+        for span in &line.spans {
+            if x >= right {
+                break;
+            }
+            for ch in span.content.chars() {
+                if x >= right {
+                    break;
+                }
+                if ch != ' ' {
+                    let cell = &mut buf[(x, y)];
+                    cell.set_char(ch);
+                    cell.set_style(span.style);
+                }
+                x = x.saturating_add(1);
+            }
+        }
+    }
 }
 
 /// Render a small speech bubble: "« text »" centered above the pet, styled
@@ -1257,6 +1333,116 @@ mod tests {
         assert!(
             glyphs.is_empty(),
             "Flat color should disable habitat (dim-without-color is just noise)"
+        );
+    }
+
+    #[test]
+    fn pet_silhouette_halo_covers_glyph_cells_and_eight_neighbors() {
+        // Synthetic 3×3 art with a single 'X' in the center. Halo must include
+        // the X itself plus all 8 surrounding cells of the absolute pet_rect.
+        let lines = vec!["   ".to_string(), " X ".to_string(), "   ".to_string()];
+        let pet_rect = Rect::new(10, 20, 3, 3);
+        let rects = pet_silhouette_halo_rects(&lines, pet_rect, false);
+        let cells: std::collections::HashSet<(u16, u16)> =
+            rects.iter().map(|r| (r.x, r.y)).collect();
+        let expected: std::collections::HashSet<(u16, u16)> = (10u16..=12)
+            .flat_map(|x| (20u16..=22).map(move |y| (x, y)))
+            .collect();
+        assert_eq!(cells, expected);
+    }
+
+    #[test]
+    fn pet_silhouette_halo_skips_pure_whitespace_rows() {
+        // An entirely-blank row contributes no halo cells anywhere.
+        let lines = vec!["   ".to_string(), "   ".to_string(), "   ".to_string()];
+        let pet_rect = Rect::new(0, 0, 3, 3);
+        let rects = pet_silhouette_halo_rects(&lines, pet_rect, false);
+        assert!(rects.is_empty(), "blank art must produce no halo cells");
+    }
+
+    #[test]
+    fn pet_silhouette_halo_mirrors_columns_when_facing_left() {
+        // Single 'X' at column 0 of a 3-wide line. With mirror=true, the
+        // glyph's effective column flips to width-1-col_idx = 2.
+        let lines = vec!["X  ".to_string()];
+        let pet_rect = Rect::new(100, 50, 3, 1);
+        let rects = pet_silhouette_halo_rects(&lines, pet_rect, true);
+        let cells: std::collections::HashSet<(u16, u16)> =
+            rects.iter().map(|r| (r.x, r.y)).collect();
+        // Mirrored X lands at absolute (102, 50). Halo: (101..=103, 49..=51).
+        // Row 49 underflows when pet_rect.y=50 and dy=-1 — fine, included.
+        assert!(cells.contains(&(102, 50)), "mirrored glyph cell missing");
+        assert!(cells.contains(&(101, 50)), "left halo missing");
+        assert!(cells.contains(&(103, 50)), "right halo missing");
+        assert!(
+            !cells.contains(&(100, 50)),
+            "non-mirrored origin must stay free"
+        );
+    }
+
+    #[test]
+    fn pet_silhouette_halo_for_real_pet_is_smaller_than_inflated_rect() {
+        // The previous behavior excluded a 15×12 inflated rect = 180 cells.
+        // Silhouette+halo for a real pet should cover the diamond (~50 cells)
+        // plus its halo (~50–80 cells), well under 180 — leaving room for
+        // habitat backdrop glyphs in the rect's negative space.
+        let vm = vm_with_real_pet();
+        let pet_rect = Rect::new(10, 20, 13, 10);
+        let rects = pet_silhouette_halo_rects(&vm.pet_art, pet_rect, false);
+        assert!(
+            rects.len() < 180,
+            "silhouette+halo ({}) must be smaller than 15×12 inflated rect (180)",
+            rects.len()
+        );
+        assert!(
+            rects.len() > 20,
+            "silhouette+halo ({}) should still cover the diamond and its margin",
+            rects.len()
+        );
+    }
+
+    #[test]
+    fn pet_panel_lets_background_show_through_empty_silhouette_cells() {
+        use crate::tui::render_context::WatchClock;
+        // Fill the entire 13×10 pet bounding rect with a marker char before
+        // rendering. With sparse silhouette rendering, the pet pass must only
+        // overwrite cells that contain a non-space glyph — so markers placed
+        // in the diamond's negative space (corners, frame padding rows) must
+        // survive intact.
+        //
+        // Flat color disables ambient_glyphs and accents; the fixture vm has
+        // no trophies, so the pet pass is the only writer to the buffer.
+        let vm = vm_with_real_pet();
+        let panel = PetPanel;
+        let ctx = RenderContext::with_clock(
+            ColorCapability::Flat,
+            WatchClock::fixed(time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap()),
+        );
+        let backend = TestBackend::new(13, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let marker = '\u{2605}'; // ★
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let buf = f.buffer_mut();
+                for y in 0..10u16 {
+                    for x in 0..13u16 {
+                        buf[(x, y)].set_char(marker);
+                    }
+                }
+                panel.render(area, buf, &vm, &ctx);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let preserved: usize = (0..10u16)
+            .flat_map(|y| (0..13u16).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() == "\u{2605}")
+            .count();
+        assert!(
+            preserved >= 30,
+            "pet's empty silhouette cells must preserve background; only {preserved} / 130 markers survived (expected ≥ 30 — the diamond's negative space)"
         );
     }
 
