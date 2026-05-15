@@ -359,6 +359,10 @@ fn watch_view_model_exposes_catalog_backed_habitat_props() {
 
     assert_eq!(vm.habitat.earned_props.len(), 1);
     assert_eq!(vm.habitat.earned_props[0].id.as_str(), "codex_signal_lamp");
+    assert_eq!(
+        vm.habitat.earned_props[0].earned_at,
+        datetime!(2026-05-11 12:00:00 UTC)
+    );
     assert_eq!(vm.habitat.earned_props[0].display_priority, 70);
     assert_eq!(
         vm.habitat.earned_props[0].kind,
