@@ -1212,9 +1212,17 @@ fn pet_panel_renders_habitat_props_behind_pet_art() {
 #[test]
 fn pet_panel_draw_order_keeps_pet_above_habitat_props() {
     let source = std::fs::read_to_string("src/tui/panels/pet.rs").unwrap();
-    let ambient = source.find("ambient_glyphs_for(").expect("ambient pass");
-    let props = source.find("habitat_props_for(").expect("prop pass");
-    let pet = source
+    let render_body = source
+        .split("fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext)")
+        .nth(1)
+        .expect("PetPanel render body");
+    let ambient = render_body
+        .find("ambient_glyphs_for(")
+        .expect("ambient render pass");
+    let props = render_body
+        .find("habitat_props_for(")
+        .expect("prop render pass");
+    let pet = render_body
         .find("render_pet_inside(buf, vm, &scene, now)")
         .expect("pet render pass");
 

@@ -6,6 +6,7 @@ use crate::tui::style::{tokenpet_palette, ColorCapability};
 use crate::tui::view_model::HabitatView;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
+use std::collections::HashMap;
 
 const MAX_TROPHIES: usize = 3;
 const MAX_ACCENTS: usize = 4;
@@ -55,10 +56,10 @@ pub fn habitat_props_for(
     }
 
     if matches!(ctx.color_capability, ColorCapability::Truecolor) {
+        let accent_cells = stable_accent_cells_by_id(habitat, scene.habitat, &occupied, seed, now);
         for id in visible_accent_ids(habitat, now) {
-            if let Some(cell) = render_accent(id, scene.habitat, &occupied, seed, now) {
-                occupied.push(Rect::new(cell.col, cell.row, 1, 1));
-                cells.push(cell);
+            if let Some(cell) = accent_cells.get(id) {
+                cells.push(cell.clone());
             }
         }
     }
@@ -86,6 +87,20 @@ pub(crate) fn visible_trophy_ids(habitat: &HabitatView) -> Vec<&str> {
 }
 
 pub(crate) fn visible_accent_ids(habitat: &HabitatView, now: time::OffsetDateTime) -> Vec<&str> {
+    let props = sorted_accent_ids(habitat);
+
+    if props.len() <= MAX_ACCENTS {
+        return props;
+    }
+
+    let start =
+        (now.unix_timestamp() / ACCENT_ROTATION_SECS).rem_euclid(props.len() as i64) as usize;
+    (0..MAX_ACCENTS)
+        .map(|offset| props[(start + offset) % props.len()])
+        .collect()
+}
+
+fn sorted_accent_ids(habitat: &HabitatView) -> Vec<&str> {
     let mut props = habitat
         .earned_props
         .iter()
@@ -97,15 +112,7 @@ pub(crate) fn visible_accent_ids(habitat: &HabitatView, now: time::OffsetDateTim
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
 
-    if props.len() <= MAX_ACCENTS {
-        return props.into_iter().map(|prop| prop.id.as_str()).collect();
-    }
-
-    let start =
-        (now.unix_timestamp() / ACCENT_ROTATION_SECS).rem_euclid(props.len() as i64) as usize;
-    (0..MAX_ACCENTS)
-        .map(|offset| props[(start + offset) % props.len()].id.as_str())
-        .collect()
+    props.into_iter().map(|prop| prop.id.as_str()).collect()
 }
 
 fn trophy_anchor(id: &str, habitat: Rect) -> Option<Position> {
@@ -312,6 +319,26 @@ fn offset_position(anchor: Position, dx: i16, dy: i16) -> Option<Position> {
         u16::try_from(x).ok()?,
         u16::try_from(y).ok()?,
     ))
+}
+
+fn stable_accent_cells_by_id<'a>(
+    habitat: &'a HabitatView,
+    area: Rect,
+    exclusions: &[Rect],
+    seed: &str,
+    now: time::OffsetDateTime,
+) -> HashMap<&'a str, HabitatPropCell> {
+    let mut occupied = exclusions.to_vec();
+    let mut cells = HashMap::new();
+
+    for id in sorted_accent_ids(habitat) {
+        if let Some(cell) = render_accent(id, area, &occupied, seed, now) {
+            occupied.push(Rect::new(cell.col, cell.row, 1, 1));
+            cells.insert(id, cell);
+        }
+    }
+
+    cells
 }
 
 fn render_accent(
@@ -641,6 +668,48 @@ mod tests {
         .into_iter()
         .find(|cell| cell.glyph == '◆')
         .expect("shard visible after rotation");
+
+        assert_eq!(
+            (before_rotation.col, before_rotation.row),
+            (after_rotation.col, after_rotation.row)
+        );
+    }
+
+    #[test]
+    fn accent_collision_retry_is_stable_across_rotation_windows() {
+        let habitat = HabitatView {
+            earned_props: vec![
+                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
+                earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
+                earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
+                earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
+                earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
+            ],
+        };
+        let mut scene = scene();
+        scene.habitat = Rect::new(0, 0, 5, 4);
+        scene.exclusions.clear();
+
+        let before_rotation = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:21 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◌')
+        .expect("shell visible before rotation");
+        let after_rotation = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:31 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◌')
+        .expect("shell visible after rotation");
 
         assert_eq!(
             (before_rotation.col, before_rotation.row),
