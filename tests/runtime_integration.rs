@@ -356,3 +356,27 @@ fn unapplied_usage_survives_state_save_failure_and_applies_once_next_run() {
         cursor.cursor_value
     );
 }
+
+#[test]
+fn fresh_pet_state_starts_with_empty_habitat_state() {
+    let state = PetState::new_for_test("mochi-7f3a", "mochi");
+
+    assert!(state.habitat.earned_props.is_empty());
+    assert_eq!(state.habitat.reconciled_lifetime_tokens_at, None);
+}
+
+#[test]
+fn habitat_catalog_exposes_v1_prop_ids_and_kinds() {
+    use glorp::game::habitat::{catalog_prop, HabitatPropKind};
+    use glorp::storage::state::HabitatPropId;
+
+    let codex = catalog_prop(&HabitatPropId::new("codex_signal_lamp")).unwrap();
+    assert_eq!(codex.kind, HabitatPropKind::Trophy);
+    assert_eq!(codex.display_priority, 70);
+
+    let pebble = catalog_prop(&HabitatPropId::new("token_pebble_25k")).unwrap();
+    assert_eq!(pebble.kind, HabitatPropKind::Accent);
+    assert_eq!(pebble.lifetime_threshold, Some(25_000.0));
+
+    assert!(catalog_prop(&HabitatPropId::new("non_catalog_prop_for_filter_test")).is_none());
+}

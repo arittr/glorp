@@ -18,6 +18,47 @@ pub struct NarrativeEvent {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HabitatPropId(String);
+
+impl HabitatPropId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&'static str> for HabitatPropId {
+    fn from(value: &'static str) -> Self {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EarnedHabitatProp {
+    pub id: HabitatPropId,
+    pub earned_at: OffsetDateTime,
+    pub source: HabitatPropSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HabitatPropSource {
+    LifetimeTokens { threshold: f64 },
+    ProviderFirstUse { provider_surface: String },
+    HeavySession,
+    WiltRecovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct HabitatState {
+    pub earned_props: Vec<EarnedHabitatProp>,
+    pub reconciled_lifetime_tokens_at: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PetState {
     pub schema_version: u32,
@@ -43,6 +84,10 @@ pub struct PetState {
     /// discarded (recent_events is ephemeral, trimmed to 20 entries).
     #[serde(default, deserialize_with = "deserialize_narrative_events_backcompat")]
     pub recent_events: Vec<NarrativeEvent>,
+    /// Earned habitat props. Stores durable unlock facts only; placement and
+    /// motion are derived by the watch renderer from layout and clock.
+    #[serde(default)]
+    pub habitat: HabitatState,
     /// Last observed mood — used to detect mood transitions across polls.
     #[serde(default)]
     pub last_seen_mood: Option<Mood>,
@@ -92,6 +137,7 @@ impl PetState {
             rhythm: RhythmProfile::default(),
             seen_stage_transitions: Vec::new(),
             recent_events: Vec::new(),
+            habitat: HabitatState::default(),
             last_seen_mood: None,
             previous_vitals: None,
             last_idle_narration_at: None,

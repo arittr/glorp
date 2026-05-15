@@ -8,7 +8,7 @@ use crate::{
     paths::AppPaths,
     pet::generation::{generate_pet, resolve_accepted_name},
     storage::{
-        state::{NarrativeEvent, PetIdentity, PetState, StateStore, Vitals},
+        state::{HabitatState, NarrativeEvent, PetIdentity, PetState, StateStore, Vitals},
         usage_store::UsageStore,
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
@@ -69,6 +69,7 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
             observed_at: now,
             text: format!("{accepted_name} has hatched"),
         }],
+        habitat: HabitatState::default(),
         last_seen_mood: None,
         previous_vitals: None,
         last_idle_narration_at: None,
