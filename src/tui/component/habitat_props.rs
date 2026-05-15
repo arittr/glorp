@@ -328,12 +328,18 @@ fn stable_accent_cells_by_id<'a>(
     seed: &str,
     now: time::OffsetDateTime,
 ) -> HashMap<&'a str, HabitatPropCell> {
-    let mut occupied = exclusions.to_vec();
+    let anchors = stable_accent_anchors_by_id(habitat, area, exclusions, seed);
+    let mut rendered = exclusions.to_vec();
     let mut cells = HashMap::new();
 
     for id in sorted_accent_ids(habitat) {
-        if let Some(cell) = render_accent(id, area, &occupied, seed, now) {
-            occupied.push(Rect::new(cell.col, cell.row, 1, 1));
+        let Some(anchor) = anchors.get(id).copied() else {
+            continue;
+        };
+        let mut blocked = rendered.clone();
+        blocked.extend(anchor_exclusions_except(&anchors, id));
+        if let Some(cell) = accent_cell_from_anchor(id, anchor, area, &blocked, now) {
+            rendered.push(Rect::new(cell.col, cell.row, 1, 1));
             cells.insert(id, cell);
         }
     }
@@ -341,6 +347,39 @@ fn stable_accent_cells_by_id<'a>(
     cells
 }
 
+fn anchor_exclusions_except(anchors: &HashMap<&str, Position>, id: &str) -> Vec<Rect> {
+    anchors
+        .iter()
+        .filter_map(|(other_id, anchor)| {
+            if *other_id == id {
+                None
+            } else {
+                Some(Rect::new(anchor.x, anchor.y, 1, 1))
+            }
+        })
+        .collect()
+}
+
+fn stable_accent_anchors_by_id<'a>(
+    habitat: &'a HabitatView,
+    area: Rect,
+    exclusions: &[Rect],
+    seed: &str,
+) -> HashMap<&'a str, Position> {
+    let mut occupied = exclusions.to_vec();
+    let mut anchors = HashMap::new();
+
+    for id in sorted_accent_ids(habitat) {
+        if let Some(anchor) = accent_anchor_for(id, area, &occupied, seed) {
+            occupied.push(Rect::new(anchor.x, anchor.y, 1, 1));
+            anchors.insert(id, anchor);
+        }
+    }
+
+    anchors
+}
+
+#[cfg(test)]
 fn render_accent(
     id: &str,
     habitat: Rect,
@@ -348,11 +387,15 @@ fn render_accent(
     seed: &str,
     now: time::OffsetDateTime,
 ) -> Option<HabitatPropCell> {
+    let anchor = accent_anchor_for(id, habitat, exclusions, seed)?;
+    accent_cell_from_anchor(id, anchor, habitat, exclusions, now)
+}
+
+fn accent_anchor_for(id: &str, habitat: Rect, exclusions: &[Rect], seed: &str) -> Option<Position> {
     if habitat.width < 4 || habitat.height < 3 {
         return None;
     }
 
-    let glyph = accent_glyph(id, now);
     let col_min = habitat.x.saturating_add(2);
     let col_max = habitat.x.saturating_add(habitat.width.saturating_sub(2));
     let row_min = habitat.y.saturating_add(1);
@@ -360,7 +403,6 @@ fn render_accent(
     let col_span = col_max.saturating_sub(col_min).saturating_add(1);
     let row_span = row_max.saturating_sub(row_min).saturating_add(1);
     let base = prop_hash(seed, id);
-    let motion = accent_motion_offset(id, now);
 
     for attempt in 0..ACCENT_CANDIDATES {
         let phase = base.wrapping_add(
@@ -368,23 +410,54 @@ fn render_accent(
                 .wrapping_mul(37)
                 .wrapping_add(attempt.wrapping_mul(attempt).wrapping_mul(11)),
         );
-        let base_col = col_min + (phase % col_span);
-        let col = shift_coordinate(base_col, motion.0, col_min, col_max);
+        let col = col_min + (phase % col_span);
         let row_phase = phase / 3 + attempt.wrapping_mul(23);
-        let base_row = row_min + (row_phase % row_span);
-        let row = shift_coordinate(base_row, motion.1, row_min, row_max);
+        let row = row_min + (row_phase % row_span);
         let pos = Position::new(col, row);
         if habitat.contains(pos) && !exclusions.iter().any(|rect| rect.contains(pos)) {
-            return Some(HabitatPropCell {
-                row,
-                col,
-                glyph,
-                style: accent_style(),
-            });
+            return Some(pos);
         }
     }
 
     None
+}
+
+fn accent_cell_from_anchor(
+    id: &str,
+    anchor: Position,
+    habitat: Rect,
+    exclusions: &[Rect],
+    now: time::OffsetDateTime,
+) -> Option<HabitatPropCell> {
+    if habitat.width < 4 || habitat.height < 3 {
+        return None;
+    }
+
+    let col_min = habitat.x.saturating_add(2);
+    let col_max = habitat.x.saturating_add(habitat.width.saturating_sub(2));
+    let row_min = habitat.y.saturating_add(1);
+    let row_max = habitat.y.saturating_add(habitat.height.saturating_sub(2));
+    let motion = accent_motion_offset(id, now);
+    let moved = Position::new(
+        shift_coordinate(anchor.x, motion.0, col_min, col_max),
+        shift_coordinate(anchor.y, motion.1, row_min, row_max),
+    );
+    let pos = if habitat.contains(moved) && !exclusions.iter().any(|rect| rect.contains(moved)) {
+        moved
+    } else {
+        anchor
+    };
+
+    if !habitat.contains(pos) || exclusions.iter().any(|rect| rect.contains(pos)) {
+        return None;
+    }
+
+    Some(HabitatPropCell {
+        row: pos.y,
+        col: pos.x,
+        glyph: accent_glyph(id, now),
+        style: accent_style(),
+    })
 }
 
 fn prop_hash(seed: &str, id: &str) -> u16 {
@@ -714,6 +787,51 @@ mod tests {
         assert_eq!(
             (before_rotation.col, before_rotation.row),
             (after_rotation.col, after_rotation.row)
+        );
+    }
+
+    #[test]
+    fn accent_collision_retry_does_not_change_with_motion_phase() {
+        let habitat = HabitatView {
+            earned_props: vec![
+                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
+                earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
+                earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
+                earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
+            ],
+        };
+        let mut scene = scene();
+        scene.habitat = Rect::new(0, 0, 4, 7);
+        scene.exclusions.clear();
+
+        let before_phase = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00:09 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◌')
+        .expect("shell visible before phase change");
+        let after_phase = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00:10 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◌')
+        .expect("shell visible after phase change");
+
+        assert!(
+            (i32::from(before_phase.col) - i32::from(after_phase.col)).abs() <= 1,
+            "shell moved too far horizontally: {before_phase:?} -> {after_phase:?}"
+        );
+        assert!(
+            (i32::from(before_phase.row) - i32::from(after_phase.row)).abs() <= 1,
+            "shell moved too far vertically: {before_phase:?} -> {after_phase:?}"
         );
     }
 
