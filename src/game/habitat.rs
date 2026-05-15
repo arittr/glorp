@@ -1,4 +1,15 @@
-use crate::storage::state::HabitatPropId;
+use time::OffsetDateTime;
+
+use crate::{
+    game::metabolism::Mood,
+    storage::{
+        state::{EarnedHabitatProp, HabitatPropId, HabitatPropSource, PetState},
+        usage_store::UsageLedgerRow,
+    },
+};
+
+const HEAVY_SESSION_MIN_TOKENS: f64 = 50_000.0;
+const HEAVY_SESSION_BASELINE_FRACTION: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HabitatPropKind {
@@ -91,4 +102,119 @@ pub fn ladder_props() -> impl Iterator<Item = &'static HabitatPropSpec> {
     HABITAT_PROP_CATALOG
         .iter()
         .filter(|prop| prop.lifetime_threshold.is_some())
+}
+
+pub fn unlock_habitat_props(
+    state: &mut PetState,
+    rows: &[UsageLedgerRow],
+    recent_effective_tokens: f64,
+    initial_mood: Mood,
+    new_mood: Mood,
+    now: OffsetDateTime,
+) -> Vec<HabitatPropId> {
+    let mut unlocked = Vec::new();
+    unlock_lifetime_ladder(state, now, &mut unlocked);
+    unlock_first_codex(state, rows, now, &mut unlocked);
+    unlock_heavy_session(state, recent_effective_tokens, now, &mut unlocked);
+    unlock_wilt_recovery(state, initial_mood, new_mood, now, &mut unlocked);
+    unlocked
+}
+
+fn unlock_lifetime_ladder(
+    state: &mut PetState,
+    now: OffsetDateTime,
+    unlocked: &mut Vec<HabitatPropId>,
+) {
+    let lifetime = state.lifetime_effective_tokens.max(0.0);
+    for prop in ladder_props() {
+        let threshold = prop.lifetime_threshold.unwrap_or(f64::INFINITY);
+        if lifetime >= threshold {
+            record_prop(
+                state,
+                HabitatPropId::new(prop.id),
+                HabitatPropSource::LifetimeTokens { threshold },
+                now,
+                unlocked,
+            );
+        }
+    }
+    state.habitat.reconciled_lifetime_tokens_at = Some(lifetime);
+}
+
+fn unlock_first_codex(
+    state: &mut PetState,
+    rows: &[UsageLedgerRow],
+    now: OffsetDateTime,
+    unlocked: &mut Vec<HabitatPropId>,
+) {
+    if rows
+        .iter()
+        .any(|row| row.event.provider_surface == "codex" && row.event.effective_tokens > 0.0)
+    {
+        record_prop(
+            state,
+            HabitatPropId::new(CODEX_SIGNAL_LAMP),
+            HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+            now,
+            unlocked,
+        );
+    }
+}
+
+fn unlock_heavy_session(
+    state: &mut PetState,
+    recent_effective_tokens: f64,
+    now: OffsetDateTime,
+    unlocked: &mut Vec<HabitatPropId>,
+) {
+    let baseline = state.calibration.daily_effective_tokens.max(1.0);
+    let threshold = HEAVY_SESSION_MIN_TOKENS.max(baseline * HEAVY_SESSION_BASELINE_FRACTION);
+    if recent_effective_tokens >= threshold {
+        record_prop(
+            state,
+            HabitatPropId::new(HEAVY_SESSION_PLANTER),
+            HabitatPropSource::HeavySession,
+            now,
+            unlocked,
+        );
+    }
+}
+
+fn unlock_wilt_recovery(
+    state: &mut PetState,
+    initial_mood: Mood,
+    new_mood: Mood,
+    now: OffsetDateTime,
+    unlocked: &mut Vec<HabitatPropId>,
+) {
+    if initial_mood == Mood::Wilted && new_mood != Mood::Wilted {
+        record_prop(
+            state,
+            HabitatPropId::new(WILT_RECOVERY_SPROUT),
+            HabitatPropSource::WiltRecovery,
+            now,
+            unlocked,
+        );
+    }
+}
+
+fn record_prop(
+    state: &mut PetState,
+    id: HabitatPropId,
+    source: HabitatPropSource,
+    earned_at: OffsetDateTime,
+    unlocked: &mut Vec<HabitatPropId>,
+) {
+    if state.habitat.earned_props.iter().any(|prop| prop.id == id) {
+        return;
+    }
+
+    state.habitat.earned_props.push(EarnedHabitatProp {
+        id: id.clone(),
+        earned_at,
+        source,
+    });
+    unlocked.push(id);
 }

@@ -191,6 +191,30 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
     }
 }
 
+fn habitat_prop_ids(state: &PetState) -> Vec<&str> {
+    state
+        .habitat
+        .earned_props
+        .iter()
+        .map(|prop| prop.id.as_str())
+        .collect()
+}
+
+fn poll_with_surface(
+    provider_surface: &str,
+    effective_tokens: f64,
+    now: time::OffsetDateTime,
+) -> UsagePollResult {
+    let mut poll = poll_with_delta(effective_tokens, now);
+    for delta in &mut poll.deltas {
+        delta.provider_surface = provider_surface.to_string();
+        delta.cursor_update.provider_surface = provider_surface.to_string();
+        delta.cursor_update.cursor_key =
+            format!("{provider_surface}-cursor-{}", now.unix_timestamp());
+    }
+    poll
+}
+
 fn empty_poll() -> UsagePollResult {
     UsagePollResult {
         deltas: Vec::new(),
@@ -379,4 +403,159 @@ fn habitat_catalog_exposes_v1_prop_ids_and_kinds() {
     assert_eq!(pebble.lifetime_threshold, Some(25_000.0));
 
     assert!(catalog_prop(&HabitatPropId::new("non_catalog_prop_for_filter_test")).is_none());
+}
+
+#[test]
+fn lifetime_threshold_unlocks_one_ladder_prop_once() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_delta(25_000.0, now),
+        now,
+    )
+    .unwrap();
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &empty_poll(),
+        now + Duration::minutes(10),
+    )
+    .unwrap();
+
+    let ids = habitat_prop_ids(&state);
+    assert_eq!(ids, vec!["token_pebble_25k"]);
+}
+
+#[test]
+fn one_large_poll_unlocks_ladder_props_in_threshold_order() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 10_000_000.0;
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_delta(1_100_000.0, now),
+        now,
+    )
+    .unwrap();
+
+    assert_eq!(
+        habitat_prop_ids(&state),
+        vec![
+            "token_pebble_25k",
+            "token_shell_100k",
+            "token_spark_500k",
+            "token_shard_1m",
+        ]
+    );
+}
+
+#[test]
+fn existing_lifetime_counter_reconciles_ladder_props_without_usage_delta() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.lifetime_effective_tokens = 125_000.0;
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    apply_usage_poll(&mut state, &mut usage_store, &empty_poll(), now).unwrap();
+
+    assert_eq!(
+        habitat_prop_ids(&state),
+        vec!["token_pebble_25k", "token_shell_100k"]
+    );
+    assert_eq!(state.habitat.reconciled_lifetime_tokens_at, Some(125_000.0));
+}
+
+#[test]
+fn first_codex_usage_unlocks_signal_lamp_once() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_surface("codex", 1_000.0, now),
+        now,
+    )
+    .unwrap();
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_surface("codex", 1_000.0, now + Duration::minutes(10)),
+        now + Duration::minutes(10),
+    )
+    .unwrap();
+
+    let lamp_count = state
+        .habitat
+        .earned_props
+        .iter()
+        .filter(|prop| prop.id.as_str() == "codex_signal_lamp")
+        .count();
+    assert_eq!(lamp_count, 1);
+}
+
+#[test]
+fn heavy_session_unlocks_planter_once() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_delta(49_999.0, now),
+        now,
+    )
+    .unwrap();
+    assert!(!habitat_prop_ids(&state).contains(&"heavy_session_planter"));
+
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_delta(50_000.0, now + Duration::minutes(10)),
+        now + Duration::minutes(10),
+    )
+    .unwrap();
+
+    assert!(habitat_prop_ids(&state).contains(&"heavy_session_planter"));
+}
+
+#[test]
+fn wilted_recovery_unlocks_sprout_once() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    state.vitals = Vitals {
+        fed: 2.0,
+        happiness: 2.0,
+        energy: 2.0,
+    };
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_delta(100_000.0, now),
+        now,
+    )
+    .unwrap();
+
+    assert!(habitat_prop_ids(&state).contains(&"wilt_recovery_sprout"));
 }

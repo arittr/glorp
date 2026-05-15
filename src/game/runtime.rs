@@ -5,6 +5,7 @@ use crate::{
     game::{
         calibration::CalibrationBaseline,
         evolution::{apply_xp_delta, stage_for_xp, Stage, StageTransition},
+        habitat,
         metabolism::{apply_decay, apply_food, mood_for_vitals, MetabolismResult},
     },
     pet::narration,
@@ -96,6 +97,7 @@ pub fn apply_unapplied_usage(
 
     let initial_stage = state.stage;
     let initial_vitals = state.vitals;
+    let initial_mood = mood_for_vitals(game_vitals(state.vitals));
 
     if recent_effective_tokens > 0.0 {
         for row in &rows {
@@ -171,6 +173,14 @@ pub fn apply_unapplied_usage(
             });
         }
     }
+    habitat::unlock_habitat_props(
+        state,
+        &rows,
+        recent_effective_tokens,
+        initial_mood,
+        new_mood,
+        now,
+    );
     state.previous_vitals = Some(initial_vitals);
 
     state.last_usage_poll_at = Some(now);
