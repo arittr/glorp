@@ -1187,3 +1187,37 @@ fn wide_layout_pet_art_stays_inside_full_width_panel() {
         "art must not reach the right frame border"
     );
 }
+
+#[test]
+fn pet_panel_renders_habitat_props_behind_pet_art() {
+    let vm = WatchViewModel::fixture_with_habitat_props();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+    terminal
+        .draw(|frame| render_watch_frame_with_capability(frame, &vm, ColorCapability::Truecolor))
+        .unwrap();
+
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(
+        text.contains('◉') || text.contains('○'),
+        "codex_signal_lamp should render in pet habitat:\n{text}"
+    );
+    assert!(
+        text.contains('▲'),
+        "token_pebble_25k should render in pet habitat:\n{text}"
+    );
+    assert!(text.contains("/\\_/\\") || text.contains("> ^ <"));
+}
+
+#[test]
+fn pet_panel_draw_order_keeps_pet_above_habitat_props() {
+    let source = std::fs::read_to_string("src/tui/panels/pet.rs").unwrap();
+    let ambient = source.find("ambient_glyphs_for(").expect("ambient pass");
+    let props = source.find("habitat_props_for(").expect("prop pass");
+    let pet = source
+        .find("render_pet_inside(buf, vm, &scene, now)")
+        .expect("pet render pass");
+
+    assert!(ambient < props, "ambient must render before props");
+    assert!(props < pet, "props must render before pet art");
+}

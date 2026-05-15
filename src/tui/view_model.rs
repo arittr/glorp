@@ -271,6 +271,26 @@ impl WatchViewModel {
         vm
     }
 
+    #[doc(hidden)]
+    pub fn fixture_with_habitat_props() -> Self {
+        let mut vm = Self::fixture();
+        vm.habitat.earned_props = vec![
+            EarnedHabitatPropView {
+                id: crate::storage::state::HabitatPropId::new("codex_signal_lamp"),
+                earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                kind: crate::game::habitat::HabitatPropKind::Trophy,
+                display_priority: 70,
+            },
+            EarnedHabitatPropView {
+                id: crate::storage::state::HabitatPropId::new("token_pebble_25k"),
+                earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                kind: crate::game::habitat::HabitatPropKind::Accent,
+                display_priority: 10,
+            },
+        ];
+        vm
+    }
+
     /// Like `fixture_with_events` but fills `recent_events` with `n` Usage events
     /// (alternating claude-code / codex sources) for cap and color tests.
     #[doc(hidden)]

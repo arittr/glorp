@@ -14,7 +14,7 @@ use crate::pet::animator::{
 };
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
-use crate::tui::component::{PetScene, PetSceneLayout};
+use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, SemanticStyles};
@@ -283,7 +283,19 @@ impl LegacyPanel for PetPanel {
             }
         }
 
-        // Pass 2: pet art with shimmer, twinkle, and token-pop overlays.
+        for prop in habitat_props_for(&vm.habitat, &scene, species, &vm.pet_render.seed, ctx) {
+            if prop.col >= scene.habitat.x
+                && prop.row >= scene.habitat.y
+                && prop.col < scene.habitat.x.saturating_add(scene.habitat.width)
+                && prop.row < scene.habitat.y.saturating_add(scene.habitat.height)
+            {
+                let cell = &mut buf[(prop.col, prop.row)];
+                cell.set_char(prop.glyph);
+                cell.set_style(prop.style);
+            }
+        }
+
+        // Pass 3: pet art with shimmer, twinkle, and token-pop overlays.
         render_pet_inside(buf, vm, &scene, now);
     }
 }
