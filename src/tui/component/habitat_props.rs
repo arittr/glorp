@@ -5,7 +5,7 @@ use crate::tui::render_context::RenderContext;
 use crate::tui::style::{tokenpet_palette, ColorCapability};
 use crate::tui::view_model::HabitatView;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 
 const MAX_TROPHIES: usize = 3;
 const MAX_ACCENTS: usize = 4;
@@ -45,7 +45,7 @@ pub fn habitat_props_for(
                 trophy_sprite(id, species, now),
                 scene.habitat,
                 &occupied,
-                trophy_style(ctx.color_capability),
+                trophy_style(ctx.color_capability, species),
             );
             if !rendered.is_empty() {
                 occupied.push(bounds_for_cells(&rendered));
@@ -55,10 +55,8 @@ pub fn habitat_props_for(
     }
 
     if matches!(ctx.color_capability, ColorCapability::Truecolor) {
-        for (index, id) in visible_accent_ids(habitat, now).iter().enumerate() {
-            if let Some(cell) =
-                render_accent(id, index, scene.habitat, &occupied, species, seed, now)
-            {
+        for id in visible_accent_ids(habitat, now) {
+            if let Some(cell) = render_accent(id, scene.habitat, &occupied, seed, now) {
                 occupied.push(Rect::new(cell.col, cell.row, 1, 1));
                 cells.push(cell);
             }
@@ -318,10 +316,8 @@ fn offset_position(anchor: Position, dx: i16, dy: i16) -> Option<Position> {
 
 fn render_accent(
     id: &str,
-    index: usize,
     habitat: Rect,
     exclusions: &[Rect],
-    _species: Species,
     seed: &str,
     now: time::OffsetDateTime,
 ) -> Option<HabitatPropCell> {
@@ -330,9 +326,13 @@ fn render_accent(
     }
 
     let glyph = accent_glyph(id, now);
-    let width_span = habitat.width.saturating_sub(3);
-    let row_span = habitat.height.saturating_sub(2);
-    let base = prop_hash(seed, id, index);
+    let col_min = habitat.x.saturating_add(2);
+    let col_max = habitat.x.saturating_add(habitat.width.saturating_sub(2));
+    let row_min = habitat.y.saturating_add(1);
+    let row_max = habitat.y.saturating_add(habitat.height.saturating_sub(2));
+    let col_span = col_max.saturating_sub(col_min).saturating_add(1);
+    let row_span = row_max.saturating_sub(row_min).saturating_add(1);
+    let base = prop_hash(seed, id);
     let motion = accent_motion_offset(id, now);
 
     for attempt in 0..ACCENT_CANDIDATES {
@@ -341,13 +341,11 @@ fn render_accent(
                 .wrapping_mul(37)
                 .wrapping_add(attempt.wrapping_mul(attempt).wrapping_mul(11)),
         );
-        let col = habitat.x
-            + 2
-            + ((phase as i32 + i32::from(motion.0)).rem_euclid(i32::from(width_span)) as u16);
+        let base_col = col_min + (phase % col_span);
+        let col = shift_coordinate(base_col, motion.0, col_min, col_max);
         let row_phase = phase / 3 + attempt.wrapping_mul(23);
-        let row = habitat.y
-            + 1
-            + ((i32::from(row_phase) + i32::from(motion.1)).rem_euclid(i32::from(row_span)) as u16);
+        let base_row = row_min + (row_phase % row_span);
+        let row = shift_coordinate(base_row, motion.1, row_min, row_max);
         let pos = Position::new(col, row);
         if habitat.contains(pos) && !exclusions.iter().any(|rect| rect.contains(pos)) {
             return Some(HabitatPropCell {
@@ -362,19 +360,23 @@ fn render_accent(
     None
 }
 
-fn prop_hash(seed: &str, id: &str, index: usize) -> u16 {
-    let mut hash = index as u16;
+fn prop_hash(seed: &str, id: &str) -> u16 {
+    let mut hash = 0u16;
     for byte in seed.bytes().chain(id.bytes()) {
         hash = hash.wrapping_mul(31).wrapping_add(u16::from(byte));
     }
     hash
 }
 
+fn shift_coordinate(base: u16, delta: i8, min: u16, max: u16) -> u16 {
+    (i32::from(base) + i32::from(delta)).clamp(i32::from(min), i32::from(max)) as u16
+}
+
 fn accent_motion_offset(id: &str, now: time::OffsetDateTime) -> (i8, i8) {
     let phase = now.unix_timestamp().rem_euclid(20);
     match id {
         "token_pebble_25k" | "token_shell_100k" => (0, if phase < 10 { 0 } else { -1 }),
-        "token_orbit_5m" => (if phase < 10 { -1 } else { 1 }, 0),
+        "token_orbit_5m" => (if phase < 10 { 0 } else { 1 }, 0),
         "token_lantern_10m" => (0, if phase < 10 { -1 } else { 0 }),
         _ => (0, 0),
     }
@@ -402,10 +404,21 @@ fn prop_visual_glyphs_for_test() -> &'static [char] {
     ]
 }
 
-fn trophy_style(color_capability: ColorCapability) -> Style {
+fn trophy_style(color_capability: ColorCapability, species: Species) -> Style {
     match color_capability {
-        ColorCapability::Truecolor => Style::default().fg(tokenpet_palette().accent.rgb),
+        ColorCapability::Truecolor => Style::default().fg(species_trophy_color(species)),
         ColorCapability::Flat => Style::default(),
+    }
+}
+
+fn species_trophy_color(species: Species) -> Color {
+    match species {
+        Species::Fuzz => Color::Rgb(0xff, 0xc8, 0x96),
+        Species::Blob => Color::Rgb(0x8c, 0xdc, 0xa0),
+        Species::Ghost => Color::Rgb(0xbe, 0xaa, 0xf0),
+        Species::Glitch => Color::Rgb(0x78, 0xff, 0xb4),
+        Species::Crystal => Color::Rgb(0xaa, 0xdc, 0xff),
+        Species::Mech => Color::Rgb(0xff, 0xdc, 0x64),
     }
 }
 
@@ -595,11 +608,127 @@ mod tests {
     }
 
     #[test]
+    fn accent_anchor_stays_with_prop_across_rotation_windows() {
+        let habitat = HabitatView {
+            earned_props: vec![
+                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
+                earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
+                earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
+                earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
+                earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
+            ],
+        };
+        let mut scene = scene();
+        scene.exclusions.clear();
+
+        let before_rotation = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:21 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◆')
+        .expect("shard visible before rotation");
+        let after_rotation = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:31 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◆')
+        .expect("shard visible after rotation");
+
+        assert_eq!(
+            (before_rotation.col, before_rotation.row),
+            (after_rotation.col, after_rotation.row)
+        );
+    }
+
+    #[test]
+    fn moving_accents_do_not_wrap_between_adjacent_phases() {
+        for (id, glyph, seed) in [
+            ("token_orbit_5m", '°', "fixture-seed"),
+            ("token_lantern_10m", '○', "fixture-seed"),
+        ] {
+            let habitat = HabitatView {
+                earned_props: vec![earned(id, HabitatPropKind::Accent, 10, 0)],
+            };
+            let mut scene = scene();
+            scene.exclusions.clear();
+            let before = habitat_props_for(
+                &habitat,
+                &scene,
+                Species::Fuzz,
+                seed,
+                &ctx(datetime!(2026-05-11 12:00:09 UTC)),
+            )
+            .into_iter()
+            .find(|cell| cell.glyph == glyph)
+            .expect("accent visible before phase change");
+            let after = habitat_props_for(
+                &habitat,
+                &scene,
+                Species::Fuzz,
+                seed,
+                &ctx(datetime!(2026-05-11 12:00:10 UTC)),
+            )
+            .into_iter()
+            .find(|cell| cell.glyph == glyph)
+            .expect("accent visible after phase change");
+
+            assert!(
+                (i32::from(before.col) - i32::from(after.col)).abs() <= 1,
+                "{id} moved too far horizontally: {before:?} -> {after:?}"
+            );
+            assert!(
+                (i32::from(before.row) - i32::from(after.row)).abs() <= 1,
+                "{id} moved too far vertically: {before:?} -> {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trophy_color_uses_species_tint_not_global_accent() {
+        let habitat = HabitatView {
+            earned_props: vec![earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0)],
+        };
+        let mut scene = scene();
+        scene.exclusions.clear();
+        let fuzz = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◉')
+        .expect("fuzz lamp lit cell");
+        let mech = habitat_props_for(
+            &habitat,
+            &scene,
+            Species::Mech,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00 UTC)),
+        )
+        .into_iter()
+        .find(|cell| cell.glyph == '◉')
+        .expect("mech lamp lit cell");
+
+        assert_ne!(fuzz.style.fg, mech.style.fg);
+        assert_ne!(fuzz.style.fg, Some(tokenpet_palette().accent.rgb));
+    }
+
+    #[test]
     fn accent_retry_escapes_blocked_first_column() {
         let habitat = Rect::new(0, 0, 20, 8);
         let blocked_col = habitat.x
             + 2
-            + (prop_hash("fixture-seed", "token_pebble_25k", 0) % habitat.width.saturating_sub(3));
+            + (prop_hash("fixture-seed", "token_pebble_25k") % habitat.width.saturating_sub(3));
         let exclusions = [Rect::new(
             blocked_col,
             1,
@@ -609,10 +738,8 @@ mod tests {
 
         let cell = render_accent(
             "token_pebble_25k",
-            0,
             habitat,
             &exclusions,
-            Species::Fuzz,
             "fixture-seed",
             datetime!(2026-05-11 12:00 UTC),
         )
