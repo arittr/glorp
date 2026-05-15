@@ -936,7 +936,7 @@ fn bounds_for_cells(cells: &[HabitatPropCell]) -> Rect {
 mod tests {
     use super::*;
     use crate::game::habitat::{
-        HabitatPetLayer, HabitatPropKind, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_PEBBLE_25K,
+        HabitatPetLayer, HabitatPropKind, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_SHARD_1M,
     };
     use crate::pet::generation::Species;
     use crate::storage::state::HabitatPropId;
@@ -984,7 +984,7 @@ mod tests {
         let habitat = HabitatView {
             earned_props: vec![
                 earned(TOKEN_FRIENDLY_CLOUD_750K, HabitatPropKind::Trophy, 45, 0),
-                earned(TOKEN_PEBBLE_25K, HabitatPropKind::Accent, 10, 1),
+                earned(TOKEN_SHARD_1M, HabitatPropKind::Accent, 40, 1),
             ],
         };
         let mut scene = scene();
@@ -1005,26 +1005,24 @@ mod tests {
             .expect("cloud rendered");
         assert_eq!(cloud_cell.pet_layer, HabitatPetLayer::Behind);
 
-        let pebble_cell = cells
+        let shard_cell = cells
             .iter()
-            .find(|cell| cell.glyph == '▲')
-            .expect("pebble rendered");
-        assert_eq!(pebble_cell.pet_layer, HabitatPetLayer::Background);
+            .find(|cell| cell.glyph == '◆')
+            .expect("shard rendered");
+        assert_eq!(shard_cell.pet_layer, HabitatPetLayer::Background);
     }
 
     #[test]
     fn background_props_avoid_silhouette_halo_rects() {
-        // A 1×1 silhouette cell at the pebble's expected anchor area should
-        // push the pebble (Background layer) to a different cell. The cell
-        // explicitly covered by silhouette_halo must not appear in any
-        // Background prop's output.
+        // A Background prop (wall-mounted shard) must avoid cells in the
+        // silhouette halo. Cover most of the habitat with a per-cell
+        // silhouette except a small free strip on the right; the shard must
+        // land in the free strip.
         let habitat_view = HabitatView {
-            earned_props: vec![earned(TOKEN_PEBBLE_25K, HabitatPropKind::Accent, 10, 0)],
+            earned_props: vec![earned(TOKEN_SHARD_1M, HabitatPropKind::Accent, 40, 0)],
         };
         let mut scene = scene();
         scene.exclusions.clear();
-        // Cover most of the habitat with a per-cell silhouette except a small
-        // free strip on the right side. The pebble must land on a free cell.
         let blocked: Vec<Rect> = (0..scene.habitat.width.saturating_sub(4))
             .flat_map(|dx| (0..scene.habitat.height).map(move |dy| Rect::new(dx, dy, 1, 1)))
             .collect();
@@ -1038,14 +1036,14 @@ mod tests {
             &ctx(datetime!(2026-05-11 12:00 UTC)),
         );
 
-        let pebble = cells
+        let shard = cells
             .iter()
-            .find(|cell| cell.glyph == '▲')
-            .expect("pebble should still render in the free strip");
+            .find(|cell| cell.glyph == '◆')
+            .expect("shard should still render in the free strip");
         assert!(
-            pebble.col >= scene.habitat.width - 4,
-            "Background pebble must avoid blocked silhouette region; landed at col {}",
-            pebble.col
+            shard.col >= scene.habitat.width - 4,
+            "Background shard must avoid blocked silhouette region; landed at col {}",
+            shard.col
         );
     }
 

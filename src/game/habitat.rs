@@ -79,7 +79,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorLeft,
         display_priority: 10,
         lifetime_threshold: Some(25_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
     },
     HabitatPropSpec {
         id: TOKEN_SHELL_100K,
@@ -87,7 +87,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorRight,
         display_priority: 20,
         lifetime_threshold: Some(100_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
     },
     HabitatPropSpec {
         id: TOKEN_MOSS_TUFT_250K,
@@ -95,7 +95,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorMid,
         display_priority: 25,
         lifetime_threshold: Some(250_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
     },
     HabitatPropSpec {
         id: TOKEN_SPARK_500K,
@@ -127,7 +127,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorMid,
         display_priority: 55,
         lifetime_threshold: Some(2_000_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
     },
     HabitatPropSpec {
         id: TOKEN_ORBIT_5M,
@@ -167,7 +167,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorRight,
         display_priority: 80,
         lifetime_threshold: None,
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
     },
     HabitatPropSpec {
         id: WILT_RECOVERY_SPROUT,
@@ -175,7 +175,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorLeft,
         display_priority: 90,
         lifetime_threshold: None,
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
     },
 ];
 
@@ -329,19 +329,34 @@ mod tests {
     }
 
     #[test]
-    fn other_props_default_to_background_pet_layer() {
+    fn floor_props_are_behind_pet_layer() {
+        // Floor-row props share the pet's walking row. They should render
+        // behind the pet so the pet visually occludes them when it wanders
+        // past, rather than being shoved aside by the silhouette halo.
         for id in [
             TOKEN_PEBBLE_25K,
             TOKEN_SHELL_100K,
             TOKEN_MOSS_TUFT_250K,
+            TOKEN_TREASURE_CHEST_2M,
+            HEAVY_SESSION_PLANTER,
+            WILT_RECOVERY_SPROUT,
+        ] {
+            assert_eq!(
+                catalog_prop_by_str(id).unwrap().pet_layer,
+                HabitatPetLayer::Behind,
+                "{id} sits on the floor; should be Behind so pet occludes it"
+            );
+        }
+    }
+
+    #[test]
+    fn non_floor_props_default_to_background_pet_layer() {
+        for id in [
             TOKEN_SPARK_500K,
             TOKEN_SHARD_1M,
-            TOKEN_TREASURE_CHEST_2M,
             TOKEN_ORBIT_5M,
             TOKEN_LANTERN_10M,
             CODEX_SIGNAL_LAMP,
-            HEAVY_SESSION_PLANTER,
-            WILT_RECOVERY_SPROUT,
         ] {
             assert_eq!(
                 catalog_prop_by_str(id).unwrap().pet_layer,
