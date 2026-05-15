@@ -328,6 +328,44 @@ fn blocked_source_surfaces_via_source_health() {
     assert_ne!(codex_health.status, SourceStatus::Ready);
 }
 
+#[test]
+fn watch_view_model_exposes_catalog_backed_habitat_props() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let _usage_store = UsageStore::open(&usage_db).unwrap();
+    let mut state = mech_state();
+    state
+        .habitat
+        .earned_props
+        .push(glorp::storage::state::EarnedHabitatProp {
+            id: glorp::storage::state::HabitatPropId::new("codex_signal_lamp"),
+            earned_at: datetime!(2026-05-11 12:00:00 UTC),
+            source: glorp::storage::state::HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+        });
+    state
+        .habitat
+        .earned_props
+        .push(glorp::storage::state::EarnedHabitatProp {
+            id: glorp::storage::state::HabitatPropId::new("non_catalog_prop_for_filter_test"),
+            earned_at: datetime!(2026-05-11 12:01:00 UTC),
+            source: glorp::storage::state::HabitatPropSource::HeavySession,
+        });
+
+    let vm =
+        build_watch_view_model_for_test_at(&state, &usage_db, datetime!(2026-05-11 12:02:00 UTC))
+            .unwrap();
+
+    assert_eq!(vm.habitat.earned_props.len(), 1);
+    assert_eq!(vm.habitat.earned_props[0].id.as_str(), "codex_signal_lamp");
+    assert_eq!(vm.habitat.earned_props[0].display_priority, 70);
+    assert_eq!(
+        vm.habitat.earned_props[0].kind,
+        glorp::game::habitat::HabitatPropKind::Trophy
+    );
+}
+
 fn mech_state() -> PetState {
     let mut state = PetState::new_for_test("servo-watch-seed", "bolt");
     state.pet.generated_species = glorp::pet::generation::Species::Mech;

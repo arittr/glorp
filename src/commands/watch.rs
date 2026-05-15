@@ -20,8 +20,8 @@ use crate::{
         app::{WatchApp, WatchUsagePoller},
         style::LogKind,
         view_model::{
-            BioView, EventView, PetRenderModel, ProgressView, SourceHealthView, SourceStatus,
-            SourceUsageView, WatchViewModel,
+            BioView, EarnedHabitatPropView, EventView, HabitatView, PetRenderModel, ProgressView,
+            SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel,
         },
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
@@ -138,6 +138,7 @@ pub(crate) fn build_watch_view_model_at(
             stage: state.stage,
             mood,
         },
+        habitat: build_habitat_view(state),
         pet_name: state.pet.accepted_name.clone(),
         species: species.as_str().to_string(),
         stage: stage_label(species, stage).to_string(),
@@ -253,6 +254,25 @@ fn recent_tokens_per_min(usage_events: &[NormalizedUsageEvent], now: OffsetDateT
         .filter(|e| e.observed_at >= cutoff)
         .map(|e| e.effective_tokens)
         .sum()
+}
+
+fn build_habitat_view(state: &PetState) -> HabitatView {
+    let earned_props = state
+        .habitat
+        .earned_props
+        .iter()
+        .filter_map(|earned| {
+            let spec = crate::game::habitat::catalog_prop(&earned.id)?;
+            Some(EarnedHabitatPropView {
+                id: earned.id.clone(),
+                earned_at: earned.earned_at,
+                kind: spec.kind,
+                display_priority: spec.display_priority,
+            })
+        })
+        .collect();
+
+    HabitatView { earned_props }
 }
 
 #[doc(hidden)]

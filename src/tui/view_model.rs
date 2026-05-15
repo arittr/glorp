@@ -1,6 +1,7 @@
-use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
+use crate::game::{evolution::Stage, habitat::HabitatPropKind};
 use crate::pet::generation::Species;
+use crate::storage::state::HabitatPropId;
 use crate::tui::style::LogKind;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8,6 +9,7 @@ pub struct WatchViewModel {
     pub pet_art: Vec<String>,
     pub pet_spans: Vec<crate::pet::render::StyledSegment>,
     pub pet_render: PetRenderModel,
+    pub habitat: HabitatView,
     pub pet_name: String,
     pub species: String,
     pub stage: String,
@@ -68,6 +70,19 @@ pub struct PetRenderModel {
     pub generated_species: Species,
     pub stage: Stage,
     pub mood: Mood,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HabitatView {
+    pub earned_props: Vec<EarnedHabitatPropView>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EarnedHabitatPropView {
+    pub id: HabitatPropId,
+    pub earned_at: time::OffsetDateTime,
+    pub kind: HabitatPropKind,
+    pub display_priority: i16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +163,9 @@ impl WatchViewModel {
                 generated_species: Species::Fuzz,
                 stage: Stage::S0,
                 mood: Mood::Content,
+            },
+            habitat: HabitatView {
+                earned_props: Vec::new(),
             },
             pet_name: "miso".into(),
             species: "terminal sprout".into(),
