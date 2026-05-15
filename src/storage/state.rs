@@ -88,6 +88,10 @@ pub struct PetState {
     /// motion are derived by the watch renderer from layout and clock.
     #[serde(default)]
     pub habitat: HabitatState,
+    /// Usage ledger row ids already reflected into this JSON state. This keeps
+    /// a save-before-mark retry from applying the same SQLite rows twice.
+    #[serde(default)]
+    pub reflected_usage_event_ids: Vec<i64>,
     /// Last observed mood — used to detect mood transitions across polls.
     #[serde(default)]
     pub last_seen_mood: Option<Mood>,
@@ -138,6 +142,7 @@ impl PetState {
             seen_stage_transitions: Vec::new(),
             recent_events: Vec::new(),
             habitat: HabitatState::default(),
+            reflected_usage_event_ids: Vec::new(),
             last_seen_mood: None,
             previous_vitals: None,
             last_idle_narration_at: None,

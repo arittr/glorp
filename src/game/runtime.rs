@@ -19,6 +19,7 @@ use crate::{
 const USAGE_RETENTION_DAYS: i64 = 90;
 const RECENT_EVENT_LIMIT: usize = 20;
 const POLL_NARRATION_COOLDOWN: Duration = Duration::minutes(5);
+const REFLECTED_USAGE_EVENT_ID_LIMIT: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeUpdate {
@@ -90,7 +91,12 @@ pub fn apply_unapplied_usage(
 ) -> Result<RuntimeUpdate> {
     reconcile_stage_with_xp(state);
     let rows = usage_store.unapplied_events(500)?;
-    let recent_effective_tokens = rows
+    let rows_to_apply = rows
+        .iter()
+        .filter(|row| !state.reflected_usage_event_ids.contains(&row.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let recent_effective_tokens = rows_to_apply
         .iter()
         .map(|row| row.event.effective_tokens.max(0.0))
         .sum::<f64>();
@@ -100,7 +106,7 @@ pub fn apply_unapplied_usage(
     let initial_mood = mood_for_vitals(game_vitals(state.vitals));
 
     if recent_effective_tokens > 0.0 {
-        for row in &rows {
+        for row in &rows_to_apply {
             apply_effective_delta(state, row.event.effective_tokens.max(0.0));
         }
 
@@ -114,7 +120,7 @@ pub fn apply_unapplied_usage(
                 });
             }
         }
-    } else {
+    } else if rows.is_empty() {
         apply_idle_decay(state, now);
 
         // Idle narration: fires if idle ≥ 30 min and no idle narration in the last 6 hours.
@@ -175,12 +181,13 @@ pub fn apply_unapplied_usage(
     }
     habitat::unlock_habitat_props(
         state,
-        &rows,
+        &rows_to_apply,
         recent_effective_tokens,
         initial_mood,
         new_mood,
         now,
     );
+    record_reflected_usage_event_ids(state, rows.iter().map(|row| row.id));
     state.previous_vitals = Some(initial_vitals);
 
     state.last_usage_poll_at = Some(now);
@@ -282,6 +289,20 @@ fn should_narrate_poll_cycle(
     }
 
     narration::should_sample_poll_phrase(&state.pet.seed, bucket, effective_tokens, now)
+}
+
+fn record_reflected_usage_event_ids(state: &mut PetState, ids: impl IntoIterator<Item = i64>) {
+    state.reflected_usage_event_ids.extend(ids);
+    state.reflected_usage_event_ids.sort_unstable();
+    state.reflected_usage_event_ids.dedup();
+
+    let extra = state
+        .reflected_usage_event_ids
+        .len()
+        .saturating_sub(REFLECTED_USAGE_EVENT_ID_LIMIT);
+    if extra > 0 {
+        state.reflected_usage_event_ids.drain(0..extra);
+    }
 }
 
 fn game_vitals(vitals: StoredVitals) -> crate::game::metabolism::Vitals {

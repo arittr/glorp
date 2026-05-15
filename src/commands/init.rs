@@ -70,6 +70,7 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
             text: format!("{accepted_name} has hatched"),
         }],
         habitat: HabitatState::default(),
+        reflected_usage_event_ids: Vec::new(),
         last_seen_mood: None,
         previous_vitals: None,
         last_idle_narration_at: None,

@@ -1,7 +1,7 @@
 use glorp::{
     game::{
         evolution::Stage,
-        runtime::{apply_unapplied_usage, apply_usage_poll},
+        runtime::{apply_unapplied_usage, apply_usage_poll, stage_usage_poll_deltas},
     },
     storage::{
         state::{PetState, Vitals},
@@ -474,6 +474,37 @@ fn existing_lifetime_counter_reconciles_ladder_props_without_usage_delta() {
         vec!["token_pebble_25k", "token_shell_100k"]
     );
     assert_eq!(state.habitat.reconciled_lifetime_tokens_at, Some(125_000.0));
+}
+
+#[test]
+fn reflected_unapplied_usage_does_not_unlock_ladder_twice_on_mark_retry() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 1_000_000.0;
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+    stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll_with_delta(60_000.0, now),
+        state.calibration,
+        now,
+    )
+    .unwrap();
+    let first_update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+
+    assert_eq!(state.lifetime_effective_tokens, 60_000.0);
+    assert_eq!(habitat_prop_ids(&state), vec!["token_pebble_25k"]);
+
+    let retry_update =
+        apply_unapplied_usage(&mut state, &mut usage_store, now + Duration::minutes(1)).unwrap();
+
+    assert_eq!(
+        retry_update.applied_event_ids,
+        first_update.applied_event_ids
+    );
+    assert_eq!(state.lifetime_effective_tokens, 60_000.0);
+    assert_eq!(habitat_prop_ids(&state), vec!["token_pebble_25k"]);
 }
 
 #[test]
