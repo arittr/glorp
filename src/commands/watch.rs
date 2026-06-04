@@ -182,8 +182,9 @@ pub(crate) fn build_watch_view_model_at(
                 .map(|(_, v)| *v)
                 .sum();
             let is_max = matches!(stage, Stage::S6);
-            let xp_to_next = next_stage_xp_target(stage);
-            let xp_in_stage = state.xp;
+            let stage_start = stage_start_xp(stage);
+            let xp_in_stage = state.xp - stage_start;
+            let xp_to_next = next_stage_xp_target(stage) - stage_start;
             let fraction = if xp_to_next <= 0.0 || is_max {
                 1.0
             } else {
@@ -388,6 +389,18 @@ fn next_stage_xp_target(stage: Stage) -> f64 {
         Stage::S3 => 4.0,
         Stage::S4 => 14.0,
         Stage::S5 | Stage::S6 => 60.0,
+    }
+}
+
+fn stage_start_xp(stage: Stage) -> f64 {
+    match stage {
+        Stage::S0 => 0.0,
+        Stage::S1 => 0.04,
+        Stage::S2 => 0.25,
+        Stage::S3 => 1.0,
+        Stage::S4 => 4.0,
+        Stage::S5 => 14.0,
+        Stage::S6 => 60.0,
     }
 }
 
@@ -732,16 +745,18 @@ mod tests {
         let mut state = PetState::new_for_test("test", "Mochi");
         state.pet.generated_species = Species::Fuzz;
         state.stage = Stage::S4;
-        state.xp = 8.5; // 61% toward S4 target of 14.0
+        state.xp = 8.5; // S4 spans 4.0..14.0; 8.5 is 4.5/10.0 = 45% through the stage
 
         let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
         assert_eq!(vm.progress.stage_label, "fuzz");
         assert_eq!(vm.progress.next_stage_label, "archfuzz");
         assert!(
-            vm.progress.fraction > 0.5 && vm.progress.fraction < 0.7,
-            "expected fraction in (0.5, 0.7), got {}",
+            (vm.progress.fraction - 0.45).abs() < 0.01,
+            "expected stage-relative fraction ~0.45, got {}",
             vm.progress.fraction
         );
+        assert!((vm.progress.xp_in_stage - 4.5).abs() < 1e-6);
+        assert!((vm.progress.xp_to_next - 10.0).abs() < 1e-6);
         assert!(
             vm.progress.rate_per_hour > 0.0,
             "expected positive rate, got {}",
