@@ -388,7 +388,7 @@ fn mech_state() -> PetState {
 }
 
 #[test]
-fn ema_rate_grows_with_more_recent_events() {
+fn rate_per_hour_grows_with_more_recent_events() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("usage.sqlite");
     let mut store = UsageStore::open(&db_path).unwrap();
@@ -410,7 +410,7 @@ fn ema_rate_grows_with_more_recent_events() {
     let vm_a = build_watch_view_model_for_test_at(&state, &db_path, now).unwrap();
     let rate_a = vm_a.progress.rate_per_hour;
 
-    // Add one large event right at now — it carries maximum EMA weight.
+    // Add one large event right at now — it lands inside the 1-hour window.
     store
         .insert_event(&NormalizedUsageEvent {
             observed_at: now,
@@ -426,6 +426,6 @@ fn ema_rate_grows_with_more_recent_events() {
     let rate_b = vm_b.progress.rate_per_hour;
     assert!(
         rate_b > rate_a,
-        "ema must grow with more recent contribution (a={rate_a}, b={rate_b})"
+        "rate must grow with more recent contribution (a={rate_a}, b={rate_b})"
     );
 }

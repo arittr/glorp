@@ -127,7 +127,7 @@ pub struct ProgressView {
     pub xp_in_stage: f64,
     /// next_stage_xp_target(state.stage), in stage-progress units.
     pub xp_to_next: f64,
-    /// 6h-half-life EMA, effective tokens / hour.
+    /// Effective tokens observed in the last hour (sum over `bucket_at`).
     pub rate_per_hour: f64,
     /// True at S6; ProgressPanel renders "max evolved" instead of a bar.
     pub is_max_stage: bool,
