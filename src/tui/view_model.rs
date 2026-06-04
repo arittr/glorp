@@ -123,7 +123,8 @@ pub struct ProgressView {
     pub fraction: f32,
     /// state.xp - stage_start_xp(state.stage), in stage-progress units.
     pub xp_in_stage: f64,
-    /// next_stage_xp_target(state.stage), in stage-progress units.
+    /// next_stage_xp_target(state.stage) - stage_start_xp(state.stage), in
+    /// stage-progress units (the current stage's full span).
     pub xp_to_next: f64,
     /// Effective tokens observed in the last hour (sum over `bucket_at`).
     pub rate_per_hour: f64,
