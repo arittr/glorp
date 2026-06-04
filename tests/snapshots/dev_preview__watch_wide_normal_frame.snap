@@ -1,6 +1,5 @@
 ---
 source: tests/dev_preview.rs
-assertion_line: 554
 expression: frame
 ---
 ╭ glorp · Mochi · fuzz · 18d · content ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮
@@ -27,7 +26,7 @@ expression: frame
 │                                                      ·  ·  ·  ·  ·  ▅  █         ← 7-day                             │
 │                                                                                                                      │
 │ progress ──────────────────────────────────────     feed ────────────────────────────────────────────────────────────│
-│  xp         ███████░░░░░  61   ↑ 16.7k/hr            08:53  claude-code added 8.8k effective tokens                  │
+│  xp         █████░░░░░░░  45   ↑ 16.7k/hr            08:53  claude-code added 8.8k effective tokens                  │
 │                                                      08:38  Mochi brightened                                         │
 │ bio ───────────────────────────────────────────      08:43  Mochi munched                                            │
 │  hatched   sep 21 08:53                              08:45  codex added 4.2k effective tokens                        │
