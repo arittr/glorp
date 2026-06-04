@@ -15,9 +15,10 @@ const SPEECH_VISIBLE_SECS: i64 = 5;
 /// each cycle, then hides for the rest.
 const SPEECH_CYCLE_SECS: i64 = 30;
 
-/// Token volume in the last minute above which speech defaults to "yum!"
-/// or similar feeding reactions, regardless of mood.
-const MUNCH_SPEECH_THRESHOLD_PER_MIN: f64 = 30_000.0;
+/// Effective tokens in the recent activity window above which speech defaults
+/// to feeding reactions ("yum!" etc.), regardless of mood. Branch 2 will
+/// re-point this onto the normalized live-activity signal.
+const MUNCH_SPEECH_THRESHOLD: f64 = 30_000.0;
 
 /// Compute the pet's current speech line, if any. Returns Some(text) for
 /// the first ~5s of each 30s cycle (deterministic on `now`), None otherwise.
@@ -25,7 +26,7 @@ const MUNCH_SPEECH_THRESHOLD_PER_MIN: f64 = 30_000.0;
 /// in, then falls back to mood-flavored idle lines.
 pub fn current_pet_speech(
     mood: Mood,
-    recent_tokens_per_min: f64,
+    recent_activity_tokens: f64,
     now: OffsetDateTime,
 ) -> Option<String> {
     let cycle_pos = now.unix_timestamp().rem_euclid(SPEECH_CYCLE_SECS);
@@ -33,7 +34,7 @@ pub fn current_pet_speech(
         return None;
     }
 
-    if recent_tokens_per_min >= MUNCH_SPEECH_THRESHOLD_PER_MIN {
+    if recent_activity_tokens >= MUNCH_SPEECH_THRESHOLD {
         return Some(pick_munch_phrase(now));
     }
 

@@ -167,7 +167,7 @@ pub(crate) fn build_watch_view_model_at(
         mouse_tracking_enabled: true,
         current_speech: crate::pet::speech::current_pet_speech(
             mood,
-            recent_tokens_per_min(&recent_usage, now),
+            recent_activity_tokens(&recent_usage, now),
             now,
         ),
         wander_offset_x: 0, // computed at render time by the panel from area.width
@@ -247,12 +247,22 @@ pub(crate) fn build_watch_view_model_at(
     })
 }
 
-/// Tokens observed in the last 60 seconds, returned as a per-minute rate.
-fn recent_tokens_per_min(usage_events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
-    let cutoff = now - Duration::minutes(1);
+/// Window over which `recent_activity_tokens` sums recent activity. Spans at
+/// least two 10-minute smear buckets so the value decays smoothly instead of
+/// stepping.
+const RECENT_ACTIVITY_WINDOW: Duration = Duration::minutes(20);
+
+/// Effective tokens whose activity time (`bucket_at`) falls in the last
+/// `RECENT_ACTIVITY_WINDOW`. Uses `bucket_at`, not `observed_at`: a catchup
+/// poll back-dates a fat delta across past buckets while stamping every
+/// smeared row with `observed_at = now`, so an `observed_at` window spikes to
+/// the whole delta on one poll and snaps to zero on the next. Summing by
+/// `bucket_at` reflects when activity actually happened.
+fn recent_activity_tokens(usage_events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
+    let cutoff = now - RECENT_ACTIVITY_WINDOW;
     usage_events
         .iter()
-        .filter(|e| e.observed_at >= cutoff)
+        .filter(|e| e.bucket_at >= cutoff)
         .map(|e| e.effective_tokens)
         .sum()
 }
@@ -819,6 +829,34 @@ mod tests {
         assert_eq!(
             vm.progress.rate_per_hour, 42_000.0,
             "catchup row with bucket_at 3h ago must NOT contribute to the rate"
+        );
+    }
+
+    #[test]
+    fn recent_activity_tokens_uses_bucket_at_not_observed_at() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        // Build an event observed `now` but whose activity time is `bucket_offset` ago.
+        let event = |bucket_offset: Duration, tokens: f64| NormalizedUsageEvent {
+            observed_at: now,
+            bucket_at: now - bucket_offset,
+            effective_tokens: tokens,
+            ..NormalizedUsageEvent::for_test_at(now, tokens)
+        };
+        // Catchup: a huge delta whose activity happened 3h ago — must NOT count.
+        assert_eq!(
+            recent_activity_tokens(&[event(Duration::hours(3), 1_000_000.0)], now),
+            0.0
+        );
+        // Same catchup plus fresh in-window activity — only the fresh tokens count.
+        assert_eq!(
+            recent_activity_tokens(
+                &[
+                    event(Duration::hours(3), 1_000_000.0),
+                    event(Duration::minutes(5), 12_000.0),
+                ],
+                now
+            ),
+            12_000.0
         );
     }
 
