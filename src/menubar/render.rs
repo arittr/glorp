@@ -153,11 +153,7 @@ fn append_stats(runs: &mut Vec<StyledRun>, vm: &WatchViewModel) {
         push_stat_row(runs, "xp", "max evolved".into());
     } else {
         let pct = ((vm.progress.fraction * 100.0).round() as i32).clamp(0, 100);
-        push_stat_row(
-            runs,
-            "xp",
-            format!("{}%  →  {}", pct, vm.progress.next_stage_label),
-        );
+        push_stat_row(runs, "xp", format!("{}%", pct));
     }
     runs.push(StyledRun::plain("\n"));
 
