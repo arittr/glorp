@@ -235,9 +235,9 @@ impl WatchViewModel {
             progress: ProgressView {
                 stage_label: "fuzz".to_string(),
                 next_stage_label: "archfuzz".to_string(),
-                fraction: 0.61,
-                xp_in_stage: 8.5,
-                xp_to_next: 14.0,
+                fraction: 0.45,
+                xp_in_stage: 4.5,
+                xp_to_next: 10.0,
                 rate_per_hour: 109_000.0,
                 is_max_stage: false,
             },
