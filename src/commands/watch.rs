@@ -144,8 +144,6 @@ pub(crate) fn build_watch_view_model_at(
         stage: stage_label(species, stage).to_string(),
         mood: mood.as_str().to_string(),
         age_days: (now - state.created_at).whole_days().max(0) as u32,
-        xp_current: state.xp,
-        xp_target: next_stage_xp_target(stage),
         fed: state.vitals.fed / 100.0,
         happiness: state.vitals.happiness / 100.0,
         energy: state.vitals.energy / 100.0,
