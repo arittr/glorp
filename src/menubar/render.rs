@@ -17,6 +17,7 @@ use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 
 use crate::format::format_tokens;
 use crate::pet::render::PaletteRoleName;
+use crate::tui::life::SourceAccent;
 use crate::tui::view_model::WatchViewModel;
 
 /// Approximate width in columns of the wider stats lines; used to size the
@@ -73,6 +74,20 @@ fn role_color(role: PaletteRoleName) -> Rgb {
     }
 }
 
+fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
+    let base = role_color(role);
+    if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
+        return base;
+    }
+
+    match vm.life_profile.source_accent {
+        Some(SourceAccent::Codex) => Rgb(0x86, 0xd9, 0xef),
+        Some(SourceAccent::Claude) => Rgb(0xb3, 0x9d, 0xff),
+        Some(SourceAccent::Balanced) => Rgb(0xf0, 0xc4, 0x6a),
+        None => base,
+    }
+}
+
 struct StyledRun {
     text: String,
     color: Rgb,
@@ -124,7 +139,7 @@ fn append_pet(runs: &mut Vec<StyledRun>, vm: &WatchViewModel) {
             }
             if span_end > span_start {
                 let body: String = chars[span_start..span_end].iter().collect();
-                runs.push(StyledRun::new(body, role_color(span.role)));
+                runs.push(StyledRun::new(body, role_color_for_profile(span.role, vm)));
                 cursor = span_end;
             }
         }
@@ -269,6 +284,8 @@ fn color_for(rgb: Rgb) -> Retained<NSColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pet::render::StyledSegment;
+    use crate::tui::life::{PetLifeProfile, SourceAccent};
     use crate::tui::view_model::WatchViewModel;
 
     /// The animation tick uses `pet_block.char_len` as the upper bound of the
@@ -292,5 +309,86 @@ mod tests {
             ns_len, block.char_len,
             "BMP-only content should keep NSString UTF-16 length in sync with char count"
         );
+    }
+
+    #[test]
+    fn menubar_profile_accent_is_poll_bound_and_bmp_safe() {
+        let mut vm = WatchViewModel::fixture();
+        vm.pet_art = vec!["EAPB".to_string()];
+        vm.pet_spans = vec![
+            StyledSegment {
+                line: 0,
+                start: 0,
+                end: 1,
+                role: PaletteRoleName::Eye,
+            },
+            StyledSegment {
+                line: 0,
+                start: 1,
+                end: 2,
+                role: PaletteRoleName::Accent,
+            },
+            StyledSegment {
+                line: 0,
+                start: 2,
+                end: 3,
+                role: PaletteRoleName::Particle,
+            },
+            StyledSegment {
+                line: 0,
+                start: 3,
+                end: 4,
+                role: PaletteRoleName::Body,
+            },
+        ];
+        vm.life_profile = PetLifeProfile {
+            activity_level: 1.5,
+            source_accent: Some(SourceAccent::Codex),
+            ..Default::default()
+        };
+
+        let block = render_pet_block(&vm);
+
+        assert_eq!(
+            block.char_len,
+            block.attr.length(),
+            "profile accents must not disturb the menubar BMP length invariant"
+        );
+
+        let runs = pet_runs_for_test(&vm);
+        assert_eq!(runs[0].text, "E");
+        assert_eq!(
+            rgb_tuple(runs[0].color),
+            rgb_tuple(role_color(PaletteRoleName::Eye))
+        );
+        assert_eq!(runs[1].text, "A");
+        assert_eq!(rgb_tuple(runs[1].color), (0x86, 0xd9, 0xef));
+        assert_eq!(runs[2].text, "P");
+        assert_eq!(rgb_tuple(runs[2].color), (0x86, 0xd9, 0xef));
+        assert_eq!(runs[3].text, "B");
+        assert_eq!(
+            rgb_tuple(runs[3].color),
+            rgb_tuple(role_color(PaletteRoleName::Body))
+        );
+
+        let base_accent = rgb_tuple(role_color(PaletteRoleName::Accent));
+        let profile_accent = rgb_tuple(role_color_for_profile(PaletteRoleName::Accent, &vm));
+        assert_ne!(
+            profile_accent, base_accent,
+            "Codex profile should recolor the accent role"
+        );
+        assert_eq!(profile_accent, (0x86, 0xd9, 0xef));
+    }
+
+    fn pet_runs_for_test(vm: &WatchViewModel) -> Vec<StyledRun> {
+        let mut runs = Vec::new();
+        append_pet(&mut runs, vm);
+        runs.push(StyledRun::plain("\n"));
+        runs
+    }
+
+    fn rgb_tuple(rgb: Rgb) -> (u8, u8, u8) {
+        let Rgb(r, g, b) = rgb;
+        (r, g, b)
     }
 }
