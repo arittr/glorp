@@ -11,7 +11,11 @@ use crate::storage::{
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
 use crate::tui::layout::render_watch_frame_with_layout;
+use crate::tui::life::{
+    IdleLifeState, PetLifeProfile, PropReaction, PropReactionKind, SourceAccent, WorkWeather,
+};
 use crate::tui::render_context::{RenderContext, WatchClock};
+use crate::tui::style::ColorCapability;
 use crate::tui::{component::layout_watch_with_context, component::preview_layout};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -22,7 +26,7 @@ use time::{Duration, OffsetDateTime, UtcOffset};
 pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Vec<PreviewFrame>> {
     std::fs::create_dir_all(scratch_dir)?;
 
-    Ok(vec![
+    let mut frames = vec![
         render_watch_frame(
             "watch-wide-normal",
             "Watch Wide Normal",
@@ -47,7 +51,13 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
             ctx,
             scratch_dir,
         )?,
-    ])
+    ];
+
+    for fixture in liveliness_frame_fixtures(ctx) {
+        frames.push(render_liveliness_watch_frame(ctx, scratch_dir, fixture)?);
+    }
+
+    Ok(frames)
 }
 
 pub(crate) struct WatchFrameFixture<'a> {
@@ -57,6 +67,21 @@ pub(crate) struct WatchFrameFixture<'a> {
     pub height: u16,
     pub state: &'a PetState,
     pub now: OffsetDateTime,
+}
+
+#[derive(Clone)]
+pub(crate) struct WatchLifeFixture {
+    pub profile: PetLifeProfile,
+    pub color_capability: ColorCapability,
+}
+
+struct LivelinessFrameFixture {
+    id: &'static str,
+    title: &'static str,
+    width: u16,
+    height: u16,
+    now: OffsetDateTime,
+    life: WatchLifeFixture,
 }
 
 fn render_watch_frame(
@@ -82,10 +107,40 @@ fn render_watch_frame(
     )
 }
 
+fn render_liveliness_watch_frame(
+    ctx: &PreviewRenderContext,
+    scratch_dir: &Path,
+    fixture: LivelinessFrameFixture,
+) -> Result<PreviewFrame> {
+    let state = liveliness_pet_state(ctx);
+    render_watch_frame_from_state_with_life(
+        ctx,
+        scratch_dir,
+        WatchFrameFixture {
+            id: fixture.id,
+            title: fixture.title,
+            width: fixture.width,
+            height: fixture.height,
+            state: &state,
+            now: fixture.now,
+        },
+        Some(&fixture.life),
+    )
+}
+
 pub(crate) fn render_watch_frame_from_state(
     ctx: &PreviewRenderContext,
     scratch_dir: &Path,
     fixture: WatchFrameFixture<'_>,
+) -> Result<PreviewFrame> {
+    render_watch_frame_from_state_with_life(ctx, scratch_dir, fixture, None)
+}
+
+fn render_watch_frame_from_state_with_life(
+    ctx: &PreviewRenderContext,
+    scratch_dir: &Path,
+    fixture: WatchFrameFixture<'_>,
+    life: Option<&WatchLifeFixture>,
 ) -> Result<PreviewFrame> {
     let WatchFrameFixture {
         id,
@@ -97,8 +152,12 @@ pub(crate) fn render_watch_frame_from_state(
     } = fixture;
     let usage_path = scratch_dir.join(format!("{id}.sqlite"));
     seed_usage_store(&usage_path, now)?;
-    let render = RenderContext::with_clock(ctx.render.color_capability, WatchClock::fixed(now));
-    let vm = build_watch_view_model_at(state, &usage_path, now, UtcOffset::UTC)?;
+    let color_capability = life.map_or(ctx.render.color_capability, |life| life.color_capability);
+    let render = RenderContext::with_clock(color_capability, WatchClock::fixed(now));
+    let mut vm = build_watch_view_model_at(state, &usage_path, now, UtcOffset::UTC)?;
+    if let Some(life) = life {
+        vm.life_profile = life.profile.clone();
+    }
     let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &render);
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
@@ -109,6 +168,92 @@ pub(crate) fn render_watch_frame_from_state(
     let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
     frame.layout = Some(preview_layout(id, &layout));
     Ok(frame)
+}
+
+fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameFixture> {
+    let dawn = ctx.fixed_now;
+    let midday = ctx.fixed_now + Duration::hours(4);
+    let evening = ctx.fixed_now + Duration::hours(10);
+
+    vec![
+        LivelinessFrameFixture {
+            id: "watch-liveliness-s6-idle-dawn",
+            title: "Watch Liveliness S6 Idle Dawn",
+            width: 120,
+            height: 32,
+            now: dawn,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+        },
+        LivelinessFrameFixture {
+            id: "watch-liveliness-s6-warm-midday",
+            title: "Watch Liveliness S6 Warm Midday",
+            width: 120,
+            height: 32,
+            now: midday,
+            life: WatchLifeFixture {
+                profile: warm_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+            },
+        },
+        LivelinessFrameFixture {
+            id: "watch-liveliness-s6-hot-midday",
+            title: "Watch Liveliness S6 Hot Midday",
+            width: 120,
+            height: 32,
+            now: midday,
+            life: WatchLifeFixture {
+                profile: hot_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+            },
+        },
+        LivelinessFrameFixture {
+            id: "watch-liveliness-s6-cooling-evening",
+            title: "Watch Liveliness S6 Cooling Evening",
+            width: 120,
+            height: 32,
+            now: evening,
+            life: WatchLifeFixture {
+                profile: cooling_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+        },
+        LivelinessFrameFixture {
+            id: "watch-liveliness-compact-s6-hot",
+            title: "Watch Liveliness Compact S6 Hot",
+            width: 72,
+            height: 24,
+            now: midday,
+            life: WatchLifeFixture {
+                profile: hot_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+            },
+        },
+        LivelinessFrameFixture {
+            id: "watch-liveliness-flat-s6-hot",
+            title: "Watch Liveliness Flat S6 Hot",
+            width: 120,
+            height: 32,
+            now: midday,
+            life: WatchLifeFixture {
+                profile: hot_life_profile(false),
+                color_capability: ColorCapability::Flat,
+            },
+        },
+        LivelinessFrameFixture {
+            id: "watch-liveliness-calm-mode-s6-hot",
+            title: "Watch Liveliness Calm Mode S6 Hot",
+            width: 120,
+            height: 32,
+            now: midday,
+            life: WatchLifeFixture {
+                profile: hot_life_profile(true),
+                color_capability: ColorCapability::Truecolor,
+            },
+        },
+    ]
 }
 
 fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
@@ -177,6 +322,120 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state
 }
 
+fn liveliness_pet_state(ctx: &PreviewRenderContext) -> PetState {
+    let mut state = seeded_pet_state(ctx);
+    state.pet.generated_species = Species::Crystal;
+    state.stage = Stage::S6;
+    state.xp = 72.0;
+    state.lifetime_effective_tokens = 2_400_000.0;
+    state.vitals = Vitals {
+        fed: 86.0,
+        happiness: 88.0,
+        energy: 84.0,
+    };
+    state.created_at = ctx.fixed_now - Duration::days(96);
+    state.last_updated_at = ctx.fixed_now;
+    state.last_usage_poll_at = Some(ctx.fixed_now - Duration::minutes(1));
+    state.recent_events = vec![
+        NarrativeEvent {
+            observed_at: ctx.fixed_now - Duration::minutes(14),
+            text: format!("{} caught a warm signal", state.pet.accepted_name),
+        },
+        NarrativeEvent {
+            observed_at: ctx.fixed_now - Duration::minutes(5),
+            text: format!("{} polished the crystal den", state.pet.accepted_name),
+        },
+        NarrativeEvent {
+            observed_at: ctx.fixed_now - Duration::minutes(1),
+            text: format!(
+                "{} evolved into {}",
+                state.pet.accepted_name,
+                crate::pet::art::stage_label(state.pet.generated_species, state.stage)
+            ),
+        },
+    ];
+    state
+}
+
+fn idle_life_profile() -> PetLifeProfile {
+    PetLifeProfile {
+        activity_level: 0.0,
+        burst_level: 0.0,
+        source_accent: None,
+        work_weather: WorkWeather::Clear,
+        prop_reactions: Vec::new(),
+        idle: IdleLifeState {
+            idle_minutes: 45,
+            is_recently_active: false,
+        },
+        calm_mode: false,
+    }
+}
+
+fn warm_life_profile(calm_mode: bool) -> PetLifeProfile {
+    PetLifeProfile {
+        activity_level: 0.68,
+        burst_level: 0.24,
+        source_accent: Some(SourceAccent::Balanced),
+        work_weather: WorkWeather::Mixed,
+        prop_reactions: vec![PropReaction {
+            prop_id: HabitatPropId::new("codex_signal_lamp"),
+            intensity: 0.35,
+            kind: PropReactionKind::Glow,
+        }],
+        idle: IdleLifeState {
+            idle_minutes: 0,
+            is_recently_active: true,
+        },
+        calm_mode,
+    }
+}
+
+fn hot_life_profile(calm_mode: bool) -> PetLifeProfile {
+    PetLifeProfile {
+        activity_level: 1.56,
+        burst_level: 1.22,
+        source_accent: Some(SourceAccent::Codex),
+        work_weather: WorkWeather::OutputSparks,
+        prop_reactions: vec![
+            PropReaction {
+                prop_id: HabitatPropId::new("codex_signal_lamp"),
+                intensity: 0.9,
+                kind: PropReactionKind::Pulse,
+            },
+            PropReaction {
+                prop_id: HabitatPropId::new("heavy_session_planter"),
+                intensity: 0.72,
+                kind: PropReactionKind::Bloom,
+            },
+        ],
+        idle: IdleLifeState {
+            idle_minutes: 0,
+            is_recently_active: true,
+        },
+        calm_mode,
+    }
+}
+
+fn cooling_life_profile() -> PetLifeProfile {
+    PetLifeProfile {
+        activity_level: 0.38,
+        burst_level: 0.0,
+        source_accent: Some(SourceAccent::Claude),
+        work_weather: WorkWeather::CacheMist,
+        prop_reactions: vec![PropReaction {
+            prop_id: HabitatPropId::new("token_shell_100k"),
+            intensity: 0.28,
+            kind: PropReactionKind::Glow,
+        }],
+        idle: IdleLifeState {
+            idle_minutes: 12,
+            is_recently_active: false,
+        },
+        calm_mode: false,
+    }
+}
+
 fn seed_usage_store(path: &Path, now: OffsetDateTime) -> Result<()> {
     let mut usage = UsageStore::open(path)?;
     for (surface, observed_at, effective_tokens, model) in [
@@ -215,13 +474,22 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 3);
+        assert_eq!(frames.len(), 10);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
         assert_eq!((frames[1].width, frames[1].height), (180, 50));
         assert_eq!(frames[2].id, "watch-compact-normal");
         assert_eq!((frames[2].width, frames[2].height), (72, 24));
+        assert_eq!(frames[3].id, "watch-liveliness-s6-idle-dawn");
+        assert_eq!((frames[3].width, frames[3].height), (120, 32));
+        assert_eq!(frames[4].id, "watch-liveliness-s6-warm-midday");
+        assert_eq!(frames[5].id, "watch-liveliness-s6-hot-midday");
+        assert_eq!(frames[6].id, "watch-liveliness-s6-cooling-evening");
+        assert_eq!(frames[7].id, "watch-liveliness-compact-s6-hot");
+        assert_eq!((frames[7].width, frames[7].height), (72, 24));
+        assert_eq!(frames[8].id, "watch-liveliness-flat-s6-hot");
+        assert_eq!(frames[9].id, "watch-liveliness-calm-mode-s6-hot");
     }
 
     #[test]

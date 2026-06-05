@@ -6,6 +6,16 @@ use serde_json::Value;
 use std::path::PathBuf;
 use tempfile::{tempdir, TempDir};
 
+const LIVELINESS_WATCH_IDS: [&str; 7] = [
+    "watch-liveliness-s6-idle-dawn",
+    "watch-liveliness-s6-warm-midday",
+    "watch-liveliness-s6-hot-midday",
+    "watch-liveliness-s6-cooling-evening",
+    "watch-liveliness-compact-s6-hot",
+    "watch-liveliness-flat-s6-hot",
+    "watch-liveliness-calm-mode-s6-hot",
+];
+
 struct PreviewRun {
     _dir: TempDir,
     out: PathBuf,
@@ -108,6 +118,20 @@ fn dev_preview_watch_writes_expected_artifacts() {
         .out
         .join("frames/watch-compact-normal.layout.json")
         .is_file());
+    for id in LIVELINESS_WATCH_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id} text artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.cells.json")).is_file(),
+            "missing {id} cells artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.layout.json")).is_file(),
+            "missing {id} layout artifact"
+        );
+    }
 
     let manifest = run.manifest();
     assert_eq!(manifest["schema_version"], 2);
@@ -153,6 +177,23 @@ fn dev_preview_watch_writes_expected_artifacts() {
     assert_artifact_type(&manifest, "watch-tall-wide", "text");
     assert_artifact_type(&manifest, "watch-tall-wide-cells", "cells");
     assert_artifact_type(&manifest, "watch-tall-wide-layout", "layout");
+    for id in LIVELINESS_WATCH_IDS {
+        let (width, height) = liveliness_dimensions(id);
+        assert_scenario(
+            &manifest,
+            id,
+            "watch",
+            (width, height),
+            (
+                &format!("frames/{id}.txt"),
+                &format!("frames/{id}.cells.json"),
+                Some(&format!("frames/{id}.layout.json")),
+            ),
+        );
+        assert_artifact_type(&manifest, id, "text");
+        assert_artifact_type(&manifest, &format!("{id}-cells"), "cells");
+        assert_artifact_type(&manifest, &format!("{id}-layout"), "layout");
+    }
 }
 
 #[test]
@@ -186,6 +227,54 @@ fn dev_preview_watch_manifest_lists_habitat_prop_fixture_ids() {
                 "{id} habitat_props should include {expected}"
             );
         }
+    }
+}
+
+#[test]
+fn dev_preview_watch_includes_liveliness_profile_inputs() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    for id in LIVELINESS_WATCH_IDS {
+        let watch_scenario = scenario(&manifest, id);
+        let life_profile = &watch_scenario["inputs"]["life_profile"];
+
+        assert!(
+            life_profile["activity_level"].is_number(),
+            "{id} activity_level should be numeric"
+        );
+        assert!(
+            life_profile["burst_level"].is_number(),
+            "{id} burst_level should be numeric"
+        );
+        assert!(
+            life_profile["freshness"].is_string(),
+            "{id} freshness should be a string"
+        );
+    }
+}
+
+#[test]
+#[ignore = "visual consumers are added in Task 7"]
+fn dev_preview_liveliness_changes_pet_scene_cells_not_only_text() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let warm_cells = read_cells(&run, "watch-liveliness-s6-warm-midday");
+    let warm_layout = read_layout(&run, "watch-liveliness-s6-warm-midday");
+    let hot_cells = read_cells(&run, "watch-liveliness-s6-hot-midday");
+    let hot_layout = read_layout(&run, "watch-liveliness-s6-hot-midday");
+
+    let warm_habitat = cells_for_target(&warm_cells, &warm_layout, "watch.pet.habitat");
+    let hot_habitat = cells_for_target(&hot_cells, &hot_layout, "watch.pet.habitat");
+
+    if warm_habitat == hot_habitat {
+        panic!(
+            "Task 7 should make liveliness profile changes visible inside watch.pet.habitat; warm and hot habitat cells are currently identical"
+        );
     }
 }
 
@@ -426,6 +515,13 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-wide-normal.txt",
         "frames/watch-tall-wide.txt",
         "frames/watch-compact-normal.txt",
+        "frames/watch-liveliness-s6-idle-dawn.txt",
+        "frames/watch-liveliness-s6-warm-midday.txt",
+        "frames/watch-liveliness-s6-hot-midday.txt",
+        "frames/watch-liveliness-s6-cooling-evening.txt",
+        "frames/watch-liveliness-compact-s6-hot.txt",
+        "frames/watch-liveliness-flat-s6-hot.txt",
+        "frames/watch-liveliness-calm-mode-s6-hot.txt",
         "frames/habitat-props-catalog.txt",
         "frames/watch-habitat-early.txt",
         "frames/watch-habitat-lived-in.txt",
@@ -444,6 +540,13 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-wide-normal".to_string(),
             "watch-tall-wide".to_string(),
             "watch-compact-normal".to_string(),
+            "watch-liveliness-s6-idle-dawn".to_string(),
+            "watch-liveliness-s6-warm-midday".to_string(),
+            "watch-liveliness-s6-hot-midday".to_string(),
+            "watch-liveliness-s6-cooling-evening".to_string(),
+            "watch-liveliness-compact-s6-hot".to_string(),
+            "watch-liveliness-flat-s6-hot".to_string(),
+            "watch-liveliness-calm-mode-s6-hot".to_string(),
             "habitat-props-catalog".to_string(),
             "watch-habitat-early".to_string(),
             "watch-habitat-lived-in".to_string(),
@@ -608,6 +711,46 @@ fn scenario_ids(manifest: &Value) -> Vec<String> {
         .unwrap()
         .iter()
         .map(|scenario| scenario["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn liveliness_dimensions(id: &str) -> (u64, u64) {
+    if id == "watch-liveliness-compact-s6-hot" {
+        (72, 24)
+    } else {
+        (120, 32)
+    }
+}
+
+fn read_cells(run: &PreviewRun, id: &str) -> Value {
+    read_json(run.out.join(format!("frames/{id}.cells.json")))
+}
+
+fn read_layout(run: &PreviewRun, id: &str) -> Value {
+    read_json(run.out.join(format!("frames/{id}.layout.json")))
+}
+
+fn read_json(path: PathBuf) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn cells_for_target(cells: &Value, layout: &Value, target: &str) -> Vec<Value> {
+    let rect = &layout["targets"][target];
+    let x = rect["x"].as_u64().unwrap();
+    let y = rect["y"].as_u64().unwrap();
+    let width = rect["width"].as_u64().unwrap();
+    let height = rect["height"].as_u64().unwrap();
+
+    cells["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|cell| {
+            let cell_x = cell["x"].as_u64().unwrap();
+            let cell_y = cell["y"].as_u64().unwrap();
+            cell_x >= x && cell_x < x + width && cell_y >= y && cell_y < y + height
+        })
+        .cloned()
         .collect()
 }
 

@@ -197,6 +197,15 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Confirm critical pet and usage details remain visible.".to_string(),
             ],
         ),
+        id if id.starts_with("watch-liveliness-") => (
+            PreviewScenarioKind::Watch,
+            "Review deterministic live-scene profile inputs before visual liveliness rendering consumes them.",
+            life_profile_inputs_for_frame(id, frame, ctx),
+            vec![
+                "Confirm the frame has a truthful life_profile input contract.".to_string(),
+                "Use the cells and layout artifacts as Task 7 proof fixtures.".to_string(),
+            ],
+        ),
         "pet-species-stage" => (
             PreviewScenarioKind::PetMatrix,
             "Review every Slice 1 pet species across all seven growth stages.",
@@ -373,6 +382,154 @@ fn preview_habitat_props() -> Value {
     ])
 }
 
+fn life_profile_inputs_for_frame(
+    id: &str,
+    frame: &PreviewFrame,
+    ctx: &PreviewRenderContext,
+) -> BTreeMap<String, Value> {
+    let midday = ctx.fixed_now + time::Duration::hours(4);
+    let evening = ctx.fixed_now + time::Duration::hours(10);
+    let (
+        activity_level,
+        burst_level,
+        source_accent,
+        weather,
+        prop_reactions,
+        color_capability,
+        calm_mode,
+        freshness,
+        fixed_now,
+    ) = match id {
+        "watch-liveliness-s6-idle-dawn" => (
+            0.0,
+            0.0,
+            None,
+            "clear",
+            json!([]),
+            ColorCapability::Truecolor,
+            false,
+            "cold-start",
+            ctx.fixed_now,
+        ),
+        "watch-liveliness-s6-warm-midday" => (
+            0.68,
+            0.24,
+            Some("balanced"),
+            "mixed",
+            json!([{
+                "prop_id": "codex_signal_lamp",
+                "intensity": 0.35,
+                "kind": "glow"
+            }]),
+            ColorCapability::Truecolor,
+            false,
+            "live",
+            midday,
+        ),
+        "watch-liveliness-s6-hot-midday"
+        | "watch-liveliness-compact-s6-hot"
+        | "watch-liveliness-flat-s6-hot" => (
+            1.56,
+            1.22,
+            Some("codex"),
+            "output-sparks",
+            json!([
+                {
+                    "prop_id": "codex_signal_lamp",
+                    "intensity": 0.9,
+                    "kind": "pulse"
+                },
+                {
+                    "prop_id": "heavy_session_planter",
+                    "intensity": 0.72,
+                    "kind": "bloom"
+                }
+            ]),
+            if id == "watch-liveliness-flat-s6-hot" {
+                ColorCapability::Flat
+            } else {
+                ColorCapability::Truecolor
+            },
+            false,
+            "live",
+            midday,
+        ),
+        "watch-liveliness-calm-mode-s6-hot" => (
+            1.56,
+            1.22,
+            Some("codex"),
+            "output-sparks",
+            json!([
+                {
+                    "prop_id": "codex_signal_lamp",
+                    "intensity": 0.9,
+                    "kind": "pulse"
+                },
+                {
+                    "prop_id": "heavy_session_planter",
+                    "intensity": 0.72,
+                    "kind": "bloom"
+                }
+            ]),
+            ColorCapability::Truecolor,
+            true,
+            "live",
+            midday,
+        ),
+        "watch-liveliness-s6-cooling-evening" => (
+            0.38,
+            0.0,
+            Some("claude"),
+            "cache-mist",
+            json!([{
+                "prop_id": "token_shell_100k",
+                "intensity": 0.28,
+                "kind": "glow"
+            }]),
+            ColorCapability::Truecolor,
+            false,
+            "backfill",
+            evening,
+        ),
+        _ => (
+            0.0,
+            0.0,
+            None,
+            "clear",
+            json!([]),
+            ctx.render.color_capability,
+            false,
+            "unknown",
+            ctx.fixed_now,
+        ),
+    };
+
+    BTreeMap::from([
+        (
+            "fixed_now".to_string(),
+            Value::String(format_rfc3339_lossy(fixed_now)),
+        ),
+        ("tick".to_string(), json!(fixed_now.unix_timestamp())),
+        ("terminal_width".to_string(), json!(frame.width)),
+        ("terminal_height".to_string(), json!(frame.height)),
+        (
+            "life_profile".to_string(),
+            json!({
+                "activity_level": activity_level,
+                "burst_level": burst_level,
+                "source_accent": source_accent,
+                "weather": weather,
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": prop_reactions,
+                "color_capability": color_capability_name(color_capability),
+                "calm_mode": calm_mode,
+                "freshness": freshness
+            }),
+        ),
+    ])
+}
+
 fn text_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.txt", frame.id))
 }
@@ -467,6 +624,13 @@ mod tests {
                 "watch-wide-normal",
                 "watch-tall-wide",
                 "watch-compact-normal",
+                "watch-liveliness-s6-idle-dawn",
+                "watch-liveliness-s6-warm-midday",
+                "watch-liveliness-s6-hot-midday",
+                "watch-liveliness-s6-cooling-evening",
+                "watch-liveliness-compact-s6-hot",
+                "watch-liveliness-flat-s6-hot",
+                "watch-liveliness-calm-mode-s6-hot",
                 "habitat-props-catalog",
                 "watch-habitat-early",
                 "watch-habitat-lived-in",
