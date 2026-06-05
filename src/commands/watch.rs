@@ -17,7 +17,7 @@ use crate::{
         usage_store::{NormalizedUsageEvent, UsageStore},
     },
     tui::{
-        app::{WatchApp, WatchUsagePoller},
+        app::{WatchApp, WatchPollResult, WatchUsagePoller},
         style::LogKind,
         view_model::{
             BioView, EarnedHabitatPropView, EventView, HabitatView, PetRenderModel, ProgressView,
@@ -309,10 +309,10 @@ struct RealWatchPoller {
 }
 
 impl WatchUsagePoller for RealWatchPoller {
-    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchPollResult> {
         let state_store = StateStore::new(self.state_file.clone());
-        let state = match poll_usage_and_apply(&state_store, &self.usage_db, &self.config_file) {
-            Ok(Some(state)) => state,
+        let outcome = match poll_usage_and_apply(&state_store, &self.usage_db, &self.config_file) {
+            Ok(Some(outcome)) => outcome,
             Ok(None) => {
                 return Err(GlorpError::Message(
                     "no glorp pet exists yet; run `glorp init` first".into(),
@@ -327,18 +327,32 @@ impl WatchUsagePoller for RealWatchPoller {
                     kind: LogKind::Diagnostic,
                     text: err.to_string(),
                 });
-                return Ok(vm);
+                return Ok(WatchPollResult {
+                    vm,
+                    applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                        OffsetDateTime::now_utc(),
+                        Duration::seconds(0),
+                    ),
+                });
             }
         };
-        build_watch_view_model(&state, &self.usage_db)
+        Ok(WatchPollResult {
+            vm: build_watch_view_model(&outcome.state, &self.usage_db)?,
+            applied_signal: outcome.applied_signal,
+        })
     }
+}
+
+pub(crate) struct PollUsageOutcome {
+    pub state: PetState,
+    pub applied_signal: crate::tui::life::AppliedUsageSignal,
 }
 
 pub(crate) fn poll_usage_and_apply(
     state_store: &StateStore,
     usage_db: &Path,
     config_file: &Path,
-) -> Result<Option<PetState>> {
+) -> Result<Option<PollUsageOutcome>> {
     let Some(mut state) = state_store.load()? else {
         return Ok(None);
     };
@@ -347,17 +361,29 @@ pub(crate) fn poll_usage_and_apply(
     let weights = crate::game::effective_tokens::EffectiveTokenWeights::from_config(config);
     let result =
         CcusageCommandProvider::from_environment_with_weights(weights).poll(&mut usage_store)?;
+    let now = OffsetDateTime::now_utc();
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
-        let now = OffsetDateTime::now_utc();
         // Stage smeared ledger rows for new provider deltas before applying.
         stage_usage_poll_deltas(&mut usage_store, &result, state.calibration, now)?;
         let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
+        let applied_signal = update.applied_signal;
         state_store.save(&state)?;
         // Mark after save: a failure here drifts state.lifetime ahead of the
         // usage store; the next successful run reconciles via the ledger.
         usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
+        return Ok(Some(PollUsageOutcome {
+            state,
+            applied_signal,
+        }));
     }
-    Ok(Some(state))
+    let elapsed = state
+        .last_usage_poll_at
+        .map(|last| now - last)
+        .unwrap_or_else(|| Duration::seconds(0));
+    Ok(Some(PollUsageOutcome {
+        state,
+        applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(now, elapsed),
+    }))
 }
 
 fn mood_from_state(state: &PetState) -> Mood {

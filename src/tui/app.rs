@@ -69,8 +69,9 @@ pub struct WatchApp {
     config: WatchAppConfig,
     overlay: Option<Overlay>,
     request_tx: Sender<PollRequest>,
-    result_rx: Receiver<Result<WatchViewModel>>,
+    result_rx: Receiver<Result<WatchPollResult>>,
     worker: Option<JoinHandle<()>>,
+    life_signal_state: crate::tui::life::LifeSignalState,
     in_flight: bool,
     poll_count: u64,
     animation_frame: u64,
@@ -105,7 +106,7 @@ impl WatchApp {
         mut poller: Box<dyn WatchUsagePoller>,
     ) -> Self {
         let (request_tx, request_rx) = mpsc::channel::<PollRequest>();
-        let (result_tx, result_rx) = mpsc::channel::<Result<WatchViewModel>>();
+        let (result_tx, result_rx) = mpsc::channel::<Result<WatchPollResult>>();
         let worker = thread::spawn(move || {
             while let Ok(request) = request_rx.recv() {
                 match request {
@@ -133,6 +134,7 @@ impl WatchApp {
             request_tx,
             result_rx,
             worker: Some(worker),
+            life_signal_state: crate::tui::life::LifeSignalState::default(),
             in_flight: false,
             poll_count: 0,
             animation_frame: 0,
@@ -411,7 +413,7 @@ impl WatchApp {
     fn try_collect_poll_result(&mut self) -> Result<()> {
         match self.result_rx.try_recv() {
             Ok(result) => {
-                self.vm = result?;
+                self.install_poll_result(result?);
                 self.poll_count += 1;
                 self.in_flight = false;
                 Ok(())
@@ -484,10 +486,19 @@ impl WatchApp {
             .result_rx
             .recv()
             .map_err(|err| GlorpError::Message(format!("watch poll worker hung up: {err}")))?;
-        self.vm = result?;
+        self.install_poll_result(result?);
         self.poll_count += 1;
         self.in_flight = false;
         Ok(())
+    }
+
+    fn install_poll_result(&mut self, mut result: WatchPollResult) -> WatchViewModel {
+        let profile = self
+            .life_signal_state
+            .observe(result.applied_signal, time::OffsetDateTime::now_utc());
+        result.vm.life_profile = profile;
+        self.vm = result.vm;
+        self.vm.clone()
     }
 
     #[doc(hidden)]
@@ -519,15 +530,27 @@ impl Drop for WatchApp {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct WatchPollResult {
+    pub vm: WatchViewModel,
+    pub applied_signal: crate::tui::life::AppliedUsageSignal,
+}
+
 pub trait WatchUsagePoller: Send {
-    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel>;
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchPollResult>;
 }
 
 struct NoopWatchPoller;
 
 impl WatchUsagePoller for NoopWatchPoller {
-    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
-        Ok(current.clone())
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchPollResult> {
+        Ok(WatchPollResult {
+            vm: current.clone(),
+            applied_signal: crate::tui::life::AppliedUsageSignal::quiet(
+                time::OffsetDateTime::now_utc(),
+                time::Duration::seconds(0),
+            ),
+        })
     }
 }
 
@@ -578,9 +601,21 @@ impl WatchTestHarness {
 }
 
 impl WatchUsagePoller for WatchTestHarness {
-    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchPollResult> {
         self.vm = current.clone();
-        run_single_watch_tick_for_test(self)
+        let vm = run_single_watch_tick_for_test(self)?;
+        Ok(WatchPollResult {
+            vm,
+            applied_signal: crate::tui::life::AppliedUsageSignal {
+                applied_effective_tokens: self.effective_delta.max(0.0),
+                raw_effective_tokens: Some(self.effective_delta.max(0.0)),
+                source_mix: None,
+                token_shape: None,
+                observed_at: time::OffsetDateTime::now_utc(),
+                elapsed_since_successful_poll: time::Duration::seconds(10),
+                freshness: crate::tui::life::UsageSignalFreshness::Live,
+            },
+        })
     }
 }
 
@@ -661,6 +696,41 @@ mod tests {
     };
     use crossterm::event::KeyModifiers;
     use ratatui::layout::Rect;
+
+    struct SignalPoller {
+        signal: crate::tui::life::AppliedUsageSignal,
+    }
+
+    impl WatchUsagePoller for SignalPoller {
+        fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchPollResult> {
+            Ok(WatchPollResult {
+                vm: current.clone(),
+                applied_signal: self.signal,
+            })
+        }
+    }
+
+    #[test]
+    fn refresh_stamps_life_profile_from_applied_signal() {
+        let now = time::macros::datetime!(2026-06-05 12:00 UTC);
+        let vm = WatchViewModel::fixture();
+        let signal = crate::tui::life::AppliedUsageSignal {
+            applied_effective_tokens: 80_000.0,
+            raw_effective_tokens: Some(80_000.0),
+            source_mix: None,
+            token_shape: None,
+            observed_at: now,
+            elapsed_since_successful_poll: time::Duration::seconds(10),
+            freshness: crate::tui::life::UsageSignalFreshness::Live,
+        };
+        let mut app =
+            WatchApp::with_poll_callback(vm, Default::default(), Box::new(SignalPoller { signal }));
+
+        let refreshed = app.refresh_for_test().unwrap();
+
+        assert!(refreshed.life_profile.activity_level > 0.0);
+        assert!(refreshed.life_profile.burst_level > 0.0);
+    }
 
     #[test]
     fn evolution_overlay_does_not_fire_for_stage_that_predates_app_launch() {

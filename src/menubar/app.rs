@@ -66,6 +66,7 @@ struct AppState {
     /// roughly every `POLL_INTERVAL`; the main thread applies the most
     /// recent one and discards stale ones.
     poll_rx: mpsc::Receiver<PollResult>,
+    life_signal_state: crate::tui::life::LifeSignalState,
 }
 
 /// Snapshot of fresh provider data computed on the worker thread. All fields
@@ -74,6 +75,7 @@ struct AppState {
 struct PollResult {
     pet_state: PetState,
     vm: WatchViewModel,
+    applied_signal: crate::tui::life::AppliedUsageSignal,
 }
 
 thread_local! {
@@ -141,6 +143,7 @@ pub fn run() -> Result<()> {
             animation_frame: 0,
             pet_block_char_len,
             poll_rx,
+            life_signal_state: crate::tui::life::LifeSignalState::default(),
         });
     });
 
@@ -171,16 +174,23 @@ fn spawn_poll_worker(paths: AppPaths) -> mpsc::Receiver<PollResult> {
             let state_store = StateStore::new(paths.state_file.clone());
             loop {
                 thread::sleep(POLL_INTERVAL);
-                let pet_state =
+                let outcome =
                     match poll_usage_and_apply(&state_store, &paths.usage_db, &paths.config_file) {
-                        Ok(Some(state)) => state,
+                        Ok(Some(outcome)) => outcome,
                         Ok(None) | Err(_) => continue,
                     };
-                let vm = match build_watch_view_model(&pet_state, &paths.usage_db) {
+                let vm = match build_watch_view_model(&outcome.state, &paths.usage_db) {
                     Ok(vm) => vm,
                     Err(_) => continue,
                 };
-                if tx.send(PollResult { pet_state, vm }).is_err() {
+                if tx
+                    .send(PollResult {
+                        pet_state: outcome.state,
+                        vm,
+                        applied_signal: outcome.applied_signal,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -372,22 +382,27 @@ fn drain_poll_results() {
     let Some(result) = latest else {
         return;
     };
+    let mut vm = result.vm;
     let (text_view, status_item) = match APP_STATE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|s| (s.text_view.clone(), s.status_item.clone()))
+        cell.borrow_mut().as_mut().map(|s| {
+            let profile = s
+                .life_signal_state
+                .observe(result.applied_signal, time::OffsetDateTime::now_utc());
+            vm.life_profile = profile;
+            (s.text_view.clone(), s.status_item.clone())
+        })
     }) {
         Some(pair) => pair,
         None => return,
     };
-    let pet_len = write_full_text(&text_view, &result.vm);
+    let pet_len = write_full_text(&text_view, &vm);
     let mtm = MainThreadMarker::new().expect("ui_tick on non-main thread");
     if let Some(button) = unsafe { status_item.button(mtm) } {
         unsafe { button.setTitle(&NSString::from_str(&status_item_title(&result.pet_state))) };
     }
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
-            state.vm = result.vm;
+            state.vm = vm;
             state.pet_block_char_len = pet_len;
         }
     });

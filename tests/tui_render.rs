@@ -4,7 +4,7 @@ use glorp::pet::render::{PaletteRoleName, StyledSegment};
 use glorp::tui::app::{
     render_evolution_overlay_for_test, render_frame_for_test, render_hatch_overlay_for_test,
     render_help_overlay_for_test, run_single_watch_tick_for_test, WatchApp, WatchAppConfig,
-    WatchTestHarness, WatchUsagePoller, WatchViewModel,
+    WatchPollResult, WatchTestHarness, WatchUsagePoller, WatchViewModel,
 };
 use glorp::tui::layout::render_watch_frame_with_capability;
 use glorp::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
@@ -779,12 +779,18 @@ struct BlockingTestPoller {
 }
 
 impl WatchUsagePoller for BlockingTestPoller {
-    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchPollResult> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         // Signal that we entered the poll, then block until the test releases us.
         self.start.wait();
         self.release.wait();
-        Ok(current.clone())
+        Ok(WatchPollResult {
+            vm: current.clone(),
+            applied_signal: glorp::tui::life::AppliedUsageSignal::quiet(
+                time::OffsetDateTime::now_utc(),
+                time::Duration::seconds(0),
+            ),
+        })
     }
 }
 
@@ -973,12 +979,18 @@ struct ForeverBlockingPoller {
 }
 
 impl WatchUsagePoller for ForeverBlockingPoller {
-    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchViewModel> {
+    fn poll_usage(&mut self, current: &WatchViewModel) -> Result<WatchPollResult> {
         self.entered.wait();
         // Sleep effectively forever; the OS reaps this thread when the
         // process exits. The test asserts that Drop does NOT wait on this.
         std::thread::sleep(Duration::from_secs(3600));
-        Ok(current.clone())
+        Ok(WatchPollResult {
+            vm: current.clone(),
+            applied_signal: glorp::tui::life::AppliedUsageSignal::quiet(
+                time::OffsetDateTime::now_utc(),
+                time::Duration::seconds(0),
+            ),
+        })
     }
 }
 
