@@ -2,6 +2,7 @@ use crate::game::metabolism::Mood;
 use crate::game::{evolution::Stage, habitat::HabitatPropKind};
 use crate::pet::generation::Species;
 use crate::storage::state::HabitatPropId;
+use crate::tui::life::PetLifeProfile;
 use crate::tui::style::LogKind;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -10,6 +11,7 @@ pub struct WatchViewModel {
     pub pet_spans: Vec<crate::pet::render::StyledSegment>,
     pub pet_render: PetRenderModel,
     pub habitat: HabitatView,
+    pub life_profile: PetLifeProfile,
     pub pet_name: String,
     pub species: String,
     pub stage: String,
@@ -166,6 +168,7 @@ impl WatchViewModel {
             habitat: HabitatView {
                 earned_props: Vec::new(),
             },
+            life_profile: PetLifeProfile::default(),
             pet_name: "miso".into(),
             species: "terminal sprout".into(),
             stage: "hatchling".into(),
@@ -379,6 +382,11 @@ mod tests {
         assert!(
             !vm.bio.hatched_label.is_empty(),
             "bio.hatched_label must be non-empty in fixture"
+        );
+        assert_eq!(
+            vm.life_profile,
+            crate::tui::life::PetLifeProfile::default(),
+            "fixture should start with the quiet live profile"
         );
     }
 }

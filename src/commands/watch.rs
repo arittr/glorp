@@ -139,6 +139,7 @@ pub(crate) fn build_watch_view_model_at(
             mood,
         },
         habitat: build_habitat_view(state),
+        life_profile: crate::tui::life::PetLifeProfile::default(),
         pet_name: state.pet.accepted_name.clone(),
         species: species.as_str().to_string(),
         stage: stage_label(species, stage).to_string(),
