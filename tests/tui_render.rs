@@ -1253,7 +1253,7 @@ fn pet_panel_draw_order_keeps_pet_above_habitat_props() {
         .find("habitat_props_for(")
         .expect("prop render pass");
     let pet = render_body
-        .find("render_pet_inside(buf, vm, &scene, now)")
+        .find("render_pet_inside(")
         .expect("pet render pass");
 
     assert!(ambient < props, "ambient must render before props");
