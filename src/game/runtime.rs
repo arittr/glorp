@@ -11,8 +11,9 @@ use crate::{
     pet::narration,
     storage::{
         state::{NarrativeEvent, PetState, Vitals as StoredVitals},
-        usage_store::{NormalizedUsageEvent, UsageStore},
+        usage_store::{NormalizedUsageEvent, UsageLedgerRow, UsageStore},
     },
+    tui::life::{AppliedSourceMix, AppliedUsageSignal, TokenShapeDelta, UsageSignalFreshness},
     usage::provider::{UsageDelta, UsagePollResult},
 };
 
@@ -25,6 +26,7 @@ const REFLECTED_USAGE_EVENT_ID_LIMIT: usize = 1_000;
 pub struct RuntimeUpdate {
     pub recent_effective_tokens: f64,
     pub applied_event_ids: Vec<i64>,
+    pub applied_signal: AppliedUsageSignal,
 }
 
 pub fn stage_usage_poll_deltas(
@@ -47,25 +49,16 @@ pub fn stage_usage_poll_deltas(
             event.bucket_at = bucket_at;
             event.effective_tokens = effective_tokens;
             if let Some(totals) = delta.token_totals {
-                event.input_tokens = scaled_token_bucket(
-                    Some(totals.uncached_input),
-                    effective_tokens,
-                    total_effective,
-                );
+                event.input_tokens =
+                    scaled_token_bucket(totals.uncached_input, effective_tokens, total_effective);
                 event.output_tokens =
-                    scaled_token_bucket(Some(totals.output), effective_tokens, total_effective);
-                event.cache_creation_tokens = scaled_token_bucket(
-                    Some(totals.cache_creation),
-                    effective_tokens,
-                    total_effective,
-                );
+                    scaled_token_bucket(totals.output, effective_tokens, total_effective);
+                event.cache_creation_tokens =
+                    scaled_token_bucket(totals.cache_creation, effective_tokens, total_effective);
                 event.cache_read_tokens =
-                    scaled_token_bucket(Some(totals.cache_read), effective_tokens, total_effective);
-                event.reasoning_output_tokens = scaled_token_bucket(
-                    Some(totals.reasoning_output),
-                    effective_tokens,
-                    total_effective,
-                );
+                    scaled_token_bucket(totals.cache_read, effective_tokens, total_effective);
+                event.reasoning_output_tokens =
+                    scaled_token_bucket(totals.reasoning_output, effective_tokens, total_effective);
             }
             ids.push(usage_store.insert_unapplied_event_bucket(
                 &event,
@@ -78,10 +71,7 @@ pub fn stage_usage_poll_deltas(
     Ok(ids)
 }
 
-fn scaled_token_bucket(total: Option<u64>, effective_share: f64, total_effective: f64) -> f64 {
-    let Some(total) = total else {
-        return 0.0;
-    };
+fn scaled_token_bucket(total: u64, effective_share: f64, total_effective: f64) -> f64 {
     if !effective_share.is_finite() || !total_effective.is_finite() || total_effective <= 0.0 {
         return 0.0;
     }
@@ -120,6 +110,7 @@ pub fn apply_unapplied_usage(
     now: OffsetDateTime,
 ) -> Result<RuntimeUpdate> {
     reconcile_stage_with_xp(state);
+    let previous_poll_at = state.last_usage_poll_at;
     let rows = usage_store.unapplied_events(500)?;
     let rows_to_apply = rows
         .iter()
@@ -220,6 +211,7 @@ pub fn apply_unapplied_usage(
     record_reflected_usage_event_ids(state, rows.iter().map(|row| row.id));
     state.previous_vitals = Some(initial_vitals);
 
+    let applied_signal = applied_signal_from_rows(&rows_to_apply, now, previous_poll_at);
     state.last_usage_poll_at = Some(now);
     state.last_updated_at = now;
     trim_recent_events(state);
@@ -228,7 +220,92 @@ pub fn apply_unapplied_usage(
     Ok(RuntimeUpdate {
         recent_effective_tokens,
         applied_event_ids: rows.into_iter().map(|row| row.id).collect(),
+        applied_signal,
     })
+}
+
+fn applied_signal_from_rows(
+    rows: &[UsageLedgerRow],
+    now: OffsetDateTime,
+    previous_poll_at: Option<OffsetDateTime>,
+) -> AppliedUsageSignal {
+    let elapsed = previous_poll_at
+        .map(|last| now - last)
+        .unwrap_or_else(|| Duration::seconds(0));
+    let applied_effective_tokens = rows
+        .iter()
+        .map(|row| row.event.effective_tokens.max(0.0))
+        .sum::<f64>();
+
+    let mut claude_effective_tokens = 0.0;
+    let mut codex_effective_tokens = 0.0;
+    for row in rows {
+        let effective_tokens = row.event.effective_tokens.max(0.0);
+        let provider_surface = row.event.provider_surface.to_ascii_lowercase();
+        if provider_surface.contains("claude") {
+            claude_effective_tokens += effective_tokens;
+        }
+        if provider_surface.contains("codex") {
+            codex_effective_tokens += effective_tokens;
+        }
+    }
+    let source_mix = if claude_effective_tokens > 0.0 || codex_effective_tokens > 0.0 {
+        Some(AppliedSourceMix {
+            claude_effective_tokens,
+            codex_effective_tokens,
+        })
+    } else {
+        None
+    };
+
+    let freshness = if previous_poll_at.is_none() && applied_effective_tokens > 0.0 {
+        UsageSignalFreshness::ColdStart
+    } else {
+        UsageSignalFreshness::Live
+    };
+
+    AppliedUsageSignal {
+        applied_effective_tokens,
+        raw_effective_tokens: None,
+        source_mix,
+        token_shape: token_shape_from_rows(rows),
+        observed_at: now,
+        elapsed_since_successful_poll: elapsed,
+        freshness,
+    }
+}
+
+fn token_shape_from_rows(rows: &[UsageLedgerRow]) -> Option<TokenShapeDelta> {
+    let shape = TokenShapeDelta {
+        input_tokens: rows.iter().map(|row| row.event.input_tokens.max(0.0)).sum(),
+        output_tokens: rows
+            .iter()
+            .map(|row| row.event.output_tokens.max(0.0))
+            .sum(),
+        cache_creation_tokens: rows
+            .iter()
+            .map(|row| row.event.cache_creation_tokens.max(0.0))
+            .sum(),
+        cache_read_tokens: rows
+            .iter()
+            .map(|row| row.event.cache_read_tokens.max(0.0))
+            .sum(),
+        reasoning_output_tokens: rows
+            .iter()
+            .map(|row| row.event.reasoning_output_tokens.max(0.0))
+            .sum(),
+    };
+
+    if shape.input_tokens > 0.0
+        || shape.output_tokens > 0.0
+        || shape.cache_creation_tokens > 0.0
+        || shape.cache_read_tokens > 0.0
+        || shape.reasoning_output_tokens > 0.0
+    {
+        Some(shape)
+    } else {
+        None
+    }
 }
 
 #[doc(hidden)]
@@ -369,6 +446,101 @@ fn reconcile_stage_with_xp(state: &mut PetState) {
                 from: Stage::from_index(index - 1).unwrap_or(Stage::S6),
                 to: Stage::from_index(index).unwrap_or(Stage::S6),
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        storage::{
+            state::PetState,
+            usage_store::{ProviderCursorUpdate, UsageStore},
+        },
+        tui::life::{AppliedSourceMix, TokenShapeDelta, UsageSignalFreshness},
+    };
+    use tempfile::tempdir;
+    use time::macros::datetime;
+
+    #[test]
+    fn apply_unapplied_usage_returns_applied_signal_summary() {
+        let dir = tempdir().unwrap();
+        let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+        let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+        state.last_usage_poll_at = Some(datetime!(2026 - 05 - 09 11:50 UTC));
+        let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+        let claude_event = NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            input_tokens: 2_000.0,
+            output_tokens: 3_000.0,
+            cache_read_tokens: 5_000.0,
+            effective_tokens: 10_000.0,
+            observed_at: now,
+            bucket_at: now,
+            ..NormalizedUsageEvent::for_test_at(now, 10_000.0)
+        };
+        usage_store
+            .insert_unapplied_event_bucket(
+                &claude_event,
+                &ProviderCursorUpdate {
+                    provider_surface: "claude-code".into(),
+                    cursor_key: "claude-test".into(),
+                    cursor_value: "claude-row".into(),
+                    provider_version: "test-provider".into(),
+                    parser_version: "test-parser".into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+
+        let codex_event = NormalizedUsageEvent {
+            provider_surface: "codex".into(),
+            input_tokens: 3_000.0,
+            output_tokens: 6_000.0,
+            cache_read_tokens: 11_000.0,
+            effective_tokens: 20_000.0,
+            observed_at: now,
+            bucket_at: now,
+            ..NormalizedUsageEvent::for_test_at(now, 20_000.0)
+        };
+        usage_store
+            .insert_unapplied_event_bucket(
+                &codex_event,
+                &ProviderCursorUpdate {
+                    provider_surface: "codex".into(),
+                    cursor_key: "codex-test".into(),
+                    cursor_value: "codex-row".into(),
+                    provider_version: "test-provider".into(),
+                    parser_version: "test-parser".into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+
+        assert_eq!(update.applied_signal.freshness, UsageSignalFreshness::Live);
+        assert_eq!(update.applied_signal.applied_effective_tokens, 30_000.0);
+        assert_eq!(
+            update.applied_signal.source_mix,
+            Some(AppliedSourceMix {
+                claude_effective_tokens: 10_000.0,
+                codex_effective_tokens: 20_000.0,
+            })
+        );
+        assert_eq!(
+            update.applied_signal.token_shape,
+            Some(TokenShapeDelta {
+                input_tokens: 5_000.0,
+                output_tokens: 9_000.0,
+                cache_creation_tokens: 0.0,
+                cache_read_tokens: 16_000.0,
+                reasoning_output_tokens: 0.0,
+            })
         );
     }
 }

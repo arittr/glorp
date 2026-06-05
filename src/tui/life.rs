@@ -16,6 +16,31 @@ pub struct AppliedUsageSignal {
     pub freshness: UsageSignalFreshness,
 }
 
+impl AppliedUsageSignal {
+    pub fn quiet(now: OffsetDateTime, elapsed_since_successful_poll: Duration) -> Self {
+        Self {
+            applied_effective_tokens: 0.0,
+            raw_effective_tokens: None,
+            source_mix: None,
+            token_shape: None,
+            observed_at: now,
+            elapsed_since_successful_poll,
+            freshness: UsageSignalFreshness::Live,
+        }
+    }
+
+    pub fn diagnostics_only(now: OffsetDateTime, elapsed_since_successful_poll: Duration) -> Self {
+        Self {
+            freshness: UsageSignalFreshness::DiagnosticsOnly,
+            ..Self::quiet(now, elapsed_since_successful_poll)
+        }
+    }
+
+    pub fn can_burst(self) -> bool {
+        self.freshness == UsageSignalFreshness::Live && self.applied_effective_tokens > 0.0
+    }
+}
+
 /// Effective-token split for the current app surfaces: Claude Code and Codex.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AppliedSourceMix {
@@ -140,5 +165,37 @@ mod tests {
         assert_eq!(profile.idle.idle_minutes, 0);
         assert!(!profile.idle.is_recently_active);
         assert!(!profile.calm_mode);
+    }
+
+    #[test]
+    fn missing_detail_does_not_make_live_signal_non_live() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::hours(1);
+        let signal = AppliedUsageSignal {
+            applied_effective_tokens: 1_000.0,
+            raw_effective_tokens: None,
+            source_mix: None,
+            token_shape: None,
+            observed_at: now,
+            elapsed_since_successful_poll: Duration::minutes(10),
+            freshness: UsageSignalFreshness::Live,
+        };
+
+        assert_eq!(signal.freshness, UsageSignalFreshness::Live);
+        assert!(signal.can_burst());
+    }
+
+    #[test]
+    fn diagnostics_only_signal_is_non_live() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::hours(1);
+        let signal = AppliedUsageSignal::diagnostics_only(now, Duration::minutes(10));
+
+        assert_eq!(signal.applied_effective_tokens, 0.0);
+        assert_eq!(signal.raw_effective_tokens, None);
+        assert_eq!(signal.source_mix, None);
+        assert_eq!(signal.token_shape, None);
+        assert_eq!(signal.observed_at, now);
+        assert_eq!(signal.elapsed_since_successful_poll, Duration::minutes(10));
+        assert_eq!(signal.freshness, UsageSignalFreshness::DiagnosticsOnly);
+        assert!(!signal.can_burst());
     }
 }
