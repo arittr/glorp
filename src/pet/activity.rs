@@ -72,6 +72,36 @@ pub fn derive_pet_activities(
     out
 }
 
+/// Generate at most one sparse activity line from the live presentation
+/// profile. Usage-event rows stay owned by `derive_pet_activities`; this only
+/// adds a profile-flavored reaction when the live scene is hot enough.
+pub fn derive_profile_pet_activities(
+    pet_name: &str,
+    species: Species,
+    mood: Mood,
+    profile: &crate::tui::life::PetLifeProfile,
+    now: OffsetDateTime,
+) -> Vec<EventView> {
+    if profile.burst_level < 0.35 && profile.activity_level < 1.25 {
+        return Vec::new();
+    }
+
+    let verb = match (profile.work_weather, species, mood) {
+        (crate::tui::life::WorkWeather::CacheMist, _, _) => "is glowing through cached light",
+        (crate::tui::life::WorkWeather::OutputSparks, _, _) => "sparked at the edges",
+        (crate::tui::life::WorkWeather::ReasoningPulse, _, _) => "pulsed thoughtfully",
+        (_, Species::Crystal, _) => "rang softly with work",
+        (_, _, Mood::Sleepy) => "perked up",
+        _ => "brightened",
+    };
+
+    vec![EventView {
+        timestamp: format_hhmm(now),
+        kind: LogKind::PetActivity,
+        text: format!("{pet_name} {verb}"),
+    }]
+}
+
 fn format_hhmm(t: OffsetDateTime) -> String {
     format!("{:02}:{:02}", t.hour(), t.minute())
 }
@@ -204,6 +234,32 @@ mod tests {
         let now = datetime!(2026-05-11 12:00 UTC);
         let acts = derive_pet_activities("vex", Species::Blob, Mood::Sleepy, &[], &[], now);
         assert!(acts.iter().any(|e| e.text.contains("dozing")));
+    }
+
+    #[test]
+    fn profile_activity_adds_sparse_live_line_for_hot_profile() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let profile = crate::tui::life::PetLifeProfile {
+            activity_level: 1.5,
+            burst_level: 0.8,
+            ..Default::default()
+        };
+        let acts =
+            derive_profile_pet_activities("luxopal", Species::Crystal, Mood::Happy, &profile, now);
+
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].kind, LogKind::PetActivity);
+        assert!(acts[0].text.contains("luxopal"));
+    }
+
+    #[test]
+    fn profile_activity_stays_silent_for_quiet_recent_profile() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let profile = crate::tui::life::PetLifeProfile::default();
+        let acts =
+            derive_profile_pet_activities("luxopal", Species::Crystal, Mood::Happy, &profile, now);
+
+        assert!(acts.is_empty());
     }
 
     #[test]

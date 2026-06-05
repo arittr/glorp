@@ -493,10 +493,15 @@ impl WatchApp {
     }
 
     fn install_poll_result(&mut self, mut result: WatchPollResult) -> WatchViewModel {
-        let profile = self
-            .life_signal_state
-            .observe(result.applied_signal, time::OffsetDateTime::now_utc());
+        let now = time::OffsetDateTime::now_utc();
+        let profile = self.life_signal_state.observe(result.applied_signal, now);
         result.vm.life_profile = profile;
+        result.vm.current_speech = crate::pet::speech::current_pet_speech_for_profile(
+            result.vm.pet_render.mood,
+            &result.vm.life_profile,
+            now,
+        );
+        append_profile_pet_activities(&mut result.vm, now);
         self.vm = result.vm;
         self.vm.clone()
     }
@@ -551,6 +556,25 @@ impl WatchUsagePoller for NoopWatchPoller {
                 time::Duration::seconds(0),
             ),
         })
+    }
+}
+
+fn append_profile_pet_activities(vm: &mut WatchViewModel, now: time::OffsetDateTime) {
+    let activities = crate::pet::activity::derive_profile_pet_activities(
+        &vm.pet_name,
+        vm.pet_render.generated_species,
+        vm.pet_render.mood,
+        &vm.life_profile,
+        now,
+    );
+    for activity in activities {
+        if !vm
+            .recent_events
+            .iter()
+            .any(|event| event.kind == activity.kind && event.text == activity.text)
+        {
+            vm.recent_events.push(activity);
+        }
     }
 }
 
@@ -730,6 +754,38 @@ mod tests {
 
         assert!(refreshed.life_profile.activity_level > 0.0);
         assert!(refreshed.life_profile.burst_level > 0.0);
+    }
+
+    #[test]
+    fn refresh_adds_profile_activity_without_replacing_usage_rows() {
+        let mut app = WatchApp::with_poll_callback(
+            WatchViewModel::fixture(),
+            Default::default(),
+            Box::new(WatchTestHarness::with_usage_delta(
+                "codex",
+                "2026-06-05T13:42:00Z",
+                80_000.0,
+            )),
+        );
+
+        let refreshed = app.refresh_for_test().unwrap();
+
+        assert!(
+            refreshed
+                .recent_events
+                .iter()
+                .any(|event| event.kind == LogKind::Usage
+                    && event.text.contains("codex added 80.0k effective tokens")),
+            "usage row should remain in the feed: {:?}",
+            refreshed.recent_events
+        );
+        assert!(
+            refreshed.recent_events.iter().any(|event| {
+                event.kind == LogKind::PetActivity && event.text.contains(&refreshed.pet_name)
+            }),
+            "profile activity line should be appended: {:?}",
+            refreshed.recent_events
+        );
     }
 
     #[test]

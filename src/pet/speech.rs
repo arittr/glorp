@@ -41,6 +41,26 @@ pub fn current_pet_speech(
     Some(mood_phrase(mood, now))
 }
 
+/// Compute speech from the live presentation profile. Uses the same visibility
+/// cycle as token-based speech while deriving feeding reactions from normalized
+/// live activity instead of raw recent token totals.
+pub fn current_pet_speech_for_profile(
+    mood: Mood,
+    profile: &crate::tui::life::PetLifeProfile,
+    now: OffsetDateTime,
+) -> Option<String> {
+    let cycle_pos = now.unix_timestamp().rem_euclid(SPEECH_CYCLE_SECS);
+    if cycle_pos >= SPEECH_VISIBLE_SECS {
+        return None;
+    }
+
+    if profile.burst_level >= 0.35 || profile.activity_level >= 1.25 {
+        return Some(pick_munch_phrase(now));
+    }
+
+    Some(mood_phrase(mood, now))
+}
+
 fn pick_munch_phrase(now: OffsetDateTime) -> String {
     const PHRASES: &[&str] = &["yum!", "more!", "tasty!", "delicious", "*chomp*"];
     let idx = (now.unix_timestamp() / SPEECH_CYCLE_SECS).rem_euclid(PHRASES.len() as i64) as usize;
@@ -109,6 +129,31 @@ mod tests {
         let speech = current_pet_speech(Mood::Content, 50_000.0, visible).unwrap();
         let munch_phrases = ["yum!", "more!", "tasty!", "delicious", "*chomp*"];
         assert!(munch_phrases.contains(&speech.as_str()));
+    }
+
+    #[test]
+    fn speech_uses_profile_burst_for_munch_reaction() {
+        let visible = datetime!(2026-05-11 12:00 UTC);
+        let profile = crate::tui::life::PetLifeProfile {
+            burst_level: 1.0,
+            ..Default::default()
+        };
+
+        let speech = current_pet_speech_for_profile(Mood::Content, &profile, visible).unwrap();
+
+        let munch_phrases = ["yum!", "more!", "tasty!", "delicious", "*chomp*"];
+        assert!(munch_phrases.contains(&speech.as_str()));
+    }
+
+    #[test]
+    fn speech_does_not_fake_munch_when_profile_is_idle() {
+        let visible = datetime!(2026-05-11 12:00 UTC);
+        let profile = crate::tui::life::PetLifeProfile::default();
+
+        let speech = current_pet_speech_for_profile(Mood::Content, &profile, visible).unwrap();
+
+        let munch_phrases = ["yum!", "more!", "tasty!", "delicious", "*chomp*"];
+        assert!(!munch_phrases.contains(&speech.as_str()));
     }
 
     #[test]
