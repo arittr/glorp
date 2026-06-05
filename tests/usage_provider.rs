@@ -68,6 +68,28 @@ fn provider_normalizes_claude_and_codex_records() {
 }
 
 #[test]
+fn provider_deltas_carry_raw_token_bucket_detail() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = provider(Some("ccusage-ok.mjs"), None);
+
+    let poll = provider.poll(&mut store).unwrap();
+    let claude_delta = poll
+        .deltas
+        .iter()
+        .find(|delta| delta.provider_surface == "claude-code")
+        .expect("expected claude delta");
+    let buckets = claude_delta
+        .token_totals
+        .expect("provider delta should include raw token bucket detail");
+
+    assert!(
+        buckets.uncached_input > 0 || buckets.output > 0 || buckets.cache_creation > 0,
+        "expected non-empty bucket detail: {buckets:?}"
+    );
+}
+
+#[test]
 fn repeated_poll_does_not_double_count_unchanged_totals() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();

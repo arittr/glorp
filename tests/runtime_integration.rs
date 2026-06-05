@@ -7,7 +7,10 @@ use glorp::{
         state::{PetState, Vitals},
         usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore},
     },
-    usage::provider::{UsageDelta, UsagePollResult},
+    usage::{
+        normalize::RawTokenTotals,
+        provider::{UsageDelta, UsagePollResult},
+    },
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
@@ -162,6 +165,51 @@ fn runtime_compacts_old_usage_events_after_poll() {
     );
 }
 
+#[test]
+fn staged_usage_apportions_token_buckets_across_smear_rows() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    let mut poll = poll_with_delta(12_000.0, now);
+    poll.deltas[0].token_totals = Some(RawTokenTotals {
+        uncached_input: 6_000,
+        output: 3_000,
+        cache_creation: 2_000,
+        cache_read: 1_000,
+        reasoning_output: 500,
+    });
+
+    let ids = stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll,
+        glorp::game::calibration::CalibrationBaseline {
+            daily_effective_tokens: 100_000.0,
+        },
+        now,
+    )
+    .unwrap();
+    assert!(
+        ids.len() > 1,
+        "test expects catchup smear to create multiple rows"
+    );
+
+    let rows = usage_store.unapplied_events(100).unwrap();
+    let input_sum: f64 = rows.iter().map(|row| row.event.input_tokens).sum();
+    let output_sum: f64 = rows.iter().map(|row| row.event.output_tokens).sum();
+    let cache_creation_sum: f64 = rows.iter().map(|row| row.event.cache_creation_tokens).sum();
+    let cache_read_sum: f64 = rows.iter().map(|row| row.event.cache_read_tokens).sum();
+    let reasoning_sum: f64 = rows
+        .iter()
+        .map(|row| row.event.reasoning_output_tokens)
+        .sum();
+
+    assert!((input_sum - 6_000.0).abs() < 0.01);
+    assert!((output_sum - 3_000.0).abs() < 0.01);
+    assert!((cache_creation_sum - 2_000.0).abs() < 0.01);
+    assert!((cache_read_sum - 1_000.0).abs() < 0.01);
+    assert!((reasoning_sum - 500.0).abs() < 0.01);
+}
+
 fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePollResult {
     // Each call yields a distinct cursor_value so the unapplied ledger's idempotency
     // (keyed on provider_surface|cursor_key|cursor_value) treats each call as a new poll.
@@ -185,6 +233,7 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
                 provider_version: "test-provider".to_string(),
                 parser_version: "test-parser".to_string(),
             },
+            token_totals: None,
         }],
         diagnostics: Vec::new(),
         total_effective_tokens: effective_tokens,

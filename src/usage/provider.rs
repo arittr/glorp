@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::storage::usage_store::{ProviderCursorUpdate, UsageStore};
+use crate::usage::normalize::RawTokenTotals;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -20,6 +21,7 @@ pub struct UsageDelta {
     pub observed_at: OffsetDateTime,
     pub model: Option<String>,
     pub cursor_update: ProviderCursorUpdate,
+    pub token_totals: Option<RawTokenTotals>,
 }
 
 #[derive(Debug, Clone)]

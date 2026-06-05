@@ -38,15 +38,35 @@ pub fn stage_usage_poll_deltas(
     for delta in &poll.deltas {
         let buckets = crate::game::catchup::smear_catchup_delta(delta.effective_tokens, baseline);
         let bucket_count = buckets.len();
+        let total_effective: f64 = buckets.iter().sum();
         for (bucket_index, effective_tokens) in buckets.into_iter().enumerate() {
             let bucket_offset = bucket_count.saturating_sub(bucket_index + 1) as i64;
             let bucket_at = current_bucket - Duration::minutes(bucket_offset * 10);
-            let event = NormalizedUsageEvent {
-                observed_at: now,
-                bucket_at,
-                effective_tokens,
-                ..event_for_delta(delta, now)
-            };
+            let mut event = event_for_delta(delta, now);
+            event.observed_at = now;
+            event.bucket_at = bucket_at;
+            event.effective_tokens = effective_tokens;
+            if let Some(totals) = delta.token_totals {
+                event.input_tokens = scaled_token_bucket(
+                    Some(totals.uncached_input),
+                    effective_tokens,
+                    total_effective,
+                );
+                event.output_tokens =
+                    scaled_token_bucket(Some(totals.output), effective_tokens, total_effective);
+                event.cache_creation_tokens = scaled_token_bucket(
+                    Some(totals.cache_creation),
+                    effective_tokens,
+                    total_effective,
+                );
+                event.cache_read_tokens =
+                    scaled_token_bucket(Some(totals.cache_read), effective_tokens, total_effective);
+                event.reasoning_output_tokens = scaled_token_bucket(
+                    Some(totals.reasoning_output),
+                    effective_tokens,
+                    total_effective,
+                );
+            }
             ids.push(usage_store.insert_unapplied_event_bucket(
                 &event,
                 &delta.cursor_update,
@@ -56,6 +76,16 @@ pub fn stage_usage_poll_deltas(
         }
     }
     Ok(ids)
+}
+
+fn scaled_token_bucket(total: Option<u64>, effective_share: f64, total_effective: f64) -> f64 {
+    let Some(total) = total else {
+        return 0.0;
+    };
+    if !effective_share.is_finite() || !total_effective.is_finite() || total_effective <= 0.0 {
+        return 0.0;
+    }
+    (total as f64) * (effective_share / total_effective).clamp(0.0, 1.0)
 }
 
 // `bucket_at` and `effective_tokens` are placeholders here because Rust struct

@@ -331,6 +331,7 @@ impl CcusageCommandProvider {
                 observed_at,
                 model: record.model,
                 cursor_update,
+                token_totals: Some(delta_totals),
             });
         }
 
