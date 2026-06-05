@@ -2,6 +2,7 @@ use crate::game::habitat::{
     catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone,
 };
 use crate::pet::generation::Species;
+use crate::storage::state::HabitatPropId;
 use crate::tui::component::PetSceneLayout;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{tokenpet_palette, ColorCapability};
@@ -17,6 +18,7 @@ const ACCENT_CANDIDATES: u16 = 16;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HabitatPropCell {
+    pub prop_id: HabitatPropId,
     pub row: u16,
     pub col: u16,
     pub glyph: char,
@@ -73,6 +75,7 @@ pub fn habitat_props_for(
                 &exclusions,
                 trophy_style(ctx.color_capability, id),
                 layer,
+                id,
             );
             if !rendered.is_empty() {
                 occupied.push(bounds_for_cells(&rendered));
@@ -677,6 +680,7 @@ fn render_sprite(
     exclusions: &[Rect],
     style: Style,
     pet_layer: HabitatPetLayer,
+    id: &str,
 ) -> Vec<HabitatPropCell> {
     let mut cells = Vec::new();
     for cell in sprite {
@@ -687,6 +691,7 @@ fn render_sprite(
             return Vec::new();
         }
         cells.push(HabitatPropCell {
+            prop_id: HabitatPropId::new(id),
             row: pos.y,
             col: pos.x,
             glyph: cell.glyph,
@@ -849,6 +854,7 @@ fn accent_cell_from_anchor(
     }
 
     Some(HabitatPropCell {
+        prop_id: HabitatPropId::new(id),
         row: pos.y,
         col: pos.x,
         glyph: accent_glyph(id, now),
@@ -1525,6 +1531,7 @@ mod tests {
             &[],
             Style::default(),
             HabitatPetLayer::Background,
+            "codex_signal_lamp",
         );
 
         assert!(cells.is_empty());

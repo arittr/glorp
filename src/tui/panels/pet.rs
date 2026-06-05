@@ -16,7 +16,7 @@ use crate::pet::animator::{
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
-use crate::tui::life::{PetLifeProfile, WorkWeather};
+use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, WorkWeather};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, ColorCapability, SemanticStyles};
@@ -162,6 +162,28 @@ fn activity_lift_style(
         return style;
     }
     let lift = (activity_level.clamp(0.0, 2.0) * 22.0) as u8;
+    match style.fg {
+        Some(Color::Rgb(r, g, b)) => style.fg(Color::Rgb(
+            r.saturating_add(lift),
+            g.saturating_add(lift),
+            b.saturating_add(lift),
+        )),
+        _ => style,
+    }
+}
+
+fn apply_prop_reaction_style(
+    style: Style,
+    reaction: Option<&PropReaction>,
+    color_capability: ColorCapability,
+) -> Style {
+    if matches!(color_capability, ColorCapability::Flat) {
+        return style;
+    }
+    let Some(reaction) = reaction else {
+        return style;
+    };
+    let lift = (reaction.intensity.clamp(0.0, 1.0) * 35.0) as u8;
     match style.fg {
         Some(Color::Rgb(r, g, b)) => style.fg(Color::Rgb(
             r.saturating_add(lift),
@@ -452,9 +474,16 @@ impl LegacyPanel for PetPanel {
             }
         }
         let compact = area.width <= 72 || area.height <= 24;
-        let extra_count = activity_glyph_budget(&vm.life_profile, compact);
+        let earned_prop_ids = vm
+            .habitat
+            .earned_props
+            .iter()
+            .map(|prop| prop.id.clone())
+            .collect::<Vec<_>>();
+        let life_profile = build_prop_reactions(vm.life_profile.clone(), &earned_prop_ids, compact);
+        let extra_count = activity_glyph_budget(&life_profile, compact);
         let activity_glyphs = activity_glyphs_for(
-            &vm.life_profile,
+            &life_profile,
             species,
             scene.habitat,
             &ambient_exclusions,
@@ -488,9 +517,17 @@ impl LegacyPanel for PetPanel {
                 HabitatPetLayer::Background | HabitatPetLayer::Behind
             ) && habitat_contains(&scene, prop)
             {
+                let reaction = life_profile
+                    .prop_reactions
+                    .iter()
+                    .find(|reaction| reaction.prop_id == prop.prop_id);
                 let cell = &mut buf[(prop.col, prop.row)];
                 cell.set_char(prop.glyph);
-                cell.set_style(prop.style);
+                cell.set_style(apply_prop_reaction_style(
+                    prop.style,
+                    reaction,
+                    ctx.color_capability,
+                ));
             }
         }
 
@@ -505,9 +542,17 @@ impl LegacyPanel for PetPanel {
             if matches!(prop.pet_layer, HabitatPetLayer::Foreground)
                 && habitat_contains(&scene, prop)
             {
+                let reaction = life_profile
+                    .prop_reactions
+                    .iter()
+                    .find(|reaction| reaction.prop_id == prop.prop_id);
                 let cell = &mut buf[(prop.col, prop.row)];
                 cell.set_char(prop.glyph);
-                cell.set_style(prop.style);
+                cell.set_style(apply_prop_reaction_style(
+                    prop.style,
+                    reaction,
+                    ctx.color_capability,
+                ));
             }
         }
     }
@@ -1293,6 +1338,25 @@ mod tests {
         assert_eq!(clamped.fg, Some(ratatui::style::Color::Rgb(255, 255, 255)));
 
         let flat = activity_lift_style(original, 2.0, ColorCapability::Flat);
+        assert_eq!(flat, original);
+    }
+
+    #[test]
+    fn prop_reaction_style_lifts_rgb_and_preserves_flat() {
+        let original = Style::default().fg(Color::Rgb(100, 110, 120));
+        let reaction = crate::tui::life::PropReaction {
+            prop_id: crate::storage::state::HabitatPropId::new(
+                crate::game::habitat::CODEX_SIGNAL_LAMP,
+            ),
+            intensity: 0.5,
+            kind: crate::tui::life::PropReactionKind::Glow,
+        };
+
+        let lifted =
+            apply_prop_reaction_style(original, Some(&reaction), ColorCapability::Truecolor);
+        assert_eq!(lifted.fg, Some(Color::Rgb(117, 127, 137)));
+
+        let flat = apply_prop_reaction_style(original, Some(&reaction), ColorCapability::Flat);
         assert_eq!(flat, original);
     }
 

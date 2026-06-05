@@ -297,6 +297,40 @@ pub fn classify_work_weather(shape: Option<TokenShapeDelta>) -> WorkWeather {
     }
 }
 
+pub fn build_prop_reactions(
+    mut profile: PetLifeProfile,
+    earned: &[HabitatPropId],
+    compact: bool,
+) -> PetLifeProfile {
+    let intensity = (profile.activity_level.clamp(0.0, 2.0) / 2.0).clamp(0.0, 1.0);
+    profile.prop_reactions = earned
+        .iter()
+        .filter_map(|id| {
+            let reaction = match (id.as_str(), profile.source_accent) {
+                (
+                    crate::game::habitat::CODEX_SIGNAL_LAMP,
+                    Some(SourceAccent::Codex | SourceAccent::Balanced),
+                ) => Some(PropReactionKind::Glow),
+                (crate::game::habitat::HEAVY_SESSION_PLANTER, _) if profile.burst_level > 0.5 => {
+                    Some(PropReactionKind::Bloom)
+                }
+                _ => None,
+            }?;
+            let kind = if compact && matches!(reaction, PropReactionKind::Orbit) {
+                PropReactionKind::Glow
+            } else {
+                reaction
+            };
+            Some(PropReaction {
+                prop_id: id.clone(),
+                intensity,
+                kind,
+            })
+        })
+        .collect();
+    profile
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +535,56 @@ mod tests {
         assert_eq!(
             classify_work_weather(Some(token_shape(800.0, 100.0, 50.0, 0.0, 50.0))),
             WorkWeather::Clear
+        );
+    }
+
+    #[test]
+    fn prop_reactions_target_only_earned_visible_props() {
+        let earned = vec![
+            HabitatPropId::new(crate::game::habitat::CODEX_SIGNAL_LAMP),
+            HabitatPropId::new(crate::game::habitat::HEAVY_SESSION_PLANTER),
+        ];
+        let profile = build_prop_reactions(
+            PetLifeProfile {
+                activity_level: 1.5,
+                burst_level: 1.0,
+                source_accent: Some(SourceAccent::Codex),
+                ..Default::default()
+            },
+            &earned,
+            true,
+        );
+
+        assert!(profile
+            .prop_reactions
+            .iter()
+            .any(|reaction| reaction.prop_id.as_str() == crate::game::habitat::CODEX_SIGNAL_LAMP));
+        assert!(!profile
+            .prop_reactions
+            .iter()
+            .any(|reaction| reaction.kind == PropReactionKind::Orbit));
+    }
+
+    #[test]
+    fn prop_reactions_do_not_invent_unearned_props() {
+        let earned = vec![HabitatPropId::new(
+            crate::game::habitat::HEAVY_SESSION_PLANTER,
+        )];
+        let profile = build_prop_reactions(
+            PetLifeProfile {
+                activity_level: 1.0,
+                burst_level: 1.0,
+                source_accent: Some(SourceAccent::Codex),
+                ..Default::default()
+            },
+            &earned,
+            false,
+        );
+
+        assert_eq!(profile.prop_reactions.len(), 1);
+        assert_eq!(
+            profile.prop_reactions[0].prop_id.as_str(),
+            crate::game::habitat::HEAVY_SESSION_PLANTER
         );
     }
 }
