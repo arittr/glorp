@@ -21,6 +21,8 @@ const USAGE_RETENTION_DAYS: i64 = 90;
 const RECENT_EVENT_LIMIT: usize = 20;
 const POLL_NARRATION_COOLDOWN: Duration = Duration::minutes(5);
 const REFLECTED_USAGE_EVENT_ID_LIMIT: usize = 1_000;
+const LIVE_SIGNAL_MAX_ELAPSED_SECONDS: i64 = 30 * 60;
+const LIVE_SIGNAL_BACKFILL_DAILY_RATIO: f64 = 1.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeUpdate {
@@ -211,7 +213,8 @@ pub fn apply_unapplied_usage(
     record_reflected_usage_event_ids(state, rows.iter().map(|row| row.id));
     state.previous_vitals = Some(initial_vitals);
 
-    let applied_signal = applied_signal_from_rows(&rows_to_apply, now, previous_poll_at);
+    let applied_signal =
+        applied_signal_from_rows(&rows_to_apply, now, previous_poll_at, state.calibration);
     state.last_usage_poll_at = Some(now);
     state.last_updated_at = now;
     trim_recent_events(state);
@@ -228,6 +231,7 @@ fn applied_signal_from_rows(
     rows: &[UsageLedgerRow],
     now: OffsetDateTime,
     previous_poll_at: Option<OffsetDateTime>,
+    calibration: CalibrationBaseline,
 ) -> AppliedUsageSignal {
     let elapsed = previous_poll_at
         .map(|last| now - last)
@@ -258,11 +262,12 @@ fn applied_signal_from_rows(
         None
     };
 
-    let freshness = if previous_poll_at.is_none() && applied_effective_tokens > 0.0 {
-        UsageSignalFreshness::ColdStart
-    } else {
-        UsageSignalFreshness::Live
-    };
+    let freshness = signal_freshness(
+        applied_effective_tokens,
+        elapsed,
+        previous_poll_at,
+        calibration,
+    );
 
     AppliedUsageSignal {
         applied_effective_tokens,
@@ -273,6 +278,31 @@ fn applied_signal_from_rows(
         elapsed_since_successful_poll: elapsed,
         freshness,
     }
+}
+
+fn signal_freshness(
+    applied_effective_tokens: f64,
+    elapsed: Duration,
+    previous_poll_at: Option<OffsetDateTime>,
+    calibration: CalibrationBaseline,
+) -> UsageSignalFreshness {
+    if applied_effective_tokens <= 0.0 {
+        return UsageSignalFreshness::Live;
+    }
+    if previous_poll_at.is_none() {
+        return UsageSignalFreshness::ColdStart;
+    }
+    if elapsed.whole_seconds() < 0 {
+        return UsageSignalFreshness::Backfill;
+    }
+    if elapsed.whole_seconds() > LIVE_SIGNAL_MAX_ELAPSED_SECONDS {
+        return UsageSignalFreshness::Backfill;
+    }
+    let daily = calibration.daily_effective_tokens.max(1.0);
+    if applied_effective_tokens > daily * LIVE_SIGNAL_BACKFILL_DAILY_RATIO {
+        return UsageSignalFreshness::Backfill;
+    }
+    UsageSignalFreshness::Live
 }
 
 fn token_shape_from_rows(rows: &[UsageLedgerRow]) -> Option<TokenShapeDelta> {
@@ -541,6 +571,102 @@ mod tests {
                 cache_read_tokens: 16_000.0,
                 reasoning_output_tokens: 0.0,
             })
+        );
+    }
+
+    #[test]
+    fn delayed_applied_usage_is_backfill_not_live_burst() {
+        let dir = tempdir().unwrap();
+        let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+        let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+        state.last_usage_poll_at = Some(datetime!(2026 - 05 - 09 10:00 UTC));
+        let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+        let event = NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            effective_tokens: 20_000.0,
+            observed_at: now,
+            bucket_at: now,
+            ..NormalizedUsageEvent::for_test_at(now, 20_000.0)
+        };
+        usage_store
+            .insert_unapplied_event_bucket(
+                &event,
+                &ProviderCursorUpdate {
+                    provider_surface: "claude-code".into(),
+                    cursor_key: "claude-test".into(),
+                    cursor_value: "delayed-row".into(),
+                    provider_version: "test-provider".into(),
+                    parser_version: "test-parser".into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+
+        assert_eq!(update.applied_signal.applied_effective_tokens, 20_000.0);
+        assert_eq!(
+            update.applied_signal.freshness,
+            UsageSignalFreshness::Backfill
+        );
+        assert!(
+            !update.applied_signal.can_burst(),
+            "delayed helper/backfill rows should still feed Glorp without firing live burst"
+        );
+    }
+
+    #[test]
+    fn single_cadence_huge_usage_is_backfill_not_live_burst() {
+        let dir = tempdir().unwrap();
+        let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+        let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+        state.calibration.daily_effective_tokens = 100_000.0;
+        state.last_usage_poll_at = Some(datetime!(2026 - 05 - 09 11:59:50 UTC));
+        let now = datetime!(2026 - 05 - 09 12:00 UTC);
+
+        let event = NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            effective_tokens: 250_000.0,
+            observed_at: now,
+            bucket_at: now,
+            ..NormalizedUsageEvent::for_test_at(now, 250_000.0)
+        };
+        usage_store
+            .insert_unapplied_event_bucket(
+                &event,
+                &ProviderCursorUpdate {
+                    provider_surface: "claude-code".into(),
+                    cursor_key: "claude-test".into(),
+                    cursor_value: "huge-row".into(),
+                    provider_version: "test-provider".into(),
+                    parser_version: "test-parser".into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+
+        assert_eq!(
+            update.applied_signal.freshness,
+            UsageSignalFreshness::Backfill
+        );
+        assert!(!update.applied_signal.can_burst());
+    }
+
+    #[test]
+    fn clock_skewed_previous_poll_is_backfill_not_live_burst() {
+        assert_eq!(
+            signal_freshness(
+                5_000.0,
+                Duration::seconds(-10),
+                Some(datetime!(2026 - 05 - 09 12:00 UTC)),
+                CalibrationBaseline::default(),
+            ),
+            UsageSignalFreshness::Backfill
         );
     }
 }

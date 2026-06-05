@@ -11,7 +11,7 @@ use crate::game::evolution::Stage;
 use crate::game::habitat::HabitatPetLayer;
 use crate::pet::animator::{
     compute_facing, compute_shimmer_role, compute_token_pop, compute_twinkle,
-    compute_wander_position_x, low_energy_lightness_multiplier,
+    compute_wander_position_x, low_energy_lightness_multiplier, TokenPop,
 };
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
@@ -144,13 +144,58 @@ fn work_weather_seed(weather: WorkWeather) -> u64 {
 
 fn activity_glyph_color(profile: &PetLifeProfile) -> Color {
     let p = crate::tui::style::tokenpet_palette();
-    match profile.work_weather {
+    let weather = match profile.work_weather {
         WorkWeather::CacheMist => p.good.rgb,
         WorkWeather::OutputSparks => p.accent.rgb,
         WorkWeather::ReasoningPulse => p.bad.rgb,
         WorkWeather::Mixed => p.good.rgb,
         WorkWeather::Clear => p.accent.rgb,
+    };
+    if let Some(accent) = profile.source_accent {
+        if profile.work_weather == WorkWeather::Clear {
+            source_accent_color(accent)
+        } else {
+            blend_colors(source_accent_color(accent), weather, 0.65)
+        }
+    } else {
+        weather
     }
+}
+
+fn source_accent_color(accent: crate::tui::life::SourceAccent) -> Color {
+    match accent {
+        crate::tui::life::SourceAccent::Claude => Color::Rgb(0xb3, 0x9d, 0xff),
+        crate::tui::life::SourceAccent::Codex => Color::Rgb(0x86, 0xd9, 0xef),
+        crate::tui::life::SourceAccent::Balanced => Color::Rgb(0xf0, 0xc4, 0x6a),
+    }
+}
+
+fn blend_colors(primary: Color, secondary: Color, primary_weight: f32) -> Color {
+    let (Color::Rgb(pr, pg, pb), Color::Rgb(sr, sg, sb)) = (primary, secondary) else {
+        return primary;
+    };
+    let weight = primary_weight.clamp(0.0, 1.0);
+    let inv = 1.0 - weight;
+    Color::Rgb(
+        ((pr as f32 * weight) + (sr as f32 * inv)).round() as u8,
+        ((pg as f32 * weight) + (sg as f32 * inv)).round() as u8,
+        ((pb as f32 * weight) + (sb as f32 * inv)).round() as u8,
+    )
+}
+
+fn profile_token_pop(
+    last_feed_pulse_at: Option<time::OffsetDateTime>,
+    profile: &PetLifeProfile,
+    color_capability: ColorCapability,
+    now: time::OffsetDateTime,
+) -> Option<TokenPop> {
+    if profile.calm_mode
+        || profile.burst_level <= 0.0
+        || matches!(color_capability, ColorCapability::Flat)
+    {
+        return None;
+    }
+    compute_token_pop(last_feed_pulse_at, now)
 }
 
 fn activity_lift_style(
@@ -585,7 +630,12 @@ fn render_pet_inside(
     let species = vm.pet_render.generated_species;
     let shimmer_role = compute_shimmer_role(species, now);
     let twinkle = compute_twinkle(species, now);
-    let token_pop = compute_token_pop(vm.last_feed_pulse_at, now);
+    let token_pop = profile_token_pop(
+        vm.last_feed_pulse_at,
+        &vm.life_profile,
+        color_capability,
+        now,
+    );
 
     // When the token-pop is active, override shimmer to Pattern for extra flash.
     let effective_shimmer_role = if token_pop.is_some() {
@@ -1358,6 +1408,75 @@ mod tests {
 
         let flat = apply_prop_reaction_style(original, Some(&reaction), ColorCapability::Flat);
         assert_eq!(flat, original);
+    }
+
+    #[test]
+    fn activity_glyph_color_uses_source_accent_when_available() {
+        let claude = activity_glyph_color(&crate::tui::life::PetLifeProfile {
+            source_accent: Some(crate::tui::life::SourceAccent::Claude),
+            ..Default::default()
+        });
+        let codex = activity_glyph_color(&crate::tui::life::PetLifeProfile {
+            source_accent: Some(crate::tui::life::SourceAccent::Codex),
+            ..Default::default()
+        });
+
+        assert_ne!(claude, codex);
+        assert_eq!(claude, Color::Rgb(0xb3, 0x9d, 0xff));
+        assert_eq!(codex, Color::Rgb(0x86, 0xd9, 0xef));
+    }
+
+    #[test]
+    fn activity_glyph_color_keeps_weather_visible_with_source_accent() {
+        let cache_claude = activity_glyph_color(&crate::tui::life::PetLifeProfile {
+            source_accent: Some(crate::tui::life::SourceAccent::Claude),
+            work_weather: crate::tui::life::WorkWeather::CacheMist,
+            ..Default::default()
+        });
+        let output_claude = activity_glyph_color(&crate::tui::life::PetLifeProfile {
+            source_accent: Some(crate::tui::life::SourceAccent::Claude),
+            work_weather: crate::tui::life::WorkWeather::OutputSparks,
+            ..Default::default()
+        });
+
+        assert_ne!(cache_claude, output_claude);
+    }
+
+    #[test]
+    fn token_pop_requires_current_profile_burst() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let pulse = now - time::Duration::seconds(1);
+
+        assert!(profile_token_pop(
+            Some(pulse),
+            &crate::tui::life::PetLifeProfile {
+                burst_level: 0.6,
+                ..Default::default()
+            },
+            ColorCapability::Truecolor,
+            now,
+        )
+        .is_some());
+        assert!(profile_token_pop(
+            Some(pulse),
+            &crate::tui::life::PetLifeProfile {
+                burst_level: 0.0,
+                ..Default::default()
+            },
+            ColorCapability::Truecolor,
+            now,
+        )
+        .is_none());
+        assert!(profile_token_pop(
+            Some(pulse),
+            &crate::tui::life::PetLifeProfile {
+                burst_level: 0.6,
+                ..Default::default()
+            },
+            ColorCapability::Flat,
+            now,
+        )
+        .is_none());
     }
 
     #[test]

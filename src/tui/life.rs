@@ -175,9 +175,10 @@ impl Default for LifeSignalState {
 
 impl LifeSignalState {
     pub fn observe(&mut self, signal: AppliedUsageSignal, now: OffsetDateTime) -> PetLifeProfile {
+        let freshness = self.profile_freshness(signal);
         let elapsed_secs = signal.elapsed_since_successful_poll.whole_seconds().max(1) as f64;
         let tokens_per_minute = signal.applied_effective_tokens.max(0.0) / elapsed_secs * 60.0;
-        if signal.freshness == UsageSignalFreshness::Live && tokens_per_minute > 0.0 {
+        if freshness == UsageSignalFreshness::Live && tokens_per_minute > 0.0 {
             self.reference_tokens_per_minute = ((1.0 - EMA_ALPHA)
                 * self.reference_tokens_per_minute
                 + EMA_ALPHA * tokens_per_minute)
@@ -188,7 +189,7 @@ impl LifeSignalState {
         }
 
         let target = activity_from_rate(tokens_per_minute, self.reference_tokens_per_minute);
-        if signal.freshness == UsageSignalFreshness::Live {
+        if freshness == UsageSignalFreshness::Live {
             self.ema_activity_level = ((1.0 - EMA_ALPHA as f32) * self.ema_activity_level
                 + EMA_ALPHA as f32 * target)
                 .clamp(0.0, MAX_ACTIVITY_LEVEL);
@@ -206,24 +207,41 @@ impl LifeSignalState {
         }
         self.last_observed_at = Some(now);
 
-        let burst_level = if signal.can_burst() {
-            activity_from_rate(tokens_per_minute, self.reference_tokens_per_minute)
-                .clamp(0.0, MAX_BURST_LEVEL)
-        } else {
-            0.0
-        };
+        let burst_level =
+            if freshness == UsageSignalFreshness::Live && signal.applied_effective_tokens > 0.0 {
+                activity_from_rate(tokens_per_minute, self.reference_tokens_per_minute)
+                    .clamp(0.0, MAX_BURST_LEVEL)
+            } else {
+                0.0
+            };
 
         PetLifeProfile {
             activity_level: self.ema_activity_level,
             burst_level,
-            source_accent: classify_source_accent(signal.source_mix),
-            work_weather: classify_work_weather(signal.token_shape),
+            source_accent: if freshness == UsageSignalFreshness::Live {
+                classify_source_accent(signal.source_mix)
+            } else {
+                None
+            },
+            work_weather: if freshness == UsageSignalFreshness::Live {
+                classify_work_weather(signal.token_shape)
+            } else {
+                WorkWeather::Clear
+            },
             prop_reactions: Vec::new(),
             idle: IdleLifeState {
                 idle_minutes: idle_minutes(signal.elapsed_since_successful_poll),
                 is_recently_active: signal.applied_effective_tokens > 0.0,
             },
             calm_mode: false,
+        }
+    }
+
+    fn profile_freshness(&self, signal: AppliedUsageSignal) -> UsageSignalFreshness {
+        if self.last_observed_at.is_none() && signal.applied_effective_tokens > 0.0 {
+            UsageSignalFreshness::ColdStart
+        } else {
+            signal.freshness
         }
     }
 }
@@ -302,15 +320,31 @@ pub fn build_prop_reactions(
     earned: &[HabitatPropId],
     compact: bool,
 ) -> PetLifeProfile {
-    let intensity = (profile.activity_level.clamp(0.0, 2.0) / 2.0).clamp(0.0, 1.0);
+    let explicit_reactions = profile.prop_reactions.clone();
+    let calm_scale = if profile.calm_mode { 0.35 } else { 1.0 };
+    let generated_intensity =
+        ((profile.activity_level.clamp(0.0, 2.0) / 2.0) * calm_scale).clamp(0.0, 1.0);
     profile.prop_reactions = earned
         .iter()
         .filter_map(|id| {
+            if let Some(reaction) = explicit_reactions
+                .iter()
+                .find(|reaction| reaction.prop_id == *id)
+            {
+                return Some(normalize_prop_reaction(
+                    reaction.clone(),
+                    compact,
+                    calm_scale,
+                ));
+            }
             let reaction = match (id.as_str(), profile.source_accent) {
                 (
                     crate::game::habitat::CODEX_SIGNAL_LAMP,
                     Some(SourceAccent::Codex | SourceAccent::Balanced),
                 ) => Some(PropReactionKind::Glow),
+                (crate::game::habitat::TOKEN_SHELL_100K, Some(SourceAccent::Claude)) => {
+                    Some(PropReactionKind::Glow)
+                }
                 (crate::game::habitat::HEAVY_SESSION_PLANTER, _) if profile.burst_level > 0.5 => {
                     Some(PropReactionKind::Bloom)
                 }
@@ -323,12 +357,24 @@ pub fn build_prop_reactions(
             };
             Some(PropReaction {
                 prop_id: id.clone(),
-                intensity,
+                intensity: generated_intensity,
                 kind,
             })
         })
         .collect();
     profile
+}
+
+fn normalize_prop_reaction(
+    mut reaction: PropReaction,
+    compact: bool,
+    intensity_scale: f32,
+) -> PropReaction {
+    reaction.intensity = (reaction.intensity.clamp(0.0, 1.0) * intensity_scale).clamp(0.0, 1.0);
+    if compact && matches!(reaction.kind, PropReactionKind::Orbit) {
+        reaction.kind = PropReactionKind::Glow;
+    }
+    reaction
 }
 
 #[cfg(test)]
@@ -462,10 +508,14 @@ mod tests {
         let mut state = LifeSignalState::default();
         let cold = AppliedUsageSignal {
             freshness: UsageSignalFreshness::ColdStart,
+            source_mix: Some(source_mix(1_000.0, 9_000.0)),
+            token_shape: Some(token_shape(100.0, 600.0, 0.0, 0.0, 0.0)),
             ..live_signal(80_000.0, Duration::seconds(10), now)
         };
         let cold_profile = state.observe(cold, now);
         assert_eq!(cold_profile.burst_level, 0.0);
+        assert_eq!(cold_profile.source_accent, None);
+        assert_eq!(cold_profile.work_weather, WorkWeather::Clear);
 
         let live_missing_detail =
             live_signal(80_000.0, Duration::seconds(10), now + Duration::seconds(10));
@@ -474,11 +524,37 @@ mod tests {
     }
 
     #[test]
+    fn first_session_live_signal_suppresses_burst_and_detail_flare() {
+        let now = time::macros::datetime!(2026-06-05 12:00 UTC);
+        let mut state = LifeSignalState::default();
+        let profile = state.observe(
+            AppliedUsageSignal {
+                source_mix: Some(source_mix(1_000.0, 9_000.0)),
+                token_shape: Some(token_shape(100.0, 600.0, 0.0, 0.0, 0.0)),
+                ..live_signal(80_000.0, Duration::seconds(10), now)
+            },
+            now,
+        );
+
+        assert_eq!(profile.burst_level, 0.0);
+        assert_eq!(profile.source_accent, None);
+        assert_eq!(profile.work_weather, WorkWeather::Clear);
+    }
+
+    #[test]
     fn life_signal_state_clamps_burst_to_profile_contract() {
         let now = time::macros::datetime!(2026-06-05 12:00 UTC);
         let mut state = LifeSignalState::default();
 
-        let profile = state.observe(live_signal(20_000_000.0, Duration::seconds(10), now), now);
+        state.observe(AppliedUsageSignal::quiet(now, Duration::seconds(10)), now);
+        let profile = state.observe(
+            live_signal(
+                20_000_000.0,
+                Duration::seconds(10),
+                now + Duration::seconds(10),
+            ),
+            now + Duration::seconds(10),
+        );
 
         assert_eq!(profile.burst_level, 1.5);
     }
@@ -586,5 +662,78 @@ mod tests {
             profile.prop_reactions[0].prop_id.as_str(),
             crate::game::habitat::HEAVY_SESSION_PLANTER
         );
+    }
+
+    #[test]
+    fn prop_reactions_preserve_explicit_earned_profile_reactions() {
+        let earned = vec![
+            HabitatPropId::new(crate::game::habitat::CODEX_SIGNAL_LAMP),
+            HabitatPropId::new(crate::game::habitat::HEAVY_SESSION_PLANTER),
+        ];
+        let profile = build_prop_reactions(
+            PetLifeProfile {
+                activity_level: 1.5,
+                burst_level: 1.0,
+                source_accent: Some(SourceAccent::Codex),
+                prop_reactions: vec![PropReaction {
+                    prop_id: HabitatPropId::new(crate::game::habitat::CODEX_SIGNAL_LAMP),
+                    intensity: 0.9,
+                    kind: PropReactionKind::Pulse,
+                }],
+                ..Default::default()
+            },
+            &earned,
+            false,
+        );
+
+        let codex_lamp = profile
+            .prop_reactions
+            .iter()
+            .find(|reaction| reaction.prop_id.as_str() == crate::game::habitat::CODEX_SIGNAL_LAMP)
+            .expect("explicit codex lamp reaction should remain");
+        assert_eq!(codex_lamp.kind, PropReactionKind::Pulse);
+        assert_eq!(codex_lamp.intensity, 0.9);
+    }
+
+    #[test]
+    fn calm_mode_reduces_prop_reaction_intensity() {
+        let earned = vec![HabitatPropId::new(
+            crate::game::habitat::HEAVY_SESSION_PLANTER,
+        )];
+        let profile = build_prop_reactions(
+            PetLifeProfile {
+                activity_level: 1.8,
+                burst_level: 1.2,
+                calm_mode: true,
+                ..Default::default()
+            },
+            &earned,
+            false,
+        );
+
+        assert_eq!(profile.prop_reactions.len(), 1);
+        assert!(
+            profile.prop_reactions[0].intensity < 0.5,
+            "calm mode should keep earned prop reactions visibly quieter"
+        );
+    }
+
+    #[test]
+    fn claude_source_accent_can_react_on_earned_shell() {
+        let earned = vec![HabitatPropId::new(crate::game::habitat::TOKEN_SHELL_100K)];
+        let profile = build_prop_reactions(
+            PetLifeProfile {
+                activity_level: 0.8,
+                source_accent: Some(SourceAccent::Claude),
+                ..Default::default()
+            },
+            &earned,
+            false,
+        );
+
+        assert!(profile
+            .prop_reactions
+            .iter()
+            .any(|reaction| reaction.prop_id.as_str() == crate::game::habitat::TOKEN_SHELL_100K));
     }
 }

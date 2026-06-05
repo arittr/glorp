@@ -496,6 +496,15 @@ impl WatchApp {
         let now = time::OffsetDateTime::now_utc();
         let profile = self.life_signal_state.observe(result.applied_signal, now);
         result.vm.life_profile = profile;
+        result.vm.last_feed_pulse_at = if result.vm.life_profile.burst_level > 0.0
+            && !matches!(
+                self.config.color_capability,
+                crate::tui::style::ColorCapability::Flat
+            ) {
+            Some(now)
+        } else {
+            None
+        };
         result.vm.current_speech = crate::pet::speech::current_pet_speech_for_profile(
             result.vm.pet_render.mood,
             &result.vm.life_profile,
@@ -735,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_stamps_life_profile_from_applied_signal() {
+    fn refresh_stamps_life_profile_from_applied_signal_after_session_primer() {
         let now = time::macros::datetime!(2026-06-05 12:00 UTC);
         let vm = WatchViewModel::fixture();
         let signal = crate::tui::life::AppliedUsageSignal {
@@ -747,13 +756,46 @@ mod tests {
             elapsed_since_successful_poll: time::Duration::seconds(10),
             freshness: crate::tui::life::UsageSignalFreshness::Live,
         };
-        let mut app =
-            WatchApp::with_poll_callback(vm, Default::default(), Box::new(SignalPoller { signal }));
+        let config = WatchAppConfig {
+            color_capability: crate::tui::style::ColorCapability::Truecolor,
+            ..Default::default()
+        };
+        let mut app = WatchApp::with_poll_callback(vm, config, Box::new(SignalPoller { signal }));
+
+        let primed = app.refresh_for_test().unwrap();
+        assert_eq!(primed.life_profile.burst_level, 0.0);
+        assert_eq!(primed.last_feed_pulse_at, None);
 
         let refreshed = app.refresh_for_test().unwrap();
-
         assert!(refreshed.life_profile.activity_level > 0.0);
         assert!(refreshed.life_profile.burst_level > 0.0);
+        assert!(refreshed.last_feed_pulse_at.is_some());
+    }
+
+    #[test]
+    fn flat_mode_does_not_stamp_feed_pulse_for_live_burst() {
+        let now = time::macros::datetime!(2026-06-05 12:00 UTC);
+        let vm = WatchViewModel::fixture();
+        let signal = crate::tui::life::AppliedUsageSignal {
+            applied_effective_tokens: 80_000.0,
+            raw_effective_tokens: Some(80_000.0),
+            source_mix: None,
+            token_shape: None,
+            observed_at: now,
+            elapsed_since_successful_poll: time::Duration::seconds(10),
+            freshness: crate::tui::life::UsageSignalFreshness::Live,
+        };
+        let config = WatchAppConfig {
+            color_capability: crate::tui::style::ColorCapability::Flat,
+            ..Default::default()
+        };
+        let mut app = WatchApp::with_poll_callback(vm, config, Box::new(SignalPoller { signal }));
+
+        app.refresh_for_test().unwrap();
+        let refreshed = app.refresh_for_test().unwrap();
+
+        assert!(refreshed.life_profile.burst_level > 0.0);
+        assert_eq!(refreshed.last_feed_pulse_at, None);
     }
 
     #[test]
@@ -766,6 +808,17 @@ mod tests {
                 "2026-06-05T13:42:00Z",
                 80_000.0,
             )),
+        );
+
+        let primed = app.refresh_for_test().unwrap();
+        assert!(
+            primed
+                .recent_events
+                .iter()
+                .any(|event| event.kind == LogKind::Usage
+                    && event.text.contains("codex added 80.0k effective tokens")),
+            "usage row should remain in the feed: {:?}",
+            primed.recent_events
         );
 
         let refreshed = app.refresh_for_test().unwrap();

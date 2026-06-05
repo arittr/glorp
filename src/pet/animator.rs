@@ -3,7 +3,7 @@
 //!
 //! The animator is owned by `WatchApp`. Each frame:
 //! 1. `update(vm, elapsed)` inspects the current view model, detects changes
-//!    since the previous frame (mood, stage, usage spike), and enqueues the
+//!    since the previous frame (mood, stage, live profile burst), and enqueues the
 //!    appropriate tachyonfx Effect via the internal EffectManager.
 //! 2. `apply(area, buf)` is called from inside the dispatcher's `Frame::draw`
 //!    closure after the panel renders. It advances the manager by the same
@@ -14,7 +14,7 @@
 //! Effects in scope for this initial Phase 4 cut:
 //! - Mood fade (`hsl_shift` over ~400ms when `vm.mood` changes)
 //! - Stage-up morph (`dissolve` + `coalesce` ~800ms when `vm.stage` changes)
-//! - Feed pulse (`sweep_in` accent wash ~400ms when today's tokens jump)
+//! - Feed pulse (`sweep_in` accent wash ~400ms when the live profile stamps a burst)
 //! - Hatch sequence (`coalesce` of the s0 art ~1.2s on first frame for a
 //!   freshly-hatched pet — detected via `age_days == 0` and a fresh animator)
 //!
@@ -48,10 +48,6 @@ const SHIMMER_PERIOD_SECS: i64 = 22;
 /// Twinkle period: a sparkle glyph fires for ~1 frame every 7s.
 const TWINKLE_PERIOD_SECS: i64 = 7;
 
-/// Threshold (in tokens) above which a single tick of usage growth is
-/// treated as a "feed event" and triggers a pulse effect.
-const FEED_EVENT_TOKEN_THRESHOLD: f64 = 250.0;
-
 /// Per-effect key. Used by `add_unique_effect` so a new transition of the
 /// same kind cancels the previous one in flight (e.g., mood changing twice
 /// in quick succession only plays the most recent fade).
@@ -77,8 +73,6 @@ pub struct PetAnimator {
     last_mood: Option<String>,
     /// Stage seen on the previous `update`. None until first call.
     last_stage: Option<String>,
-    /// Today's effective tokens seen on the previous `update`.
-    last_today_tokens: Option<f64>,
     /// True until the first `update` call seeds the snapshot. Used to fire
     /// the hatch effect on the initial frame for a pet whose age == 0.
     first_update: bool,
@@ -100,7 +94,6 @@ impl PetAnimator {
             manager: EffectManager::default(),
             last_mood: None,
             last_stage: None,
-            last_today_tokens: None,
             first_update: true,
             idle_ms: MAX_EFFECT_RUNTIME_MS,
             has_run: false,
@@ -148,12 +141,16 @@ impl PetAnimator {
             }
         }
 
-        // Feed pulse: today's effective tokens jumped by more than the
-        // threshold since the last tick. Species-tinted sweep tells you
-        // who got fed at a glance.
-        if let Some(prev_tokens) = self.last_today_tokens {
-            let delta = vm.today_effective_tokens - prev_tokens;
-            if delta >= FEED_EVENT_TOKEN_THRESHOLD {
+        // Feed pulse: the live profile reports the leading edge of a real
+        // applied usage burst. This deliberately ignores daily aggregate jumps
+        // so cold starts, backfills, and midnight rollover cannot fake a pop.
+        let feed_pulse_at = if vm.life_profile.burst_level > 0.0 {
+            vm.last_feed_pulse_at
+        } else {
+            None
+        };
+        if let Some(pulse_at) = feed_pulse_at {
+            if self.last_feed_pulse_at != Some(pulse_at) {
                 self.enqueue(
                     EffectKey::FeedPulse,
                     sweep_in(
@@ -164,13 +161,12 @@ impl PetAnimator {
                         ms(400),
                     ),
                 );
-                self.last_feed_pulse_at = Some(time::OffsetDateTime::now_utc());
             }
         }
+        self.last_feed_pulse_at = feed_pulse_at;
 
         self.last_mood = Some(vm.mood.clone());
         self.last_stage = Some(vm.stage.clone());
-        self.last_today_tokens = Some(vm.today_effective_tokens);
         self.first_update = false;
     }
 
@@ -552,15 +548,74 @@ mod tests {
     }
 
     #[test]
-    fn feed_pulse_fires_on_token_spike() {
+    fn feed_pulse_ignores_daily_token_growth_without_profile_burst() {
         let mut a = PetAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
         vm.today_effective_tokens = 1_000.0;
+        vm.life_profile.burst_level = 0.0;
         a.update(&vm);
-        vm.today_effective_tokens = 5_000.0; // +4000 > threshold
+
+        vm.today_effective_tokens = 5_000.0;
+        vm.life_profile.burst_level = 0.0;
         a.update(&vm);
-        assert!(a.has_active_effects(), "feed should pulse");
+
+        assert!(
+            !a.has_active_effects(),
+            "daily total growth should not bypass the live profile burst contract"
+        );
+        assert_eq!(a.last_feed_pulse_at, None);
+    }
+
+    #[test]
+    fn feed_pulse_fires_on_profile_burst() {
+        let mut a = PetAnimator::new();
+        let mut vm = fixture_vm();
+        vm.age_days = 5;
+        vm.today_effective_tokens = 1_000.0;
+        vm.life_profile.burst_level = 0.0;
+        a.update(&vm);
+
+        vm.life_profile.burst_level = 0.8;
+        vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_000).unwrap());
+        a.update(&vm);
+
+        assert!(a.has_active_effects(), "profile burst should pulse");
+        assert!(a.last_feed_pulse_at.is_some());
+    }
+
+    #[test]
+    fn feed_pulse_fires_on_first_seen_profile_burst_timestamp() {
+        let mut a = PetAnimator::new();
+        let mut vm = fixture_vm();
+        vm.age_days = 5;
+        vm.life_profile.burst_level = 0.8;
+        vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_000).unwrap());
+
+        a.update(&vm);
+
+        assert!(
+            a.has_active_effects(),
+            "first seen profile burst should pulse"
+        );
+        assert_eq!(a.last_feed_pulse_at, vm.last_feed_pulse_at);
+    }
+
+    #[test]
+    fn feed_pulse_refreshes_for_new_profile_burst_timestamp() {
+        let mut a = PetAnimator::new();
+        let mut vm = fixture_vm();
+        vm.age_days = 5;
+        vm.life_profile.burst_level = 0.8;
+        vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_000).unwrap());
+        a.update(&vm);
+        a.idle_ms = MAX_EFFECT_RUNTIME_MS;
+
+        vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_010).unwrap());
+        a.update(&vm);
+
+        assert_eq!(a.last_feed_pulse_at, vm.last_feed_pulse_at);
+        assert_eq!(a.idle_ms, 0, "new poll burst should refresh the pulse");
     }
 
     #[test]

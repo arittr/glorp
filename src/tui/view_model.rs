@@ -54,9 +54,9 @@ pub struct WatchViewModel {
     /// Derived from the sign of the drift target's velocity. The renderer
     /// horizontally mirrors the pet art when this is -1.
     pub facing: i8,
-    /// Wall-clock time of the most recent feed pulse (token spike above
-    /// the feed threshold). Drives the 2-second token-gain pop overlay.
-    /// None until the first qualifying poll tick.
+    /// Wall-clock time of the most recent live-profile burst stamped by the
+    /// poll owner. Drives the 2-second token-gain pop overlay in color modes.
+    /// None until the first qualifying live poll, and always None in Flat mode.
     pub last_feed_pulse_at: Option<time::OffsetDateTime>,
     /// Stage progress data for the progress panel.
     pub progress: ProgressView,
