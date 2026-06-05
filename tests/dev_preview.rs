@@ -257,7 +257,6 @@ fn dev_preview_watch_includes_liveliness_profile_inputs() {
 }
 
 #[test]
-#[ignore = "visual consumers are added in Task 7"]
 fn dev_preview_liveliness_changes_pet_scene_cells_not_only_text() {
     let run = PreviewRun::new();
 
@@ -268,14 +267,19 @@ fn dev_preview_liveliness_changes_pet_scene_cells_not_only_text() {
     let hot_cells = read_cells(&run, "watch-liveliness-s6-hot-midday");
     let hot_layout = read_layout(&run, "watch-liveliness-s6-hot-midday");
 
+    assert_eq!(
+        warm_layout["targets"]["watch.pet.habitat"], hot_layout["targets"]["watch.pet.habitat"],
+        "same-clock warm/hot liveliness fixtures should compare the same habitat rect"
+    );
+
     let warm_habitat = cells_for_target(&warm_cells, &warm_layout, "watch.pet.habitat");
     let hot_habitat = cells_for_target(&hot_cells, &hot_layout, "watch.pet.habitat");
+    let changed = changed_cells_by_symbol_or_fg(&warm_habitat, &hot_habitat);
 
-    if warm_habitat == hot_habitat {
-        panic!(
-            "Task 7 should make liveliness profile changes visible inside watch.pet.habitat; warm and hot habitat cells are currently identical"
-        );
-    }
+    assert!(
+        changed >= 8,
+        "liveliness profile changes should visibly alter at least 8 habitat cells; changed {changed}"
+    );
 }
 
 #[test]
@@ -752,6 +756,18 @@ fn cells_for_target(cells: &Value, layout: &Value, target: &str) -> Vec<Value> {
         })
         .cloned()
         .collect()
+}
+
+fn changed_cells_by_symbol_or_fg(a: &[Value], b: &[Value]) -> usize {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "cell captures must cover the same rect size"
+    );
+    a.iter()
+        .zip(b)
+        .filter(|(left, right)| left["symbol"] != right["symbol"] || left["fg"] != right["fg"])
+        .count()
 }
 
 fn local_asset_refs(html: &str) -> Vec<String> {

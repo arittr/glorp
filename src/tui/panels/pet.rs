@@ -16,9 +16,10 @@ use crate::pet::animator::{
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
+use crate::tui::life::{PetLifeProfile, WorkWeather};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{semantic_styles, SemanticStyles};
+use crate::tui::style::{semantic_styles, ColorCapability, SemanticStyles};
 use crate::tui::view_model::WatchViewModel;
 
 pub struct PetPanel;
@@ -122,6 +123,69 @@ fn stage_seed(stage: Stage) -> u64 {
     }
 }
 
+/// Capped count of extra activity glyphs for the current life profile.
+fn activity_glyph_budget(profile: &PetLifeProfile, compact: bool) -> usize {
+    if profile.calm_mode {
+        return 0;
+    }
+    let max = if compact { 3.0 } else { 10.0 };
+    ((profile.activity_level.clamp(0.0, 2.0) / 2.0) * max).round() as usize
+}
+
+fn work_weather_seed(weather: WorkWeather) -> u64 {
+    match weather {
+        WorkWeather::Clear => 0,
+        WorkWeather::CacheMist => 1,
+        WorkWeather::OutputSparks => 2,
+        WorkWeather::ReasoningPulse => 3,
+        WorkWeather::Mixed => 4,
+    }
+}
+
+fn activity_glyph_color(profile: &PetLifeProfile) -> Color {
+    let p = crate::tui::style::tokenpet_palette();
+    match profile.work_weather {
+        WorkWeather::CacheMist => p.good.rgb,
+        WorkWeather::OutputSparks => p.accent.rgb,
+        WorkWeather::ReasoningPulse => p.bad.rgb,
+        WorkWeather::Mixed => p.good.rgb,
+        WorkWeather::Clear => p.accent.rgb,
+    }
+}
+
+fn activity_lift_style(
+    style: Style,
+    activity_level: f32,
+    color_capability: ColorCapability,
+) -> Style {
+    if matches!(color_capability, ColorCapability::Flat) {
+        return style;
+    }
+    let lift = (activity_level.clamp(0.0, 2.0) * 22.0) as u8;
+    match style.fg {
+        Some(Color::Rgb(r, g, b)) => style.fg(Color::Rgb(
+            r.saturating_add(lift),
+            g.saturating_add(lift),
+            b.saturating_add(lift),
+        )),
+        _ => style,
+    }
+}
+
+fn lift_pet_styles_for_activity(
+    styles: &SemanticStyles,
+    activity_level: f32,
+    color_capability: ColorCapability,
+) -> SemanticStyles {
+    let mut s = styles.clone();
+    s.pet_body = activity_lift_style(s.pet_body, activity_level, color_capability);
+    s.pet_eye = activity_lift_style(s.pet_eye, activity_level, color_capability);
+    s.pet_mouth = activity_lift_style(s.pet_mouth, activity_level, color_capability);
+    s.pet_accent = activity_lift_style(s.pet_accent, activity_level, color_capability);
+    s.pet_pattern = activity_lift_style(s.pet_pattern, activity_level, color_capability);
+    s
+}
+
 fn overlaps_any(g: &AmbientGlyph, exclusions: &[Rect]) -> bool {
     exclusions.iter().any(|r| {
         g.col >= r.x
@@ -209,6 +273,62 @@ pub fn ambient_glyphs_for(
         };
         if !overlaps_any(&candidate, exclusions) {
             glyphs.push(candidate);
+        }
+    }
+
+    glyphs
+}
+
+/// Returns extra work-activity glyphs for the habitat backdrop.
+fn activity_glyphs_for(
+    profile: &PetLifeProfile,
+    species: Species,
+    habitat: Rect,
+    exclusions: &[Rect],
+    now: time::OffsetDateTime,
+    color_capability: ColorCapability,
+    count: usize,
+) -> Vec<AmbientGlyph> {
+    if count == 0
+        || profile.calm_mode
+        || profile.activity_level <= 0.0
+        || habitat.width == 0
+        || habitat.height == 0
+        || matches!(color_capability, ColorCapability::Flat)
+    {
+        return Vec::new();
+    }
+
+    let activity_bucket = (profile.activity_level.clamp(0.0, 2.0) * 10.0).round() as u64;
+    let minute_floor = (now.unix_timestamp() / 60) as u64;
+    let seed = species_seed(species)
+        .wrapping_mul(0xD6E8_FD9A_934D_CC17)
+        .wrapping_add(minute_floor.wrapping_mul(0xA076_1D64_78BD_642F))
+        .wrapping_add(activity_bucket.wrapping_mul(0xE703_7ED1_A0B4_28DB))
+        .wrapping_add(work_weather_seed(profile.work_weather).wrapping_mul(0x8EBC_6AF0_9C88_C6E3));
+    let mut rng = Pcg32::seed_from_u64(seed);
+    let palette = ['\u{2726}', '\u{2727}', '\u{00b7}', '*'];
+    let color = activity_glyph_color(profile);
+    let mut glyphs = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        for _attempt in 0..32 {
+            let col = habitat.x + rng.gen_range(0..habitat.width);
+            let row = habitat.y + rng.gen_range(0..habitat.height);
+            let candidate = AmbientGlyph {
+                row,
+                col,
+                glyph: *palette.choose(&mut rng).unwrap_or(&'*'),
+                color,
+            };
+            if !overlaps_any(&candidate, exclusions)
+                && !glyphs
+                    .iter()
+                    .any(|g: &AmbientGlyph| g.col == candidate.col && g.row == candidate.row)
+            {
+                glyphs.push(candidate);
+                break;
+            }
         }
     }
 
@@ -331,6 +451,24 @@ impl LegacyPanel for PetPanel {
                 cell.set_style(ratatui::style::Style::default().fg(g.color));
             }
         }
+        let compact = area.width <= 72 || area.height <= 24;
+        let extra_count = activity_glyph_budget(&vm.life_profile, compact);
+        let activity_glyphs = activity_glyphs_for(
+            &vm.life_profile,
+            species,
+            scene.habitat,
+            &ambient_exclusions,
+            now,
+            ctx.color_capability,
+            extra_count,
+        );
+        for g in activity_glyphs {
+            if ambient_glyph_is_inside_area(&g, scene.habitat) {
+                let cell = &mut buf[(g.col, g.row)];
+                cell.set_char(g.glyph);
+                cell.set_style(Style::default().fg(g.color));
+            }
+        }
 
         // Trophies + accents, classified by their pet-layer from the catalog.
         // Background avoids the silhouette halo; Behind ignores it (renders
@@ -358,7 +496,7 @@ impl LegacyPanel for PetPanel {
 
         // Pet art with shimmer, twinkle, and token-pop overlays — paints over
         // any Background / Behind cells it touches via the silhouette.
-        render_pet_inside(buf, vm, &scene, now);
+        render_pet_inside(buf, vm, &scene, now, ctx.color_capability);
 
         // Foreground props paint on top of the pet, for whenever depth in
         // front of the pet is wanted (no foreground props in the catalog
@@ -389,6 +527,7 @@ fn render_pet_inside(
     vm: &WatchViewModel,
     scene: &PetSceneLayout,
     now: time::OffsetDateTime,
+    color_capability: ColorCapability,
 ) {
     let base = semantic_styles();
     let m = low_energy_lightness_multiplier(vm.energy);
@@ -418,6 +557,13 @@ fn render_pet_inside(
         1.0
     };
     let shimmer_styles = brighten_pet_role(&droop, effective_shimmer_role, shimmer_m);
+    let activity_level = if vm.life_profile.calm_mode {
+        0.0
+    } else {
+        vm.life_profile.activity_level
+    };
+    let live_styles =
+        lift_pet_styles_for_activity(&shimmer_styles, activity_level, color_capability);
 
     // Twinkle: also place a sparkle at the token-pop center when pop is active.
     let effective_twinkle = if token_pop.is_some() {
@@ -436,7 +582,7 @@ fn render_pet_inside(
     let lines = build_pet_lines(
         vm,
         scene.pet_art.width as usize,
-        &shimmer_styles,
+        &live_styles,
         cursor_norm_x,
         effective_twinkle,
     );
@@ -1105,6 +1251,69 @@ mod tests {
             s.contains('o') || s.contains('.') || s.contains('^'),
             "pet must render visibly in a tall panel rect; got content: {s:?}"
         );
+    }
+
+    #[test]
+    fn activity_glyph_budget_caps_compact_hot_state() {
+        let profile = crate::tui::life::PetLifeProfile {
+            activity_level: 2.0,
+            burst_level: 1.5,
+            ..Default::default()
+        };
+
+        assert_eq!(activity_glyph_budget(&profile, true), 3);
+        assert_eq!(activity_glyph_budget(&profile, false), 10);
+    }
+
+    #[test]
+    fn activity_glyph_budget_suppresses_calm_mode() {
+        let profile = crate::tui::life::PetLifeProfile {
+            activity_level: 2.0,
+            burst_level: 1.5,
+            calm_mode: true,
+            ..Default::default()
+        };
+
+        assert_eq!(activity_glyph_budget(&profile, true), 0);
+        assert_eq!(activity_glyph_budget(&profile, false), 0);
+    }
+
+    #[test]
+    fn activity_style_lift_is_clamped_and_flat_safe() {
+        let original =
+            ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(100, 100, 100));
+        let style = activity_lift_style(original, 2.0, ColorCapability::Truecolor);
+        assert_ne!(style, original);
+
+        let clamped = activity_lift_style(
+            ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(250, 251, 252)),
+            2.0,
+            ColorCapability::Truecolor,
+        );
+        assert_eq!(clamped.fg, Some(ratatui::style::Color::Rgb(255, 255, 255)));
+
+        let flat = activity_lift_style(original, 2.0, ColorCapability::Flat);
+        assert_eq!(flat, original);
+    }
+
+    #[test]
+    fn activity_glyphs_are_suppressed_for_flat_color() {
+        let profile = crate::tui::life::PetLifeProfile {
+            activity_level: 2.0,
+            work_weather: crate::tui::life::WorkWeather::OutputSparks,
+            ..Default::default()
+        };
+        let glyphs = activity_glyphs_for(
+            &profile,
+            Species::Crystal,
+            Rect::new(0, 0, 40, 12),
+            &[],
+            time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+            ColorCapability::Flat,
+            10,
+        );
+
+        assert!(glyphs.is_empty());
     }
 
     #[test]
