@@ -82,6 +82,7 @@ Opens with the prototype/measurement step above; nothing downstream is built unt
 ## Branch 3 — Panels & aggregates
 
 - **One canonical day axis** (local-day on `bucket_at`): add a day-grouping query on that basis and route best-day, the intraday series, and today's total through it. Fix the **pre-existing** 7-day-history bug that compares a local date against UTC `period_date` (`src/storage/usage_store.rs`). Add a `best_prior_day(local_today)` query — `best_day_effective_tokens()` is arg-less and cannot exclude today.
+  - **Superseded in part (2026-06-09):** the day-grouping helper, the today/7-day reader routing, and the 7-day local-vs-UTC fix moved to `2026-06-09-glorp-lives-in-time-design.md` (Branch T1), which also absorbs a compaction-retention fix on the same axis. This branch consumes that helper for best-day / `best_prior_day` / the intraday series; do not re-implement the axis here.
 - **Intraday hourly sparkline** (today-by-hour, local) in `TodayPanel`, via the existing spark widget. Define empty/early-day and midnight-rollover behavior.
 - **Best-day milestone:** display + a non-persistent "new best day" highlight when today's running total beats the best prior day, all on the canonical axis. Define the midnight rollover.
 - **Intra-stage pips:** a display-only sub-level row from the stage-relative fraction (`floor(fraction × PIP_COUNT)`). No persistence, no narration.
