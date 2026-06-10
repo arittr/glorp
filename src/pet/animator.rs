@@ -50,6 +50,9 @@ const TWINKLE_PERIOD_SECS: i64 = 7;
 /// Sleep onset/wake position easing window, seconds. Also consumed by
 /// tui::day's wake-resume derivation.
 pub const WANDER_SETTLE_SECS: i64 = 8;
+/// Asleep breath: period x3, inhale window x2 — slow and deep.
+const SLEEP_BREATH_PERIOD_SCALE: i64 = 3;
+const SLEEP_BREATH_INHALE_SCALE: i64 = 2;
 
 /// Per-effect key. Used by `add_unique_effect` so a new transition of the
 /// same kind cancels the previous one in flight (e.g., mood changing twice
@@ -275,9 +278,35 @@ fn species_stage_up_ms(species: Option<Species>) -> (u32, u32) {
 /// inhale duration vary per species — glitch breathes jittery and quick,
 /// crystal breathes slow and deliberate.
 pub fn compute_breath_offset(species: Option<Species>, now: time::OffsetDateTime) -> u8 {
+    compute_breath_offset_with_rhythm(species, now, BreathRhythm::Awake)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreathRhythm {
+    Awake,
+    /// Slowed cycle whose phase is anchored at the sleep-onset instant so the
+    /// period change is continuous, not a pop.
+    Asleep {
+        onset: time::OffsetDateTime,
+    },
+}
+
+pub fn compute_breath_offset_with_rhythm(
+    species: Option<Species>,
+    now: time::OffsetDateTime,
+    rhythm: BreathRhythm,
+) -> u8 {
     let (period_ds, inhale_ds) = species_breath_rhythm_decis(species);
+    let (period_ds, inhale_ds, anchor_ds) = match rhythm {
+        BreathRhythm::Awake => (period_ds, inhale_ds, 0),
+        BreathRhythm::Asleep { onset } => (
+            period_ds * SLEEP_BREATH_PERIOD_SCALE,
+            inhale_ds * SLEEP_BREATH_INHALE_SCALE,
+            onset.unix_timestamp() * 10 + i64::from(onset.millisecond() / 100),
+        ),
+    };
     let ts_ds = now.unix_timestamp() * 10 + i64::from(now.millisecond() / 100);
-    let phase = ts_ds.rem_euclid(period_ds);
+    let phase = (ts_ds - anchor_ds).rem_euclid(period_ds);
     if phase < inhale_ds {
         1
     } else {
@@ -374,6 +403,45 @@ fn splitmix64(mut x: u64) -> u64 {
 fn wander_ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Wander position while asleep: blends from the live curve into the held
+/// onset evaluation over WANDER_SETTLE_SECS. At the onset instant the two
+/// endpoints coincide (now == onset), so sleep onset is continuous.
+pub fn compute_sleep_wander_x(
+    habitat_width: u16,
+    species: Species,
+    now: time::OffsetDateTime,
+    onset: time::OffsetDateTime,
+) -> i16 {
+    let held = compute_wander_position_x(habitat_width, species, onset);
+    let live = compute_wander_position_x(habitat_width, species, now);
+    let k = ease_fraction(now, onset);
+    blend_positions(live, held, k)
+}
+
+/// Wander position right after a wake: eases from the frozen sleep position
+/// back onto the live curve over WANDER_SETTLE_SECS.
+pub fn compute_wake_wander_x(
+    habitat_width: u16,
+    species: Species,
+    now: time::OffsetDateTime,
+    from_eval: time::OffsetDateTime,
+    woke_at: time::OffsetDateTime,
+) -> i16 {
+    let frozen = compute_wander_position_x(habitat_width, species, from_eval);
+    let live = compute_wander_position_x(habitat_width, species, now);
+    let k = ease_fraction(now, woke_at);
+    blend_positions(frozen, live, k)
+}
+
+fn ease_fraction(now: time::OffsetDateTime, since: time::OffsetDateTime) -> f32 {
+    let elapsed_ms = (now - since).whole_milliseconds().max(0) as f32;
+    (elapsed_ms / 1_000.0 / WANDER_SETTLE_SECS as f32).clamp(0.0, 1.0)
+}
+
+fn blend_positions(from: i16, to: i16, k: f32) -> i16 {
+    (f32::from(from) * (1.0 - k) + f32::from(to) * k).round() as i16
 }
 
 /// Returns `+1` if the pet's current drift target is to the right of the
@@ -959,5 +1027,78 @@ mod tests {
         let mid = low_energy_lightness_multiplier(0.3);
         assert!(mid > 0.55 && mid < 1.0, "got {mid}");
         assert_eq!(low_energy_lightness_multiplier(0.0), 0.55);
+    }
+
+    #[test]
+    fn sleep_breath_is_slower_and_continuous_at_onset() {
+        let onset = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        // At the onset instant, the asleep phase starts at zero — identical
+        // breath state to a fresh awake cycle start (no visible pop).
+        let at_onset = compute_breath_offset_with_rhythm(
+            Some(Species::Fuzz),
+            onset,
+            BreathRhythm::Asleep { onset },
+        );
+        assert_eq!(at_onset, 1, "phase 0 sits inside the inhale window");
+        // The asleep cycle is SLEEP_BREATH_PERIOD_SCALE x longer: for fuzz
+        // (period 40ds, inhale 8ds) the asleep inhale window is 16ds of a
+        // 120ds cycle — at +5s (50ds) the pet must be at rest, and the next
+        // inhale starts at +12s.
+        let mid = compute_breath_offset_with_rhythm(
+            Some(Species::Fuzz),
+            onset + time::Duration::seconds(5),
+            BreathRhythm::Asleep { onset },
+        );
+        assert_eq!(mid, 0);
+        let next_cycle = compute_breath_offset_with_rhythm(
+            Some(Species::Fuzz),
+            onset + time::Duration::seconds(12),
+            BreathRhythm::Asleep { onset },
+        );
+        assert_eq!(next_cycle, 1);
+    }
+
+    #[test]
+    fn awake_rhythm_matches_the_existing_breath_function() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_123).unwrap();
+        for species in [Species::Fuzz, Species::Glitch, Species::Crystal] {
+            assert_eq!(
+                compute_breath_offset_with_rhythm(Some(species), now, BreathRhythm::Awake),
+                compute_breath_offset(Some(species), now),
+            );
+        }
+    }
+
+    #[test]
+    fn wander_holds_at_sleep_onset_and_eases_back_on_wake() {
+        let onset = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let width = 52_u16;
+        let held = compute_wander_position_x(width, Species::Fuzz, onset);
+        // Deep into sleep, position is fully held at the onset evaluation.
+        let deep = onset + time::Duration::minutes(40);
+        assert_eq!(
+            compute_sleep_wander_x(width, Species::Fuzz, deep, onset),
+            held,
+            "asleep wander must hold the onset position"
+        );
+        // At the onset instant itself the blend starts from the live curve,
+        // which equals the held value — continuous by construction.
+        assert_eq!(
+            compute_sleep_wander_x(width, Species::Fuzz, onset, onset),
+            compute_wander_position_x(width, Species::Fuzz, onset),
+        );
+        // Wake resume: at the wake instant the position is the frozen eval;
+        // after WANDER_SETTLE_SECS it equals the live curve.
+        let woke_at = deep;
+        let from_eval = onset;
+        assert_eq!(
+            compute_wake_wander_x(width, Species::Fuzz, woke_at, from_eval, woke_at),
+            compute_wander_position_x(width, Species::Fuzz, from_eval),
+        );
+        let settled = woke_at + time::Duration::seconds(WANDER_SETTLE_SECS);
+        assert_eq!(
+            compute_wake_wander_x(width, Species::Fuzz, settled, from_eval, woke_at),
+            compute_wander_position_x(width, Species::Fuzz, settled),
+        );
     }
 }

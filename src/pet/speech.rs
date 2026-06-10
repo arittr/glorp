@@ -176,11 +176,14 @@ mod tests {
 
     #[test]
     fn sleep_petting_phrases_come_from_the_sleep_pool() {
-        let now = datetime!(2026-06-09 23:30 UTC);
-        let phrase = pick_sleep_petting_phrase(now);
-        assert!(
-            SLEEP_PETTING_PHRASES.contains(&phrase.as_str()),
-            "got {phrase}"
-        );
+        let visible = datetime!(2026-06-09 23:30 UTC);
+        for seconds in 0..10 {
+            let at = visible + time::Duration::seconds(seconds);
+            let phrase = pick_sleep_petting_phrase(at);
+            assert!(
+                SLEEP_PETTING_PHRASES.contains(&phrase.as_str()),
+                "got {phrase}"
+            );
+        }
     }
 }

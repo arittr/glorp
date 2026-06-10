@@ -270,10 +270,18 @@ impl WatchApp {
         );
         let now = time::OffsetDateTime::now_utc();
         let species = self.vm.pet_render.generated_species;
+        let rhythm = match (
+            self.vm.day_context.asleep,
+            self.vm.day_context.sleep_onset_utc,
+        ) {
+            (true, Some(onset)) => crate::pet::animator::BreathRhythm::Asleep { onset },
+            _ => crate::pet::animator::BreathRhythm::Awake,
+        };
         // wander_offset_x and facing are computed at render time in the panel
         // from area.width so they stay mutually consistent. We only update
         // breath and feed-pulse timestamp here.
-        self.vm.breath_offset_y = crate::pet::animator::compute_breath_offset(Some(species), now);
+        self.vm.breath_offset_y =
+            crate::pet::animator::compute_breath_offset_with_rhythm(Some(species), now, rhythm);
         self.vm.last_feed_pulse_at = self.pet_animator.last_feed_pulse_at;
     }
 
@@ -348,6 +356,9 @@ impl WatchApp {
     /// the visible speech bubble for a few seconds, and give vitals a small
     /// transient lift. Non-persistent — the next worker poll restores the
     /// real PetState happiness/energy from disk.
+    ///
+    /// The lift applies even while asleep; only the phrase pool and wake state
+    /// are gated by sleep.
     fn pet_the_pet(&mut self) {
         let now_wall = time::OffsetDateTime::now_utc();
         let phrase = if self.vm.day_context.asleep {

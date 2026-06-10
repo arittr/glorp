@@ -178,7 +178,13 @@ pub(crate) fn build_watch_view_model_at(
             now,
         ),
         wander_offset_x: 0, // computed at render time by the panel from area.width
-        breath_offset_y: crate::pet::animator::compute_breath_offset(Some(species), now),
+        breath_offset_y: {
+            let rhythm = match (day_context.asleep, day_context.sleep_onset_utc) {
+                (true, Some(onset)) => crate::pet::animator::BreathRhythm::Asleep { onset },
+                _ => crate::pet::animator::BreathRhythm::Awake,
+            };
+            crate::pet::animator::compute_breath_offset_with_rhythm(Some(species), now, rhythm)
+        },
         facing: 1,                // computed at render time by the panel from area.width
         last_feed_pulse_at: None, // populated by WatchApp when a token spike fires
         progress: {

@@ -10,8 +10,9 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::game::evolution::Stage;
 use crate::game::habitat::HabitatPetLayer;
 use crate::pet::animator::{
-    compute_facing, compute_shimmer_role, compute_token_pop, compute_twinkle,
-    compute_wander_position_x, low_energy_lightness_multiplier, TokenPop,
+    compute_facing, compute_shimmer_role, compute_sleep_wander_x, compute_token_pop,
+    compute_twinkle, compute_wake_wander_x, compute_wander_position_x,
+    low_energy_lightness_multiplier, TokenPop,
 };
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
@@ -468,8 +469,27 @@ impl LegacyPanel for PetPanel {
         // vm.wander_offset_x or vm.facing carry.
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
-        let wander_x = compute_wander_position_x(area.width, species, now);
-        let facing = compute_facing(area.width, species, now);
+        let day = &vm.day_context;
+        let (wander_x, facing) = match (day.asleep, day.sleep_onset_utc, day.wake_resume) {
+            (true, Some(onset), _) => (
+                compute_sleep_wander_x(area.width, species, now, onset),
+                compute_facing(area.width, species, onset), // held facing: no mirror flips with shut eyes
+            ),
+            (false, _, Some(resume)) => (
+                compute_wake_wander_x(
+                    area.width,
+                    species,
+                    now,
+                    resume.from_eval_utc,
+                    resume.woke_at_utc,
+                ),
+                compute_facing(area.width, species, now),
+            ),
+            _ => (
+                compute_wander_position_x(area.width, species, now),
+                compute_facing(area.width, species, now),
+            ),
+        };
         let vm = if wander_x != vm.wander_offset_x || facing != vm.facing {
             // Build a local copy with the computed values rather than mutating.
             std::borrow::Cow::Owned({
@@ -488,7 +508,6 @@ impl LegacyPanel for PetPanel {
         // wants pet avoidance. Replaces the inflated bounding rect so habitat
         // content can fill the diamond's negative space while keeping a
         // breathing margin around the actual pet outline.
-        let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let stage = vm.pet_render.stage;
         let mirror = vm.facing == -1;
@@ -792,7 +811,7 @@ fn darken_style(style: Style, multiplier: f32) -> Style {
 }
 
 /// Hit-test the screen cursor against the pet panel rect. Returns normalized
-/// x ∈ [-1.0, 1.0] relative to the panel center, or None when the cursor is
+/// x ∈ [-1.0, 1.0] relative to the panel center, or None when the pet is asleep, the cursor is
 /// outside the rect, missing, or mouse tracking is disabled.
 fn cursor_normalized_x_within(vm: &WatchViewModel, area: Rect) -> Option<f32> {
     if vm.day_context.asleep {
