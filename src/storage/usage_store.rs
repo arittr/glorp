@@ -272,7 +272,7 @@ impl UsageStore {
                 SUM(COALESCE(cost_usd, 0.0)),
                 COUNT(*)
             FROM usage_events
-            WHERE period_start < ?1 AND applied_at IS NOT NULL
+            WHERE period_start < ?1 AND bucket_at < ?1 AND applied_at IS NOT NULL
             GROUP BY provider_surface, period_date, source_surface
             ON CONFLICT(provider_surface, period_date, source_surface) DO UPDATE SET
                 input_tokens = daily_aggregates.input_tokens + excluded.input_tokens,
@@ -286,7 +286,7 @@ impl UsageStore {
             params![format_time(cutoff)?],
         )?;
         tx.execute(
-            "DELETE FROM usage_events WHERE period_start < ?1 AND applied_at IS NOT NULL",
+            "DELETE FROM usage_events WHERE period_start < ?1 AND bucket_at < ?1 AND applied_at IS NOT NULL",
             params![format_time(cutoff)?],
         )?;
         tx.commit()?;
@@ -1012,6 +1012,8 @@ impl UsageStore {
                 WHERE provider_delta_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_usage_events_applied_at
                 ON usage_events(applied_at);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_bucket_at
+                ON usage_events(bucket_at);
             ",
         )?;
         Ok(())
@@ -1314,5 +1316,66 @@ mod tests {
             .unwrap();
         let best = store.best_day_effective_tokens().unwrap();
         assert_eq!(best, 3_000.0, "events 1k + aggregate 2k = 3k");
+    }
+
+    #[test]
+    fn compact_before_keeps_rows_with_recent_bucket_at_even_when_period_start_is_ancient() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let ancient_period = now - time::Duration::days(120);
+        // Long-gap resume shape: provider day is 120 days old, but the smear
+        // anchored the bucket at poll time (now).
+        let event = NormalizedUsageEvent {
+            period_start: ancient_period,
+            observed_at: now,
+            bucket_at: now,
+            ..NormalizedUsageEvent::for_test_at(now, 9_999.0)
+        };
+        store.insert_event(&event).unwrap(); // insert_event rows are born applied
+        store
+            .compact_before(now - time::Duration::days(90))
+            .unwrap();
+        let totals = store
+            .token_totals_by_source_between(now - time::Duration::minutes(10), now)
+            .unwrap();
+        let sum: f64 = totals.iter().map(|(_, v)| v).sum();
+        assert_eq!(
+            sum, 9_999.0,
+            "rows still inside live bucket_at windows must survive compaction"
+        );
+    }
+
+    #[test]
+    fn compact_before_still_compacts_rows_old_on_both_axes() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let old = now - time::Duration::days(120);
+        store.insert_event(&sample_event_at(old, 4_444.0)).unwrap();
+        store
+            .compact_before(now - time::Duration::days(90))
+            .unwrap();
+        let totals = store
+            .token_totals_by_source_between(old - time::Duration::minutes(10), now)
+            .unwrap();
+        let sum: f64 = totals.iter().map(|(_, v)| v).sum();
+        assert_eq!(
+            sum, 0.0,
+            "both-axes-old rows must move into daily_aggregates"
+        );
+    }
+
+    #[test]
+    fn migrate_creates_bucket_at_index() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_usage_events_bucket_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }
