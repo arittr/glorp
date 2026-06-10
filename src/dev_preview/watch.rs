@@ -154,7 +154,12 @@ fn render_watch_frame_from_state_with_life(
     seed_usage_store(&usage_path, now)?;
     let color_capability = life.map_or(ctx.render.color_capability, |life| life.color_capability);
     let render = RenderContext::with_clock(color_capability, WatchClock::fixed(now));
-    let mut vm = build_watch_view_model_at(state, &usage_path, now, UtcOffset::UTC)?;
+    let mut vm = build_watch_view_model_at(
+        state,
+        &usage_path,
+        now,
+        crate::storage::day_axis::LocalDayMapper::Fixed(UtcOffset::UTC),
+    )?;
     if let Some(life) = life {
         vm.life_profile = life.profile.clone();
     }

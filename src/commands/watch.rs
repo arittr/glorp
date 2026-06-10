@@ -13,6 +13,7 @@ use crate::{
         render::{render_pet, AnimationFrame},
     },
     storage::{
+        day_axis::LocalDayMapper,
         state::{PetState, StateStore},
         usage_store::{NormalizedUsageEvent, UsageStore},
     },
@@ -52,15 +53,19 @@ pub fn run() -> Result<()> {
 }
 
 pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<WatchViewModel> {
-    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-    build_watch_view_model_at(state, usage_db, OffsetDateTime::now_utc(), local_offset)
+    build_watch_view_model_at(
+        state,
+        usage_db,
+        OffsetDateTime::now_utc(),
+        LocalDayMapper::System,
+    )
 }
 
 pub(crate) fn build_watch_view_model_at(
     state: &PetState,
     usage_db: &Path,
     now: OffsetDateTime,
-    local_offset: time::UtcOffset,
+    mapper: LocalDayMapper,
 ) -> Result<WatchViewModel> {
     let usage_store = UsageStore::open(usage_db)?;
     let recent_usage = usage_store.recent_events(500)?;
@@ -78,12 +83,13 @@ pub(crate) fn build_watch_view_model_at(
         },
     );
 
-    // Callers pass `local_offset` explicitly so the view is deterministic for
-    // dev-preview/tests (which pass UTC) without depending on the OS at render
-    // time. The production wrapper supplies the user's resolved local offset.
-    let now_local = now.to_offset(local_offset);
-    let today_start = time::PrimitiveDateTime::new(now_local.date(), time::Time::MIDNIGHT)
-        .assume_offset(local_offset);
+    // Canonical local-day axis: the mapper is injectable so tests and Preview
+    // Lab can pin an offset while production resolves the OS timezone.
+    let local_offset = mapper.offset_at(now);
+    let _now_local = now.to_offset(local_offset);
+    let today_start = mapper
+        .local_day_start(mapper.local_date(now))
+        .to_offset(time::UtcOffset::UTC);
     let last_10m_start = now - Duration::minutes(10);
 
     let today_totals = usage_store
@@ -150,7 +156,7 @@ pub(crate) fn build_watch_view_model_at(
         energy: state.vitals.energy / 100.0,
         today_effective_tokens: today_total_tokens,
         recent_daily_effective_tokens: usage_store
-            .seven_day_token_history(now_local.date())
+            .seven_day_token_history(now, mapper)
             .unwrap_or_else(|_| vec![0.0; 7]),
         source_breakdown,
         source_health,
@@ -299,7 +305,12 @@ pub fn build_watch_view_model_for_test_at(
     usage_db: &Path,
     now: OffsetDateTime,
 ) -> Result<WatchViewModel> {
-    build_watch_view_model_at(state, usage_db, now, time::UtcOffset::UTC)
+    build_watch_view_model_at(
+        state,
+        usage_db,
+        now,
+        LocalDayMapper::Fixed(time::UtcOffset::UTC),
+    )
 }
 
 struct RealWatchPoller {
@@ -710,7 +721,12 @@ fn timestamp_column(timestamp: OffsetDateTime) -> String {
 mod tests {
     use super::*;
     use crate::pet::generation::Species;
-    use crate::storage::{state::PetState, usage_store::UsageStore};
+    use crate::storage::{
+        day_axis::LocalDayMapper,
+        state::PetState,
+        usage_store::{ProviderCursorUpdate, UsageStore},
+    };
+    use crate::usage::provider::{UsageDelta, UsagePollResult};
     use tempfile::tempdir;
     use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -738,7 +754,13 @@ mod tests {
         let mut state = PetState::new_for_test("test", "buddy");
         state.created_at = created_at;
 
-        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
         assert_eq!(vm.bio.age_label, "18d");
         assert!(
             vm.bio.hatched_label.contains("apr"),
@@ -762,7 +784,13 @@ mod tests {
         let mut state = PetState::new_for_test("test", "buddy");
         state.created_at = now - Duration::hours(4);
 
-        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
         assert_eq!(vm.bio.age_label, "0d 4h");
     }
 
@@ -782,7 +810,13 @@ mod tests {
         state.stage = Stage::S4;
         state.xp = 8.5; // S4 spans 4.0..14.0; 8.5 is 4.5/10.0 = 45% through the stage
 
-        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
         assert_eq!(vm.progress.stage_label, "fuzz");
         assert_eq!(vm.progress.next_stage_label, "archfuzz");
         assert!(
@@ -812,7 +846,13 @@ mod tests {
         state.stage = Stage::S6;
         state.xp = 100.0;
 
-        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
         assert!(vm.progress.is_max_stage);
         assert_eq!(vm.progress.next_stage_label, "—");
     }
@@ -850,7 +890,13 @@ mod tests {
         state.pet.generated_species = Species::Fuzz;
         state.stage = Stage::S4;
         state.xp = 5.0;
-        let vm = build_watch_view_model_at(&state, &db_path, now, time::UtcOffset::UTC).unwrap();
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
         assert_eq!(
             vm.progress.rate_per_hour, 42_000.0,
             "catchup row with bucket_at 3h ago must NOT contribute to the rate"
@@ -943,6 +989,101 @@ mod tests {
             events[3].text.contains("8.0k"),
             "fourth should be usage 8k: {}",
             events[3].text
+        );
+    }
+
+    fn catchup_poll_result_for_test_n(n: u64, effective_tokens: f64) -> UsagePollResult {
+        UsagePollResult {
+            deltas: vec![UsageDelta {
+                provider_surface: "claude-code".into(),
+                command: "ccusage daily --json --offline".into(),
+                effective_tokens,
+                confidence: "local-log-derived".into(),
+                period_start: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                observed_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                model: Some("test-model".into()),
+                cursor_update: ProviderCursorUpdate {
+                    provider_surface: "claude-code".into(),
+                    cursor_key: "catchup-test".into(),
+                    cursor_value: format!("cursor-{n}"),
+                    provider_version: "test-provider".into(),
+                    parser_version: "test-parser".into(),
+                },
+                token_totals: None,
+            }],
+            diagnostics: vec![],
+            total_effective_tokens: effective_tokens,
+        }
+    }
+
+    #[test]
+    fn status_today_and_watch_today_agree_across_a_midnight_boundary() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut usage = UsageStore::open(&db_path).unwrap();
+        let mapper = LocalDayMapper::Fixed(time::UtcOffset::from_hms(-8, 0, 0).unwrap());
+        // 23:30 local June 8 (07:30 UTC June 9) — late-night work.
+        let late = PrimitiveDateTime::new(
+            Date::from_calendar_date(2026, Month::June, 9).unwrap(),
+            Time::from_hms(7, 30, 0).unwrap(),
+        )
+        .assume_utc();
+        usage
+            .insert_event(&NormalizedUsageEvent {
+                observed_at: late,
+                bucket_at: late,
+                ..NormalizedUsageEvent::for_test_at(late, 3_000.0)
+            })
+            .unwrap();
+        // Now = 00:30 local June 9 (08:30 UTC): the late-night row is YESTERDAY.
+        let now = late + Duration::hours(1);
+        let state = PetState::new_for_test("test", "buddy");
+        let vm = build_watch_view_model_at(&state, &db_path, now, mapper).unwrap();
+        let status_today = usage.today_effective_tokens(now, mapper).unwrap();
+        assert_eq!(vm.today_effective_tokens, status_today);
+        assert_eq!(
+            status_today, 0.0,
+            "yesterday's local work must not be today"
+        );
+    }
+
+    #[test]
+    fn oversized_staged_backlog_becomes_visible_over_successive_applies() {
+        use crate::game::runtime::{apply_unapplied_usage, stage_usage_poll_deltas};
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut usage = UsageStore::open(&db_path).unwrap();
+        let mut state = PetState::new_for_test("seed", "buddy");
+        state.calibration.daily_effective_tokens = 1_000.0; // force many small buckets
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let mapper = LocalDayMapper::Fixed(time::UtcOffset::UTC);
+        // Stage > 500 rows via the REAL path: 60 deltas x ~6-12 smear buckets.
+        for i in 0..60 {
+            let poll = catchup_poll_result_for_test_n(i, 50_000.0); // distinct cursor per delta
+            stage_usage_poll_deltas(&mut usage, &poll, state.calibration, now).unwrap();
+        }
+        let before = usage.today_effective_tokens(now, mapper).unwrap();
+        let update = apply_unapplied_usage(&mut state, &mut usage, now).unwrap();
+        usage
+            .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+            .unwrap();
+        let after_one = usage.today_effective_tokens(now, mapper).unwrap();
+        assert_eq!(
+            before, 0.0,
+            "staged rows are invisible to applied-only reads"
+        );
+        assert!(after_one > 0.0, "the first apply makes <=500 rows visible");
+        // Drain the backlog with successive apply/mark cycles; totals converge.
+        for _ in 0..20 {
+            let u = apply_unapplied_usage(&mut state, &mut usage, now).unwrap();
+            usage
+                .mark_events_applied_and_advance_cursors(&u.applied_event_ids, now)
+                .unwrap();
+        }
+        let drained = usage.today_effective_tokens(now, mapper).unwrap();
+        assert!(
+            drained > after_one,
+            "successive polls converge the backlog into the visible total"
         );
     }
 }

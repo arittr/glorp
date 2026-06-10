@@ -790,17 +790,22 @@ impl UsageStore {
         Ok(versions)
     }
 
-    pub fn today_effective_tokens(&self) -> crate::error::Result<f64> {
-        let today = OffsetDateTime::now_utc().date().to_string();
-        self.conn
-            .query_row(
-                "SELECT COALESCE(SUM(effective_tokens), 0.0)
-                 FROM usage_events
-                 WHERE period_date = ?1",
-                params![today],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
+    /// Today's applied effective tokens on the canonical local-day axis
+    /// (local day of bucket_at). Half-open [local midnight, local midnight+1d)
+    /// so late-night rows never double-count across the boundary.
+    pub fn today_effective_tokens(
+        &self,
+        now: OffsetDateTime,
+        mapper: crate::storage::day_axis::LocalDayMapper,
+    ) -> crate::error::Result<f64> {
+        let today = mapper.local_date(now);
+        let start = mapper
+            .local_day_start(today)
+            .to_offset(time::UtcOffset::UTC);
+        let end = mapper
+            .local_day_start(today + time::Duration::days(1))
+            .to_offset(time::UtcOffset::UTC);
+        self.applied_effective_tokens_between(start, end)
     }
 
     /// Sum effective tokens per provider_surface for events whose bucket_at
@@ -965,48 +970,22 @@ impl UsageStore {
             .map_err(Into::into)
     }
 
+    /// Effective tokens per local day for the trailing 7 local days (oldest
+    /// first, today last), on the canonical bucket_at axis, applied rows only.
+    /// daily_aggregates is deliberately NOT consulted: compaction's cutoff is
+    /// 90 days, so aggregate rows cannot occur inside a 7-day window.
     pub fn seven_day_token_history(
         &self,
-        now_utc_date: time::Date,
+        now: OffsetDateTime,
+        mapper: crate::storage::day_axis::LocalDayMapper,
     ) -> crate::error::Result<Vec<f64>> {
-        let mut out = vec![0.0_f64; 7];
-        let earliest = (now_utc_date - time::Duration::days(6)).to_string();
-        let mut stmt = self.conn.prepare(
-            "SELECT period_date, SUM(effective_tokens) AS daily_total
-             FROM (
-                 SELECT period_date, effective_tokens FROM usage_events
-                 UNION ALL
-                 SELECT period_date, effective_tokens FROM daily_aggregates
-             )
-             WHERE period_date >= ?1
-             GROUP BY period_date",
-        )?;
-        let rows = stmt.query_map(params![earliest], |row| {
-            let date_str: String = row.get(0)?;
-            let total: f64 = row.get(1)?;
-            Ok((date_str, total))
-        })?;
-        for row in rows {
-            let (date_str, total) = row?;
-            // period_date is stored as YYYY-MM-DD via time::Date::to_string().
-            let parts: Vec<&str> = date_str.split('-').collect();
-            if parts.len() == 3 {
-                if let (Ok(y), Ok(m_u8), Ok(d)) = (
-                    parts[0].parse::<i32>(),
-                    parts[1].parse::<u8>(),
-                    parts[2].parse::<u8>(),
-                ) {
-                    if let Ok(month) = time::Month::try_from(m_u8) {
-                        if let Ok(date) = time::Date::from_calendar_date(y, month, d) {
-                            let days_ago = (now_utc_date - date).whole_days();
-                            if (0..=6).contains(&days_ago) {
-                                let idx = (6 - days_ago) as usize;
-                                out[idx] = total;
-                            }
-                        }
-                    }
-                }
-            }
+        let starts = mapper.day_starts_back(now, 7);
+        let mut out = Vec::with_capacity(7);
+        for pair in starts.windows(2) {
+            out.push(self.applied_effective_tokens_between(
+                pair[0].to_offset(time::UtcOffset::UTC),
+                pair[1].to_offset(time::UtcOffset::UTC),
+            )?);
         }
         Ok(out)
     }
@@ -1228,6 +1207,8 @@ fn parse_time_for_sql(value: &str) -> rusqlite::Result<OffsetDateTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::day_axis::LocalDayMapper;
+    use time::macros::datetime;
 
     fn sample_event_at(observed_at: OffsetDateTime, tokens: f64) -> NormalizedUsageEvent {
         NormalizedUsageEvent {
@@ -1359,7 +1340,9 @@ mod tests {
             .insert_event(&NormalizedUsageEvent::for_test_at(day6, 5000.0))
             .unwrap();
 
-        let history = store.seven_day_token_history(today.date()).unwrap();
+        let history = store
+            .seven_day_token_history(today, LocalDayMapper::Fixed(time::UtcOffset::UTC))
+            .unwrap();
         assert_eq!(history.len(), 7);
         assert_eq!(history[0], 1000.0);
         assert_eq!(history[6], 5000.0);
@@ -1379,7 +1362,9 @@ mod tests {
             .insert_event(&NormalizedUsageEvent::for_test_at(today, 2500.0))
             .unwrap();
 
-        let history = store.seven_day_token_history(today.date()).unwrap();
+        let history = store
+            .seven_day_token_history(today, LocalDayMapper::Fixed(time::UtcOffset::UTC))
+            .unwrap();
         assert_eq!(history[6], 4000.0);
     }
 
@@ -1387,16 +1372,39 @@ mod tests {
     fn seven_day_token_history_zero_for_empty_store() {
         let store = UsageStore::open(":memory:".as_ref()).unwrap();
         let today = OffsetDateTime::now_utc();
-        let history = store.seven_day_token_history(today.date()).unwrap();
+        let history = store
+            .seven_day_token_history(today, LocalDayMapper::Fixed(time::UtcOffset::UTC))
+            .unwrap();
         assert_eq!(history, vec![0.0; 7]);
     }
 
     #[test]
-    fn seven_day_token_history_includes_compacted_days() {
+    fn today_effective_tokens_groups_on_local_bucket_at_day_applied_only() {
         let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        // 2026-06-09 01:00 UTC == 2026-06-08 17:00 local at UTC-8: yesterday locally.
+        let mapper = LocalDayMapper::Fixed(time::UtcOffset::from_hms(-8, 0, 0).unwrap());
+        let now = datetime!(2026-06-09 18:00 UTC); // 10:00 local June 9
+        store
+            .insert_event(&sample_event_at(datetime!(2026-06-09 01:00 UTC), 7_777.0))
+            .unwrap(); // local June 8 — must NOT count
+        store
+            .insert_event(&sample_event_at(datetime!(2026-06-09 17:00 UTC), 1_111.0))
+            .unwrap(); // local June 9 09:00 — counts
+        assert_eq!(store.today_effective_tokens(now, mapper).unwrap(), 1_111.0);
+    }
+
+    #[test]
+    fn seven_day_token_history_uses_local_bucket_at_days_and_no_aggregates_union() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let mapper = LocalDayMapper::Fixed(time::UtcOffset::UTC);
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        // Day -6 only in daily_aggregates (simulating post-compaction).
-        let six_days_ago = (now.date() - time::Duration::days(6)).to_string();
+        store.insert_event(&sample_event_at(now, 1_234.0)).unwrap();
+        store
+            .insert_event(&sample_event_at(now - time::Duration::days(6), 7_777.0))
+            .unwrap();
+        // A daily_aggregates row must NOT surface: compaction cutoff is 90
+        // days, so aggregates cannot occur inside a 7-day window. This
+        // supersedes seven_day_token_history_includes_compacted_days.
         store
             .conn
             .execute(
@@ -1405,24 +1413,18 @@ mod tests {
                     input_tokens, output_tokens, cache_creation_tokens,
                     cache_read_tokens, reasoning_output_tokens,
                     effective_tokens, cost_usd, event_count
-                ) VALUES ('claude-code', ?1, 'daily', 0, 0, 0, 0, 0, 7777.0, 0, 1)",
-                rusqlite::params![six_days_ago],
+                ) VALUES ('claude-code', ?1, 'daily', 0, 0, 0, 0, 0, 5555.0, 0, 1)",
+                rusqlite::params![(now.date() - time::Duration::days(3)).to_string()],
             )
             .unwrap();
-        // Today only in usage_events.
-        store.insert_event(&sample_event_at(now, 1_234.0)).unwrap();
-        let history = store.seven_day_token_history(now.date()).unwrap();
+        let history = store.seven_day_token_history(now, mapper).unwrap();
         assert_eq!(history.len(), 7);
-        assert!(
-            history[0] > 7_700.0,
-            "day-6 (oldest) must surface from aggregates, got {}",
-            history[0]
+        assert_eq!(history[0], 7_777.0);
+        assert_eq!(
+            history[3], 0.0,
+            "aggregates must not leak into the 7-day window"
         );
-        assert!(
-            history[6] > 1_200.0,
-            "today (newest) must surface from events, got {}",
-            history[6]
-        );
+        assert_eq!(history[6], 1_234.0);
     }
 
     #[test]

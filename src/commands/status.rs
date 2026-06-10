@@ -40,7 +40,13 @@ pub fn run() -> Result<()> {
                         .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
                     recent_effective = update.recent_effective_tokens;
                 }
-                today_effective = usage_store.today_effective_tokens().unwrap_or(0.0);
+                let status_now = OffsetDateTime::now_utc();
+                today_effective = usage_store
+                    .today_effective_tokens(
+                        status_now,
+                        crate::storage::day_axis::LocalDayMapper::System,
+                    )
+                    .unwrap_or(0.0);
                 if let Some(diagnostic) = result.diagnostics.first() {
                     provider_line = format!("provider: blocked ({})", diagnostic.code);
                     provider_health_line =
