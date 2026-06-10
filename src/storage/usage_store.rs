@@ -407,30 +407,65 @@ impl UsageStore {
         let updated_at = format_time(now)?;
         let tx = self.conn.transaction()?;
         for update in &updates {
-            tx.execute(
-                "INSERT INTO provider_cursors (
-                    provider_surface,
-                    cursor_key,
-                    cursor_value,
-                    provider_version,
-                    parser_version,
-                    updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(provider_surface, cursor_key) DO UPDATE SET
-                    cursor_value = excluded.cursor_value,
-                    provider_version = excluded.provider_version,
-                    parser_version = excluded.parser_version,
-                    updated_at = excluded.updated_at",
-                params![
-                    update.provider_surface,
-                    update.cursor_key,
-                    update.cursor_value,
-                    update.provider_version,
-                    update.parser_version,
-                    updated_at,
-                ],
-            )?;
+            upsert_provider_cursor(&tx, update, &updated_at)?;
         }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Newest `provider_cursors.updated_at` for one provider surface — the
+    /// discontinuity guard's per-provider "last fed" instant. `None` means
+    /// the surface has never had a cursor (first contact). MAX is computed
+    /// lexically on the stored RFC3339 text; all writers share `format_time`,
+    /// so orderings can differ only within a single second, which the
+    /// guard's whole-day factor ignores.
+    pub fn latest_cursor_updated_at(
+        &self,
+        provider_surface: &str,
+    ) -> crate::error::Result<Option<OffsetDateTime>> {
+        self.conn
+            .query_row(
+                "SELECT MAX(updated_at) FROM provider_cursors
+                 WHERE provider_surface = ?1",
+                params![provider_surface],
+                |row| {
+                    let raw: Option<String> = row.get(0)?;
+                    raw.as_deref().map(parse_time_for_sql).transpose()
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Refuse one provider surface's poll: advance its cursors WITHOUT
+    /// staging any ledger rows and persist the refusal diagnostic, all in
+    /// ONE transaction — a crash between separate writes would discard
+    /// tokens with no record. Refused tokens are never retro-fed.
+    pub fn refuse_poll_discontinuity(
+        &mut self,
+        updates: Vec<ProviderCursorUpdate>,
+        diagnostic: &ProviderDiagnostic,
+        now: OffsetDateTime,
+    ) -> crate::error::Result<()> {
+        let updated_at = format_time(now)?;
+        let recorded_at = format_time(diagnostic.recorded_at)?;
+        let tx = self.conn.transaction()?;
+        for update in &updates {
+            upsert_provider_cursor(&tx, update, &updated_at)?;
+        }
+        tx.execute(
+            "INSERT INTO provider_diagnostics (
+                provider_surface,
+                code,
+                message,
+                recorded_at
+            ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                diagnostic.provider_surface,
+                diagnostic.code,
+                diagnostic.message,
+                recorded_at,
+            ],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -717,29 +752,7 @@ impl UsageStore {
             rusqlite::params_from_iter(update_params.iter().map(|b| b.as_ref())),
         )?;
         for update in &pending_updates {
-            tx.execute(
-                "INSERT INTO provider_cursors (
-                    provider_surface,
-                    cursor_key,
-                    cursor_value,
-                    provider_version,
-                    parser_version,
-                    updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(provider_surface, cursor_key) DO UPDATE SET
-                    cursor_value = excluded.cursor_value,
-                    provider_version = excluded.provider_version,
-                    parser_version = excluded.parser_version,
-                    updated_at = excluded.updated_at",
-                params![
-                    update.provider_surface,
-                    update.cursor_key,
-                    update.cursor_value,
-                    update.provider_version,
-                    update.parser_version,
-                    applied_at_text,
-                ],
-            )?;
+            upsert_provider_cursor(&tx, update, &applied_at_text)?;
         }
         for effective in pending_effective_tokens {
             if effective != 0.0 {
@@ -1215,6 +1228,41 @@ fn format_time(value: OffsetDateTime) -> crate::error::Result<String> {
 fn parse_time_for_sql(value: &str) -> rusqlite::Result<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+}
+
+/// Upsert one provider cursor inside an existing transaction. Shared by
+/// `advance_cursors`, `mark_events_applied_and_advance_cursors`, and
+/// `refuse_poll_discontinuity` so the conflict-update column set cannot
+/// drift between the three cursor-advance paths.
+fn upsert_provider_cursor(
+    tx: &rusqlite::Transaction<'_>,
+    update: &ProviderCursorUpdate,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO provider_cursors (
+            provider_surface,
+            cursor_key,
+            cursor_value,
+            provider_version,
+            parser_version,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(provider_surface, cursor_key) DO UPDATE SET
+            cursor_value = excluded.cursor_value,
+            provider_version = excluded.provider_version,
+            parser_version = excluded.parser_version,
+            updated_at = excluded.updated_at",
+        params![
+            update.provider_surface,
+            update.cursor_key,
+            update.cursor_value,
+            update.provider_version,
+            update.parser_version,
+            updated_at,
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1731,5 +1779,121 @@ mod tests {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         store.insert_event(&sample_event_at(now, 1.0)).unwrap();
         assert_eq!(store.latest_applied_bucket_at_before(now).unwrap(), None);
+    }
+
+    fn contact_update(surface: &str, key: &str) -> ProviderCursorUpdate {
+        ProviderCursorUpdate {
+            provider_surface: surface.to_string(),
+            cursor_key: key.to_string(),
+            cursor_value: "seeded".to_string(),
+            provider_version: "test-provider".to_string(),
+            parser_version: "test-parser".to_string(),
+        }
+    }
+
+    #[test]
+    fn latest_cursor_updated_at_is_none_without_cursors_and_max_per_surface() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        assert_eq!(store.latest_cursor_updated_at("claude-code").unwrap(), None);
+
+        let early = datetime!(2026-06-08 09:00 UTC);
+        let late = datetime!(2026-06-09 21:00 UTC);
+        store
+            .advance_cursors(vec![contact_update("claude-code", "cursor-a")], early)
+            .unwrap();
+        store
+            .advance_cursors(vec![contact_update("claude-code", "cursor-b")], late)
+            .unwrap();
+        store
+            .advance_cursors(vec![contact_update("codex", "cursor-c")], early)
+            .unwrap();
+
+        assert_eq!(
+            store.latest_cursor_updated_at("claude-code").unwrap(),
+            Some(late)
+        );
+        assert_eq!(
+            store.latest_cursor_updated_at("codex").unwrap(),
+            Some(early)
+        );
+        assert_eq!(store.latest_cursor_updated_at("gemini").unwrap(), None);
+    }
+
+    #[test]
+    fn refuse_poll_discontinuity_advances_cursors_and_persists_diagnostic_together() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = datetime!(2026-06-10 08:00 UTC);
+        let diagnostic = ProviderDiagnostic {
+            provider_surface: "claude-code".to_string(),
+            code: "usage_discontinuity".to_string(),
+            message: "refused 212000000 effective tokens (threshold 99000000)".to_string(),
+            recorded_at: now,
+        };
+
+        store
+            .refuse_poll_discontinuity(
+                vec![contact_update("claude-code", "cursor-a")],
+                &diagnostic,
+                now,
+            )
+            .unwrap();
+
+        // Cursors advanced...
+        assert_eq!(
+            store.latest_cursor_updated_at("claude-code").unwrap(),
+            Some(now)
+        );
+        assert_eq!(
+            store
+                .provider_cursor("claude-code", "cursor-a")
+                .unwrap()
+                .as_deref(),
+            Some("seeded")
+        );
+        // ...the diagnostic persisted...
+        let stored = store.recent_diagnostics(5).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].provider_surface, "claude-code");
+        assert_eq!(stored[0].code, "usage_discontinuity");
+        assert_eq!(stored[0].recorded_at, now);
+        // ...and nothing was staged: a refusal never creates food.
+        assert_eq!(store.unapplied_events(10).unwrap().len(), 0);
+        assert_eq!(store.recent_event_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn refuse_poll_discontinuity_is_one_transaction() {
+        // Atomicity: the diagnostic is present iff the cursors advanced. Drop
+        // the diagnostics table so the LAST statement in the transaction
+        // fails — a non-transactional implementation would leave the cursor
+        // upserts behind, silently discarding tokens with no record.
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = datetime!(2026-06-10 08:00 UTC);
+        store
+            .conn
+            .execute("DROP TABLE provider_diagnostics", [])
+            .unwrap();
+        let diagnostic = ProviderDiagnostic {
+            provider_surface: "claude-code".to_string(),
+            code: "usage_discontinuity".to_string(),
+            message: "refused".to_string(),
+            recorded_at: now,
+        };
+
+        let result = store.refuse_poll_discontinuity(
+            vec![contact_update("claude-code", "cursor-a")],
+            &diagnostic,
+            now,
+        );
+
+        assert!(
+            result.is_err(),
+            "a failed diagnostic insert must fail the whole call"
+        );
+        assert_eq!(
+            store.latest_cursor_updated_at("claude-code").unwrap(),
+            None,
+            "cursor upserts must roll back with the failed diagnostic insert"
+        );
     }
 }
