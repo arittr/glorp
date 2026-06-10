@@ -354,7 +354,7 @@ pub fn ambient_glyphs_for(
     habitat: Rect,
     exclusions: &[Rect],
     now: time::OffsetDateTime,
-    color_capability: crate::tui::style::ColorCapability,
+    color_capability: ColorCapability,
 ) -> Vec<AmbientGlyph> {
     ambient_glyphs_for_phase(
         species,
@@ -384,7 +384,7 @@ pub fn ambient_glyphs_for_phase(
     phase: DayPhase,
     phase_blend: f32,
 ) -> Vec<AmbientGlyph> {
-    if matches!(color_capability, crate::tui::style::ColorCapability::Flat) {
+    if matches!(color_capability, ColorCapability::Flat) {
         return Vec::new();
     }
 
@@ -1270,9 +1270,9 @@ pub(crate) fn pet_role_style(role: PaletteRoleName, styles: &SemanticStyles) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::style::ColorCapability;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ColorCapability;
 
     fn test_context() -> RenderContext {
         use crate::tui::render_context::WatchClock;
@@ -2059,7 +2059,7 @@ mod tests {
             habitat,
             &[],
             now,
-            crate::tui::style::ColorCapability::Truecolor,
+            ColorCapability::Truecolor,
             DayPhase::Day,
             1.0,
         );
@@ -2069,7 +2069,7 @@ mod tests {
             habitat,
             &[],
             now,
-            crate::tui::style::ColorCapability::Truecolor,
+            ColorCapability::Truecolor,
             DayPhase::Night,
             1.0,
         );
@@ -2105,7 +2105,7 @@ mod tests {
             habitat,
             &[],
             now,
-            crate::tui::style::ColorCapability::Flat,
+            ColorCapability::Flat,
             DayPhase::Night,
             1.0,
         );

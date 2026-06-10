@@ -74,17 +74,29 @@ fn role_color(role: PaletteRoleName) -> Rgb {
     }
 }
 
+/// Sleep dim factor for the popover pet (the menubar's only palette channel).
+const SLEEP_DIM: f32 = 0.7;
+
 fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
     let base = role_color(role);
-    if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
-        return base;
-    }
-
-    match vm.life_profile.source_accent {
-        Some(SourceAccent::Codex) => Rgb(0x86, 0xd9, 0xef),
-        Some(SourceAccent::Claude) => Rgb(0xb3, 0x9d, 0xff),
-        Some(SourceAccent::Balanced) => Rgb(0xf0, 0xc4, 0x6a),
-        None => base,
+    let colored = if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
+        base
+    } else {
+        match vm.life_profile.source_accent {
+            Some(SourceAccent::Codex) => Rgb(0x86, 0xd9, 0xef),
+            Some(SourceAccent::Claude) => Rgb(0xb3, 0x9d, 0xff),
+            Some(SourceAccent::Balanced) => Rgb(0xf0, 0xc4, 0x6a),
+            None => base,
+        }
+    };
+    if vm.day_context.asleep {
+        Rgb(
+            (f32::from(colored.0) * SLEEP_DIM) as u8,
+            (f32::from(colored.1) * SLEEP_DIM) as u8,
+            (f32::from(colored.2) * SLEEP_DIM) as u8,
+        )
+    } else {
+        colored
     }
 }
 
@@ -378,6 +390,53 @@ mod tests {
             "Codex profile should recolor the accent role"
         );
         assert_eq!(profile_accent, (0x86, 0xd9, 0xef));
+    }
+
+    #[test]
+    fn sleeping_pet_dims_the_menubar_palette_and_keeps_the_bmp_invariant() {
+        let mut vm = WatchViewModel::fixture();
+        vm.pet_art = vec!["EAPB".to_string()];
+        vm.pet_spans = vec![
+            StyledSegment {
+                line: 0,
+                start: 0,
+                end: 1,
+                role: PaletteRoleName::Eye,
+            },
+            StyledSegment {
+                line: 0,
+                start: 1,
+                end: 2,
+                role: PaletteRoleName::Accent,
+            },
+            StyledSegment {
+                line: 0,
+                start: 2,
+                end: 3,
+                role: PaletteRoleName::Particle,
+            },
+            StyledSegment {
+                line: 0,
+                start: 3,
+                end: 4,
+                role: PaletteRoleName::Body,
+            },
+        ];
+        vm.day_context.asleep = true;
+
+        let block = render_pet_block(&vm);
+        assert_eq!(
+            block.char_len,
+            block.attr.length(),
+            "sleep dimming must not disturb the menubar BMP length invariant"
+        );
+
+        let dimmed = rgb_tuple(role_color_for_profile(PaletteRoleName::Body, &vm));
+        let base = rgb_tuple(role_color(PaletteRoleName::Body));
+        assert!(
+            dimmed.0 < base.0 && dimmed.1 < base.1 && dimmed.2 < base.2,
+            "asleep must dim every role: {dimmed:?} vs {base:?}"
+        );
     }
 
     fn pet_runs_for_test(vm: &WatchViewModel) -> Vec<StyledRun> {
