@@ -1247,7 +1247,8 @@ fn pet_panel_draw_order_keeps_pet_above_habitat_props() {
         .nth(1)
         .expect("PetPanel render body");
     let ambient = render_body
-        .find("ambient_glyphs_for(")
+        .find("ambient_glyphs_for_phase(")
+        .or_else(|| render_body.find("ambient_glyphs_for("))
         .expect("ambient render pass");
     let props = render_body
         .find("habitat_props_for(")

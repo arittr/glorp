@@ -17,6 +17,7 @@ use crate::pet::animator::{
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
+use crate::tui::day::DayPhase;
 use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, WorkWeather};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
@@ -184,6 +185,83 @@ fn blend_colors(primary: Color, secondary: Color, primary_weight: f32) -> Color 
     )
 }
 
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
+        return a;
+    };
+    let t = t.clamp(0.0, 1.0);
+    Color::Rgb(
+        ((ar as f32 * (1.0 - t)) + (br as f32 * t)).round() as u8,
+        ((ag as f32 * (1.0 - t)) + (bg as f32 * t)).round() as u8,
+        ((ab as f32 * (1.0 - t)) + (bb as f32 * t)).round() as u8,
+    )
+}
+
+fn warm_shift(base: Color, amount: f32) -> Color {
+    let Color::Rgb(r, g, b) = base else {
+        return base;
+    };
+    let t = amount.clamp(0.0, 1.0);
+    let add = (t * 40.0).round() as u8;
+    let sub = (t * 30.0).round() as u8;
+    Color::Rgb(r.saturating_add(add), g, b.saturating_sub(sub))
+}
+
+fn dim_shift(base: Color, amount: f32) -> Color {
+    let Color::Rgb(r, g, b) = base else {
+        return base;
+    };
+    let t = amount.clamp(0.0, 1.0);
+    let m = 1.0 - t * 0.5;
+    Color::Rgb(
+        (r as f32 * m).round() as u8,
+        (g as f32 * m).round() as u8,
+        (b as f32 * m).round() as u8,
+    )
+}
+
+/// Per-phase sky glyph family. Re-skins the same allocation — night gets a
+/// sparse starfield, dawn/dusk warm grain, day keeps the species default.
+fn sky_palette_for_phase(species: Species, phase: DayPhase) -> &'static [char] {
+    match phase {
+        DayPhase::Day => sky_palette_for(species),
+        DayPhase::Dawn | DayPhase::Dusk => match species {
+            Species::Glitch => &['░', '▪', '·', ' '],
+            _ => &['·', '\'', '~', ' '],
+        },
+        DayPhase::Night => match species {
+            Species::Glitch => &['▪', '·', ' ', ' '],
+            _ => &['✦', '·', '*', ' '],
+        },
+    }
+}
+
+/// Sky glyph budget scale per phase. Night <= day, always.
+fn phase_count_scale(phase: DayPhase) -> f64 {
+    match phase {
+        DayPhase::Day => 1.0,
+        DayPhase::Dawn => 0.7,
+        DayPhase::Dusk => 0.8,
+        DayPhase::Night => 0.6,
+    }
+}
+
+/// Sky color for `phase`, interpolated from the neutral dim base toward the
+/// phase's target warmth/dim over `blend` (0.0 at the boundary, 1.0 after
+/// PHASE_BLEND_MINUTES). This softens the entry into a phase; it does not
+/// cross-fade between two phase targets.
+fn sky_color_for_phase(phase: DayPhase, blend: f32) -> Color {
+    let p = crate::tui::style::tokenpet_palette();
+    let base = p.dim.rgb;
+    let target = match phase {
+        DayPhase::Day => base,
+        DayPhase::Dawn => warm_shift(base, 0.25),
+        DayPhase::Dusk => warm_shift(base, 0.40),
+        DayPhase::Night => dim_shift(base, 0.40),
+    };
+    lerp_color(base, target, blend)
+}
+
 fn profile_token_pop(
     last_feed_pulse_at: Option<time::OffsetDateTime>,
     profile: &PetLifeProfile,
@@ -278,6 +356,34 @@ pub fn ambient_glyphs_for(
     now: time::OffsetDateTime,
     color_capability: crate::tui::style::ColorCapability,
 ) -> Vec<AmbientGlyph> {
+    ambient_glyphs_for_phase(
+        species,
+        stage,
+        habitat,
+        exclusions,
+        now,
+        color_capability,
+        DayPhase::Day,
+        1.0,
+    )
+}
+
+/// Phase-aware variant of [`ambient_glyphs_for`].
+///
+/// Sky glyphs re-skin the same allocation; night uses a sparser starfield,
+/// dawn/dusk use warm grain, and day keeps the species palette. Colors and
+/// floor shading interpolate for `PHASE_BLEND_MINUTES` after a phase boundary.
+#[allow(clippy::too_many_arguments)]
+pub fn ambient_glyphs_for_phase(
+    species: Species,
+    stage: Stage,
+    habitat: Rect,
+    exclusions: &[Rect],
+    now: time::OffsetDateTime,
+    color_capability: ColorCapability,
+    phase: DayPhase,
+    phase_blend: f32,
+) -> Vec<AmbientGlyph> {
     if matches!(color_capability, crate::tui::style::ColorCapability::Flat) {
         return Vec::new();
     }
@@ -298,18 +404,26 @@ pub fn ambient_glyphs_for(
         .wrapping_add(minute_floor.wrapping_mul(0x94D0_49BB_1331_11EB));
     let mut rng = Pcg32::seed_from_u64(seed);
 
-    let sky = sky_palette_for(species);
+    let sky = sky_palette_for_phase(species, phase);
     let floor = floor_palette_for(species);
 
     let p = crate::tui::style::tokenpet_palette();
-    let sky_color = p.dim.rgb;
-    let floor_color = p.dim.rgb;
+    let base = p.dim.rgb;
+    let sky_color = sky_color_for_phase(phase, phase_blend);
+    // Floor gradually dims into Night; Dawn/Dusk keep the neutral base so the
+    // pet remains readable against warm grain.
+    let floor_color = if phase == DayPhase::Night {
+        dim_shift(base, 0.40 * phase_blend)
+    } else {
+        base
+    };
 
     let mut glyphs = Vec::new();
 
     let habitat_cells = (habitat.width as usize) * (habitat.height as usize);
     let area_term = habitat_cells.saturating_sub(200) / 60;
-    let count = stage_base_count(stage) + area_term;
+    let count =
+        ((stage_base_count(stage) + area_term) as f64 * phase_count_scale(phase)).round() as usize;
 
     for _ in 0..count {
         // Reject-sample up to N times to find a free cell.
@@ -522,13 +636,19 @@ impl LegacyPanel for PetPanel {
             .filter(|r| *r != scene.pet_art)
             .collect();
         ambient_exclusions.extend_from_slice(&silhouette_halo);
-        let glyphs = ambient_glyphs_for(
+        let phase_blend = {
+            let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
+            (since / (crate::tui::day::PHASE_BLEND_MINUTES as f32 * 60.0)).clamp(0.0, 1.0)
+        };
+        let glyphs = ambient_glyphs_for_phase(
             species,
             stage,
             scene.habitat,
             &ambient_exclusions,
             now,
             ctx.color_capability,
+            vm.day_context.day_phase,
+            phase_blend,
         );
         for g in glyphs {
             if ambient_glyph_is_inside_area(&g, scene.habitat) {
@@ -1927,5 +2047,96 @@ mod tests {
         let _ = pet_inner_rect_in_panel(Rect::new(0, 0, 40, 3), &vm);
         // Offset rect that previously made max < min on the y axis.
         let _ = pet_inner_rect_in_panel(Rect::new(0, 5, 40, 3), &vm);
+    }
+
+    #[test]
+    fn night_sky_uses_the_night_family_and_a_smaller_budget() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let day = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            habitat,
+            &[],
+            now,
+            crate::tui::style::ColorCapability::Truecolor,
+            DayPhase::Day,
+            1.0,
+        );
+        let night = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            habitat,
+            &[],
+            now,
+            crate::tui::style::ColorCapability::Truecolor,
+            DayPhase::Night,
+            1.0,
+        );
+        // Night never adds: sky glyph count (excluding the floor row) must be
+        // <= day's. Floor-row glyphs share a row coordinate — partition on it.
+        let floor_row = habitat.y + habitat.height - 1;
+        let day_sky = day.iter().filter(|g| g.row != floor_row).count();
+        let night_sky = night.iter().filter(|g| g.row != floor_row).count();
+        assert!(night_sky <= day_sky, "night {night_sky} > day {day_sky}");
+        assert!(night_sky > 0, "the starfield exists");
+        // And the night family differs from the day family for this species.
+        let night_chars: std::collections::HashSet<char> = night
+            .iter()
+            .filter(|g| g.row != floor_row)
+            .map(|g| g.glyph)
+            .collect();
+        assert!(
+            night_chars
+                .iter()
+                .any(|c| !sky_palette_for(Species::Crystal).contains(c))
+                || night.iter().filter(|g| g.row != floor_row).count() < day_sky,
+            "night must read differently than day"
+        );
+    }
+
+    #[test]
+    fn flat_tier_still_renders_zero_ambient_glyphs_at_night() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let glyphs = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            habitat,
+            &[],
+            now,
+            crate::tui::style::ColorCapability::Flat,
+            DayPhase::Night,
+            1.0,
+        );
+        assert!(
+            glyphs.is_empty(),
+            "Flat keeps the existing zero-ambient contract"
+        );
+    }
+
+    #[test]
+    fn phase_blend_interpolates_the_sky_color() {
+        let p = crate::tui::style::tokenpet_palette();
+        let base = p.dim.rgb;
+        for phase in [
+            DayPhase::Dawn,
+            DayPhase::Day,
+            DayPhase::Dusk,
+            DayPhase::Night,
+        ] {
+            let c0 = sky_color_for_phase(phase, 0.0);
+            let c1 = sky_color_for_phase(phase, 1.0);
+            let mid = sky_color_for_phase(phase, 0.5);
+            assert_eq!(c0, base, "boundary starts from neutral base for {phase:?}");
+            if phase == DayPhase::Day {
+                assert_eq!(c1, base, "Day stays at the neutral base");
+                assert_eq!(mid, base, "Day midpoint is also base");
+            } else {
+                assert_ne!(c1, c0, "settled color differs from base for {phase:?}");
+                assert_ne!(mid, c0, "midpoint is not base for {phase:?}");
+                assert_ne!(mid, c1, "midpoint is not settled for {phase:?}");
+            }
+        }
     }
 }
