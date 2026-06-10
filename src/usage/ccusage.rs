@@ -128,6 +128,23 @@ impl CcusageCommandProvider {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
+        // ccusage >= 20 turned the bare `daily` command into an all-agents
+        // aggregator (gpt/gemini/codex rows included) and renamed `date` to
+        // `period`. The `claude daily` subcommand keeps the claude-only
+        // legacy shape; older helpers don't know the subcommand, so gate on
+        // the probed version. Non-claude surfaces are untouched.
+        let scoped_args: Vec<&str>;
+        let daily_args: &[&str] = if provider_surface == CLAUDE_SURFACE
+            && ccusage_major_version(&version).is_some_and(|major| major >= 20)
+        {
+            scoped_args = std::iter::once("claude")
+                .chain(daily_args.iter().copied())
+                .collect();
+            &scoped_args
+        } else {
+            daily_args
+        };
+
         let output = match self.run_command(provider_surface, &helper_command, daily_args) {
             Ok(output) => output,
             Err(GlorpError::Io(err)) if err.kind() == io::ErrorKind::TimedOut => {
@@ -639,6 +656,19 @@ fn find_on_path(command: &str) -> Option<PathBuf> {
     which::which(command).ok()
 }
 
+/// Major version from a `--version` line like "ccusage 20.0.6" (tolerates a
+/// leading binary name and a `v` prefix). None when unparseable, which keeps
+/// unknown helpers on the legacy invocation.
+fn ccusage_major_version(version_line: &str) -> Option<u32> {
+    let token = version_line.split_whitespace().last()?;
+    token
+        .trim_start_matches('v')
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn safe_version_line(bytes: &[u8]) -> Option<String> {
     let line = String::from_utf8_lossy(bytes)
         .lines()
@@ -794,6 +824,25 @@ fn parse_short_month_date(s: &str) -> Option<Date> {
         _ => return None,
     };
     Date::from_calendar_date(year, month, day).ok()
+}
+
+#[cfg(test)]
+mod ccusage_major_version_tests {
+    use super::*;
+
+    #[test]
+    fn parses_name_prefixed_and_bare_and_v_prefixed_versions() {
+        assert_eq!(ccusage_major_version("ccusage 20.0.6"), Some(20));
+        assert_eq!(ccusage_major_version("18.0.11"), Some(18));
+        assert_eq!(ccusage_major_version("v21.1.0"), Some(21));
+    }
+
+    #[test]
+    fn unparseable_versions_stay_on_the_legacy_invocation() {
+        assert_eq!(ccusage_major_version("unknown"), None);
+        assert_eq!(ccusage_major_version(""), None);
+        assert_eq!(ccusage_major_version("ccusage beta"), None);
+    }
 }
 
 #[cfg(test)]

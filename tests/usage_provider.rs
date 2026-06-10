@@ -429,3 +429,34 @@ fn snapshot_for_calibration_returns_daily_usage_without_inserting_events() {
     let after_calibration_poll = provider.poll(&mut store).unwrap();
     assert_eq!(after_calibration_poll.total_effective_tokens, 0.0);
 }
+
+#[test]
+fn ccusage_v20_uses_the_claude_scoped_subcommand() {
+    // ccusage >= 20 turned bare `daily` into an all-agents aggregator
+    // (gpt/gemini usage included, `date` renamed to `period`); the provider
+    // must invoke `claude daily` there, or months of non-claude usage appear
+    // as new cursor keys and feed the pet (observed live 2026-06-10).
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = provider(
+        Some("ccusage-v20-multiagent.mjs"),
+        Some("ccusage-codex-ok.mjs"),
+    );
+    let result = provider.poll(&mut store).unwrap();
+    let claude: Vec<_> = result
+        .deltas
+        .iter()
+        .filter(|d| d.provider_surface == "claude-code")
+        .collect();
+    assert!(!claude.is_empty(), "scoped subcommand must yield deltas");
+    assert!(
+        claude
+            .iter()
+            .all(|d| d.model.as_deref() == Some("claude-fable-5")),
+        "non-claude agent rows must never reach the ledger: {claude:?}"
+    );
+    let total: f64 = claude.iter().map(|d| d.effective_tokens).sum();
+    // 100 + 200 + 0 + 0.03 * 1000 = 330 from the claude-scoped payload; the
+    // all-agents payload would be ~2M.
+    assert!((total - 330.0).abs() < 1.0, "got {total}");
+}
