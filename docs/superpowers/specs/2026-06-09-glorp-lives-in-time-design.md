@@ -318,20 +318,37 @@ exists. The combined branch also absorbs two items born from the
 and its first successful poll fed the pet a 212M-effective-token bolus of
 non-claude history):
 
-- **Usage discontinuity guard.** Before staging, if a single poll's summed
-  delta exceeds `DISCONTINUITY_GUARD_RATIO` (default 3.0) ×
-  `CalibrationBaseline.daily_effective_tokens` × `max(1,
-  whole_days_since_last_successful_poll + 1)`, the poll is a discontinuity:
-  **advance the provider cursors without staging any ledger rows** (the
-  calibration-path precedent — totals are marked seen, the pet does not
-  eat) and persist a `usage_discontinuity` diagnostic carrying the
-  magnitude. The elapsed-days factor keeps honest vacation catch-ups
-  feeding (a real week away passes at ~8× headroom) while a same-cadence
-  poll claiming 10× a typical day is refused. This changes feeding
-  semantics by design: a delta that implausible is a helper or cursor
-  discontinuity, not work, and refusing it is the honest reading. Checked
-  against the live incident: elapsed ~10s → threshold ≈ 59M ≪ the observed
-  212M → the guard would have fired.
+- **Usage discontinuity guard** (revised after a focused red-team pass).
+  Inside `stage_usage_poll_deltas` — the only true chokepoint; `glorp
+  status` carries its own inline copy of the poll pipeline and any
+  caller-side guard would leave it unguarded — deltas are summed **per
+  provider surface** and compared against `max(DISCONTINUITY_GUARD_RATIO
+  (5.0, config-overridable) × baseline × days_factor,
+  DISCONTINUITY_GUARD_FLOOR_TOKENS (50M))`. `days_factor` = whole days
+  since that provider's newest `provider_cursors.updated_at` + 1 —
+  **per-provider**, because the shared `last_usage_poll_at` advances every
+  poll while any other provider feeds, which would pin an honest
+  multi-day catch-up at factor 1 after a single-helper outage. A provider
+  over threshold is refused **alone** (its concurrent healthy sibling
+  stages normally — the live incident had codex feeding honestly beside
+  the claude bolus): its cursors advance without staging rows and a
+  `usage_discontinuity` diagnostic persists, both in **one transaction**
+  (a crash between separate writes would discard tokens with no record).
+  A provider with no cursors at all is first contact and is refused the
+  same way (the calibration never-feed-history rule, closing the hole
+  where a helper absent at init feeds its entire history on first
+  appearance). Surfacing: the refusal lands in the persisted narrative
+  feed ("{name} declined an implausible feast") and stamps
+  `last_idle_narration_at` so the same pass can't also narrate boredom;
+  the `usage_discontinuity` diagnostic code is exempt from
+  source-health's broken classification and the ready-today filter (the
+  source is healthy — one poll was refused). Refused tokens are never
+  retro-fed; the config ratio is the escape hatch going forward. Floor +
+  loosened ratio rationale: a same-day honest heavy catch-up (3–10× a
+  median day) must pass while the observed 212M bolus still fires at ~2×
+  margin; preview/test fixtures stage well under the floor. Checked
+  against the live incident: threshold ≈ max(5 × 19.77M × 1, 50M) ≈ 99M ≪
+  212M → fires.
 - **Local feed timestamps.** Feed/event `hh:mm` labels currently render
   the UTC clock (last night's 23:00 PDT feeds displayed as "06:00").
   Display-only fix: format via the mapper's local offset. No stored data
