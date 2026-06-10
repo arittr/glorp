@@ -395,6 +395,7 @@ fn drain_poll_results() {
         Some(pair) => pair,
         None => return,
     };
+    vm.life_profile.calm_mode = vm.day_context.asleep;
     let pet_len = write_full_text(&text_view, &vm);
     let mtm = MainThreadMarker::new().expect("ui_tick on non-main thread");
     if let Some(button) = unsafe { status_item.button(mtm) } {

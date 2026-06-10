@@ -457,6 +457,11 @@ impl WatchApp {
         &self.vm
     }
 
+    #[cfg(test)]
+    pub fn current_vm_for_test_mut(&mut self) -> &mut WatchViewModel {
+        &mut self.vm
+    }
+
     pub fn in_flight_for_test(&self) -> bool {
         self.in_flight
     }
@@ -496,6 +501,11 @@ impl WatchApp {
         let now = time::OffsetDateTime::now_utc();
         let profile = self.life_signal_state.observe(result.applied_signal, now);
         result.vm.life_profile = profile;
+        // Night calm: full quiet only while the pet actually sleeps (spec:
+        // calm_mode = night && asleep; asleep already implies Night). Must be
+        // set after observe (which hardcodes calm_mode: false) and before any
+        // profile consumer in this install path.
+        result.vm.life_profile.calm_mode = result.vm.day_context.asleep;
         result.vm.last_feed_pulse_at = if result.vm.life_profile.burst_level > 0.0
             && !matches!(
                 self.config.color_capability,
@@ -729,6 +739,7 @@ mod tests {
     };
     use crossterm::event::KeyModifiers;
     use ratatui::layout::Rect;
+    use time::macros::datetime;
 
     struct SignalPoller {
         signal: crate::tui::life::AppliedUsageSignal,
@@ -886,6 +897,39 @@ mod tests {
         app.handle_mouse(mouse_event(MouseEventKind::Moved, 10, 5), &layout);
 
         assert_eq!(app.view_model_for_test().cursor_screen, None);
+    }
+
+    fn test_app_with_signal(signal: crate::tui::life::AppliedUsageSignal) -> WatchApp {
+        WatchApp::with_poll_callback(
+            WatchViewModel::fixture(),
+            WatchAppConfig::default(),
+            Box::new(SignalPoller { signal }),
+        )
+    }
+
+    #[test]
+    fn asleep_day_context_sets_calm_mode_and_it_survives_the_poll_install() {
+        // Build a WatchApp via the SignalPoller test harness with a vm whose
+        // day_context.asleep is true in the poll result.
+        let mut app = test_app_with_signal(crate::tui::life::AppliedUsageSignal::quiet(
+            datetime!(2026-06-09 23:30 UTC),
+            time::Duration::seconds(10),
+        ));
+        // SignalPoller returns current.clone(), so mutating the fixture VM carries into the poll result.
+        app.current_vm_for_test_mut().day_context.asleep = true;
+        app.refresh_for_test().unwrap();
+        // First-poll establishment: the very first install must already be calm.
+        assert!(
+            app.view_model_for_test().life_profile.calm_mode,
+            "asleep must engage calm_mode on the installed profile"
+        );
+
+        app.current_vm_for_test_mut().day_context.asleep = false;
+        app.refresh_for_test().unwrap();
+        assert!(
+            !app.view_model_for_test().life_profile.calm_mode,
+            "asleep=false must disengage calm_mode"
+        );
     }
 
     fn test_layout_with_pet_hit_area() -> ComponentLayout {
