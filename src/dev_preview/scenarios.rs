@@ -206,6 +206,15 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Use the cells and layout artifacts as Task 7 proof fixtures.".to_string(),
             ],
         ),
+        id if id.starts_with("watch-daycontext-") => (
+            PreviewScenarioKind::Watch,
+            "Review deterministic day-phase and rhythm inputs before the watch scene renders them.",
+            day_context_inputs_for_frame(id, frame, ctx),
+            vec![
+                "Confirm the frame has a truthful day_context input contract.".to_string(),
+                "Use the cells artifact as Task 14 proof fixtures.".to_string(),
+            ],
+        ),
         "pet-species-stage" => (
             PreviewScenarioKind::PetMatrix,
             "Review every Slice 1 pet species across all seven growth stages.",
@@ -530,6 +539,174 @@ fn life_profile_inputs_for_frame(
     ])
 }
 
+fn day_context_inputs_for_frame(
+    id: &str,
+    frame: &PreviewFrame,
+    ctx: &PreviewRenderContext,
+) -> BTreeMap<String, Value> {
+    let fixed_now = ctx.fixed_now;
+    let (
+        day_phase,
+        phase_started_at_utc,
+        phase_ends_at_utc,
+        asleep,
+        sleep_onset_utc,
+        wake_resume,
+        blend,
+        life_profile,
+    ) = match id {
+        "watch-daycontext-night-asleep" => (
+            "night",
+            fixed_now - time::Duration::hours(2),
+            fixed_now + time::Duration::hours(6),
+            true,
+            Some(fixed_now - time::Duration::minutes(25)),
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": true,
+                "freshness": "live"
+            }),
+        ),
+        "watch-daycontext-dawn-crossing" => (
+            "dawn",
+            fixed_now - time::Duration::minutes(10),
+            fixed_now + time::Duration::minutes(20),
+            false,
+            None,
+            None,
+            0.33,
+            json!({
+                "activity_level": 0.68,
+                "burst_level": 0.24,
+                "source_accent": Some("balanced"),
+                "weather": "mixed",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "codex_signal_lamp",
+                    "intensity": 0.35,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+        ),
+        "watch-daycontext-night-wake-catchup" => (
+            "night",
+            fixed_now - time::Duration::hours(2),
+            fixed_now + time::Duration::hours(6),
+            false,
+            None,
+            Some((
+                fixed_now - time::Duration::hours(3),
+                fixed_now - time::Duration::minutes(2),
+            )),
+            1.0,
+            json!({
+                "activity_level": 0.38,
+                "burst_level": 0.0,
+                "source_accent": Some("claude"),
+                "weather": "cache-mist",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "token_shell_100k",
+                    "intensity": 0.28,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "backfill"
+            }),
+        ),
+        "watch-daycontext-hatch-at-night" => (
+            "night",
+            fixed_now - time::Duration::hours(2),
+            fixed_now + time::Duration::hours(6),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s0",
+                "species": "fuzz",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "cold-start"
+            }),
+        ),
+        _ => (
+            "day",
+            fixed_now,
+            fixed_now,
+            false,
+            None,
+            None,
+            0.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": color_capability_name(ctx.render.color_capability),
+                "calm_mode": false,
+                "freshness": "unknown"
+            }),
+        ),
+    };
+
+    let wake_resume_json = wake_resume.map(|(from_eval, woke_at)| {
+        json!({
+            "from_eval_utc": format_rfc3339_lossy(from_eval),
+            "woke_at_utc": format_rfc3339_lossy(woke_at)
+        })
+    });
+
+    BTreeMap::from([
+        (
+            "fixed_now".to_string(),
+            Value::String(format_rfc3339_lossy(fixed_now)),
+        ),
+        ("tick".to_string(), json!(fixed_now.unix_timestamp())),
+        ("terminal_width".to_string(), json!(frame.width)),
+        ("terminal_height".to_string(), json!(frame.height)),
+        (
+            "day_context".to_string(),
+            json!({
+                "day_phase": day_phase,
+                "phase_started_at_utc": format_rfc3339_lossy(phase_started_at_utc),
+                "phase_ends_at_utc": format_rfc3339_lossy(phase_ends_at_utc),
+                "asleep": asleep,
+                "sleep_onset_utc": sleep_onset_utc.map(format_rfc3339_lossy),
+                "wake_resume": wake_resume_json,
+                // `blend` is a computed value derived from `phase_started_at_utc`
+                // and `PHASE_BLEND_MINUTES`; it is included in the manifest for
+                // reviewer convenience.
+                "blend": blend
+            }),
+        ),
+        ("life_profile".to_string(), life_profile),
+    ])
+}
+
 fn text_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.txt", frame.id))
 }
@@ -631,6 +808,10 @@ mod tests {
                 "watch-liveliness-compact-s6-hot",
                 "watch-liveliness-flat-s6-hot",
                 "watch-liveliness-calm-mode-s6-hot",
+                "watch-daycontext-night-asleep",
+                "watch-daycontext-dawn-crossing",
+                "watch-daycontext-night-wake-catchup",
+                "watch-daycontext-hatch-at-night",
                 "habitat-props-catalog",
                 "watch-habitat-early",
                 "watch-habitat-lived-in",

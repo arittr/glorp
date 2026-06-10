@@ -16,6 +16,13 @@ const LIVELINESS_WATCH_IDS: [&str; 7] = [
     "watch-liveliness-calm-mode-s6-hot",
 ];
 
+const DAY_CONTEXT_WATCH_IDS: [&str; 4] = [
+    "watch-daycontext-night-asleep",
+    "watch-daycontext-dawn-crossing",
+    "watch-daycontext-night-wake-catchup",
+    "watch-daycontext-hatch-at-night",
+];
+
 struct PreviewRun {
     _dir: TempDir,
     out: PathBuf,
@@ -119,6 +126,20 @@ fn dev_preview_watch_writes_expected_artifacts() {
         .join("frames/watch-compact-normal.layout.json")
         .is_file());
     for id in LIVELINESS_WATCH_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id} text artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.cells.json")).is_file(),
+            "missing {id} cells artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.layout.json")).is_file(),
+            "missing {id} layout artifact"
+        );
+    }
+    for id in DAY_CONTEXT_WATCH_IDS {
         assert!(
             run.out.join(format!("frames/{id}.txt")).is_file(),
             "missing {id} text artifact"
@@ -252,6 +273,37 @@ fn dev_preview_watch_includes_liveliness_profile_inputs() {
         assert!(
             life_profile["freshness"].is_string(),
             "{id} freshness should be a string"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_watch_includes_day_context_inputs() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    for id in DAY_CONTEXT_WATCH_IDS {
+        let watch_scenario = scenario(&manifest, id);
+        let day_context = &watch_scenario["inputs"]["day_context"];
+
+        assert!(
+            day_context.is_object(),
+            "{id} day_context should be an object"
+        );
+        assert!(
+            day_context["day_phase"].is_string(),
+            "{id} day_phase should be a string"
+        );
+        assert!(
+            day_context["asleep"].is_boolean(),
+            "{id} asleep should be a boolean"
+        );
+        let sleep_onset = &day_context["sleep_onset_utc"];
+        assert!(
+            sleep_onset.is_string() || sleep_onset.is_null(),
+            "{id} sleep_onset_utc should be a string or null"
         );
     }
 }
@@ -526,6 +578,10 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-liveliness-compact-s6-hot.txt",
         "frames/watch-liveliness-flat-s6-hot.txt",
         "frames/watch-liveliness-calm-mode-s6-hot.txt",
+        "frames/watch-daycontext-night-asleep.txt",
+        "frames/watch-daycontext-dawn-crossing.txt",
+        "frames/watch-daycontext-night-wake-catchup.txt",
+        "frames/watch-daycontext-hatch-at-night.txt",
         "frames/habitat-props-catalog.txt",
         "frames/watch-habitat-early.txt",
         "frames/watch-habitat-lived-in.txt",
@@ -551,6 +607,10 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-liveliness-compact-s6-hot".to_string(),
             "watch-liveliness-flat-s6-hot".to_string(),
             "watch-liveliness-calm-mode-s6-hot".to_string(),
+            "watch-daycontext-night-asleep".to_string(),
+            "watch-daycontext-dawn-crossing".to_string(),
+            "watch-daycontext-night-wake-catchup".to_string(),
+            "watch-daycontext-hatch-at-night".to_string(),
             "habitat-props-catalog".to_string(),
             "watch-habitat-early".to_string(),
             "watch-habitat-lived-in".to_string(),
@@ -659,6 +719,17 @@ fn dev_preview_watch_wide_normal_frame_snapshot() {
     let frame = std::fs::read_to_string(run.out.join("frames/watch-wide-normal.txt")).unwrap();
 
     insta::assert_snapshot!("watch_wide_normal_frame", frame);
+}
+
+#[test]
+fn dev_preview_watch_daycontext_night_asleep_frame_snapshot() {
+    let run = PreviewRun::new();
+    run.run_success("watch");
+
+    let frame =
+        std::fs::read_to_string(run.out.join("frames/watch-daycontext-night-asleep.txt")).unwrap();
+
+    insta::assert_snapshot!("watch_daycontext_night_asleep_frame", frame);
 }
 
 fn assert_scenario(

@@ -1,4 +1,4 @@
-use crate::commands::watch::build_watch_view_model_at;
+use crate::commands::watch::{build_watch_view_model_at, rerender_pet_for_view_model};
 use crate::dev_preview::frame::{frame_from_buffer, PreviewFrame};
 use crate::dev_preview::scenarios::PreviewRenderContext;
 use crate::error::Result;
@@ -10,6 +10,7 @@ use crate::storage::{
     },
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
+use crate::tui::day::{DayContext, DayPhase, WakeResume};
 use crate::tui::layout::render_watch_frame_with_layout;
 use crate::tui::life::{
     IdleLifeState, PetLifeProfile, PropReaction, PropReactionKind, SourceAccent, WorkWeather,
@@ -57,6 +58,10 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
         frames.push(render_liveliness_watch_frame(ctx, scratch_dir, fixture)?);
     }
 
+    for fixture in day_context_frame_fixtures(ctx) {
+        frames.push(render_day_context_watch_frame(ctx, scratch_dir, fixture)?);
+    }
+
     Ok(frames)
 }
 
@@ -82,6 +87,18 @@ struct LivelinessFrameFixture {
     height: u16,
     now: OffsetDateTime,
     life: WatchLifeFixture,
+}
+
+struct DayContextFrameFixture {
+    id: &'static str,
+    title: &'static str,
+    width: u16,
+    height: u16,
+    now: OffsetDateTime,
+    state: fn(&PreviewRenderContext) -> PetState,
+    life: WatchLifeFixture,
+    day_context: DayContext,
+    hold_eyes_closed: bool,
 }
 
 fn render_watch_frame(
@@ -125,6 +142,31 @@ fn render_liveliness_watch_frame(
             now: fixture.now,
         },
         Some(&fixture.life),
+        None,
+        false,
+    )
+}
+
+fn render_day_context_watch_frame(
+    ctx: &PreviewRenderContext,
+    scratch_dir: &Path,
+    fixture: DayContextFrameFixture,
+) -> Result<PreviewFrame> {
+    let state = (fixture.state)(ctx);
+    render_watch_frame_from_state_with_life(
+        ctx,
+        scratch_dir,
+        WatchFrameFixture {
+            id: fixture.id,
+            title: fixture.title,
+            width: fixture.width,
+            height: fixture.height,
+            state: &state,
+            now: fixture.now,
+        },
+        Some(&fixture.life),
+        Some(fixture.day_context),
+        fixture.hold_eyes_closed,
     )
 }
 
@@ -133,7 +175,7 @@ pub(crate) fn render_watch_frame_from_state(
     scratch_dir: &Path,
     fixture: WatchFrameFixture<'_>,
 ) -> Result<PreviewFrame> {
-    render_watch_frame_from_state_with_life(ctx, scratch_dir, fixture, None)
+    render_watch_frame_from_state_with_life(ctx, scratch_dir, fixture, None, None, false)
 }
 
 fn render_watch_frame_from_state_with_life(
@@ -141,6 +183,8 @@ fn render_watch_frame_from_state_with_life(
     scratch_dir: &Path,
     fixture: WatchFrameFixture<'_>,
     life: Option<&WatchLifeFixture>,
+    day_context: Option<DayContext>,
+    hold_eyes_closed: bool,
 ) -> Result<PreviewFrame> {
     let WatchFrameFixture {
         id,
@@ -162,6 +206,13 @@ fn render_watch_frame_from_state_with_life(
     )?;
     if let Some(life) = life {
         vm.life_profile = life.profile.clone();
+    }
+    if let Some(day) = day_context {
+        vm.day_context = day;
+        vm.life_profile.calm_mode = day.asleep;
+    }
+    if hold_eyes_closed {
+        rerender_pet_for_view_model(&mut vm, now.unix_timestamp().max(0) as u64, true)?;
     }
     let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &render);
 
@@ -257,6 +308,68 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
                 profile: hot_life_profile(true),
                 color_capability: ColorCapability::Truecolor,
             },
+        },
+    ]
+}
+
+fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrameFixture> {
+    let fixed_now = ctx.fixed_now;
+    vec![
+        DayContextFrameFixture {
+            id: "watch-daycontext-night-asleep",
+            title: "Watch DayContext Night Asleep",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: calm_idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: night_asleep_day_context(fixed_now),
+            hold_eyes_closed: true,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-dawn-crossing",
+            title: "Watch DayContext Dawn Crossing",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: warm_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: dawn_crossing_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-night-wake-catchup",
+            title: "Watch DayContext Night Wake Catchup",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: cooling_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: night_wake_catchup_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-hatch-at-night",
+            title: "Watch DayContext Hatch At Night",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: newborn_pet_state,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: night_newborn_day_context(fixed_now),
+            hold_eyes_closed: false,
         },
     ]
 }
@@ -441,6 +554,85 @@ fn cooling_life_profile() -> PetLifeProfile {
     }
 }
 
+fn calm_idle_life_profile() -> PetLifeProfile {
+    PetLifeProfile {
+        activity_level: 0.0,
+        burst_level: 0.0,
+        source_accent: None,
+        work_weather: WorkWeather::Clear,
+        prop_reactions: Vec::new(),
+        idle: IdleLifeState {
+            idle_minutes: 45,
+            is_recently_active: false,
+        },
+        calm_mode: true,
+    }
+}
+
+fn newborn_pet_state(ctx: &PreviewRenderContext) -> PetState {
+    let mut state = PetState::new_for_test("glorp-preview-watch", "Mochi");
+    state.pet.generated_species = Species::Fuzz;
+    state.stage = Stage::S0;
+    state.xp = 0.0;
+    state.lifetime_effective_tokens = 0.0;
+    state.vitals = Vitals {
+        fed: 80.0,
+        happiness: 80.0,
+        energy: 80.0,
+    };
+    state.created_at = ctx.fixed_now;
+    state.last_updated_at = ctx.fixed_now;
+    state.last_usage_poll_at = None;
+    state.recent_events = Vec::new();
+    state.habitat.earned_props = Vec::new();
+    state
+}
+
+fn night_asleep_day_context(fixed_now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Night,
+        phase_started_at_utc: fixed_now - Duration::hours(2),
+        phase_ends_at_utc: fixed_now + Duration::hours(6),
+        asleep: true,
+        sleep_onset_utc: Some(fixed_now - Duration::minutes(25)),
+        ..DayContext::default()
+    }
+}
+
+fn dawn_crossing_day_context(fixed_now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Dawn,
+        phase_started_at_utc: fixed_now - Duration::minutes(10),
+        phase_ends_at_utc: fixed_now + Duration::minutes(20),
+        asleep: false,
+        ..DayContext::default()
+    }
+}
+
+fn night_wake_catchup_day_context(fixed_now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Night,
+        phase_started_at_utc: fixed_now - Duration::hours(2),
+        phase_ends_at_utc: fixed_now + Duration::hours(6),
+        asleep: false,
+        wake_resume: Some(WakeResume {
+            from_eval_utc: fixed_now - Duration::hours(3),
+            woke_at_utc: fixed_now - Duration::minutes(2),
+        }),
+        ..DayContext::default()
+    }
+}
+
+fn night_newborn_day_context(fixed_now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Night,
+        phase_started_at_utc: fixed_now - Duration::hours(2),
+        phase_ends_at_utc: fixed_now + Duration::hours(6),
+        asleep: false,
+        ..DayContext::default()
+    }
+}
+
 fn seed_usage_store(path: &Path, now: OffsetDateTime) -> Result<()> {
     let mut usage = UsageStore::open(path)?;
     for (surface, observed_at, effective_tokens, model) in [
@@ -479,7 +671,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 10);
+        assert_eq!(frames.len(), 14);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -495,6 +687,14 @@ mod tests {
         assert_eq!((frames[7].width, frames[7].height), (72, 24));
         assert_eq!(frames[8].id, "watch-liveliness-flat-s6-hot");
         assert_eq!(frames[9].id, "watch-liveliness-calm-mode-s6-hot");
+        assert_eq!(frames[10].id, "watch-daycontext-night-asleep");
+        assert_eq!((frames[10].width, frames[10].height), (120, 32));
+        assert_eq!(frames[11].id, "watch-daycontext-dawn-crossing");
+        assert_eq!((frames[11].width, frames[11].height), (120, 32));
+        assert_eq!(frames[12].id, "watch-daycontext-night-wake-catchup");
+        assert_eq!((frames[12].width, frames[12].height), (120, 32));
+        assert_eq!(frames[13].id, "watch-daycontext-hatch-at-night");
+        assert_eq!((frames[13].width, frames[13].height), (120, 32));
     }
 
     #[test]

@@ -91,9 +91,9 @@ fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
     };
     if vm.day_context.asleep {
         Rgb(
-            (f32::from(colored.0) * SLEEP_DIM) as u8,
-            (f32::from(colored.1) * SLEEP_DIM) as u8,
-            (f32::from(colored.2) * SLEEP_DIM) as u8,
+            (f32::from(colored.0) * SLEEP_DIM).round() as u8,
+            (f32::from(colored.1) * SLEEP_DIM).round() as u8,
+            (f32::from(colored.2) * SLEEP_DIM).round() as u8,
         )
     } else {
         colored
