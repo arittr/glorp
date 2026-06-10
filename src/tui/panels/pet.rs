@@ -17,7 +17,7 @@ use crate::pet::animator::{
 use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
-use crate::tui::day::DayPhase;
+use crate::tui::day::{DayPhase, Season};
 use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, WorkWeather};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
@@ -225,19 +225,41 @@ fn dim_shift(base: Color, amount: f32) -> Color {
     )
 }
 
-/// Per-phase sky glyph family. Re-skins the same allocation — night gets a
-/// sparse starfield, dawn/dusk warm grain, day keeps the species default.
-fn sky_palette_for_phase(species: Species, phase: DayPhase) -> &'static [char] {
+/// Per-phase sky glyph family, with `date_seed` picking among authored
+/// variants per (species, phase) — the day's character is visual texture
+/// only, never personality content (locked rule). Night stays a sparse
+/// starfield, dawn/dusk warm grain, day a species family.
+fn sky_palette_for_phase(species: Species, phase: DayPhase, date_seed: u64) -> &'static [char] {
+    let variant = (date_seed % 2) as usize;
     match phase {
-        DayPhase::Day => sky_palette_for(species),
-        DayPhase::Dawn | DayPhase::Dusk => match species {
-            Species::Glitch => &['░', '▪', '·', ' '],
-            _ => &['·', '\'', '~', ' '],
-        },
-        DayPhase::Night => match species {
-            Species::Glitch => &['▪', '·', ' ', ' '],
-            _ => &['✦', '·', '*', ' '],
-        },
+        DayPhase::Day => {
+            if variant == 0 {
+                sky_palette_for(species)
+            } else {
+                match species {
+                    Species::Fuzz => &['*', '·', '`', '.'],
+                    Species::Blob => &['o', '·', '°', '.'],
+                    Species::Ghost => &['\'', '~', '·', ','],
+                    Species::Glitch => &['░', '▒', '▪', '·'],
+                    Species::Crystal => &['✧', '·', '✦', '◇'],
+                    Species::Mech => &['°', '·', '─', '○'],
+                }
+            }
+        }
+        DayPhase::Dawn | DayPhase::Dusk => {
+            let variants: [&'static [char]; 2] = match species {
+                Species::Glitch => [&['░', '▪', '·', ' '], &['·', '░', '▪', ' ']],
+                _ => [&['·', '\'', '~', ' '], &['\'', ',', '·', ' ']],
+            };
+            variants[variant]
+        }
+        DayPhase::Night => {
+            let variants: [&'static [char]; 2] = match species {
+                Species::Glitch => [&['▪', '·', ' ', ' '], &['·', '▪', '.', ' ']],
+                _ => [&['✦', '·', '*', ' '], &['*', '·', '✧', ' ']],
+            };
+            variants[variant]
+        }
     }
 }
 
@@ -251,11 +273,53 @@ fn phase_count_scale(phase: DayPhase) -> f64 {
     }
 }
 
+/// Bounded seasonal hue drift on the sky color. Summer is the neutral
+/// reference; the other seasons nudge channels by at most
+/// SEASON_DRIFT_MAX_CHANNEL_NUDGE. Drift only — the season is never named in
+/// any UI text, speech, or dream (spec: Seasons).
+#[allow(dead_code)]
+const SEASON_DRIFT_MAX_CHANNEL_NUDGE: u8 = 8;
+
+fn season_hue_drift(color: Color, season: Season) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    match season {
+        Season::Summer => color,
+        Season::Spring => Color::Rgb(r, g.saturating_add(6), b),
+        Season::Autumn => Color::Rgb(r.saturating_add(7), g, b.saturating_sub(5)),
+        Season::Winter => Color::Rgb(r.saturating_sub(4), g, b.saturating_add(7)),
+    }
+}
+
+/// Ambient tint bias from the 7-day climate class. None and Clear both
+/// render nothing (spec: Climate rendering); the class -> color mapping
+/// matches the live weather channel's activity_glyph_color so the two
+/// channels never disagree about what a class looks like.
+const CLIMATE_TINT_WEIGHT: f32 = 0.12;
+
+fn climate_tint(color: Color, climate: Option<WorkWeather>) -> Color {
+    let p = crate::tui::style::tokenpet_palette();
+    let target = match climate {
+        None | Some(WorkWeather::Clear) => return color,
+        Some(WorkWeather::CacheMist) => p.good.rgb,
+        Some(WorkWeather::OutputSparks) => p.accent.rgb,
+        Some(WorkWeather::ReasoningPulse) => p.bad.rgb,
+        Some(WorkWeather::Mixed) => p.good.rgb,
+    };
+    lerp_color(color, target, CLIMATE_TINT_WEIGHT)
+}
+
 /// Sky color for `phase`, interpolated from the neutral dim base toward the
 /// phase's target warmth/dim over `blend` (0.0 at the boundary, 1.0 after
-/// PHASE_BLEND_MINUTES). This softens the entry into a phase; it does not
-/// cross-fade between two phase targets.
-fn sky_color_for_phase(phase: DayPhase, blend: f32) -> Color {
+/// PHASE_BLEND_MINUTES), then drifted by season and biased by climate.
+/// Summer + None/Clear is the neutral identity.
+fn sky_color_for_phase(
+    phase: DayPhase,
+    blend: f32,
+    season: Season,
+    climate: Option<WorkWeather>,
+) -> Color {
     let p = crate::tui::style::tokenpet_palette();
     let base = p.dim.rgb;
     let target = match phase {
@@ -264,7 +328,10 @@ fn sky_color_for_phase(phase: DayPhase, blend: f32) -> Color {
         DayPhase::Dusk => warm_shift(base, 0.40),
         DayPhase::Night => dim_shift(base, 0.40),
     };
-    lerp_color(base, target, blend)
+    climate_tint(
+        season_hue_drift(lerp_color(base, target, blend), season),
+        climate,
+    )
 }
 
 fn profile_token_pop(
@@ -370,6 +437,9 @@ pub fn ambient_glyphs_for(
         color_capability,
         DayPhase::Day,
         1.0,
+        0,
+        Season::Summer,
+        None,
     )
 }
 
@@ -388,6 +458,9 @@ pub fn ambient_glyphs_for_phase(
     color_capability: ColorCapability,
     phase: DayPhase,
     phase_blend: f32,
+    date_seed: u64,
+    season: Season,
+    climate: Option<WorkWeather>,
 ) -> Vec<AmbientGlyph> {
     if matches!(color_capability, ColorCapability::Flat) {
         return Vec::new();
@@ -409,12 +482,12 @@ pub fn ambient_glyphs_for_phase(
         .wrapping_add(minute_floor.wrapping_mul(0x94D0_49BB_1331_11EB));
     let mut rng = Pcg32::seed_from_u64(seed);
 
-    let sky = sky_palette_for_phase(species, phase);
+    let sky = sky_palette_for_phase(species, phase, date_seed);
     let floor = floor_palette_for(species);
 
     let p = crate::tui::style::tokenpet_palette();
     let base = p.dim.rgb;
-    let sky_color = sky_color_for_phase(phase, phase_blend);
+    let sky_color = sky_color_for_phase(phase, phase_blend, season, climate);
     // Floor gradually dims into Night; Dawn/Dusk keep the neutral base so the
     // pet remains readable against warm grain.
     let floor_color = if phase == DayPhase::Night {
@@ -737,6 +810,9 @@ impl LegacyPanel for PetPanel {
             ctx.color_capability,
             vm.day_context.day_phase,
             phase_blend,
+            vm.day_context.date_seed,
+            vm.day_context.season,
+            vm.day_context.climate,
         );
         for g in glyphs {
             if ambient_glyph_is_inside_area(&g, scene.habitat) {
@@ -2167,6 +2243,9 @@ mod tests {
             ColorCapability::Truecolor,
             DayPhase::Day,
             1.0,
+            0,
+            Season::Summer,
+            None,
         );
         let night = ambient_glyphs_for_phase(
             Species::Crystal,
@@ -2177,6 +2256,9 @@ mod tests {
             ColorCapability::Truecolor,
             DayPhase::Night,
             1.0,
+            0,
+            Season::Summer,
+            None,
         );
         // Night never adds: sky glyph count (excluding the floor row) must be
         // <= day's. Floor-row glyphs share a row coordinate — partition on it.
@@ -2213,6 +2295,9 @@ mod tests {
             ColorCapability::Flat,
             DayPhase::Night,
             1.0,
+            0,
+            Season::Summer,
+            None,
         );
         assert!(
             glyphs.is_empty(),
@@ -2230,9 +2315,9 @@ mod tests {
             DayPhase::Dusk,
             DayPhase::Night,
         ] {
-            let c0 = sky_color_for_phase(phase, 0.0);
-            let c1 = sky_color_for_phase(phase, 1.0);
-            let mid = sky_color_for_phase(phase, 0.5);
+            let c0 = sky_color_for_phase(phase, 0.0, Season::Summer, None);
+            let c1 = sky_color_for_phase(phase, 1.0, Season::Summer, None);
+            let mid = sky_color_for_phase(phase, 0.5, Season::Summer, None);
             assert_eq!(c0, base, "boundary starts from neutral base for {phase:?}");
             if phase == DayPhase::Day {
                 assert_eq!(c1, base, "Day stays at the neutral base");
@@ -2345,5 +2430,87 @@ mod tests {
             mote_glyphs_for(&immature, habitat, &[], now, ColorCapability::Truecolor).is_empty(),
             "the default 100k baseline must not render a fabricated feast"
         );
+    }
+
+    #[test]
+    fn sky_family_is_stable_for_a_seed_and_authors_two_variants_per_phase() {
+        let all_species = [
+            Species::Fuzz,
+            Species::Blob,
+            Species::Ghost,
+            Species::Glitch,
+            Species::Crystal,
+            Species::Mech,
+        ];
+        let phases = [
+            DayPhase::Dawn,
+            DayPhase::Day,
+            DayPhase::Dusk,
+            DayPhase::Night,
+        ];
+        for species in all_species {
+            for phase in phases {
+                assert_eq!(
+                    sky_palette_for_phase(species, phase, 9),
+                    sky_palette_for_phase(species, phase, 9),
+                    "{species:?}/{phase:?} family must be a pure function of the seed"
+                );
+                assert_ne!(
+                    sky_palette_for_phase(species, phase, 8),
+                    sky_palette_for_phase(species, phase, 9),
+                    "{species:?}/{phase:?} needs at least two authored variants"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn climate_clear_and_none_tint_nothing_and_a_real_climate_tints() {
+        for phase in [
+            DayPhase::Dawn,
+            DayPhase::Day,
+            DayPhase::Dusk,
+            DayPhase::Night,
+        ] {
+            assert_eq!(
+                sky_color_for_phase(phase, 1.0, Season::Summer, None),
+                sky_color_for_phase(phase, 1.0, Season::Summer, Some(WorkWeather::Clear)),
+                "Clear must render exactly like None for {phase:?}"
+            );
+        }
+        assert_ne!(
+            sky_color_for_phase(DayPhase::Day, 1.0, Season::Summer, None),
+            sky_color_for_phase(
+                DayPhase::Day,
+                1.0,
+                Season::Summer,
+                Some(WorkWeather::CacheMist)
+            ),
+            "a real climate biases the ambient tint"
+        );
+    }
+
+    #[test]
+    fn season_drift_is_bounded_and_summer_is_the_neutral_reference() {
+        let c = Color::Rgb(110, 110, 110);
+        assert_eq!(season_hue_drift(c, Season::Summer), c);
+        for season in [
+            crate::tui::day::Season::Spring,
+            crate::tui::day::Season::Autumn,
+            crate::tui::day::Season::Winter,
+        ] {
+            let drifted = season_hue_drift(c, season);
+            assert_ne!(drifted, c, "{season:?} must drift the hue");
+            let Color::Rgb(r, g, b) = drifted else {
+                panic!("rgb in, rgb out");
+            };
+            for channel in [r, g, b] {
+                assert!(
+                    (i16::from(channel) - 110).abs() <= i16::from(SEASON_DRIFT_MAX_CHANNEL_NUDGE),
+                    "{season:?} drift must stay subtle (channel {channel})"
+                );
+            }
+        }
+        assert_eq!(season_hue_drift(Color::Reset, Season::Winter), Color::Reset);
     }
 }
