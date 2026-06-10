@@ -33,6 +33,10 @@ pub const MIN_DISTINCT_ACTIVE_HOURS: usize = 3;
 pub const SLEEP_IDLE_MINUTES: i64 = 20;
 /// Phase palettes interpolate over this window after a phase boundary.
 pub const PHASE_BLEND_MINUTES: i64 = 30;
+/// Trailing window for accumulated-active-time fatigue, in hours.
+pub const FATIGUE_WINDOW_HOURS: i64 = 16;
+/// Morning-after flavor covers all of Dawn plus this many minutes of Day.
+pub const MORNING_AFTER_DAY_MINUTES: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DayPhase {
@@ -197,6 +201,13 @@ pub struct DayContext {
     pub wake_resume: Option<WakeResume>,
     /// Next local-day rollover (T2 motes tidy fade).
     pub local_day_rollover_utc: time::OffsetDateTime,
+    /// Accumulated-active-time fatigue, 0.0..=1.0. Derived from the count of
+    /// 10-minute buckets containing applied tokens in the trailing
+    /// FATIGUE_WINDOW_HOURS, scaled by the window's volume ratio vs baseline.
+    /// 0.0 while the maturity gate is closed.
+    pub tiredness: f32,
+    /// UTC instant the current local day began (motes tidy-fade anchor).
+    pub local_day_started_utc: time::OffsetDateTime,
 }
 
 impl Default for DayContext {
@@ -219,6 +230,8 @@ impl Default for DayContext {
             sleep_onset_utc: None,
             wake_resume: None,
             local_day_rollover_utc: epoch,
+            tiredness: 0.0,
+            local_day_started_utc: epoch,
         }
     }
 }
@@ -325,6 +338,21 @@ pub fn build_day_context(
         modal_climate(&counts)
     };
 
+    // --- tiredness: accumulated active time, not elapsed span ---
+    let tiredness = if mature {
+        let fatigue_start = now - Duration::hours(FATIGUE_WINDOW_HOURS);
+        let fatigue_buckets = usage_store
+            .applied_bucket_sums_between(fatigue_start, now + Duration::seconds(1))
+            .unwrap_or_default();
+        let active_buckets = fatigue_buckets.iter().filter(|&&(_, t)| t > 0.0).count();
+        let window_volume: f64 = fatigue_buckets.iter().map(|&(_, t)| t).sum();
+        let active_share = active_buckets as f32 / (FATIGUE_WINDOW_HOURS * 6) as f32;
+        let volume_ratio = ((window_volume / baseline) as f32).clamp(0.0, 1.0);
+        (active_share * volume_ratio).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
     // --- sleep predicate (spec: Sleep semantics) ---
     let latest_bucket = usage_store.latest_applied_bucket_at().unwrap_or(None);
     let has_eaten = latest_bucket.is_some();
@@ -369,6 +397,8 @@ pub fn build_day_context(
         sleep_onset_utc,
         wake_resume,
         local_day_rollover_utc: tomorrow_start,
+        tiredness,
+        local_day_started_utc: today_start,
     }
 }
 
@@ -380,6 +410,18 @@ pub fn scene_asleep_for_poll(
     mapper: LocalDayMapper,
 ) -> bool {
     build_day_context(usage_store, state, now, mapper).asleep
+}
+
+/// Morning-after selection window: all of Dawn plus the first
+/// MORNING_AFTER_DAY_MINUTES of Day. Pure function of carried instants.
+pub fn in_morning_after_window(day: &DayContext, now: time::OffsetDateTime) -> bool {
+    match day.day_phase {
+        DayPhase::Dawn => true,
+        DayPhase::Day => {
+            now < day.phase_started_at_utc + Duration::minutes(MORNING_AFTER_DAY_MINUTES)
+        }
+        DayPhase::Dusk | DayPhase::Night => false,
+    }
 }
 
 /// Classify a day's token shape, effective-weighted. The cache-read effective
@@ -973,5 +1015,137 @@ mod tests {
             now,
         );
         assert_eq!(resume4, None);
+    }
+
+    /// Rows that satisfy the maturity gate (5 distinct active days, 3 distinct
+    /// hours) while staying outside the trailing FATIGUE_WINDOW_HOURS at `now`
+    /// AND outside today/yesterday: 2..=6 local days back.
+    fn maturity_rows(now: time::OffsetDateTime) -> Vec<(time::OffsetDateTime, f64)> {
+        let mut rows = Vec::new();
+        for back in 2..=6_i64 {
+            for hour in [9_i64, 13, 17] {
+                rows.push((
+                    now - time::Duration::days(back) - time::Duration::hours(hour - 12),
+                    10_000.0,
+                ));
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn tiredness_counts_active_buckets_not_elapsed_span() {
+        let now = datetime!(2026-06-09 16:00 UTC);
+        let mut rows = maturity_rows(now);
+        let morning_start = datetime!(2026-06-09 06:00 UTC);
+        for i in 0..24_i64 {
+            rows.push((morning_start + time::Duration::minutes(i * 10), 20_000.0));
+        }
+        let store = store_with_applied(&rows);
+        let mut state = crate::storage::state::PetState::new_for_test("seed", "buddy");
+        state.created_at = now - time::Duration::days(10);
+
+        let at_four_pm = build_day_context(&store, &state, now, utc_mapper());
+        assert!(at_four_pm.mature, "fixture must pass the maturity gate");
+        assert!(
+            (at_four_pm.tiredness - 0.25).abs() < 1e-6,
+            "got {}",
+            at_four_pm.tiredness
+        );
+        assert!(
+            at_four_pm.tiredness < 0.5,
+            "a rested afternoon must never read near-max"
+        );
+
+        let at_ten_am = build_day_context(
+            &store,
+            &state,
+            datetime!(2026-06-09 10:00 UTC),
+            utc_mapper(),
+        );
+        assert!((at_ten_am.tiredness - at_four_pm.tiredness).abs() < 1e-6);
+    }
+
+    #[test]
+    fn light_days_stay_below_the_tired_motion_threshold() {
+        let now = datetime!(2026-06-09 12:00 UTC);
+        let mut rows = maturity_rows(now);
+        for i in 0..3_i64 {
+            rows.push((
+                now - time::Duration::hours(2) + time::Duration::minutes(i * 10),
+                2_000.0,
+            ));
+        }
+        let store = store_with_applied(&rows);
+        let mut state = crate::storage::state::PetState::new_for_test("seed", "buddy");
+        state.created_at = now - time::Duration::days(10);
+        let ctx = build_day_context(&store, &state, now, utc_mapper());
+        assert!(ctx.mature);
+        assert!(ctx.tiredness > 0.0, "real activity must register");
+        assert!(
+            ctx.tiredness < 0.05,
+            "light days must not read tired, got {}",
+            ctx.tiredness
+        );
+    }
+
+    #[test]
+    fn tiredness_is_zero_while_the_maturity_gate_is_closed() {
+        let now = datetime!(2026-06-09 16:00 UTC);
+        let mut rows = Vec::new();
+        for i in 0..24_i64 {
+            rows.push((
+                now - time::Duration::hours(5) + time::Duration::minutes(i * 10),
+                20_000.0,
+            ));
+        }
+        let store = store_with_applied(&rows);
+        let mut state = crate::storage::state::PetState::new_for_test("seed", "buddy");
+        state.created_at = now - time::Duration::days(10);
+        let ctx = build_day_context(&store, &state, now, utc_mapper());
+        assert!(!ctx.mature);
+        assert_eq!(ctx.tiredness, 0.0, "immature pets never read tired");
+    }
+
+    #[test]
+    fn local_day_started_utc_is_the_current_local_midnight() {
+        let now = datetime!(2026-06-09 16:00 UTC);
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let mut state = crate::storage::state::PetState::new_for_test("seed", "buddy");
+        state.created_at = now - time::Duration::days(2);
+        let ctx = build_day_context(&store, &state, now, utc_mapper());
+        assert_eq!(ctx.local_day_started_utc, datetime!(2026-06-09 00:00 UTC));
+        assert_eq!(ctx.local_day_rollover_utc, datetime!(2026-06-10 00:00 UTC));
+        let minus8 = LocalDayMapper::Fixed(time::UtcOffset::from_hms(-8, 0, 0).unwrap());
+        let ctx_pst = build_day_context(&store, &state, now, minus8);
+        assert_eq!(
+            ctx_pst.local_day_started_utc,
+            datetime!(2026-06-09 08:00 UTC),
+            "local midnight at UTC-8 is 08:00 UTC"
+        );
+    }
+
+    #[test]
+    fn morning_after_window_covers_dawn_plus_first_day_hour_and_is_restart_idempotent() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let mut state = crate::storage::state::PetState::new_for_test("seed", "buddy");
+        state.created_at = datetime!(2026-06-07 00:00 UTC);
+        let cases = [
+            (datetime!(2026-06-09 07:30 UTC), true),  // mid-Dawn
+            (datetime!(2026-06-09 08:59 UTC), true),  // last Dawn minute
+            (datetime!(2026-06-09 09:30 UTC), true),  // 30 min into Day
+            (datetime!(2026-06-09 10:30 UTC), false), // 90 min into Day
+            (datetime!(2026-06-09 20:00 UTC), false), // Dusk
+            (datetime!(2026-06-09 02:00 UTC), false), // Night
+        ];
+        for (now, expected) in cases {
+            let ctx = build_day_context(&store, &state, now, utc_mapper());
+            assert_eq!(in_morning_after_window(&ctx, now), expected, "at {now}");
+            let rebuilt = build_day_context(&store, &state, now, utc_mapper());
+            assert_eq!(
+                in_morning_after_window(&rebuilt, now),
+                in_morning_after_window(&ctx, now)
+            );
+        }
     }
 }
