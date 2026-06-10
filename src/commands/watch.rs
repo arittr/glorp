@@ -81,6 +81,7 @@ pub(crate) fn build_watch_view_model_at(
         AnimationFrame {
             tick: now.unix_timestamp().max(0) as u64,
             blink_suppression_ticks: 0,
+            hold_eyes_closed: day_context.asleep,
         },
     );
 
@@ -411,7 +412,11 @@ fn mood_from_state(state: &PetState) -> Mood {
     .mood
 }
 
-pub fn rerender_pet_for_view_model(vm: &mut WatchViewModel, tick: u64) -> Result<()> {
+pub fn rerender_pet_for_view_model(
+    vm: &mut WatchViewModel,
+    tick: u64,
+    hold_eyes_closed: bool,
+) -> Result<()> {
     let species = vm.pet_render.generated_species;
     let generated = generate_pet(&vm.pet_render.seed).with_species(species);
     let rendered = render_pet(
@@ -421,6 +426,7 @@ pub fn rerender_pet_for_view_model(vm: &mut WatchViewModel, tick: u64) -> Result
         AnimationFrame {
             tick,
             blink_suppression_ticks: 0,
+            hold_eyes_closed,
         },
     );
     vm.pet_art = rendered.lines;

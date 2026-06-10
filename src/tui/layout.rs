@@ -346,6 +346,7 @@ mod render_compact_tests {
             AnimationFrame {
                 tick: 0,
                 blink_suppression_ticks: 0,
+                hold_eyes_closed: false,
             },
         );
         let mut vm = WatchViewModel::fixture();

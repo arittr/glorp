@@ -8,6 +8,7 @@ fn frame(tick: u64) -> AnimationFrame {
     AnimationFrame {
         tick,
         blink_suppression_ticks: 0,
+        hold_eyes_closed: false,
     }
 }
 

@@ -7,6 +7,9 @@ use crate::pet::generation::{GeneratedPet, Species};
 pub struct AnimationFrame {
     pub tick: u64,
     pub blink_suppression_ticks: u8,
+    /// Sleep presentation: force the species closed-blink eyes. Must never be
+    /// implemented by substituting Mood::Sleepy — mood is the vitals contract.
+    pub hold_eyes_closed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,7 +76,7 @@ pub fn render_pet(
     frame: AnimationFrame,
 ) -> RenderedPet {
     let profile = species_animation_profile(pet.species);
-    let blinking = should_blink(pet, mood, frame, profile);
+    let blinking = frame.hold_eyes_closed || should_blink(pet, mood, frame, profile);
     let expression = expression_for(pet, mood, blinking);
     let raw = template_lines(
         pet.species,
@@ -606,4 +609,45 @@ fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
         }
     }
     particles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pet::generation::generate_pet;
+
+    #[test]
+    fn hold_eyes_closed_renders_closed_blink_eyes_without_touching_mood() {
+        let pet = generate_pet("hold-eyes-seed");
+        let frame = AnimationFrame {
+            tick: 1, // a tick that does NOT blink on its own
+            blink_suppression_ticks: 0,
+            hold_eyes_closed: true,
+        };
+        let rendered = render_pet(&pet, Stage::S3, Mood::Content, frame);
+        let art = rendered.lines.join("\n");
+        assert!(
+            art.contains(closed_blink_eyes(pet.species)),
+            "held-closed eyes must use the species closed-blink glyphs, got:\n{art}"
+        );
+    }
+
+    #[test]
+    fn hold_eyes_closed_false_keeps_existing_blink_behavior() {
+        let pet = generate_pet("hold-eyes-seed");
+        let open = render_pet(
+            &pet,
+            Stage::S3,
+            Mood::Content,
+            AnimationFrame {
+                tick: 1,
+                blink_suppression_ticks: 0,
+                hold_eyes_closed: false,
+            },
+        );
+        assert!(
+            open.lines.join("\n").contains(&pet.traits.eyes),
+            "non-blinking awake frame keeps the trait eyes"
+        );
+    }
 }

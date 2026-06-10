@@ -86,6 +86,10 @@ pub struct WatchApp {
     /// The phrase chosen at the moment of the last 'p' press, held until
     /// the petting bubble window expires.
     petting_phrase: Option<String>,
+    /// The value most recently passed to `rerender_pet_for_view_model` as the
+    /// sleep-presentation `hold_eyes_closed` flag. Tracked so tests can assert
+    /// the milestone exemption (evolution overlay keeps eyes open).
+    last_hold_eyes_closed: bool,
 }
 
 /// Faster tick rate used while tachyonfx effects are active. ~60 fps target.
@@ -145,6 +149,7 @@ impl WatchApp {
             last_frame_time: None,
             pet_petted_at: None,
             petting_phrase: None,
+            last_hold_eyes_closed: false,
         }
     }
 
@@ -242,10 +247,27 @@ impl WatchApp {
         Ok(())
     }
 
+    fn compute_hold_eyes_closed(
+        vm: &WatchViewModel,
+        overlay: &Option<Overlay>,
+        evolution_overlay_started_at: &Option<Instant>,
+    ) -> bool {
+        vm.day_context.asleep && evolution_overlay_started_at.is_none() && overlay.is_none()
+    }
+
     fn advance_animation_frame(&mut self) {
         self.animation_frame = self.animation_frame.wrapping_add(1);
-        let _ =
-            crate::commands::watch::rerender_pet_for_view_model(&mut self.vm, self.animation_frame);
+        let hold_eyes_closed = Self::compute_hold_eyes_closed(
+            &self.vm,
+            &self.overlay,
+            &self.evolution_overlay_started_at,
+        );
+        self.last_hold_eyes_closed = hold_eyes_closed;
+        let _ = crate::commands::watch::rerender_pet_for_view_model(
+            &mut self.vm,
+            self.animation_frame,
+            hold_eyes_closed,
+        );
         let now = time::OffsetDateTime::now_utc();
         let species = self.vm.pet_render.generated_species;
         // wander_offset_x and facing are computed at render time in the panel
@@ -449,8 +471,17 @@ impl WatchApp {
 
     pub fn advance_animation_for_test(&mut self) {
         self.animation_frame = self.animation_frame.wrapping_add(1);
-        let _ =
-            crate::commands::watch::rerender_pet_for_view_model(&mut self.vm, self.animation_frame);
+        let hold_eyes_closed = Self::compute_hold_eyes_closed(
+            &self.vm,
+            &self.overlay,
+            &self.evolution_overlay_started_at,
+        );
+        self.last_hold_eyes_closed = hold_eyes_closed;
+        let _ = crate::commands::watch::rerender_pet_for_view_model(
+            &mut self.vm,
+            self.animation_frame,
+            hold_eyes_closed,
+        );
     }
 
     pub fn view_model_for_test(&self) -> &WatchViewModel {
@@ -460,6 +491,11 @@ impl WatchApp {
     #[cfg(test)]
     pub fn current_vm_for_test_mut(&mut self) -> &mut WatchViewModel {
         &mut self.vm
+    }
+
+    #[cfg(test)]
+    pub fn last_hold_eyes_closed_for_test(&self) -> bool {
+        self.last_hold_eyes_closed
     }
 
     pub fn in_flight_for_test(&self) -> bool {
@@ -972,5 +1008,39 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn evolution_overlay_renders_the_pet_awake_even_while_asleep() {
+        // Milestone exemption: while the evolution overlay window is active,
+        // hold_eyes_closed must be false despite day_context.asleep.
+        let mut app = WatchApp::new(WatchViewModel::fixture());
+        {
+            let vm = app.current_vm_for_test_mut();
+            vm.day_context.asleep = true;
+            vm.latest_evolution = Some("fuzz".into());
+        }
+        // Fire the evolution overlay so started_at is set.
+        assert!(app.update_evolution_overlay(), "overlay should be active");
+        app.advance_animation_for_test();
+        assert!(
+            !app.last_hold_eyes_closed_for_test(),
+            "evolution overlay must suppress hold_eyes_closed even while asleep"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_the_pet_awake_even_while_asleep() {
+        let mut app = test_app_with_signal(crate::tui::life::AppliedUsageSignal::quiet(
+            datetime!(2026-06-09 23:30 UTC),
+            time::Duration::seconds(10),
+        ));
+        app.current_vm_for_test_mut().day_context.asleep = true;
+        app.overlay = Some(Overlay::Help);
+        app.advance_animation_for_test();
+        assert!(
+            !app.last_hold_eyes_closed_for_test(),
+            "help overlay must keep eyes open even while asleep"
+        );
     }
 }

@@ -430,7 +430,8 @@ fn animate_pet() {
     let next_frame = frame.wrapping_add(1);
     let prev_pet_art = vm.pet_art.clone();
     let prev_pet_spans = vm.pet_spans.clone();
-    if rerender_pet_for_view_model(&mut vm, next_frame).is_err() {
+    let hold_eyes_closed = vm.day_context.asleep;
+    if rerender_pet_for_view_model(&mut vm, next_frame, hold_eyes_closed).is_err() {
         return;
     }
     if vm.pet_art == prev_pet_art && vm.pet_spans == prev_pet_spans {
