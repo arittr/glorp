@@ -9,7 +9,7 @@ A terminal pet fed by real Claude Code and Codex token usage.
 
 It lives in your shell, hatches from a local seed, and grows from the work you actually do. No manual feeding, no fake metrics — when you ship more code, your pet evolves.
 
-<img width="1179" height="779" alt="Screenshot 2026-05-13 at 4 36 53 PM" src="https://github.com/user-attachments/assets/bd6052e7-0f8f-41de-b21c-1740f4a0cf48" />
+<img width="1183" height="745" alt="Screenshot 2026-06-09 at 10 51 14 PM" src="https://github.com/user-attachments/assets/a5991505-8241-4301-9058-c4959e04f2b0" />
 
 ## Privacy
 
