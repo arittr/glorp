@@ -877,6 +877,30 @@ impl UsageStore {
             .map_err(Into::into)
     }
 
+    /// Applied-only per-source effective sums over the half-open bucket_at
+    /// window `[start, end)`. DayContext's yesterday source mix; the
+    /// unfiltered variant (`token_totals_by_source_between`) serves the
+    /// today panel and must not change.
+    pub fn applied_effective_tokens_by_source_between(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> crate::error::Result<Vec<(String, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT provider_surface, COALESCE(SUM(effective_tokens), 0.0)
+             FROM usage_events
+             WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2
+             GROUP BY provider_surface
+             ORDER BY provider_surface",
+        )?;
+        let rows = stmt
+            .query_map(params![format_time(start)?, format_time(end)?], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Applied-only bucket sums over `[start, end)`, ascending.
     ///
     /// Groups by distinct `bucket_at` value (not by 10-minute truncation).
@@ -1772,6 +1796,25 @@ mod tests {
             )
             .unwrap();
         assert!(!store.has_any_applied_events().unwrap());
+    }
+
+    #[test]
+    fn applied_effective_tokens_by_source_between_groups_applied_rows_per_surface() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let mut codex = sample_event_at(now, 3_000.0);
+        codex.provider_surface = "codex".into();
+        store.insert_event(&codex).unwrap();
+        store.insert_event(&sample_event_at(now, 1_000.0)).unwrap(); // claude-code
+        let totals = store
+            .applied_effective_tokens_by_source_between(
+                now - time::Duration::hours(1),
+                now + time::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(totals.len(), 2);
+        assert!(totals.contains(&("codex".to_string(), 3_000.0)));
+        assert!(totals.contains(&("claude-code".to_string(), 1_000.0)));
     }
 
     #[test]

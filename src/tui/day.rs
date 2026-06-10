@@ -45,6 +45,9 @@ pub const WEEKEND_ACTIVE_SHARE: f32 = 0.30;
 /// A finished day reads as a feast when its ratio clears this multiple
 /// of the calibration baseline.
 pub const FEAST_DAY_RATIO: f32 = 1.5;
+/// Yesterday counts as codex-heavy at or above this share of applied
+/// effective tokens (mirrors classify_source_accent's codex-dominant edge).
+pub const CODEX_HEAVY_SHARE: f32 = 0.6;
 /// Trailing window for accumulated-active-time fatigue, in hours.
 pub const FATIGUE_WINDOW_HOURS: i64 = 16;
 /// Morning-after flavor covers all of Dawn plus this many minutes of Day.
@@ -202,6 +205,9 @@ pub struct DayContext {
     pub date_seed: u64,
     pub today_ratio: f32,
     pub yesterday: Option<DaySummary>,
+    /// Codex share of yesterday's applied effective tokens, 0.0..=1.0.
+    /// 0.0 when yesterday is None or had no applied volume.
+    pub yesterday_codex_share: f32,
     pub climate: Option<WorkWeather>,
     pub is_weekend: bool,
     pub weekend_share: f32,
@@ -233,6 +239,7 @@ impl Default for DayContext {
             date_seed: 0,
             today_ratio: 0.0,
             yesterday: None,
+            yesterday_codex_share: 0.0,
             climate: None,
             is_weekend: false,
             weekend_share: 0.0,
@@ -318,6 +325,7 @@ pub fn build_day_context(
         .unwrap_or(0.0);
     let today_ratio = (today_tokens / baseline) as f32;
 
+    let mut yesterday_codex_share = 0.0;
     let yesterday = if state.created_at >= today_start {
         None
     } else {
@@ -328,6 +336,20 @@ pub fn build_day_context(
         let shape = usage_store
             .applied_token_shape_between(y_start, today_start)
             .unwrap_or_default();
+        let per_source = usage_store
+            .applied_effective_tokens_by_source_between(y_start, today_start)
+            .unwrap_or_default();
+        let total: f64 = per_source.iter().map(|(_, v)| *v).sum();
+        let codex: f64 = per_source
+            .iter()
+            .filter(|(name, _)| name == "codex")
+            .map(|(_, v)| *v)
+            .sum();
+        yesterday_codex_share = if total > 0.0 {
+            (codex / total) as f32
+        } else {
+            0.0
+        };
         Some(DaySummary {
             ratio: (tokens / baseline) as f32,
             dominant_shape: classify_day_shape(shape),
@@ -397,6 +419,7 @@ pub fn build_day_context(
         date_seed: date_seed_for(now_local, windows.dawn_start, &state.pet.seed),
         today_ratio,
         yesterday,
+        yesterday_codex_share,
         climate,
         is_weekend: matches!(
             now_local.date().weekday(),
@@ -1215,5 +1238,33 @@ mod tests {
         assert!((mid - 0.5).abs() < 1e-5, "expected ~0.5, got {mid}");
         assert_eq!(weekend_softening(&ctx(0.05, true, false)), 0.0);
         assert_eq!(weekend_softening(&ctx(0.05, false, true)), 0.0);
+    }
+
+    #[test]
+    fn yesterday_codex_share_reflects_the_applied_source_mix() {
+        let now = datetime!(2026-06-09 12:00 UTC);
+        let yesterday = now - time::Duration::days(1);
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let mut codex = NormalizedUsageEvent {
+            observed_at: yesterday,
+            bucket_at: yesterday,
+            ..NormalizedUsageEvent::for_test_at(yesterday, 8_000.0)
+        };
+        codex.provider_surface = "codex".into();
+        store.insert_event(&codex).unwrap();
+        store
+            .insert_event(&NormalizedUsageEvent {
+                observed_at: yesterday,
+                bucket_at: yesterday,
+                ..NormalizedUsageEvent::for_test_at(yesterday, 2_000.0)
+            })
+            .unwrap(); // claude-code
+        let mut state = crate::storage::state::PetState::new_for_test("seed", "buddy");
+        state.created_at = now - time::Duration::days(3);
+        let ctx = build_day_context(&store, &state, now, utc_mapper());
+        assert!((ctx.yesterday_codex_share - 0.8).abs() < 1e-6);
+        let empty = UsageStore::open(":memory:".as_ref()).unwrap();
+        let ctx2 = build_day_context(&empty, &state, now, utc_mapper());
+        assert_eq!(ctx2.yesterday_codex_share, 0.0);
     }
 }
