@@ -30,6 +30,11 @@ pub struct PetPanel;
 /// and 10 rows tall (8 art rows + 1-cell particle border top/bottom).
 const PET_W: u16 = 13;
 const PET_H: u16 = 10;
+/// Day-accumulation motes may use at most this share of the ambient glyph
+/// allocation — the room never crowds the sky (spec: Day accumulation).
+const MOTE_BUDGET_SHARE: f64 = 0.5;
+/// Floor-mote glyphs: soft specks, deliberately sub-countable.
+const MOTE_GLYPHS: &[char] = &['·', '.', ','];
 
 /// Computes the 13×10 sub-rect where the pet art sits inside the panel area,
 /// accounting for vertical centering, breathing offset, and wander offset.
@@ -461,6 +466,89 @@ pub fn ambient_glyphs_for_phase(
     glyphs
 }
 
+/// Soft-saturating day-accumulation density in `today_ratio`: asymptotic and
+/// sub-countable, so no learnable "full room" exists. No numbers, no fill
+/// direction, no completion framing (spec: Day accumulation).
+fn mote_density(ratio: f32) -> f32 {
+    1.0 - (-ratio.max(0.0)).exp()
+}
+
+/// Day-accumulation floor motes. Density tracks `today_ratio` with soft
+/// saturation, capped at MOTE_BUDGET_SHARE of the ambient allocation.
+/// Placement is jittered by `date_seed` and stable all day — the room
+/// accumulates instead of reshuffling, and a growing count extends the same
+/// position sequence so existing motes hold still. For the first
+/// MOTE_TIDY_FADE_MINUTES after the local day started, yesterday's density
+/// fades to zero instead of vanishing at 00:00 (`date_seed` rolls at dawn,
+/// not midnight, so the fading set keeps last night's positions). Flat
+/// renders zero motes (ambient contract unchanged); immature pets render
+/// zero (spec: Maturity gate governs every baseline-ratio channel).
+fn mote_glyphs_for(
+    day: &crate::tui::day::DayContext,
+    habitat: Rect,
+    exclusions: &[Rect],
+    now: time::OffsetDateTime,
+    color_capability: crate::tui::style::ColorCapability,
+) -> Vec<AmbientGlyph> {
+    if matches!(color_capability, ColorCapability::Flat) || !day.mature {
+        return Vec::new();
+    }
+    if habitat.width == 0 || habitat.height < 3 {
+        return Vec::new();
+    }
+
+    let habitat_cells = (habitat.width as usize) * (habitat.height as usize);
+    let area_term = habitat_cells.saturating_sub(200) / 60;
+    let allocation_floor = (4 + area_term) as f64 * phase_count_scale(day.day_phase);
+    let budget = (MOTE_BUDGET_SHARE * allocation_floor).floor();
+
+    let today_count = (budget * f64::from(mote_density(day.today_ratio))).round() as usize;
+
+    let fade_elapsed = (now - day.local_day_started_utc).whole_seconds() as f32;
+    let fade_window = (crate::tui::day::MOTE_TIDY_FADE_MINUTES as f32) * 60.0;
+    let fading_count = match day.yesterday {
+        Some(y) if fade_elapsed >= 0.0 && fade_elapsed < fade_window => {
+            let remaining = 1.0 - fade_elapsed / fade_window;
+            (budget * f64::from(mote_density(y.ratio) * remaining)).round() as usize
+        }
+        _ => 0,
+    };
+    let count = today_count.max(fading_count);
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let mut rng = Pcg32::seed_from_u64(day.date_seed.wrapping_mul(0xA076_1D64_78BD_642F));
+    let p = crate::tui::style::tokenpet_palette();
+    let color = warm_shift(p.dim.rgb, 0.15);
+    let band = (habitat.height / 3)
+        .max(1)
+        .min(habitat.height.saturating_sub(2));
+    let band_top = habitat.y + habitat.height - 1 - band;
+    let mut glyphs: Vec<AmbientGlyph> = Vec::with_capacity(count);
+    for _ in 0..count {
+        for _attempt in 0..16 {
+            let col = habitat.x + rng.gen_range(0..habitat.width);
+            let row = band_top + rng.gen_range(0..band);
+            let candidate = AmbientGlyph {
+                row,
+                col,
+                glyph: *MOTE_GLYPHS.choose(&mut rng).unwrap_or(&'·'),
+                color,
+            };
+            if !overlaps_any(&candidate, exclusions)
+                && !glyphs
+                    .iter()
+                    .any(|g| g.col == candidate.col && g.row == candidate.row)
+            {
+                glyphs.push(candidate);
+                break;
+            }
+        }
+    }
+    glyphs
+}
+
 /// Returns extra work-activity glyphs for the habitat backdrop.
 fn activity_glyphs_for(
     profile: &PetLifeProfile,
@@ -655,6 +743,22 @@ impl LegacyPanel for PetPanel {
                 let cell = &mut buf[(g.col, g.row)];
                 cell.set_char(g.glyph);
                 cell.set_style(ratatui::style::Style::default().fg(g.color));
+            }
+        }
+        // Mote pass: after ambient, before activity glyphs, same exclusions
+        // (silhouette halo + speech) — spec: Day accumulation.
+        let motes = mote_glyphs_for(
+            &vm.day_context,
+            scene.habitat,
+            &ambient_exclusions,
+            now,
+            ctx.color_capability,
+        );
+        for g in motes {
+            if ambient_glyph_is_inside_area(&g, scene.habitat) {
+                let cell = &mut buf[(g.col, g.row)];
+                cell.set_char(g.glyph);
+                cell.set_style(Style::default().fg(g.color));
             }
         }
         let compact = area.width <= 72 || area.height <= 24;
@@ -2139,5 +2243,107 @@ mod tests {
                 assert_ne!(mid, c1, "midpoint is not settled for {phase:?}");
             }
         }
+    }
+
+    #[test]
+    fn mote_density_soft_saturates_with_no_learnable_full_state() {
+        let step01 = mote_density(1.0) - mote_density(0.0);
+        let step24 = mote_density(4.0) - mote_density(2.0);
+        assert!(
+            step24 < step01,
+            "saturating: step24 {step24} must be < step01 {step01}"
+        );
+        assert!(mote_density(4.0) > mote_density(2.0), "still rising");
+        assert!(mote_density(10.0) < 1.0, "asymptotic, never full");
+        assert_eq!(mote_density(0.0), 0.0, "no work, no motes");
+    }
+
+    #[test]
+    fn motes_cap_at_the_budget_share_of_the_ambient_allocation() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let day = crate::tui::day::DayContext {
+            mature: true,
+            today_ratio: 100.0,
+            ..crate::tui::day::DayContext::default()
+        };
+        let motes = mote_glyphs_for(&day, habitat, &[], now, ColorCapability::Truecolor);
+        assert!(!motes.is_empty(), "a heavy day shows motes");
+        assert!(motes.len() <= 4, "cap is half the stage-floor allocation");
+        let floor_row = habitat.y + habitat.height - 1; // 11
+        for g in &motes {
+            assert!(g.row < floor_row, "motes never overwrite the floor row");
+            assert!(g.row >= 7, "motes stay in the lower band");
+        }
+        let blocked = mote_glyphs_for(&day, habitat, &[habitat], now, ColorCapability::Truecolor);
+        assert!(blocked.is_empty(), "fully excluded habitat places nothing");
+    }
+
+    #[test]
+    fn mote_tidy_fade_thins_yesterdays_motes_after_rollover() {
+        let habitat = Rect::new(0, 0, 60, 15);
+        let day_start = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let day = crate::tui::day::DayContext {
+            mature: true,
+            today_ratio: 0.0,
+            yesterday: Some(crate::tui::day::DaySummary {
+                ratio: 3.0,
+                dominant_shape: None,
+            }),
+            local_day_started_utc: day_start,
+            date_seed: 7,
+            ..crate::tui::day::DayContext::default()
+        };
+        let at = |minutes: i64| {
+            mote_glyphs_for(
+                &day,
+                habitat,
+                &[],
+                day_start + time::Duration::minutes(minutes),
+                ColorCapability::Truecolor,
+            )
+        };
+        let t0 = at(0);
+        let t15 = at(15);
+        let t30 = at(30);
+        assert!(!t0.is_empty(), "yesterday's motes are still in the room");
+        assert!(!t15.is_empty(), "mid-window the fade is partial");
+        assert!(
+            t15.len() < t0.len(),
+            "fade is monotonic: {} -> {}",
+            t0.len(),
+            t15.len()
+        );
+        assert!(t30.is_empty(), "tidy fade completes at the window edge");
+        for g in &t15 {
+            assert!(
+                t0.contains(g),
+                "fade removes from the end, never reshuffles"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_and_immature_pets_render_zero_motes() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let mature = crate::tui::day::DayContext {
+            mature: true,
+            today_ratio: 5.0,
+            ..crate::tui::day::DayContext::default()
+        };
+        assert!(
+            mote_glyphs_for(&mature, habitat, &[], now, ColorCapability::Flat).is_empty(),
+            "Flat keeps the zero-ambient contract"
+        );
+        let immature = crate::tui::day::DayContext {
+            mature: false,
+            today_ratio: 5.0,
+            ..crate::tui::day::DayContext::default()
+        };
+        assert!(
+            mote_glyphs_for(&immature, habitat, &[], now, ColorCapability::Truecolor).is_empty(),
+            "the default 100k baseline must not render a fabricated feast"
+        );
     }
 }

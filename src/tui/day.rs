@@ -33,6 +33,9 @@ pub const MIN_DISTINCT_ACTIVE_HOURS: usize = 3;
 pub const SLEEP_IDLE_MINUTES: i64 = 20;
 /// Phase palettes interpolate over this window after a phase boundary.
 pub const PHASE_BLEND_MINUTES: i64 = 30;
+/// Motes fade out over this window after local-day rollover instead of
+/// vanishing mid-grind at 00:00 (spec: Boundary behavior).
+pub const MOTE_TIDY_FADE_MINUTES: i64 = 30;
 /// A finished day reads as a feast when its ratio clears this multiple
 /// of the calibration baseline.
 pub const FEAST_DAY_RATIO: f32 = 1.5;
@@ -1150,5 +1153,20 @@ mod tests {
                 in_morning_after_window(&ctx, now)
             );
         }
+    }
+
+    #[test]
+    fn day_context_carries_the_local_day_started_instant() {
+        let now = datetime!(2026-06-09 15:00 UTC);
+        let store = store_with_applied(&[(now - time::Duration::hours(1), 5_000.0)]);
+        let mut state = crate::storage::state::PetState::new_for_test("seed", "buddy");
+        state.created_at = now - time::Duration::days(2);
+        let ctx = build_day_context(&store, &state, now, utc_mapper());
+        assert_eq!(ctx.local_day_started_utc, datetime!(2026-06-09 00:00 UTC));
+        assert_eq!(ctx.local_day_rollover_utc, datetime!(2026-06-10 00:00 UTC));
+        assert_eq!(
+            DayContext::default().local_day_started_utc,
+            time::OffsetDateTime::UNIX_EPOCH
+        );
     }
 }
