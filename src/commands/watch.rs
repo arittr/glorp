@@ -179,20 +179,12 @@ pub(crate) fn build_watch_view_model_at(
             .map(|stage| stage.as_str().to_string()),
         cursor_screen: None,
         mouse_tracking_enabled: true,
-        current_speech: if day_context.asleep {
-            crate::pet::speech::current_pet_speech_for_scene(
-                mood,
-                &crate::tui::life::PetLifeProfile::default(),
-                true,
-                now,
-            )
-        } else {
-            crate::pet::speech::current_pet_speech(
-                mood,
-                recent_activity_tokens(&recent_usage, now),
-                now,
-            )
-        },
+        current_speech: crate::pet::speech::current_pet_speech_for_scene(
+            mood,
+            &crate::tui::life::PetLifeProfile::default(),
+            &day_context,
+            now,
+        ),
         wander_offset_x: 0, // computed at render time by the panel from area.width
         breath_offset_y: {
             let rhythm = match (day_context.asleep, day_context.sleep_onset_utc) {
@@ -274,26 +266,6 @@ pub(crate) fn build_watch_view_model_at(
             }
         },
     })
-}
-
-/// Window over which `recent_activity_tokens` sums recent activity. Spans at
-/// least two 10-minute smear buckets so the value decays smoothly instead of
-/// stepping.
-const RECENT_ACTIVITY_WINDOW: Duration = Duration::minutes(20);
-
-/// Effective tokens whose activity time (`bucket_at`) falls in the last
-/// `RECENT_ACTIVITY_WINDOW`. Uses `bucket_at`, not `observed_at`: a catchup
-/// poll back-dates a fat delta across past buckets while stamping every
-/// smeared row with `observed_at = now`, so an `observed_at` window spikes to
-/// the whole delta on one poll and snaps to zero on the next. Summing by
-/// `bucket_at` reflects when activity actually happened.
-fn recent_activity_tokens(usage_events: &[NormalizedUsageEvent], now: OffsetDateTime) -> f64 {
-    let cutoff = now - RECENT_ACTIVITY_WINDOW;
-    usage_events
-        .iter()
-        .filter(|e| e.bucket_at >= cutoff)
-        .map(|e| e.effective_tokens)
-        .sum()
 }
 
 fn build_habitat_view(state: &PetState) -> HabitatView {
@@ -977,34 +949,6 @@ mod tests {
     }
 
     #[test]
-    fn recent_activity_tokens_uses_bucket_at_not_observed_at() {
-        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        // Build an event observed `now` but whose activity time is `bucket_offset` ago.
-        let event = |bucket_offset: Duration, tokens: f64| NormalizedUsageEvent {
-            observed_at: now,
-            bucket_at: now - bucket_offset,
-            effective_tokens: tokens,
-            ..NormalizedUsageEvent::for_test_at(now, tokens)
-        };
-        // Catchup: a huge delta whose activity happened 3h ago — must NOT count.
-        assert_eq!(
-            recent_activity_tokens(&[event(Duration::hours(3), 1_000_000.0)], now),
-            0.0
-        );
-        // Same catchup plus fresh in-window activity — only the fresh tokens count.
-        assert_eq!(
-            recent_activity_tokens(
-                &[
-                    event(Duration::hours(3), 1_000_000.0),
-                    event(Duration::minutes(5), 12_000.0),
-                ],
-                now
-            ),
-            12_000.0
-        );
-    }
-
-    #[test]
     fn build_recent_events_interleaves_narrative_and_usage_by_timestamp() {
         use crate::storage::state::NarrativeEvent;
 
@@ -1348,6 +1292,38 @@ mod tests {
         assert_eq!(
             feed.timestamp, "23:00",
             "last night's 23:00 local feed must not display as 06:00 UTC"
+        );
+    }
+
+    #[test]
+    fn vm_build_speech_uses_the_scene_precedence_stack_not_raw_token_munch() {
+        use time::macros::datetime;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut store = UsageStore::open(&db_path).unwrap();
+        let now = datetime!(2026-05-11 12:00 UTC); // unix_ts % 30 == 0: visible slot
+        store
+            .insert_event(&sample_event_at_for_test(
+                now - Duration::minutes(5),
+                1_800_000.0,
+            ))
+            .unwrap();
+        drop(store);
+        let mut state = PetState::new_for_test("test", "buddy");
+        state.created_at = now - Duration::days(3);
+
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
+        let line = vm.current_speech.expect("visible slot must produce a line");
+        let munch = ["yum!", "more!", "tasty!", "delicious", "*chomp*"];
+        assert!(
+            !munch.contains(&line.as_str()),
+            "vm build must not munch on raw recent tokens, got {line}"
         );
     }
 }

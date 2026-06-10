@@ -33,6 +33,9 @@ pub const MIN_DISTINCT_ACTIVE_HOURS: usize = 3;
 pub const SLEEP_IDLE_MINUTES: i64 = 20;
 /// Phase palettes interpolate over this window after a phase boundary.
 pub const PHASE_BLEND_MINUTES: i64 = 30;
+/// A finished day reads as a feast when its ratio clears this multiple
+/// of the calibration baseline.
+pub const FEAST_DAY_RATIO: f32 = 1.5;
 /// Trailing window for accumulated-active-time fatigue, in hours.
 pub const FATIGUE_WINDOW_HOURS: i64 = 16;
 /// Morning-after flavor covers all of Dawn plus this many minutes of Day.
