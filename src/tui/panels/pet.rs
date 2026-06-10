@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::game::evolution::Stage;
-use crate::game::habitat::HabitatPetLayer;
+use crate::game::habitat::{catalog_prop, HabitatPetLayer, HabitatPropId, HabitatPropZone};
 use crate::pet::animator::{
     compute_facing, compute_shimmer_role, compute_sleep_wander_x, compute_token_pop,
     compute_twinkle, compute_wake_wander_x, compute_wander_position_x, lazy_wander_instant,
@@ -18,7 +18,9 @@ use crate::pet::generation::Species;
 use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::day::{DayPhase, Season};
-use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, WorkWeather};
+use crate::tui::life::{
+    build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind, WorkWeather,
+};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{semantic_styles, ColorCapability, SemanticStyles};
@@ -137,6 +139,39 @@ fn activity_glyph_budget(profile: &PetLifeProfile, compact: bool) -> usize {
     }
     let max = if compact { 3.0 } else { 10.0 };
     ((profile.activity_level.clamp(0.0, 2.0) / 2.0) * max).round() as usize
+}
+
+const RESONANCE_REACTION_INTENSITY: f32 = 0.25;
+const RESONANCE_WANDER_BIAS_CELLS: i16 = 3;
+
+fn apply_resonance_reaction(
+    mut profile: PetLifeProfile,
+    resonant: Option<&HabitatPropId>,
+) -> PetLifeProfile {
+    let Some(id) = resonant else {
+        return profile;
+    };
+    if profile.prop_reactions.iter().any(|r| r.prop_id == *id) {
+        return profile;
+    }
+    profile.prop_reactions.push(PropReaction {
+        prop_id: id.clone(),
+        intensity: RESONANCE_REACTION_INTENSITY,
+        kind: PropReactionKind::Glow,
+    });
+    profile
+}
+
+fn resonance_wander_bias(resonant: Option<&HabitatPropId>) -> i16 {
+    let Some(spec) = resonant.and_then(catalog_prop) else {
+        return 0;
+    };
+    let side: i16 = match spec.zone {
+        HabitatPropZone::FloorLeft | HabitatPropZone::WallLeft | HabitatPropZone::AirLeft => -1,
+        HabitatPropZone::FloorRight | HabitatPropZone::WallRight | HabitatPropZone::AirRight => 1,
+        HabitatPropZone::FloorMid | HabitatPropZone::AirMid | HabitatPropZone::Ceiling => 0,
+    };
+    side * RESONANCE_WANDER_BIAS_CELLS
 }
 
 fn work_weather_seed(weather: WorkWeather) -> u64 {
@@ -771,6 +806,19 @@ impl LegacyPanel for PetPanel {
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let day = &vm.day_context;
+        let resonant_prop = {
+            let earned: Vec<crate::storage::state::EarnedHabitatProp> = vm
+                .habitat
+                .earned_props
+                .iter()
+                .map(|prop| crate::storage::state::EarnedHabitatProp {
+                    id: prop.id.clone(),
+                    earned_at: prop.earned_at,
+                    source: prop.source.clone(),
+                })
+                .collect();
+            crate::tui::day::resonant_prop_for_day(day, &earned)
+        };
         let softening = effective_weekend_softening(day, &vm.life_profile);
         let (wander_x, facing) = match (day.asleep, day.sleep_onset_utc, day.wake_resume) {
             (true, Some(onset), _) => (
@@ -790,7 +838,8 @@ impl LegacyPanel for PetPanel {
             _ => {
                 let wander_now = lazy_wander_instant(now, day.local_day_started_utc, softening);
                 (
-                    compute_wander_position_x(area.width, species, wander_now),
+                    compute_wander_position_x(area.width, species, wander_now)
+                        + resonance_wander_bias(resonant_prop.as_ref()),
                     compute_facing(area.width, species, wander_now),
                 )
             }
@@ -877,6 +926,7 @@ impl LegacyPanel for PetPanel {
             .map(|prop| prop.id.clone())
             .collect::<Vec<_>>();
         let life_profile = build_prop_reactions(vm.life_profile.clone(), &earned_prop_ids, compact);
+        let life_profile = apply_resonance_reaction(life_profile, resonant_prop.as_ref());
         let extra_count = activity_glyph_budget(&life_profile, compact);
         let activity_glyphs = activity_glyphs_for(
             &life_profile,
@@ -2585,5 +2635,53 @@ mod tests {
             "full softening shifts the color"
         );
         assert_eq!(weekend_soften_color(Color::Reset, 1.0), Color::Reset);
+    }
+
+    #[test]
+    fn resonance_adds_gentle_glow_when_prop_has_no_live_reaction() {
+        let id =
+            crate::storage::state::HabitatPropId::new(crate::game::habitat::HEAVY_SESSION_PLANTER);
+        let styled = apply_resonance_reaction(PetLifeProfile::default(), Some(&id));
+        assert_eq!(styled.prop_reactions.len(), 1);
+        assert_eq!(styled.prop_reactions[0].prop_id, id);
+        assert_eq!(styled.prop_reactions[0].kind, PropReactionKind::Glow);
+        assert!(
+            styled.prop_reactions[0].intensity > 0.0 && styled.prop_reactions[0].intensity <= 1.0
+        );
+    }
+
+    #[test]
+    fn resonance_never_overrides_a_live_reaction_for_the_same_prop() {
+        let id =
+            crate::storage::state::HabitatPropId::new(crate::game::habitat::HEAVY_SESSION_PLANTER);
+        let profile = PetLifeProfile {
+            prop_reactions: vec![PropReaction {
+                prop_id: id.clone(),
+                intensity: 0.72,
+                kind: PropReactionKind::Bloom,
+            }],
+            ..PetLifeProfile::default()
+        };
+        let styled = apply_resonance_reaction(profile, Some(&id));
+        assert_eq!(styled.prop_reactions.len(), 1);
+        assert_eq!(styled.prop_reactions[0].intensity, 0.72);
+        assert_eq!(styled.prop_reactions[0].kind, PropReactionKind::Bloom);
+    }
+
+    #[test]
+    fn resonance_wander_bias_points_toward_the_prop_zone() {
+        let planter =
+            crate::storage::state::HabitatPropId::new(crate::game::habitat::HEAVY_SESSION_PLANTER);
+        let sprout =
+            crate::storage::state::HabitatPropId::new(crate::game::habitat::WILT_RECOVERY_SPROUT);
+        assert!(
+            resonance_wander_bias(Some(&planter)) > 0,
+            "right-zone prop pulls right"
+        );
+        assert!(
+            resonance_wander_bias(Some(&sprout)) < 0,
+            "left-zone prop pulls left"
+        );
+        assert_eq!(resonance_wander_bias(None), 0, "no companion, no bias");
     }
 }

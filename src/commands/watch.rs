@@ -279,6 +279,7 @@ fn build_habitat_view(state: &PetState) -> HabitatView {
                 earned_at: earned.earned_at,
                 kind: spec.kind,
                 display_priority: spec.display_priority,
+                source: earned.source.clone(),
             })
         })
         .collect();
@@ -1420,6 +1421,33 @@ mod tests {
             vm.breath_offset_y,
             compute_breath_offset_with_rhythm(Some(Species::Crystal), probe, asleep_rhythm),
             "asleep must outrank tired at the vm breath call site"
+        );
+    }
+
+    #[test]
+    fn habitat_view_carries_unlock_provenance_for_resonance() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        drop(UsageStore::open(&db_path).unwrap());
+        let mut state = PetState::new_for_test("seed", "buddy");
+        state.habitat.earned_props = vec![crate::storage::state::EarnedHabitatProp {
+            id: crate::storage::state::HabitatPropId::new(
+                crate::game::habitat::HEAVY_SESSION_PLANTER,
+            ),
+            earned_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+            source: crate::storage::state::HabitatPropSource::HeavySession,
+        }];
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_600).unwrap();
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
+        assert_eq!(
+            vm.habitat.earned_props[0].source,
+            crate::storage::state::HabitatPropSource::HeavySession
         );
     }
 }

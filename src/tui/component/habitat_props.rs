@@ -980,6 +980,7 @@ mod tests {
             earned_at: datetime!(2026-05-11 12:00 UTC) + time::Duration::minutes(i64::from(minute)),
             kind,
             display_priority: priority,
+            source: crate::storage::state::HabitatPropSource::LifetimeTokens { threshold: 0.0 },
         }
     }
 

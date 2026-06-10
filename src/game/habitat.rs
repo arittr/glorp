@@ -3,10 +3,12 @@ use time::OffsetDateTime;
 use crate::{
     game::metabolism::Mood,
     storage::{
-        state::{EarnedHabitatProp, HabitatPropId, HabitatPropSource, PetState},
+        state::{EarnedHabitatProp, HabitatPropSource, PetState},
         usage_store::UsageLedgerRow,
     },
 };
+
+pub use crate::storage::state::HabitatPropId;
 
 const HEAVY_SESSION_MIN_TOKENS: f64 = 50_000.0;
 const HEAVY_SESSION_BASELINE_FRACTION: f64 = 0.5;

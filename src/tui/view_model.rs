@@ -1,7 +1,7 @@
 use crate::game::metabolism::Mood;
 use crate::game::{evolution::Stage, habitat::HabitatPropKind};
 use crate::pet::generation::Species;
-use crate::storage::state::HabitatPropId;
+use crate::storage::state::{HabitatPropId, HabitatPropSource};
 use crate::tui::life::PetLifeProfile;
 use crate::tui::style::LogKind;
 
@@ -86,6 +86,7 @@ pub struct EarnedHabitatPropView {
     pub earned_at: time::OffsetDateTime,
     pub kind: HabitatPropKind,
     pub display_priority: i16,
+    pub source: HabitatPropSource,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -284,12 +285,18 @@ impl WatchViewModel {
                 earned_at: time::OffsetDateTime::UNIX_EPOCH,
                 kind: crate::game::habitat::HabitatPropKind::Trophy,
                 display_priority: 70,
+                source: HabitatPropSource::ProviderFirstUse {
+                    provider_surface: "codex".to_string(),
+                },
             },
             EarnedHabitatPropView {
                 id: crate::storage::state::HabitatPropId::new("token_pebble_25k"),
                 earned_at: time::OffsetDateTime::UNIX_EPOCH,
                 kind: crate::game::habitat::HabitatPropKind::Accent,
                 display_priority: 10,
+                source: HabitatPropSource::LifetimeTokens {
+                    threshold: 25_000.0,
+                },
             },
         ];
         vm

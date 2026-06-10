@@ -8,7 +8,7 @@
 //! nothing is persisted.
 
 use crate::storage::day_axis::LocalDayMapper;
-use crate::storage::state::PetState;
+use crate::storage::state::{EarnedHabitatProp, HabitatPropSource, PetState};
 use crate::storage::usage_store::{AppliedShapeSums, UsageStore};
 use crate::tui::life::{classify_work_weather, TokenShapeDelta, WorkWeather};
 use std::collections::{HashMap, HashSet};
@@ -505,6 +505,36 @@ pub fn classify_day_shape(s: AppliedShapeSums) -> Option<WorkWeather> {
     })))
 }
 
+pub fn resonant_prop_for_day(
+    day: &DayContext,
+    earned: &[crate::storage::state::EarnedHabitatProp],
+) -> Option<crate::game::habitat::HabitatPropId> {
+    if day.asleep {
+        return None;
+    }
+    let yesterday_started = day.local_day_started_utc - Duration::days(1);
+    let feast_yesterday = day.mature
+        && day
+            .yesterday
+            .is_some_and(|summary| summary.ratio >= FEAST_DAY_RATIO);
+    let codex_heavy_yesterday = day.yesterday_codex_share >= CODEX_HEAVY_SHARE;
+    let mut qualified: Vec<&EarnedHabitatProp> = earned
+        .iter()
+        .filter(|prop| match &prop.source {
+            HabitatPropSource::HeavySession => feast_yesterday,
+            HabitatPropSource::ProviderFirstUse { .. } => codex_heavy_yesterday,
+            HabitatPropSource::WiltRecovery => prop.earned_at >= yesterday_started,
+            HabitatPropSource::LifetimeTokens { .. } => false,
+        })
+        .collect();
+    if qualified.is_empty() {
+        return None;
+    }
+    qualified.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    let index = (day.date_seed % qualified.len() as u64) as usize;
+    Some(qualified[index].id.clone())
+}
+
 fn modal_climate(counts: &HashMap<WorkWeather, usize>) -> Option<WorkWeather> {
     let max = counts.values().copied().max()?;
     let winners: Vec<WorkWeather> = counts
@@ -630,6 +660,7 @@ fn derive_wake_resume(
 mod tests {
     use super::*;
     use crate::storage::day_axis::LocalDayMapper;
+    use crate::storage::state::HabitatPropId;
     use crate::storage::usage_store::{NormalizedUsageEvent, UsageStore};
     use time::macros::datetime;
 
@@ -1266,5 +1297,175 @@ mod tests {
         let empty = UsageStore::open(":memory:".as_ref()).unwrap();
         let ctx2 = build_day_context(&empty, &state, now, utc_mapper());
         assert_eq!(ctx2.yesterday_codex_share, 0.0);
+    }
+
+    fn earned_prop(
+        id: &str,
+        source: HabitatPropSource,
+        earned_at: time::OffsetDateTime,
+    ) -> EarnedHabitatProp {
+        EarnedHabitatProp {
+            id: HabitatPropId::new(id),
+            earned_at,
+            source,
+        }
+    }
+
+    fn resonance_day(date_seed: u64, yesterday_ratio: f32) -> DayContext {
+        DayContext {
+            yesterday: Some(DaySummary {
+                ratio: yesterday_ratio,
+                dominant_shape: None,
+            }),
+            date_seed,
+            mature: true,
+            asleep: false,
+            local_day_started_utc: datetime!(2026-06-08 00:00 UTC),
+            ..DayContext::default()
+        }
+    }
+
+    #[test]
+    fn resonance_requires_an_earned_prop() {
+        let day = resonance_day(0, 1.8);
+        assert_eq!(resonant_prop_for_day(&day, &[]), None, "earned-only");
+        let ladder = earned_prop(
+            "token_pebble_25k",
+            HabitatPropSource::LifetimeTokens {
+                threshold: 25_000.0,
+            },
+            datetime!(2026-06-07 12:00 UTC),
+        );
+        assert_eq!(resonant_prop_for_day(&day, &[ladder]), None);
+    }
+
+    #[test]
+    fn feast_yesterday_resonates_the_heavy_session_planter_only_when_mature() {
+        let planter = earned_prop(
+            "heavy_session_planter",
+            HabitatPropSource::HeavySession,
+            datetime!(2026-05-01 12:00 UTC),
+        );
+        let day = resonance_day(0, 1.8);
+        assert_eq!(
+            resonant_prop_for_day(&day, std::slice::from_ref(&planter)),
+            Some(HabitatPropId::new("heavy_session_planter"))
+        );
+        let immature = DayContext {
+            mature: false,
+            ..day
+        };
+        assert_eq!(
+            resonant_prop_for_day(&immature, &[planter]),
+            None,
+            "ratio-qualified resonance is maturity-gated"
+        );
+    }
+
+    #[test]
+    fn codex_heavy_yesterday_and_fresh_recovery_resonate_without_maturity() {
+        let lamp = earned_prop(
+            "codex_signal_lamp",
+            HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+            datetime!(2026-05-20 15:00 UTC),
+        );
+        let sprout = earned_prop(
+            "wilt_recovery_sprout",
+            HabitatPropSource::WiltRecovery,
+            datetime!(2026-06-08 08:30 UTC),
+        );
+        let day = DayContext {
+            mature: false,
+            yesterday_codex_share: 0.8,
+            ..resonance_day(0, 0.2)
+        };
+        assert_eq!(
+            resonant_prop_for_day(&day, &[lamp]),
+            Some(HabitatPropId::new("codex_signal_lamp"))
+        );
+        assert_eq!(
+            resonant_prop_for_day(&day, &[sprout]),
+            Some(HabitatPropId::new("wilt_recovery_sprout"))
+        );
+    }
+
+    #[test]
+    fn stale_event_unlocks_and_ordinary_yesterdays_resonate_nothing() {
+        let lamp = earned_prop(
+            "codex_signal_lamp",
+            HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+            datetime!(2026-05-20 15:00 UTC),
+        );
+        let planter = earned_prop(
+            "heavy_session_planter",
+            HabitatPropSource::HeavySession,
+            datetime!(2026-05-01 12:00 UTC),
+        );
+        let day = resonance_day(0, 0.3);
+        assert_eq!(
+            resonant_prop_for_day(&day, &[lamp, planter]),
+            None,
+            "no qualifying signal -> no companion"
+        );
+    }
+
+    #[test]
+    fn date_seed_tie_breaks_equally_qualified_props_deterministically() {
+        let lamp = earned_prop(
+            "codex_signal_lamp",
+            HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+            datetime!(2026-05-20 15:00 UTC),
+        );
+        let planter = earned_prop(
+            "heavy_session_planter",
+            HabitatPropSource::HeavySession,
+            datetime!(2026-05-01 12:00 UTC),
+        );
+        let earned = [lamp, planter];
+        let seed_zero = DayContext {
+            yesterday_codex_share: 0.8,
+            ..resonance_day(0, 1.8)
+        };
+        let seed_one = DayContext {
+            yesterday_codex_share: 0.8,
+            ..resonance_day(1, 1.8)
+        };
+        assert_eq!(
+            resonant_prop_for_day(&seed_zero, &earned),
+            Some(HabitatPropId::new("codex_signal_lamp"))
+        );
+        assert_eq!(
+            resonant_prop_for_day(&seed_one, &earned),
+            Some(HabitatPropId::new("heavy_session_planter"))
+        );
+        assert_eq!(
+            resonant_prop_for_day(&seed_zero, &earned),
+            resonant_prop_for_day(&seed_zero, &earned),
+            "same day, same companion"
+        );
+    }
+
+    #[test]
+    fn resonance_pauses_entirely_while_asleep() {
+        let planter = earned_prop(
+            "heavy_session_planter",
+            HabitatPropSource::HeavySession,
+            datetime!(2026-05-01 12:00 UTC),
+        );
+        let day = DayContext {
+            asleep: true,
+            ..resonance_day(0, 1.8)
+        };
+        assert_eq!(
+            resonant_prop_for_day(&day, &[planter]),
+            None,
+            "no glowing shrine over a sleeping pet"
+        );
     }
 }

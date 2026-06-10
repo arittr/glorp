@@ -163,11 +163,22 @@ fn render_single_prop(
 }
 
 fn earned_view(prop: &HabitatPropSpec, earned_at: OffsetDateTime) -> EarnedHabitatPropView {
+    let source = match prop.lifetime_threshold {
+        Some(threshold) => HabitatPropSource::LifetimeTokens { threshold },
+        None => match prop.id {
+            crate::game::habitat::CODEX_SIGNAL_LAMP => HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+            crate::game::habitat::WILT_RECOVERY_SPROUT => HabitatPropSource::WiltRecovery,
+            _ => HabitatPropSource::HeavySession,
+        },
+    };
     EarnedHabitatPropView {
         id: HabitatPropId::new(prop.id),
         earned_at,
         kind: prop.kind,
         display_priority: prop.display_priority,
+        source,
     }
 }
 
