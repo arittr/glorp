@@ -308,6 +308,35 @@ diverge):
 - All ramps are pure functions of the boundary instants already carried on
   the vm. Dawn-crossing and midnight-mid-session get Preview Lab fixtures.
 
+## Amendment (2026-06-10): T2 + T3 ship as one combined branch
+
+Decided with Drew after T1 shipped in v0.6.1: Branches T2 and T3 are
+implemented as a single branch (`feat/lives-in-time-t2t3`) — none of the
+remaining features is individually large now that the `DayContext` contract
+exists. The combined branch also absorbs two items born from the
+2026-06-10 incident (ccusage 20.x silently became an all-agents aggregator
+and its first successful poll fed the pet a 212M-effective-token bolus of
+non-claude history):
+
+- **Usage discontinuity guard.** Before staging, if a single poll's summed
+  delta exceeds `DISCONTINUITY_GUARD_RATIO` (default 3.0) ×
+  `CalibrationBaseline.daily_effective_tokens` × `max(1,
+  whole_days_since_last_successful_poll + 1)`, the poll is a discontinuity:
+  **advance the provider cursors without staging any ledger rows** (the
+  calibration-path precedent — totals are marked seen, the pet does not
+  eat) and persist a `usage_discontinuity` diagnostic carrying the
+  magnitude. The elapsed-days factor keeps honest vacation catch-ups
+  feeding (a real week away passes at ~8× headroom) while a same-cadence
+  poll claiming 10× a typical day is refused. This changes feeding
+  semantics by design: a delta that implausible is a helper or cursor
+  discontinuity, not work, and refusing it is the honest reading. Checked
+  against the live incident: elapsed ~10s → threshold ≈ 59M ≪ the observed
+  212M → the guard would have fired.
+- **Local feed timestamps.** Feed/event `hh:mm` labels currently render
+  the UTC clock (last night's 23:00 PDT feeds displayed as "06:00").
+  Display-only fix: format via the mapper's local offset. No stored data
+  changes.
+
 ## Branch T2 — the pet's day
 
 - **Day accumulation**: floor motes whose density tracks `today_ratio` with
