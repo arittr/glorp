@@ -554,6 +554,7 @@ fn day_context_inputs_for_frame(
         wake_resume,
         blend,
         life_profile,
+        extras,
     ) = match id {
         "watch-daycontext-night-asleep" => (
             "night",
@@ -575,6 +576,7 @@ fn day_context_inputs_for_frame(
                 "calm_mode": true,
                 "freshness": "live"
             }),
+            json!({}),
         ),
         "watch-daycontext-dawn-crossing" => (
             "dawn",
@@ -600,6 +602,7 @@ fn day_context_inputs_for_frame(
                 "calm_mode": false,
                 "freshness": "live"
             }),
+            json!({}),
         ),
         "watch-daycontext-night-wake-catchup" => (
             "night",
@@ -628,6 +631,7 @@ fn day_context_inputs_for_frame(
                 "calm_mode": false,
                 "freshness": "backfill"
             }),
+            json!({}),
         ),
         "watch-daycontext-hatch-at-night" => (
             "night",
@@ -648,6 +652,211 @@ fn day_context_inputs_for_frame(
                 "color_capability": "truecolor",
                 "calm_mode": false,
                 "freshness": "cold-start"
+            }),
+            json!({}),
+        ),
+        "watch-daycontext-dream-night" => (
+            "night",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            true,
+            Some(fixed_now - time::Duration::hours(1)),
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": true,
+                "freshness": "live"
+            }),
+            json!({
+                "yesterday": {
+                    "ratio": 1.6,
+                    "dominant_shape": "cache-mist"
+                },
+                "date_seed": 7,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-heavy-day-evening" => (
+            "dusk",
+            fixed_now - time::Duration::hours(1),
+            fixed_now + time::Duration::hours(2),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.38,
+                "burst_level": 0.0,
+                "source_accent": Some("claude"),
+                "weather": "cache-mist",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "token_shell_100k",
+                    "intensity": 0.28,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "backfill"
+            }),
+            json!({
+                "today_ratio": 1.7,
+                "tiredness": 0.85,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-light-day-morning" => (
+            "dawn",
+            fixed_now - time::Duration::minutes(40),
+            fixed_now + time::Duration::minutes(80),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.02,
+                "yesterday": {
+                    "ratio": 0.04,
+                    "dominant_shape": null
+                },
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-weekend-midday" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "is_weekend": true,
+                "weekend_share": 0.05,
+                "today_ratio": 0.3,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-climate-cache-week" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "climate": "cache-mist",
+                "today_ratio": 0.5,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-prop-resonance-planter" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "yesterday": {
+                    "ratio": 1.9,
+                    "dominant_shape": "output-sparks"
+                },
+                "today_ratio": 0.4,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-midnight-mid-session" => (
+            "night",
+            fixed_now - time::Duration::hours(2),
+            fixed_now + time::Duration::hours(6),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.68,
+                "burst_level": 0.24,
+                "source_accent": Some("balanced"),
+                "weather": "mixed",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "codex_signal_lamp",
+                    "intensity": 0.35,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.03,
+                "tiredness": 0.45,
+                "yesterday": {
+                    "ratio": 1.3,
+                    "dominant_shape": "mixed"
+                },
+                "mature": true
             }),
         ),
         _ => (
@@ -670,6 +879,7 @@ fn day_context_inputs_for_frame(
                 "calm_mode": false,
                 "freshness": "unknown"
             }),
+            json!({}),
         ),
     };
 
@@ -680,6 +890,27 @@ fn day_context_inputs_for_frame(
         })
     });
 
+    let mut day_context = json!({
+        "day_phase": day_phase,
+        "phase_started_at_utc": format_rfc3339_lossy(phase_started_at_utc),
+        "phase_ends_at_utc": format_rfc3339_lossy(phase_ends_at_utc),
+        "asleep": asleep,
+        "sleep_onset_utc": sleep_onset_utc.map(format_rfc3339_lossy),
+        "wake_resume": wake_resume_json,
+        // `blend` is a computed value derived from `phase_started_at_utc`
+        // and `PHASE_BLEND_MINUTES`; it is included in the manifest for
+        // reviewer convenience.
+        "blend": blend
+    });
+
+    if let Some(obj) = day_context.as_object_mut() {
+        if let Some(extras_obj) = extras.as_object() {
+            for (k, v) in extras_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
     BTreeMap::from([
         (
             "fixed_now".to_string(),
@@ -688,21 +919,7 @@ fn day_context_inputs_for_frame(
         ("tick".to_string(), json!(fixed_now.unix_timestamp())),
         ("terminal_width".to_string(), json!(frame.width)),
         ("terminal_height".to_string(), json!(frame.height)),
-        (
-            "day_context".to_string(),
-            json!({
-                "day_phase": day_phase,
-                "phase_started_at_utc": format_rfc3339_lossy(phase_started_at_utc),
-                "phase_ends_at_utc": format_rfc3339_lossy(phase_ends_at_utc),
-                "asleep": asleep,
-                "sleep_onset_utc": sleep_onset_utc.map(format_rfc3339_lossy),
-                "wake_resume": wake_resume_json,
-                // `blend` is a computed value derived from `phase_started_at_utc`
-                // and `PHASE_BLEND_MINUTES`; it is included in the manifest for
-                // reviewer convenience.
-                "blend": blend
-            }),
-        ),
+        ("day_context".to_string(), day_context),
         ("life_profile".to_string(), life_profile),
     ])
 }
@@ -812,6 +1029,13 @@ mod tests {
                 "watch-daycontext-dawn-crossing",
                 "watch-daycontext-night-wake-catchup",
                 "watch-daycontext-hatch-at-night",
+                "watch-daycontext-dream-night",
+                "watch-daycontext-heavy-day-evening",
+                "watch-daycontext-light-day-morning",
+                "watch-daycontext-weekend-midday",
+                "watch-daycontext-climate-cache-week",
+                "watch-daycontext-prop-resonance-planter",
+                "watch-daycontext-midnight-mid-session",
                 "habitat-props-catalog",
                 "watch-habitat-early",
                 "watch-habitat-lived-in",

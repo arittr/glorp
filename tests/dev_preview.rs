@@ -16,11 +16,18 @@ const LIVELINESS_WATCH_IDS: [&str; 7] = [
     "watch-liveliness-calm-mode-s6-hot",
 ];
 
-const DAY_CONTEXT_WATCH_IDS: [&str; 4] = [
+const DAY_CONTEXT_WATCH_IDS: [&str; 11] = [
     "watch-daycontext-night-asleep",
     "watch-daycontext-dawn-crossing",
     "watch-daycontext-night-wake-catchup",
     "watch-daycontext-hatch-at-night",
+    "watch-daycontext-dream-night",
+    "watch-daycontext-heavy-day-evening",
+    "watch-daycontext-light-day-morning",
+    "watch-daycontext-weekend-midday",
+    "watch-daycontext-climate-cache-week",
+    "watch-daycontext-prop-resonance-planter",
+    "watch-daycontext-midnight-mid-session",
 ];
 
 struct PreviewRun {
@@ -582,6 +589,13 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-daycontext-dawn-crossing.txt",
         "frames/watch-daycontext-night-wake-catchup.txt",
         "frames/watch-daycontext-hatch-at-night.txt",
+        "frames/watch-daycontext-dream-night.txt",
+        "frames/watch-daycontext-heavy-day-evening.txt",
+        "frames/watch-daycontext-light-day-morning.txt",
+        "frames/watch-daycontext-weekend-midday.txt",
+        "frames/watch-daycontext-climate-cache-week.txt",
+        "frames/watch-daycontext-prop-resonance-planter.txt",
+        "frames/watch-daycontext-midnight-mid-session.txt",
         "frames/habitat-props-catalog.txt",
         "frames/watch-habitat-early.txt",
         "frames/watch-habitat-lived-in.txt",
@@ -611,6 +625,13 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-daycontext-dawn-crossing".to_string(),
             "watch-daycontext-night-wake-catchup".to_string(),
             "watch-daycontext-hatch-at-night".to_string(),
+            "watch-daycontext-dream-night".to_string(),
+            "watch-daycontext-heavy-day-evening".to_string(),
+            "watch-daycontext-light-day-morning".to_string(),
+            "watch-daycontext-weekend-midday".to_string(),
+            "watch-daycontext-climate-cache-week".to_string(),
+            "watch-daycontext-prop-resonance-planter".to_string(),
+            "watch-daycontext-midnight-mid-session".to_string(),
             "habitat-props-catalog".to_string(),
             "watch-habitat-early".to_string(),
             "watch-habitat-lived-in".to_string(),
@@ -730,6 +751,20 @@ fn dev_preview_watch_daycontext_night_asleep_frame_snapshot() {
         std::fs::read_to_string(run.out.join("frames/watch-daycontext-night-asleep.txt")).unwrap();
 
     insta::assert_snapshot!("watch_daycontext_night_asleep_frame", frame);
+}
+
+#[test]
+fn dev_preview_watch_daycontext_heavy_day_evening_frame_snapshot() {
+    let run = PreviewRun::new();
+    run.run_success("watch");
+
+    let frame = std::fs::read_to_string(
+        run.out
+            .join("frames/watch-daycontext-heavy-day-evening.txt"),
+    )
+    .unwrap();
+
+    insta::assert_snapshot!("watch_daycontext_heavy_day_evening_frame", frame);
 }
 
 fn assert_scenario(

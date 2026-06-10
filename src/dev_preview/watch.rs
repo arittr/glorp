@@ -10,7 +10,7 @@ use crate::storage::{
     },
     usage_store::{NormalizedUsageEvent, UsageStore},
 };
-use crate::tui::day::{DayContext, DayPhase, WakeResume};
+use crate::tui::day::{DayContext, DayPhase, DaySummary, WakeResume};
 use crate::tui::layout::render_watch_frame_with_layout;
 use crate::tui::life::{
     IdleLifeState, PetLifeProfile, PropReaction, PropReactionKind, SourceAccent, WorkWeather,
@@ -210,9 +210,19 @@ fn render_watch_frame_from_state_with_life(
     if let Some(day) = day_context {
         vm.day_context = day;
         vm.life_profile.calm_mode = day.asleep;
+        vm.current_speech = crate::pet::speech::current_pet_speech_for_scene(
+            vm.pet_render.mood,
+            &vm.life_profile,
+            &day,
+            now,
+        );
     }
-    if hold_eyes_closed {
-        rerender_pet_for_view_model(&mut vm, now.unix_timestamp().max(0) as u64, true)?;
+    if hold_eyes_closed || day_context.is_some_and(|day| day.tiredness > 0.0) {
+        rerender_pet_for_view_model(
+            &mut vm,
+            now.unix_timestamp().max(0) as u64,
+            hold_eyes_closed,
+        )?;
     }
     let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &render);
 
@@ -314,6 +324,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
 
 fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrameFixture> {
     let fixed_now = ctx.fixed_now;
+    let speech_visible_now = fixed_now + Duration::seconds(10);
     vec![
         DayContextFrameFixture {
             id: "watch-daycontext-night-asleep",
@@ -369,6 +380,104 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
                 color_capability: ColorCapability::Truecolor,
             },
             day_context: night_newborn_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-dream-night",
+            title: "Watch DayContext Dream Night",
+            width: 120,
+            height: 32,
+            now: speech_visible_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: calm_idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: dream_night_day_context(speech_visible_now),
+            hold_eyes_closed: true,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-heavy-day-evening",
+            title: "Watch DayContext Heavy Day Evening",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: cooling_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: heavy_day_evening_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-light-day-morning",
+            title: "Watch DayContext Light Day Morning",
+            width: 120,
+            height: 32,
+            now: speech_visible_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: light_day_morning_day_context(speech_visible_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-weekend-midday",
+            title: "Watch DayContext Weekend Midday",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: weekend_midday_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-climate-cache-week",
+            title: "Watch DayContext Climate Cache Week",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: climate_cache_week_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-prop-resonance-planter",
+            title: "Watch DayContext Prop Resonance Planter",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: prop_resonance_planter_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-midnight-mid-session",
+            title: "Watch DayContext Midnight Mid Session",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: warm_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+            },
+            day_context: midnight_mid_session_day_context(fixed_now),
             hold_eyes_closed: false,
         },
     ]
@@ -633,6 +742,121 @@ fn night_newborn_day_context(fixed_now: OffsetDateTime) -> DayContext {
     }
 }
 
+fn dream_night_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Night,
+        phase_started_at_utc: now - Duration::hours(3),
+        phase_ends_at_utc: now + Duration::hours(5),
+        asleep: true,
+        sleep_onset_utc: Some(now - Duration::hours(1)),
+        yesterday: Some(DaySummary {
+            ratio: 1.6,
+            dominant_shape: Some(WorkWeather::CacheMist),
+        }),
+        date_seed: 7,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(2),
+        local_day_rollover_utc: now + Duration::hours(22),
+        ..DayContext::default()
+    }
+}
+
+fn heavy_day_evening_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Dusk,
+        phase_started_at_utc: now - Duration::hours(1),
+        phase_ends_at_utc: now + Duration::hours(2),
+        today_ratio: 1.7,
+        tiredness: 0.85,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(13),
+        local_day_rollover_utc: now + Duration::hours(11),
+        ..DayContext::default()
+    }
+}
+
+fn light_day_morning_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Dawn,
+        phase_started_at_utc: now - Duration::minutes(40),
+        phase_ends_at_utc: now + Duration::minutes(80),
+        today_ratio: 0.02,
+        yesterday: Some(DaySummary {
+            ratio: 0.04,
+            dominant_shape: None,
+        }),
+        mature: true,
+        local_day_started_utc: now - Duration::hours(7),
+        local_day_rollover_utc: now + Duration::hours(17),
+        ..DayContext::default()
+    }
+}
+
+fn weekend_midday_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Day,
+        phase_started_at_utc: now - Duration::hours(3),
+        phase_ends_at_utc: now + Duration::hours(5),
+        is_weekend: true,
+        weekend_share: 0.05,
+        today_ratio: 0.3,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(12),
+        local_day_rollover_utc: now + Duration::hours(12),
+        ..DayContext::default()
+    }
+}
+
+fn climate_cache_week_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Day,
+        phase_started_at_utc: now - Duration::hours(3),
+        phase_ends_at_utc: now + Duration::hours(5),
+        climate: Some(WorkWeather::CacheMist),
+        today_ratio: 0.5,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(12),
+        local_day_rollover_utc: now + Duration::hours(12),
+        ..DayContext::default()
+    }
+}
+
+fn prop_resonance_planter_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Day,
+        phase_started_at_utc: now - Duration::hours(3),
+        phase_ends_at_utc: now + Duration::hours(5),
+        yesterday: Some(DaySummary {
+            ratio: 1.9,
+            dominant_shape: Some(WorkWeather::OutputSparks),
+        }),
+        today_ratio: 0.4,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(12),
+        local_day_rollover_utc: now + Duration::hours(12),
+        ..DayContext::default()
+    }
+}
+
+fn midnight_mid_session_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Night,
+        phase_started_at_utc: now - Duration::hours(2),
+        phase_ends_at_utc: now + Duration::hours(6),
+        asleep: false,
+        today_ratio: 0.03,
+        tiredness: 0.45,
+        yesterday: Some(DaySummary {
+            ratio: 1.3,
+            dominant_shape: Some(WorkWeather::Mixed),
+        }),
+        mature: true,
+        local_day_started_utc: now - Duration::minutes(10),
+        local_day_rollover_utc: now + Duration::hours(24) - Duration::minutes(10),
+        ..DayContext::default()
+    }
+}
+
 fn seed_usage_store(path: &Path, now: OffsetDateTime) -> Result<()> {
     let mut usage = UsageStore::open(path)?;
     for (surface, observed_at, effective_tokens, model) in [
@@ -671,7 +895,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 14);
+        assert_eq!(frames.len(), 21);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -695,6 +919,20 @@ mod tests {
         assert_eq!((frames[12].width, frames[12].height), (120, 32));
         assert_eq!(frames[13].id, "watch-daycontext-hatch-at-night");
         assert_eq!((frames[13].width, frames[13].height), (120, 32));
+        assert_eq!(frames[14].id, "watch-daycontext-dream-night");
+        assert_eq!((frames[14].width, frames[14].height), (120, 32));
+        assert_eq!(frames[15].id, "watch-daycontext-heavy-day-evening");
+        assert_eq!((frames[15].width, frames[15].height), (120, 32));
+        assert_eq!(frames[16].id, "watch-daycontext-light-day-morning");
+        assert_eq!((frames[16].width, frames[16].height), (120, 32));
+        assert_eq!(frames[17].id, "watch-daycontext-weekend-midday");
+        assert_eq!((frames[17].width, frames[17].height), (120, 32));
+        assert_eq!(frames[18].id, "watch-daycontext-climate-cache-week");
+        assert_eq!((frames[18].width, frames[18].height), (120, 32));
+        assert_eq!(frames[19].id, "watch-daycontext-prop-resonance-planter");
+        assert_eq!((frames[19].width, frames[19].height), (120, 32));
+        assert_eq!(frames[20].id, "watch-daycontext-midnight-mid-session");
+        assert_eq!((frames[20].width, frames[20].height), (120, 32));
     }
 
     #[test]

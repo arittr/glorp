@@ -1,0 +1,36 @@
+---
+source: tests/dev_preview.rs
+expression: frame
+---
+╭ glorp · Mochi · crystal · 96d · happy ✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦╮
+│                                                                                                                      │
+│                               '                                                                                      │
+│         ▲           ~                              ~                                                                 │
+│                                                 ·           ·       *  .  *                                     ╷    │
+│                        ◌           '                                  /██\                                      ◉    │
+│                                                                      /▓██\                    '                 ╵    │
+│               ·✦ '                                ~             ~   /██^.^█\/\                                       │
+│                                                              '      \▒█ω█▓/ \/                                       │
+│                                       ~                              \▒ + /                                     '    │
+│                  ·          .         ~                        ·      \▒◦/                                           │
+│                   ·                                        ·        ✦ ✧ ✦ ✧ ✦  ·        .                 ·   ѱ      │
+│       '     ·                   '                                                   ,                        ╲┃╱     │
+│        ·                    ·                                     ~                                           ◌      │
+│      ·  .·   ..·      .    ·    .   .  ·    · .·   · .   ·      .   ·   ..  ..   · · .  .  . ·   .·     ·  ·  ·· . .·│
+│                                                                                                                      │
+│ vitals ────────────────────────────────────────     today ───────────────────────────────────────────────────────────│
+│  fed        ██████████░░  86                         tokens            16,700                                        │
+│  happy      ███████████░  88                         claude            12,500    75%                                 │
+│  energy     ██████████░░  84                         codex              4,200    25%                                 │
+│                                                      last 10m          +16.7k    this 10m                            │
+│                                                      ·  ·  ·  ·  ·  ▅  █         ← 7-day                             │
+│                                                                                                                      │
+│ progress ──────────────────────────────────────     feed ────────────────────────────────────────────────────────────│
+│  stage      max evolved                              08:53  claude-code added 8.8k effective tokens                  │
+│                                                      08:39  Mochi caught a warm signal                               │
+│ bio ───────────────────────────────────────────      08:45  codex added 4.2k effective tokens                        │
+│  hatched   jul 05 08:53                              08:48  Mochi polished the crystal den                           │
+│  age       96d                                       08:48  claude-code added 12.5k effective tokens                 │
+│                                                      08:52  Mochi evolved into lodestar                              │
+│                                                                                                                      │
+╰ q quit · r refresh · m mouse · ? help ✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦✦╯
