@@ -104,7 +104,7 @@ fn normalize_claude_row(
     provider_surface: &str,
     row: &Value,
 ) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
-    let period_start = required_string(provider_surface, row, "date")?;
+    let period_start = period_start_field(provider_surface, row)?;
     if let Some(breakdowns) = row.get("modelBreakdowns").and_then(Value::as_array) {
         let mut records = Vec::new();
         for model_row in breakdowns {
@@ -138,7 +138,7 @@ fn normalize_codex_row(
     provider_surface: &str,
     row: &Value,
 ) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
-    let period_start = required_string(provider_surface, row, "date")?;
+    let period_start = period_start_field(provider_surface, row)?;
     if let Some(models) = row.get("models").and_then(Value::as_object) {
         let mut records = Vec::new();
         for (model, model_row) in models {
@@ -202,20 +202,25 @@ fn codex_totals(
     })
 }
 
-fn required_string(
-    provider_surface: &str,
-    value: &Value,
-    field: &str,
-) -> std::result::Result<String, ProviderDiagnostic> {
-    optional_string(value, field).ok_or_else(|| missing(provider_surface, field))
-}
-
 fn required_u64(
     provider_surface: &str,
     value: &Value,
     field: &str,
 ) -> std::result::Result<u64, ProviderDiagnostic> {
     optional_u64(value, field).ok_or_else(|| missing(provider_surface, field))
+}
+
+/// The daily row's period date. ccusage >= 20 renamed `date` to `period`
+/// (same `YYYY-MM-DD` value); older helpers — and ccusage-codex, which has
+/// not picked up the rename yet — still emit `date`. Prefer `date` so
+/// existing helper versions stay byte-stable, accept `period` as fallback.
+fn period_start_field(
+    provider_surface: &str,
+    row: &Value,
+) -> std::result::Result<String, ProviderDiagnostic> {
+    optional_string(row, "date")
+        .or_else(|| optional_string(row, "period"))
+        .ok_or_else(|| missing(provider_surface, "date/period"))
 }
 
 fn missing(provider_surface: &str, field: &str) -> ProviderDiagnostic {
@@ -274,6 +279,67 @@ mod tests {
             (1_610_000.0..1_611_000.0).contains(&effective),
             "got {effective}"
         );
+    }
+
+    #[test]
+    fn ccusage_v20_period_field_is_accepted_for_claude_and_codex_rows() {
+        // ccusage 20.x renamed the daily row's `date` field to `period`
+        // (observed live 2026-06-10: helper 20.0.6 broke every claude poll
+        // with "missing field date"). Both spellings must normalize.
+        let payload = serde_json::json!({
+            "daily": [{
+                "period": "2026-06-10",
+                "agent": "all",
+                "inputTokens": 30_344,
+                "outputTokens": 100_091,
+                "cacheCreationTokens": 1_893_797,
+                "cacheReadTokens": 9_813_957,
+                "totalCost": 0,
+                "modelsUsed": ["claude-fable-5"],
+                "modelBreakdowns": [{
+                    "modelName": "claude-fable-5",
+                    "inputTokens": 30_477,
+                    "outputTokens": 103_773,
+                    "cacheCreationTokens": 1_897_540,
+                    "cacheReadTokens": 10_761_204,
+                    "cost": 0.0
+                }]
+            }]
+        })
+        .to_string();
+        let records = normalize_usage_json("claude-code", &payload).unwrap();
+        assert!(!records.is_empty());
+        assert!(records.iter().all(|r| r.period_start == "2026-06-10"));
+
+        let codex_payload = serde_json::json!({
+            "daily": [{
+                "period": "2026-06-10",
+                "inputTokens": 100,
+                "outputTokens": 50,
+                "cachedInputTokens": 80,
+                "reasoningOutputTokens": 10
+            }]
+        })
+        .to_string();
+        let codex_records = normalize_usage_json("codex", &codex_payload).unwrap();
+        assert_eq!(codex_records[0].period_start, "2026-06-10");
+    }
+
+    #[test]
+    fn legacy_date_field_is_still_preferred_over_period() {
+        let payload = serde_json::json!({
+            "daily": [{
+                "date": "2026-06-09",
+                "period": "2026-06-10",
+                "inputTokens": 1,
+                "outputTokens": 1,
+                "cacheCreationTokens": 0,
+                "cacheReadTokens": 0
+            }]
+        })
+        .to_string();
+        let records = normalize_usage_json("claude-code", &payload).unwrap();
+        assert_eq!(records[0].period_start, "2026-06-09");
     }
 
     #[test]
