@@ -172,11 +172,20 @@ pub(crate) fn build_watch_view_model_at(
             .map(|stage| stage.as_str().to_string()),
         cursor_screen: None,
         mouse_tracking_enabled: true,
-        current_speech: crate::pet::speech::current_pet_speech(
-            mood,
-            recent_activity_tokens(&recent_usage, now),
-            now,
-        ),
+        current_speech: if day_context.asleep {
+            crate::pet::speech::current_pet_speech_for_scene(
+                mood,
+                &crate::tui::life::PetLifeProfile::default(),
+                true,
+                now,
+            )
+        } else {
+            crate::pet::speech::current_pet_speech(
+                mood,
+                recent_activity_tokens(&recent_usage, now),
+                now,
+            )
+        },
         wander_offset_x: 0, // computed at render time by the panel from area.width
         breath_offset_y: {
             let rhythm = match (day_context.asleep, day_context.sleep_onset_utc) {
@@ -384,7 +393,13 @@ pub(crate) fn poll_usage_and_apply(
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
         // Stage smeared ledger rows for new provider deltas before applying.
         stage_usage_poll_deltas(&mut usage_store, &result, state.calibration, now)?;
-        let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
+        let scene_asleep = crate::tui::day::scene_asleep_for_poll(
+            &usage_store,
+            &state,
+            now,
+            LocalDayMapper::System,
+        );
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now, scene_asleep)?;
         let applied_signal = update.applied_signal;
         state_store.save(&state)?;
         // Mark after save: a failure here drifts state.lifetime ahead of the
@@ -1053,18 +1068,6 @@ mod tests {
         }
     }
 
-    // Wrapper that accepts the 4-arg shape Task 11 will add to the real
-    // apply_unapplied_usage. Until then, the scene_asleep parameter is ignored
-    // and the test is #[ignore] so it does not run.
-    fn apply_unapplied_usage_for_test(
-        state: &mut PetState,
-        usage_store: &mut UsageStore,
-        now: OffsetDateTime,
-        _scene_asleep: bool,
-    ) -> crate::error::Result<crate::game::runtime::RuntimeUpdate> {
-        crate::game::runtime::apply_unapplied_usage(state, usage_store, now)
-    }
-
     #[test]
     fn status_today_and_watch_today_agree_across_a_midnight_boundary() {
         let dir = tempdir().unwrap();
@@ -1112,7 +1115,7 @@ mod tests {
             stage_usage_poll_deltas(&mut usage, &poll, state.calibration, now).unwrap();
         }
         let before = usage.today_effective_tokens(now, mapper).unwrap();
-        let update = apply_unapplied_usage(&mut state, &mut usage, now).unwrap();
+        let update = apply_unapplied_usage(&mut state, &mut usage, now, false).unwrap();
         usage
             .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
             .unwrap();
@@ -1124,7 +1127,7 @@ mod tests {
         assert!(after_one > 0.0, "the first apply makes <=500 rows visible");
         // Drain the backlog with successive apply/mark cycles; totals converge.
         for _ in 0..20 {
-            let u = apply_unapplied_usage(&mut state, &mut usage, now).unwrap();
+            let u = apply_unapplied_usage(&mut state, &mut usage, now, false).unwrap();
             usage
                 .mark_events_applied_and_advance_cursors(&u.applied_event_ids, now)
                 .unwrap();
@@ -1137,7 +1140,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "enabled by Task 11"]
     fn cold_start_catchup_wakes_the_pet_once_through_the_real_smear_path() {
         use crate::game::runtime::stage_usage_poll_deltas;
         let dir = tempdir().unwrap();
@@ -1166,7 +1168,9 @@ mod tests {
         // Drive the REAL smear: a poll result with one fat 6h-old delta.
         let poll = catchup_poll_result_for_test(120_000.0);
         stage_usage_poll_deltas(&mut usage, &poll, state.calibration, now).unwrap();
-        let update = apply_unapplied_usage_for_test(&mut state, &mut usage, now, false).unwrap();
+        let update =
+            crate::game::runtime::apply_unapplied_usage(&mut state, &mut usage, now, false)
+                .unwrap();
         usage
             .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
             .unwrap();

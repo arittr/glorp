@@ -366,7 +366,7 @@ fn catchup_application_records_each_stage_transition_once() {
         }
     }
 
-    let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+    let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
     usage_store
         .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
         .unwrap();
@@ -409,12 +409,14 @@ fn unapplied_usage_survives_state_save_failure_and_applies_once_next_run() {
 
     let mut failed_state = PetState::new_for_test("mochi-7f3a", "mochi");
     failed_state.calibration.daily_effective_tokens = 100_000.0;
-    let failed_update = apply_unapplied_usage(&mut failed_state, &mut usage_store, now).unwrap();
+    let failed_update =
+        apply_unapplied_usage(&mut failed_state, &mut usage_store, now, false).unwrap();
     assert_eq!(failed_update.applied_event_ids, vec![inserted_id]);
 
     let mut retried_state = PetState::new_for_test("mochi-7f3a", "mochi");
     retried_state.calibration.daily_effective_tokens = 100_000.0;
-    let retry_update = apply_unapplied_usage(&mut retried_state, &mut usage_store, now).unwrap();
+    let retry_update =
+        apply_unapplied_usage(&mut retried_state, &mut usage_store, now, false).unwrap();
     usage_store
         .mark_events_applied_and_advance_cursors(&retry_update.applied_event_ids, now)
         .unwrap();
@@ -554,13 +556,18 @@ fn reflected_unapplied_usage_does_not_unlock_ladder_twice_on_mark_retry() {
         now,
     )
     .unwrap();
-    let first_update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+    let first_update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
 
     assert_eq!(state.lifetime_effective_tokens, 60_000.0);
     assert_eq!(habitat_prop_ids(&state), vec!["token_pebble_25k"]);
 
-    let retry_update =
-        apply_unapplied_usage(&mut state, &mut usage_store, now + Duration::minutes(1)).unwrap();
+    let retry_update = apply_unapplied_usage(
+        &mut state,
+        &mut usage_store,
+        now + Duration::minutes(1),
+        false,
+    )
+    .unwrap();
 
     assert_eq!(
         retry_update.applied_event_ids,

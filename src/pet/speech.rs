@@ -44,7 +44,7 @@ pub fn current_pet_speech(
 /// Compute speech from the live presentation profile. Uses the same visibility
 /// cycle as token-based speech while deriving feeding reactions from normalized
 /// live activity instead of raw recent token totals.
-pub fn current_pet_speech_for_profile(
+pub(crate) fn current_pet_speech_for_profile(
     mood: Mood,
     profile: &crate::tui::life::PetLifeProfile,
     now: OffsetDateTime,
@@ -59,6 +59,34 @@ pub fn current_pet_speech_for_profile(
     }
 
     Some(mood_phrase(mood, now))
+}
+
+/// Show the sleep bubble only on every Nth 30s speech cycle — night is calm.
+const SLEEP_SPEECH_CYCLE_N: i64 = 3;
+const SLEEP_SPEECH_PHRASES: &[&str] = &["zzz...", "...zzz", "z z z"];
+
+/// Scene-aware speech selector: the T1 precedence subset. While asleep the
+/// only voice is the sparse zzz cadence (T2 splices dream windows into this
+/// branch); munch phrases and mood lines are suppressed — the petting
+/// override sits above this at the app layer.
+pub fn current_pet_speech_for_scene(
+    mood: Mood,
+    profile: &crate::tui::life::PetLifeProfile,
+    asleep: bool,
+    now: OffsetDateTime,
+) -> Option<String> {
+    if !asleep {
+        return current_pet_speech_for_profile(mood, profile, now);
+    }
+    let cycle_pos = now.unix_timestamp().rem_euclid(SPEECH_CYCLE_SECS);
+    let cycle_index = now.unix_timestamp().div_euclid(SPEECH_CYCLE_SECS);
+    if cycle_pos >= SPEECH_VISIBLE_SECS || cycle_index.rem_euclid(SLEEP_SPEECH_CYCLE_N) != 0 {
+        return None;
+    }
+    let idx = cycle_index
+        .div_euclid(SLEEP_SPEECH_CYCLE_N)
+        .rem_euclid(SLEEP_SPEECH_PHRASES.len() as i64) as usize;
+    Some(SLEEP_SPEECH_PHRASES[idx].to_string())
 }
 
 fn pick_munch_phrase(now: OffsetDateTime) -> String {
@@ -185,5 +213,32 @@ mod tests {
                 "got {phrase}"
             );
         }
+    }
+
+    #[test]
+    fn asleep_speech_is_a_sparse_zzz_cadence_and_suppresses_munch_and_mood_lines() {
+        // Visible slot of every SLEEP_SPEECH_CYCLE_N-th 30s cycle only.
+        let cycle0 = OffsetDateTime::from_unix_timestamp(90 * ((1_700_000_000) / 90)).unwrap();
+        let hot_profile = crate::tui::life::PetLifeProfile {
+            burst_level: 1.0, // would be a munch line awake
+            ..Default::default()
+        };
+        let line = current_pet_speech_for_scene(Mood::Hungry, &hot_profile, true, cycle0);
+        assert!(
+            matches!(line.as_deref(), Some(l) if SLEEP_SPEECH_PHRASES.contains(&l)),
+            "asleep at an eligible cycle: zzz, never munch or 'feed me?' — got {line:?}"
+        );
+        // The next cycle (not a multiple of SLEEP_SPEECH_CYCLE_N) is silent.
+        let cycle1 = cycle0 + time::Duration::seconds(30);
+        assert_eq!(
+            current_pet_speech_for_scene(Mood::Hungry, &hot_profile, true, cycle1),
+            None
+        );
+        // Awake delegates to the existing profile selector.
+        let awake = current_pet_speech_for_scene(Mood::Hungry, &hot_profile, false, cycle0);
+        assert_eq!(
+            awake,
+            current_pet_speech_for_profile(Mood::Hungry, &hot_profile, cycle0)
+        );
     }
 }

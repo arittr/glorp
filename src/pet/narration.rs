@@ -148,9 +148,15 @@ pub fn vital_phrase(name: &str, crossing: VitalCrossing) -> String {
     }
 }
 
-/// Produce an idle drift narration line.
-pub fn idle_phrase(name: &str, now: OffsetDateTime) -> String {
-    let variants: &[&str] = &["{name} drifted off", "{name} dreams"];
+/// Produce an idle drift narration line. Sleep-claiming variants are only
+/// eligible while the scene is actually asleep — the feed must never assert
+/// a sleep the pet panel contradicts (and vice versa).
+pub fn idle_phrase(name: &str, now: OffsetDateTime, asleep: bool) -> String {
+    let variants: &[&str] = if asleep {
+        &["{name} drifted off", "{name} dreams"]
+    } else {
+        &["{name} is quiet", "{name} settled in"]
+    };
     let idx = pick_idx(now, variants.len());
     variants[idx].replace("{name}", name)
 }
@@ -404,7 +410,7 @@ mod tests {
     #[test]
     fn idle_phrase_contains_name() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let phrase = idle_phrase("kit", now);
+        let phrase = idle_phrase("kit", now, false);
         assert!(phrase.contains("kit"), "phrase: {phrase}");
     }
 
@@ -414,8 +420,26 @@ mod tests {
         let mut phrases: std::collections::HashSet<String> = std::collections::HashSet::new();
         for tick in 0..4i64 {
             let now = base + time::Duration::seconds(tick * 30);
-            phrases.insert(idle_phrase("buddy", now));
+            phrases.insert(idle_phrase("buddy", now, false));
         }
         assert_eq!(phrases.len(), 2, "both idle variants should appear");
+    }
+
+    #[test]
+    fn sleep_claiming_idle_lines_are_only_eligible_while_asleep() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        for offset in 0..4 {
+            let at = now + time::Duration::seconds(offset * 30);
+            let awake = idle_phrase("buddy", at, false);
+            assert!(
+                !awake.contains("drifted off") && !awake.contains("dreams"),
+                "awake idle must not claim sleep: {awake}"
+            );
+            let asleep = idle_phrase("buddy", at, true);
+            assert!(
+                asleep.contains("drifted off") || asleep.contains("dreams"),
+                "asleep idle uses the sleep vocabulary: {asleep}"
+            );
+        }
     }
 }

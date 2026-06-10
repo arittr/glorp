@@ -32,7 +32,14 @@ pub fn run() -> Result<()> {
                     let now = OffsetDateTime::now_utc();
                     // Stage smeared ledger rows for new provider deltas before applying.
                     stage_usage_poll_deltas(&mut usage_store, &result, state.calibration, now)?;
-                    let update = apply_unapplied_usage(&mut state, &mut usage_store, now)?;
+                    let scene_asleep = crate::tui::day::scene_asleep_for_poll(
+                        &usage_store,
+                        &state,
+                        now,
+                        crate::storage::day_axis::LocalDayMapper::System,
+                    );
+                    let update =
+                        apply_unapplied_usage(&mut state, &mut usage_store, now, scene_asleep)?;
                     store.save(&state)?;
                     // Mark after save: a failure here drifts state.lifetime ahead of the
                     // usage store; the next successful run reconciles via the ledger.

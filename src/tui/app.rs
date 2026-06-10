@@ -566,9 +566,10 @@ impl WatchApp {
         } else {
             None
         };
-        result.vm.current_speech = crate::pet::speech::current_pet_speech_for_profile(
+        result.vm.current_speech = crate::pet::speech::current_pet_speech_for_scene(
             result.vm.pet_render.mood,
             &result.vm.life_profile,
+            result.vm.day_context.asleep,
             now,
         );
         append_profile_pet_activities(&mut result.vm, now);

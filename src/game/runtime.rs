@@ -110,6 +110,7 @@ pub fn apply_unapplied_usage(
     state: &mut PetState,
     usage_store: &mut UsageStore,
     now: OffsetDateTime,
+    scene_asleep: bool,
 ) -> Result<RuntimeUpdate> {
     reconcile_stage_with_xp(state);
     let previous_poll_at = state.last_usage_poll_at;
@@ -153,7 +154,7 @@ pub fn apply_unapplied_usage(
             if idle_for >= Duration::minutes(30)
                 && last_narration_age.is_none_or(|age| age >= Duration::hours(6))
             {
-                let text = narration::idle_phrase(&state.pet.accepted_name.clone(), now);
+                let text = narration::idle_phrase(&state.pet.accepted_name, now, scene_asleep);
                 state.recent_events.push(NarrativeEvent {
                     observed_at: now,
                     text,
@@ -351,7 +352,7 @@ pub fn apply_usage_poll(
     now: OffsetDateTime,
 ) -> Result<RuntimeUpdate> {
     stage_usage_poll_deltas(usage_store, poll, state.calibration, now)?;
-    let update = apply_unapplied_usage(state, usage_store, now)?;
+    let update = apply_unapplied_usage(state, usage_store, now, false)?;
     usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
     Ok(update)
 }
@@ -492,6 +493,43 @@ mod tests {
     };
     use tempfile::tempdir;
     use time::macros::datetime;
+    use time::OffsetDateTime;
+
+    #[test]
+    fn idle_narration_uses_sleep_vocabulary_only_when_scene_asleep() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut usage = UsageStore::open(&db_path).unwrap();
+        let mut state = PetState::new_for_test("seed", "buddy");
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        state.last_usage_poll_at = Some(now - Duration::minutes(30));
+
+        apply_unapplied_usage(&mut state, &mut usage, now, true).unwrap();
+        let last_asleep = state
+            .recent_events
+            .last()
+            .map(|e| e.text.as_str())
+            .unwrap_or("");
+        assert!(
+            last_asleep.contains("drifted off") || last_asleep.contains("dreams"),
+            "expected sleep vocabulary, got: {last_asleep}"
+        );
+
+        state.recent_events.clear();
+        state.last_idle_narration_at = None;
+        state.last_usage_poll_at = Some(now - Duration::minutes(30));
+
+        apply_unapplied_usage(&mut state, &mut usage, now, false).unwrap();
+        let last_awake = state
+            .recent_events
+            .last()
+            .map(|e| e.text.as_str())
+            .unwrap_or("");
+        assert!(
+            !last_awake.contains("drifted off") && !last_awake.contains("dreams"),
+            "awake idle must not claim sleep: {last_awake}"
+        );
+    }
 
     #[test]
     fn apply_unapplied_usage_returns_applied_signal_summary() {
@@ -551,7 +589,7 @@ mod tests {
             )
             .unwrap();
 
-        let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
 
         assert_eq!(update.applied_signal.freshness, UsageSignalFreshness::Live);
         assert_eq!(update.applied_signal.applied_effective_tokens, 30_000.0);
@@ -604,7 +642,7 @@ mod tests {
             )
             .unwrap();
 
-        let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
 
         assert_eq!(update.applied_signal.applied_effective_tokens, 20_000.0);
         assert_eq!(
@@ -648,7 +686,7 @@ mod tests {
             )
             .unwrap();
 
-        let update = apply_unapplied_usage(&mut state, &mut usage_store, now).unwrap();
+        let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
 
         assert_eq!(
             update.applied_signal.freshness,
