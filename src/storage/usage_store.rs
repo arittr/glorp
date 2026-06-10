@@ -25,6 +25,23 @@ pub struct NormalizedUsageEvent {
     pub provider_delta_id: Option<String>,
 }
 
+/// Component sums for a day-window token-shape read (DaySummary/climate input).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AppliedShapeSums {
+    /// Sum of raw input tokens.
+    pub input_tokens: f64,
+    /// Sum of raw output tokens.
+    pub output_tokens: f64,
+    /// Sum of cache creation tokens.
+    pub cache_creation_tokens: f64,
+    /// Sum of cache read tokens.
+    pub cache_read_tokens: f64,
+    /// Sum of reasoning output tokens.
+    pub reasoning_output_tokens: f64,
+    /// Sum of effective tokens (weighted composite).
+    pub effective_tokens: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCursorUpdate {
     pub provider_surface: String,
@@ -243,6 +260,9 @@ impl UsageStore {
         Ok(id)
     }
 
+    /// Compacts usage events whose `period_start` and `bucket_at` are both
+    /// strictly less than `cutoff` into `daily_aggregates`. Rows with a NULL
+    /// `applied_at` (unapplied events) are never touched.
     pub fn compact_before(&mut self, cutoff: OffsetDateTime) -> crate::error::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -816,6 +836,135 @@ impl UsageStore {
         Ok(rows)
     }
 
+    /// Applied-only effective-token sum over the half-open bucket_at window
+    /// `[start, end)`.
+    ///
+    /// Caller must ensure `start`/`end` share subsecond precision with stored
+    /// `bucket_at` values (whole seconds / 10-minute-floored). Mixed fractional
+    /// / whole-second bounds can misorder under lexical RFC3339 comparison.
+    pub fn applied_effective_tokens_between(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> crate::error::Result<f64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(effective_tokens), 0.0)
+                 FROM usage_events
+                 WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2",
+                params![format_time(start)?, format_time(end)?],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Applied-only bucket sums over `[start, end)`, ascending.
+    ///
+    /// Groups by distinct `bucket_at` value (not by 10-minute truncation).
+    ///
+    /// Caller must ensure `start`/`end` share subsecond precision with stored
+    /// `bucket_at` values (whole seconds / 10-minute-floored). Mixed fractional
+    /// / whole-second bounds can misorder under lexical RFC3339 comparison.
+    pub fn applied_bucket_sums_between(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> crate::error::Result<Vec<(OffsetDateTime, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT bucket_at, SUM(effective_tokens)
+             FROM usage_events
+             WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2
+             GROUP BY bucket_at
+             ORDER BY bucket_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![format_time(start)?, format_time(end)?], |row| {
+                let at: String = row.get(0)?;
+                Ok((parse_time_for_sql(&at)?, row.get::<_, f64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Applied-only token-shape component sums over `[start, end)`.
+    ///
+    /// Caller must ensure `start`/`end` share subsecond precision with stored
+    /// `bucket_at` values (whole seconds / 10-minute-floored). Mixed fractional
+    /// / whole-second bounds can misorder under lexical RFC3339 comparison.
+    pub fn applied_token_shape_between(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> crate::error::Result<AppliedShapeSums> {
+        self.conn
+            .query_row(
+                "SELECT
+                    COALESCE(SUM(input_tokens), 0.0),
+                    COALESCE(SUM(output_tokens), 0.0),
+                    COALESCE(SUM(cache_creation_tokens), 0.0),
+                    COALESCE(SUM(cache_read_tokens), 0.0),
+                    COALESCE(SUM(reasoning_output_tokens), 0.0),
+                    COALESCE(SUM(effective_tokens), 0.0)
+                 FROM usage_events
+                 WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2",
+                params![format_time(start)?, format_time(end)?],
+                |row| {
+                    Ok(AppliedShapeSums {
+                        input_tokens: row.get(0)?,
+                        output_tokens: row.get(1)?,
+                        cache_creation_tokens: row.get(2)?,
+                        cache_read_tokens: row.get(3)?,
+                        reasoning_output_tokens: row.get(4)?,
+                        effective_tokens: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Newest applied bucket_at, if any. No upper bound: future-dated rows
+    /// (clock set backwards) surface here, which is the fail-awake rule.
+    pub fn latest_applied_bucket_at(&self) -> crate::error::Result<Option<OffsetDateTime>> {
+        let max: Option<String> = self.conn.query_row(
+            "SELECT MAX(bucket_at) FROM usage_events WHERE applied_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        max.map(|s| parse_time_for_sql(&s).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Newest applied bucket_at strictly before `at` (wake-resume easing).
+    ///
+    /// Caller must ensure `at` shares subsecond precision with stored
+    /// `bucket_at` values (whole seconds / 10-minute-floored). Mixed fractional
+    /// / whole-second bounds can misorder under lexical RFC3339 comparison.
+    pub fn latest_applied_bucket_at_before(
+        &self,
+        at: OffsetDateTime,
+    ) -> crate::error::Result<Option<OffsetDateTime>> {
+        let max: Option<String> = self.conn.query_row(
+            "SELECT MAX(bucket_at) FROM usage_events
+             WHERE applied_at IS NOT NULL AND bucket_at < ?1",
+            params![format_time(at)?],
+            |row| row.get(0),
+        )?;
+        max.map(|s| parse_time_for_sql(&s).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Whether the pet has ever eaten (any applied row). Newborn sleep gate.
+    pub fn has_any_applied_events(&self) -> crate::error::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM usage_events WHERE applied_at IS NOT NULL)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .map_err(Into::into)
+    }
+
     pub fn seven_day_token_history(
         &self,
         now_utc_date: time::Date,
@@ -1362,6 +1511,13 @@ mod tests {
             sum, 0.0,
             "both-axes-old rows must move into daily_aggregates"
         );
+        assert_eq!(
+            store
+                .daily_aggregate_effective_tokens("claude-code")
+                .unwrap(),
+            4_444.0,
+            "compacted row must roll up into daily_aggregates"
+        );
     }
 
     #[test]
@@ -1377,5 +1533,179 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn applied_effective_tokens_between_excludes_unapplied_rows() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store.insert_event(&sample_event_at(now, 1_000.0)).unwrap(); // applied
+        let staged = NormalizedUsageEvent {
+            observed_at: now,
+            bucket_at: now,
+            ..NormalizedUsageEvent::for_test_at(now, 500.0)
+        };
+        store
+            .insert_unapplied_event_bucket(
+                &staged,
+                &ProviderCursorUpdate {
+                    provider_surface: "claude-code".into(),
+                    cursor_key: "k".into(),
+                    cursor_value: "v".into(),
+                    provider_version: "p".into(),
+                    parser_version: "q".into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+        let sum = store
+            .applied_effective_tokens_between(
+                now - time::Duration::hours(1),
+                now + time::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(
+            sum, 1_000.0,
+            "staged rows must not leak into DayContext reads"
+        );
+    }
+
+    #[test]
+    fn applied_effective_tokens_between_is_half_open() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let start = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let end = start + time::Duration::hours(24);
+        store.insert_event(&sample_event_at(start, 1.0)).unwrap(); // == start: in
+        store.insert_event(&sample_event_at(end, 2.0)).unwrap(); // == end: out
+        assert_eq!(
+            store.applied_effective_tokens_between(start, end).unwrap(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn applied_bucket_sums_between_groups_by_bucket() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let t0 = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store.insert_event(&sample_event_at(t0, 100.0)).unwrap();
+        store.insert_event(&sample_event_at(t0, 50.0)).unwrap(); // same bucket
+        store
+            .insert_event(&sample_event_at(t0 + time::Duration::minutes(10), 25.0))
+            .unwrap();
+        let sums = store
+            .applied_bucket_sums_between(
+                t0 - time::Duration::minutes(10),
+                t0 + time::Duration::hours(1),
+            )
+            .unwrap();
+        assert_eq!(sums.len(), 2);
+        assert_eq!(sums[0].1, 150.0);
+        assert_eq!(sums[1].1, 25.0);
+    }
+
+    #[test]
+    fn applied_token_shape_between_sums_components() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let mut event = sample_event_at(now, 1_030.0);
+        event.input_tokens = 500.0;
+        event.output_tokens = 400.0;
+        event.cache_creation_tokens = 100.0;
+        event.cache_read_tokens = 1_000.0; // stored effective_tokens is 1030 assuming 0.03 cache-read weighting
+        event.reasoning_output_tokens = 0.0;
+        store.insert_event(&event).unwrap();
+        let shape = store
+            .applied_token_shape_between(
+                now - time::Duration::hours(1),
+                now + time::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(shape.input_tokens, 500.0);
+        assert_eq!(shape.output_tokens, 400.0);
+        assert_eq!(shape.cache_creation_tokens, 100.0);
+        assert_eq!(shape.cache_read_tokens, 1_000.0);
+        assert_eq!(shape.reasoning_output_tokens, 0.0);
+        assert_eq!(shape.effective_tokens, 1_030.0);
+    }
+
+    #[test]
+    fn latest_applied_bucket_at_and_existence_probes() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        assert!(!store.has_any_applied_events().unwrap());
+        assert_eq!(store.latest_applied_bucket_at().unwrap(), None);
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store.insert_event(&sample_event_at(now, 1.0)).unwrap();
+        store
+            .insert_event(&sample_event_at(now - time::Duration::hours(2), 1.0))
+            .unwrap();
+        assert!(store.has_any_applied_events().unwrap());
+        assert_eq!(store.latest_applied_bucket_at().unwrap(), Some(now));
+        assert_eq!(
+            store.latest_applied_bucket_at_before(now).unwrap(),
+            Some(now - time::Duration::hours(2))
+        );
+    }
+
+    #[test]
+    fn applied_effective_tokens_between_returns_zero_when_empty() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        assert_eq!(
+            store
+                .applied_effective_tokens_between(now - time::Duration::hours(1), now,)
+                .unwrap(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn applied_bucket_sums_between_returns_empty_when_empty() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        assert!(store
+            .applied_bucket_sums_between(now - time::Duration::hours(1), now,)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn applied_token_shape_between_returns_default_when_empty() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let shape = store
+            .applied_token_shape_between(now - time::Duration::hours(1), now)
+            .unwrap();
+        assert_eq!(shape, AppliedShapeSums::default());
+    }
+
+    #[test]
+    fn has_any_applied_events_false_with_only_unapplied_rows() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let staged = sample_event_at(now, 500.0);
+        store
+            .insert_unapplied_event_bucket(
+                &staged,
+                &ProviderCursorUpdate {
+                    provider_surface: "claude-code".into(),
+                    cursor_key: "k".into(),
+                    cursor_value: "v".into(),
+                    provider_version: "p".into(),
+                    parser_version: "q".into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+        assert!(!store.has_any_applied_events().unwrap());
+    }
+
+    #[test]
+    fn latest_applied_bucket_at_before_returns_none_when_no_earlier_bucket() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store.insert_event(&sample_event_at(now, 1.0)).unwrap();
+        assert_eq!(store.latest_applied_bucket_at_before(now).unwrap(), None);
     }
 }
