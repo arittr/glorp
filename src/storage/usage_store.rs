@@ -939,6 +939,19 @@ impl UsageStore {
             .transpose()
     }
 
+    /// When the most recent apply happened (MAX(applied_at)) — the wake
+    /// instant for resume easing; bucket_at is 10-minute-floored and too
+    /// coarse for an 8-second ease.
+    pub fn latest_applied_marked_at(&self) -> crate::error::Result<Option<OffsetDateTime>> {
+        let max: Option<String> = self.conn.query_row(
+            "SELECT MAX(applied_at) FROM usage_events WHERE applied_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        max.map(|s| parse_time_for_sql(&s).map_err(Into::into))
+            .transpose()
+    }
+
     /// Newest applied bucket_at strictly before `at` (wake-resume easing).
     ///
     /// Caller must ensure `at` shares subsecond precision with stored
@@ -1647,6 +1660,15 @@ mod tests {
             store.latest_applied_bucket_at_before(now).unwrap(),
             Some(now - time::Duration::hours(2))
         );
+    }
+
+    #[test]
+    fn latest_applied_marked_at_returns_max_applied_at() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        assert_eq!(store.latest_applied_marked_at().unwrap(), None);
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        store.insert_event(&sample_event_at(now, 1.0)).unwrap();
+        assert_eq!(store.latest_applied_marked_at().unwrap(), Some(now));
     }
 
     #[test]

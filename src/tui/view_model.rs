@@ -12,6 +12,9 @@ pub struct WatchViewModel {
     pub pet_render: PetRenderModel,
     pub habitat: HabitatView,
     pub life_profile: PetLifeProfile,
+    /// Derived time-of-day context. Built once per poll alongside the vm;
+    /// per-frame consumers compare clock instants against its UTC boundaries.
+    pub day_context: crate::tui::day::DayContext,
     pub pet_name: String,
     pub species: String,
     pub stage: String,
@@ -169,6 +172,7 @@ impl WatchViewModel {
                 earned_props: Vec::new(),
             },
             life_profile: PetLifeProfile::default(),
+            day_context: crate::tui::day::DayContext::default(),
             pet_name: "miso".into(),
             species: "terminal sprout".into(),
             stage: "hatchling".into(),

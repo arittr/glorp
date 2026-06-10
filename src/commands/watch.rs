@@ -68,6 +68,7 @@ pub(crate) fn build_watch_view_model_at(
     mapper: LocalDayMapper,
 ) -> Result<WatchViewModel> {
     let usage_store = UsageStore::open(usage_db)?;
+    let day_context = crate::tui::day::build_day_context(&usage_store, state, now, mapper);
     let recent_usage = usage_store.recent_events(500)?;
     let species = state.pet.generated_species;
     let stage = state.stage;
@@ -86,7 +87,6 @@ pub(crate) fn build_watch_view_model_at(
     // Canonical local-day axis: the mapper is injectable so tests and Preview
     // Lab can pin an offset while production resolves the OS timezone.
     let local_offset = mapper.offset_at(now);
-    let _now_local = now.to_offset(local_offset);
     let today_start = mapper
         .local_day_start(mapper.local_date(now))
         .to_offset(time::UtcOffset::UTC);
@@ -146,6 +146,7 @@ pub(crate) fn build_watch_view_model_at(
         },
         habitat: build_habitat_view(state),
         life_profile: crate::tui::life::PetLifeProfile::default(),
+        day_context,
         pet_name: state.pet.accepted_name.clone(),
         species: species.as_str().to_string(),
         stage: stage_label(species, stage).to_string(),
@@ -477,12 +478,12 @@ fn source_health(
     names
         .into_iter()
         .map(|name| {
-            let today_effective_tokens = lookup(today_totals, &name);
+            let today_for_source = lookup(today_totals, &name);
             let bucket_effective_tokens = lookup(last_10m_totals, &name);
             let diagnostic = diagnostics
                 .iter()
                 .find(|diagnostic| diagnostic.provider_surface == name);
-            let status = if today_effective_tokens > 0.0 || bucket_effective_tokens > 0.0 {
+            let status = if today_for_source > 0.0 || bucket_effective_tokens > 0.0 {
                 SourceStatus::Ready
             } else if diagnostic.is_some() {
                 SourceStatus::Diagnostic
@@ -492,7 +493,7 @@ fn source_health(
             SourceHealthView {
                 name,
                 status,
-                today_effective_tokens,
+                today_effective_tokens: today_for_source,
                 bucket_effective_tokens,
                 diagnostic_code: diagnostic.map(|diagnostic| diagnostic.code.clone()),
                 diagnostic_message: diagnostic.map(|diagnostic| diagnostic.message.clone()),
@@ -1016,6 +1017,42 @@ mod tests {
         }
     }
 
+    fn catchup_poll_result_for_test(effective_tokens: f64) -> UsagePollResult {
+        UsagePollResult {
+            deltas: vec![UsageDelta {
+                provider_surface: "claude-code".into(),
+                command: "ccusage daily --json --offline".into(),
+                effective_tokens,
+                confidence: "local-log-derived".into(),
+                period_start: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                observed_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                model: Some("test-model".into()),
+                cursor_update: ProviderCursorUpdate {
+                    provider_surface: "claude-code".into(),
+                    cursor_key: "catchup-test".into(),
+                    cursor_value: "delayed-row".into(),
+                    provider_version: "test-provider".into(),
+                    parser_version: "test-parser".into(),
+                },
+                token_totals: None,
+            }],
+            diagnostics: vec![],
+            total_effective_tokens: effective_tokens,
+        }
+    }
+
+    // Wrapper that accepts the 4-arg shape Task 11 will add to the real
+    // apply_unapplied_usage. Until then, the scene_asleep parameter is ignored
+    // and the test is #[ignore] so it does not run.
+    fn apply_unapplied_usage_for_test(
+        state: &mut PetState,
+        usage_store: &mut UsageStore,
+        now: OffsetDateTime,
+        _scene_asleep: bool,
+    ) -> crate::error::Result<crate::game::runtime::RuntimeUpdate> {
+        crate::game::runtime::apply_unapplied_usage(state, usage_store, now)
+    }
+
     #[test]
     fn status_today_and_watch_today_agree_across_a_midnight_boundary() {
         let dir = tempdir().unwrap();
@@ -1084,6 +1121,57 @@ mod tests {
         assert!(
             drained > after_one,
             "successive polls converge the backlog into the visible total"
+        );
+    }
+
+    #[test]
+    #[ignore = "enabled by Task 11"]
+    fn cold_start_catchup_wakes_the_pet_once_through_the_real_smear_path() {
+        use crate::game::runtime::stage_usage_poll_deltas;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut usage = UsageStore::open(&db_path).unwrap();
+        let mut state = PetState::new_for_test("seed", "buddy");
+        let now = PrimitiveDateTime::new(
+            Date::from_calendar_date(2026, Month::June, 9).unwrap(),
+            Time::from_hms(23, 30, 0).unwrap(),
+        )
+        .assume_utc();
+        state.created_at = now - Duration::days(3);
+        state.last_usage_poll_at = Some(now - Duration::hours(6)); // long gap => Backfill
+                                                                   // Give the pet sleep-eligible history: one applied row hours ago.
+        usage
+            .insert_event(&NormalizedUsageEvent {
+                observed_at: now - Duration::hours(5),
+                bucket_at: now - Duration::hours(5),
+                ..NormalizedUsageEvent::for_test_at(now - Duration::hours(5), 1_000.0)
+            })
+            .unwrap();
+        let mapper = crate::storage::day_axis::LocalDayMapper::Fixed(time::UtcOffset::UTC);
+        let pre = crate::tui::day::build_day_context(&usage, &state, now, mapper);
+        assert!(pre.asleep, "pet is asleep before the catch-up poll");
+
+        // Drive the REAL smear: a poll result with one fat 6h-old delta.
+        let poll = catchup_poll_result_for_test(120_000.0);
+        stage_usage_poll_deltas(&mut usage, &poll, state.calibration, now).unwrap();
+        let update = apply_unapplied_usage_for_test(&mut state, &mut usage, now, false).unwrap();
+        usage
+            .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+            .unwrap();
+
+        let post = crate::tui::day::build_day_context(&usage, &state, now, mapper);
+        assert!(
+            !post.asleep,
+            "the accepted catch-up wake: newly applied tokens wake the pet"
+        );
+        // ...but the wake is gentle: backfill cannot fire burst animations.
+        assert!(!update.applied_signal.can_burst());
+        // And it is bounded: SLEEP_IDLE_MINUTES later with no new rows, back asleep.
+        let later = now + Duration::minutes(crate::tui::day::SLEEP_IDLE_MINUTES + 11);
+        let resettled = crate::tui::day::build_day_context(&usage, &state, later, mapper);
+        assert!(
+            resettled.asleep,
+            "one wake, then re-sleep after the idle window"
         );
     }
 }

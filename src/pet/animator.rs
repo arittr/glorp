@@ -47,6 +47,9 @@ const SHIMMER_DURATION_SECS: i64 = 1;
 const SHIMMER_PERIOD_SECS: i64 = 22;
 /// Twinkle period: a sparkle glyph fires for ~1 frame every 7s.
 const TWINKLE_PERIOD_SECS: i64 = 7;
+/// Sleep onset/wake position easing window, seconds. Also consumed by
+/// tui::day's wake-resume derivation.
+pub const WANDER_SETTLE_SECS: i64 = 8;
 
 /// Per-effect key. Used by `add_unique_effect` so a new transition of the
 /// same kind cancels the previous one in flight (e.g., mood changing twice

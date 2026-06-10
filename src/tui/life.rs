@@ -86,7 +86,7 @@ pub enum SourceAccent {
     Balanced,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkWeather {
     Clear,
     CacheMist,
