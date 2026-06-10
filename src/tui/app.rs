@@ -350,7 +350,11 @@ impl WatchApp {
     /// real PetState happiness/energy from disk.
     fn pet_the_pet(&mut self) {
         let now_wall = time::OffsetDateTime::now_utc();
-        let phrase = crate::pet::speech::pick_petting_phrase(now_wall);
+        let phrase = if self.vm.day_context.asleep {
+            crate::pet::speech::pick_sleep_petting_phrase(now_wall)
+        } else {
+            crate::pet::speech::pick_petting_phrase(now_wall)
+        };
         self.vm.current_speech = Some(phrase.clone());
         self.petting_phrase = Some(phrase);
         self.pet_petted_at = Some(Instant::now());
@@ -1041,6 +1045,26 @@ mod tests {
         assert!(
             !app.last_hold_eyes_closed_for_test(),
             "help overlay must keep eyes open even while asleep"
+        );
+    }
+
+    #[test]
+    fn petting_a_sleeping_pet_uses_the_sleep_pool_and_does_not_wake_it() {
+        let mut app = WatchApp::new(WatchViewModel::fixture());
+        app.vm.day_context.asleep = true;
+        app.pet_the_pet();
+        let speech = app
+            .vm
+            .current_speech
+            .clone()
+            .expect("petting should set speech");
+        assert!(
+            crate::pet::speech::SLEEP_PETTING_PHRASES.contains(&speech.as_str()),
+            "expected sleep petting phrase, got {speech}"
+        );
+        assert!(
+            app.vm.day_context.asleep,
+            "petting must not mutate day_context.asleep"
         );
     }
 }

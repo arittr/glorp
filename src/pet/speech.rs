@@ -86,6 +86,16 @@ pub fn pick_petting_phrase(now: OffsetDateTime) -> String {
     PHRASES[idx].to_string()
 }
 
+/// Reaction pool when the user pets a SLEEPING pet: it stirs but stays
+/// asleep — petting is affection, not food, so it never wakes the pet.
+pub(crate) const SLEEP_PETTING_PHRASES: &[&str] =
+    &["*snore*", "*stirs*", "...zzz", "*curls up tighter*"];
+
+pub fn pick_sleep_petting_phrase(now: OffsetDateTime) -> String {
+    let idx = (now.unix_timestamp()).rem_euclid(SLEEP_PETTING_PHRASES.len() as i64) as usize;
+    SLEEP_PETTING_PHRASES[idx].to_string()
+}
+
 fn mood_phrase(mood: Mood, now: OffsetDateTime) -> String {
     let phrases: &[&str] = match mood {
         Mood::Happy => &["great job!", "feeling fantastic", "all good!", "happy days"],
@@ -162,5 +172,15 @@ mod tests {
         let happy = current_pet_speech(Mood::Happy, 0.0, visible);
         let sleepy = current_pet_speech(Mood::Sleepy, 0.0, visible);
         assert_ne!(happy, sleepy);
+    }
+
+    #[test]
+    fn sleep_petting_phrases_come_from_the_sleep_pool() {
+        let now = datetime!(2026-06-09 23:30 UTC);
+        let phrase = pick_sleep_petting_phrase(now);
+        assert!(
+            SLEEP_PETTING_PHRASES.contains(&phrase.as_str()),
+            "got {phrase}"
+        );
     }
 }

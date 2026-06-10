@@ -795,6 +795,9 @@ fn darken_style(style: Style, multiplier: f32) -> Style {
 /// x ∈ [-1.0, 1.0] relative to the panel center, or None when the cursor is
 /// outside the rect, missing, or mouse tracking is disabled.
 fn cursor_normalized_x_within(vm: &WatchViewModel, area: Rect) -> Option<f32> {
+    if vm.day_context.asleep {
+        return None;
+    }
     if !vm.mouse_tracking_enabled {
         return None;
     }
@@ -1262,6 +1265,20 @@ mod tests {
         vm.mouse_tracking_enabled = false;
         let area = Rect::new(0, 0, 40, 5);
         assert!(cursor_normalized_x_within(&vm, area).is_none());
+    }
+
+    #[test]
+    fn cursor_eyes_are_disabled_while_asleep() {
+        let mut vm = WatchViewModel::fixture();
+        vm.mouse_tracking_enabled = true;
+        vm.cursor_screen = Some((5, 5));
+        vm.day_context.asleep = true;
+        let area = Rect::new(0, 0, 20, 10);
+        assert_eq!(
+            cursor_normalized_x_within(&vm, area),
+            None,
+            "closed eyes must not pop open to follow the mouse"
+        );
     }
 
     #[test]
