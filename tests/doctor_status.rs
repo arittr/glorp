@@ -296,3 +296,40 @@ fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
     assert_eq!(saved.vitals.happiness, 65.0);
     assert_eq!(saved.vitals.energy, 66.0);
 }
+
+#[test]
+fn status_surfaces_usage_discontinuity_without_claiming_blocked() {
+    let dir = tempdir().unwrap();
+    let mut state = PetState::new_for_test("fixture-seed", "mochi");
+    state.calibration.daily_effective_tokens = 10_000.0;
+    glorp::storage::state::StateStore::new(dir.path().join("state.json"))
+        .save(&state)
+        .unwrap();
+    // Deliberately NO establish_provider_contact: both helpers are first
+    // contact, so the guard refuses their history.
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
+        .env(
+            "GLORP_CCUSAGE_CODEX_BIN",
+            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
+        )
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider: local-log-derived"))
+        .stdout(predicate::str::contains("provider health: ok"))
+        .stdout(predicate::str::contains("diagnostic: usage_discontinuity"))
+        .stdout(predicate::str::contains("declined an implausible feast"))
+        .stdout(predicate::str::contains("blocked").not());
+
+    let saved: PetState =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        saved.lifetime_effective_tokens, 0.0,
+        "refused tokens never feed"
+    );
+}

@@ -631,12 +631,14 @@ impl WatchUsagePoller for NoopWatchPoller {
 }
 
 fn append_profile_pet_activities(vm: &mut WatchViewModel, now: time::OffsetDateTime) {
+    let local_offset = crate::storage::day_axis::LocalDayMapper::System.offset_at(now);
     let activities = crate::pet::activity::derive_profile_pet_activities(
         &vm.pet_name,
         vm.pet_render.generated_species,
         vm.pet_render.mood,
         &vm.life_profile,
         now,
+        local_offset,
     );
     for activity in activities {
         if !vm
@@ -774,12 +776,9 @@ pub fn render_hatch_overlay_for_test(frame: &mut ratatui::Frame<'_>) {
 }
 
 fn timestamp_column(timestamp: &str) -> String {
-    timestamp
-        .split('T')
-        .nth(1)
-        .and_then(|time| time.get(0..5))
-        .unwrap_or("--:--")
-        .to_string()
+    time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+        .map(|instant| crate::pet::activity::format_hhmm_local(instant, instant.offset()))
+        .unwrap_or_else(|_| "--:--".into())
 }
 
 #[cfg(test)]
@@ -1078,5 +1077,15 @@ mod tests {
             app.vm.day_context.asleep,
             "petting must not mutate day_context.asleep"
         );
+    }
+
+    #[test]
+    fn harness_timestamp_column_formats_hhmm_in_the_string_offset() {
+        assert_eq!(super::timestamp_column("2026-05-09T13:42:00Z"), "13:42");
+        assert_eq!(
+            super::timestamp_column("2026-05-09T23:00:00-07:00"),
+            "23:00"
+        );
+        assert_eq!(super::timestamp_column("not a timestamp"), "--:--");
     }
 }

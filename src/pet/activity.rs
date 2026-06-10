@@ -36,13 +36,14 @@ pub fn derive_pet_activities(
     usage_events: &[NormalizedUsageEvent],
     seen_stage_transitions: &[Stage],
     now: OffsetDateTime,
+    local_offset: time::UtcOffset,
 ) -> Vec<EventView> {
     let mut out = Vec::new();
 
     // 1. Most recent stage transition (if any) → evolution activity.
     if let Some(last) = seen_stage_transitions.last() {
         out.push(EventView {
-            timestamp: format_hhmm(now),
+            timestamp: format_hhmm_local(now, local_offset),
             kind: LogKind::PetActivity,
             text: format!("{pet_name} evolved into {last}"),
         });
@@ -52,7 +53,7 @@ pub fn derive_pet_activities(
     if let Some(spike_total) = recent_munch_spike(usage_events, now) {
         let pretty = format_tokens(spike_total);
         out.push(EventView {
-            timestamp: format_hhmm(now),
+            timestamp: format_hhmm_local(now, local_offset),
             kind: LogKind::PetActivity,
             text: format!("{pet_name} munched {pretty} tokens"),
         });
@@ -63,7 +64,7 @@ pub fn derive_pet_activities(
     if is_idle(usage_events, now) {
         let idle_text = idle_thought(pet_name, species, mood, now);
         out.push(EventView {
-            timestamp: format_hhmm(now),
+            timestamp: format_hhmm_local(now, local_offset),
             kind: LogKind::PetActivity,
             text: idle_text,
         });
@@ -81,6 +82,7 @@ pub fn derive_profile_pet_activities(
     mood: Mood,
     profile: &crate::tui::life::PetLifeProfile,
     now: OffsetDateTime,
+    local_offset: time::UtcOffset,
 ) -> Vec<EventView> {
     if profile.burst_level < 0.35 && profile.activity_level < 1.25 {
         return Vec::new();
@@ -96,14 +98,18 @@ pub fn derive_profile_pet_activities(
     };
 
     vec![EventView {
-        timestamp: format_hhmm(now),
+        timestamp: format_hhmm_local(now, local_offset),
         kind: LogKind::PetActivity,
         text: format!("{pet_name} {verb}"),
     }]
 }
 
-fn format_hhmm(t: OffsetDateTime) -> String {
-    format!("{:02}:{:02}", t.hour(), t.minute())
+/// Format an instant as a local-clock `hh:mm` label. All EventView timestamp
+/// formatting goes through this; callers thread the offset (vm build:
+/// `mapper.offset_at(now)`; install paths: `LocalDayMapper::System`).
+pub fn format_hhmm_local(now: OffsetDateTime, offset: time::UtcOffset) -> String {
+    let local = now.to_offset(offset);
+    format!("{:02}:{:02}", local.hour(), local.minute())
 }
 
 /// Sum effective tokens from the last hour. Returns Some(total) if total >=
@@ -208,8 +214,15 @@ mod tests {
             usage_event(now - time::Duration::minutes(5), 60_000.0),
             usage_event(now - time::Duration::minutes(15), 50_000.0),
         ];
-        let acts =
-            derive_pet_activities("vex-jit", Species::Glitch, Mood::Happy, &events, &[], now);
+        let acts = derive_pet_activities(
+            "vex-jit",
+            Species::Glitch,
+            Mood::Happy,
+            &events,
+            &[],
+            now,
+            time::UtcOffset::UTC,
+        );
         assert!(acts.iter().any(|e| e.text.contains("munched")));
     }
 
@@ -217,14 +230,30 @@ mod tests {
     fn munch_spike_does_not_fire_below_threshold() {
         let now = datetime!(2026-05-11 12:00 UTC);
         let events = vec![usage_event(now - time::Duration::minutes(5), 5_000.0)];
-        let acts = derive_pet_activities("vex", Species::Blob, Mood::Happy, &events, &[], now);
+        let acts = derive_pet_activities(
+            "vex",
+            Species::Blob,
+            Mood::Happy,
+            &events,
+            &[],
+            now,
+            time::UtcOffset::UTC,
+        );
         assert!(!acts.iter().any(|e| e.text.contains("munched")));
     }
 
     #[test]
     fn idle_thought_appears_when_no_recent_activity() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let acts = derive_pet_activities("vex", Species::Mech, Mood::Happy, &[], &[], now);
+        let acts = derive_pet_activities(
+            "vex",
+            Species::Mech,
+            Mood::Happy,
+            &[],
+            &[],
+            now,
+            time::UtcOffset::UTC,
+        );
         assert!(acts.iter().any(|e| e.text.contains("vex")));
         assert!(acts.iter().any(|e| e.kind == LogKind::PetActivity));
     }
@@ -232,7 +261,15 @@ mod tests {
     #[test]
     fn idle_thought_uses_mood_override_when_sleepy() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let acts = derive_pet_activities("vex", Species::Blob, Mood::Sleepy, &[], &[], now);
+        let acts = derive_pet_activities(
+            "vex",
+            Species::Blob,
+            Mood::Sleepy,
+            &[],
+            &[],
+            now,
+            time::UtcOffset::UTC,
+        );
         assert!(acts.iter().any(|e| e.text.contains("dozing")));
     }
 
@@ -244,8 +281,14 @@ mod tests {
             burst_level: 0.8,
             ..Default::default()
         };
-        let acts =
-            derive_profile_pet_activities("luxopal", Species::Crystal, Mood::Happy, &profile, now);
+        let acts = derive_profile_pet_activities(
+            "luxopal",
+            Species::Crystal,
+            Mood::Happy,
+            &profile,
+            now,
+            time::UtcOffset::UTC,
+        );
 
         assert_eq!(acts.len(), 1);
         assert_eq!(acts[0].kind, LogKind::PetActivity);
@@ -256,8 +299,14 @@ mod tests {
     fn profile_activity_stays_silent_for_quiet_recent_profile() {
         let now = datetime!(2026-05-11 12:00 UTC);
         let profile = crate::tui::life::PetLifeProfile::default();
-        let acts =
-            derive_profile_pet_activities("luxopal", Species::Crystal, Mood::Happy, &profile, now);
+        let acts = derive_profile_pet_activities(
+            "luxopal",
+            Species::Crystal,
+            Mood::Happy,
+            &profile,
+            now,
+            time::UtcOffset::UTC,
+        );
 
         assert!(acts.is_empty());
     }
@@ -265,7 +314,15 @@ mod tests {
     #[test]
     fn idle_thought_is_species_flavored() {
         let now = datetime!(2026-05-11 12:00 UTC);
-        let mech_acts = derive_pet_activities("m", Species::Mech, Mood::Happy, &[], &[], now);
+        let mech_acts = derive_pet_activities(
+            "m",
+            Species::Mech,
+            Mood::Happy,
+            &[],
+            &[],
+            now,
+            time::UtcOffset::UTC,
+        );
         let mech_text = mech_acts.iter().find(|e| !e.text.contains("evolved"));
         // Mech catalog includes mechanical/technical verbs.
         let has_mech = mech_text.is_some_and(|e| {
@@ -285,8 +342,35 @@ mod tests {
     fn stage_transition_emits_evolution_activity() {
         let now = datetime!(2026-05-11 12:00 UTC);
         let transitions = vec![Stage::S4];
-        let acts =
-            derive_pet_activities("vex", Species::Glitch, Mood::Happy, &[], &transitions, now);
+        let acts = derive_pet_activities(
+            "vex",
+            Species::Glitch,
+            Mood::Happy,
+            &[],
+            &transitions,
+            now,
+            time::UtcOffset::UTC,
+        );
         assert!(acts.iter().any(|e| e.text.contains("evolved into s4")));
+    }
+
+    #[test]
+    fn format_hhmm_local_renders_the_offset_clock_not_utc() {
+        let now = datetime!(2026-06-09 06:00 UTC); // 23:00 the previous evening at UTC-7
+        let offset = time::UtcOffset::from_hms(-7, 0, 0).unwrap();
+        assert_eq!(format_hhmm_local(now, offset), "23:00");
+        assert_eq!(format_hhmm_local(now, time::UtcOffset::UTC), "06:00");
+    }
+
+    #[test]
+    fn activity_timestamps_thread_the_local_offset() {
+        let now = datetime!(2026-06-09 03:10 UTC);
+        let offset = time::UtcOffset::from_hms(-8, 0, 0).unwrap(); // 19:10 local
+        let acts = derive_pet_activities("vex", Species::Mech, Mood::Happy, &[], &[], now, offset);
+        assert!(!acts.is_empty());
+        assert!(
+            acts.iter().all(|e| e.timestamp == "19:10"),
+            "expected local 19:10 stamps: {acts:?}"
+        );
     }
 }

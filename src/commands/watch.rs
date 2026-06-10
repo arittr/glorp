@@ -129,8 +129,15 @@ pub(crate) fn build_watch_view_model_at(
         &recent_usage,
         &state.seen_stage_transitions,
         now,
+        local_offset,
     );
-    let recent_events = build_recent_events(state, &recent_usage, &diagnostics, pet_activities);
+    let recent_events = build_recent_events(
+        state,
+        &recent_usage,
+        &diagnostics,
+        pet_activities,
+        local_offset,
+    );
     let errors = diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.clone())
@@ -350,15 +357,19 @@ impl WatchUsagePoller for RealWatchPoller {
                 let mut vm = current.clone();
                 vm.helper_status = "provider poll failed".into();
                 vm.errors.push(err.to_string());
+                let now = OffsetDateTime::now_utc();
                 vm.recent_events.push(EventView {
-                    timestamp: timestamp_column(OffsetDateTime::now_utc()),
+                    timestamp: crate::pet::activity::format_hhmm_local(
+                        now,
+                        LocalDayMapper::System.offset_at(now),
+                    ),
                     kind: LogKind::Diagnostic,
                     text: err.to_string(),
                 });
                 return Ok(WatchPollResult {
                     vm,
                     applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
-                        OffsetDateTime::now_utc(),
+                        now,
                         Duration::seconds(0),
                     ),
                 });
@@ -497,6 +508,9 @@ fn source_health(
         names.insert(name.clone());
     }
     for diagnostic in diagnostics {
+        if diagnostic.code == crate::game::runtime::USAGE_DISCONTINUITY_CODE {
+            continue; // a refused poll is not a broken source
+        }
         names.insert(diagnostic.provider_surface.clone());
     }
 
@@ -513,9 +527,10 @@ fn source_health(
         .map(|name| {
             let today_for_source = lookup(today_totals, &name);
             let bucket_effective_tokens = lookup(last_10m_totals, &name);
-            let diagnostic = diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.provider_surface == name);
+            let diagnostic = diagnostics.iter().find(|diagnostic| {
+                diagnostic.provider_surface == name
+                    && diagnostic.code != crate::game::runtime::USAGE_DISCONTINUITY_CODE
+            });
             let status = if today_for_source > 0.0 || bucket_effective_tokens > 0.0 {
                 SourceStatus::Ready
             } else if diagnostic.is_some() {
@@ -545,7 +560,10 @@ fn active_diagnostics(
         .collect::<std::collections::BTreeSet<_>>();
     diagnostics
         .into_iter()
-        .filter(|diagnostic| !ready_today.contains(diagnostic.provider_surface.as_str()))
+        .filter(|diagnostic| {
+            diagnostic.code == crate::game::runtime::USAGE_DISCONTINUITY_CODE
+                || !ready_today.contains(diagnostic.provider_surface.as_str())
+        })
         .collect()
 }
 
@@ -554,6 +572,7 @@ fn build_recent_events(
     usage_events: &[NormalizedUsageEvent],
     diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
     pet_activities: Vec<EventView>,
+    local_offset: time::UtcOffset,
 ) -> Vec<EventView> {
     // Merge narrative and usage events by observed_at so the feed reads as a
     // single chronological timeline (oldest at top, newest at bottom).
@@ -569,7 +588,7 @@ fn build_recent_events(
         let timestamp = if event.observed_at == time::OffsetDateTime::UNIX_EPOCH {
             "--:--".into()
         } else {
-            timestamp_column(event.observed_at)
+            crate::pet::activity::format_hhmm_local(event.observed_at, local_offset)
         };
         merged.push(Timestamped {
             observed_at: event.observed_at,
@@ -581,7 +600,7 @@ fn build_recent_events(
         });
     }
 
-    for (observed_at, view) in aggregated_recent_usage_with_time(usage_events, 4) {
+    for (observed_at, view) in aggregated_recent_usage_with_time(usage_events, 4, local_offset) {
         merged.push(Timestamped { observed_at, view });
     }
 
@@ -589,7 +608,7 @@ fn build_recent_events(
 
     let mut events: Vec<EventView> = merged.into_iter().map(|m| m.view).collect();
 
-    for diagnostic_event in deduped_recent_diagnostics(diagnostics, 2) {
+    for diagnostic_event in deduped_recent_diagnostics(diagnostics, 2, local_offset) {
         events.push(diagnostic_event);
     }
     // Pet activities are rendered as if they happened "now" — append at the
@@ -605,6 +624,7 @@ fn build_recent_events(
 fn aggregated_recent_usage_with_time(
     usage_events: &[NormalizedUsageEvent],
     take: usize,
+    local_offset: time::UtcOffset,
 ) -> Vec<(OffsetDateTime, EventView)> {
     #[derive(Default)]
     struct Group {
@@ -656,7 +676,7 @@ fn aggregated_recent_usage_with_time(
             Some((
                 observed_at,
                 EventView {
-                    timestamp: timestamp_column(observed_at),
+                    timestamp: crate::pet::activity::format_hhmm_local(observed_at, local_offset),
                     kind: LogKind::Usage,
                     text: format!(
                         "{} added {} effective tokens",
@@ -674,6 +694,7 @@ fn aggregated_recent_usage_with_time(
 fn deduped_recent_diagnostics(
     diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
     take: usize,
+    local_offset: time::UtcOffset,
 ) -> Vec<EventView> {
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut keep: Vec<&crate::storage::usage_store::ProviderDiagnostic> = Vec::new();
@@ -689,7 +710,10 @@ fn deduped_recent_diagnostics(
     keep.into_iter()
         .rev()
         .map(|diagnostic| EventView {
-            timestamp: timestamp_column(diagnostic.recorded_at),
+            timestamp: crate::pet::activity::format_hhmm_local(
+                diagnostic.recorded_at,
+                local_offset,
+            ),
             kind: LogKind::Diagnostic,
             text: format!("{}: {}", diagnostic.provider_surface, diagnostic.code),
         })
@@ -745,10 +769,6 @@ fn helper_status(
                 .join(", ")
         ))
     }
-}
-
-fn timestamp_column(timestamp: OffsetDateTime) -> String {
-    format!("{:02}:{:02}", timestamp.hour(), timestamp.minute())
 }
 
 #[cfg(test)]
@@ -1019,7 +1039,7 @@ mod tests {
             },
         ];
 
-        let events = build_recent_events(&state, &usage_events, &[], vec![]);
+        let events = build_recent_events(&state, &usage_events, &[], vec![], time::UtcOffset::UTC);
 
         // Verify chronological order: T+0, T+10, T+20, T+30
         assert_eq!(events.len(), 4);
@@ -1231,6 +1251,103 @@ mod tests {
         assert!(
             resettled.asleep,
             "one wake, then re-sleep after the idle window"
+        );
+    }
+
+    fn discontinuity_diagnostic_for_test(
+        surface: &str,
+        recorded_at: OffsetDateTime,
+    ) -> crate::storage::usage_store::ProviderDiagnostic {
+        crate::storage::usage_store::ProviderDiagnostic {
+            provider_surface: surface.to_string(),
+            code: crate::game::runtime::USAGE_DISCONTINUITY_CODE.to_string(),
+            message: "refused 212000000 effective tokens (threshold 99000000)".to_string(),
+            recorded_at,
+        }
+    }
+
+    #[test]
+    fn usage_discontinuity_does_not_mark_a_source_broken() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let diagnostics = vec![discontinuity_diagnostic_for_test("claude-code", now)];
+
+        let today = vec![("claude-code".to_string(), 12_000.0)];
+        let health = source_health(&today, &[], &diagnostics);
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].status, SourceStatus::Ready);
+        assert_eq!(health[0].diagnostic_code, None);
+        assert_eq!(health[0].diagnostic_message, None);
+
+        let health = source_health(&[], &[], &diagnostics);
+        assert!(
+            health.is_empty(),
+            "a discontinuity-only surface must not appear broken: {health:?}"
+        );
+    }
+
+    #[test]
+    fn usage_discontinuity_survives_the_ready_today_filter() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let helper_exit = crate::storage::usage_store::ProviderDiagnostic {
+            provider_surface: "codex".to_string(),
+            code: "helper_exit".to_string(),
+            message: "helper exited 2".to_string(),
+            recorded_at: now,
+        };
+        let sources = vec![
+            SourceUsageView {
+                name: "claude-code".to_string(),
+                effective_tokens: 12_000.0,
+            },
+            SourceUsageView {
+                name: "codex".to_string(),
+                effective_tokens: 500.0,
+            },
+        ];
+
+        let active = active_diagnostics(
+            &sources,
+            vec![
+                discontinuity_diagnostic_for_test("claude-code", now),
+                helper_exit,
+            ],
+        );
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(
+            active[0].code,
+            crate::game::runtime::USAGE_DISCONTINUITY_CODE
+        );
+    }
+
+    #[test]
+    fn feed_timestamps_render_the_mapper_local_clock_not_utc() {
+        use crate::storage::state::NarrativeEvent;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        UsageStore::open(&db_path).unwrap();
+        let now = PrimitiveDateTime::new(
+            Date::from_calendar_date(2026, Month::June, 10).unwrap(),
+            Time::from_hms(6, 30, 0).unwrap(),
+        )
+        .assume_utc();
+        let mut state = PetState::new_for_test("test", "buddy");
+        state.recent_events = vec![NarrativeEvent {
+            observed_at: now - Duration::minutes(30), // 06:00 UTC = 23:00 at UTC-7
+            text: "buddy munched 1.0k tokens".into(),
+        }];
+        let mapper = LocalDayMapper::Fixed(time::UtcOffset::from_hms(-7, 0, 0).unwrap());
+
+        let vm = build_watch_view_model_at(&state, &db_path, now, mapper).unwrap();
+
+        let feed = vm
+            .recent_events
+            .iter()
+            .find(|event| event.text.contains("munched"))
+            .unwrap();
+        assert_eq!(
+            feed.timestamp, "23:00",
+            "last night's 23:00 local feed must not display as 06:00 UTC"
         );
     }
 }

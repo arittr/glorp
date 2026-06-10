@@ -426,7 +426,8 @@ impl UsageStore {
         self.conn
             .query_row(
                 "SELECT MAX(updated_at) FROM provider_cursors
-                 WHERE provider_surface = ?1",
+                 WHERE provider_surface = ?1
+                   AND cursor_key NOT LIKE 'helper_version::%'",
                 params![provider_surface],
                 |row| {
                     let raw: Option<String> = row.get(0)?;
