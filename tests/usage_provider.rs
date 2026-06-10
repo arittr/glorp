@@ -1,7 +1,7 @@
 use glorp::game::effective_tokens::EffectiveTokenWeights;
 use glorp::game::runtime::apply_usage_poll;
 use glorp::storage::state::PetState;
-use glorp::storage::usage_store::UsageStore;
+use glorp::storage::usage_store::{ProviderCursorUpdate, UsageStore};
 use glorp::usage::ccusage::{CcusageCommandProvider, HelperDiscovery, HelperPaths};
 use glorp::usage::normalize::RawTokenTotals;
 use glorp::usage::provider::{ProviderCursorKey, UsagePollResult, UsageProvider};
@@ -200,7 +200,29 @@ fn transcript_like_fields_are_ignored() {
 
     let mut state = PetState::new_for_test("test-seed", "test");
     state.calibration.daily_effective_tokens = 100_000.0;
-    apply_usage_poll(&mut state, &mut store, &result, OffsetDateTime::now_utc()).unwrap();
+    let now = OffsetDateTime::now_utc();
+    store
+        .advance_cursors(
+            vec![
+                ProviderCursorUpdate {
+                    provider_surface: "claude-code".to_string(),
+                    cursor_key: "claude-code-first-contact".to_string(),
+                    cursor_value: "seeded".to_string(),
+                    provider_version: "test-provider".to_string(),
+                    parser_version: "test-parser".to_string(),
+                },
+                ProviderCursorUpdate {
+                    provider_surface: "codex".to_string(),
+                    cursor_key: "codex-first-contact".to_string(),
+                    cursor_value: "seeded".to_string(),
+                    provider_version: "test-provider".to_string(),
+                    parser_version: "test-parser".to_string(),
+                },
+            ],
+            now,
+        )
+        .unwrap();
+    apply_usage_poll(&mut state, &mut store, &result, now).unwrap();
 
     let stored = store.recent_events(50).unwrap();
     assert!(

@@ -5,16 +5,26 @@ use std::path::Path;
 pub struct AppConfig {
     #[serde(default = "default_cache_read_weight")]
     pub cache_read_weight: f64,
+    /// Multiplier on the per-provider discontinuity threshold
+    /// (`guard_ratio x baseline x days_factor`, floored at 50M effective
+    /// tokens). The escape hatch for users the guard refuses honestly.
+    #[serde(default = "default_discontinuity_guard_ratio")]
+    pub discontinuity_guard_ratio: f64,
 }
 
 fn default_cache_read_weight() -> f64 {
     0.03
 }
 
+fn default_discontinuity_guard_ratio() -> f64 {
+    crate::game::runtime::DISCONTINUITY_GUARD_RATIO
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             cache_read_weight: default_cache_read_weight(),
+            discontinuity_guard_ratio: default_discontinuity_guard_ratio(),
         }
     }
 }
@@ -37,5 +47,27 @@ impl AppConfig {
         }
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discontinuity_guard_ratio_defaults_when_absent_from_config() {
+        let config: AppConfig = toml::from_str("cache_read_weight = 0.05").unwrap();
+        assert_eq!(
+            config.discontinuity_guard_ratio,
+            crate::game::runtime::DISCONTINUITY_GUARD_RATIO
+        );
+        assert_eq!(AppConfig::default().discontinuity_guard_ratio, 5.0);
+    }
+
+    #[test]
+    fn discontinuity_guard_ratio_is_overridable() {
+        let config: AppConfig = toml::from_str("discontinuity_guard_ratio = 12.5").unwrap();
+        assert_eq!(config.discontinuity_guard_ratio, 12.5);
+        assert_eq!(config.cache_read_weight, 0.03);
     }
 }

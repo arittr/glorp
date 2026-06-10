@@ -29,6 +29,7 @@ fn effective_tokens_count_cache_reads_lightly() {
 fn cache_read_weight_is_configurable() {
     let config = AppConfig {
         cache_read_weight: 0.05,
+        ..AppConfig::default()
     };
     let weights = EffectiveTokenWeights::from_config(config);
     let buckets = TokenBuckets {

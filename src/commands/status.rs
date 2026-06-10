@@ -31,7 +31,13 @@ pub fn run() -> Result<()> {
                 if !result.deltas.is_empty() || result.diagnostics.is_empty() {
                     let now = OffsetDateTime::now_utc();
                     // Stage smeared ledger rows for new provider deltas before applying.
-                    stage_usage_poll_deltas(&mut usage_store, &result, state.calibration, now)?;
+                    stage_usage_poll_deltas(
+                        &mut usage_store,
+                        &result,
+                        &mut state,
+                        config.discontinuity_guard_ratio,
+                        now,
+                    )?;
                     let scene_asleep = crate::tui::day::scene_asleep_for_poll(
                         &usage_store,
                         &state,

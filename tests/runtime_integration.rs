@@ -1,7 +1,10 @@
 use glorp::{
     game::{
         evolution::Stage,
-        runtime::{apply_unapplied_usage, apply_usage_poll, stage_usage_poll_deltas},
+        runtime::{
+            apply_unapplied_usage, apply_usage_poll, stage_usage_poll_deltas,
+            DISCONTINUITY_GUARD_RATIO,
+        },
     },
     storage::{
         state::{PetState, Vitals},
@@ -30,6 +33,7 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
         energy: 40.0,
     };
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
     let poll = poll_with_delta(100_000.0, now);
 
     // Two polls with distinct cursor_values represent successive bumps in provider totals.
@@ -94,6 +98,7 @@ fn rapid_token_polls_do_not_narrate_every_feed() {
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     let start = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", start);
 
     for tick in 0..6 {
         let now = start + Duration::seconds(tick * 10);
@@ -170,6 +175,7 @@ fn staged_usage_apportions_token_buckets_across_smear_rows() {
     let dir = tempdir().unwrap();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
     let mut poll = poll_with_delta(12_000.0, now);
     poll.deltas[0].token_totals = Some(RawTokenTotals {
         uncached_input: 6_000,
@@ -179,12 +185,13 @@ fn staged_usage_apportions_token_buckets_across_smear_rows() {
         reasoning_output: 500,
     });
 
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
     let ids = stage_usage_poll_deltas(
         &mut usage_store,
         &poll,
-        glorp::game::calibration::CalibrationBaseline {
-            daily_effective_tokens: 100_000.0,
-        },
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
         now,
     )
     .unwrap();
@@ -272,6 +279,25 @@ fn empty_poll() -> UsagePollResult {
     }
 }
 
+fn establish_provider_contact(
+    usage_store: &mut UsageStore,
+    surface: &str,
+    now: time::OffsetDateTime,
+) {
+    usage_store
+        .advance_cursors(
+            vec![ProviderCursorUpdate {
+                provider_surface: surface.to_string(),
+                cursor_key: format!("{surface}-first-contact"),
+                cursor_value: "seeded".to_string(),
+                provider_version: "test-provider".to_string(),
+                parser_version: "test-parser".to_string(),
+            }],
+            now,
+        )
+        .unwrap();
+}
+
 fn is_eating_narration(text: &str, pet_name: &str) -> bool {
     text.starts_with(&format!("{pet_name} "))
         && [
@@ -288,6 +314,7 @@ fn cold_start_does_not_narrate_initial_mood() {
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
 
     // Precondition: fresh state has no prior mood recorded.
     assert!(state.last_seen_mood.is_none());
@@ -475,6 +502,7 @@ fn lifetime_threshold_unlocks_one_ladder_prop_once() {
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
 
     apply_usage_poll(
         &mut state,
@@ -502,6 +530,7 @@ fn one_large_poll_unlocks_ladder_props_in_threshold_order() {
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 10_000_000.0;
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
 
     apply_usage_poll(
         &mut state,
@@ -548,11 +577,13 @@ fn reflected_unapplied_usage_does_not_unlock_ladder_twice_on_mark_retry() {
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 1_000_000.0;
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
 
     stage_usage_poll_deltas(
         &mut usage_store,
         &poll_with_delta(60_000.0, now),
-        state.calibration,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
         now,
     )
     .unwrap();
@@ -584,6 +615,7 @@ fn first_codex_usage_unlocks_signal_lamp_once() {
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "codex", now);
 
     apply_usage_poll(
         &mut state,
@@ -616,6 +648,7 @@ fn heavy_session_unlocks_planter_once() {
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
 
     apply_usage_poll(
         &mut state,
@@ -649,6 +682,7 @@ fn wilted_recovery_unlocks_sprout_once() {
         energy: 2.0,
     };
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
 
     apply_usage_poll(
         &mut state,
@@ -659,4 +693,165 @@ fn wilted_recovery_unlocks_sprout_once() {
     .unwrap();
 
     assert!(habitat_prop_ids(&state).contains(&"wilt_recovery_sprout"));
+}
+
+#[test]
+fn discontinuity_bolus_is_refused_alone_while_honest_sibling_feeds() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 19_770_000.0;
+    let now = datetime!(2026 - 06 - 10 08:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now - Duration::hours(1));
+    establish_provider_contact(&mut usage_store, "codex", now - Duration::hours(1));
+
+    let mut poll = poll_with_delta(212_000_000.0, now);
+    poll.deltas
+        .extend(poll_with_surface("codex", 40_000.0, now).deltas);
+    poll.total_effective_tokens = 212_040_000.0;
+
+    let ids = stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        now,
+    )
+    .unwrap();
+
+    let rows = usage_store.unapplied_events(100).unwrap();
+    assert!(!rows.is_empty(), "the honest codex delta must stage");
+    assert!(
+        rows.iter().all(|row| row.event.provider_surface == "codex"),
+        "no claude-code row may stage: {rows:?}"
+    );
+    assert_eq!(ids.len(), rows.len());
+    let staged: f64 = rows.iter().map(|row| row.event.effective_tokens).sum();
+    assert!((staged - 40_000.0).abs() < 0.01);
+
+    assert_eq!(
+        usage_store.latest_cursor_updated_at("claude-code").unwrap(),
+        Some(now)
+    );
+    let diagnostics = usage_store.recent_diagnostics(5).unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].provider_surface, "claude-code");
+    assert_eq!(diagnostics[0].code, "usage_discontinuity");
+
+    assert_eq!(
+        state
+            .recent_events
+            .iter()
+            .filter(|event| event.text == "mochi declined an implausible feast")
+            .count(),
+        1
+    );
+    assert_eq!(state.last_idle_narration_at, Some(now));
+
+    let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
+    usage_store
+        .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+        .unwrap();
+    assert_eq!(
+        usage_store.latest_cursor_updated_at("codex").unwrap(),
+        Some(now)
+    );
+}
+
+#[test]
+fn multi_day_vacation_catchup_passes_the_guard_via_days_factor() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 20_000_000.0;
+    let now = datetime!(2026 - 06 - 10 08:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now - Duration::days(6));
+
+    let poll = poll_with_delta(120_000_000.0, now);
+    stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        now,
+    )
+    .unwrap();
+
+    let rows = usage_store.unapplied_events(200).unwrap();
+    let staged: f64 = rows.iter().map(|row| row.event.effective_tokens).sum();
+    // Smear cap: 12 buckets × (20M × 0.25) = 60M maximum staged.
+    assert!((staged - 60_000_000.0).abs() < 0.01);
+    assert!(usage_store.recent_diagnostics(5).unwrap().is_empty());
+    assert!(state.recent_events.is_empty(), "no refusal narration");
+    assert_eq!(state.last_idle_narration_at, None);
+}
+
+#[test]
+fn first_contact_provider_is_refused_without_staging_history() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    let now = datetime!(2026 - 06 - 10 08:00 UTC);
+
+    let poll = poll_with_delta(1_000.0, now);
+    let ids = stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        now,
+    )
+    .unwrap();
+
+    assert!(ids.is_empty());
+    assert_eq!(usage_store.unapplied_events(10).unwrap().len(), 0);
+    assert_eq!(
+        usage_store.latest_cursor_updated_at("claude-code").unwrap(),
+        Some(now)
+    );
+    let diagnostics = usage_store.recent_diagnostics(5).unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "usage_discontinuity");
+
+    let next = now + Duration::minutes(10);
+    let staged_ids = stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll_with_delta(1_000.0, next),
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        next,
+    )
+    .unwrap();
+    assert!(!staged_ids.is_empty());
+}
+
+#[test]
+fn guard_floor_passes_heavy_honest_days_over_a_low_median_baseline() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 2_000_000.0;
+    let now = datetime!(2026 - 06 - 10 08:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now - Duration::hours(2));
+
+    let poll = poll_with_delta(30_000_000.0, now);
+    stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        now,
+    )
+    .unwrap();
+
+    let staged: f64 = usage_store
+        .unapplied_events(200)
+        .unwrap()
+        .iter()
+        .map(|row| row.event.effective_tokens)
+        .sum();
+    // Smear cap: 12 buckets × (2M × 0.25) = 6M maximum staged.
+    assert!((staged - 6_000_000.0).abs() < 0.01);
+    assert!(usage_store.recent_diagnostics(5).unwrap().is_empty());
 }

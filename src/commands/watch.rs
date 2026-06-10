@@ -392,7 +392,13 @@ pub(crate) fn poll_usage_and_apply(
     let now = OffsetDateTime::now_utc();
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
         // Stage smeared ledger rows for new provider deltas before applying.
-        stage_usage_poll_deltas(&mut usage_store, &result, state.calibration, now)?;
+        stage_usage_poll_deltas(
+            &mut usage_store,
+            &result,
+            &mut state,
+            config.discontinuity_guard_ratio,
+            now,
+        )?;
         let scene_asleep = crate::tui::day::scene_asleep_for_poll(
             &usage_store,
             &state,
@@ -766,6 +772,25 @@ mod tests {
         }
     }
 
+    fn establish_contact_for_test(
+        usage_store: &mut UsageStore,
+        surface: &str,
+        now: OffsetDateTime,
+    ) {
+        usage_store
+            .advance_cursors(
+                vec![ProviderCursorUpdate {
+                    provider_surface: surface.to_string(),
+                    cursor_key: format!("{surface}-first-contact"),
+                    cursor_value: "seeded".to_string(),
+                    provider_version: "test-provider".to_string(),
+                    parser_version: "test-parser".to_string(),
+                }],
+                now,
+            )
+            .unwrap();
+    }
+
     #[test]
     fn build_watch_view_model_populates_bio_view() {
         let dir = tempdir().unwrap();
@@ -1109,10 +1134,19 @@ mod tests {
         state.calibration.daily_effective_tokens = 1_000.0; // force many small buckets
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let mapper = LocalDayMapper::Fixed(time::UtcOffset::UTC);
+        // Seed contact so the guard does not refuse every first-contact delta.
+        establish_contact_for_test(&mut usage, "claude-code", now);
         // Stage > 500 rows via the REAL path: 60 deltas x ~6-12 smear buckets.
         for i in 0..60 {
             let poll = catchup_poll_result_for_test_n(i, 50_000.0); // distinct cursor per delta
-            stage_usage_poll_deltas(&mut usage, &poll, state.calibration, now).unwrap();
+            stage_usage_poll_deltas(
+                &mut usage,
+                &poll,
+                &mut state,
+                crate::game::runtime::DISCONTINUITY_GUARD_RATIO,
+                now,
+            )
+            .unwrap();
         }
         let before = usage.today_effective_tokens(now, mapper).unwrap();
         let update = apply_unapplied_usage(&mut state, &mut usage, now, false).unwrap();
@@ -1165,9 +1199,18 @@ mod tests {
         let pre = crate::tui::day::build_day_context(&usage, &state, now, mapper);
         assert!(pre.asleep, "pet is asleep before the catch-up poll");
 
+        // Seed contact so the guard does not refuse the catch-up delta.
+        establish_contact_for_test(&mut usage, "claude-code", now);
         // Drive the REAL smear: a poll result with one fat 6h-old delta.
         let poll = catchup_poll_result_for_test(120_000.0);
-        stage_usage_poll_deltas(&mut usage, &poll, state.calibration, now).unwrap();
+        stage_usage_poll_deltas(
+            &mut usage,
+            &poll,
+            &mut state,
+            crate::game::runtime::DISCONTINUITY_GUARD_RATIO,
+            now,
+        )
+        .unwrap();
         let update =
             crate::game::runtime::apply_unapplied_usage(&mut state, &mut usage, now, false)
                 .unwrap();

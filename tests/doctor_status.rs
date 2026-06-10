@@ -1,7 +1,24 @@
 use assert_cmd::Command;
 use glorp::storage::state::{write_state_for_test, PetState, PetStateFixture};
+use glorp::storage::usage_store::{ProviderCursorUpdate, UsageStore};
 use predicates::prelude::*;
 use tempfile::tempdir;
+use time::OffsetDateTime;
+
+fn establish_provider_contact(usage_store: &mut UsageStore, surface: &str, now: OffsetDateTime) {
+    usage_store
+        .advance_cursors(
+            vec![ProviderCursorUpdate {
+                provider_surface: surface.to_string(),
+                cursor_key: format!("{surface}-first-contact"),
+                cursor_value: "seeded".to_string(),
+                provider_version: "test-provider".to_string(),
+                parser_version: "test-parser".to_string(),
+            }],
+            now,
+        )
+        .unwrap();
+}
 
 #[test]
 fn status_is_pipe_friendly_when_pet_exists() {
@@ -205,6 +222,12 @@ fn status_persists_real_usage_delta_into_pet_state() {
     glorp::storage::state::StateStore::new(dir.path().join("state.json"))
         .save(&state)
         .unwrap();
+
+    let now = OffsetDateTime::now_utc();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    establish_provider_contact(&mut usage_store, "claude-code", now);
+    establish_provider_contact(&mut usage_store, "codex", now);
+    drop(usage_store);
 
     Command::cargo_bin("glorp")
         .unwrap()

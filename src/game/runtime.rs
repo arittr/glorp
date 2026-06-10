@@ -11,7 +11,7 @@ use crate::{
     pet::narration,
     storage::{
         state::{NarrativeEvent, PetState, Vitals as StoredVitals},
-        usage_store::{NormalizedUsageEvent, UsageLedgerRow, UsageStore},
+        usage_store::{NormalizedUsageEvent, ProviderDiagnostic, UsageLedgerRow, UsageStore},
     },
     tui::life::{AppliedSourceMix, AppliedUsageSignal, TokenShapeDelta, UsageSignalFreshness},
     usage::provider::{UsageDelta, UsagePollResult},
@@ -23,6 +23,18 @@ const POLL_NARRATION_COOLDOWN: Duration = Duration::minutes(5);
 const REFLECTED_USAGE_EVENT_ID_LIMIT: usize = 1_000;
 const LIVE_SIGNAL_MAX_ELAPSED_SECONDS: i64 = 30 * 60;
 const LIVE_SIGNAL_BACKFILL_DAILY_RATIO: f64 = 1.0;
+/// A provider surface whose summed poll delta exceeds
+/// `guard_ratio x baseline x days_factor` (floored below) is refused:
+/// cursors advance, nothing stages. Config-overridable via
+/// `discontinuity_guard_ratio` (spec Amendment 2026-06-10).
+pub const DISCONTINUITY_GUARD_RATIO: f64 = 5.0;
+/// Guard threshold floor — a same-day honest heavy catch-up over a
+/// low-median baseline must pass while a true bolus still fires.
+pub const DISCONTINUITY_GUARD_FLOOR_TOKENS: f64 = 50_000_000.0;
+/// Diagnostic code persisted on a refused poll. Exempt from source-health
+/// broken classification and the ready-today filter (the source is
+/// healthy — one poll was refused).
+pub const USAGE_DISCONTINUITY_CODE: &str = "usage_discontinuity";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeUpdate {
@@ -34,12 +46,19 @@ pub struct RuntimeUpdate {
 pub fn stage_usage_poll_deltas(
     usage_store: &mut UsageStore,
     poll: &UsagePollResult,
-    baseline: CalibrationBaseline,
+    state: &mut PetState,
+    guard_ratio: f64,
     now: OffsetDateTime,
 ) -> Result<Vec<i64>> {
+    let baseline = state.calibration;
+    let refused_surfaces =
+        refuse_discontinuous_surfaces(usage_store, poll, state, guard_ratio, now)?;
     let mut ids = Vec::new();
     let current_bucket = floor_to_ten_minute_bucket(now);
     for delta in &poll.deltas {
+        if refused_surfaces.contains(&delta.provider_surface) {
+            continue;
+        }
         let buckets = crate::game::catchup::smear_catchup_delta(delta.effective_tokens, baseline);
         let bucket_count = buckets.len();
         let total_effective: f64 = buckets.iter().sum();
@@ -71,6 +90,80 @@ pub fn stage_usage_poll_deltas(
         }
     }
     Ok(ids)
+}
+
+/// The usage discontinuity guard (spec Amendment 2026-06-10). Per provider
+/// surface, a poll whose summed effective delta exceeds
+/// `max(guard_ratio x baseline x days_factor, DISCONTINUITY_GUARD_FLOOR_TOKENS)`
+/// is refused alone: its cursors advance with a persisted
+/// `usage_discontinuity` diagnostic in one transaction, and nothing stages.
+/// `days_factor` = whole days since that provider's newest cursor
+/// `updated_at` + 1 — per-provider, so an honest multi-day catch-up after a
+/// single-helper outage is not pinned at factor 1 by its healthy sibling. A
+/// surface with no cursors at all is first contact and is refused outright
+/// (the calibration never-feed-history rule). Refusal narrates once and
+/// stamps `last_idle_narration_at` so the same pass cannot also narrate
+/// boredom. Refused tokens are never retro-fed; the config ratio is the
+/// escape hatch going forward.
+fn refuse_discontinuous_surfaces(
+    usage_store: &mut UsageStore,
+    poll: &UsagePollResult,
+    state: &mut PetState,
+    guard_ratio: f64,
+    now: OffsetDateTime,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut surface_sums: std::collections::BTreeMap<String, f64> =
+        std::collections::BTreeMap::new();
+    for delta in &poll.deltas {
+        *surface_sums
+            .entry(delta.provider_surface.clone())
+            .or_insert(0.0) += delta.effective_tokens.max(0.0);
+    }
+
+    let mut refused = std::collections::BTreeSet::new();
+    for (surface, sum) in &surface_sums {
+        let message = match usage_store.latest_cursor_updated_at(surface)? {
+            None => {
+                format!("first contact: refused {sum:.0} effective tokens (history never feeds)")
+            }
+            Some(updated_at) => {
+                let days_factor = ((now - updated_at).whole_days().max(0) + 1) as f64;
+                let threshold =
+                    (guard_ratio * state.calibration.daily_effective_tokens * days_factor)
+                        .max(DISCONTINUITY_GUARD_FLOOR_TOKENS);
+                if *sum <= threshold {
+                    continue;
+                }
+                format!("refused {sum:.0} effective tokens (threshold {threshold:.0})")
+            }
+        };
+        let updates: Vec<_> = poll
+            .deltas
+            .iter()
+            .filter(|delta| &delta.provider_surface == surface)
+            .map(|delta| delta.cursor_update.clone())
+            .collect();
+        usage_store.refuse_poll_discontinuity(
+            updates,
+            &ProviderDiagnostic {
+                provider_surface: surface.clone(),
+                code: USAGE_DISCONTINUITY_CODE.to_string(),
+                message,
+                recorded_at: now,
+            },
+            now,
+        )?;
+        refused.insert(surface.clone());
+    }
+
+    if !refused.is_empty() {
+        state.recent_events.push(NarrativeEvent {
+            observed_at: now,
+            text: format!("{} declined an implausible feast", state.pet.accepted_name),
+        });
+        state.last_idle_narration_at = Some(now);
+    }
+    Ok(refused)
 }
 
 fn scaled_token_bucket(total: u64, effective_share: f64, total_effective: f64) -> f64 {
@@ -351,7 +444,7 @@ pub fn apply_usage_poll(
     poll: &UsagePollResult,
     now: OffsetDateTime,
 ) -> Result<RuntimeUpdate> {
-    stage_usage_poll_deltas(usage_store, poll, state.calibration, now)?;
+    stage_usage_poll_deltas(usage_store, poll, state, DISCONTINUITY_GUARD_RATIO, now)?;
     let update = apply_unapplied_usage(state, usage_store, now, false)?;
     usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
     Ok(update)
