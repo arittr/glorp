@@ -36,6 +36,12 @@ pub const PHASE_BLEND_MINUTES: i64 = 30;
 /// Motes fade out over this window after local-day rollover instead of
 /// vanishing mid-grind at 00:00 (spec: Boundary behavior).
 pub const MOTE_TIDY_FADE_MINUTES: i64 = 30;
+/// Weekend softening is full when the ledger's weekend share of window
+/// volume is at or below this...
+pub const WEEKEND_QUIET_SHARE: f32 = 0.10;
+/// ...and zero at or above this — a weekend-active user gets no sleepy
+/// Saturday room (spec: Weekend texture).
+pub const WEEKEND_ACTIVE_SHARE: f32 = 0.30;
 /// A finished day reads as a feast when its ratio clears this multiple
 /// of the calibration baseline.
 pub const FEAST_DAY_RATIO: f32 = 1.5;
@@ -416,6 +422,23 @@ pub fn scene_asleep_for_poll(
     mapper: LocalDayMapper,
 ) -> bool {
     build_day_context(usage_store, state, now, mapper).asleep
+}
+
+/// Weekend softening factor 0.0 (none) ..= 1.0 (full), from is_weekend and
+/// weekend_share: full at share <= WEEKEND_QUIET_SHARE, and zero when
+/// share >= WEEKEND_ACTIVE_SHARE, linear between; 0.0 while immature
+/// (spec: the Maturity gate governs every baseline-ratio channel) and on weekdays.
+pub fn weekend_softening(day: &DayContext) -> f32 {
+    if !day.is_weekend || !day.mature {
+        return 0.0;
+    }
+    if day.weekend_share <= WEEKEND_QUIET_SHARE {
+        1.0
+    } else if day.weekend_share >= WEEKEND_ACTIVE_SHARE {
+        0.0
+    } else {
+        (WEEKEND_ACTIVE_SHARE - day.weekend_share) / (WEEKEND_ACTIVE_SHARE - WEEKEND_QUIET_SHARE)
+    }
 }
 
 /// Morning-after selection window: all of Dawn plus the first
@@ -1168,5 +1191,29 @@ mod tests {
             DayContext::default().local_day_started_utc,
             time::OffsetDateTime::UNIX_EPOCH
         );
+    }
+
+    #[test]
+    fn weekend_softening_maps_share_boundaries_and_respects_the_gates() {
+        let ctx = |share: f32, mature: bool, is_weekend: bool| DayContext {
+            is_weekend,
+            mature,
+            weekend_share: share,
+            ..DayContext::default()
+        };
+        assert_eq!(weekend_softening(&ctx(0.05, true, true)), 1.0);
+        assert_eq!(
+            weekend_softening(&ctx(WEEKEND_QUIET_SHARE, true, true)),
+            1.0
+        );
+        assert_eq!(
+            weekend_softening(&ctx(WEEKEND_ACTIVE_SHARE, true, true)),
+            0.0
+        );
+        assert_eq!(weekend_softening(&ctx(0.45, true, true)), 0.0);
+        let mid = weekend_softening(&ctx(0.20, true, true));
+        assert!((mid - 0.5).abs() < 1e-5, "expected ~0.5, got {mid}");
+        assert_eq!(weekend_softening(&ctx(0.05, true, false)), 0.0);
+        assert_eq!(weekend_softening(&ctx(0.05, false, true)), 0.0);
     }
 }

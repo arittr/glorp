@@ -11,7 +11,7 @@ use crate::game::evolution::Stage;
 use crate::game::habitat::HabitatPetLayer;
 use crate::pet::animator::{
     compute_facing, compute_shimmer_role, compute_sleep_wander_x, compute_token_pop,
-    compute_twinkle, compute_wake_wander_x, compute_wander_position_x,
+    compute_twinkle, compute_wake_wander_x, compute_wander_position_x, lazy_wander_instant,
     low_energy_lightness_multiplier, TokenPop,
 };
 use crate::pet::generation::Species;
@@ -622,6 +622,32 @@ fn mote_glyphs_for(
     glyphs
 }
 
+/// Live-activity channels always win over weekend softening: any live
+/// signal suppresses it entirely (spec: Weekend texture).
+fn effective_weekend_softening(day: &crate::tui::day::DayContext, profile: &PetLifeProfile) -> f32 {
+    if profile.burst_level > 0.0 || profile.activity_level > 0.0 {
+        return 0.0;
+    }
+    crate::tui::day::weekend_softening(day)
+}
+
+/// Weekend palette softening: pulls a scene color toward the neutral dim
+/// base. Applied to the ambient and mote passes only — activity glyphs and
+/// the pet itself are live channels and stay untouched.
+const WEEKEND_PALETTE_SOFTEN_MAX: f32 = 0.25;
+
+fn weekend_soften_color(color: Color, softening: f32) -> Color {
+    if softening <= 0.0 {
+        return color;
+    }
+    let p = crate::tui::style::tokenpet_palette();
+    lerp_color(
+        color,
+        p.dim.rgb,
+        WEEKEND_PALETTE_SOFTEN_MAX * softening.clamp(0.0, 1.0),
+    )
+}
+
 /// Returns extra work-activity glyphs for the habitat backdrop.
 fn activity_glyphs_for(
     profile: &PetLifeProfile,
@@ -745,6 +771,7 @@ impl LegacyPanel for PetPanel {
         let now = ctx.clock.now_utc();
         let species = vm.pet_render.generated_species;
         let day = &vm.day_context;
+        let softening = effective_weekend_softening(day, &vm.life_profile);
         let (wander_x, facing) = match (day.asleep, day.sleep_onset_utc, day.wake_resume) {
             (true, Some(onset), _) => (
                 compute_sleep_wander_x(area.width, species, now, onset),
@@ -760,10 +787,13 @@ impl LegacyPanel for PetPanel {
                 ),
                 compute_facing(area.width, species, now),
             ),
-            _ => (
-                compute_wander_position_x(area.width, species, now),
-                compute_facing(area.width, species, now),
-            ),
+            _ => {
+                let wander_now = lazy_wander_instant(now, day.local_day_started_utc, softening);
+                (
+                    compute_wander_position_x(area.width, species, wander_now),
+                    compute_facing(area.width, species, wander_now),
+                )
+            }
         };
         let vm = if wander_x != vm.wander_offset_x || facing != vm.facing {
             // Build a local copy with the computed values rather than mutating.
@@ -818,7 +848,9 @@ impl LegacyPanel for PetPanel {
             if ambient_glyph_is_inside_area(&g, scene.habitat) {
                 let cell = &mut buf[(g.col, g.row)];
                 cell.set_char(g.glyph);
-                cell.set_style(ratatui::style::Style::default().fg(g.color));
+                cell.set_style(
+                    ratatui::style::Style::default().fg(weekend_soften_color(g.color, softening)),
+                );
             }
         }
         // Mote pass: after ambient, before activity glyphs, same exclusions
@@ -834,7 +866,7 @@ impl LegacyPanel for PetPanel {
             if ambient_glyph_is_inside_area(&g, scene.habitat) {
                 let cell = &mut buf[(g.col, g.row)];
                 cell.set_char(g.glyph);
-                cell.set_style(Style::default().fg(g.color));
+                cell.set_style(Style::default().fg(weekend_soften_color(g.color, softening)));
             }
         }
         let compact = area.width <= 72 || area.height <= 24;
@@ -2512,5 +2544,46 @@ mod tests {
             }
         }
         assert_eq!(season_hue_drift(Color::Reset, Season::Winter), Color::Reset);
+    }
+
+    #[test]
+    fn live_activity_always_wins_over_weekend_softening() {
+        let day = crate::tui::day::DayContext {
+            is_weekend: true,
+            mature: true,
+            weekend_share: 0.05,
+            ..crate::tui::day::DayContext::default()
+        };
+        let idle = PetLifeProfile::idle();
+        assert!(
+            (effective_weekend_softening(&day, &idle) - 1.0).abs() < 1e-6,
+            "quiet weekend, idle pet: full softening"
+        );
+        let mut active = PetLifeProfile::idle();
+        active.activity_level = 0.8;
+        assert_eq!(
+            effective_weekend_softening(&day, &active),
+            0.0,
+            "live activity suppresses softening entirely"
+        );
+        let mut bursting = PetLifeProfile::idle();
+        bursting.burst_level = 0.4;
+        assert_eq!(
+            effective_weekend_softening(&day, &bursting),
+            0.0,
+            "a live burst suppresses softening entirely"
+        );
+    }
+
+    #[test]
+    fn weekend_softening_pulls_scene_colors_toward_the_dim_base() {
+        let c = Color::Rgb(200, 120, 40);
+        assert_eq!(weekend_soften_color(c, 0.0), c, "no softening, no change");
+        assert_ne!(
+            weekend_soften_color(c, 1.0),
+            c,
+            "full softening shifts the color"
+        );
+        assert_eq!(weekend_soften_color(Color::Reset, 1.0), Color::Reset);
     }
 }

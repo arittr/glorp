@@ -458,6 +458,25 @@ pub fn compute_wake_wander_x(
     blend_positions(frozen, live, k)
 }
 
+/// Weekend-lazy wander clock: runs at 1/(1 + softening) speed, anchored at a
+/// vm-carried instant so motion is continuous while softening holds. A
+/// softening change (live activity beginning, the midnight weekend edge)
+/// re-times the clock in one step — bounded, poll-aligned, and coincident
+/// with the activity that caused it (live channels win; spec: Weekend
+/// texture).
+pub fn lazy_wander_instant(
+    now: time::OffsetDateTime,
+    anchor: time::OffsetDateTime,
+    softening: f32,
+) -> time::OffsetDateTime {
+    let s = softening.clamp(0.0, 1.0);
+    if s <= 0.0 {
+        return now;
+    }
+    let elapsed = (now - anchor).as_seconds_f64().max(0.0);
+    anchor + time::Duration::seconds_f64(elapsed / (1.0 + f64::from(s)))
+}
+
 fn ease_fraction(now: time::OffsetDateTime, since: time::OffsetDateTime) -> f32 {
     let elapsed_ms = (now - since).whole_milliseconds().max(0) as f32;
     (elapsed_ms / 1_000.0 / WANDER_SETTLE_SECS as f32).clamp(0.0, 1.0)
@@ -1181,6 +1200,21 @@ mod tests {
         assert_eq!(
             breath_rhythm_for_day(&crate::tui::day::DayContext::default()),
             BreathRhythm::Awake
+        );
+    }
+
+    #[test]
+    fn lazy_wander_instant_dilates_elapsed_time_only_when_softened() {
+        let anchor = time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let now = anchor + time::Duration::minutes(60);
+        assert_eq!(lazy_wander_instant(now, anchor, 0.0), now);
+        assert_eq!(
+            lazy_wander_instant(now, anchor, 1.0),
+            anchor + time::Duration::minutes(30)
+        );
+        assert_eq!(
+            lazy_wander_instant(anchor - time::Duration::minutes(5), anchor, 1.0),
+            anchor
         );
     }
 }
