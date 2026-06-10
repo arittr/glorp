@@ -10,6 +10,9 @@ pub struct AnimationFrame {
     /// Sleep presentation: force the species closed-blink eyes. Must never be
     /// implemented by substituting Mood::Sleepy — mood is the vitals contract.
     pub hold_eyes_closed: bool,
+    /// Ticks added to the species blink cadence (tiredness slows blinking).
+    /// 0 = normal. Producers map tiredness 0..1 -> 0..TIRED_BLINK_MAX_SLOWDOWN.
+    pub blink_slowdown: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,6 +168,12 @@ pub fn species_animation_profile(species: Species) -> AnimationProfile {
     }
 }
 
+pub const TIRED_BLINK_MAX_SLOWDOWN: u8 = 24;
+
+pub fn blink_slowdown_for_tiredness(tiredness: f32) -> u8 {
+    (tiredness.clamp(0.0, 1.0) * f32::from(TIRED_BLINK_MAX_SLOWDOWN)).round() as u8
+}
+
 pub fn closed_blink_eyes(species: Species) -> &'static str {
     match species {
         Species::Fuzz | Species::Blob => "- -",
@@ -252,8 +261,9 @@ fn should_blink(
         return false;
     }
     let jitter = u64::from(profile.blink_jitter.max(1));
-    let cadence =
-        u64::from(profile.blink_average) + (u64::from(pet.animation_phase.blink) % jitter);
+    let cadence = u64::from(profile.blink_average)
+        + (u64::from(pet.animation_phase.blink) % jitter)
+        + u64::from(frame.blink_slowdown);
     (frame.tick + u64::from(pet.animation_phase.blink)).is_multiple_of(cadence)
 }
 
@@ -623,6 +633,7 @@ mod tests {
             tick: 1, // a tick that does NOT blink on its own
             blink_suppression_ticks: 0,
             hold_eyes_closed: true,
+            blink_slowdown: 0,
         };
         let rendered = render_pet(&pet, Stage::S3, Mood::Content, frame);
         let art = rendered.lines.join("\n");
@@ -643,11 +654,60 @@ mod tests {
                 tick: 1,
                 blink_suppression_ticks: 0,
                 hold_eyes_closed: false,
+                blink_slowdown: 0,
             },
         );
         assert!(
             open.lines.join("\n").contains(&pet.traits.eyes),
             "non-blinking awake frame keeps the trait eyes"
+        );
+    }
+
+    #[test]
+    fn blink_slowdown_maps_tiredness_zero_to_zero_and_full_to_max() {
+        assert_eq!(blink_slowdown_for_tiredness(0.0), 0);
+        assert_eq!(blink_slowdown_for_tiredness(1.0), TIRED_BLINK_MAX_SLOWDOWN);
+        assert_eq!(
+            blink_slowdown_for_tiredness(0.5),
+            TIRED_BLINK_MAX_SLOWDOWN / 2
+        );
+        assert_eq!(blink_slowdown_for_tiredness(7.0), TIRED_BLINK_MAX_SLOWDOWN);
+        assert_eq!(blink_slowdown_for_tiredness(-1.0), 0);
+    }
+
+    #[test]
+    fn blink_cadence_slows_monotonically_with_blink_slowdown() {
+        use crate::pet::generation::Species;
+        let pet = generate_pet("hold-eyes-seed").with_species(Species::Blob);
+        let blink_count = |slowdown: u8| {
+            (0..1500_u64)
+                .filter(|&tick| {
+                    let rendered = render_pet(
+                        &pet,
+                        Stage::S3,
+                        Mood::Content,
+                        AnimationFrame {
+                            tick,
+                            blink_suppression_ticks: 0,
+                            hold_eyes_closed: false,
+                            blink_slowdown: slowdown,
+                        },
+                    );
+                    rendered
+                        .lines
+                        .join("\n")
+                        .contains(closed_blink_eyes(pet.species))
+                })
+                .count()
+        };
+        let rested = blink_count(0);
+        let halfway = blink_count(TIRED_BLINK_MAX_SLOWDOWN / 2);
+        let exhausted = blink_count(TIRED_BLINK_MAX_SLOWDOWN);
+        assert!(rested > 0, "a rested pet blinks");
+        assert!(exhausted > 0, "a tired pet still blinks, just slower");
+        assert!(
+            rested > halfway && halfway > exhausted,
+            "cadence must slow monotonically: {rested} > {halfway} > {exhausted}"
         );
     }
 }

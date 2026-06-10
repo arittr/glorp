@@ -270,13 +270,7 @@ impl WatchApp {
         );
         let now = time::OffsetDateTime::now_utc();
         let species = self.vm.pet_render.generated_species;
-        let rhythm = match (
-            self.vm.day_context.asleep,
-            self.vm.day_context.sleep_onset_utc,
-        ) {
-            (true, Some(onset)) => crate::pet::animator::BreathRhythm::Asleep { onset },
-            _ => crate::pet::animator::BreathRhythm::Awake,
-        };
+        let rhythm = crate::pet::animator::breath_rhythm_for_day(&self.vm.day_context);
         // wander_offset_x and facing are computed at render time in the panel
         // from area.width so they stay mutually consistent. We only update
         // breath and feed-pulse timestamp here.

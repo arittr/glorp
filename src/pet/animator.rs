@@ -53,6 +53,8 @@ pub const WANDER_SETTLE_SECS: i64 = 8;
 /// Asleep breath: period x3, inhale window x2 — slow and deep.
 const SLEEP_BREATH_PERIOD_SCALE: i64 = 3;
 const SLEEP_BREATH_INHALE_SCALE: i64 = 2;
+pub const TIRED_BREATH_MAX_SCALE: f64 = 1.5;
+const TIRED_BREATH_MIN_TIREDNESS: f32 = 0.05;
 
 /// Per-effect key. Used by `add_unique_effect` so a new transition of the
 /// same kind cancels the previous one in flight (e.g., mood changing twice
@@ -289,6 +291,11 @@ pub enum BreathRhythm {
     Asleep {
         onset: time::OffsetDateTime,
     },
+    /// Lengthened period for a tired-but-awake pet. eighths in 0..=8 maps to
+    /// period scale 1.0..=TIRED_BREATH_MAX_SCALE (integer to keep Copy+Eq).
+    Tired {
+        eighths: u8,
+    },
 }
 
 pub fn compute_breath_offset_with_rhythm(
@@ -304,6 +311,10 @@ pub fn compute_breath_offset_with_rhythm(
             inhale_ds * SLEEP_BREATH_INHALE_SCALE,
             onset.unix_timestamp() * 10 + i64::from(onset.millisecond() / 100),
         ),
+        BreathRhythm::Tired { eighths } => {
+            let stretch = 16 + i64::from(eighths.min(8));
+            (period_ds * stretch / 16, inhale_ds, 0)
+        }
     };
     let ts_ds = now.unix_timestamp() * 10 + i64::from(now.millisecond() / 100);
     let phase = (ts_ds - anchor_ds).rem_euclid(period_ds);
@@ -312,6 +323,18 @@ pub fn compute_breath_offset_with_rhythm(
     } else {
         0
     }
+}
+
+pub fn breath_rhythm_for_day(day: &crate::tui::day::DayContext) -> BreathRhythm {
+    if let (true, Some(onset)) = (day.asleep, day.sleep_onset_utc) {
+        return BreathRhythm::Asleep { onset };
+    }
+    if day.tiredness > TIRED_BREATH_MIN_TIREDNESS {
+        return BreathRhythm::Tired {
+            eighths: (day.tiredness.clamp(0.0, 1.0) * 8.0).round() as u8,
+        };
+    }
+    BreathRhythm::Awake
 }
 
 /// Per-species breath rhythm in tenths-of-a-second. Returns (period, inhale_window).
@@ -1099,6 +1122,65 @@ mod tests {
         assert_eq!(
             compute_wake_wander_x(width, Species::Fuzz, settled, from_eval, woke_at),
             compute_wander_position_x(width, Species::Fuzz, settled),
+        );
+    }
+
+    #[test]
+    fn tired_breath_period_scale_at_full_eighths_equals_tired_breath_max_scale() {
+        let species = Some(Species::Crystal);
+        let rising_edges = |rhythm: BreathRhythm| {
+            let base = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+            let mut prev = 0;
+            let mut edges = 0;
+            for ds in 0..1800_i64 {
+                let now = base + time::Duration::milliseconds(ds * 100);
+                let cur = compute_breath_offset_with_rhythm(species, now, rhythm);
+                if prev == 0 && cur == 1 {
+                    edges += 1;
+                }
+                prev = cur;
+            }
+            edges
+        };
+        let awake = rising_edges(BreathRhythm::Awake);
+        let tired = rising_edges(BreathRhythm::Tired { eighths: 8 });
+        assert_eq!(awake, 30);
+        assert_eq!(tired, 20);
+        assert!(
+            (f64::from(awake) / f64::from(tired) - TIRED_BREATH_MAX_SCALE).abs() < f64::EPSILON,
+            "full-eighths period stretch must equal TIRED_BREATH_MAX_SCALE"
+        );
+    }
+
+    #[test]
+    fn breath_rhythm_for_day_picks_asleep_over_tired_over_awake() {
+        let onset = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let asleep = crate::tui::day::DayContext {
+            asleep: true,
+            sleep_onset_utc: Some(onset),
+            tiredness: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            breath_rhythm_for_day(&asleep),
+            BreathRhythm::Asleep { onset }
+        );
+        let tired = crate::tui::day::DayContext {
+            tiredness: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(
+            breath_rhythm_for_day(&tired),
+            BreathRhythm::Tired { eighths: 4 }
+        );
+        let barely = crate::tui::day::DayContext {
+            tiredness: 0.05,
+            ..Default::default()
+        };
+        assert_eq!(breath_rhythm_for_day(&barely), BreathRhythm::Awake);
+        assert_eq!(
+            breath_rhythm_for_day(&crate::tui::day::DayContext::default()),
+            BreathRhythm::Awake
         );
     }
 }

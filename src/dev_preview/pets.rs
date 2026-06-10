@@ -70,6 +70,7 @@ fn render_pet_cell(area: Rect, buffer: &mut Buffer, species: Species, stage: Sta
             tick: 0,
             blink_suppression_ticks: 0,
             hold_eyes_closed: false,
+            blink_slowdown: 0,
         },
     );
 

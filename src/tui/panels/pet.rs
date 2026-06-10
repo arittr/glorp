@@ -1298,6 +1298,7 @@ mod tests {
                 tick: 0,
                 blink_suppression_ticks: 0,
                 hold_eyes_closed: false,
+                blink_slowdown: 0,
             },
         );
         let mut vm = WatchViewModel::fixture();

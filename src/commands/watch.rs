@@ -82,6 +82,7 @@ pub(crate) fn build_watch_view_model_at(
             tick: now.unix_timestamp().max(0) as u64,
             blink_suppression_ticks: 0,
             hold_eyes_closed: day_context.asleep,
+            blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(day_context.tiredness),
         },
     );
 
@@ -186,13 +187,11 @@ pub(crate) fn build_watch_view_model_at(
             now,
         ),
         wander_offset_x: 0, // computed at render time by the panel from area.width
-        breath_offset_y: {
-            let rhythm = match (day_context.asleep, day_context.sleep_onset_utc) {
-                (true, Some(onset)) => crate::pet::animator::BreathRhythm::Asleep { onset },
-                _ => crate::pet::animator::BreathRhythm::Awake,
-            };
-            crate::pet::animator::compute_breath_offset_with_rhythm(Some(species), now, rhythm)
-        },
+        breath_offset_y: crate::pet::animator::compute_breath_offset_with_rhythm(
+            Some(species),
+            now,
+            crate::pet::animator::breath_rhythm_for_day(&day_context),
+        ),
         facing: 1,                // computed at render time by the panel from area.width
         last_feed_pulse_at: None, // populated by WatchApp when a token spike fires
         progress: {
@@ -437,6 +436,9 @@ pub fn rerender_pet_for_view_model(
             tick,
             blink_suppression_ticks: 0,
             hold_eyes_closed,
+            blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(
+                vm.day_context.tiredness,
+            ),
         },
     );
     vm.pet_art = rendered.lines;
@@ -1324,6 +1326,100 @@ mod tests {
         assert!(
             !munch.contains(&line.as_str()),
             "vm build must not munch on raw recent tokens, got {line}"
+        );
+    }
+
+    #[test]
+    fn rerender_threads_day_context_tiredness_into_blink_cadence() {
+        let mut rested = WatchViewModel::fixture();
+        rested.pet_render.mood = Mood::Content;
+        rested.pet_render.generated_species = Species::Blob;
+        rested.pet_render.stage = Stage::S3;
+        let mut tired = rested.clone();
+        tired.day_context.tiredness = 1.0;
+
+        let closed = crate::pet::render::closed_blink_eyes(Species::Blob);
+        let mut rested_blinks = 0;
+        let mut tired_blinks = 0;
+        for tick in 0..1500_u64 {
+            rerender_pet_for_view_model(&mut rested, tick, false).unwrap();
+            if rested.pet_art.join("\n").contains(closed) {
+                rested_blinks += 1;
+            }
+            rerender_pet_for_view_model(&mut tired, tick, false).unwrap();
+            if tired.pet_art.join("\n").contains(closed) {
+                tired_blinks += 1;
+            }
+        }
+        assert!(
+            tired_blinks > 0,
+            "a tired pet still blinks, just less often"
+        );
+        assert!(
+            rested_blinks > tired_blinks,
+            "tiredness must slow blinking through the rerender path \
+             (app frame tick + menubar animate): {rested_blinks} vs {tired_blinks}"
+        );
+    }
+
+    #[test]
+    fn vm_breath_rhythm_lets_asleep_outrank_tiredness() {
+        use crate::pet::animator::{compute_breath_offset_with_rhythm, BreathRhythm};
+        use time::macros::datetime;
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut store = UsageStore::open(&db_path).unwrap();
+        for back in 2..=6_i64 {
+            for hour in [9_i64, 13, 17] {
+                let at =
+                    datetime!(2026-06-10 00:00 UTC) - Duration::days(back) + Duration::hours(hour);
+                store
+                    .insert_event(&sample_event_at_for_test(at, 10_000.0))
+                    .unwrap();
+            }
+        }
+        for i in 0..24_i64 {
+            store
+                .insert_event(&sample_event_at_for_test(
+                    datetime!(2026-06-09 18:00 UTC) + Duration::minutes(i * 10),
+                    20_000.0,
+                ))
+                .unwrap();
+        }
+        drop(store);
+        let mut state = PetState::new_for_test("test", "buddy");
+        state.created_at = datetime!(2026-06-01 00:00 UTC);
+        state.pet.generated_species = Species::Crystal;
+
+        let now = datetime!(2026-06-10 01:30 UTC);
+        let onset = datetime!(2026-06-10 00:00 UTC);
+        let asleep_rhythm = BreathRhythm::Asleep { onset };
+        let tired_rhythm = BreathRhythm::Tired { eighths: 2 };
+        let probe = (0..180_i64)
+            .map(|s| now + Duration::seconds(s))
+            .find(|&t| {
+                compute_breath_offset_with_rhythm(Some(Species::Crystal), t, asleep_rhythm)
+                    != compute_breath_offset_with_rhythm(Some(Species::Crystal), t, tired_rhythm)
+            })
+            .expect("sleep (18s period) and tired (6.7s) rhythms diverge fast");
+
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            probe,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
+        assert!(vm.day_context.asleep, "fixture must derive an asleep scene");
+        assert!(
+            vm.day_context.tiredness > 0.05,
+            "fixture must also be tired, got {}",
+            vm.day_context.tiredness
+        );
+        assert_eq!(
+            vm.breath_offset_y,
+            compute_breath_offset_with_rhythm(Some(Species::Crystal), probe, asleep_rhythm),
+            "asleep must outrank tired at the vm breath call site"
         );
     }
 }
