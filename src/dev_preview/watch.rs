@@ -551,6 +551,81 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             day_context: night_quiet_day_context(fixed_now),
             hold_eyes_closed: false,
         },
+        DayContextFrameFixture {
+            id: "watch-daycontext-work-output-sparks",
+            title: "Watch DayContext Work Output Sparks",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: work_life_profile(WorkWeather::OutputSparks),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: work_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-work-reasoning-pulse",
+            title: "Watch DayContext Work Reasoning Pulse",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: work_life_profile(WorkWeather::ReasoningPulse),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: work_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-work-cache-mist",
+            title: "Watch DayContext Work Cache Mist",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: work_life_profile(WorkWeather::CacheMist),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: work_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-work-mixed",
+            title: "Watch DayContext Work Mixed",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: work_life_profile(WorkWeather::Mixed),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: work_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-work-clear",
+            title: "Watch DayContext Work Clear",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: work_life_profile(WorkWeather::Clear),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: work_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
     ]
 }
 
@@ -1218,6 +1293,18 @@ fn calm_idle_life_profile() -> PetLifeProfile {
     }
 }
 
+fn work_life_profile(weather: WorkWeather) -> PetLifeProfile {
+    match weather {
+        WorkWeather::Clear => idle_life_profile(),
+        WorkWeather::CacheMist => cooling_life_profile(),
+        _ => {
+            let mut profile = warm_life_profile(false);
+            profile.work_weather = weather;
+            profile
+        }
+    }
+}
+
 fn newborn_pet_state(ctx: &PreviewRenderContext) -> PetState {
     let mut state = PetState::new_for_test("glorp-preview-watch", "Mochi");
     state.pet.generated_species = Species::Fuzz;
@@ -1254,6 +1341,20 @@ fn dawn_crossing_day_context(fixed_now: OffsetDateTime) -> DayContext {
         phase_started_at_utc: fixed_now - Duration::minutes(10),
         phase_ends_at_utc: fixed_now + Duration::minutes(20),
         asleep: false,
+        ..DayContext::default()
+    }
+}
+
+fn work_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Day,
+        phase_started_at_utc: now - Duration::hours(3),
+        phase_ends_at_utc: now + Duration::hours(5),
+        today_ratio: 0.6,
+        tiredness: 0.1,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(12),
+        local_day_rollover_utc: now + Duration::hours(12),
         ..DayContext::default()
     }
 }
@@ -1477,7 +1578,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 32);
+        assert_eq!(frames.len(), 37);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -1521,18 +1622,28 @@ mod tests {
         assert_eq!((frames[22].width, frames[22].height), (120, 32));
         assert_eq!(frames[23].id, "watch-daycontext-night-quiet");
         assert_eq!((frames[23].width, frames[23].height), (120, 32));
-        assert_eq!(frames[24].id, "room-starter-day-clear");
+        assert_eq!(frames[24].id, "watch-daycontext-work-output-sparks");
         assert_eq!((frames[24].width, frames[24].height), (120, 32));
-        assert_eq!(frames[25].id, "room-botanical-cache-evening");
-        assert_eq!(frames[26].id, "room-technical-output-active");
-        assert_eq!(frames[27].id, "room-celestial-artifact-night");
-        assert_eq!(frames[28].id, "room-cozy-weekend-quiet");
-        assert_eq!(frames[29].id, "room-mixed-full-wide");
-        assert_eq!((frames[29].width, frames[29].height), (180, 50));
-        assert_eq!(frames[30].id, "room-heavy-day-cozy-large");
-        assert_eq!((frames[30].width, frames[30].height), (120, 32));
-        assert_eq!(frames[31].id, "room-dawn-wake-small");
-        assert_eq!((frames[31].width, frames[31].height), (72, 24));
+        assert_eq!(frames[25].id, "watch-daycontext-work-reasoning-pulse");
+        assert_eq!((frames[25].width, frames[25].height), (120, 32));
+        assert_eq!(frames[26].id, "watch-daycontext-work-cache-mist");
+        assert_eq!((frames[26].width, frames[26].height), (120, 32));
+        assert_eq!(frames[27].id, "watch-daycontext-work-mixed");
+        assert_eq!((frames[27].width, frames[27].height), (120, 32));
+        assert_eq!(frames[28].id, "watch-daycontext-work-clear");
+        assert_eq!((frames[28].width, frames[28].height), (120, 32));
+        assert_eq!(frames[29].id, "room-starter-day-clear");
+        assert_eq!((frames[29].width, frames[29].height), (120, 32));
+        assert_eq!(frames[30].id, "room-botanical-cache-evening");
+        assert_eq!(frames[31].id, "room-technical-output-active");
+        assert_eq!(frames[32].id, "room-celestial-artifact-night");
+        assert_eq!(frames[33].id, "room-cozy-weekend-quiet");
+        assert_eq!(frames[34].id, "room-mixed-full-wide");
+        assert_eq!((frames[34].width, frames[34].height), (180, 50));
+        assert_eq!(frames[35].id, "room-heavy-day-cozy-large");
+        assert_eq!((frames[35].width, frames[35].height), (120, 32));
+        assert_eq!(frames[36].id, "room-dawn-wake-small");
+        assert_eq!((frames[36].width, frames[36].height), (72, 24));
     }
 
     #[test]

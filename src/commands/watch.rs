@@ -75,6 +75,7 @@ pub(crate) fn build_watch_view_model_at(
     let mood = mood_from_state(state);
     let generated = generate_pet(&state.pet.seed).with_species(species);
     let pet_performance = crate::tui::room::pet_performance_from_day_context(&day_context);
+    let life_profile = crate::tui::life::PetLifeProfile::default();
     let rendered = render_pet(
         &generated,
         stage,
@@ -89,7 +90,14 @@ pub(crate) fn build_watch_view_model_at(
                 crate::tui::room::PetPerformance::TiredAwake
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
-            work_accent: crate::pet::render::WorkAccent::None,
+            work_accent: crate::pet::render::work_accent_for(
+                life_profile.work_weather,
+                if life_profile.calm_mode {
+                    0.0
+                } else {
+                    life_profile.activity_level
+                },
+            ),
         },
     );
 
@@ -161,7 +169,7 @@ pub(crate) fn build_watch_view_model_at(
             mood,
         },
         habitat: build_habitat_view(state),
-        life_profile: crate::tui::life::PetLifeProfile::default(),
+        life_profile,
         day_context,
         pet_name: state.pet.accepted_name.clone(),
         species: species.as_str().to_string(),
@@ -453,7 +461,14 @@ pub fn rerender_pet_for_view_model(
                 crate::tui::room::PetPerformance::TiredAwake
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
-            work_accent: crate::pet::render::WorkAccent::None,
+            work_accent: crate::pet::render::work_accent_for(
+                vm.life_profile.work_weather,
+                if vm.life_profile.calm_mode {
+                    0.0
+                } else {
+                    vm.life_profile.activity_level
+                },
+            ),
         },
     );
     vm.pet_art = rendered.lines;

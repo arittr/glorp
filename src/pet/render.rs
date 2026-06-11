@@ -15,6 +15,22 @@ pub enum WorkAccent {
     Dreamy,
 }
 
+/// Map live work shape to a subtle expression accent. Returns `None` unless
+/// work is actually flowing (activity gate), so a stale weather never lingers
+/// on an idle pet — keeping this on the texture side of the locked boundary.
+pub fn work_accent_for(weather: crate::tui::life::WorkWeather, activity_level: f32) -> WorkAccent {
+    use crate::tui::life::WorkWeather::*;
+    if activity_level < 0.3 {
+        return WorkAccent::None;
+    }
+    match weather {
+        OutputSparks | Mixed => WorkAccent::Alert,
+        ReasoningPulse => WorkAccent::Focused,
+        CacheMist => WorkAccent::Dreamy,
+        Clear => WorkAccent::None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AnimationFrame {
     pub tick: u64,
@@ -665,6 +681,31 @@ fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
 mod tests {
     use super::*;
     use crate::pet::generation::generate_pet;
+
+    #[test]
+    fn work_accent_from_weather_gates_on_live_work() {
+        use crate::tui::life::WorkWeather;
+        // Idle: no accent regardless of weather.
+        assert_eq!(
+            work_accent_for(WorkWeather::OutputSparks, 0.0),
+            WorkAccent::None
+        );
+        // Live work maps weather to accent.
+        assert_eq!(
+            work_accent_for(WorkWeather::OutputSparks, 0.9),
+            WorkAccent::Alert
+        );
+        assert_eq!(
+            work_accent_for(WorkWeather::ReasoningPulse, 0.9),
+            WorkAccent::Focused
+        );
+        assert_eq!(
+            work_accent_for(WorkWeather::CacheMist, 0.9),
+            WorkAccent::Dreamy
+        );
+        assert_eq!(work_accent_for(WorkWeather::Mixed, 0.9), WorkAccent::Alert);
+        assert_eq!(work_accent_for(WorkWeather::Clear, 0.9), WorkAccent::None);
+    }
 
     #[test]
     fn soft_eyes_relax_a_positive_mood_without_changing_mouth() {

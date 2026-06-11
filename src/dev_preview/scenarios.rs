@@ -1029,6 +1029,152 @@ fn day_context_inputs_for_frame(
                 "mature": true
             }),
         ),
+        "watch-daycontext-work-output-sparks" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.68,
+                "burst_level": 0.24,
+                "source_accent": Some("balanced"),
+                "weather": "output-sparks",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "codex_signal_lamp",
+                    "intensity": 0.35,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.6,
+                "tiredness": 0.1,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-work-reasoning-pulse" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.68,
+                "burst_level": 0.24,
+                "source_accent": Some("balanced"),
+                "weather": "reasoning-pulse",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "codex_signal_lamp",
+                    "intensity": 0.35,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.6,
+                "tiredness": 0.1,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-work-cache-mist" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.38,
+                "burst_level": 0.0,
+                "source_accent": Some("claude"),
+                "weather": "cache-mist",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "token_shell_100k",
+                    "intensity": 0.28,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "backfill"
+            }),
+            json!({
+                "today_ratio": 0.6,
+                "tiredness": 0.1,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-work-mixed" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.68,
+                "burst_level": 0.24,
+                "source_accent": Some("balanced"),
+                "weather": "mixed",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "codex_signal_lamp",
+                    "intensity": 0.35,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.6,
+                "tiredness": 0.1,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-work-clear" => (
+            "day",
+            fixed_now - time::Duration::hours(3),
+            fixed_now + time::Duration::hours(5),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.6,
+                "tiredness": 0.1,
+                "mature": true
+            }),
+        ),
         _ => (
             "day",
             fixed_now,
@@ -1213,6 +1359,11 @@ mod tests {
                 "watch-daycontext-dawn-fresh",
                 "watch-daycontext-dusk-heavy",
                 "watch-daycontext-night-quiet",
+                "watch-daycontext-work-output-sparks",
+                "watch-daycontext-work-reasoning-pulse",
+                "watch-daycontext-work-cache-mist",
+                "watch-daycontext-work-mixed",
+                "watch-daycontext-work-clear",
                 "room-starter-day-clear",
                 "room-botanical-cache-evening",
                 "room-technical-output-active",

@@ -464,6 +464,7 @@ mod render_compact_tests {
 
         // Build a crystal S2 WatchViewModel (the species the user reported missing).
         let pet = generate_pet("crystal-compact-test");
+        let mut vm = WatchViewModel::fixture();
         let rendered = render_pet(
             &pet,
             Stage::S2,
@@ -474,10 +475,16 @@ mod render_compact_tests {
                 hold_eyes_closed: false,
                 blink_slowdown: 0,
                 soft_eyes: false,
-                work_accent: crate::pet::render::WorkAccent::None,
+                work_accent: crate::pet::render::work_accent_for(
+                    vm.life_profile.work_weather,
+                    if vm.life_profile.calm_mode {
+                        0.0
+                    } else {
+                        vm.life_profile.activity_level
+                    },
+                ),
             },
         );
-        let mut vm = WatchViewModel::fixture();
         vm.pet_art = rendered.lines;
         vm.pet_spans = rendered.spans;
 
