@@ -888,6 +888,7 @@ impl LegacyPanel for PetPanel {
             &ambient_exclusions,
             now,
             ctx.color_capability,
+            vm.day_context.day_phase,
         );
         for g in room_glyphs {
             if !rects_contain(&ambient_exclusions, g.col, g.row) {

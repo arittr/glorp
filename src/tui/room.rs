@@ -428,6 +428,7 @@ pub fn room_glyphs_for(
     exclusions: &[Rect],
     now: OffsetDateTime,
     color_capability: ColorCapability,
+    day_phase: DayPhase,
 ) -> Vec<RoomGlyph> {
     let mut cells: std::collections::HashMap<(u16, u16), RoomGlyph> =
         std::collections::HashMap::new();
@@ -442,10 +443,20 @@ pub fn room_glyphs_for(
     }
     let mut glyphs: Vec<RoomGlyph> = cells.into_values().collect();
     glyphs.sort_by_key(|g| (g.row, g.col));
+    let budget = (motion_budget(area) as f64 * phase_density_scale(day_phase)).round() as usize;
+    let flat = matches!(color_capability, ColorCapability::Flat);
     glyphs
         .into_iter()
         .filter(|glyph| !rects_contain(exclusions, glyph.col, glyph.row))
-        .take(motion_budget(area))
+        .take(budget)
+        .map(|mut glyph| {
+            if !flat {
+                if let Some(fg) = glyph.style.fg {
+                    glyph.style = glyph.style.fg(phase_warmth_tint(fg, day_phase));
+                }
+            }
+            glyph
+        })
         .collect()
 }
 
@@ -1073,6 +1084,109 @@ mod tests {
         assert_eq!(motion_budget(Rect::new(0, 0, 180, 50)), 28);
     }
 
+    fn phase_test_profile() -> RoomLifeProfile {
+        RoomLifeProfile {
+            biome: RoomBiome {
+                primary: RoomBiomeTag::Botanical,
+                secondary: Some(RoomBiomeTag::Cozy),
+            },
+            room_weather: RoomWeatherLayer::Clear,
+            resonant_emitter: None,
+            pet_performance: PetPerformance::RestedAwake,
+            scene_moments: Vec::new(),
+            identity_prop_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn room_glyphs_are_sparser_at_night_than_day() {
+        let profile = phase_test_profile();
+        let area = Rect::new(0, 0, 120, 32);
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let day = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+        );
+        let night = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Night,
+        );
+        assert!(
+            night.len() < day.len(),
+            "night ({}) should have fewer ambient glyphs than day ({})",
+            night.len(),
+            day.len()
+        );
+    }
+
+    #[test]
+    fn room_glyphs_warm_at_dusk_in_color_mode() {
+        let profile = phase_test_profile();
+        let area = Rect::new(0, 0, 120, 32);
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let day = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+        );
+        let dusk = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Dusk,
+        );
+        // At least one co-located glyph should be warmer (redder) at dusk.
+        let warmer = day.iter().any(|d| {
+            dusk.iter().any(|k| {
+                k.row == d.row
+                    && k.col == d.col
+                    && matches!((k.style.fg, d.style.fg),
+                        (Some(Color::Rgb(kr, _, _)), Some(Color::Rgb(dr, _, _))) if kr > dr)
+            })
+        });
+        assert!(warmer, "dusk should warm at least one room glyph vs day");
+    }
+
+    #[test]
+    fn room_glyphs_still_emit_in_flat_mode_at_night() {
+        let profile = phase_test_profile();
+        let area = Rect::new(0, 0, 120, 32);
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let glyphs = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Flat,
+            DayPhase::Night,
+        );
+        assert!(
+            !glyphs.is_empty(),
+            "flat night should still emit room glyphs"
+        );
+        let faint = tokenpet_palette().faint.rgb;
+        for g in &glyphs {
+            assert_eq!(
+                g.style.fg,
+                Some(faint),
+                "flat mode keeps the faint color (no warmth)"
+            );
+        }
+    }
+
     #[test]
     fn room_glyphs_are_deterministic_for_identical_inputs() {
         let profile = RoomLifeProfile {
@@ -1089,8 +1203,22 @@ mod tests {
         let area = Rect::new(0, 0, 120, 32);
         let now = datetime!(2026-06-11 10:00 UTC);
 
-        let a = room_glyphs_for(&profile, area, &[], now, ColorCapability::Truecolor);
-        let b = room_glyphs_for(&profile, area, &[], now, ColorCapability::Truecolor);
+        let a = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+        );
+        let b = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+        );
 
         assert_eq!(
             a, b,
@@ -1114,7 +1242,14 @@ mod tests {
         let area = Rect::new(0, 0, 120, 32);
         let now = datetime!(2026-06-11 10:00 UTC);
 
-        let glyphs = room_glyphs_for(&profile, area, &[], now, ColorCapability::Flat);
+        let glyphs = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Flat,
+            DayPhase::Day,
+        );
 
         assert!(
             !glyphs.is_empty(),
@@ -1146,7 +1281,14 @@ mod tests {
         let area = Rect::new(0, 0, 120, 32);
         let now = datetime!(2026-06-11 10:00 UTC);
 
-        let glyphs = room_glyphs_for(&profile, area, &[], now, ColorCapability::Truecolor);
+        let glyphs = room_glyphs_for(
+            &profile,
+            area,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+        );
         let symbols: std::collections::HashSet<char> = glyphs.iter().map(|g| g.glyph).collect();
         let zones: std::collections::HashSet<RoomZone> = glyphs.iter().map(|g| g.zone).collect();
         let has_mist = symbols.iter().any(|c| ['~', ',', '`'].contains(c));
