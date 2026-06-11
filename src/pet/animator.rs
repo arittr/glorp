@@ -57,6 +57,12 @@ pub const WANDER_SETTLE_SECS: i64 = 8;
 /// Asleep breath: period x3, inhale window x2 — slow and deep.
 const SLEEP_BREATH_PERIOD_SCALE: i64 = 3;
 const SLEEP_BREATH_INHALE_SCALE: i64 = 2;
+/// Minutes over which sleep breath inhale depth fades from full to shallow.
+const SLEEP_BREATH_DEPTH_WINDOW_MIN: i64 = 90;
+/// Inhale depth percentage at sleep onset.
+const SLEEP_BREATH_DEPTH_START_PCT: i64 = 100;
+/// Inhale depth percentage after `SLEEP_BREATH_DEPTH_WINDOW_MIN` minutes.
+const SLEEP_BREATH_DEPTH_END_PCT: i64 = 40;
 pub const TIRED_BREATH_MAX_SCALE: f64 = 1.5;
 const TIRED_BREATH_MIN_TIREDNESS: f32 = 0.05;
 
@@ -444,10 +450,15 @@ pub fn compute_breath_offset_with_rhythm(
     let (period_ds, inhale_ds, anchor_ds) = match rhythm {
         BreathRhythm::Awake => (period_ds, inhale_ds, 0),
         BreathRhythm::Asleep { onset } => {
-            let elapsed_min = (now - onset).whole_minutes().clamp(0, 90);
-            // Inhale window shrinks from full to ~40% over the first 90 min asleep.
-            let depth_num = 100 - (elapsed_min * 60 / 90); // 100 -> 40
-            let inhale = (inhale_ds * SLEEP_BREATH_INHALE_SCALE * depth_num / 100).max(1);
+            let elapsed_min = (now - onset)
+                .whole_minutes()
+                .clamp(0, SLEEP_BREATH_DEPTH_WINDOW_MIN);
+            let depth_num = SLEEP_BREATH_DEPTH_START_PCT
+                - (elapsed_min * (SLEEP_BREATH_DEPTH_START_PCT - SLEEP_BREATH_DEPTH_END_PCT)
+                    / SLEEP_BREATH_DEPTH_WINDOW_MIN);
+            let inhale = (inhale_ds * SLEEP_BREATH_INHALE_SCALE * depth_num
+                / SLEEP_BREATH_DEPTH_START_PCT)
+                .max(1);
             (
                 period_ds * SLEEP_BREATH_PERIOD_SCALE,
                 inhale,
