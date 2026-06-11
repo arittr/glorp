@@ -32,7 +32,9 @@ they do not yet *use* what is derived.
 
 Goal: the resting scene looks meaningfully different through the day and across
 kinds-of-day, with every difference traceable to a real signal — finishing the
-Alive Room intent, plus two correctness/micro-life gaps it never covered.
+Alive Room intent (A, B), correcting two source-of-truth gaps it never covered
+(C), adding sleep/idle micro-life (D), and one genuinely-new channel: the pet's
+face reacting to the *kind* of work flowing, not just the time (E).
 
 ## Principles
 
@@ -104,7 +106,9 @@ Touched consumers:
 - `pet/animator.rs::species_breath_rhythm_decis` (`animator.rs:478`) and
   `BreathRhythm::Asleep` (`animator.rs:445`) — cadence re-align + sleep depth.
 - `game/metabolism.rs::Mood` (`metabolism.rs:25`) and
-  `pet/render.rs::expression_for` (`render.rs:215`) — new `Ecstatic` mood.
+  `pet/render.rs::expression_for` (`render.rs:215`) — new `Ecstatic` mood (C2)
+  and a work-type accent parameter (E), derived in `panels/pet.rs` from the
+  already-available `PetLifeProfile.work_weather` + live-activity gate.
 
 ## A — Room phase composition and warmth
 
@@ -206,6 +210,41 @@ Small micro-life on signals we already hold.
   loop-frozen. Texture-only spacing change; no new behaviors introduced
   (locked boundary).
 
+## E — Work-type expression (genuinely new)
+
+The creature's face does not react to *what kind of work* is flowing.
+`expression_for` (`render.rs:215`) takes only `(mood, blinking)`. `work_weather`
+already classifies the token shape (CacheMist / OutputSparks / ReasoningPulse /
+Mixed / Clear) and currently drives only room overlays, particle color, and
+dreams. Route it into a subtle expression accent so the pet reads as *reacting
+to your work*, not just the clock.
+
+- **Modifier, not override.** Mood stays primary (vitals-driven). The work
+  accent is a small secondary variation layered on the mood face — never a
+  replacement.
+- **Emotional truth gate.** Apply only when mood is neutral-to-positive
+  (`Content` / `Happy` / `Ecstatic`). A `Sad` / `Hungry` / `Sleepy` / `Wilted`
+  pet keeps its honest face — work-type never makes a struggling pet look sharp.
+- **Live-work gate (locked boundary).** Express only while work is actually
+  flowing — gated on `activity_level` / `burst_level` above a small threshold —
+  and relax to the plain mood face when idle. A stale weather never lingers on
+  an idle pet, so this stays on the texture side of the texture-vs-personality
+  boundary: the accent tracks real, current work.
+- **Accent vocabulary** (echoing the established `work_weather → color` map at
+  `pet.rs:188`, magnitudes tuned in preview):
+  - OutputSparks: brighter / sharper eyes — alert.
+  - ReasoningPulse: narrowed / focused eyes.
+  - CacheMist: softer / dreamier eyes.
+  - Mixed: lightly busy; Clear: no accent (plain mood).
+- **Species fallback.** Where a species' art cannot carry an eye variant, it
+  falls back to no accent (same rule the Alive Room Pet Performance section
+  uses). Global eye-variant strings, applied only when the mood gate permits —
+  mirroring how the mood faces themselves are global, not per-species.
+- **Seam.** `expression_for` gains an optional work-accent argument; the accent
+  (`work_weather` + live-work gate + mood gate) is computed in `panels/pet.rs`
+  where `PetLifeProfile` is already in hand, and threaded through `render_pet`.
+  Subtle by rule 3 — a small eye variant, not a new face.
+
 ## Error handling and fallback
 
 Pure presentation transforms of validated state; no new I/O or failure modes.
@@ -223,11 +262,15 @@ broken frame.
   compose without clamping surprises) — the subtle one; re-aligned breath value
   assertions and glitch→crystal ordering (C1); `Ecstatic` face + blink-block and
   the peak-vitals threshold (C2); sleep-depth breath monotonic over `onset` and
-  idle-spacing growth (D).
+  idle-spacing growth (D); work accent applies only under both gates — no accent
+  when idle or when mood is negative, correct accent per `work_weather` when
+  actively working (E).
 - **Preview lab.** Add `dev-preview` scenarios crossing phase
   (dawn/day/dusk/night) with kind-of-day (fresh vs heavy) and a couple of
   performance states, at compact and normal watch sizes, including one small
   early-stage and one large late-stage pet (Alive Room preview requirement).
+  Add an active-work scenario per `work_weather` class to prove the E accents
+  (and to confirm no accent renders when idle or mood is negative).
   These let us tune "bold room / subtle pet" by eye before shipping. Resting
   frames prove differentiation at rest; strips prove motion.
 - **Flat-mode coverage.** A low-color preview/test proving phases differ without
@@ -241,7 +284,9 @@ One spec, phased build (each phase independently shippable and preview-gated):
    established pattern.
 2. **B — pet posture + eyes.** Builds on A's preview fixtures for tuning.
 3. **C — breath re-align + Ecstatic.** Independent; can land any time.
-4. **D — sleep-depth + idle laziness.** Polish.
+4. **E — work-type expression.** Net-new channel; builds on the `Ecstatic`
+   mood from C2 and the live-activity signals already on `PetLifeProfile`.
+5. **D — sleep-depth + idle laziness.** Polish.
 
 ## Open questions
 
