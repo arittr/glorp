@@ -274,6 +274,14 @@ fn expression_for(
     if frame.soft_eyes && matches!(mood, Mood::Content | Mood::Happy) {
         expr.eyes = "\u{02d8}.\u{02d8}".to_string(); // ˘.˘ relaxed, heavy-lidded
     }
+    if !matches!(mood, Mood::Sad | Mood::Hungry | Mood::Sleepy | Mood::Wilted) {
+        match frame.work_accent {
+            WorkAccent::None => {}
+            WorkAccent::Alert => expr.eyes = "^o^".to_string(),
+            WorkAccent::Focused => expr.eyes = ">.<".to_string(),
+            WorkAccent::Dreamy => expr.eyes = "u.u".to_string(),
+        }
+    }
     expr
 }
 
@@ -692,6 +700,38 @@ mod tests {
             b.contains(&pet.traits.mouth),
             "soft eyes should not change the mouth, got:\n{b}"
         );
+    }
+
+    #[test]
+    fn work_accent_sharpens_only_positive_moods() {
+        let pet = generate_pet("accent-seed");
+        let base = AnimationFrame {
+            tick: 2,
+            ..AnimationFrame::default()
+        };
+        let alert = AnimationFrame {
+            work_accent: WorkAccent::Alert,
+            ..base
+        };
+        // Positive mood: accent changes the face.
+        let happy_plain = render_pet(&pet, Stage::S3, Mood::Happy, base)
+            .lines
+            .join("\n");
+        let happy_alert = render_pet(&pet, Stage::S3, Mood::Happy, alert)
+            .lines
+            .join("\n");
+        assert_ne!(
+            happy_plain, happy_alert,
+            "alert accent should change a happy face"
+        );
+        // Negative mood: accent is ignored (honest face).
+        let sad_plain = render_pet(&pet, Stage::S3, Mood::Sad, base)
+            .lines
+            .join("\n");
+        let sad_alert = render_pet(&pet, Stage::S3, Mood::Sad, alert)
+            .lines
+            .join("\n");
+        assert_eq!(sad_plain, sad_alert, "a sad pet keeps its honest face");
     }
 
     #[test]
