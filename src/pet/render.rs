@@ -246,6 +246,10 @@ fn expression_for(
             eyes: "^.^".to_string(),
             mouth: "\u{03c9}".to_string(),
         },
+        Mood::Ecstatic => Expression {
+            eyes: "*o*".to_string(),
+            mouth: "\u{25bd}".to_string(), // ▽
+        },
         Mood::Content => Expression {
             eyes: pet.traits.eyes.clone(),
             mouth: pet.traits.mouth.clone(),
@@ -279,7 +283,10 @@ fn should_blink(
     frame: AnimationFrame,
     profile: AnimationProfile,
 ) -> bool {
-    if matches!(mood, Mood::Sad | Mood::Sleepy | Mood::Wilted) {
+    if matches!(
+        mood,
+        Mood::Sad | Mood::Sleepy | Mood::Wilted | Mood::Ecstatic
+    ) {
         return false;
     }
     if frame.blink_suppression_ticks > 0 {
@@ -726,6 +733,19 @@ mod tests {
             open.lines.join("\n").contains(&pet.traits.eyes),
             "non-blinking awake frame keeps the trait eyes"
         );
+    }
+
+    #[test]
+    fn ecstatic_renders_the_star_eyes_and_blocks_blink() {
+        let pet = generate_pet("ecstatic-seed");
+        let frame = AnimationFrame {
+            tick: 1,
+            ..AnimationFrame::default()
+        };
+        let art = render_pet(&pet, Stage::S4, Mood::Ecstatic, frame)
+            .lines
+            .join("\n");
+        assert!(art.contains("*o*"), "ecstatic uses star eyes, got:\n{art}");
     }
 
     #[test]

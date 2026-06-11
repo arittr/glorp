@@ -181,6 +181,7 @@ pub fn pick_sleep_petting_phrase(now: OffsetDateTime) -> String {
 fn mood_phrase(mood: Mood, now: OffsetDateTime) -> String {
     let phrases: &[&str] = match mood {
         Mood::Happy => &["great job!", "feeling fantastic", "all good!", "happy days"],
+        Mood::Ecstatic => &["!!!", "so good", "best day"],
         Mood::Content => &["hmm", "thinking deeply", "just chilling", "all is well"],
         Mood::Sleepy => &["zzz...", "so tired", "*yawn*", "5 more minutes"],
         Mood::Sad => &["...", "missing you", "kinda down", "*sigh*"],

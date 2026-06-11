@@ -108,6 +108,7 @@ pub fn stage_phrase(name: &str, species: Species, new_stage: Stage) -> String {
 pub fn mood_phrase(name: &str, to: Mood, now: OffsetDateTime) -> String {
     let variants: &[&str] = match to {
         Mood::Happy => &["{name} brightened", "{name} looks great"],
+        Mood::Ecstatic => &["{name} is beaming", "{name} glows"],
         Mood::Content => &["{name} settled", "{name} relaxed"],
         Mood::Sleepy => &["{name} grew drowsy", "{name} yawned"],
         Mood::Hungry => &["{name} grew hungry", "{name} got peckish"],
@@ -326,6 +327,7 @@ mod tests {
         let base = datetime!(2026-05-11 12:00 UTC);
         for mood in [
             Mood::Happy,
+            Mood::Ecstatic,
             Mood::Content,
             Mood::Sleepy,
             Mood::Hungry,

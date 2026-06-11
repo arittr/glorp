@@ -24,6 +24,7 @@ pub struct Vitals {
 #[serde(rename_all = "lowercase")]
 pub enum Mood {
     Happy,
+    Ecstatic,
     Content,
     Hungry,
     Sad,
@@ -36,6 +37,7 @@ impl Mood {
     pub const fn as_str(self) -> &'static str {
         match self {
             Mood::Happy => "happy",
+            Mood::Ecstatic => "ecstatic",
             Mood::Content => "content",
             Mood::Hungry => "hungry",
             Mood::Sad => "sad",
@@ -57,6 +59,7 @@ impl FromStr for Mood {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "happy" => Ok(Mood::Happy),
+            "ecstatic" => Ok(Mood::Ecstatic),
             "content" => Ok(Mood::Content),
             "hungry" => Ok(Mood::Hungry),
             "sad" => Ok(Mood::Sad),
@@ -235,6 +238,8 @@ fn mood_for(vitals: Vitals) -> Mood {
         Mood::Sad
     } else if vitals.energy < 20.0 {
         Mood::Sleepy
+    } else if vitals.fed >= 90.0 && vitals.happiness >= 90.0 && vitals.energy >= 70.0 {
+        Mood::Ecstatic
     } else if vitals.fed >= 75.0 && vitals.happiness >= 75.0 && vitals.energy >= 55.0 {
         Mood::Happy
     } else {
@@ -273,5 +278,29 @@ fn weekend_activity_weight(weekend_count: usize, active_count: usize) -> f64 {
         LEARNED_WEEKEND_WEIGHT
     } else {
         DEFAULT_WEEKEND_WEIGHT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peak_vitals_are_ecstatic_and_round_trip() {
+        let peak = Vitals {
+            fed: 95.0,
+            happiness: 95.0,
+            energy: 80.0,
+        };
+        assert_eq!(mood_for_vitals(peak), Mood::Ecstatic);
+        // Just-happy stays Happy.
+        let happy = Vitals {
+            fed: 80.0,
+            happiness: 80.0,
+            energy: 60.0,
+        };
+        assert_eq!(mood_for_vitals(happy), Mood::Happy);
+        assert_eq!("ecstatic".parse::<Mood>().unwrap(), Mood::Ecstatic);
+        assert_eq!(Mood::Ecstatic.as_str(), "ecstatic");
     }
 }
