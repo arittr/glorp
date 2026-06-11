@@ -1001,7 +1001,14 @@ impl LegacyPanel for PetPanel {
 
         // Pet art with shimmer, twinkle, and token-pop overlays — paints over
         // any Background / Behind cells it touches via the silhouette.
-        render_pet_inside(buf, vm, &scene, now, ctx.color_capability);
+        render_pet_inside(
+            buf,
+            vm,
+            &scene,
+            now,
+            ctx.color_capability,
+            room_profile.pet_performance,
+        );
 
         // Tiny performance cue near the pet: one cell, never a template rewrite.
         apply_pet_performance_cues(
@@ -1104,6 +1111,19 @@ fn mark_pet_air(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: S
     }
 }
 
+/// Resting brightness baseline by performance state, composed UNDER the
+/// activity lift (a tired pet still visibly brightens when work arrives, it
+/// just settles back lower). 1.0 = neutral. Bounded so the pet is never dark.
+fn performance_lightness_multiplier(performance: crate::tui::room::PetPerformance) -> f32 {
+    use crate::tui::room::PetPerformance::*;
+    match performance {
+        RestedAwake | CatchUpWake | SourceBurstPerk => 1.0,
+        TiredAwake => 0.88,
+        HeavyDayCozy => 0.82,
+        AsleepDreaming => 0.7,
+    }
+}
+
 /// Renders the speech bubble and pet art into `area`, centered vertically.
 /// This is the pre-existing render logic extracted from the old `render` body.
 fn render_pet_inside(
@@ -1112,10 +1132,12 @@ fn render_pet_inside(
     scene: &PetSceneLayout,
     now: time::OffsetDateTime,
     color_capability: ColorCapability,
+    pet_performance: crate::tui::room::PetPerformance,
 ) {
     let base = semantic_styles();
-    let m = low_energy_lightness_multiplier(vm.energy);
-    let droop = darken_pet_styles(&base, m);
+    let energy_m = low_energy_lightness_multiplier(vm.energy);
+    let perf_m = performance_lightness_multiplier(pet_performance);
+    let droop = darken_pet_styles(&base, energy_m * perf_m);
 
     if let (Some(speech_area), Some(speech)) = (scene.speech, vm.current_speech.as_deref()) {
         render_speech_bubble(speech_area, buf, speech, &droop);
@@ -2891,5 +2913,18 @@ mod tests {
                 let _ = buf[(x, y)].symbol();
             }
         }
+    }
+
+    #[test]
+    fn performance_lightness_baseline_dims_tired_and_asleep_below_rested() {
+        let rested =
+            performance_lightness_multiplier(crate::tui::room::PetPerformance::RestedAwake);
+        let tired = performance_lightness_multiplier(crate::tui::room::PetPerformance::TiredAwake);
+        let asleep =
+            performance_lightness_multiplier(crate::tui::room::PetPerformance::AsleepDreaming);
+        assert_eq!(rested, 1.0, "rested is the neutral baseline");
+        assert!(tired < rested, "tired sits below rested");
+        assert!(asleep < tired, "asleep is the dimmest");
+        assert!(asleep > 0.5, "never fully dark");
     }
 }
