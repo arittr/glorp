@@ -21,6 +21,8 @@ use crate::tui::{component::layout_watch_with_context, component::preview_layout
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::Path;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
@@ -62,6 +64,10 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
         frames.push(render_day_context_watch_frame(ctx, scratch_dir, fixture)?);
     }
 
+    for fixture in alive_room_frame_fixtures(ctx) {
+        frames.push(render_alive_room_watch_frame(ctx, scratch_dir, fixture)?);
+    }
+
     Ok(frames)
 }
 
@@ -78,6 +84,7 @@ pub(crate) struct WatchFrameFixture<'a> {
 pub(crate) struct WatchLifeFixture {
     pub profile: PetLifeProfile,
     pub color_capability: ColorCapability,
+    pub last_feed_pulse_at: Option<OffsetDateTime>,
 }
 
 struct LivelinessFrameFixture {
@@ -206,6 +213,7 @@ fn render_watch_frame_from_state_with_life(
     )?;
     if let Some(life) = life {
         vm.life_profile = life.profile.clone();
+        vm.last_feed_pulse_at = life.last_feed_pulse_at;
     }
     if let Some(day) = day_context {
         vm.day_context = day;
@@ -251,6 +259,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
             life: WatchLifeFixture {
                 profile: idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
         },
         LivelinessFrameFixture {
@@ -262,6 +271,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
             life: WatchLifeFixture {
                 profile: warm_life_profile(false),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
         },
         LivelinessFrameFixture {
@@ -273,6 +283,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
             life: WatchLifeFixture {
                 profile: hot_life_profile(false),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
         },
         LivelinessFrameFixture {
@@ -284,6 +295,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
             life: WatchLifeFixture {
                 profile: cooling_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
         },
         LivelinessFrameFixture {
@@ -295,6 +307,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
             life: WatchLifeFixture {
                 profile: hot_life_profile(false),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
         },
         LivelinessFrameFixture {
@@ -306,6 +319,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
             life: WatchLifeFixture {
                 profile: hot_life_profile(false),
                 color_capability: ColorCapability::Flat,
+                last_feed_pulse_at: None,
             },
         },
         LivelinessFrameFixture {
@@ -317,6 +331,7 @@ fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameF
             life: WatchLifeFixture {
                 profile: hot_life_profile(true),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
         },
     ]
@@ -336,6 +351,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: calm_idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: night_asleep_day_context(fixed_now),
             hold_eyes_closed: true,
@@ -350,6 +366,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: warm_life_profile(false),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: dawn_crossing_day_context(fixed_now),
             hold_eyes_closed: false,
@@ -364,6 +381,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: cooling_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: night_wake_catchup_day_context(fixed_now),
             hold_eyes_closed: false,
@@ -378,6 +396,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: night_newborn_day_context(fixed_now),
             hold_eyes_closed: false,
@@ -392,6 +411,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: calm_idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: dream_night_day_context(speech_visible_now),
             hold_eyes_closed: true,
@@ -406,6 +426,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: cooling_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: heavy_day_evening_day_context(fixed_now),
             hold_eyes_closed: false,
@@ -420,6 +441,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: light_day_morning_day_context(speech_visible_now),
             hold_eyes_closed: false,
@@ -434,6 +456,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: weekend_midday_day_context(fixed_now),
             hold_eyes_closed: false,
@@ -448,6 +471,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: climate_cache_week_day_context(fixed_now),
             hold_eyes_closed: false,
@@ -462,6 +486,7 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: idle_life_profile(),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: prop_resonance_planter_day_context(fixed_now),
             hold_eyes_closed: false,
@@ -476,11 +501,481 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             life: WatchLifeFixture {
                 profile: warm_life_profile(false),
                 color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
             },
             day_context: midnight_mid_session_day_context(fixed_now),
             hold_eyes_closed: false,
         },
     ]
+}
+
+struct AliveRoomFrameFixture {
+    id: &'static str,
+    title: &'static str,
+    width: u16,
+    height: u16,
+    species: Species,
+    stage: Stage,
+    props: Vec<EarnedHabitatProp>,
+    life: WatchLifeFixture,
+    day_context: DayContext,
+    expected_biome: &'static str,
+    expected_emitter: Option<&'static str>,
+}
+
+fn alive_room_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFixture> {
+    let fixed_now = ctx.fixed_now;
+    vec![
+        AliveRoomFrameFixture {
+            id: "room-starter-day-clear",
+            title: "Room Starter Day Clear",
+            width: 120,
+            height: 32,
+            species: Species::Fuzz,
+            stage: Stage::S0,
+            props: vec![],
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Day,
+                mature: false,
+                ..DayContext::default()
+            },
+            expected_biome: "Starter",
+            expected_emitter: None,
+        },
+        AliveRoomFrameFixture {
+            id: "room-botanical-cache-evening",
+            title: "Room Botanical Cache Evening",
+            width: 120,
+            height: 32,
+            species: Species::Crystal,
+            stage: Stage::S6,
+            props: vec![
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("heavy_session_planter"),
+                    earned_at: fixed_now - Duration::days(20),
+                    source: HabitatPropSource::HeavySession,
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_moss_tuft_250k"),
+                    earned_at: fixed_now - Duration::days(15),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 250_000.0,
+                    },
+                },
+            ],
+            life: WatchLifeFixture {
+                profile: {
+                    let mut p = cooling_life_profile();
+                    p.prop_reactions = vec![PropReaction {
+                        prop_id: HabitatPropId::new("heavy_session_planter"),
+                        intensity: 0.5,
+                        kind: PropReactionKind::Glow,
+                    }];
+                    p
+                },
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Dusk,
+                today_ratio: 0.8,
+                tiredness: 0.3,
+                mature: true,
+                ..DayContext::default()
+            },
+            expected_biome: "Botanical",
+            expected_emitter: Some("heavy_session_planter"),
+        },
+        AliveRoomFrameFixture {
+            id: "room-technical-output-active",
+            title: "Room Technical Output Active",
+            width: 120,
+            height: 32,
+            species: Species::Crystal,
+            stage: Stage::S6,
+            props: vec![EarnedHabitatProp {
+                id: HabitatPropId::new("codex_signal_lamp"),
+                earned_at: fixed_now - Duration::days(12),
+                source: HabitatPropSource::ProviderFirstUse {
+                    provider_surface: "codex".to_string(),
+                },
+            }],
+            life: WatchLifeFixture {
+                profile: hot_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: Some(fixed_now - Duration::seconds(5)),
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Day,
+                mature: true,
+                ..DayContext::default()
+            },
+            expected_biome: "Technical",
+            expected_emitter: Some("codex_signal_lamp"),
+        },
+        AliveRoomFrameFixture {
+            id: "room-celestial-artifact-night",
+            title: "Room Celestial Artifact Night",
+            width: 120,
+            height: 32,
+            species: Species::Crystal,
+            stage: Stage::S6,
+            props: vec![
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_lantern_10m"),
+                    earned_at: fixed_now - Duration::days(8),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 10_000_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_shell_100k"),
+                    earned_at: fixed_now - Duration::days(10),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 100_000.0,
+                    },
+                },
+            ],
+            life: WatchLifeFixture {
+                profile: {
+                    let mut p = calm_idle_life_profile();
+                    p.prop_reactions = vec![PropReaction {
+                        prop_id: HabitatPropId::new("token_lantern_10m"),
+                        intensity: 0.6,
+                        kind: PropReactionKind::Glow,
+                    }];
+                    p
+                },
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Night,
+                asleep: true,
+                mature: true,
+                ..DayContext::default()
+            },
+            expected_biome: "Celestial",
+            expected_emitter: Some("token_lantern_10m"),
+        },
+        AliveRoomFrameFixture {
+            id: "room-cozy-weekend-quiet",
+            title: "Room Cozy Weekend Quiet",
+            width: 120,
+            height: 32,
+            species: Species::Fuzz,
+            stage: Stage::S4,
+            props: vec![
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("wilt_recovery_sprout"),
+                    earned_at: fixed_now - Duration::days(5),
+                    source: HabitatPropSource::WiltRecovery,
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_lantern_10m"),
+                    earned_at: fixed_now - Duration::days(7),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 10_000_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_moss_tuft_250k"),
+                    earned_at: fixed_now - Duration::days(9),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 250_000.0,
+                    },
+                },
+            ],
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Day,
+                is_weekend: true,
+                weekend_share: 0.05,
+                mature: true,
+                ..DayContext::default()
+            },
+            expected_biome: "Cozy",
+            expected_emitter: None,
+        },
+        AliveRoomFrameFixture {
+            id: "room-mixed-full-wide",
+            title: "Room Mixed Full Wide",
+            width: 180,
+            height: 50,
+            species: Species::Crystal,
+            stage: Stage::S6,
+            props: vec![
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("heavy_session_planter"),
+                    earned_at: fixed_now - Duration::days(18),
+                    source: HabitatPropSource::HeavySession,
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("codex_signal_lamp"),
+                    earned_at: fixed_now - Duration::days(14),
+                    source: HabitatPropSource::ProviderFirstUse {
+                        provider_surface: "codex".to_string(),
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_shard_1m"),
+                    earned_at: fixed_now - Duration::days(11),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 1_000_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_treasure_chest_2m"),
+                    earned_at: fixed_now - Duration::days(10),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 2_000_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_orbit_5m"),
+                    earned_at: fixed_now - Duration::days(9),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 5_000_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_spark_500k"),
+                    earned_at: fixed_now - Duration::days(8),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 500_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_friendly_cloud_750k"),
+                    earned_at: fixed_now - Duration::days(7),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 750_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_lantern_10m"),
+                    earned_at: fixed_now - Duration::days(6),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 10_000_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_hanging_vine_25m"),
+                    earned_at: fixed_now - Duration::days(5),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 25_000_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_shell_100k"),
+                    earned_at: fixed_now - Duration::days(4),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 100_000.0,
+                    },
+                },
+                EarnedHabitatProp {
+                    id: HabitatPropId::new("token_moss_tuft_250k"),
+                    earned_at: fixed_now - Duration::days(3),
+                    source: HabitatPropSource::LifetimeTokens {
+                        threshold: 250_000.0,
+                    },
+                },
+            ],
+            life: WatchLifeFixture {
+                profile: {
+                    let mut p = hot_life_profile(false);
+                    p.work_weather = WorkWeather::Mixed;
+                    p.prop_reactions = vec![PropReaction {
+                        prop_id: HabitatPropId::new("codex_signal_lamp"),
+                        intensity: 0.9,
+                        kind: PropReactionKind::Pulse,
+                    }];
+                    p
+                },
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: Some(fixed_now - Duration::seconds(5)),
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Day,
+                mature: true,
+                ..DayContext::default()
+            },
+            expected_biome: "Cozy",
+            expected_emitter: Some("codex_signal_lamp"),
+        },
+        AliveRoomFrameFixture {
+            id: "room-heavy-day-cozy-large",
+            title: "Room Heavy Day Cozy Large",
+            width: 120,
+            height: 32,
+            species: Species::Crystal,
+            stage: Stage::S6,
+            props: vec![EarnedHabitatProp {
+                id: HabitatPropId::new("heavy_session_planter"),
+                earned_at: fixed_now - Duration::days(6),
+                source: HabitatPropSource::HeavySession,
+            }],
+            life: WatchLifeFixture {
+                profile: {
+                    let mut p = cooling_life_profile();
+                    p.prop_reactions = vec![PropReaction {
+                        prop_id: HabitatPropId::new("heavy_session_planter"),
+                        intensity: 0.5,
+                        kind: PropReactionKind::Glow,
+                    }];
+                    p
+                },
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Dusk,
+                today_ratio: 1.7,
+                tiredness: 0.85,
+                mature: true,
+                ..DayContext::default()
+            },
+            expected_biome: "Botanical",
+            expected_emitter: Some("heavy_session_planter"),
+        },
+        AliveRoomFrameFixture {
+            id: "room-dawn-wake-small",
+            title: "Room Dawn Wake Small",
+            width: 72,
+            height: 24,
+            species: Species::Crystal,
+            stage: Stage::S6,
+            props: vec![EarnedHabitatProp {
+                id: HabitatPropId::new("token_lantern_10m"),
+                earned_at: fixed_now - Duration::days(4),
+                source: HabitatPropSource::LifetimeTokens {
+                    threshold: 10_000_000.0,
+                },
+            }],
+            life: WatchLifeFixture {
+                profile: {
+                    let mut p = warm_life_profile(false);
+                    p.prop_reactions = vec![PropReaction {
+                        prop_id: HabitatPropId::new("token_lantern_10m"),
+                        intensity: 0.7,
+                        kind: PropReactionKind::Glow,
+                    }];
+                    p
+                },
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: Some(fixed_now - Duration::seconds(5)),
+            },
+            day_context: DayContext {
+                day_phase: DayPhase::Dawn,
+                wake_resume: Some(WakeResume {
+                    from_eval_utc: fixed_now - Duration::hours(3),
+                    woke_at_utc: fixed_now - Duration::minutes(2),
+                }),
+                mature: true,
+                ..DayContext::default()
+            },
+            expected_biome: "Celestial",
+            expected_emitter: Some("token_lantern_10m"),
+        },
+    ]
+}
+
+fn alive_room_pet_state(ctx: &PreviewRenderContext, fixture: &AliveRoomFrameFixture) -> PetState {
+    let mut state = liveliness_pet_state(ctx);
+    state.pet.generated_species = fixture.species;
+    state.stage = fixture.stage;
+    state.habitat.earned_props = fixture.props.clone();
+    state
+}
+
+fn render_alive_room_watch_frame(
+    ctx: &PreviewRenderContext,
+    scratch_dir: &Path,
+    fixture: AliveRoomFrameFixture,
+) -> Result<PreviewFrame> {
+    let state = alive_room_pet_state(ctx, &fixture);
+    let mut frame = render_watch_frame_from_state_with_life(
+        ctx,
+        scratch_dir,
+        WatchFrameFixture {
+            id: fixture.id,
+            title: fixture.title,
+            width: fixture.width,
+            height: fixture.height,
+            state: &state,
+            now: ctx.fixed_now,
+        },
+        Some(&fixture.life),
+        Some(fixture.day_context),
+        false,
+    )?;
+
+    let mut vm = crate::tui::view_model::WatchViewModel::fixture();
+    vm.pet_render.generated_species = fixture.species;
+    vm.pet_render.stage = fixture.stage;
+    vm.habitat.earned_props = fixture
+        .props
+        .iter()
+        .map(|prop| {
+            let spec = crate::game::habitat::catalog_prop_by_str(prop.id.as_str()).unwrap();
+            crate::tui::view_model::EarnedHabitatPropView {
+                id: prop.id.clone(),
+                earned_at: prop.earned_at,
+                kind: spec.kind,
+                display_priority: spec.display_priority,
+                source: prop.source.clone(),
+            }
+        })
+        .collect();
+    vm.life_profile = fixture.life.profile.clone();
+    vm.day_context = fixture.day_context;
+    vm.last_feed_pulse_at = fixture.life.last_feed_pulse_at;
+    let room_profile = crate::tui::room::derive_room_life_profile(&vm, ctx.fixed_now);
+
+    frame.extra_inputs = BTreeMap::from([
+        (
+            "fixed_now".to_string(),
+            Value::String(ctx.fixed_now.unix_timestamp().to_string()),
+        ),
+        (
+            "species".to_string(),
+            Value::String(fixture.species.as_str().to_string()),
+        ),
+        (
+            "stage".to_string(),
+            Value::String(format!("{:?}", fixture.stage).to_lowercase()),
+        ),
+        ("terminal_width".to_string(), json!(fixture.width)),
+        ("terminal_height".to_string(), json!(fixture.height)),
+        (
+            "expected_room_life_profile".to_string(),
+            json!({
+                "primary_biome": fixture.expected_biome,
+                "emitter": fixture.expected_emitter,
+            }),
+        ),
+        (
+            "room_life_profile".to_string(),
+            json!({
+                "primary_biome": format!("{:?}", room_profile.biome.primary),
+                "secondary_biome": room_profile.biome.secondary.map(|tag| format!("{tag:?}")),
+                "emitter": room_profile.resonant_emitter.as_ref().map(|emitter| emitter.prop_id.as_str().to_string()),
+                "pet_performance": format!("{:?}", room_profile.pet_performance),
+                "scene_moments": room_profile.scene_moments.iter().map(|moment| format!("{:?}", moment.key)).collect::<Vec<_>>(),
+            }),
+        ),
+    ]);
+
+    Ok(frame)
 }
 
 fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
@@ -895,7 +1390,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 21);
+        assert_eq!(frames.len(), 29);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -933,6 +1428,18 @@ mod tests {
         assert_eq!((frames[19].width, frames[19].height), (120, 32));
         assert_eq!(frames[20].id, "watch-daycontext-midnight-mid-session");
         assert_eq!((frames[20].width, frames[20].height), (120, 32));
+        assert_eq!(frames[21].id, "room-starter-day-clear");
+        assert_eq!((frames[21].width, frames[21].height), (120, 32));
+        assert_eq!(frames[22].id, "room-botanical-cache-evening");
+        assert_eq!(frames[23].id, "room-technical-output-active");
+        assert_eq!(frames[24].id, "room-celestial-artifact-night");
+        assert_eq!(frames[25].id, "room-cozy-weekend-quiet");
+        assert_eq!(frames[26].id, "room-mixed-full-wide");
+        assert_eq!((frames[26].width, frames[26].height), (180, 50));
+        assert_eq!(frames[27].id, "room-heavy-day-cozy-large");
+        assert_eq!((frames[27].width, frames[27].height), (120, 32));
+        assert_eq!(frames[28].id, "room-dawn-wake-small");
+        assert_eq!((frames[28].width, frames[28].height), (72, 24));
     }
 
     #[test]

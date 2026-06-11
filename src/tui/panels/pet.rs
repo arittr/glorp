@@ -23,6 +23,7 @@ use crate::tui::life::{
 };
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
+use crate::tui::room::rects_contain;
 use crate::tui::style::{semantic_styles, ColorCapability, SemanticStyles};
 use crate::tui::view_model::WatchViewModel;
 
@@ -876,6 +877,26 @@ impl LegacyPanel for PetPanel {
             .filter(|r| *r != scene.pet_art)
             .collect();
         ambient_exclusions.extend_from_slice(&silhouette_halo);
+
+        // Alive room base: persistent biome, weather, and prop emitter glyphs
+        // drawn before the existing ambient/mote/activity passes so they set
+        // the room's silhouette without replacing pet or speech cells.
+        let room_profile = crate::tui::room::derive_room_life_profile(vm, now);
+        let room_glyphs = crate::tui::room::room_glyphs_for(
+            &room_profile,
+            scene.habitat,
+            &ambient_exclusions,
+            now,
+            ctx.color_capability,
+        );
+        for g in room_glyphs {
+            if !rects_contain(&ambient_exclusions, g.col, g.row) {
+                let cell = &mut buf[(g.col, g.row)];
+                cell.set_char(g.glyph);
+                cell.set_style(g.style);
+            }
+        }
+
         let phase_blend = {
             let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
             (since / (crate::tui::day::PHASE_BLEND_MINUTES as f32 * 60.0)).clamp(0.0, 1.0)
@@ -981,6 +1002,14 @@ impl LegacyPanel for PetPanel {
         // any Background / Behind cells it touches via the silhouette.
         render_pet_inside(buf, vm, &scene, now, ctx.color_capability);
 
+        // Tiny performance cue near the pet: one cell, never a template rewrite.
+        apply_pet_performance_cues(
+            buf,
+            &scene,
+            room_profile.pet_performance,
+            ctx.color_capability,
+        );
+
         // Foreground props paint on top of the pet, for whenever depth in
         // front of the pet is wanted (no foreground props in the catalog
         // today; the pass exists so adding one only requires a catalog flip).
@@ -1009,6 +1038,69 @@ fn habitat_contains(scene: &PetSceneLayout, prop: &crate::tui::component::Habita
         && prop.row >= scene.habitat.y
         && prop.col < scene.habitat.x.saturating_add(scene.habitat.width)
         && prop.row < scene.habitat.y.saturating_add(scene.habitat.height)
+}
+
+/// Overwrites one or two cells near the pet with a tiny performance cue glyph.
+/// Keeps the rest of the pet template untouched — this is punctuation, not a
+/// rewrite.
+fn apply_pet_performance_cues(
+    buf: &mut Buffer,
+    scene: &PetSceneLayout,
+    performance: crate::tui::room::PetPerformance,
+    color_capability: ColorCapability,
+) {
+    let style = performance_cue_style(color_capability);
+    match performance {
+        crate::tui::room::PetPerformance::TiredAwake => mark_pet_floor(buf, scene, '˙', style),
+        crate::tui::room::PetPerformance::HeavyDayCozy => mark_pet_floor(buf, scene, '~', style),
+        crate::tui::room::PetPerformance::AsleepDreaming => mark_pet_air(buf, scene, 'z', style),
+        crate::tui::room::PetPerformance::CatchUpWake => mark_pet_air(buf, scene, '^', style),
+        crate::tui::room::PetPerformance::SourceBurstPerk => mark_pet_air(buf, scene, '!', style),
+        crate::tui::room::PetPerformance::RestedAwake => {}
+    }
+}
+
+fn performance_cue_style(color_capability: ColorCapability) -> Style {
+    let color = if matches!(color_capability, ColorCapability::Flat) {
+        crate::tui::style::tokenpet_palette().faint.rgb
+    } else {
+        Color::Rgb(0xd4, 0xa6, 0x57)
+    };
+    Style::default().fg(color)
+}
+
+/// Places `symbol` on the floor cell just below the pet's bounding rect,
+/// clipped to the habitat area.
+fn mark_pet_floor(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: Style) {
+    let x = scene.pet_art.x + scene.pet_art.width / 2;
+    let y = scene.pet_art.y.saturating_add(scene.pet_art.height);
+    let within_habitat = x >= scene.habitat.x
+        && y >= scene.habitat.y
+        && x < scene.habitat.x.saturating_add(scene.habitat.width)
+        && y < scene.habitat.y.saturating_add(scene.habitat.height);
+    if within_habitat {
+        let cell = &mut buf[(x, y)];
+        cell.set_char(symbol);
+        cell.set_style(style);
+    }
+}
+
+/// Places `symbol` on the air cell just above the pet's bounding rect,
+/// clipped to the habitat area. Skips the write when there is no row above
+/// the pet, so the cue never overwrites pet art.
+fn mark_pet_air(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: Style) {
+    let x = scene.pet_art.x + scene.pet_art.width / 2;
+    let y = scene.pet_art.y.saturating_sub(1);
+    let above_pet = y < scene.pet_art.y;
+    let within_habitat = x >= scene.habitat.x
+        && y >= scene.habitat.y
+        && x < scene.habitat.x.saturating_add(scene.habitat.width)
+        && y < scene.habitat.y.saturating_add(scene.habitat.height);
+    if above_pet && within_habitat {
+        let cell = &mut buf[(x, y)];
+        cell.set_char(symbol);
+        cell.set_style(style);
+    }
 }
 
 /// Renders the speech bubble and pet art into `area`, centered vertically.
@@ -2683,5 +2775,120 @@ mod tests {
             "left-zone prop pulls left"
         );
         assert_eq!(resonance_wander_bias(None), 0, "no companion, no bias");
+    }
+
+    fn test_scene_with_pet_art(pet_art: Rect) -> PetSceneLayout {
+        let area = Rect::new(0, 0, 80, 14);
+        PetSceneLayout {
+            id: crate::tui::component::WatchComponentId::Pet.path(),
+            panel: area,
+            speech: None,
+            content: area,
+            pet_art,
+            hit_area: area,
+            habitat: area,
+            exclusions: Vec::new(),
+            targets: std::collections::BTreeMap::new(),
+            effect_targets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn performance_cue_places_floor_symbol_below_pet() {
+        let pet_art = Rect::new(30, 3, 13, 10);
+        let scene = test_scene_with_pet_art(pet_art);
+        let mut buf = Buffer::empty(scene.habitat);
+
+        apply_pet_performance_cues(
+            &mut buf,
+            &scene,
+            crate::tui::room::PetPerformance::TiredAwake,
+            ColorCapability::Truecolor,
+        );
+
+        let x = pet_art.x + pet_art.width / 2;
+        let y = pet_art.y + pet_art.height;
+        assert_eq!(buf[(x, y)].symbol(), "˙");
+    }
+
+    #[test]
+    fn performance_cue_places_air_symbol_above_pet() {
+        let pet_art = Rect::new(30, 3, 13, 10);
+        let scene = test_scene_with_pet_art(pet_art);
+        let mut buf = Buffer::empty(scene.habitat);
+
+        apply_pet_performance_cues(
+            &mut buf,
+            &scene,
+            crate::tui::room::PetPerformance::AsleepDreaming,
+            ColorCapability::Truecolor,
+        );
+
+        let x = pet_art.x + pet_art.width / 2;
+        let y = pet_art.y - 1;
+        assert_eq!(buf[(x, y)].symbol(), "z");
+    }
+
+    #[test]
+    fn performance_cue_works_in_flat_mode() {
+        let pet_art = Rect::new(30, 3, 13, 10);
+        let scene = test_scene_with_pet_art(pet_art);
+        let mut buf = Buffer::empty(scene.habitat);
+
+        apply_pet_performance_cues(
+            &mut buf,
+            &scene,
+            crate::tui::room::PetPerformance::HeavyDayCozy,
+            ColorCapability::Flat,
+        );
+
+        let x = pet_art.x + pet_art.width / 2;
+        let y = pet_art.y + pet_art.height;
+        assert_eq!(buf[(x, y)].symbol(), "~");
+    }
+
+    #[test]
+    fn performance_cue_skips_air_mark_when_pet_touches_top_edge() {
+        let pet_art = Rect::new(30, 0, 13, 10);
+        let scene = test_scene_with_pet_art(pet_art);
+        let mut buf = Buffer::empty(scene.habitat);
+
+        // Should not panic on underflow and must not overwrite pet art.
+        apply_pet_performance_cues(
+            &mut buf,
+            &scene,
+            crate::tui::room::PetPerformance::CatchUpWake,
+            ColorCapability::Truecolor,
+        );
+
+        let x = pet_art.x + pet_art.width / 2;
+        let y = pet_art.y;
+        assert_ne!(
+            buf[(x, y)].symbol(),
+            "^",
+            "air mark should be skipped when there is no row above the pet"
+        );
+    }
+
+    #[test]
+    fn performance_cue_does_not_write_outside_habitat() {
+        let pet_art = Rect::new(70, 3, 13, 10);
+        let scene = test_scene_with_pet_art(pet_art);
+        let mut buf = Buffer::empty(scene.habitat);
+
+        apply_pet_performance_cues(
+            &mut buf,
+            &scene,
+            crate::tui::room::PetPerformance::SourceBurstPerk,
+            ColorCapability::Truecolor,
+        );
+
+        // No panic and no out-of-bounds write; the clipped center x is
+        // habitat-limited, so the buffer is still valid.
+        for y in 0..scene.habitat.height {
+            for x in 0..scene.habitat.width {
+                let _ = buf[(x, y)].symbol();
+            }
+        }
     }
 }

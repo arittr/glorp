@@ -30,6 +30,17 @@ const DAY_CONTEXT_WATCH_IDS: [&str; 11] = [
     "watch-daycontext-midnight-mid-session",
 ];
 
+const ALIVE_ROOM_WATCH_IDS: [&str; 8] = [
+    "room-starter-day-clear",
+    "room-botanical-cache-evening",
+    "room-technical-output-active",
+    "room-celestial-artifact-night",
+    "room-cozy-weekend-quiet",
+    "room-mixed-full-wide",
+    "room-heavy-day-cozy-large",
+    "room-dawn-wake-small",
+];
+
 struct PreviewRun {
     _dir: TempDir,
     out: PathBuf,
@@ -160,6 +171,24 @@ fn dev_preview_watch_writes_expected_artifacts() {
             "missing {id} layout artifact"
         );
     }
+    for id in ALIVE_ROOM_WATCH_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id} text artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.cells.json")).is_file(),
+            "missing {id} cells artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.layout.json")).is_file(),
+            "missing {id} layout artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.room.txt")).is_file(),
+            "missing {id} room text artifact"
+        );
+    }
 
     let manifest = run.manifest();
     assert_eq!(manifest["schema_version"], 2);
@@ -221,6 +250,24 @@ fn dev_preview_watch_writes_expected_artifacts() {
         assert_artifact_type(&manifest, id, "text");
         assert_artifact_type(&manifest, &format!("{id}-cells"), "cells");
         assert_artifact_type(&manifest, &format!("{id}-layout"), "layout");
+    }
+    for id in ALIVE_ROOM_WATCH_IDS {
+        let (width, height) = alive_room_dimensions(id);
+        assert_scenario(
+            &manifest,
+            id,
+            "watch",
+            (width, height),
+            (
+                &format!("frames/{id}.txt"),
+                &format!("frames/{id}.cells.json"),
+                Some(&format!("frames/{id}.layout.json")),
+            ),
+        );
+        assert_artifact_type(&manifest, id, "text");
+        assert_artifact_type(&manifest, &format!("{id}-cells"), "cells");
+        assert_artifact_type(&manifest, &format!("{id}-layout"), "layout");
+        assert_artifact_type(&manifest, &format!("{id}-room"), "text");
     }
 }
 
@@ -339,6 +386,105 @@ fn dev_preview_liveliness_changes_pet_scene_cells_not_only_text() {
         changed >= 8,
         "liveliness profile changes should visibly alter at least 8 habitat cells; changed {changed}"
     );
+}
+
+#[test]
+fn alive_room_fixtures_differ_by_symbols_in_multiple_room_zones() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let botanical_cells = read_cells(&run, "room-botanical-cache-evening");
+    let botanical_layout = read_layout(&run, "room-botanical-cache-evening");
+    let technical_cells = read_cells(&run, "room-technical-output-active");
+    let technical_layout = read_layout(&run, "room-technical-output-active");
+
+    let botanical_room = cells_for_target(&botanical_cells, &botanical_layout, "watch.room.effect");
+    let technical_room = cells_for_target(&technical_cells, &technical_layout, "watch.room.effect");
+    let changed = changed_cells_by_symbol(&botanical_room, &technical_room);
+    let rect = &botanical_layout["targets"]["watch.room.effect"];
+    let zones = changed_room_zones(
+        &botanical_room,
+        &technical_room,
+        rect["width"].as_u64().unwrap(),
+        rect["height"].as_u64().unwrap(),
+    );
+
+    assert!(
+        changed >= 24,
+        "room states should differ by symbols; changed {changed}"
+    );
+    assert!(
+        zones.len() >= 2,
+        "room states should differ across zones; got {zones:?}"
+    );
+}
+
+#[test]
+fn alive_room_pet_performance_fixtures_change_pet_adjacent_symbols() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let heavy = read_cells(&run, "room-heavy-day-cozy-large");
+    let heavy_layout = read_layout(&run, "room-heavy-day-cozy-large");
+    let dawn = read_cells(&run, "room-dawn-wake-small");
+    let dawn_layout = read_layout(&run, "room-dawn-wake-small");
+    let heavy_pet = cells_for_target(&heavy, &heavy_layout, "watch.pet.art");
+    let dawn_pet = cells_for_target(&dawn, &dawn_layout, "watch.pet.art");
+
+    assert!(
+        changed_cells_by_symbol(&heavy_pet, &dawn_pet) >= 2,
+        "pet performance fixtures should produce readable pet-local differences"
+    );
+}
+
+#[test]
+fn dev_preview_alive_room_fixtures_include_room_profile_inputs() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    for id in ALIVE_ROOM_WATCH_IDS {
+        let scenario = scenario(&manifest, id);
+        assert!(
+            scenario["inputs"]["room_life_profile"].is_object(),
+            "{id} missing room_life_profile"
+        );
+        assert!(
+            scenario["inputs"]["expected_room_life_profile"].is_object(),
+            "{id} missing expected profile"
+        );
+        assert!(
+            scenario["review_prompts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|prompt| prompt.as_str().unwrap().contains("primary biome")),
+            "{id} review prompts should mention primary biome"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_alive_room_writes_cropped_room_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    for id in ALIVE_ROOM_WATCH_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.room.txt")).is_file(),
+            "missing cropped room for {id}"
+        );
+        let scenario = scenario(&manifest, id);
+        assert_eq!(
+            scenario["files"]["room_text"],
+            format!("frames/{id}.room.txt")
+        );
+    }
 }
 
 #[test]
@@ -635,6 +781,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-daycontext-climate-cache-week.txt",
         "frames/watch-daycontext-prop-resonance-planter.txt",
         "frames/watch-daycontext-midnight-mid-session.txt",
+        "frames/room-starter-day-clear.txt",
+        "frames/room-botanical-cache-evening.txt",
+        "frames/room-technical-output-active.txt",
+        "frames/room-celestial-artifact-night.txt",
+        "frames/room-cozy-weekend-quiet.txt",
+        "frames/room-mixed-full-wide.txt",
+        "frames/room-heavy-day-cozy-large.txt",
+        "frames/room-dawn-wake-small.txt",
         "frames/habitat-props-catalog.txt",
         "frames/watch-habitat-early.txt",
         "frames/watch-habitat-lived-in.txt",
@@ -671,6 +825,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-daycontext-climate-cache-week".to_string(),
             "watch-daycontext-prop-resonance-planter".to_string(),
             "watch-daycontext-midnight-mid-session".to_string(),
+            "room-starter-day-clear".to_string(),
+            "room-botanical-cache-evening".to_string(),
+            "room-technical-output-active".to_string(),
+            "room-celestial-artifact-night".to_string(),
+            "room-cozy-weekend-quiet".to_string(),
+            "room-mixed-full-wide".to_string(),
+            "room-heavy-day-cozy-large".to_string(),
+            "room-dawn-wake-small".to_string(),
             "habitat-props-catalog".to_string(),
             "watch-habitat-early".to_string(),
             "watch-habitat-lived-in".to_string(),
@@ -949,6 +1111,16 @@ fn liveliness_dimensions(id: &str) -> (u64, u64) {
     }
 }
 
+fn alive_room_dimensions(id: &str) -> (u64, u64) {
+    if id == "room-mixed-full-wide" {
+        (180, 50)
+    } else if id == "room-dawn-wake-small" {
+        (72, 24)
+    } else {
+        (120, 32)
+    }
+}
+
 fn read_cells(run: &PreviewRun, id: &str) -> Value {
     read_json(run.out.join(format!("frames/{id}.cells.json")))
 }
@@ -991,6 +1163,43 @@ fn changed_cells_by_symbol_or_fg(a: &[Value], b: &[Value]) -> usize {
         .zip(b)
         .filter(|(left, right)| left["symbol"] != right["symbol"] || left["fg"] != right["fg"])
         .count()
+}
+
+fn changed_cells_by_symbol(a: &[Value], b: &[Value]) -> usize {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .filter(|(left, right)| left["symbol"] != right["symbol"])
+        .count()
+}
+
+fn changed_room_zones(
+    a: &[Value],
+    b: &[Value],
+    width: u64,
+    height: u64,
+) -> std::collections::BTreeSet<&'static str> {
+    let mut zones = std::collections::BTreeSet::new();
+    for (left, right) in a.iter().zip(b) {
+        if left["symbol"] == right["symbol"] {
+            continue;
+        }
+        let x = left["x"].as_u64().unwrap();
+        let y = left["y"].as_u64().unwrap();
+        let zone = if y < height / 3 {
+            "upper-air"
+        } else if y > height * 2 / 3 {
+            "floor"
+        } else if x < width / 3 {
+            "left-anchor"
+        } else if x > width * 2 / 3 {
+            "right-anchor"
+        } else {
+            "pet-adjacent"
+        };
+        zones.insert(zone);
+    }
+    zones
 }
 
 fn local_asset_refs(html: &str) -> Vec<String> {

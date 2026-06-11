@@ -56,6 +56,8 @@ pub struct PreviewScenarioFiles {
     pub cells: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_text: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +130,34 @@ pub fn write_text_frame(path: &Path, frame: &PreviewFrame) -> Result<()> {
                 .cells
                 .iter()
                 .find(|cell| cell.x == x && cell.y == y)
+                .expect("frame should contain each coordinate");
+            if cell.continuation {
+                continue;
+            }
+            text.push_str(&cell.symbol);
+        }
+        text.push('\n');
+    }
+    fs::write(path, text)?;
+    Ok(())
+}
+
+pub fn write_room_text_frame(path: &Path, frame: &PreviewFrame, target_id: &str) -> Result<()> {
+    let layout = frame
+        .layout
+        .as_ref()
+        .expect("frame should have layout for room text");
+    let target = layout
+        .targets
+        .get(target_id)
+        .unwrap_or_else(|| panic!("layout should contain {target_id}"));
+    let mut text = String::new();
+    for row in target.y..target.y + target.height {
+        for col in target.x..target.x + target.width {
+            let cell = frame
+                .cells
+                .iter()
+                .find(|cell| cell.x == col && cell.y == row)
                 .expect("frame should contain each coordinate");
             if cell.continuation {
                 continue;
@@ -456,6 +486,7 @@ mod tests {
                 },
             ],
             layout: None,
+            extra_inputs: BTreeMap::new(),
         }
     }
 
@@ -498,6 +529,7 @@ mod tests {
                 },
             ],
             layout: None,
+            extra_inputs: BTreeMap::new(),
         }
     }
 
@@ -520,6 +552,7 @@ mod tests {
                     text: PathBuf::from("frames/frame-one.txt"),
                     cells: PathBuf::from("frames/frame-one.cells.json"),
                     layout: None,
+                    room_text: None,
                 },
                 inputs: BTreeMap::from([(
                     "fixed_now".to_string(),

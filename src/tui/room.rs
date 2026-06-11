@@ -1,14 +1,22 @@
 use crate::game::habitat::{
-    CODEX_SIGNAL_LAMP, HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_HANGING_VINE_25M,
-    TOKEN_LANTERN_10M, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M,
-    TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
+    catalog_prop_by_str, CODEX_SIGNAL_LAMP, HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K,
+    TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M,
+    TOKEN_PEBBLE_25K, TOKEN_SHARD_1M, TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M,
+    WILT_RECOVERY_SPROUT,
 };
 use crate::storage::state::{EarnedHabitatProp, HabitatPropId};
-use crate::tui::day::{in_morning_after_window, resonant_prop_for_day, DayPhase};
+use crate::tui::day::{in_morning_after_window, resonant_prop_for_day, DayContext, DayPhase};
 use crate::tui::life::WorkWeather;
 use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
+use rand_pcg::Pcg32;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use std::collections::HashMap;
 use time::{Duration, OffsetDateTime};
+
+use crate::tui::style::ColorCapability;
 
 const BASE_EARNED_PROP_WEIGHT: f32 = 1.0;
 const RECENT_EARNED_BONUS: f32 = 0.4;
@@ -132,7 +140,7 @@ pub fn derive_room_life_profile(vm: &WatchViewModel, now: OffsetDateTime) -> Roo
     let resonant = resonant_prop_from_vm(vm);
     let biome = derive_biome(&vm.habitat.earned_props, resonant.as_ref(), now);
     let room_weather = vm.life_profile.work_weather.into();
-    let pet_performance = pet_performance_for(vm);
+    let pet_performance = pet_performance_for(vm, now);
     let visible_prop_ids = visible_identity_ids(&vm.habitat.earned_props);
     let resonant_emitter = select_emitter(vm, resonant.as_ref(), &visible_prop_ids);
     let scene_moments = scene_moments_for(vm, now, resonant_emitter.as_ref(), pet_performance);
@@ -211,15 +219,27 @@ fn derive_biome(
     RoomBiome { primary, secondary }
 }
 
-fn pet_performance_for(vm: &WatchViewModel) -> PetPerformance {
+/// Select the pet performance state used for room scene moments and cues.
+///
+/// Precedence (highest first):
+/// 1. AsleepDreaming (sleep overrides everything)
+/// 2. CatchUpWake (morning-after wake-resume window)
+/// 3. SourceBurstPerk (recent feed pulse + high burst)
+/// 4. HeavyDayCozy (high today_ratio + dusk/evening + tiredness)
+/// 5. TiredAwake (high tiredness, no heavy-day signal)
+/// 6. RestedAwake (night or quiet default)
+fn pet_performance_for(vm: &WatchViewModel, now: OffsetDateTime) -> PetPerformance {
     if vm.day_context.asleep {
         return PetPerformance::AsleepDreaming;
     }
     if vm.day_context.wake_resume.is_some() {
         return PetPerformance::CatchUpWake;
     }
-    if vm.life_profile.burst_level > 0.9 {
+    if is_source_burst_perk(vm, now) {
         return PetPerformance::SourceBurstPerk;
+    }
+    if is_heavy_day_cozy(&vm.day_context) {
+        return PetPerformance::HeavyDayCozy;
     }
     if vm.day_context.tiredness > 0.6 {
         return PetPerformance::TiredAwake;
@@ -233,6 +253,17 @@ fn pet_performance_for(vm: &WatchViewModel) -> PetPerformance {
         return PetPerformance::HeavyDayCozy;
     }
     PetPerformance::RestedAwake
+}
+
+fn is_source_burst_perk(vm: &WatchViewModel, now: OffsetDateTime) -> bool {
+    vm.life_profile.burst_level > 0.8
+        && vm
+            .last_feed_pulse_at
+            .is_some_and(|pulse| now - pulse <= Duration::seconds(8))
+}
+
+fn is_heavy_day_cozy(day: &DayContext) -> bool {
+    day.today_ratio > 1.0 && day.tiredness > 0.6 && matches!(day.day_phase, DayPhase::Dusk)
 }
 
 fn visible_identity_ids(earned: &[EarnedHabitatPropView]) -> Vec<HabitatPropId> {
@@ -359,6 +390,466 @@ fn emitter_behavior_for_prop(id: &str) -> PropEmitterBehavior {
     }
 }
 
+/// One placed resting-room glyph produced from biome, weather, and emitter layers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoomGlyph {
+    pub row: u16,
+    pub col: u16,
+    pub glyph: char,
+    pub style: Style,
+    pub zone: RoomZone,
+}
+
+/// Spatial zone inside the habitat area where a glyph belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RoomZone {
+    Floor,
+    UpperAir,
+    LeftAnchor,
+    RightAnchor,
+    PetAdjacent,
+}
+
+/// Build the full set of resting-room glyphs for the current profile, capping
+/// at the motion budget and filtering out anything that falls inside an
+/// exclusion rect (e.g. pet silhouette or speech).
+///
+/// Layers are composed in biome → weather → emitter order; later layers
+/// overwrite earlier layers at the same cell, and the total count is capped by
+/// `motion_budget`.
+pub fn room_glyphs_for(
+    profile: &RoomLifeProfile,
+    area: Rect,
+    exclusions: &[Rect],
+    now: OffsetDateTime,
+    color_capability: ColorCapability,
+) -> Vec<RoomGlyph> {
+    let mut cells: std::collections::HashMap<(u16, u16), RoomGlyph> =
+        std::collections::HashMap::new();
+    for glyph in biome_glyphs(profile, area, now, color_capability) {
+        cells.insert((glyph.row, glyph.col), glyph);
+    }
+    for glyph in weather_glyphs(profile, area, now, color_capability) {
+        cells.insert((glyph.row, glyph.col), glyph);
+    }
+    for glyph in emitter_glyphs(profile, area, now, color_capability) {
+        cells.insert((glyph.row, glyph.col), glyph);
+    }
+    let mut glyphs: Vec<RoomGlyph> = cells.into_values().collect();
+    glyphs.sort_by_key(|g| (g.row, g.col));
+    glyphs
+        .into_iter()
+        .filter(|glyph| !rects_contain(exclusions, glyph.col, glyph.row))
+        .take(motion_budget(area))
+        .collect()
+}
+
+/// Maximum number of moving/resting glyphs allowed for a habitat area of the
+/// given size class. Preview Lab and live watch use the same thresholds.
+pub fn motion_budget(area: Rect) -> usize {
+    if area.width <= 72 || area.height <= 24 {
+        8
+    } else if area.width >= 180 || area.height >= 50 {
+        28
+    } else {
+        16
+    }
+}
+
+pub(crate) fn rects_contain(rects: &[Rect], col: u16, row: u16) -> bool {
+    rects.iter().any(|r| {
+        r.x <= col
+            && col < r.x.saturating_add(r.width)
+            && r.y <= row
+            && row < r.y.saturating_add(r.height)
+    })
+}
+
+fn biome_symbols(tag: RoomBiomeTag) -> &'static [char] {
+    match tag {
+        RoomBiomeTag::Starter => &['.', '·'],
+        RoomBiomeTag::Botanical => &['"', '\'', '`', ','],
+        RoomBiomeTag::Technical => &[':', ';', '+', '='],
+        RoomBiomeTag::Celestial => &['*', '·', '˚', '.'],
+        RoomBiomeTag::Artifact => &['.', 'o', '◇', '°'],
+        RoomBiomeTag::Cozy => &['~', '·', '⌞', '⌟'],
+    }
+}
+
+type ZoneAllocations = (Vec<(RoomZone, usize)>, Vec<(RoomZone, usize)>);
+
+fn zone_counts_for_biome(biome: RoomBiome) -> ZoneAllocations {
+    let primary = match biome.primary {
+        RoomBiomeTag::Starter => vec![(RoomZone::Floor, 2), (RoomZone::UpperAir, 1)],
+        RoomBiomeTag::Botanical => vec![
+            (RoomZone::Floor, 4),
+            (RoomZone::UpperAir, 2),
+            (RoomZone::LeftAnchor, 1),
+            (RoomZone::RightAnchor, 1),
+            (RoomZone::PetAdjacent, 1),
+        ],
+        RoomBiomeTag::Technical => vec![
+            (RoomZone::RightAnchor, 4),
+            (RoomZone::UpperAir, 2),
+            (RoomZone::Floor, 1),
+            (RoomZone::LeftAnchor, 1),
+            (RoomZone::PetAdjacent, 1),
+        ],
+        RoomBiomeTag::Celestial => vec![
+            (RoomZone::UpperAir, 4),
+            (RoomZone::LeftAnchor, 1),
+            (RoomZone::RightAnchor, 1),
+            (RoomZone::Floor, 1),
+            (RoomZone::PetAdjacent, 1),
+        ],
+        RoomBiomeTag::Artifact => vec![
+            (RoomZone::Floor, 3),
+            (RoomZone::LeftAnchor, 1),
+            (RoomZone::RightAnchor, 1),
+            (RoomZone::UpperAir, 1),
+            (RoomZone::PetAdjacent, 1),
+        ],
+        RoomBiomeTag::Cozy => vec![
+            (RoomZone::PetAdjacent, 3),
+            (RoomZone::LeftAnchor, 1),
+            (RoomZone::RightAnchor, 1),
+            (RoomZone::Floor, 1),
+            (RoomZone::UpperAir, 1),
+        ],
+    };
+
+    let secondary = biome.secondary.map(|tag| match tag {
+        RoomBiomeTag::Starter => vec![(RoomZone::Floor, 1)],
+        RoomBiomeTag::Botanical => vec![(RoomZone::Floor, 2)],
+        RoomBiomeTag::Technical => vec![(RoomZone::RightAnchor, 2)],
+        RoomBiomeTag::Celestial => vec![(RoomZone::UpperAir, 2)],
+        RoomBiomeTag::Artifact => vec![(RoomZone::Floor, 2)],
+        RoomBiomeTag::Cozy => vec![(RoomZone::PetAdjacent, 2)],
+    });
+
+    (primary, secondary.unwrap_or_default())
+}
+
+fn biome_seed(biome: &RoomBiome, minute_floor: u64) -> u64 {
+    let primary = tag_seed(biome.primary);
+    let secondary = biome.secondary.map(tag_seed).unwrap_or(255);
+    primary
+        .wrapping_shl(16)
+        .wrapping_add(secondary)
+        .wrapping_add(minute_floor.wrapping_mul(0xA0F6_5E0E_8B99_4B17))
+}
+
+fn tag_seed(tag: RoomBiomeTag) -> u64 {
+    match tag {
+        RoomBiomeTag::Starter => 0,
+        RoomBiomeTag::Botanical => 1,
+        RoomBiomeTag::Technical => 2,
+        RoomBiomeTag::Celestial => 3,
+        RoomBiomeTag::Artifact => 4,
+        RoomBiomeTag::Cozy => 5,
+    }
+}
+
+fn zone_rect(area: Rect, zone: RoomZone) -> Rect {
+    let third_w = area.width / 3;
+    let third_h = area.height / 3;
+    match zone {
+        RoomZone::UpperAir => Rect::new(area.x, area.y, area.width, third_h),
+        RoomZone::Floor => Rect::new(
+            area.x,
+            area.y.saturating_add(2 * third_h),
+            area.width,
+            area.height.saturating_sub(2 * third_h),
+        ),
+        RoomZone::LeftAnchor => Rect::new(area.x, area.y.saturating_add(third_h), third_w, third_h),
+        RoomZone::RightAnchor => Rect::new(
+            area.x.saturating_add(2 * third_w),
+            area.y.saturating_add(third_h),
+            area.width.saturating_sub(2 * third_w),
+            third_h,
+        ),
+        RoomZone::PetAdjacent => Rect::new(
+            area.x.saturating_add(third_w),
+            area.y.saturating_add(third_h),
+            third_w,
+            third_h,
+        ),
+    }
+}
+
+fn place_zone_glyphs<R: Rng>(
+    area: Rect,
+    zone: RoomZone,
+    count: usize,
+    symbols: &[char],
+    style: Style,
+    rng: &mut R,
+) -> Vec<RoomGlyph> {
+    let rect = zone_rect(area, zone);
+    if rect.width == 0 || rect.height == 0 || symbols.is_empty() || count == 0 {
+        return Vec::new();
+    }
+    let mut placed = std::collections::HashSet::new();
+    let mut glyphs = Vec::with_capacity(count);
+    for _ in 0..count {
+        for _attempt in 0..24 {
+            let col = rect.x + rng.gen_range(0..rect.width);
+            let row = rect.y + rng.gen_range(0..rect.height);
+            if placed.insert((col, row)) {
+                let glyph = *symbols.choose(rng).unwrap_or(&symbols[0]);
+                glyphs.push(RoomGlyph {
+                    row,
+                    col,
+                    glyph,
+                    style,
+                    zone,
+                });
+                break;
+            }
+        }
+    }
+    glyphs
+}
+
+fn biome_style(tag: RoomBiomeTag, color_capability: ColorCapability) -> Style {
+    let base = Style::default();
+    if matches!(color_capability, ColorCapability::Flat) {
+        return base.fg(crate::tui::style::tokenpet_palette().faint.rgb);
+    }
+    let color = match tag {
+        RoomBiomeTag::Starter => Color::Rgb(0x88, 0x88, 0x88),
+        RoomBiomeTag::Botanical => Color::Rgb(0x7d, 0xb6, 0x69),
+        RoomBiomeTag::Technical => Color::Rgb(0x86, 0xd9, 0xef),
+        RoomBiomeTag::Celestial => Color::Rgb(0xff, 0xee, 0xaa),
+        RoomBiomeTag::Artifact => Color::Rgb(0xd4, 0xa5, 0x5a),
+        RoomBiomeTag::Cozy => Color::Rgb(0xdf, 0xa0, 0x7e),
+    };
+    base.fg(color)
+}
+
+fn biome_glyphs(
+    profile: &RoomLifeProfile,
+    area: Rect,
+    now: OffsetDateTime,
+    color_capability: ColorCapability,
+) -> Vec<RoomGlyph> {
+    let minute_floor = (now.unix_timestamp() / 60) as u64;
+    let seed = biome_seed(&profile.biome, minute_floor);
+    let mut rng = Pcg32::seed_from_u64(seed);
+    let (primary_counts, secondary_counts) = zone_counts_for_biome(profile.biome);
+    let style = biome_style(profile.biome.primary, color_capability);
+    let symbols = biome_symbols(profile.biome.primary);
+    let mut glyphs = Vec::new();
+    for (zone, count) in primary_counts {
+        glyphs.extend(place_zone_glyphs(
+            area, zone, count, symbols, style, &mut rng,
+        ));
+    }
+    if let Some(secondary) = profile.biome.secondary {
+        let sec_style = biome_style(secondary, color_capability);
+        let sec_symbols = biome_symbols(secondary);
+        for (zone, count) in secondary_counts {
+            glyphs.extend(place_zone_glyphs(
+                area,
+                zone,
+                count,
+                sec_symbols,
+                sec_style,
+                &mut rng,
+            ));
+        }
+    }
+    glyphs
+}
+
+fn weather_symbols(weather: RoomWeatherLayer) -> &'static [char] {
+    match weather {
+        RoomWeatherLayer::Clear => &[],
+        RoomWeatherLayer::CacheMist => &['~', '·', ',', '`'],
+        RoomWeatherLayer::OutputSparks => &['*', '+', '·', '˚'],
+        RoomWeatherLayer::ReasoningPulse => &['○', '◌', '·', ':'],
+        RoomWeatherLayer::Mixed => &[], // Mixed delegates to two sub-weather passes.
+    }
+}
+
+fn weather_seed(weather: RoomWeatherLayer, minute_floor: u64) -> u64 {
+    let discriminant: u64 = match weather {
+        RoomWeatherLayer::Clear => 0,
+        RoomWeatherLayer::CacheMist => 1,
+        RoomWeatherLayer::OutputSparks => 2,
+        RoomWeatherLayer::ReasoningPulse => 3,
+        RoomWeatherLayer::Mixed => 4,
+    };
+    discriminant
+        .wrapping_mul(0xC7CE_5D9F_E3F7_29C9)
+        .wrapping_add(minute_floor.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+fn weather_style(weather: RoomWeatherLayer, color_capability: ColorCapability) -> Style {
+    let base = Style::default();
+    if matches!(color_capability, ColorCapability::Flat) {
+        return base.fg(crate::tui::style::tokenpet_palette().faint.rgb);
+    }
+    let color = match weather {
+        RoomWeatherLayer::Clear => {
+            unreachable!(
+                "weather_glyphs returns early for Clear, so weather_style is never called with it"
+            )
+        }
+        RoomWeatherLayer::CacheMist => Color::Rgb(0x9d, 0xb6, 0x9d),
+        RoomWeatherLayer::OutputSparks => Color::Rgb(0xff, 0xd7, 0x66),
+        RoomWeatherLayer::ReasoningPulse => Color::Rgb(0xc9, 0x8f, 0xde),
+        RoomWeatherLayer::Mixed => Color::Rgb(0xbb, 0xbb, 0xbb),
+    };
+    base.fg(color)
+}
+
+fn weather_glyphs(
+    profile: &RoomLifeProfile,
+    area: Rect,
+    now: OffsetDateTime,
+    color_capability: ColorCapability,
+) -> Vec<RoomGlyph> {
+    let minute_floor = (now.unix_timestamp() / 60) as u64;
+    match profile.room_weather {
+        RoomWeatherLayer::Clear => Vec::new(),
+        RoomWeatherLayer::Mixed => {
+            // Combine mist (floor) and sparks (upper) spatially, but keep the
+            // total count within the same budget as a single weather layer.
+            let mut glyphs = Vec::new();
+            let mist_seed = weather_seed(RoomWeatherLayer::CacheMist, minute_floor);
+            let mut mist_rng = Pcg32::seed_from_u64(mist_seed);
+            let mist_style = weather_style(RoomWeatherLayer::CacheMist, color_capability);
+            let mist_symbols = weather_symbols(RoomWeatherLayer::CacheMist);
+            glyphs.extend(place_zone_glyphs(
+                area,
+                RoomZone::Floor,
+                2,
+                mist_symbols,
+                mist_style,
+                &mut mist_rng,
+            ));
+            let spark_seed = weather_seed(RoomWeatherLayer::OutputSparks, minute_floor);
+            let mut spark_rng = Pcg32::seed_from_u64(spark_seed);
+            let spark_style = weather_style(RoomWeatherLayer::OutputSparks, color_capability);
+            let spark_symbols = weather_symbols(RoomWeatherLayer::OutputSparks);
+            glyphs.extend(place_zone_glyphs(
+                area,
+                RoomZone::UpperAir,
+                2,
+                spark_symbols,
+                spark_style,
+                &mut spark_rng,
+            ));
+            glyphs
+        }
+        _ => {
+            let seed = weather_seed(profile.room_weather, minute_floor);
+            let mut rng = Pcg32::seed_from_u64(seed);
+            let style = weather_style(profile.room_weather, color_capability);
+            let symbols = weather_symbols(profile.room_weather);
+            let (zones, counts): (&[RoomZone], &[usize]) = match profile.room_weather {
+                RoomWeatherLayer::CacheMist => (
+                    &[RoomZone::Floor, RoomZone::LeftAnchor, RoomZone::PetAdjacent],
+                    &[4, 1, 1],
+                ),
+                RoomWeatherLayer::OutputSparks => (
+                    &[
+                        RoomZone::UpperAir,
+                        RoomZone::RightAnchor,
+                        RoomZone::PetAdjacent,
+                    ],
+                    &[4, 2, 1],
+                ),
+                RoomWeatherLayer::ReasoningPulse => {
+                    (&[RoomZone::PetAdjacent, RoomZone::UpperAir], &[3, 2])
+                }
+                _ => return Vec::new(),
+            };
+            let mut glyphs = Vec::new();
+            for (&zone, &count) in zones.iter().zip(counts.iter()) {
+                glyphs.extend(place_zone_glyphs(
+                    area, zone, count, symbols, style, &mut rng,
+                ));
+            }
+            glyphs
+        }
+    }
+}
+
+fn emitter_symbols(behavior: PropEmitterBehavior) -> &'static [char] {
+    match behavior {
+        PropEmitterBehavior::LeafDrift => &['"', '\'', '`', ','],
+        PropEmitterBehavior::TechnicalPing => &[':', ';', '+', '='],
+        PropEmitterBehavior::HopefulSprout => &['"', '·', '`', ','],
+        PropEmitterBehavior::WarmHalo => &['○', '◌', '·', '°'],
+        PropEmitterBehavior::CloudDrift => &['~', '·', ',', '`'],
+        PropEmitterBehavior::OrbitArc => &['*', '·', '+', '˚'],
+        PropEmitterBehavior::ArtifactGlint => &['.', 'o', '◇', '°'],
+    }
+}
+
+fn emitter_zone_for_prop(prop_id: &str) -> RoomZone {
+    use crate::game::habitat::HabitatPropZone;
+    let Some(spec) = catalog_prop_by_str(prop_id) else {
+        return RoomZone::PetAdjacent;
+    };
+    match spec.zone {
+        HabitatPropZone::FloorLeft => RoomZone::LeftAnchor,
+        HabitatPropZone::FloorRight => RoomZone::RightAnchor,
+        HabitatPropZone::FloorMid => RoomZone::Floor,
+        HabitatPropZone::WallLeft | HabitatPropZone::AirLeft => RoomZone::LeftAnchor,
+        HabitatPropZone::WallRight | HabitatPropZone::AirRight => RoomZone::RightAnchor,
+        HabitatPropZone::Ceiling => RoomZone::UpperAir,
+        HabitatPropZone::AirMid => RoomZone::PetAdjacent,
+    }
+}
+
+fn emitter_seed(prop_id: &str, minute_floor: u64) -> u64 {
+    let id_hash = prop_id.bytes().fold(0x811c_9dc5u64, |h, b| {
+        h.wrapping_mul(0x0100_0193) ^ b as u64
+    });
+    id_hash.wrapping_add(minute_floor.wrapping_mul(0xD6E8_FD9A_934D_CC17))
+}
+
+fn emitter_style(behavior: PropEmitterBehavior, color_capability: ColorCapability) -> Style {
+    let base = Style::default();
+    if matches!(color_capability, ColorCapability::Flat) {
+        return base.fg(crate::tui::style::tokenpet_palette().faint.rgb);
+    }
+    let color = match behavior {
+        PropEmitterBehavior::LeafDrift | PropEmitterBehavior::HopefulSprout => {
+            Color::Rgb(0x7d, 0xb6, 0x69)
+        }
+        PropEmitterBehavior::TechnicalPing | PropEmitterBehavior::OrbitArc => {
+            Color::Rgb(0x86, 0xd9, 0xef)
+        }
+        PropEmitterBehavior::WarmHalo => Color::Rgb(0xff, 0xcc, 0x66),
+        PropEmitterBehavior::CloudDrift => Color::Rgb(0xbf, 0xd7, 0xea),
+        PropEmitterBehavior::ArtifactGlint => Color::Rgb(0xd4, 0xa5, 0x5a),
+    };
+    base.fg(color)
+}
+
+fn emitter_glyphs(
+    profile: &RoomLifeProfile,
+    area: Rect,
+    now: OffsetDateTime,
+    color_capability: ColorCapability,
+) -> Vec<RoomGlyph> {
+    let Some(emitter) = profile.resonant_emitter.as_ref() else {
+        return Vec::new();
+    };
+    let minute_floor = (now.unix_timestamp() / 60) as u64;
+    let seed = emitter_seed(emitter.prop_id.as_str(), minute_floor);
+    let mut rng = Pcg32::seed_from_u64(seed);
+    let zone = emitter_zone_for_prop(emitter.prop_id.as_str());
+    let count = (emitter.intensity * 3.0).round().clamp(1.0, 3.0) as usize;
+    let symbols = emitter_symbols(emitter.behavior);
+    let style = emitter_style(emitter.behavior, color_capability);
+    place_zone_glyphs(area, zone, count, symbols, style, &mut rng)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +862,7 @@ mod tests {
     use crate::tui::life::{
         IdleLifeState, PetLifeProfile, PropReaction, PropReactionKind, WorkWeather,
     };
+    use crate::tui::style::{tokenpet_palette, ColorCapability};
     use crate::tui::view_model::{EarnedHabitatPropView, HabitatView, WatchViewModel};
     use time::macros::datetime;
 
@@ -490,5 +982,170 @@ mod tests {
                 .any(|moment| moment.key == SceneMomentKey::FeedSweep),
             "sleeping room should not fake a live feed burst"
         );
+    }
+
+    #[test]
+    fn pet_performance_tired_and_heavy_day_are_distinct() {
+        let mut vm = vm_with_props(vec![earned(HEAVY_SESSION_PLANTER, 80)]);
+        vm.day_context = DayContext {
+            mature: true,
+            tiredness: 0.8,
+            today_ratio: 1.4,
+            day_phase: DayPhase::Dusk,
+            ..vm.day_context
+        };
+
+        let profile = derive_room_life_profile(&vm, datetime!(2026-06-11 19:00 UTC));
+
+        assert_eq!(profile.pet_performance, PetPerformance::HeavyDayCozy);
+    }
+
+    #[test]
+    fn source_burst_perk_requires_live_burst() {
+        let mut vm = vm_with_props(vec![earned(CODEX_SIGNAL_LAMP, 70)]);
+        vm.life_profile.burst_level = 0.9;
+        vm.last_feed_pulse_at = Some(datetime!(2026-06-11 10:00 UTC));
+
+        let profile = derive_room_life_profile(&vm, datetime!(2026-06-11 10:00:02 UTC));
+
+        assert_eq!(profile.pet_performance, PetPerformance::SourceBurstPerk);
+    }
+
+    #[test]
+    fn source_burst_perk_ignores_stale_pulse() {
+        let mut vm = vm_with_props(vec![earned(CODEX_SIGNAL_LAMP, 70)]);
+        vm.life_profile.burst_level = 0.9;
+        vm.last_feed_pulse_at = Some(datetime!(2026-06-11 10:00 UTC));
+
+        let profile = derive_room_life_profile(&vm, datetime!(2026-06-11 10:00:09 UTC));
+
+        assert_ne!(
+            profile.pet_performance,
+            PetPerformance::SourceBurstPerk,
+            "a 9-second-old pulse should not read as a live burst"
+        );
+    }
+
+    #[test]
+    fn room_motion_budget_matches_preview_size_classes() {
+        assert_eq!(motion_budget(Rect::new(0, 0, 72, 24)), 8);
+        assert_eq!(motion_budget(Rect::new(0, 0, 120, 32)), 16);
+        assert_eq!(motion_budget(Rect::new(0, 0, 180, 50)), 28);
+    }
+
+    #[test]
+    fn room_glyphs_are_deterministic_for_identical_inputs() {
+        let profile = RoomLifeProfile {
+            biome: RoomBiome {
+                primary: RoomBiomeTag::Botanical,
+                secondary: Some(RoomBiomeTag::Cozy),
+            },
+            room_weather: RoomWeatherLayer::Clear,
+            resonant_emitter: None,
+            pet_performance: PetPerformance::RestedAwake,
+            scene_moments: Vec::new(),
+            identity_prop_ids: Vec::new(),
+        };
+        let area = Rect::new(0, 0, 120, 32);
+        let now = datetime!(2026-06-11 10:00 UTC);
+
+        let a = room_glyphs_for(&profile, area, &[], now, ColorCapability::Truecolor);
+        let b = room_glyphs_for(&profile, area, &[], now, ColorCapability::Truecolor);
+
+        assert_eq!(
+            a, b,
+            "identical inputs should produce identical room glyphs"
+        );
+    }
+
+    #[test]
+    fn room_glyphs_use_symbol_families_in_flat_mode() {
+        let profile = RoomLifeProfile {
+            biome: RoomBiome {
+                primary: RoomBiomeTag::Technical,
+                secondary: None,
+            },
+            room_weather: RoomWeatherLayer::OutputSparks,
+            resonant_emitter: None,
+            pet_performance: PetPerformance::RestedAwake,
+            scene_moments: Vec::new(),
+            identity_prop_ids: Vec::new(),
+        };
+        let area = Rect::new(0, 0, 120, 32);
+        let now = datetime!(2026-06-11 10:00 UTC);
+
+        let glyphs = room_glyphs_for(&profile, area, &[], now, ColorCapability::Flat);
+
+        assert!(
+            !glyphs.is_empty(),
+            "flat mode should still emit room glyphs"
+        );
+        let expected = tokenpet_palette().faint.rgb;
+        for g in &glyphs {
+            assert_eq!(
+                g.style.fg,
+                Some(expected),
+                "flat-mode glyph should use the faint palette color"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_weather_glyphs_span_families_or_zones() {
+        let profile = RoomLifeProfile {
+            biome: RoomBiome {
+                primary: RoomBiomeTag::Botanical,
+                secondary: None,
+            },
+            room_weather: RoomWeatherLayer::Mixed,
+            resonant_emitter: None,
+            pet_performance: PetPerformance::RestedAwake,
+            scene_moments: Vec::new(),
+            identity_prop_ids: Vec::new(),
+        };
+        let area = Rect::new(0, 0, 120, 32);
+        let now = datetime!(2026-06-11 10:00 UTC);
+
+        let glyphs = room_glyphs_for(&profile, area, &[], now, ColorCapability::Truecolor);
+        let symbols: std::collections::HashSet<char> = glyphs.iter().map(|g| g.glyph).collect();
+        let zones: std::collections::HashSet<RoomZone> = glyphs.iter().map(|g| g.zone).collect();
+        let has_mist = symbols.iter().any(|c| ['~', ',', '`'].contains(c));
+        let has_spark = symbols.iter().any(|c| ['*', '+', '˚'].contains(c));
+
+        assert!(
+            (has_mist && has_spark) || zones.len() >= 2,
+            "mixed weather should produce both families or span multiple zones; symbols={symbols:?} zones={zones:?}"
+        );
+    }
+
+    #[test]
+    fn emitter_intensity_yields_one_to_three_glyphs() {
+        for (intensity, label) in [(0.5, "half"), (1.0, "full")] {
+            let profile = RoomLifeProfile {
+                biome: RoomBiome {
+                    primary: RoomBiomeTag::Technical,
+                    secondary: None,
+                },
+                room_weather: RoomWeatherLayer::Clear,
+                resonant_emitter: Some(PropEmitter {
+                    prop_id: HabitatPropId::from(CODEX_SIGNAL_LAMP),
+                    behavior: PropEmitterBehavior::TechnicalPing,
+                    intensity,
+                }),
+                pet_performance: PetPerformance::RestedAwake,
+                scene_moments: Vec::new(),
+                identity_prop_ids: vec![HabitatPropId::from(CODEX_SIGNAL_LAMP)],
+            };
+            let area = Rect::new(0, 0, 120, 32);
+            let now = datetime!(2026-06-11 10:00 UTC);
+
+            let glyphs = emitter_glyphs(&profile, area, now, ColorCapability::Truecolor);
+
+            assert!(
+                (1..=3).contains(&glyphs.len()),
+                "emitter intensity {label} should produce 1-3 glyphs; got {}",
+                glyphs.len()
+            );
+        }
     }
 }

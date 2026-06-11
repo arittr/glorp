@@ -6,6 +6,8 @@ use ratatui::{
     text::Line,
 };
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PreviewFrame {
@@ -15,6 +17,8 @@ pub struct PreviewFrame {
     pub height: u16,
     pub cells: Vec<PreviewCell>,
     pub layout: Option<PreviewLayout>,
+    #[serde(skip)]
+    pub extra_inputs: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -64,6 +68,7 @@ pub fn frame_from_buffer(
         height: area.height,
         cells,
         layout: None,
+        extra_inputs: BTreeMap::new(),
     }
 }
 

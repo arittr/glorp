@@ -1,8 +1,8 @@
 use crate::dev_preview::export::{
     copy_assets, write_cells_json, write_index_html, write_layout_json, write_manifest,
-    write_review_markdown, write_text_frame, ArtifactType, PreviewArtifact, PreviewDimensions,
-    PreviewManifest, PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER,
-    SCHEMA_VERSION,
+    write_review_markdown, write_room_text_frame, write_text_frame, ArtifactType, PreviewArtifact,
+    PreviewDimensions, PreviewManifest, PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind,
+    PRODUCER, SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::habitat_props::{
@@ -82,6 +82,13 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         write_cells_json(&staging_dir.join(cells_path(frame)), frame)?;
         if let Some(layout) = &frame.layout {
             write_layout_json(&staging_dir.join(layout_path(frame)), layout)?;
+            if layout.targets.contains_key("watch.room.effect") {
+                write_room_text_frame(
+                    &staging_dir.join(room_text_path(frame)),
+                    frame,
+                    "watch.room.effect",
+                )?;
+            }
         }
     }
 
@@ -309,6 +316,16 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     .to_string(),
             ],
         ),
+        id if id.starts_with("room-") => (
+            PreviewScenarioKind::Watch,
+            "Review deterministic alive room inputs and rendered output.",
+            frame.extra_inputs.clone(),
+            vec![
+                "Confirm the frame shows the expected primary biome.".to_string(),
+                "Check room symbol distribution across upper-air, floor, and anchor zones."
+                    .to_string(),
+            ],
+        ),
         _ => (
             PreviewScenarioKind::Watch,
             "Review this generated preview frame.",
@@ -330,6 +347,13 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
             text: text_path(frame),
             cells: cells_path(frame),
             layout: frame.layout.as_ref().map(|_| layout_path(frame)),
+            room_text: frame.layout.as_ref().and_then(|layout| {
+                if layout.targets.contains_key("watch.room.effect") {
+                    Some(room_text_path(frame))
+                } else {
+                    None
+                }
+            }),
         },
         inputs,
         review_prompts,
@@ -361,6 +385,20 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 title: format!("{} Layout", frame.title),
                 artifact_type: ArtifactType::Layout,
                 path: layout_path(frame),
+                width: Some(frame.width),
+                height: Some(frame.height),
+            });
+        }
+        if frame
+            .layout
+            .as_ref()
+            .is_some_and(|l| l.targets.contains_key("watch.room.effect"))
+        {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-room", frame.id),
+                title: format!("{} Room", frame.title),
+                artifact_type: ArtifactType::Text,
+                path: room_text_path(frame),
                 width: Some(frame.width),
                 height: Some(frame.height),
             });
@@ -984,6 +1022,10 @@ fn layout_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.layout.json", frame.id))
 }
 
+fn room_text_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.room.txt", frame.id))
+}
+
 fn color_capability_name(capability: ColorCapability) -> &'static str {
     match capability {
         ColorCapability::Truecolor => "truecolor",
@@ -1084,6 +1126,14 @@ mod tests {
                 "watch-daycontext-climate-cache-week",
                 "watch-daycontext-prop-resonance-planter",
                 "watch-daycontext-midnight-mid-session",
+                "room-starter-day-clear",
+                "room-botanical-cache-evening",
+                "room-technical-output-active",
+                "room-celestial-artifact-night",
+                "room-cozy-weekend-quiet",
+                "room-mixed-full-wide",
+                "room-heavy-day-cozy-large",
+                "room-dawn-wake-small",
                 "habitat-props-catalog",
                 "watch-habitat-early",
                 "watch-habitat-lived-in",
@@ -1111,6 +1161,7 @@ mod tests {
             height: 32,
             cells: Vec::new(),
             layout: None,
+            extra_inputs: BTreeMap::new(),
         };
 
         let scenario = scenario_metadata(&frame, &ctx);
@@ -1141,6 +1192,7 @@ mod tests {
             height: 86,
             cells: Vec::new(),
             layout: None,
+            extra_inputs: BTreeMap::new(),
         };
 
         let scenario = scenario_metadata(&frame, &ctx);
