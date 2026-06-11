@@ -477,13 +477,13 @@ pub fn breath_rhythm_for_day(day: &crate::tui::day::DayContext) -> BreathRhythm 
 /// Glitch: 2.0s cycle, 0.4s peak — twitchy. Crystal: 6.0s cycle, 0.8s peak — slow.
 fn species_breath_rhythm_decis(species: Option<Species>) -> (i64, i64) {
     match species {
-        Some(Species::Glitch) => (20, 4),
-        Some(Species::Mech) => (40, 5),
-        Some(Species::Fuzz) => (40, 8),
-        Some(Species::Ghost) => (45, 10),
-        Some(Species::Blob) => (50, 12),
-        Some(Species::Crystal) => (60, 8),
-        None => (40, 8),
+        Some(Species::Glitch) => (18, 4),
+        Some(Species::Ghost) => (22, 6),
+        Some(Species::Blob) => (26, 10),
+        Some(Species::Fuzz) => (32, 8),
+        Some(Species::Mech) => (34, 8),
+        Some(Species::Crystal) => (38, 12),
+        None => (32, 8),
     }
 }
 
@@ -972,6 +972,17 @@ mod tests {
     }
 
     #[test]
+    fn breath_periods_match_pet_jsx_ordering() {
+        // pet.jsx SPECIES_ANIM breathPeriod: glitch 9 < ghost 11 < blob 13 < fuzz 16 < mech 17 < crystal 19.
+        let p = |s| species_breath_rhythm_decis(Some(s)).0;
+        assert!(p(Species::Glitch) < p(Species::Ghost));
+        assert!(p(Species::Ghost) < p(Species::Blob));
+        assert!(p(Species::Blob) < p(Species::Fuzz));
+        assert!(p(Species::Fuzz) <= p(Species::Mech));
+        assert!(p(Species::Mech) < p(Species::Crystal));
+    }
+
+    #[test]
     fn wander_offset_returns_one_of_three_values() {
         use time::macros::datetime;
         let mut seen = std::collections::HashSet::new();
@@ -1255,9 +1266,9 @@ mod tests {
         );
         assert_eq!(at_onset, 1, "phase 0 sits inside the inhale window");
         // The asleep cycle is SLEEP_BREATH_PERIOD_SCALE x longer: for fuzz
-        // (period 40ds, inhale 8ds) the asleep inhale window is 16ds of a
-        // 120ds cycle — at +5s (50ds) the pet must be at rest, and the next
-        // inhale starts at +12s.
+        // (period 32ds, inhale 8ds) the asleep inhale window is 16ds of a
+        // 96ds cycle — at +5s (50ds) the pet must be at rest, and the next
+        // inhale starts at +9.6s.
         let mid = compute_breath_offset_with_rhythm(
             Some(Species::Fuzz),
             onset + time::Duration::seconds(5),
@@ -1266,7 +1277,7 @@ mod tests {
         assert_eq!(mid, 0);
         let next_cycle = compute_breath_offset_with_rhythm(
             Some(Species::Fuzz),
-            onset + time::Duration::seconds(12),
+            onset + time::Duration::seconds(10),
             BreathRhythm::Asleep { onset },
         );
         assert_eq!(next_cycle, 1);
@@ -1335,8 +1346,8 @@ mod tests {
         };
         let awake = rising_edges(BreathRhythm::Awake);
         let tired = rising_edges(BreathRhythm::Tired { eighths: 8 });
-        assert_eq!(awake, 30);
-        assert_eq!(tired, 20);
+        assert_eq!(awake, 48);
+        assert_eq!(tired, 32);
         assert!(
             (f64::from(awake) / f64::from(tired) - TIRED_BREATH_MAX_SCALE).abs() < f64::EPSILON,
             "full-eighths period stretch must equal TIRED_BREATH_MAX_SCALE"
