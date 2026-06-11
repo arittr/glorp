@@ -1477,7 +1477,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 29);
+        assert_eq!(frames.len(), 32);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -1515,18 +1515,24 @@ mod tests {
         assert_eq!((frames[19].width, frames[19].height), (120, 32));
         assert_eq!(frames[20].id, "watch-daycontext-midnight-mid-session");
         assert_eq!((frames[20].width, frames[20].height), (120, 32));
-        assert_eq!(frames[21].id, "room-starter-day-clear");
+        assert_eq!(frames[21].id, "watch-daycontext-dawn-fresh");
         assert_eq!((frames[21].width, frames[21].height), (120, 32));
-        assert_eq!(frames[22].id, "room-botanical-cache-evening");
-        assert_eq!(frames[23].id, "room-technical-output-active");
-        assert_eq!(frames[24].id, "room-celestial-artifact-night");
-        assert_eq!(frames[25].id, "room-cozy-weekend-quiet");
-        assert_eq!(frames[26].id, "room-mixed-full-wide");
-        assert_eq!((frames[26].width, frames[26].height), (180, 50));
-        assert_eq!(frames[27].id, "room-heavy-day-cozy-large");
-        assert_eq!((frames[27].width, frames[27].height), (120, 32));
-        assert_eq!(frames[28].id, "room-dawn-wake-small");
-        assert_eq!((frames[28].width, frames[28].height), (72, 24));
+        assert_eq!(frames[22].id, "watch-daycontext-dusk-heavy");
+        assert_eq!((frames[22].width, frames[22].height), (120, 32));
+        assert_eq!(frames[23].id, "watch-daycontext-night-quiet");
+        assert_eq!((frames[23].width, frames[23].height), (120, 32));
+        assert_eq!(frames[24].id, "room-starter-day-clear");
+        assert_eq!((frames[24].width, frames[24].height), (120, 32));
+        assert_eq!(frames[25].id, "room-botanical-cache-evening");
+        assert_eq!(frames[26].id, "room-technical-output-active");
+        assert_eq!(frames[27].id, "room-celestial-artifact-night");
+        assert_eq!(frames[28].id, "room-cozy-weekend-quiet");
+        assert_eq!(frames[29].id, "room-mixed-full-wide");
+        assert_eq!((frames[29].width, frames[29].height), (180, 50));
+        assert_eq!(frames[30].id, "room-heavy-day-cozy-large");
+        assert_eq!((frames[30].width, frames[30].height), (120, 32));
+        assert_eq!(frames[31].id, "room-dawn-wake-small");
+        assert_eq!((frames[31].width, frames[31].height), (72, 24));
     }
 
     #[test]
