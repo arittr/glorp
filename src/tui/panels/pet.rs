@@ -1124,6 +1124,17 @@ fn performance_lightness_multiplier(performance: crate::tui::room::PetPerformanc
     }
 }
 
+/// Resting vertical offset (rows) by performance state. Settled states sit
+/// one row lower; alert/rested stay put. Capped at 1 to preserve the quiet
+/// halo around the pet.
+fn performance_posture_offset(performance: crate::tui::room::PetPerformance) -> u16 {
+    use crate::tui::room::PetPerformance::*;
+    match performance {
+        TiredAwake | HeavyDayCozy | AsleepDreaming => 1,
+        RestedAwake | CatchUpWake | SourceBurstPerk => 0,
+    }
+}
+
 /// Renders the speech bubble and pet art into `area`, centered vertically.
 /// This is the pre-existing render logic extracted from the old `render` body.
 fn render_pet_inside(
@@ -1190,14 +1201,21 @@ fn render_pet_inside(
     // Hit-test against the full column width so the cursor anywhere in the
     // panel triggers eye tracking, matching the pre-Fill behavior.
     let cursor_norm_x = cursor_normalized_x_within(vm, scene.hit_area);
+    let posture = performance_posture_offset(pet_performance);
+    let pet_rect = {
+        let mut r = scene.pet_art;
+        let max_y = scene.habitat.y + scene.habitat.height.saturating_sub(r.height);
+        r.y = (r.y + posture).min(max_y);
+        r
+    };
     let lines = build_pet_lines(
         vm,
-        scene.pet_art.width as usize,
+        pet_rect.width as usize,
         &live_styles,
         cursor_norm_x,
         effective_twinkle,
     );
-    render_pet_lines_sparse(buf, scene.pet_art, &lines);
+    render_pet_lines_sparse(buf, pet_rect, &lines);
 }
 
 /// Draws `lines` into `area`, writing only non-space glyphs. Whitespace cells
@@ -1682,6 +1700,16 @@ mod tests {
         vm.pet_art = rendered.lines;
         vm.pet_spans = rendered.spans;
         vm
+    }
+
+    #[test]
+    fn posture_offset_settles_tired_cozy_asleep_one_row() {
+        use crate::tui::room::PetPerformance::*;
+        assert_eq!(performance_posture_offset(RestedAwake), 0);
+        assert_eq!(performance_posture_offset(SourceBurstPerk), 0);
+        assert_eq!(performance_posture_offset(TiredAwake), 1);
+        assert_eq!(performance_posture_offset(HeavyDayCozy), 1);
+        assert_eq!(performance_posture_offset(AsleepDreaming), 1);
     }
 
     #[test]
