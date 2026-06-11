@@ -1,7 +1,7 @@
 # Glorp Alive Room — design
 
 - Date: 2026-06-11
-- Status: approved direction by Drew; spec pending review before implementation planning
+- Status: approved direction by Drew; review-patched before implementation planning
 - Builds on:
   - `docs/superpowers/specs/2026-06-04-glorp-liveliness-design.md`
   - `docs/superpowers/specs/2026-06-05-glorp-liveliness-branch2-design.md`
@@ -67,6 +67,11 @@ The room may be playful and magical, but it should stay calm enough to leave
 open while working. Panels remain utilitarian and readable. The pet room is
 where liveliness belongs.
 
+The art direction is a small pet room reacting with the pet, not a diagnostic
+overlay. A lamp can wink, a sprout can lean toward the pet, a cloud can tuck
+the room in, and an orbit can behave like a mobile. Reviewers should be able
+to answer yes to: "Would I want to leave this open while working?"
+
 ### Props Are Identity
 
 Props are the persistent personality layer. Day/weather/pet state can modify
@@ -108,17 +113,31 @@ pub struct RoomLifeProfile {
 ```
 
 Exact type names can change during implementation, but the boundary should
-remain: build a compact, derived room profile once per view-model build or poll
-update, then render from that profile. Avoid threading many independent ad hoc
-flags through the panel.
+remain: build a compact, stable room profile once per view-model build or poll
+update, then render from that profile plus per-frame render state. Avoid
+threading many independent ad hoc flags through the panel.
 
-Inputs:
+Stable profile inputs:
 
 - `HabitatView.earned_props`
 - `DayContext`
 - `PetLifeProfile`
 - species, stage, mood, energy, and existing pet render data
-- current render clock for deterministic phase/motion
+
+Per-frame render inputs should stay out of `RoomLifeProfile`:
+
+```rust
+pub struct RoomFrameState {
+    pub phase: RoomRenderPhase,
+    pub now: OffsetDateTime,
+    pub layout: RoomGeometry,
+}
+```
+
+The names can change, but the split should remain. `RoomLifeProfile` contains
+semantic choices and seeds. The renderer combines it with current time and
+layout so resting motion can advance without rebuilding the profile every
+frame.
 
 Outputs:
 
@@ -147,10 +166,11 @@ Initial tag model:
 
 Composition rules:
 
-- Visible earned props contribute tag weight using display priority, recency,
-  and whether the prop is currently resonant.
+- All earned eligible props contribute tag weight using display priority,
+  recency, and whether the prop is currently resonant. Biome identity must not
+  depend only on the rotating set of currently visible accent props.
 - Initial weight formula, expressed as named constants in code:
-  - base visible prop weight: `1.0`
+  - base earned prop weight: `1.0`
   - display priority weight: `display_priority / 100.0`
   - recent earned bonus: `0.4` when earned within the last 7 local days
   - resonant bonus: `1.2` for the selected resonant prop
@@ -164,6 +184,27 @@ Composition rules:
 
 This gives durable identity without making every visible prop emit noise at
 once.
+
+Visibility still matters for local behavior. Emitters and effect targets are
+eligible only when the contributing prop is actually rendered in the room.
+
+### Biome Recipes
+
+Each biome needs a persistent silhouette recipe, not just a tint:
+
+| Biome | Silhouette zones | Persistent landmarks | Local emitter language |
+|---|---|---|---|
+| `Botanical` | floor-left/floor-right texture, occasional upper vine | moss tuft, sprout, planter remain grounded and readable | leaves drift toward the pet; sprouts lean or open |
+| `Technical` | right-side signal column, mid-air pings, sparse floor grid | lamp/orbit/shard creates a recognizable instrument corner | pings, scans, small directional sweeps |
+| `Celestial` | upper-air arcs, night sky specks, soft halo pockets | cloud/orbit/lantern keeps a sky/mobile feeling | glimmers, arcs, soft clearing sweeps |
+| `Artifact` | lower scattered relic texture, glint pockets, den-like edges | shell/shard/chest/pebble read as a little collection | short glints, coalescing sparkles |
+| `Cozy` | low warmth, side pools of light, quiet corner texture | lantern/moss/shell/planter make a den | halos, sleepy curls, room tucks inward |
+
+Blends choose one dominant silhouette and one accent zone. For example,
+`BotanicalTechnical` keeps the botanical floor alive while a technical lamp or
+orbit anchors one side. The top earned props by identity weight should remain
+visually anchored whenever layout space allows; overlays can modify them but
+should not erase them.
 
 ## Prop Emitters
 
@@ -192,6 +233,37 @@ Emitter examples:
 Emitter output must include target rect/cells so both renderer overlays and
 `tachyonfx` moments can act on the same prop.
 
+Emitter placement and targeting must come from one shared geometry result:
+
+```rust
+pub struct PropPlacement {
+    pub prop_id: PropTargetId,
+    pub cells: Vec<PlacedCell>,
+    pub bounds: Rect,
+    pub layer: PropLayer,
+}
+
+pub struct RoomGeometry {
+    pub room_bounds: Rect,
+    pub pet_silhouette: CellMask,
+    pub speech_bounds: Option<Rect>,
+    pub prop_placements: Vec<PropPlacement>,
+}
+```
+
+Exact names can change. The important contract is that `PetPanel::render`,
+layout artifacts, Preview Lab metadata, and `tachyonfx` targets consume the same
+placed prop result. Do not recompute preview prop targets separately from the
+rendered prop cells. Prop effect targets should be emitted only for props that
+are actually visible in that frame.
+
+Implementation must choose and document the target-id strategy:
+
+- static catalog-backed ids, when all targetable props come from known catalog
+  entries; or
+- owned/string-backed target ids, if earned prop ids need to flow through the
+  target system.
+
 ## Weather And Day Overlays
 
 Existing work weather and day phase should become bolder and spatially
@@ -218,22 +290,52 @@ Day phase changes composition, not just color:
 The pet room should remain readable in flat/low-color mode by changing glyph
 families and placement, not relying only on RGB differences.
 
+Overlay hierarchy:
+
+1. Pet silhouette, eyes, and speech remain readable.
+2. Foreground anchored props remain identifiable.
+3. The selected prop emitter may occupy its local zone.
+4. One ambient weather/day layer may animate at rest.
+5. One short scene moment may temporarily override part of the room.
+
+Budgets:
+
+- Maintain at least a one-cell quiet halo around readable pet features whenever
+  layout size allows.
+- Compact watch (`72x24` preview class): at most `8` moving ambient glyphs plus
+  one short moment.
+- Normal watch (`120x32` preview class): at most `16` moving ambient glyphs
+  plus one short moment.
+- Tall/wide watch (`180x50` preview class): at most `28` moving ambient glyphs
+  plus one short moment.
+- Mixed weather can combine two channels spatially, but only one channel should
+  have moving glyphs at rest.
+
+If layers compete for the same cells, prefer pet readability, then visible
+landmark props, then current emitter, then weather texture.
+
 ## Pet Performance
 
 Add a small performance vocabulary that can be applied across existing species
 templates without rewriting every pet:
 
 - Rested/awake: current baseline.
-- Tired-but-awake: slower breath, fewer blinks, slight lower posture, softer
+- Tired-but-awake: slower breath, fewer blinks, slight lower posture, and softer
   eyes where species art supports it.
-- Heavy-day cozy: pet feels satisfied and a little worn out; not sad.
-- Dreaming/asleep: closed/dream eyes, sparse dream bubble, quieter room.
-- Catch-up wake: gentle wake/eat reaction after nighttime backfill.
-- Source burst/perk: brief alertness or glance when live work arrives.
+- Heavy-day cozy: pet settles near or faces an earned prop; satisfied and a
+  little worn out, not sad.
+- Dreaming/asleep: curled or held resting posture, closed/dream eyes, sparse
+  dream bubble, quieter room.
+- Catch-up wake: gentle stretch or wake/eat reaction after nighttime backfill.
+- Source burst/perk: brief alertness, glance, ear/eye lift, or posture perk when
+  live work arrives.
 
 Implementation should prefer small overlays and eye/posture substitutions over
 large new templates. If a species cannot support a particular eye shape, it
 uses motion/speech instead.
+
+Preview proof must include at least one small early-stage pet and one larger
+late-stage pet for tired, asleep, heavy-day cozy, wake, and burst/perk states.
 
 ## Tachyonfx Moments
 
@@ -244,11 +346,31 @@ effects over the pet effect rectangle. This pass should expand the concept from
 Add named effect targets:
 
 - `watch.pet.effect` — existing pet art/effect target.
-- `watch.room.effect` — full habitat room interior, excluding panels.
+- `watch.room.effect` — habitat room interior with an explicit room-layer mask.
 - `watch.prop.<prop-id>.effect` — bounds/cells for visible prop emitters.
 
 The exact path shape can change if the component layout has a better naming
 pattern, but the manifest/layout artifacts must expose stable target ids.
+Every scene effect target must include rect plus layer/mask metadata. A
+room-level effect must either apply before pet art/foreground props are drawn or
+exclude pet silhouette and speech cells from its mask. `WatchApp` can own the
+scene animator state, but `PetPanel` may apply room/prop effects at the render
+phase where their layer is safe.
+
+Scene moments should be explicit data:
+
+```rust
+pub struct SceneMoment {
+    pub key: SceneMomentKey,
+    pub trigger_id: SceneTriggerId,
+    pub target_id: TargetPath,
+    pub duration_ms: u16,
+    pub max_replay_age_ms: u32,
+}
+```
+
+Names can change, but each moment needs identity, a stable trigger or timestamp,
+target, finite duration, and freshness/replay semantics.
 
 Moment examples:
 
@@ -269,12 +391,26 @@ Rules:
 - The watch loop may use the existing fast tick while effects are active, but
   resting biome motion must not pin the UI at 60fps forever.
 
+Initial duration caps:
+
+| Moment | Max duration |
+|---|---:|
+| Feed sweep | `500ms` |
+| Prop resonance ripple | `700ms` |
+| Dawn/wake wipe | `900ms` |
+| Heavy-session shimmer | `800ms` |
+| Dream glimmer | `600ms` |
+
 Architecturally, use one scene-level animator owned by `WatchApp`. The simplest
 implementation is to extend/rename the current `PetAnimator` into a
 `SceneAnimator` that still handles existing hatch/stage/mood/feed effects but
 can process multiple named target rects. Do not add a parallel effect manager;
 one owner should arbitrate effect keys, active-effect timing, and the fast-tick
 decision.
+
+The animator must remember last-seen scene triggers and compute `active_until`
+from declared durations. Rebuilding the same `SceneMoment` on consecutive polls
+must not enqueue the same effect again.
 
 ## Preview Lab Proof
 
@@ -301,15 +437,64 @@ Extend `dev-preview` with:
   - dawn/wake room wipe
   - heavy-session shimmer
 
-Reuse the existing animation-strip design:
+If animation-strip infrastructure is absent in the checkout, make it the first
+implementation slice for Preview Lab:
 
+- add a preview selector for animation strips, such as
+  `--scenario animation`;
+- add a first-class strip model, such as
+  `PreviewStripKind::SceneMoment`;
+- add `manifest.strips[]` entries with strip id, kind, dimensions, frame count,
+  target id, phase/elapsed timing, and file paths;
 - strips live under `strips/<strip-id>/`
-- strip metadata is first-class in `manifest.json`
-- HTML playback starts paused with frame-by-frame controls
+- each strip frame is written as local text/cell artifacts, for example
+  `strips/<strip-id>/frame-000.txt` and
+  `strips/<strip-id>/frame-000.cells.json`
+- HTML playback starts paused with frame-by-frame controls and local-only
+  assets;
 - `review.md` includes prompts explaining what each strip proves
 
+### Required Preview Fixtures
+
+Preview fixture ids can change if implementation finds better names, but the
+contract must cover this matrix:
+
+| Fixture | Size | Pet | Props | Inputs | Expected profile |
+|---|---:|---|---|---|---|
+| `room-starter-day-clear` | `120x32` | small early-stage | none | weekday day, clear | starter, no emitter |
+| `room-botanical-cache-evening` | `120x32` | medium | moss, sprout, planter | heavy evening, cache mist | botanical/cozy, planter emitter |
+| `room-technical-output-active` | `120x32` | medium | lamp, orbit, shard | active day, output sparks | technical/celestial, lamp or orbit emitter |
+| `room-celestial-artifact-night` | `120x32` | small early-stage | cloud, shell, shard | night asleep/dream | celestial/artifact, cloud or shell emitter |
+| `room-cozy-weekend-quiet` | `72x24` | small early-stage | lantern, moss, shell | weekend midday, clear | cozy, restrained motion |
+| `room-mixed-full-wide` | `180x50` | large late-stage | full advanced set | mixed weather, dusk | blended identity, capped motion |
+| `room-heavy-day-cozy-large` | `120x32` | large late-stage | planter, lantern, cloud | heavy day, dusk | cozy settle near prop |
+| `room-dawn-wake-small` | `120x32` | small early-stage | lantern, sprout | dawn wake | wake performance, dawn wipe eligible |
+
+Each fixture manifest entry must include deterministic earned props, fixed
+local time, `DayContext`, `PetLifeProfile`, expected `RoomLifeProfile`, and
+effect target metadata. Room-only cropped artifacts must be available for blind
+review.
+
+Review prompts:
+
+- Identify the primary biome from the cropped room alone.
+- Identify day/weather family from the cropped room alone.
+- Identify the active prop emitter, if any.
+- Identify the pet performance state.
+- Decide whether the room would be pleasant to leave open while working.
+
+Automated visual acceptance:
+
+- Compare the stable room target while excluding side panels.
+- Require changed symbols, not only RGB/style differences.
+- Require changes in at least two spatial zones for different scenario
+  families, such as floor, upper air, left anchor, right anchor, pet-adjacent
+  halo, or prop corner.
+- Run comparisons in flat/low-color mode so color-only changes fail.
+
 The success bar: a reviewer should be able to identify the scenario family by
-looking at the room area alone.
+looking at the room area alone, and tests should fail if scenarios differ only
+by color.
 
 ## Testing
 
@@ -328,15 +513,22 @@ Unit tests:
 
 Render/preview tests:
 
-- affected static preview snapshots update deliberately
+- affected static preview snapshots update deliberately; prefer cropped room
+  targets and key strip frames over broad full-frame churn
 - new still frames exist and have truthful manifest inputs
 - strip artifacts are written with fixed dimensions and manifest entries
 - layout artifacts expose room/prop/pet effect targets
+- effect target metadata includes owner, role, clip behavior, rect, layer/mask,
+  and either explicit cells or `cell_count`
 - animation-strip HTML references local assets only
+- keep one full-frame watch snapshot as a smoke guard
 
 Integration tests:
 
 - `WatchApp` uses the fast tick only while finite scene effects are active
+- `SceneAnimator::has_active_effects` returns false for resting biome motion
+- scene effects expire by declared duration and the watch loop returns to idle
+  tick behavior
 - prop effect targets line up with actual visible prop bounds
 - live feed effects can target pet plus matching prop without panics
 - no real user config/state is read during Preview Lab generation
@@ -356,24 +548,28 @@ biomes or animation strips.
 This can be implemented as one coherent branch, but it should still be sliced
 internally:
 
-1. Add `RoomLifeProfile` and biome derivation with tests.
-2. Render resting biome + bolder weather/day overlays.
-3. Add prop emitters and prop effect targets.
-4. Add pet performance hints.
-5. Add scene/tachyonfx moments.
-6. Extend Preview Lab stills and animation strips.
-7. Tune against the generated contact sheet and live `cargo run -- watch`.
+1. Add Preview Lab animation-strip infrastructure first if it is absent.
+2. Add `RoomLifeProfile` and biome derivation with tests.
+3. Render resting biome + bolder weather/day overlays.
+4. Add prop emitters and prop effect targets.
+5. Add pet performance hints.
+6. Add scene/tachyonfx moments.
+7. Extend Preview Lab stills and scene strips for the full review matrix.
+8. Tune against the generated contact sheet and live `cargo run -- watch`.
 
 Each slice should leave the preview usable. Avoid landing a large invisible data
 contract without visual proof.
 
 ## Success Criteria
 
-- At least five preview still states are visually distinguishable from the room
-  area alone.
+- At least five preview still states are visually distinguishable from cropped
+  room artifacts alone, with symbol and spatial-zone differences in low-color
+  mode.
 - At least three props have clearly different local emitter behaviors.
 - At least three scene moments have deterministic animation strips.
 - A heavy/cache-mist day, output-sparks live day, quiet weekend, night dream,
   and dawn wake all read differently.
 - The pet remains the focal point; effects do not obscure panels or pet art.
 - The implementation adds no persisted semantic state and no new dependency.
+- Human reviewers can identify biome, weather/day family, active emitter, and
+  pet performance from the room area without reading side panels.
