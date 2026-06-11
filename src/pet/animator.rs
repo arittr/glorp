@@ -1,11 +1,12 @@
 //! Pet animation orchestration: detects state transitions on the view model
-//! and enqueues tachyonfx effects that play on top of the rendered pet panel.
+//! and enqueues tachyonfx effects that play on top of the rendered watch frame.
 //!
 //! The animator is owned by `WatchApp`. Each frame:
-//! 1. `update(vm, elapsed)` inspects the current view model, detects changes
-//!    since the previous frame (mood, stage, live profile burst), and enqueues the
-//!    appropriate tachyonfx Effect via the internal EffectManager.
-//! 2. `apply(area, buf)` is called from inside the dispatcher's `Frame::draw`
+//! 1. `update(vm, targets)` inspects the current view model, detects changes
+//!    since the previous frame (mood, stage, live profile burst, room scene
+//!    moments), and enqueues the appropriate tachyonfx Effect via the internal
+//!    EffectManager.
+//! 2. `apply(targets, buf)` is called from inside the dispatcher's `Frame::draw`
 //!    closure after the panel renders. It advances the manager by the same
 //!    `elapsed` and mutates the buffer cells the panel just wrote.
 //! 3. `has_active_effects()` lets the watch loop pick the faster tick rate
@@ -17,6 +18,8 @@
 //! - Feed pulse (`sweep_in` accent wash ~400ms when the live profile stamps a burst)
 //! - Hatch sequence (`coalesce` of the s0 art ~1.2s on first frame for a
 //!   freshly-hatched pet — detected via `age_days == 0` and a fresh animator)
+//! - Room scene moments (finite effects keyed by `SceneMomentKey` that play on
+//!   room slices, pet area, or prop targets)
 //!
 //! Low-energy continuous droop is implemented as a direct palette shift in
 //! the panel renderer, not as a tachyonfx effect — it's a steady-state visual,
@@ -25,6 +28,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use std::collections::HashSet;
 
 use tachyonfx::fx::{coalesce, dissolve, hsl_shift, sequence, sweep_in};
 use tachyonfx::{Duration as FxDuration, Effect, EffectManager, Motion};
@@ -59,7 +63,7 @@ const TIRED_BREATH_MIN_TIREDNESS: f32 = 0.05;
 /// Per-effect key. Used by `add_unique_effect` so a new transition of the
 /// same kind cancels the previous one in flight (e.g., mood changing twice
 /// in quick succession only plays the most recent fade).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 enum EffectKey {
     #[default]
     Idle,
@@ -67,15 +71,27 @@ enum EffectKey {
     StageUp,
     MoodFade,
     FeedPulse,
+    Scene(SceneEffectKey),
 }
 
-/// Longest effect duration we schedule (hatch is 1.2s; allow buffer for
-/// sequence(dissolve+coalesce) which is 0.8s total). After this many ms
-/// since the most recent enqueue with no new enqueues, we declare the
-/// animator quiescent and the watch loop returns to the slow tick rate.
-const MAX_EFFECT_RUNTIME_MS: u32 = 1500;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SceneEffectKey {
+    pub moment: crate::tui::room::SceneMomentKey,
+    pub trigger_id: crate::tui::room::SceneTriggerId,
+}
 
-pub struct PetAnimator {
+/// Target areas for scene effects, derived from the component layout.
+#[derive(Default)]
+pub struct SceneEffectTargets {
+    pub frame: Rect,
+    pub pet: Rect,
+    /// Whether the layout contained a `watch.room.effect` target.
+    pub room_present: bool,
+    pub room_slices: Vec<Rect>,
+    pub props: std::collections::BTreeMap<&'static str, Rect>,
+}
+
+pub struct SceneAnimator {
     manager: EffectManager<EffectKey>,
     /// Mood seen on the previous `update`. None until first call.
     last_mood: Option<String>,
@@ -84,33 +100,50 @@ pub struct PetAnimator {
     /// True until the first `update` call seeds the snapshot. Used to fire
     /// the hatch effect on the initial frame for a pet whose age == 0.
     first_update: bool,
-    /// Milliseconds since the most recent enqueue. While < MAX_EFFECT_RUNTIME_MS
-    /// we treat the animator as running and the watch loop uses the fast
-    /// tick rate. EffectManager 0.18 doesn't expose a running query, so this
-    /// approximation is the simplest reliable way to drive two-rate ticking.
+    /// Milliseconds since the most recent enqueue.
     idle_ms: u32,
     /// True once at least one effect has been enqueued.
     has_run: bool,
+    /// Duration of the longest currently active effect. Used by
+    /// `has_active_effects` to decide when the animator is quiescent.
+    active_duration_ms: u32,
     /// Wall-clock time of the most recent feed pulse detected in `update`.
     /// Exposed so `WatchApp` can forward it to `vm.last_feed_pulse_at`.
     pub last_feed_pulse_at: Option<time::OffsetDateTime>,
+    /// Trigger IDs already seen this session, to prevent replays.
+    seen_triggers: HashSet<crate::tui::room::SceneTriggerId>,
 }
 
-impl PetAnimator {
+impl SceneAnimator {
     pub fn new() -> Self {
         Self {
             manager: EffectManager::default(),
             last_mood: None,
             last_stage: None,
             first_update: true,
-            idle_ms: MAX_EFFECT_RUNTIME_MS,
+            idle_ms: 0,
             has_run: false,
+            active_duration_ms: 0,
             last_feed_pulse_at: None,
+            seen_triggers: HashSet::new(),
         }
     }
 
-    fn enqueue(&mut self, key: EffectKey, fx: Effect) {
+    fn enqueue(&mut self, key: EffectKey, fx: Effect, area: Option<Rect>, duration_ms: u32) {
+        let fx = if let Some(area) = area {
+            fx.with_area(area)
+        } else {
+            fx
+        };
         self.manager.add_unique_effect(key, fx);
+        // If the animator was previously idle, start fresh with this effect's
+        // duration. Otherwise extend the active window to the longest running
+        // effect so the fast tick stays pinned correctly.
+        if self.idle_ms >= self.active_duration_ms {
+            self.active_duration_ms = duration_ms;
+        } else {
+            self.active_duration_ms = self.active_duration_ms.max(duration_ms);
+        }
         self.idle_ms = 0;
         self.has_run = true;
     }
@@ -119,12 +152,18 @@ impl PetAnimator {
     /// effects for any detected transitions. Effects are flavored by species
     /// where it matters: glitch flickers harder on mood swings, mech sweeps
     /// in tighter on feed, etc.
-    pub fn update(&mut self, vm: &WatchViewModel) {
+    pub fn update(&mut self, vm: &WatchViewModel, targets: &SceneEffectTargets) {
         let species = Some(vm.pet_render.generated_species);
 
         // Hatch: first time we see a freshly-hatched pet, play coalesce.
         if self.first_update && vm.age_days == 0 {
-            self.enqueue(EffectKey::Hatch, coalesce(ms(species_hatch_ms(species))));
+            let duration = species_hatch_ms(species);
+            self.enqueue(
+                EffectKey::Hatch,
+                coalesce(ms(duration)),
+                Some(targets.pet),
+                duration,
+            );
         }
 
         // Stage-up: stage label changed. dissolve+coalesce sequence so the
@@ -133,9 +172,12 @@ impl PetAnimator {
         if let Some(prev) = &self.last_stage {
             if prev != &vm.stage {
                 let (diss, coal) = species_stage_up_ms(species);
+                let total = diss + coal;
                 self.enqueue(
                     EffectKey::StageUp,
                     sequence(&[dissolve(ms(diss)), coalesce(ms(coal))]),
+                    Some(targets.pet),
+                    total,
                 );
             }
         }
@@ -145,7 +187,12 @@ impl PetAnimator {
         if let Some(prev) = &self.last_mood {
             if prev != &vm.mood {
                 let drift = mood_hsl_drift_for(&vm.mood, species);
-                self.enqueue(EffectKey::MoodFade, hsl_shift(Some(drift), None, ms(400)));
+                self.enqueue(
+                    EffectKey::MoodFade,
+                    hsl_shift(Some(drift), None, ms(400)),
+                    Some(targets.pet),
+                    400,
+                );
             }
         }
 
@@ -168,6 +215,8 @@ impl PetAnimator {
                         species_feed_color(species),
                         ms(400),
                     ),
+                    Some(targets.pet),
+                    400,
                 );
             }
         }
@@ -176,25 +225,112 @@ impl PetAnimator {
         self.last_mood = Some(vm.mood.clone());
         self.last_stage = Some(vm.stage.clone());
         self.first_update = false;
+
+        let profile =
+            crate::tui::room::derive_room_life_profile(vm, time::OffsetDateTime::now_utc());
+        self.update_scene_moments(&profile.scene_moments, targets);
     }
 
-    /// Render any active effects on top of `buf` within `area`. Called from
-    /// the dispatcher after the pet panel has rendered its base content.
+    /// Enqueue effects for the supplied scene moments, using the provided
+    /// target areas so each effect applies to the correct rect.
+    pub fn update_scene_moments(
+        &mut self,
+        moments: &[crate::tui::room::SceneMoment],
+        targets: &SceneEffectTargets,
+    ) {
+        for moment in moments {
+            if !self.seen_triggers.insert(moment.trigger_id.clone()) {
+                continue;
+            }
+            let base_key = SceneEffectKey {
+                moment: moment.key,
+                trigger_id: moment.trigger_id.clone(),
+            };
+            let duration = moment.duration_ms as u32;
+            match moment.target_id {
+                "watch.room.effect" => {
+                    if targets.room_present {
+                        if !targets.room_slices.is_empty() {
+                            for (i, slice) in targets.room_slices.iter().enumerate() {
+                                let key = EffectKey::Scene(SceneEffectKey {
+                                    moment: moment.key,
+                                    trigger_id: crate::tui::room::SceneTriggerId::new(format!(
+                                        "{}:slice:{}",
+                                        moment.trigger_id.as_str(),
+                                        i
+                                    )),
+                                });
+                                self.enqueue(
+                                    key,
+                                    effect_for_moment(moment),
+                                    Some(*slice),
+                                    duration,
+                                );
+                            }
+                        }
+                        // If room is present but slices is empty, the room is fully
+                        // occluded — skip the effect rather than falling back to frame.
+                    } else {
+                        // Room target absent: fall back to the full frame.
+                        let key = EffectKey::Scene(base_key);
+                        self.enqueue(
+                            key,
+                            effect_for_moment(moment),
+                            Some(targets.frame),
+                            duration,
+                        );
+                    }
+                }
+                "watch.pet.effect" => {
+                    self.enqueue(
+                        EffectKey::Scene(base_key),
+                        effect_for_moment(moment),
+                        Some(targets.pet),
+                        duration,
+                    );
+                }
+                target_id => {
+                    if let Some(rect) = targets.props.get(target_id) {
+                        self.enqueue(
+                            EffectKey::Scene(base_key),
+                            effect_for_moment(moment),
+                            Some(*rect),
+                            duration,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render any active effects on top of `buf` within `targets.frame`. Called from
+    /// the dispatcher after the watch frame has rendered its base content.
     /// `elapsed_ms` is the milliseconds since the previous apply.
-    pub fn apply(&mut self, area: Rect, buf: &mut Buffer, elapsed_ms: u32) {
-        self.manager.process_effects(ms(elapsed_ms), buf, area);
+    pub fn apply(&mut self, targets: &SceneEffectTargets, buf: &mut Buffer, elapsed_ms: u32) {
+        self.manager
+            .process_effects(ms(elapsed_ms), buf, targets.frame);
         self.idle_ms = self.idle_ms.saturating_add(elapsed_ms);
     }
 
-    /// Whether any effect is currently running. True for `MAX_EFFECT_RUNTIME_MS`
-    /// after the most recent enqueue. The watch loop uses this to pick the
-    /// faster tick rate while transitions are in flight.
+    /// Whether any effect is currently running. True while `idle_ms` is less
+    /// than the longest active effect duration. The watch loop uses this to
+    /// pick the faster tick rate while transitions are in flight.
     pub fn has_active_effects(&self) -> bool {
-        self.has_run && self.idle_ms < MAX_EFFECT_RUNTIME_MS
+        self.has_run && self.idle_ms < self.active_duration_ms
+    }
+
+    #[cfg(test)]
+    pub fn advance_for_test(&mut self, ms: u32) {
+        self.idle_ms = self.idle_ms.saturating_add(ms);
+    }
+
+    #[cfg(test)]
+    pub fn active_until_ms_for_test(&self) -> u32 {
+        self.active_duration_ms
     }
 }
 
-impl Default for PetAnimator {
+impl Default for SceneAnimator {
     fn default() -> Self {
         Self::new()
     }
@@ -602,6 +738,32 @@ pub fn low_energy_lightness_multiplier(energy: f64) -> f32 {
     }
 }
 
+/// Build a tachyonfx effect for the given scene moment.
+fn effect_for_moment(moment: &crate::tui::room::SceneMoment) -> Effect {
+    use crate::tui::room::SceneMomentKey;
+    match moment.key {
+        SceneMomentKey::FeedSweep => sweep_in(
+            Motion::LeftToRight,
+            10,
+            0,
+            Color::Yellow,
+            ms(moment.duration_ms as u32),
+        ),
+        SceneMomentKey::PropResonanceRipple => coalesce(ms(moment.duration_ms as u32)),
+        SceneMomentKey::DawnWakeWipe => sweep_in(
+            Motion::LeftToRight,
+            10,
+            0,
+            Color::Cyan,
+            ms(moment.duration_ms as u32),
+        ),
+        SceneMomentKey::HeavySessionShimmer => {
+            hsl_shift(Some([0.0, 20.0, 10.0]), None, ms(moment.duration_ms as u32))
+        }
+        SceneMomentKey::DreamGlimmer => coalesce(ms(moment.duration_ms as u32)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,68 +772,78 @@ mod tests {
         WatchViewModel::fixture()
     }
 
+    fn dummy_targets() -> SceneEffectTargets {
+        SceneEffectTargets {
+            frame: Rect::new(0, 0, 80, 24),
+            pet: Rect::new(10, 5, 20, 10),
+            room_present: false,
+            room_slices: vec![],
+            props: std::collections::BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn new_animator_has_no_active_effects() {
-        let a = PetAnimator::new();
+        let a = SceneAnimator::new();
         assert!(!a.has_active_effects());
     }
 
     #[test]
     fn first_update_for_age_zero_pet_enqueues_hatch() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 0;
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         assert!(a.has_active_effects(), "hatch should be queued");
     }
 
     #[test]
     fn first_update_for_older_pet_does_not_hatch() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         assert!(!a.has_active_effects(), "no hatch for an older pet");
     }
 
     #[test]
     fn mood_change_enqueues_fade() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5; // avoid hatch
         vm.mood = "content".into();
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         assert!(!a.has_active_effects(), "no effects after initial snapshot");
 
         vm.mood = "sleepy".into();
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         assert!(a.has_active_effects(), "mood change should fire fade");
     }
 
     #[test]
     fn stage_change_enqueues_stage_up() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
         vm.stage = "hatchling".into();
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         vm.stage = "juvenile".into();
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         assert!(a.has_active_effects(), "stage change should fire stage-up");
     }
 
     #[test]
     fn feed_pulse_ignores_daily_token_growth_without_profile_burst() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
         vm.today_effective_tokens = 1_000.0;
         vm.life_profile.burst_level = 0.0;
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
 
         vm.today_effective_tokens = 5_000.0;
         vm.life_profile.burst_level = 0.0;
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
 
         assert!(
             !a.has_active_effects(),
@@ -682,16 +854,16 @@ mod tests {
 
     #[test]
     fn feed_pulse_fires_on_profile_burst() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
         vm.today_effective_tokens = 1_000.0;
         vm.life_profile.burst_level = 0.0;
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
 
         vm.life_profile.burst_level = 0.8;
         vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_000).unwrap());
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
 
         assert!(a.has_active_effects(), "profile burst should pulse");
         assert!(a.last_feed_pulse_at.is_some());
@@ -699,13 +871,13 @@ mod tests {
 
     #[test]
     fn feed_pulse_fires_on_first_seen_profile_burst_timestamp() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
         vm.life_profile.burst_level = 0.8;
         vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_000).unwrap());
 
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
 
         assert!(
             a.has_active_effects(),
@@ -716,16 +888,16 @@ mod tests {
 
     #[test]
     fn feed_pulse_refreshes_for_new_profile_burst_timestamp() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
         vm.life_profile.burst_level = 0.8;
         vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_000).unwrap());
-        a.update(&vm);
-        a.idle_ms = MAX_EFFECT_RUNTIME_MS;
+        a.update(&vm, &dummy_targets());
+        a.idle_ms = a.active_duration_ms;
 
         vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_010).unwrap());
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
 
         assert_eq!(a.last_feed_pulse_at, vm.last_feed_pulse_at);
         assert_eq!(a.idle_ms, 0, "new poll burst should refresh the pulse");
@@ -733,13 +905,13 @@ mod tests {
 
     #[test]
     fn small_token_growth_does_not_fire_feed_pulse() {
-        let mut a = PetAnimator::new();
+        let mut a = SceneAnimator::new();
         let mut vm = fixture_vm();
         vm.age_days = 5;
         vm.today_effective_tokens = 1_000.0;
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         vm.today_effective_tokens = 1_050.0; // +50, below threshold
-        a.update(&vm);
+        a.update(&vm, &dummy_targets());
         assert!(!a.has_active_effects(), "tiny growth should not pulse");
     }
 
@@ -1216,5 +1388,47 @@ mod tests {
             lazy_wander_instant(anchor - time::Duration::minutes(5), anchor, 1.0),
             anchor
         );
+    }
+
+    // ── scene moment tests ────────────────────────────────────────────────
+
+    #[test]
+    fn scene_moment_triggers_only_once_per_trigger_id() {
+        let mut animator = SceneAnimator::new();
+        let _vm = WatchViewModel::fixture();
+        let moment = crate::tui::room::SceneMoment {
+            key: crate::tui::room::SceneMomentKey::DawnWakeWipe,
+            trigger_id: crate::tui::room::SceneTriggerId::new("wake:1"),
+            target_id: "watch.room.effect",
+            duration_ms: 900,
+            max_replay_age_ms: 3_600_000,
+        };
+
+        animator.update_scene_moments(std::slice::from_ref(&moment), &dummy_targets());
+        assert!(animator.has_active_effects());
+        let first_active_until = animator.active_until_ms_for_test();
+
+        animator.update_scene_moments(&[moment], &dummy_targets());
+
+        assert_eq!(animator.active_until_ms_for_test(), first_active_until);
+    }
+
+    #[test]
+    fn scene_moment_expiry_controls_active_effects() {
+        let mut animator = SceneAnimator::new();
+        let _vm = WatchViewModel::fixture();
+        let moment = crate::tui::room::SceneMoment {
+            key: crate::tui::room::SceneMomentKey::PropResonanceRipple,
+            trigger_id: crate::tui::room::SceneTriggerId::new("prop:1"),
+            target_id: "watch.room.effect",
+            duration_ms: 700,
+            max_replay_age_ms: 3_600_000,
+        };
+
+        animator.update_scene_moments(&[moment], &dummy_targets());
+        animator.advance_for_test(699);
+        assert!(animator.has_active_effects());
+        animator.advance_for_test(1);
+        assert!(!animator.has_active_effects());
     }
 }

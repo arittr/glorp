@@ -7,6 +7,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::pet::animator::SceneEffectTargets;
 use crate::tui::component::{
     layout_watch, layout_watch_with_context, render_watch_layout, ComponentLayout, TargetPath,
 };
@@ -75,6 +76,130 @@ pub(crate) fn pet_effect_rect_from_layout(layout: &ComponentLayout) -> Rect {
 #[doc(hidden)]
 pub fn pet_effect_rect_for_test(frame_area: Rect, vm: &WatchViewModel) -> Rect {
     pet_effect_rect(frame_area, vm)
+}
+
+/// Derive the full set of effect targets from a resolved watch layout.
+/// Room slices exclude pet art and speech so background effects don't
+/// overwrite the pet.
+pub fn scene_effect_targets_from_layout(layout: &ComponentLayout) -> SceneEffectTargets {
+    let frame = layout.frame;
+    let pet = layout
+        .target(TargetPath::new("watch.pet.effect"))
+        .or_else(|| layout.target(TargetPath::new("watch.pet.art")))
+        .map(|target| target.rect)
+        .unwrap_or_else(|| Rect::new(frame.x, frame.y, 0, 0));
+
+    let room_target = layout.target(TargetPath::new("watch.room.effect"));
+    let room = room_target
+        .map(|target| target.rect)
+        .unwrap_or_else(|| Rect::new(frame.x, frame.y, 0, 0));
+    let room_present = room_target.is_some();
+
+    let art = layout
+        .target(TargetPath::new("watch.pet.art"))
+        .map(|target| target.rect);
+
+    let speech = layout
+        .target(TargetPath::new("watch.pet.speech"))
+        .map(|target| target.rect);
+
+    let room_slices = if room.width == 0 || room.height == 0 {
+        vec![]
+    } else {
+        let exclusions: Vec<Rect> = [art, speech].into_iter().flatten().collect();
+        split_rect_around_exclusions(room, &exclusions)
+    };
+
+    let mut props = std::collections::BTreeMap::new();
+    for (path, target) in &layout.targets {
+        let path_str = path.as_str();
+        if path_str.starts_with("watch.prop.") && path_str.ends_with(".effect") {
+            props.insert(path_str, target.rect);
+        }
+    }
+
+    SceneEffectTargets {
+        frame,
+        pet,
+        room_present,
+        room_slices,
+        props,
+    }
+}
+
+/// Split `room` into sub-rects that exclude each rectangle in `exclusions`.
+/// Returns only non-empty rects.
+fn split_rect_around_exclusions(room: Rect, exclusions: &[Rect]) -> Vec<Rect> {
+    let mut rects = vec![room];
+    for exclusion in exclusions {
+        let mut next = Vec::new();
+        for rect in rects {
+            next.extend(split_rect_around(rect, *exclusion));
+        }
+        rects = next;
+    }
+    rects
+        .into_iter()
+        .filter(|r| r.width > 0 && r.height > 0)
+        .collect()
+}
+
+/// Subtract `hole` from `rect`, returning up to four surrounding pieces.
+fn split_rect_around(rect: Rect, hole: Rect) -> Vec<Rect> {
+    let ix = rect.x.max(hole.x);
+    let iy = rect.y.max(hole.y);
+    let iw = rect
+        .x
+        .saturating_add(rect.width)
+        .min(hole.x.saturating_add(hole.width))
+        .saturating_sub(ix);
+    let ih = rect
+        .y
+        .saturating_add(rect.height)
+        .min(hole.y.saturating_add(hole.height))
+        .saturating_sub(iy);
+
+    if iw == 0 || ih == 0 {
+        return vec![rect];
+    }
+
+    let mut pieces = Vec::new();
+    // Top
+    if iy > rect.y {
+        pieces.push(Rect::new(rect.x, rect.y, rect.width, iy - rect.y));
+    }
+    // Bottom
+    if iy.saturating_add(ih) < rect.y.saturating_add(rect.height) {
+        pieces.push(Rect::new(
+            rect.x,
+            iy + ih,
+            rect.width,
+            rect.y
+                .saturating_add(rect.height)
+                .saturating_sub(iy)
+                .saturating_sub(ih),
+        ));
+    }
+    // Left
+    if ix > rect.x {
+        pieces.push(Rect::new(rect.x, iy, ix - rect.x, ih));
+    }
+    // Right
+    if ix.saturating_add(iw) < rect.x.saturating_add(rect.width) {
+        pieces.push(Rect::new(
+            ix + iw,
+            iy,
+            rect.x
+                .saturating_add(rect.width)
+                .saturating_sub(ix)
+                .saturating_sub(iw),
+            ih,
+        ));
+    }
+    pieces
+        .into_iter()
+        .filter(|r| r.width > 0 && r.height > 0)
+        .collect()
 }
 
 /// Returns the horizontal border fill character for the outer frame, picked
@@ -572,5 +697,111 @@ mod render_wide_tests {
         assert!(s.contains("bio"), "bio panel title must appear");
         assert!(s.contains("hatched"), "bio hatched label must appear");
         assert!(s.contains("age"), "bio age label must appear");
+    }
+
+    // ── split_rect_around_exclusions ──────────────────────────────────────
+
+    #[test]
+    fn split_rect_around_disjoint_holes() {
+        let room = Rect::new(0, 0, 10, 10);
+        let holes = vec![Rect::new(2, 2, 2, 2), Rect::new(6, 6, 2, 2)];
+        let slices = super::split_rect_around_exclusions(room, &holes);
+        let total_area: u32 = slices
+            .iter()
+            .map(|r| r.width as u32 * r.height as u32)
+            .sum();
+        // Total area minus hole areas = 100 - 4 - 4 = 92
+        assert_eq!(total_area, 92, "disjoint holes should leave 92 area");
+        // Each cell in the resulting slices should be outside both holes.
+        for slice in &slices {
+            for dx in 0..slice.width {
+                for dy in 0..slice.height {
+                    let x = slice.x + dx;
+                    let y = slice.y + dy;
+                    assert!(
+                        !holes.iter().any(|h| h.x <= x
+                            && x < h.x + h.width
+                            && h.y <= y
+                            && y < h.y + h.height),
+                        "slice cell ({x},{y}) should not be inside any hole"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_rect_around_nested_holes_uses_inner_only() {
+        let room = Rect::new(0, 0, 10, 10);
+        let holes = vec![Rect::new(2, 2, 6, 6), Rect::new(3, 3, 2, 2)];
+        let slices = super::split_rect_around_exclusions(room, &holes);
+        let total_area: u32 = slices
+            .iter()
+            .map(|r| r.width as u32 * r.height as u32)
+            .sum();
+        // Outer hole already excludes the inner hole area, so total excluded is 36.
+        assert_eq!(
+            total_area, 64,
+            "nested holes should exclude outer hole area only"
+        );
+    }
+
+    #[test]
+    fn split_rect_around_edge_touching_holes_does_not_over_exclude() {
+        let room = Rect::new(0, 0, 10, 10);
+        let holes = vec![Rect::new(2, 2, 2, 2), Rect::new(4, 2, 2, 2)];
+        let slices = super::split_rect_around_exclusions(room, &holes);
+        let total_area: u32 = slices
+            .iter()
+            .map(|r| r.width as u32 * r.height as u32)
+            .sum();
+        // Two 2x2 holes side by side exclude 8 total.
+        assert_eq!(total_area, 92, "edge-touching holes should exclude 8 area");
+    }
+
+    #[test]
+    fn split_rect_around_full_occlusion_returns_empty() {
+        let room = Rect::new(0, 0, 10, 10);
+        let holes = vec![Rect::new(0, 0, 10, 10)];
+        let slices = super::split_rect_around_exclusions(room, &holes);
+        assert!(
+            slices.is_empty(),
+            "full occlusion should return empty slices"
+        );
+    }
+
+    #[test]
+    fn scene_effect_targets_from_layout_populates_pet_room_and_props() {
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let layout = super::layout_watch(Rect::new(0, 0, 120, 32), &vm);
+        let targets = super::scene_effect_targets_from_layout(&layout);
+
+        // Pet target should be present (art or effect fallback).
+        assert!(targets.pet.width > 0, "pet target should have width");
+        assert!(targets.pet.height > 0, "pet target should have height");
+
+        // Room should be present in wide layout.
+        assert!(
+            targets.room_present,
+            "room should be present in wide layout"
+        );
+
+        // Room slices should be non-empty because the pet art doesn't fully occlude.
+        assert!(
+            !targets.room_slices.is_empty(),
+            "room slices should exist when pet art is smaller than room"
+        );
+
+        // Props should be populated from the fixture.
+        assert!(
+            !targets.props.is_empty(),
+            "props should be populated from fixture_with_habitat_props"
+        );
+        assert!(
+            targets
+                .props
+                .contains_key("watch.prop.codex_signal_lamp.effect"),
+            "codex_signal_lamp prop effect should be present"
+        );
     }
 }

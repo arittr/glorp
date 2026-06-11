@@ -19,13 +19,13 @@ use ratatui::{backend::CrosstermBackend, layout::Position, Terminal};
 use crate::{
     error::{GlorpError, Result},
     format::format_tokens,
-    pet::animator::PetAnimator,
+    pet::animator::SceneAnimator,
     tui::{
         component::{self, layout_watch_with_context, ComponentLayout, TargetPath, TargetRole},
         layout::{
-            pet_effect_rect_from_layout, render_evolution_overlay, render_hatch_overlay,
-            render_help_overlay, render_watch_frame_with_capability,
-            render_watch_frame_with_layout,
+            render_evolution_overlay, render_hatch_overlay, render_help_overlay,
+            render_watch_frame_with_capability, render_watch_frame_with_layout,
+            scene_effect_targets_from_layout,
         },
         render_context::RenderContext,
         style::LogKind,
@@ -78,7 +78,7 @@ pub struct WatchApp {
     last_poll: Option<Instant>,
     last_acknowledged_evolution: Option<String>,
     evolution_overlay_started_at: Option<Instant>,
-    pet_animator: PetAnimator,
+    scene_animator: SceneAnimator,
     last_frame_time: Option<Instant>,
     /// Wall-clock instant of the last 'p' press; drives a transient speech
     /// bubble override and happiness bump in the watch view.
@@ -145,7 +145,7 @@ impl WatchApp {
             last_poll: None,
             last_acknowledged_evolution,
             evolution_overlay_started_at: None,
-            pet_animator: PetAnimator::new(),
+            scene_animator: SceneAnimator::new(),
             last_frame_time: None,
             pet_petted_at: None,
             petting_phrase: None,
@@ -183,10 +183,6 @@ impl WatchApp {
             // may have replaced vm.current_speech.
             self.apply_pet_petted_override();
 
-            // Update the pet animator with the latest view model. This may
-            // enqueue mood-fade / stage-up / feed-pulse / hatch effects.
-            self.pet_animator.update(&self.vm);
-
             let now = Instant::now();
             let elapsed_ms = self
                 .last_frame_time
@@ -199,15 +195,16 @@ impl WatchApp {
             let vm_ref = &self.vm;
             let ctx = RenderContext::new(self.config.color_capability);
             let overlay = self.overlay;
-            let animator = &mut self.pet_animator;
+            let scene_animator = &mut self.scene_animator;
             let mut rendered_layout = None;
             terminal.draw(|frame| {
                 let frame_area = frame.area();
                 let layout = layout_watch_with_context(frame_area, vm_ref, &ctx);
                 render_watch_frame_with_layout(frame, vm_ref, &ctx, &layout);
-                // Apply tachyonfx effects on top of the rendered pet panel.
-                let pet_rect = pet_effect_rect_from_layout(&layout);
-                animator.apply(pet_rect, frame.buffer_mut(), elapsed_ms);
+                // Update and apply scene effects after the watch frame has rendered.
+                let targets = scene_effect_targets_from_layout(&layout);
+                scene_animator.update(vm_ref, &targets);
+                scene_animator.apply(&targets, frame.buffer_mut(), elapsed_ms);
                 rendered_layout = Some(layout);
                 match overlay {
                     Some(Overlay::Help) => render_help_overlay(frame),
@@ -222,7 +219,7 @@ impl WatchApp {
 
             // Two-rate tick: while effects are active, poll at 60 fps so the
             // animation looks smooth. Otherwise use the configured idle tick.
-            let tick = if self.pet_animator.has_active_effects() {
+            let tick = if self.scene_animator.has_active_effects() {
                 FAST_TICK
             } else {
                 self.config.animation_tick
@@ -276,7 +273,7 @@ impl WatchApp {
         // breath and feed-pulse timestamp here.
         self.vm.breath_offset_y =
             crate::pet::animator::compute_breath_offset_with_rhythm(Some(species), now, rhythm);
-        self.vm.last_feed_pulse_at = self.pet_animator.last_feed_pulse_at;
+        self.vm.last_feed_pulse_at = self.scene_animator.last_feed_pulse_at;
     }
 
     /// Returns whether the evolution overlay should render this frame.

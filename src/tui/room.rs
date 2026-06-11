@@ -112,6 +112,7 @@ pub struct SceneMoment {
     pub trigger_id: SceneTriggerId,
     pub target_id: &'static str,
     pub duration_ms: u16,
+    // TODO: reserved for future replay-gating logic
     pub max_replay_age_ms: u32,
 }
 
@@ -132,6 +133,10 @@ pub struct SceneTriggerId(String);
 impl SceneTriggerId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

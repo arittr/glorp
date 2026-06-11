@@ -1014,7 +1014,7 @@ fn drop_does_not_block_on_in_flight_poll() {
     assert!(started);
     entered.wait();
 
-    // `WatchApp` is not `Send` (PetAnimator holds tachyonfx state that isn't
+    // `WatchApp` is not `Send` (SceneAnimator holds tachyonfx state that isn't
     // thread-safe), so we can't run `drop` on a side thread and wait via
     // recv_timeout. Instead, take a wall-clock measurement around `drop(app)`
     // on this thread. This catches a regression back to the original

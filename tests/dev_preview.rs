@@ -957,12 +957,32 @@ fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
     let strips = manifest["strips"]
         .as_array()
         .expect("strips should be an array");
-    assert_eq!(strips.len(), 1);
+    assert!(
+        strips.len() >= 4,
+        "animation bundle should include smoke + at least 3 real strips"
+    );
+
+    let mut target_ids = std::collections::HashSet::new();
+    for strip in strips {
+        target_ids.insert(strip["target_id"].as_str().unwrap().to_string());
+    }
+    assert!(
+        target_ids.contains("watch.room.effect"),
+        "expected room target_id"
+    );
+    assert!(
+        target_ids.contains("watch.pet.effect"),
+        "expected pet target_id"
+    );
+    assert!(
+        target_ids.iter().any(|t| t.starts_with("watch.prop.")),
+        "expected prop target_id"
+    );
+
     assert_eq!(strips[0]["id"], "scene-strip-smoke");
     assert_eq!(strips[0]["kind"], "scene-moment");
     assert_eq!(strips[0]["dimensions"]["width"], 40);
     assert_eq!(strips[0]["dimensions"]["height"], 8);
-    assert_eq!(strips[0]["target_id"], "watch.room.effect");
     assert_eq!(strips[0]["frames"][0]["phase"], "start");
     assert_eq!(strips[0]["frames"][0]["elapsed_ms"], 0);
     assert_eq!(
@@ -980,14 +1000,23 @@ fn dev_preview_all_includes_scene_strips() {
     run.run_success("all");
 
     let manifest = run.manifest();
+    let strips = manifest["strips"].as_array().unwrap();
     assert!(
-        !manifest["strips"].as_array().unwrap().is_empty(),
-        "all preview should include animation strips"
+        strips.len() >= 4,
+        "all preview should include smoke + at least 3 real strips"
     );
     assert!(run.out.join("frames/watch-wide-normal.txt").is_file());
     assert!(run
         .out
         .join("strips/scene-strip-smoke/frame-000.txt")
+        .is_file());
+    assert!(run
+        .out
+        .join("strips/scene-feed-sweep/frame-000.txt")
+        .is_file());
+    assert!(run
+        .out
+        .join("strips/scene-dawn-wake-wipe/frame-000.txt")
         .is_file());
 }
 
