@@ -473,8 +473,22 @@ pub fn breath_rhythm_for_day(day: &crate::tui::day::DayContext) -> BreathRhythm 
     BreathRhythm::Awake
 }
 
-/// Per-species breath rhythm in tenths-of-a-second. Returns (period, inhale_window).
-/// Glitch: 2.0s cycle, 0.4s peak — twitchy. Crystal: 6.0s cycle, 0.8s peak — slow.
+/// Per-species breath rhythm in deciseconds (tenths-of-a-second).
+/// Returns `(period, inhale_window)`.
+///
+/// Values are derived from the corresponding `breathPeriod` / `breathHold`
+/// pair in `pet.jsx`, converted to deciseconds at 200 ms per decis
+/// (multiply each by 2):
+///
+/// | Species | (period, inhale) | Cycle | Inhale |
+/// |---------|------------------|-------|--------|
+/// | Glitch  | (18, 4)          | 1.8 s | 0.4 s  |
+/// | Ghost   | (22, 6)          | 2.2 s | 0.6 s  |
+/// | Blob    | (26, 10)         | 2.6 s | 1.0 s  |
+/// | Fuzz    | (32, 8)          | 3.2 s | 0.8 s  |
+/// | Mech    | (34, 8)          | 3.4 s | 0.8 s  |
+/// | Crystal | (38, 12)         | 3.8 s | 1.2 s  |
+/// | None    | (32, 8)          | Fuzz-like default |
 fn species_breath_rhythm_decis(species: Option<Species>) -> (i64, i64) {
     match species {
         Some(Species::Glitch) => (18, 4),
@@ -1267,8 +1281,8 @@ mod tests {
         assert_eq!(at_onset, 1, "phase 0 sits inside the inhale window");
         // The asleep cycle is SLEEP_BREATH_PERIOD_SCALE x longer: for fuzz
         // (period 32ds, inhale 8ds) the asleep inhale window is 16ds of a
-        // 96ds cycle — at +5s (50ds) the pet must be at rest, and the next
-        // inhale starts at +9.6s.
+        // 96ds cycle — at +5s (50ds) the pet must be at rest, and by +10s
+        // (100ds) the next inhale is active.
         let mid = compute_breath_offset_with_rhythm(
             Some(Species::Fuzz),
             onset + time::Duration::seconds(5),
@@ -1334,6 +1348,7 @@ mod tests {
             let base = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
             let mut prev = 0;
             let mut edges = 0;
+            // 1800 deciseconds = 180 seconds = 3-minute observation window.
             for ds in 0..1800_i64 {
                 let now = base + time::Duration::milliseconds(ds * 100);
                 let cur = compute_breath_offset_with_rhythm(species, now, rhythm);
