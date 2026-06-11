@@ -462,7 +462,6 @@ pub fn room_glyphs_for(
 
 /// Interior ambient-glyph density scale by phase. Night sparse, day full.
 /// Mirrors the sky's `phase_count_scale`. Texture only.
-#[allow(dead_code)]
 fn phase_density_scale(phase: DayPhase) -> f64 {
     match phase {
         DayPhase::Day => 1.0,
@@ -474,7 +473,6 @@ fn phase_density_scale(phase: DayPhase) -> f64 {
 
 /// Warmth/contrast bias applied to a room glyph color by phase: dawn cooler,
 /// day neutral, dusk warmer, night dim. Texture only — never personality.
-#[allow(dead_code)]
 fn phase_warmth_tint(color: Color, phase: DayPhase) -> Color {
     let Color::Rgb(r, g, b) = color else {
         return color;
