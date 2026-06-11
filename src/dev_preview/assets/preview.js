@@ -32,4 +32,61 @@
   }
 
   syncOverlays();
+
+  const stripTimers = new Map();
+
+  const showStripFrame = (strip, index) => {
+    const frames = Array.from(strip.querySelectorAll("[data-strip-frame]"));
+    const count = frames.length;
+    const nextIndex = ((index % count) + count) % count;
+    strip.dataset.frameIndex = String(nextIndex);
+    frames.forEach((frame, frameIndex) => {
+      frame.hidden = frameIndex !== nextIndex;
+    });
+  };
+
+  const pauseStrip = (strip) => {
+    const timer = stripTimers.get(strip);
+    if (timer) {
+      window.clearInterval(timer);
+      stripTimers.delete(strip);
+    }
+    const play = strip.querySelector("[data-strip-play]");
+    if (play) {
+      play.setAttribute("aria-pressed", "false");
+      play.textContent = "Play";
+    }
+  };
+
+  for (const strip of document.querySelectorAll("[data-strip-id]")) {
+    const play = strip.querySelector("[data-strip-play]");
+    const prev = strip.querySelector("[data-strip-prev]");
+    const next = strip.querySelector("[data-strip-next]");
+    showStripFrame(strip, 0);
+
+    play?.addEventListener("click", () => {
+      const pressed = play.getAttribute("aria-pressed") === "true";
+      if (pressed) {
+        pauseStrip(strip);
+        return;
+      }
+      play.setAttribute("aria-pressed", "true");
+      play.textContent = "Pause";
+      const duration = Number(strip.dataset.frameDuration || "160");
+      const timer = window.setInterval(() => {
+        showStripFrame(strip, Number(strip.dataset.frameIndex || "0") + 1);
+      }, duration);
+      stripTimers.set(strip, timer);
+    });
+
+    prev?.addEventListener("click", () => {
+      pauseStrip(strip);
+      showStripFrame(strip, Number(strip.dataset.frameIndex || "0") - 1);
+    });
+
+    next?.addEventListener("click", () => {
+      pauseStrip(strip);
+      showStripFrame(strip, Number(strip.dataset.frameIndex || "0") + 1);
+    });
+  }
 })();

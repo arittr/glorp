@@ -9,6 +9,7 @@ pub fn run(out: PathBuf, scenario: PreviewScenarioArg) -> Result<()> {
         PreviewScenarioArg::Watch => PreviewSelection::Watch,
         PreviewScenarioArg::Pets => PreviewSelection::Pets,
         PreviewScenarioArg::Props => PreviewSelection::Props,
+        PreviewScenarioArg::Animation => PreviewSelection::Animation,
     };
 
     generate_preview_bundle(&out, selection)?;

@@ -4,4 +4,5 @@ pub mod habitat_props;
 pub mod output;
 pub mod pets;
 pub mod scenarios;
+pub mod strips;
 pub mod watch;

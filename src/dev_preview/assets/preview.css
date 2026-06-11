@@ -30,7 +30,8 @@
   margin-top: 12px;
 }
 
-.preview-controls button {
+.preview-controls button,
+.strip-controls button {
   border: 1px solid #5a5148;
   border-radius: 6px;
   padding: 5px 9px;
@@ -40,7 +41,8 @@
   font-size: 13px;
 }
 
-.preview-controls button[aria-pressed="true"] {
+.preview-controls button[aria-pressed="true"],
+.strip-controls button[aria-pressed="true"] {
   border-color: #d6a657;
   background: #3a2c19;
   color: #ffd88a;
@@ -106,4 +108,14 @@
 
 .target-box {
   border: 1px solid rgba(255, 118, 118, 0.9);
+}
+
+.strip {
+  margin-top: 24px;
+}
+
+.strip-controls {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
 }

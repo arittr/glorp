@@ -14,19 +14,25 @@ open target/glorp-preview/index.html
 
 Scenario options:
 
-- `--scenario all` renders watch frames, the habitat prop QA frames, and the
-  pet matrix.
+- `--scenario all` renders watch frames, the habitat prop QA frames, the pet
+  matrix, and scene animation strips.
 - `--scenario watch` renders `watch-wide-normal` at `120x32` and
   `watch-tall-wide` at `180x50`, and `watch-compact-normal` at `72x24`.
 - `--scenario props` renders `habitat-props-catalog` plus early, lived-in, and
   full watch frames for prop-density review.
 - `--scenario pets` renders `pet-species-stage`, covering all six species
   across all seven growth stages.
+- `--scenario animation` renders scene animation strips (currently
+  `scene-strip-smoke`) for paused playback review.
 
 The bundle includes `index.html`, `review.md`, `manifest.json`, local assets,
-and `frames/*.txt` / `frames/*.cells.json` captures. Treat `manifest.json` as
-the review contract; it lists scenario intent, dimensions, files, inputs, and
-review prompts.
+`frames/*.txt` / `frames/*.cells.json` captures, and for animation scenarios
+`strips/<id>/frame-NNN.txt` / `strips/<id>/frame-NNN.cells.json` captures.
+Treat `manifest.json` as the review contract; it lists scenario intent,
+dimensions, files, inputs, and review prompts. `manifest.json` uses
+`schema_version` 2 and includes a `strips` array whose entries have
+`kind: "scene-moment"` along with `playback`, `target_id`, and per-frame
+`phase` / `elapsed_ms` values.
 
 `dev-preview` is intentionally hidden from normal help output. It is a local
 development tool and does not read or write real user pet state. Output

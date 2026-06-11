@@ -29,6 +29,7 @@ pub enum PreviewSelection {
     Watch,
     Pets,
     Props,
+    Animation,
 }
 
 pub struct PreviewRenderContext {
@@ -60,15 +61,20 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
     fs::create_dir_all(&scratch_dir)?;
 
     let mut frames = Vec::new();
+    let mut strips = Vec::new();
     match selection {
         PreviewSelection::All => {
             frames.extend(watch_frames(&ctx, &scratch_dir)?);
             frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?);
             frames.extend(pet_frames(&ctx)?);
+            strips.push(crate::dev_preview::strips::scene_strip_smoke());
         }
         PreviewSelection::Watch => frames.extend(watch_frames(&ctx, &scratch_dir)?),
         PreviewSelection::Pets => frames.extend(pet_frames(&ctx)?),
         PreviewSelection::Props => frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?),
+        PreviewSelection::Animation => {
+            strips.push(crate::dev_preview::strips::scene_strip_smoke());
+        }
     }
 
     for frame in &frames {
@@ -76,6 +82,14 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         write_cells_json(&staging_dir.join(cells_path(frame)), frame)?;
         if let Some(layout) = &frame.layout {
             write_layout_json(&staging_dir.join(layout_path(frame)), layout)?;
+        }
+    }
+
+    for strip in &strips {
+        fs::create_dir_all(staging_dir.join("strips").join(&strip.manifest.id))?;
+        for (frame, manifest_frame) in strip.frames.iter().zip(&strip.manifest.frames) {
+            write_text_frame(&staging_dir.join(&manifest_frame.files.text), frame)?;
+            write_cells_json(&staging_dir.join(&manifest_frame.files.cells), frame)?;
         }
     }
 
@@ -90,12 +104,17 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         glorp_version: env!("CARGO_PKG_VERSION"),
         generated_at,
         scenarios,
-        artifacts: artifacts_for_frames(&frames),
+        strips: strips.iter().map(|strip| strip.manifest.clone()).collect(),
+        artifacts: artifacts_for_frames(&frames)
+            .into_iter()
+            .chain(artifacts_for_strips(&strips))
+            .collect(),
     };
 
     write_index_html(
         &staging_dir.join("index.html"),
         &frames,
+        &strips,
         &manifest.generated_at,
     )?;
     write_review_markdown(&staging_dir.join("review.md"), &manifest)?;
@@ -379,6 +398,35 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
         width: None,
         height: None,
     });
+    artifacts
+}
+
+fn artifacts_for_strips(
+    strips: &[crate::dev_preview::strips::PreviewStripBundle],
+) -> Vec<PreviewArtifact> {
+    let mut artifacts = Vec::new();
+    for strip in strips {
+        for (index, (frame, manifest_frame)) in
+            strip.frames.iter().zip(&strip.manifest.frames).enumerate()
+        {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-frame-{index:03}", strip.manifest.id),
+                title: format!("{} Frame {index:03} Text", strip.manifest.title),
+                artifact_type: ArtifactType::Text,
+                path: manifest_frame.files.text.clone(),
+                width: Some(frame.width),
+                height: Some(frame.height),
+            });
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-frame-{index:03}-cells", strip.manifest.id),
+                title: format!("{} Frame {index:03} Cells", strip.manifest.title),
+                artifact_type: ArtifactType::Cells,
+                path: manifest_frame.files.cells.clone(),
+                width: Some(frame.width),
+                height: Some(frame.height),
+            });
+        }
+    }
     artifacts
 }
 

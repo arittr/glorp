@@ -1,4 +1,5 @@
 use crate::dev_preview::frame::{escape_html, PreviewCell, PreviewFrame};
+use crate::dev_preview::strips::PreviewStripBundle;
 use crate::error::Result;
 use crate::tui::component::PreviewLayout;
 use serde::Serialize;
@@ -19,6 +20,7 @@ pub struct PreviewManifest {
     pub glorp_version: &'static str,
     pub generated_at: String,
     pub scenarios: Vec<PreviewScenario>,
+    pub strips: Vec<PreviewStrip>,
     pub artifacts: Vec<PreviewArtifact>,
 }
 
@@ -54,6 +56,46 @@ pub struct PreviewScenarioFiles {
     pub cells: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewStrip {
+    pub id: String,
+    pub kind: PreviewStripKind,
+    pub title: String,
+    pub intent: String,
+    pub dimensions: PreviewDimensions,
+    pub target_id: String,
+    pub playback: PreviewPlayback,
+    pub inputs: BTreeMap<String, Value>,
+    pub frames: Vec<PreviewStripFrame>,
+    pub review_prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewStripKind {
+    SceneMoment,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewPlayback {
+    pub starts_paused: bool,
+    pub frame_duration_ms: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewStripFrame {
+    pub index: u16,
+    pub phase: String,
+    pub elapsed_ms: u16,
+    pub files: PreviewStripFrameFiles,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewStripFrameFiles {
+    pub text: PathBuf,
+    pub cells: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,6 +203,27 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             markdown.push('\n');
         }
     }
+
+    if !manifest.strips.is_empty() {
+        markdown.push_str("## Animation Strips\n\n");
+        for strip in &manifest.strips {
+            markdown.push_str(&format!("### {}\n\n{}\n\n", strip.title, strip.intent));
+            markdown.push_str(&format!(
+                "- ID: `{}`\n- Kind: `{}`\n- Target: `{}`\n- Size: `{}x{}`\n- Frames: `{}`\n\n",
+                strip.id,
+                strip_kind_label(strip.kind),
+                strip.target_id,
+                strip.dimensions.width,
+                strip.dimensions.height,
+                strip.frames.len()
+            ));
+            markdown.push_str("Review prompts:\n");
+            for prompt in &strip.review_prompts {
+                markdown.push_str(&format!("- {prompt}\n"));
+            }
+            markdown.push('\n');
+        }
+    }
     fs::write(path, markdown)?;
     Ok(())
 }
@@ -173,12 +236,24 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
     }
 }
 
-pub fn write_index_html(path: &Path, frames: &[PreviewFrame], generated_at: &str) -> Result<()> {
+fn strip_kind_label(kind: PreviewStripKind) -> &'static str {
+    match kind {
+        PreviewStripKind::SceneMoment => "scene-moment",
+    }
+}
+
+pub fn write_index_html(
+    path: &Path,
+    frames: &[PreviewFrame],
+    strips: &[PreviewStripBundle],
+    generated_at: &str,
+) -> Result<()> {
     let template = include_str!("assets/preview.html");
     let frames_html = frames.iter().map(render_frame_html).collect::<String>();
+    let strips_html = strips.iter().map(render_strip_html).collect::<String>();
     let html = template
         .replace("{{GENERATED_AT}}", &escape_html(generated_at))
-        .replace("{{FRAMES}}", &frames_html);
+        .replace("{{FRAMES}}", &format!("{frames_html}{strips_html}"));
     fs::write(path, html)?;
     Ok(())
 }
@@ -209,6 +284,19 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
         frame.width, frame.height
     ));
     html.push_str(r#"<div class="preview-grid-shell">"#);
+    html.push_str(&render_grid_html(frame));
+    if frame.layout.is_some() {
+        html.push_str(&format!(
+            r#"<div class="layout-overlay" data-layout-for="{}" hidden></div>"#,
+            escape_html(&frame.id)
+        ));
+    }
+    html.push_str("</div></article>");
+    html
+}
+
+fn render_grid_html(frame: &PreviewFrame) -> String {
+    let mut html = String::new();
     html.push_str(&format!(
         r#"<div class="preview-grid" style="--cols: {}; --rows: {}">"#,
         frame.width, frame.height
@@ -219,13 +307,33 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
     }
 
     html.push_str("</div>");
-    if frame.layout.is_some() {
+    html
+}
+
+fn render_strip_html(strip: &PreviewStripBundle) -> String {
+    let mut html = String::new();
+    html.push_str(&format!(
+        r#"<article class="strip" data-strip-id="{}" data-frame-index="0" data-frame-count="{}" data-frame-duration="{}">"#,
+        escape_html(&strip.manifest.id),
+        strip.frames.len(),
+        strip.manifest.playback.frame_duration_ms
+    ));
+    html.push_str(&format!("<h2>{}</h2>", escape_html(&strip.manifest.title)));
+    html.push_str(r#"<div class="strip-controls">"#);
+    html.push_str(r#"<button type="button" data-strip-prev>Prev</button>"#);
+    html.push_str(r#"<button type="button" data-strip-play aria-pressed="false">Play</button>"#);
+    html.push_str(r#"<button type="button" data-strip-next>Next</button>"#);
+    html.push_str(r#"</div>"#);
+    for (index, frame) in strip.frames.iter().enumerate() {
         html.push_str(&format!(
-            r#"<div class="layout-overlay" data-layout-for="{}" hidden></div>"#,
-            escape_html(&frame.id)
+            r#"<div class="strip-frame" data-strip-frame="{}"{}>"#,
+            escape_html(&frame.id),
+            if index == 0 { "" } else { " hidden" }
         ));
+        html.push_str(&render_grid_html(frame));
+        html.push_str("</div>");
     }
-    html.push_str("</div></article>");
+    html.push_str("</article>");
     html
 }
 
@@ -419,6 +527,7 @@ mod tests {
                 )]),
                 review_prompts: vec!["Check sample geometry.".to_string()],
             }],
+            strips: vec![],
             artifacts: vec![
                 PreviewArtifact {
                     id: "frame-one".to_string(),
@@ -473,7 +582,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.html");
 
-        write_index_html(&path, &[sample_frame()], "2026-05-12T00:00:00Z").unwrap();
+        write_index_html(&path, &[sample_frame()], &[], "2026-05-12T00:00:00Z").unwrap();
 
         let html = fs::read_to_string(path).unwrap();
         assert!(html.contains(r#"class="preview-grid" style="--cols: 2; --rows: 2""#));
@@ -486,7 +595,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.html");
 
-        write_index_html(&path, &[wide_frame()], "2026-05-12T00:00:00Z").unwrap();
+        write_index_html(&path, &[wide_frame()], &[], "2026-05-12T00:00:00Z").unwrap();
 
         let html = fs::read_to_string(path).unwrap();
         assert_eq!(html.matches(r#"<span class="cell""#).count(), 2);
@@ -502,7 +611,7 @@ mod tests {
         let mut frame = sample_frame();
         frame.cells[0].modifiers = vec!["underlined", "crossed-out"];
 
-        write_index_html(&path, &[frame], "2026-05-12T00:00:00Z").unwrap();
+        write_index_html(&path, &[frame], &[], "2026-05-12T00:00:00Z").unwrap();
 
         let html = fs::read_to_string(path).unwrap();
         assert!(html.contains("text-decoration: underline line-through"));
@@ -518,7 +627,7 @@ mod tests {
         frame.cells[0].bg = Some("#aabbcc".to_string());
         frame.cells[0].modifiers = vec!["reversed"];
 
-        write_index_html(&path, &[frame], "2026-05-12T00:00:00Z").unwrap();
+        write_index_html(&path, &[frame], &[], "2026-05-12T00:00:00Z").unwrap();
 
         let html = fs::read_to_string(path).unwrap();
         assert!(html.contains("color: #aabbcc; background-color: #112233"));
@@ -533,7 +642,7 @@ mod tests {
         frame.cells[0].bg = None;
         frame.cells[0].modifiers = vec!["reversed"];
 
-        write_index_html(&path, &[frame], "2026-05-12T00:00:00Z").unwrap();
+        write_index_html(&path, &[frame], &[], "2026-05-12T00:00:00Z").unwrap();
 
         let html = fs::read_to_string(path).unwrap();
         assert!(html.contains("color: #0d1117; background-color: #e6edf3"));
@@ -544,7 +653,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.html");
 
-        write_index_html(&path, &[sample_frame()], "2026-05-12T00:00:00Z").unwrap();
+        write_index_html(&path, &[sample_frame()], &[], "2026-05-12T00:00:00Z").unwrap();
 
         let html = fs::read_to_string(path).unwrap();
         assert!(html.contains("Frame &lt;One&gt;"));

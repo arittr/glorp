@@ -728,6 +728,84 @@ fn dev_preview_does_not_use_user_config_dir() {
     );
 }
 
+#[test]
+fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
+    let run = PreviewRun::new();
+
+    run.run_success("animation");
+
+    assert!(run.out.join("manifest.json").is_file());
+    assert!(run.out.join("review.md").is_file());
+    assert!(run.out.join("index.html").is_file());
+    assert!(run
+        .out
+        .join("strips/scene-strip-smoke/frame-000.txt")
+        .is_file());
+    assert!(run
+        .out
+        .join("strips/scene-strip-smoke/frame-000.cells.json")
+        .is_file());
+    assert!(!run.out.join("frames/watch-wide-normal.txt").exists());
+
+    let manifest = run.manifest();
+    assert_eq!(manifest["schema_version"], 2);
+    assert!(
+        manifest["scenarios"].as_array().unwrap().is_empty(),
+        "animation-only bundles should not write static scenarios"
+    );
+    let strips = manifest["strips"]
+        .as_array()
+        .expect("strips should be an array");
+    assert_eq!(strips.len(), 1);
+    assert_eq!(strips[0]["id"], "scene-strip-smoke");
+    assert_eq!(strips[0]["kind"], "scene-moment");
+    assert_eq!(strips[0]["dimensions"]["width"], 40);
+    assert_eq!(strips[0]["dimensions"]["height"], 8);
+    assert_eq!(strips[0]["target_id"], "watch.room.effect");
+    assert_eq!(strips[0]["frames"][0]["phase"], "start");
+    assert_eq!(strips[0]["frames"][0]["elapsed_ms"], 0);
+    assert_eq!(
+        strips[0]["frames"][0]["files"]["text"],
+        "strips/scene-strip-smoke/frame-000.txt"
+    );
+    assert_artifact_type(&manifest, "scene-strip-smoke-frame-000", "text");
+    assert_artifact_type(&manifest, "scene-strip-smoke-frame-000-cells", "cells");
+}
+
+#[test]
+fn dev_preview_all_includes_scene_strips() {
+    let run = PreviewRun::new();
+
+    run.run_success("all");
+
+    let manifest = run.manifest();
+    assert!(
+        !manifest["strips"].as_array().unwrap().is_empty(),
+        "all preview should include animation strips"
+    );
+    assert!(run.out.join("frames/watch-wide-normal.txt").is_file());
+    assert!(run
+        .out
+        .join("strips/scene-strip-smoke/frame-000.txt")
+        .is_file());
+}
+
+#[test]
+fn dev_preview_html_contains_paused_strip_controls() {
+    let run = PreviewRun::new();
+
+    run.run_success("animation");
+
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+    assert!(html.contains("data-strip-id=\"scene-strip-smoke\""));
+    assert!(html.contains("data-strip-play"));
+    assert!(html.contains("aria-pressed=\"false\""));
+    assert!(html.contains("data-strip-next"));
+    assert!(html.contains("data-strip-prev"));
+    assert!(!html.contains("https://"));
+    assert!(!html.contains("http://"));
+}
+
 // Snapshot guard for the deterministic `watch-wide-normal` preview frame. Any
 // silent rendering regression (palette swap, layout drift, off-by-one in the
 // composer, etc.) will diff the .snap file and fail the test. To accept an
