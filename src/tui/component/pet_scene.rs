@@ -1,7 +1,8 @@
+use crate::tui::component::habitat_props::habitat_prop_placements_for;
 use crate::tui::component::{
     ComponentPath, GeometryTarget, TargetPath, TargetRole, WatchComponentId,
 };
-use crate::tui::panels::pet::pet_inner_rect_in_panel;
+use crate::tui::panels::pet::{pet_inner_rect_in_panel, pet_silhouette_halo_rects};
 use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
 use ratatui::layout::Rect;
@@ -62,6 +63,7 @@ impl PetScene {
             0,
             area,
             TargetRole::PetPanel,
+            None,
         );
         insert_target(
             &mut targets,
@@ -71,6 +73,7 @@ impl PetScene {
             1,
             area,
             TargetRole::Habitat,
+            None,
         );
         insert_target(
             &mut targets,
@@ -80,6 +83,7 @@ impl PetScene {
             30,
             content,
             TargetRole::HitArea,
+            None,
         );
         insert_target(
             &mut targets,
@@ -89,6 +93,7 @@ impl PetScene {
             20,
             content,
             TargetRole::PetArt,
+            None,
         );
         insert_target(
             &mut targets,
@@ -98,6 +103,17 @@ impl PetScene {
             10,
             content,
             TargetRole::Effect,
+            None,
+        );
+        insert_target(
+            &mut targets,
+            TargetPath::new("watch.room.effect"),
+            owner,
+            habitat,
+            5,
+            area,
+            TargetRole::RoomEffect,
+            None,
         );
         if let Some(speech) = speech {
             insert_target(
@@ -108,7 +124,52 @@ impl PetScene {
                 20,
                 speech,
                 TargetRole::PetSpeech,
+                None,
             );
+        }
+
+        let mut effect_targets = vec![
+            TargetPath::new("watch.pet.effect"),
+            TargetPath::new("watch.room.effect"),
+        ];
+
+        let scene_for_placements = PetSceneLayout {
+            id: owner,
+            panel: area,
+            speech,
+            content,
+            pet_art,
+            hit_area,
+            habitat,
+            exclusions: exclusions.clone(),
+            targets: BTreeMap::new(),
+            effect_targets: Vec::new(),
+        };
+        let species = vm.pet_render.generated_species;
+        let seed = &vm.pet_render.seed;
+        let mirror = vm.facing == -1;
+        let silhouette_halo = pet_silhouette_halo_rects(&vm.pet_art, pet_art, mirror);
+        for placement in habitat_prop_placements_for(
+            &vm.habitat,
+            &scene_for_placements,
+            &silhouette_halo,
+            species,
+            seed,
+            _ctx,
+        ) {
+            if let Some(target_id) = placement.target_id {
+                insert_target(
+                    &mut targets,
+                    target_id,
+                    owner,
+                    placement.bounds,
+                    6,
+                    area,
+                    TargetRole::PropEffect,
+                    Some(placement.cells.len()),
+                );
+                effect_targets.push(target_id);
+            }
         }
 
         PetSceneLayout {
@@ -121,7 +182,7 @@ impl PetScene {
             habitat,
             exclusions,
             targets,
-            effect_targets: vec![TargetPath::new("watch.pet.effect")],
+            effect_targets,
         }
     }
 }
@@ -151,6 +212,7 @@ fn speech_rows(vm: &WatchViewModel) -> u16 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_target(
     targets: &mut BTreeMap<TargetPath, GeometryTarget>,
     path: TargetPath,
@@ -159,6 +221,7 @@ fn insert_target(
     z: i16,
     clip: Rect,
     role: TargetRole,
+    cell_count: Option<usize>,
 ) {
     targets.insert(
         path,
@@ -168,6 +231,7 @@ fn insert_target(
             z,
             clip,
             role,
+            cell_count,
         },
     );
 }
@@ -207,7 +271,10 @@ mod tests {
         assert_eq!(scene.exclusions, vec![scene.pet_art]);
         assert_eq!(
             scene.effect_targets,
-            vec![TargetPath::new("watch.pet.effect")]
+            vec![
+                TargetPath::new("watch.pet.effect"),
+                TargetPath::new("watch.room.effect"),
+            ]
         );
 
         let panel = scene.target(TargetPath::new("watch.pet.panel")).unwrap();

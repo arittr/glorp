@@ -273,22 +273,9 @@ fn select_emitter(
 }
 
 fn prop_target_id(id: &str) -> &'static str {
-    match id {
-        CODEX_SIGNAL_LAMP => "watch.prop.signal_lamp",
-        HEAVY_SESSION_PLANTER => "watch.prop.planter",
-        TOKEN_LANTERN_10M => "watch.prop.lantern",
-        TOKEN_ORBIT_5M => "watch.prop.orbit",
-        WILT_RECOVERY_SPROUT => "watch.prop.sprout",
-        TOKEN_FRIENDLY_CLOUD_750K => "watch.prop.cloud",
-        TOKEN_MOSS_TUFT_250K => "watch.prop.moss",
-        TOKEN_SPARK_500K => "watch.prop.spark",
-        TOKEN_SHELL_100K => "watch.prop.shell",
-        TOKEN_PEBBLE_25K => "watch.prop.pebble",
-        TOKEN_SHARD_1M => "watch.prop.shard",
-        TOKEN_TREASURE_CHEST_2M => "watch.prop.chest",
-        TOKEN_HANGING_VINE_25M => "watch.prop.vine",
-        _ => "watch.prop.effect",
-    }
+    crate::tui::component::habitat_props::prop_effect_target_path(id)
+        .map(|path| path.as_str())
+        .unwrap_or("watch.prop.effect")
 }
 
 fn scene_moments_for(

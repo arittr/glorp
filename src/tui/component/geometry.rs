@@ -106,6 +106,7 @@ pub struct GeometryTarget {
     pub z: i16,
     pub clip: Rect,
     pub role: TargetRole,
+    pub cell_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +118,8 @@ pub enum TargetRole {
     Habitat,
     HitArea,
     Effect,
+    RoomEffect,
+    PropEffect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +232,7 @@ mod tests {
                     z: 10,
                     clip: Rect::new(1, 2, 20, 10),
                     role: TargetRole::PetArt,
+                    cell_count: None,
                 },
             )
             .unwrap();
@@ -260,6 +264,7 @@ mod tests {
                     z: 10,
                     clip: Rect::new(1, 2, 20, 10),
                     role: TargetRole::PetArt,
+                    cell_count: None,
                 },
             )
             .unwrap();
@@ -289,6 +294,7 @@ mod tests {
             z: 10,
             clip: Rect::new(1, 2, 20, 10),
             role: TargetRole::PetArt,
+            cell_count: None,
         };
         layout
             .insert_target(TargetPath::new("watch.pet.art"), target)
@@ -325,6 +331,7 @@ mod tests {
                     z: 10,
                     clip: Rect::new(1, 2, 20, 10),
                     role: TargetRole::PetArt,
+                    cell_count: None,
                 },
             )
             .unwrap_err();
@@ -351,6 +358,7 @@ mod tests {
                     z: 1,
                     clip: Rect::new(0, 0, 20, 20),
                     role: TargetRole::PetPanel,
+                    cell_count: None,
                 },
             )
             .unwrap();
@@ -363,6 +371,7 @@ mod tests {
                     z: 10,
                     clip: Rect::new(0, 0, 20, 20),
                     role: TargetRole::PetArt,
+                    cell_count: None,
                 },
             )
             .unwrap();
@@ -390,6 +399,7 @@ mod tests {
                     z: 10,
                     clip: Rect::new(0, 0, 10, 10),
                     role: TargetRole::PetArt,
+                    cell_count: None,
                 },
             )
             .unwrap();

@@ -992,6 +992,7 @@ mod tests {
                     z: 0,
                     clip: Rect::new(10, 5, 20, 10),
                     role: TargetRole::PetPanel,
+                    cell_count: None,
                 },
             )
             .unwrap();
@@ -1004,6 +1005,7 @@ mod tests {
                     z: 30,
                     clip: Rect::new(12, 7, 6, 5),
                     role: TargetRole::HitArea,
+                    cell_count: None,
                 },
             )
             .unwrap();

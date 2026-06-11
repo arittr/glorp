@@ -370,7 +370,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         &std::fs::read_to_string(run.out.join("frames/watch-wide-normal.layout.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(layout["schema_version"], 1);
+    assert_eq!(layout["schema_version"], 2);
     // Pet now spans the full body width (118 on a 120-col terminal).
     assert_eq!(layout["components"]["watch.pet"]["width"], 118);
     assert!(layout["components"]["watch.pet"].is_object());
@@ -467,6 +467,24 @@ fn dev_preview_html_contains_layout_overlay_controls() {
 }
 
 #[test]
+fn dev_preview_layout_targets_include_owner_role_clip_and_layer() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let layout = read_layout(&run, "watch-wide-normal");
+    let room = &layout["targets"]["watch.room.effect"];
+    assert_eq!(room["owner"], "watch.pet");
+    assert_eq!(room["role"], "RoomEffect");
+    assert_eq!(room["layer"], "room-background");
+    assert!(room["clip"].is_object());
+
+    let pet = &layout["targets"]["watch.pet.effect"];
+    assert_eq!(pet["role"], "Effect");
+    assert_eq!(pet["layer"], "component");
+}
+
+#[test]
 fn dev_preview_pets_writes_species_stage_matrix() {
     let run = PreviewRun::new();
 
@@ -547,6 +565,27 @@ fn dev_preview_props_writes_habitat_prop_gallery_and_watch_variants() {
         "wilt_recovery_sprout",
     ] {
         assert!(catalog.contains(prop_id), "missing prop id {prop_id}");
+    }
+
+    let lived_in_layout: Value = serde_json::from_str(
+        &std::fs::read_to_string(run.out.join("frames/watch-habitat-lived-in.layout.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let prop_targets: Vec<(&String, &Value)> = lived_in_layout["targets"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| k.starts_with("watch.prop."))
+        .collect();
+    assert!(
+        !prop_targets.is_empty(),
+        "watch-habitat-lived-in should export prop effect targets"
+    );
+    for (id, target) in &prop_targets {
+        assert_eq!(target["role"], "PropEffect", "{id} role");
+        assert_eq!(target["layer"], "prop", "{id} layer");
+        assert!(target["cell_count"].is_number(), "{id} cell_count");
     }
 
     let manifest = run.manifest();

@@ -1,9 +1,12 @@
 use crate::game::habitat::{
-    catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone,
+    catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone, CODEX_SIGNAL_LAMP,
+    HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M,
+    TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M, TOKEN_SHELL_100K,
+    TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
 use crate::storage::state::HabitatPropId;
-use crate::tui::component::PetSceneLayout;
+use crate::tui::component::{PetSceneLayout, TargetPath};
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{tokenpet_palette, ColorCapability};
 use crate::tui::view_model::HabitatView;
@@ -24,6 +27,15 @@ pub struct HabitatPropCell {
     pub glyph: char,
     pub style: Style,
     pub pet_layer: HabitatPetLayer,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HabitatPropPlacement {
+    pub prop_id: HabitatPropId,
+    pub cells: Vec<HabitatPropCell>,
+    pub bounds: Rect,
+    pub pet_layer: HabitatPetLayer,
+    pub target_id: Option<TargetPath>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,9 +71,23 @@ pub fn habitat_props_for(
     seed: &str,
     ctx: &RenderContext,
 ) -> Vec<HabitatPropCell> {
+    habitat_prop_placements_for(habitat, scene, silhouette_halo, species, seed, ctx)
+        .into_iter()
+        .flat_map(|placement| placement.cells)
+        .collect()
+}
+
+pub fn habitat_prop_placements_for(
+    habitat: &HabitatView,
+    scene: &PetSceneLayout,
+    silhouette_halo: &[Rect],
+    species: Species,
+    seed: &str,
+    ctx: &RenderContext,
+) -> Vec<HabitatPropPlacement> {
     let now = ctx.clock.now_utc();
     let mut occupied = scene.exclusions.clone();
-    let mut cells = Vec::new();
+    let mut placements = Vec::new();
 
     for id in visible_trophy_ids(habitat) {
         let layer = prop_pet_layer(id);
@@ -78,8 +104,15 @@ pub fn habitat_props_for(
                 id,
             );
             if !rendered.is_empty() {
-                occupied.push(bounds_for_cells(&rendered));
-                cells.extend(rendered);
+                let bounds = bounds_for_cells(&rendered);
+                occupied.push(bounds);
+                placements.push(HabitatPropPlacement {
+                    prop_id: HabitatPropId::new(id),
+                    cells: rendered,
+                    bounds,
+                    pet_layer: layer,
+                    target_id: prop_effect_target_path(id),
+                });
                 break;
             }
         }
@@ -90,12 +123,42 @@ pub fn habitat_props_for(
             stable_accent_cells_by_id(habitat, scene, &occupied, silhouette_halo, seed, now);
         for id in visible_accent_ids(habitat, now) {
             if let Some(cell) = accent_cells.get(id) {
-                cells.push(cell.clone());
+                let layer = prop_pet_layer(id);
+                placements.push(HabitatPropPlacement {
+                    prop_id: HabitatPropId::new(id),
+                    cells: vec![cell.clone()],
+                    bounds: Rect::new(cell.col, cell.row, 1, 1),
+                    pet_layer: layer,
+                    target_id: prop_effect_target_path(id),
+                });
             }
         }
     }
 
-    cells
+    placements
+}
+
+pub fn prop_effect_target_path(id: &str) -> Option<TargetPath> {
+    match id {
+        TOKEN_PEBBLE_25K => Some(TargetPath::new("watch.prop.token_pebble_25k.effect")),
+        TOKEN_SHELL_100K => Some(TargetPath::new("watch.prop.token_shell_100k.effect")),
+        TOKEN_MOSS_TUFT_250K => Some(TargetPath::new("watch.prop.token_moss_tuft_250k.effect")),
+        TOKEN_SPARK_500K => Some(TargetPath::new("watch.prop.token_spark_500k.effect")),
+        TOKEN_FRIENDLY_CLOUD_750K => Some(TargetPath::new(
+            "watch.prop.token_friendly_cloud_750k.effect",
+        )),
+        TOKEN_SHARD_1M => Some(TargetPath::new("watch.prop.token_shard_1m.effect")),
+        TOKEN_TREASURE_CHEST_2M => {
+            Some(TargetPath::new("watch.prop.token_treasure_chest_2m.effect"))
+        }
+        TOKEN_ORBIT_5M => Some(TargetPath::new("watch.prop.token_orbit_5m.effect")),
+        TOKEN_LANTERN_10M => Some(TargetPath::new("watch.prop.token_lantern_10m.effect")),
+        TOKEN_HANGING_VINE_25M => Some(TargetPath::new("watch.prop.token_hanging_vine_25m.effect")),
+        CODEX_SIGNAL_LAMP => Some(TargetPath::new("watch.prop.codex_signal_lamp.effect")),
+        HEAVY_SESSION_PLANTER => Some(TargetPath::new("watch.prop.heavy_session_planter.effect")),
+        WILT_RECOVERY_SPROUT => Some(TargetPath::new("watch.prop.wilt_recovery_sprout.effect")),
+        _ => None,
+    }
 }
 
 fn prop_pet_layer(id: &str) -> HabitatPetLayer {
@@ -1578,5 +1641,69 @@ mod tests {
                 "{glyph} must be one terminal cell under ratatui width"
             );
         }
+    }
+
+    fn test_scene() -> PetSceneLayout {
+        scene()
+    }
+
+    fn habitat_with_props(ids: &[&str]) -> HabitatView {
+        HabitatView {
+            earned_props: ids
+                .iter()
+                .map(|id| earned(id, HabitatPropKind::Trophy, 50, 0))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn prop_placements_group_cells_with_bounds_and_static_targets() {
+        let ctx = RenderContext::with_clock(
+            ColorCapability::Truecolor,
+            crate::tui::render_context::WatchClock::fixed(
+                time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
+            ),
+        );
+        let scene = test_scene();
+        let habitat = habitat_with_props(&[
+            crate::game::habitat::CODEX_SIGNAL_LAMP,
+            crate::game::habitat::HEAVY_SESSION_PLANTER,
+        ]);
+
+        let placements =
+            habitat_prop_placements_for(&habitat, &scene, &[], Species::Fuzz, "seed", &ctx);
+
+        assert!(placements.iter().any(|placement| {
+            placement.prop_id.as_str() == crate::game::habitat::CODEX_SIGNAL_LAMP
+                && placement.target_id.as_ref().unwrap().as_str()
+                    == "watch.prop.codex_signal_lamp.effect"
+                && !placement.cells.is_empty()
+                && placement.bounds.width > 0
+                && placement.bounds.height > 0
+        }));
+    }
+
+    #[test]
+    fn habitat_props_for_flattens_shared_placements() {
+        let ctx = RenderContext::with_clock(
+            ColorCapability::Truecolor,
+            crate::tui::render_context::WatchClock::fixed(
+                time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
+            ),
+        );
+        let scene = test_scene();
+        let habitat = habitat_with_props(&[crate::game::habitat::HEAVY_SESSION_PLANTER]);
+
+        let placements =
+            habitat_prop_placements_for(&habitat, &scene, &[], Species::Fuzz, "seed", &ctx);
+        let cells = habitat_props_for(&habitat, &scene, &[], Species::Fuzz, "seed", &ctx);
+
+        assert_eq!(
+            cells,
+            placements
+                .iter()
+                .flat_map(|placement| placement.cells.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }

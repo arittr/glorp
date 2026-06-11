@@ -16,7 +16,9 @@ pub use geometry::{
 pub use habitat_props::{habitat_props_for, HabitatPropCell};
 pub use ids::{ComponentPath, TargetPath, WatchComponentId};
 pub use pet_scene::{PetScene, PetSceneLayout};
-pub use preview::{preview_layout, PreviewLayout, PreviewLayoutDecision, PreviewRect};
+pub use preview::{
+    preview_layout, PreviewLayout, PreviewLayoutDecision, PreviewRect, PreviewTarget,
+};
 pub use sizing::{AxisSize, ComponentSizing, DegradeRule};
 pub use style::{BorderTone, ComponentStyle, GradientToken, Insets, Surface, TextTone};
 pub use watch_screen::{layout_watch, layout_watch_with_context, render_watch_layout};

@@ -1,4 +1,4 @@
-use crate::tui::component::{ComponentLayout, LayoutMode};
+use crate::tui::component::{ComponentLayout, GeometryTarget, LayoutMode, TargetPath, TargetRole};
 use ratatui::layout::Rect;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -11,7 +11,7 @@ pub struct PreviewLayout {
     pub frame: PreviewRect,
     pub content: PreviewRect,
     pub components: BTreeMap<String, PreviewRect>,
-    pub targets: BTreeMap<String, PreviewRect>,
+    pub targets: BTreeMap<String, PreviewTarget>,
     pub decisions: Vec<PreviewLayoutDecision>,
 }
 
@@ -24,6 +24,21 @@ pub struct PreviewRect {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewTarget {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub owner: String,
+    pub role: String,
+    pub clip: PreviewRect,
+    pub z: i16,
+    pub layer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PreviewLayoutDecision {
     pub path: String,
     pub reason: String,
@@ -32,7 +47,7 @@ pub struct PreviewLayoutDecision {
 
 pub fn preview_layout(frame_id: &str, layout: &ComponentLayout) -> PreviewLayout {
     PreviewLayout {
-        schema_version: 1,
+        schema_version: 2,
         frame_id: frame_id.to_string(),
         mode: mode_name(layout.mode).to_string(),
         frame: rect(layout.frame),
@@ -45,7 +60,7 @@ pub fn preview_layout(frame_id: &str, layout: &ComponentLayout) -> PreviewLayout
         targets: layout
             .targets
             .iter()
-            .map(|(path, target)| (path.as_str().to_string(), rect(target.rect)))
+            .map(|(path, target)| (path.as_str().to_string(), preview_target(path, target)))
             .collect(),
         decisions: layout
             .decisions
@@ -72,5 +87,24 @@ fn rect(rect: Rect) -> PreviewRect {
         y: rect.y,
         width: rect.width,
         height: rect.height,
+    }
+}
+
+fn preview_target(_path: &TargetPath, target: &GeometryTarget) -> PreviewTarget {
+    PreviewTarget {
+        x: target.rect.x,
+        y: target.rect.y,
+        width: target.rect.width,
+        height: target.rect.height,
+        owner: target.owner.as_str().to_string(),
+        role: format!("{:?}", target.role),
+        clip: rect(target.clip),
+        z: target.z,
+        layer: match target.role {
+            TargetRole::RoomEffect => "room-background".to_string(),
+            TargetRole::PropEffect => "prop".to_string(),
+            _ => "component".to_string(),
+        },
+        cell_count: target.cell_count,
     }
 }
