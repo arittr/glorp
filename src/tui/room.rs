@@ -256,12 +256,6 @@ pub fn pet_performance_from_day_context(day: &DayContext) -> PetPerformance {
 }
 
 fn pet_performance_for(vm: &WatchViewModel, now: OffsetDateTime) -> PetPerformance {
-    if vm.day_context.asleep {
-        return PetPerformance::AsleepDreaming;
-    }
-    if vm.day_context.wake_resume.is_some() {
-        return PetPerformance::CatchUpWake;
-    }
     if is_source_burst_perk(vm, now) {
         return PetPerformance::SourceBurstPerk;
     }

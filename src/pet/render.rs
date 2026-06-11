@@ -673,6 +673,18 @@ mod tests {
             .lines
             .join("\n");
         assert_ne!(a, b, "soft eyes should change the rendered face");
+        assert!(
+            b.contains("\u{02d8}.\u{02d8}"),
+            "soft eyes should appear in rendered face, got:\n{b}"
+        );
+        assert!(
+            a.contains(&pet.traits.mouth),
+            "normal render should keep the mouth, got:\n{a}"
+        );
+        assert!(
+            b.contains(&pet.traits.mouth),
+            "soft eyes should not change the mouth, got:\n{b}"
+        );
     }
 
     #[test]
