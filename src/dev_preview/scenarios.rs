@@ -947,6 +947,88 @@ fn day_context_inputs_for_frame(
                 "mature": true
             }),
         ),
+        "watch-daycontext-dawn-fresh" => (
+            "dawn",
+            fixed_now - time::Duration::minutes(40),
+            fixed_now + time::Duration::minutes(80),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.38,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.05,
+                "tiredness": 0.0,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-dusk-heavy" => (
+            "dusk",
+            fixed_now - time::Duration::hours(1),
+            fixed_now + time::Duration::hours(2),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.38,
+                "burst_level": 0.0,
+                "source_accent": Some("claude"),
+                "weather": "cache-mist",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([{
+                    "prop_id": "token_shell_100k",
+                    "intensity": 0.28,
+                    "kind": "glow"
+                }]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "backfill"
+            }),
+            json!({
+                "today_ratio": 1.6,
+                "tiredness": 0.8,
+                "mature": true
+            }),
+        ),
+        "watch-daycontext-night-quiet" => (
+            "night",
+            fixed_now - time::Duration::hours(2),
+            fixed_now + time::Duration::hours(6),
+            false,
+            None,
+            None,
+            1.0,
+            json!({
+                "activity_level": 0.0,
+                "burst_level": 0.0,
+                "source_accent": None::<&str>,
+                "weather": "clear",
+                "stage": "s6",
+                "species": "crystal",
+                "prop_reactions": json!([]),
+                "color_capability": "truecolor",
+                "calm_mode": false,
+                "freshness": "live"
+            }),
+            json!({
+                "today_ratio": 0.1,
+                "tiredness": 0.3,
+                "mature": true
+            }),
+        ),
         _ => (
             "day",
             fixed_now,

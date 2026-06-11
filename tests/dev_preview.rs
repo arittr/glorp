@@ -16,7 +16,7 @@ const LIVELINESS_WATCH_IDS: [&str; 7] = [
     "watch-liveliness-calm-mode-s6-hot",
 ];
 
-const DAY_CONTEXT_WATCH_IDS: [&str; 11] = [
+const DAY_CONTEXT_WATCH_IDS: [&str; 14] = [
     "watch-daycontext-night-asleep",
     "watch-daycontext-dawn-crossing",
     "watch-daycontext-night-wake-catchup",
@@ -28,6 +28,9 @@ const DAY_CONTEXT_WATCH_IDS: [&str; 11] = [
     "watch-daycontext-climate-cache-week",
     "watch-daycontext-prop-resonance-planter",
     "watch-daycontext-midnight-mid-session",
+    "watch-daycontext-dawn-fresh",
+    "watch-daycontext-dusk-heavy",
+    "watch-daycontext-night-quiet",
 ];
 
 const ALIVE_ROOM_WATCH_IDS: [&str; 8] = [
@@ -358,6 +361,24 @@ fn dev_preview_watch_includes_day_context_inputs() {
         assert!(
             sleep_onset.is_string() || sleep_onset.is_null(),
             "{id} sleep_onset_utc should be a string or null"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_includes_room_phase_scenarios() {
+    let run = PreviewRun::new();
+    run.run_success("watch");
+    let manifest = run.manifest();
+    for id in [
+        "watch-daycontext-dawn-fresh",
+        "watch-daycontext-dusk-heavy",
+        "watch-daycontext-night-quiet",
+    ] {
+        let s = scenario(&manifest, id);
+        assert!(
+            s["inputs"]["day_context"]["day_phase"].is_string(),
+            "{id} needs a day_phase"
         );
     }
 }
@@ -781,6 +802,9 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-daycontext-climate-cache-week.txt",
         "frames/watch-daycontext-prop-resonance-planter.txt",
         "frames/watch-daycontext-midnight-mid-session.txt",
+        "frames/watch-daycontext-dawn-fresh.txt",
+        "frames/watch-daycontext-dusk-heavy.txt",
+        "frames/watch-daycontext-night-quiet.txt",
         "frames/room-starter-day-clear.txt",
         "frames/room-botanical-cache-evening.txt",
         "frames/room-technical-output-active.txt",
@@ -825,6 +849,9 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-daycontext-climate-cache-week".to_string(),
             "watch-daycontext-prop-resonance-planter".to_string(),
             "watch-daycontext-midnight-mid-session".to_string(),
+            "watch-daycontext-dawn-fresh".to_string(),
+            "watch-daycontext-dusk-heavy".to_string(),
+            "watch-daycontext-night-quiet".to_string(),
             "room-starter-day-clear".to_string(),
             "room-botanical-cache-evening".to_string(),
             "room-technical-output-active".to_string(),

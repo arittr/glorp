@@ -506,6 +506,51 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             day_context: midnight_mid_session_day_context(fixed_now),
             hold_eyes_closed: false,
         },
+        DayContextFrameFixture {
+            id: "watch-daycontext-dawn-fresh",
+            title: "Watch DayContext Dawn Fresh",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: cooling_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: dawn_fresh_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-dusk-heavy",
+            title: "Watch DayContext Dusk Heavy",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: cooling_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: dusk_heavy_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-daycontext-night-quiet",
+            title: "Watch DayContext Night Quiet",
+            width: 120,
+            height: 32,
+            now: fixed_now,
+            state: liveliness_pet_state,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: night_quiet_day_context(fixed_now),
+            hold_eyes_closed: false,
+        },
     ]
 }
 
@@ -1283,6 +1328,48 @@ fn light_day_morning_day_context(now: OffsetDateTime) -> DayContext {
         mature: true,
         local_day_started_utc: now - Duration::hours(7),
         local_day_rollover_utc: now + Duration::hours(17),
+        ..DayContext::default()
+    }
+}
+
+fn dawn_fresh_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Dawn,
+        phase_started_at_utc: now - Duration::minutes(40),
+        phase_ends_at_utc: now + Duration::minutes(80),
+        today_ratio: 0.05,
+        tiredness: 0.0,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(1),
+        local_day_rollover_utc: now + Duration::hours(23),
+        ..DayContext::default()
+    }
+}
+
+fn dusk_heavy_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Dusk,
+        phase_started_at_utc: now - Duration::hours(1),
+        phase_ends_at_utc: now + Duration::hours(2),
+        today_ratio: 1.6,
+        tiredness: 0.8,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(12),
+        local_day_rollover_utc: now + Duration::hours(12),
+        ..DayContext::default()
+    }
+}
+
+fn night_quiet_day_context(now: OffsetDateTime) -> DayContext {
+    DayContext {
+        day_phase: DayPhase::Night,
+        phase_started_at_utc: now - Duration::hours(2),
+        phase_ends_at_utc: now + Duration::hours(6),
+        today_ratio: 0.1,
+        tiredness: 0.3,
+        mature: true,
+        local_day_started_utc: now - Duration::hours(16),
+        local_day_rollover_utc: now + Duration::hours(8),
         ..DayContext::default()
     }
 }
