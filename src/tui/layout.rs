@@ -473,6 +473,8 @@ mod render_compact_tests {
                 blink_suppression_ticks: 0,
                 hold_eyes_closed: false,
                 blink_slowdown: 0,
+                soft_eyes: false,
+                work_accent: crate::pet::render::WorkAccent::None,
             },
         );
         let mut vm = WatchViewModel::fixture();

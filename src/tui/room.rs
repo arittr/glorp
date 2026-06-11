@@ -233,6 +233,28 @@ fn derive_biome(
 /// 4. HeavyDayCozy (high today_ratio + dusk/evening + tiredness)
 /// 5. TiredAwake (high tiredness, no heavy-day signal)
 /// 6. RestedAwake (night or quiet default)
+pub fn pet_performance_from_day_context(day: &DayContext) -> PetPerformance {
+    if day.asleep {
+        return PetPerformance::AsleepDreaming;
+    }
+    if day.wake_resume.is_some() {
+        return PetPerformance::CatchUpWake;
+    }
+    if is_heavy_day_cozy(day) {
+        return PetPerformance::HeavyDayCozy;
+    }
+    if day.tiredness > 0.6 {
+        return PetPerformance::TiredAwake;
+    }
+    if matches!(day.day_phase, DayPhase::Night) {
+        return PetPerformance::RestedAwake;
+    }
+    if day.is_weekend && day.weekend_share <= crate::tui::day::WEEKEND_QUIET_SHARE {
+        return PetPerformance::HeavyDayCozy;
+    }
+    PetPerformance::RestedAwake
+}
+
 fn pet_performance_for(vm: &WatchViewModel, now: OffsetDateTime) -> PetPerformance {
     if vm.day_context.asleep {
         return PetPerformance::AsleepDreaming;
@@ -243,21 +265,7 @@ fn pet_performance_for(vm: &WatchViewModel, now: OffsetDateTime) -> PetPerforman
     if is_source_burst_perk(vm, now) {
         return PetPerformance::SourceBurstPerk;
     }
-    if is_heavy_day_cozy(&vm.day_context) {
-        return PetPerformance::HeavyDayCozy;
-    }
-    if vm.day_context.tiredness > 0.6 {
-        return PetPerformance::TiredAwake;
-    }
-    if matches!(vm.day_context.day_phase, DayPhase::Night) {
-        return PetPerformance::RestedAwake;
-    }
-    if vm.day_context.is_weekend
-        && vm.day_context.weekend_share <= crate::tui::day::WEEKEND_QUIET_SHARE
-    {
-        return PetPerformance::HeavyDayCozy;
-    }
-    PetPerformance::RestedAwake
+    pet_performance_from_day_context(&vm.day_context)
 }
 
 fn is_source_burst_perk(vm: &WatchViewModel, now: OffsetDateTime) -> bool {

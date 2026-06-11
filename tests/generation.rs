@@ -10,6 +10,7 @@ fn frame(tick: u64) -> AnimationFrame {
         blink_suppression_ticks: 0,
         hold_eyes_closed: false,
         blink_slowdown: 0,
+        ..AnimationFrame::default()
     }
 }
 

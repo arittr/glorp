@@ -74,6 +74,7 @@ pub(crate) fn build_watch_view_model_at(
     let stage = state.stage;
     let mood = mood_from_state(state);
     let generated = generate_pet(&state.pet.seed).with_species(species);
+    let pet_performance = crate::tui::room::pet_performance_from_day_context(&day_context);
     let rendered = render_pet(
         &generated,
         stage,
@@ -83,6 +84,12 @@ pub(crate) fn build_watch_view_model_at(
             blink_suppression_ticks: 0,
             hold_eyes_closed: day_context.asleep,
             blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(day_context.tiredness),
+            soft_eyes: matches!(
+                pet_performance,
+                crate::tui::room::PetPerformance::TiredAwake
+                    | crate::tui::room::PetPerformance::HeavyDayCozy
+            ),
+            work_accent: crate::pet::render::WorkAccent::None,
         },
     );
 
@@ -429,6 +436,7 @@ pub fn rerender_pet_for_view_model(
 ) -> Result<()> {
     let species = vm.pet_render.generated_species;
     let generated = generate_pet(&vm.pet_render.seed).with_species(species);
+    let pet_performance = crate::tui::room::pet_performance_from_day_context(&vm.day_context);
     let rendered = render_pet(
         &generated,
         vm.pet_render.stage,
@@ -440,6 +448,12 @@ pub fn rerender_pet_for_view_model(
             blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(
                 vm.day_context.tiredness,
             ),
+            soft_eyes: matches!(
+                pet_performance,
+                crate::tui::room::PetPerformance::TiredAwake
+                    | crate::tui::room::PetPerformance::HeavyDayCozy
+            ),
+            work_accent: crate::pet::render::WorkAccent::None,
         },
     );
     vm.pet_art = rendered.lines;

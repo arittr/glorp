@@ -3,7 +3,19 @@ use crate::game::metabolism::Mood;
 use crate::pet::art::template_lines;
 use crate::pet::generation::{GeneratedPet, Species};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkAccent {
+    #[default]
+    None,
+    /// Output-heavy bursts: brighter, sharper eyes.
+    Alert,
+    /// Reasoning-heavy: narrowed, focused eyes.
+    Focused,
+    /// Cache-heavy: softer, dreamier eyes.
+    Dreamy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AnimationFrame {
     pub tick: u64,
     pub blink_suppression_ticks: u8,
@@ -13,6 +25,10 @@ pub struct AnimationFrame {
     /// Ticks added to the species blink cadence (tiredness slows blinking).
     /// 0 = normal. Producers map tiredness 0..1 -> 0..TIRED_BLINK_MAX_SLOWDOWN.
     pub blink_slowdown: u8,
+    /// Relax the eyes for tired/cozy performance (B). Inert for closed/blink.
+    pub soft_eyes: bool,
+    /// Subtle work-type expression accent (E). Applied only to positive moods.
+    pub work_accent: WorkAccent,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,7 +96,7 @@ pub fn render_pet(
 ) -> RenderedPet {
     let profile = species_animation_profile(pet.species);
     let blinking = frame.hold_eyes_closed || should_blink(pet, mood, frame, profile);
-    let expression = expression_for(pet, mood, blinking);
+    let expression = expression_for(pet, mood, blinking, frame);
     let raw = template_lines(
         pet.species,
         stage,
@@ -212,7 +228,12 @@ struct Expression {
     mouth: String,
 }
 
-fn expression_for(pet: &GeneratedPet, mood: Mood, blinking: bool) -> Expression {
+fn expression_for(
+    pet: &GeneratedPet,
+    mood: Mood,
+    blinking: bool,
+    frame: AnimationFrame,
+) -> Expression {
     if blinking {
         return Expression {
             eyes: closed_blink_eyes(pet.species).to_string(),
@@ -220,7 +241,7 @@ fn expression_for(pet: &GeneratedPet, mood: Mood, blinking: bool) -> Expression 
         };
     }
 
-    match mood {
+    let mut expr = match mood {
         Mood::Happy => Expression {
             eyes: "^.^".to_string(),
             mouth: "\u{03c9}".to_string(),
@@ -245,7 +266,11 @@ fn expression_for(pet: &GeneratedPet, mood: Mood, blinking: bool) -> Expression 
             eyes: ",_,".to_string(),
             mouth: "_".to_string(),
         },
+    };
+    if frame.soft_eyes && matches!(mood, Mood::Content | Mood::Happy) {
+        expr.eyes = "\u{02d8}.\u{02d8}".to_string(); // ˘.˘ relaxed, heavy-lidded
     }
+    expr
 }
 
 fn should_blink(
@@ -627,6 +652,30 @@ mod tests {
     use crate::pet::generation::generate_pet;
 
     #[test]
+    fn soft_eyes_relax_a_positive_mood_without_changing_mouth() {
+        let pet = generate_pet("soft-eyes-seed");
+        let normal = AnimationFrame {
+            tick: 1,
+            blink_suppression_ticks: 0,
+            hold_eyes_closed: false,
+            blink_slowdown: 0,
+            soft_eyes: false,
+            work_accent: WorkAccent::None,
+        };
+        let soft = AnimationFrame {
+            soft_eyes: true,
+            ..normal
+        };
+        let a = render_pet(&pet, Stage::S3, Mood::Content, normal)
+            .lines
+            .join("\n");
+        let b = render_pet(&pet, Stage::S3, Mood::Content, soft)
+            .lines
+            .join("\n");
+        assert_ne!(a, b, "soft eyes should change the rendered face");
+    }
+
+    #[test]
     fn hold_eyes_closed_renders_closed_blink_eyes_without_touching_mood() {
         let pet = generate_pet("hold-eyes-seed");
         let frame = AnimationFrame {
@@ -634,6 +683,8 @@ mod tests {
             blink_suppression_ticks: 0,
             hold_eyes_closed: true,
             blink_slowdown: 0,
+            soft_eyes: false,
+            work_accent: WorkAccent::None,
         };
         let rendered = render_pet(&pet, Stage::S3, Mood::Content, frame);
         let art = rendered.lines.join("\n");
@@ -655,6 +706,8 @@ mod tests {
                 blink_suppression_ticks: 0,
                 hold_eyes_closed: false,
                 blink_slowdown: 0,
+                soft_eyes: false,
+                work_accent: WorkAccent::None,
             },
         );
         assert!(
@@ -691,6 +744,8 @@ mod tests {
                             blink_suppression_ticks: 0,
                             hold_eyes_closed: false,
                             blink_slowdown: slowdown,
+                            soft_eyes: false,
+                            work_accent: WorkAccent::None,
                         },
                     );
                     rendered
