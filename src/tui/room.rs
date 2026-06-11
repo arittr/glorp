@@ -449,6 +449,41 @@ pub fn room_glyphs_for(
         .collect()
 }
 
+/// Interior ambient-glyph density scale by phase. Night sparse, day full.
+/// Mirrors the sky's `phase_count_scale`. Texture only.
+#[allow(dead_code)]
+fn phase_density_scale(phase: DayPhase) -> f64 {
+    match phase {
+        DayPhase::Day => 1.0,
+        DayPhase::Dawn => 0.7,
+        DayPhase::Dusk => 0.85,
+        DayPhase::Night => 0.5,
+    }
+}
+
+/// Warmth/contrast bias applied to a room glyph color by phase: dawn cooler,
+/// day neutral, dusk warmer, night dim. Texture only — never personality.
+#[allow(dead_code)]
+fn phase_warmth_tint(color: Color, phase: DayPhase) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    match phase {
+        DayPhase::Day => color,
+        DayPhase::Dawn => Color::Rgb(r.saturating_sub(6), g, b.saturating_add(8)),
+        DayPhase::Dusk => Color::Rgb(
+            r.saturating_add(12),
+            g.saturating_add(2),
+            b.saturating_sub(8),
+        ),
+        DayPhase::Night => Color::Rgb(
+            r.saturating_sub(14),
+            g.saturating_sub(10),
+            b.saturating_sub(2),
+        ),
+    }
+}
+
 /// Maximum number of moving/resting glyphs allowed for a habitat area of the
 /// given size class. Preview Lab and live watch use the same thresholds.
 pub fn motion_budget(area: Rect) -> usize {
@@ -1152,5 +1187,29 @@ mod tests {
                 glyphs.len()
             );
         }
+    }
+
+    #[test]
+    fn phase_density_scale_is_sparsest_at_night_fullest_at_day() {
+        assert_eq!(phase_density_scale(DayPhase::Day), 1.0);
+        assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dusk));
+        assert!(phase_density_scale(DayPhase::Dawn) < phase_density_scale(DayPhase::Day));
+        assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dawn));
+    }
+
+    #[test]
+    fn phase_warmth_tint_warms_at_dusk_and_cools_at_dawn() {
+        let base = Color::Rgb(120, 120, 120);
+        let Color::Rgb(dawn_r, _, dawn_b) = phase_warmth_tint(base, DayPhase::Dawn) else {
+            panic!("expected rgb");
+        };
+        let Color::Rgb(dusk_r, _, dusk_b) = phase_warmth_tint(base, DayPhase::Dusk) else {
+            panic!("expected rgb");
+        };
+        // Dusk is warmer (more red, less blue) than dawn.
+        assert!(dusk_r > dawn_r, "dusk should be redder than dawn");
+        assert!(dusk_b < dawn_b, "dusk should be less blue than dawn");
+        // Day is identity.
+        assert_eq!(phase_warmth_tint(base, DayPhase::Day), base);
     }
 }
