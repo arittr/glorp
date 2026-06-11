@@ -286,20 +286,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn peak_vitals_are_ecstatic_and_round_trip() {
+    fn peak_vitals_are_ecstatic() {
         let peak = Vitals {
             fed: 95.0,
             happiness: 95.0,
             energy: 80.0,
         };
         assert_eq!(mood_for_vitals(peak), Mood::Ecstatic);
-        // Just-happy stays Happy.
+    }
+
+    #[test]
+    fn mood_threshold_keeps_near_peak_happy() {
         let happy = Vitals {
             fed: 80.0,
             happiness: 80.0,
             energy: 60.0,
         };
         assert_eq!(mood_for_vitals(happy), Mood::Happy);
+    }
+
+    #[test]
+    fn ecstatic_round_trips_through_str() {
         assert_eq!("ecstatic".parse::<Mood>().unwrap(), Mood::Ecstatic);
         assert_eq!(Mood::Ecstatic.as_str(), "ecstatic");
     }

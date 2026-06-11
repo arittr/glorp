@@ -746,6 +746,11 @@ mod tests {
             .lines
             .join("\n");
         assert!(art.contains("*o*"), "ecstatic uses star eyes, got:\n{art}");
+        let profile = species_animation_profile(pet.species);
+        assert!(
+            !should_blink(&pet, Mood::Ecstatic, frame, profile),
+            "ecstatic mood should block blinking"
+        );
     }
 
     #[test]

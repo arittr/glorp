@@ -345,6 +345,7 @@ fn mood_hsl_drift(mood: &str) -> [f32; 3] {
         "hungry" => [10.0, 10.0, -5.0],
         "sad" => [-10.0, -20.0, -20.0],
         "happy" => [15.0, 20.0, 10.0],
+        "ecstatic" => [20.0, 25.0, 15.0], // warmer, brighter, more saturated than happy
         "wilted" => [0.0, -40.0, -30.0],
         _ => [0.0, 0.0, 0.0], // content / unknown
     }
