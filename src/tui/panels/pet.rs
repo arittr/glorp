@@ -825,7 +825,7 @@ impl LegacyPanel for PetPanel {
         let (wander_x, facing) = match (day.asleep, day.sleep_onset_utc, day.wake_resume) {
             (true, Some(onset), _) => (
                 compute_sleep_wander_x(area.width, species, now, onset, idle_minutes),
-                compute_facing(area.width, species, onset), // held facing: no mirror flips with shut eyes
+                compute_facing(area.width, species, onset, idle_minutes), // held facing: no mirror flips with shut eyes
             ),
             (false, _, Some(resume)) => (
                 compute_wake_wander_x(
@@ -836,14 +836,14 @@ impl LegacyPanel for PetPanel {
                     resume.woke_at_utc,
                     idle_minutes,
                 ),
-                compute_facing(area.width, species, now),
+                compute_facing(area.width, species, now, idle_minutes),
             ),
             _ => {
                 let wander_now = lazy_wander_instant(now, day.local_day_started_utc, softening);
                 (
                     compute_wander_position_x(area.width, species, wander_now, idle_minutes)
                         + resonance_wander_bias(resonant_prop.as_ref()),
-                    compute_facing(area.width, species, wander_now),
+                    compute_facing(area.width, species, wander_now, idle_minutes),
                 )
             }
         };

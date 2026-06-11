@@ -660,15 +660,21 @@ fn blend_positions(from: i16, to: i16, k: f32) -> i16 {
 
 /// Returns `+1` if the pet's current drift target is to the right of the
 /// previous period's target, `-1` if to the left, or `+1` as a default when
-/// there is no movement. Uses the same `half_range` as
-/// `compute_wander_position_x` so the sign of position change and the facing
-/// value are always consistent.
-pub fn compute_facing(habitat_width: u16, species: Species, now: time::OffsetDateTime) -> i8 {
+/// there is no movement. Uses the same `half_range` and scaled `hold_secs` as
+/// `compute_wander_position_x` (via `idle_minutes`) so the sign of position
+/// change and the facing value are always consistent.
+pub fn compute_facing(
+    habitat_width: u16,
+    species: Species,
+    now: time::OffsetDateTime,
+    idle_minutes: u32,
+) -> i8 {
     let half_range = (habitat_width.saturating_sub(PET_W) / 2) as i32;
     if half_range == 0 {
         return 1;
     }
-    let period = now.unix_timestamp() / TARGET_HOLD_SECS;
+    let hold_secs = (TARGET_HOLD_SECS as f64 * idle_languor_scale(idle_minutes)) as i64;
+    let period = now.unix_timestamp() / hold_secs;
     let prev = wander_deterministic_target(period - 1, species, half_range);
     let curr = wander_deterministic_target(period, species, half_range);
     match (curr - prev).signum() {
@@ -837,6 +843,8 @@ mod tests {
         assert!(idle_languor_scale(30) > idle_languor_scale(0));
         assert!(idle_languor_scale(120) > idle_languor_scale(30));
         assert!(idle_languor_scale(100_000) <= 3.0, "bounded");
+        assert_eq!(idle_languor_scale(180), 3.0, "caps at 3.0 after 180 min");
+        assert_eq!(idle_languor_scale(90), 2.0, "midpoint at 90 min");
     }
 
     #[test]
@@ -1142,7 +1150,7 @@ mod tests {
     fn facing_returns_plus_or_minus_one() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         for species in Species::all() {
-            let f = compute_facing(120, species, now);
+            let f = compute_facing(120, species, now, 0);
             assert!(f == 1 || f == -1, "got {f} for {species:?}");
         }
     }
@@ -1150,8 +1158,8 @@ mod tests {
     #[test]
     fn facing_is_deterministic() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let a = compute_facing(120, Species::Ghost, now);
-        let b = compute_facing(120, Species::Ghost, now);
+        let a = compute_facing(120, Species::Ghost, now, 0);
+        let b = compute_facing(120, Species::Ghost, now, 0);
         assert_eq!(a, b);
     }
 
@@ -1181,7 +1189,7 @@ mod tests {
                 let pos_curr =
                     compute_wander_position_x(habitat_width, species, end_of_curr_period, 0);
                 let actual_sign = (pos_curr as i32 - pos_prev as i32).signum();
-                let claimed_facing = compute_facing(habitat_width, species, end_of_curr_period);
+                let claimed_facing = compute_facing(habitat_width, species, end_of_curr_period, 0);
                 if actual_sign != 0 {
                     let expected = if actual_sign > 0 { 1 } else { -1 };
                     assert_eq!(
