@@ -5,5 +5,6 @@ pub mod layout;
 pub mod life;
 pub mod panels;
 pub mod render_context;
+pub mod room;
 pub mod style;
 pub mod view_model;
