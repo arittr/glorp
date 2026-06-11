@@ -15,9 +15,10 @@ pub enum WorkAccent {
     Dreamy,
 }
 
-/// Map live work shape to a subtle expression accent. Returns `None` unless
-/// work is actually flowing (activity gate), so a stale weather never lingers
-/// on an idle pet — keeping this on the texture side of the locked boundary.
+/// Map live work shape to a subtle expression accent. Returns `WorkAccent::None`
+/// unless work is actually flowing (activity gate), so a stale weather never
+/// lingers on an idle pet — keeping this on the texture side of the locked
+/// boundary.
 pub fn work_accent_for(weather: crate::tui::life::WorkWeather, activity_level: f32) -> WorkAccent {
     use crate::tui::life::WorkWeather::*;
     if activity_level < 0.3 {
@@ -29,6 +30,16 @@ pub fn work_accent_for(weather: crate::tui::life::WorkWeather, activity_level: f
         CacheMist => WorkAccent::Dreamy,
         Clear => WorkAccent::None,
     }
+}
+
+/// Compute work accent from a live life profile. Calm mode forces no accent.
+pub fn work_accent_for_profile(profile: &crate::tui::life::PetLifeProfile) -> WorkAccent {
+    let activity = if profile.calm_mode {
+        0.0
+    } else {
+        profile.activity_level
+    };
+    work_accent_for(profile.work_weather, activity)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

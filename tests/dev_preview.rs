@@ -16,7 +16,7 @@ const LIVELINESS_WATCH_IDS: [&str; 7] = [
     "watch-liveliness-calm-mode-s6-hot",
 ];
 
-const DAY_CONTEXT_WATCH_IDS: [&str; 14] = [
+const DAY_CONTEXT_WATCH_IDS: [&str; 19] = [
     "watch-daycontext-night-asleep",
     "watch-daycontext-dawn-crossing",
     "watch-daycontext-night-wake-catchup",
@@ -31,6 +31,11 @@ const DAY_CONTEXT_WATCH_IDS: [&str; 14] = [
     "watch-daycontext-dawn-fresh",
     "watch-daycontext-dusk-heavy",
     "watch-daycontext-night-quiet",
+    "watch-daycontext-work-output-sparks",
+    "watch-daycontext-work-reasoning-pulse",
+    "watch-daycontext-work-cache-mist",
+    "watch-daycontext-work-mixed",
+    "watch-daycontext-work-clear",
 ];
 
 const ALIVE_ROOM_WATCH_IDS: [&str; 8] = [
@@ -805,6 +810,11 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-daycontext-dawn-fresh.txt",
         "frames/watch-daycontext-dusk-heavy.txt",
         "frames/watch-daycontext-night-quiet.txt",
+        "frames/watch-daycontext-work-output-sparks.txt",
+        "frames/watch-daycontext-work-reasoning-pulse.txt",
+        "frames/watch-daycontext-work-cache-mist.txt",
+        "frames/watch-daycontext-work-mixed.txt",
+        "frames/watch-daycontext-work-clear.txt",
         "frames/room-starter-day-clear.txt",
         "frames/room-botanical-cache-evening.txt",
         "frames/room-technical-output-active.txt",
@@ -852,6 +862,11 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-daycontext-dawn-fresh".to_string(),
             "watch-daycontext-dusk-heavy".to_string(),
             "watch-daycontext-night-quiet".to_string(),
+            "watch-daycontext-work-output-sparks".to_string(),
+            "watch-daycontext-work-reasoning-pulse".to_string(),
+            "watch-daycontext-work-cache-mist".to_string(),
+            "watch-daycontext-work-mixed".to_string(),
+            "watch-daycontext-work-clear".to_string(),
             "room-starter-day-clear".to_string(),
             "room-botanical-cache-evening".to_string(),
             "room-technical-output-active".to_string(),

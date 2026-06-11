@@ -475,14 +475,7 @@ mod render_compact_tests {
                 hold_eyes_closed: false,
                 blink_slowdown: 0,
                 soft_eyes: false,
-                work_accent: crate::pet::render::work_accent_for(
-                    vm.life_profile.work_weather,
-                    if vm.life_profile.calm_mode {
-                        0.0
-                    } else {
-                        vm.life_profile.activity_level
-                    },
-                ),
+                work_accent: crate::pet::render::work_accent_for_profile(&vm.life_profile),
             },
         );
         vm.pet_art = rendered.lines;

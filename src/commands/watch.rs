@@ -10,7 +10,7 @@ use crate::{
     pet::{
         art::stage_label,
         generation::generate_pet,
-        render::{render_pet, AnimationFrame},
+        render::{render_pet, work_accent_for_profile, AnimationFrame},
     },
     storage::{
         day_axis::LocalDayMapper,
@@ -90,14 +90,7 @@ pub(crate) fn build_watch_view_model_at(
                 crate::tui::room::PetPerformance::TiredAwake
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
-            work_accent: crate::pet::render::work_accent_for(
-                life_profile.work_weather,
-                if life_profile.calm_mode {
-                    0.0
-                } else {
-                    life_profile.activity_level
-                },
-            ),
+            work_accent: work_accent_for_profile(&life_profile),
         },
     );
 
@@ -461,14 +454,7 @@ pub fn rerender_pet_for_view_model(
                 crate::tui::room::PetPerformance::TiredAwake
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
-            work_accent: crate::pet::render::work_accent_for(
-                vm.life_profile.work_weather,
-                if vm.life_profile.calm_mode {
-                    0.0
-                } else {
-                    vm.life_profile.activity_level
-                },
-            ),
+            work_accent: work_accent_for_profile(&vm.life_profile),
         },
     );
     vm.pet_art = rendered.lines;
