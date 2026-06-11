@@ -443,11 +443,17 @@ pub fn compute_breath_offset_with_rhythm(
     let (period_ds, inhale_ds) = species_breath_rhythm_decis(species);
     let (period_ds, inhale_ds, anchor_ds) = match rhythm {
         BreathRhythm::Awake => (period_ds, inhale_ds, 0),
-        BreathRhythm::Asleep { onset } => (
-            period_ds * SLEEP_BREATH_PERIOD_SCALE,
-            inhale_ds * SLEEP_BREATH_INHALE_SCALE,
-            onset.unix_timestamp() * 10 + i64::from(onset.millisecond() / 100),
-        ),
+        BreathRhythm::Asleep { onset } => {
+            let elapsed_min = (now - onset).whole_minutes().clamp(0, 90);
+            // Inhale window shrinks from full to ~40% over the first 90 min asleep.
+            let depth_num = 100 - (elapsed_min * 60 / 90); // 100 -> 40
+            let inhale = (inhale_ds * SLEEP_BREATH_INHALE_SCALE * depth_num / 100).max(1);
+            (
+                period_ds * SLEEP_BREATH_PERIOD_SCALE,
+                inhale,
+                onset.unix_timestamp() * 10 + i64::from(onset.millisecond() / 100),
+            )
+        }
         BreathRhythm::Tired { eighths } => {
             let stretch = 16 + i64::from(eighths.min(8));
             (period_ds * stretch / 16, inhale_ds, 0)
@@ -1296,6 +1302,31 @@ mod tests {
             BreathRhythm::Asleep { onset },
         );
         assert_eq!(next_cycle, 1);
+    }
+
+    #[test]
+    fn sleep_breath_gets_shallower_over_time() {
+        let onset = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let inhale_fraction = |elapsed_min: i64| {
+            let start = onset + time::Duration::minutes(elapsed_min);
+            // Count raised ticks across one ~asleep period window (300 ds is safe).
+            (0..300_i64)
+                .filter(|ds| {
+                    compute_breath_offset_with_rhythm(
+                        Some(Species::Fuzz),
+                        start + time::Duration::milliseconds(ds * 100),
+                        BreathRhythm::Asleep { onset },
+                    ) == 1
+                })
+                .count()
+        };
+        let early = inhale_fraction(0);
+        let deep = inhale_fraction(60);
+        assert!(
+            deep < early,
+            "deep sleep ({deep}) has a shorter inhale than light sleep ({early})"
+        );
+        assert!(deep > 0, "breath never stops");
     }
 
     #[test]
