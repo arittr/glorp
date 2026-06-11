@@ -821,9 +821,10 @@ impl LegacyPanel for PetPanel {
             crate::tui::day::resonant_prop_for_day(day, &earned)
         };
         let softening = effective_weekend_softening(day, &vm.life_profile);
+        let idle_minutes = vm.life_profile.idle.idle_minutes;
         let (wander_x, facing) = match (day.asleep, day.sleep_onset_utc, day.wake_resume) {
             (true, Some(onset), _) => (
-                compute_sleep_wander_x(area.width, species, now, onset),
+                compute_sleep_wander_x(area.width, species, now, onset, idle_minutes),
                 compute_facing(area.width, species, onset), // held facing: no mirror flips with shut eyes
             ),
             (false, _, Some(resume)) => (
@@ -833,13 +834,14 @@ impl LegacyPanel for PetPanel {
                     now,
                     resume.from_eval_utc,
                     resume.woke_at_utc,
+                    idle_minutes,
                 ),
                 compute_facing(area.width, species, now),
             ),
             _ => {
                 let wander_now = lazy_wander_instant(now, day.local_day_started_utc, softening);
                 (
-                    compute_wander_position_x(area.width, species, wander_now)
+                    compute_wander_position_x(area.width, species, wander_now, idle_minutes)
                         + resonance_wander_bias(resonant_prop.as_ref()),
                     compute_facing(area.width, species, wander_now),
                 )
@@ -1156,7 +1158,7 @@ fn render_pet_inside(
 
     let species = vm.pet_render.generated_species;
     let shimmer_role = compute_shimmer_role(species, now);
-    let twinkle = compute_twinkle(species, now);
+    let twinkle = compute_twinkle(species, now, vm.life_profile.idle.idle_minutes);
     let token_pop = profile_token_pop(
         vm.last_feed_pulse_at,
         &vm.life_profile,

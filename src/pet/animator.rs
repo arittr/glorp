@@ -551,14 +551,16 @@ pub fn compute_wander_position_x(
     habitat_width: u16,
     species: Species,
     now: time::OffsetDateTime,
+    idle_minutes: u32,
 ) -> i16 {
     let half_range = (habitat_width.saturating_sub(PET_W) / 2) as i32;
     if half_range == 0 {
         return 0;
     }
     let ts = now.unix_timestamp();
-    let period = ts / TARGET_HOLD_SECS;
-    let t_in_period = (ts.rem_euclid(TARGET_HOLD_SECS)) as f32 / TARGET_HOLD_SECS as f32;
+    let hold_secs = (TARGET_HOLD_SECS as f64 * idle_languor_scale(idle_minutes)) as i64;
+    let period = ts / hold_secs;
+    let t_in_period = (ts.rem_euclid(hold_secs)) as f32 / hold_secs as f32;
     let prev_target = wander_deterministic_target(period - 1, species, half_range);
     let curr_target = wander_deterministic_target(period, species, half_range);
     let ease = wander_ease_in_out(t_in_period);
@@ -604,9 +606,10 @@ pub fn compute_sleep_wander_x(
     species: Species,
     now: time::OffsetDateTime,
     onset: time::OffsetDateTime,
+    idle_minutes: u32,
 ) -> i16 {
-    let held = compute_wander_position_x(habitat_width, species, onset);
-    let live = compute_wander_position_x(habitat_width, species, now);
+    let held = compute_wander_position_x(habitat_width, species, onset, idle_minutes);
+    let live = compute_wander_position_x(habitat_width, species, now, idle_minutes);
     let k = ease_fraction(now, onset);
     blend_positions(live, held, k)
 }
@@ -619,9 +622,10 @@ pub fn compute_wake_wander_x(
     now: time::OffsetDateTime,
     from_eval: time::OffsetDateTime,
     woke_at: time::OffsetDateTime,
+    idle_minutes: u32,
 ) -> i16 {
-    let frozen = compute_wander_position_x(habitat_width, species, from_eval);
-    let live = compute_wander_position_x(habitat_width, species, now);
+    let frozen = compute_wander_position_x(habitat_width, species, from_eval, idle_minutes);
+    let live = compute_wander_position_x(habitat_width, species, now, idle_minutes);
     let k = ease_fraction(now, woke_at);
     blend_positions(frozen, live, k)
 }
@@ -707,15 +711,20 @@ pub struct TwinkleSpec {
 
 /// Returns a twinkle spec for ~1 frame every `TWINKLE_PERIOD_SECS` seconds.
 /// Position and glyph are deterministic per `(species, period)`.
-pub fn compute_twinkle(species: Species, now: time::OffsetDateTime) -> Option<TwinkleSpec> {
+pub fn compute_twinkle(
+    species: Species,
+    now: time::OffsetDateTime,
+    idle_minutes: u32,
+) -> Option<TwinkleSpec> {
     // Only active during the first half-second of the period.
     let ts_ds = now.unix_timestamp() * 10 + i64::from(now.millisecond() / 100);
-    let period_ds = TWINKLE_PERIOD_SECS * 10;
+    let period_secs = (TWINKLE_PERIOD_SECS as f64 * idle_languor_scale(idle_minutes)) as i64;
+    let period_ds = period_secs * 10;
     let pos_ds = ts_ds.rem_euclid(period_ds);
     if pos_ds >= 5 {
         return None;
     }
-    let period = now.unix_timestamp() / TWINKLE_PERIOD_SECS;
+    let period = now.unix_timestamp() / period_secs;
     let h = splitmix64(period as u64 ^ species as u64 ^ 0xDEADBEEF_CAFEBABE);
     let row = (h % 8) as u8;
     let col = ((h >> 8) % 11) as u8;
@@ -752,6 +761,14 @@ pub fn compute_token_pop(
     Some(TokenPop {
         duration_remaining_secs: 2 - elapsed,
     })
+}
+
+/// Multiplier (1.0..=3.0) that stretches idle gesture timing as idle grows:
+/// a long-idle pet wanders and sparkles less, reading as settled rather than
+/// loop-frozen.
+pub fn idle_languor_scale(idle_minutes: u32) -> f64 {
+    let m = f64::from(idle_minutes.min(180));
+    1.0 + 2.0 * (m / 180.0)
 }
 
 /// Multiplier applied to the body palette role lightness when energy is low.
@@ -812,6 +829,14 @@ mod tests {
             room_slices: vec![],
             props: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn idle_languor_scale_grows_with_idle_minutes() {
+        assert_eq!(idle_languor_scale(0), 1.0);
+        assert!(idle_languor_scale(30) > idle_languor_scale(0));
+        assert!(idle_languor_scale(120) > idle_languor_scale(30));
+        assert!(idle_languor_scale(100_000) <= 3.0, "bounded");
     }
 
     #[test]
@@ -1051,9 +1076,9 @@ mod tests {
     fn wander_position_returns_zero_when_habitat_too_narrow() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         // habitat_width == PET_W: no room to drift.
-        assert_eq!(compute_wander_position_x(PET_W, Species::Fuzz, now), 0);
+        assert_eq!(compute_wander_position_x(PET_W, Species::Fuzz, now, 0), 0);
         // habitat_width < PET_W: saturating_sub gives 0.
-        assert_eq!(compute_wander_position_x(0, Species::Fuzz, now), 0);
+        assert_eq!(compute_wander_position_x(0, Species::Fuzz, now, 0), 0);
     }
 
     #[test]
@@ -1064,7 +1089,7 @@ mod tests {
         let half_range = ((habitat_width - PET_W) / 2) as i16;
         for s in 0..=TARGET_HOLD_SECS * 4 {
             let now = start + time::Duration::seconds(s);
-            let pos = compute_wander_position_x(habitat_width, Species::Fuzz, now);
+            let pos = compute_wander_position_x(habitat_width, Species::Fuzz, now, 0);
             assert!(
                 pos >= -half_range && pos <= half_range,
                 "pos {pos} outside [-{half_range}, {half_range}] at s={s}"
@@ -1075,8 +1100,8 @@ mod tests {
     #[test]
     fn wander_position_is_deterministic() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_042).unwrap();
-        let a = compute_wander_position_x(52, Species::Crystal, now);
-        let b = compute_wander_position_x(52, Species::Crystal, now);
+        let a = compute_wander_position_x(52, Species::Crystal, now, 0);
+        let b = compute_wander_position_x(52, Species::Crystal, now, 0);
         assert_eq!(a, b, "same inputs must give same output");
     }
 
@@ -1093,7 +1118,7 @@ mod tests {
         let curr = wander_deterministic_target(period, Species::Blob, half_range);
 
         // At t=0 the position equals prev exactly.
-        let at_start = compute_wander_position_x(52, Species::Blob, base);
+        let at_start = compute_wander_position_x(52, Species::Blob, base, 0);
         assert_eq!(
             at_start as i32, prev,
             "at t=0 position should equal prev {prev}"
@@ -1103,7 +1128,7 @@ mod tests {
         // Only meaningful when prev != curr.
         if prev != curr {
             let near_end = base + time::Duration::seconds(TARGET_HOLD_SECS - 1);
-            let at_end = compute_wander_position_x(52, Species::Blob, near_end);
+            let at_end = compute_wander_position_x(52, Species::Blob, near_end, 0);
             assert!(
                 (at_end as i32 - curr).abs() <= (at_end as i32 - prev).abs(),
                 "at_end {at_end} should be closer to curr {curr} than prev {prev}"
@@ -1152,9 +1177,9 @@ mod tests {
                     time::OffsetDateTime::from_unix_timestamp(base_ts + TARGET_HOLD_SECS - 1)
                         .unwrap();
                 let pos_prev =
-                    compute_wander_position_x(habitat_width, species, end_of_prev_period);
+                    compute_wander_position_x(habitat_width, species, end_of_prev_period, 0);
                 let pos_curr =
-                    compute_wander_position_x(habitat_width, species, end_of_curr_period);
+                    compute_wander_position_x(habitat_width, species, end_of_curr_period, 0);
                 let actual_sign = (pos_curr as i32 - pos_prev as i32).signum();
                 let claimed_facing = compute_facing(habitat_width, species, end_of_curr_period);
                 if actual_sign != 0 {
@@ -1220,7 +1245,7 @@ mod tests {
     #[test]
     fn twinkle_position_within_art_bounds() {
         let now = time::OffsetDateTime::from_unix_timestamp(0).unwrap();
-        if let Some(t) = compute_twinkle(Species::Crystal, now) {
+        if let Some(t) = compute_twinkle(Species::Crystal, now, 0) {
             assert!(t.row < 8, "twinkle row {} out of art bounds", t.row);
             assert!(t.col < 11, "twinkle col {} out of art bounds", t.col);
         }
@@ -1230,7 +1255,7 @@ mod tests {
     fn twinkle_fires_at_period_start() {
         let now = time::OffsetDateTime::from_unix_timestamp(0).unwrap();
         assert!(
-            compute_twinkle(Species::Fuzz, now).is_some(),
+            compute_twinkle(Species::Fuzz, now, 0).is_some(),
             "twinkle should fire at period start (unix ts 0)"
         );
     }
@@ -1241,7 +1266,7 @@ mod tests {
         let now = time::OffsetDateTime::from_unix_timestamp(1).unwrap();
         // 1 second into a 7-second period, > 500ms into the period.
         assert!(
-            compute_twinkle(Species::Fuzz, now).is_none(),
+            compute_twinkle(Species::Fuzz, now, 0).is_none(),
             "twinkle should be None outside the half-second window"
         );
     }
@@ -1355,32 +1380,32 @@ mod tests {
     fn wander_holds_at_sleep_onset_and_eases_back_on_wake() {
         let onset = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let width = 52_u16;
-        let held = compute_wander_position_x(width, Species::Fuzz, onset);
+        let held = compute_wander_position_x(width, Species::Fuzz, onset, 0);
         // Deep into sleep, position is fully held at the onset evaluation.
         let deep = onset + time::Duration::minutes(40);
         assert_eq!(
-            compute_sleep_wander_x(width, Species::Fuzz, deep, onset),
+            compute_sleep_wander_x(width, Species::Fuzz, deep, onset, 0),
             held,
             "asleep wander must hold the onset position"
         );
         // At the onset instant itself the blend starts from the live curve,
         // which equals the held value — continuous by construction.
         assert_eq!(
-            compute_sleep_wander_x(width, Species::Fuzz, onset, onset),
-            compute_wander_position_x(width, Species::Fuzz, onset),
+            compute_sleep_wander_x(width, Species::Fuzz, onset, onset, 0),
+            compute_wander_position_x(width, Species::Fuzz, onset, 0),
         );
         // Wake resume: at the wake instant the position is the frozen eval;
         // after WANDER_SETTLE_SECS it equals the live curve.
         let woke_at = deep;
         let from_eval = onset;
         assert_eq!(
-            compute_wake_wander_x(width, Species::Fuzz, woke_at, from_eval, woke_at),
-            compute_wander_position_x(width, Species::Fuzz, from_eval),
+            compute_wake_wander_x(width, Species::Fuzz, woke_at, from_eval, woke_at, 0),
+            compute_wander_position_x(width, Species::Fuzz, from_eval, 0),
         );
         let settled = woke_at + time::Duration::seconds(WANDER_SETTLE_SECS);
         assert_eq!(
-            compute_wake_wander_x(width, Species::Fuzz, settled, from_eval, woke_at),
-            compute_wander_position_x(width, Species::Fuzz, settled),
+            compute_wake_wander_x(width, Species::Fuzz, settled, from_eval, woke_at, 0),
+            compute_wander_position_x(width, Species::Fuzz, settled, 0),
         );
     }
 
