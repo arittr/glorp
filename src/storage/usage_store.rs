@@ -1280,8 +1280,37 @@ impl UsageStore {
                 ON usage_events(bucket_at);
             ",
         )?;
+        migrate_provider_cursors_to_source_label(&self.conn)?;
         Ok(())
     }
+}
+
+fn migrate_provider_cursors_to_source_label(conn: &Connection) -> rusqlite::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct SourceKey {
+        provider_surface: String,
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT provider_surface, cursor_key FROM provider_cursors
+         WHERE cursor_key LIKE '{%'",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for (_old_surface, key_json) in rows {
+        if let Ok(key) = serde_json::from_str::<SourceKey>(&key_json) {
+            conn.execute(
+                "UPDATE OR IGNORE provider_cursors
+                 SET provider_surface = ?1
+                 WHERE cursor_key = ?2",
+                params![key.provider_surface, key_json],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> crate::error::Result<bool> {
@@ -2068,5 +2097,24 @@ mod tests {
         assert!(totals
             .iter()
             .any(|(s, v)| s == "gemini" && (*v - 50_000.0).abs() < 0.1));
+    }
+
+    #[test]
+    fn migrate_moves_data_cursor_partition_to_source_label() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let key = r#"{"provider_surface":"gemini","command":"ccusage","source_surface":"daily","period_start":"2026-06-11","model":null}"#;
+
+        store
+            .set_provider_cursor("ccusage", key, "v1", "20.0.6", "20.0.6")
+            .unwrap();
+
+        // Re-run migrations as an upgrade would.
+        store.migrate().unwrap();
+
+        assert_eq!(
+            store.provider_cursor("gemini", key).unwrap().as_deref(),
+            Some("v1")
+        );
+        assert_eq!(store.provider_cursor("ccusage", key).unwrap(), None);
     }
 }
