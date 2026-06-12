@@ -33,8 +33,7 @@ pub fn normalize_source_label(raw: &str) -> (String, String) {
 }
 
 impl SourceIdentity {
-    pub fn from_raw_agent(raw: &str) -> Self {
-        let (provider_surface, display_name) = normalize_source_label(raw);
+    fn new(provider_surface: String, display_name: String, raw_agent: Option<String>) -> Self {
         let source_family = match provider_surface.as_str() {
             "claude-code" | "codex" => SourceFamily::KnownCodingAgent,
             _ => SourceFamily::UnknownCodingAgent,
@@ -42,23 +41,19 @@ impl SourceIdentity {
         Self {
             provider_surface,
             display_name,
-            raw_agent: Some(raw.to_string()),
+            raw_agent,
             source_family,
         }
     }
 
+    pub fn from_raw_agent(raw: &str) -> Self {
+        let (provider_surface, display_name) = normalize_source_label(raw);
+        Self::new(provider_surface, display_name, Some(raw.to_string()))
+    }
+
     pub fn from_provider_surface(surface: &str) -> Self {
         let (provider_surface, display_name) = normalize_source_label(surface);
-        let source_family = match provider_surface.as_str() {
-            "claude-code" | "codex" => SourceFamily::KnownCodingAgent,
-            _ => SourceFamily::UnknownCodingAgent,
-        };
-        Self {
-            provider_surface,
-            display_name,
-            raw_agent: None,
-            source_family,
-        }
+        Self::new(provider_surface, display_name, None)
     }
 
     pub fn claude_code() -> Self {

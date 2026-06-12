@@ -226,8 +226,6 @@ fn status_persists_real_usage_delta_into_pet_state() {
     // The unified helper runs first; seed its cursor so the poll emits real
     // deltas instead of being refused as first-contact history.
     establish_provider_contact(&mut usage_store, "unified", now);
-    establish_provider_contact(&mut usage_store, "claude-code", now);
-    establish_provider_contact(&mut usage_store, "codex", now);
     drop(usage_store);
 
     Command::cargo_bin("glorp")
@@ -306,8 +304,8 @@ fn status_surfaces_usage_discontinuity_without_claiming_blocked() {
     glorp::storage::state::StateStore::new(dir.path().join("state.json"))
         .save(&state)
         .unwrap();
-    // Deliberately NO establish_provider_contact: both helpers are first
-    // contact, so the guard refuses their history.
+    // Deliberately NO establish_provider_contact: the unified helper is first
+    // contact, so the guard refuses its history.
 
     Command::cargo_bin("glorp")
         .unwrap()

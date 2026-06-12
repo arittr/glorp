@@ -244,7 +244,11 @@ impl CcusageCommandProvider {
                     let diagnostic = diagnostic(
                         provider_surface,
                         "invalid_period_start",
-                        &format!("{provider_surface} returned invalid_period_start"),
+                        &format!(
+                            "{provider_surface} invalid_period_start for period {} model {}",
+                            record.period_start,
+                            record.model.as_deref().unwrap_or("none")
+                        ),
                     );
                     persist_diagnostic(store, &diagnostic)?;
                     diagnostics.push(diagnostic);
@@ -253,7 +257,7 @@ impl CcusageCommandProvider {
             };
 
             let key = ProviderCursorKey {
-                provider_surface: record.provider_surface.clone(),
+                provider_surface: record.source_identity.provider_surface.clone(),
                 command: command_name.to_string(),
                 source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
@@ -261,7 +265,7 @@ impl CcusageCommandProvider {
             };
 
             let cursor_key = cursor_key(&key)?;
-            let cursor_partition = record.provider_surface.clone();
+            let cursor_partition = record.source_identity.provider_surface.clone();
             let previous_raw = match store.provider_cursor(&cursor_partition, &cursor_key) {
                 Ok(Some(value)) => Some(value),
                 Ok(None) => match read_legacy_cursor_value(
@@ -284,16 +288,22 @@ impl CcusageCommandProvider {
                     }
                     Ok(None) => None,
                     Err(_) => {
-                        let diagnostic =
-                            diagnostic(provider_surface, "cursor_corruption", "cursor_corruption");
+                        let diagnostic = diagnostic(
+                            provider_surface,
+                            "cursor_corruption",
+                            &format!("{provider_surface} cursor_corruption for {cursor_key}"),
+                        );
                         persist_diagnostic(store, &diagnostic)?;
                         diagnostics.push(diagnostic);
                         None
                     }
                 },
                 Err(_) => {
-                    let diagnostic =
-                        diagnostic(provider_surface, "cursor_corruption", "cursor_corruption");
+                    let diagnostic = diagnostic(
+                        provider_surface,
+                        "cursor_corruption",
+                        &format!("{provider_surface} cursor_corruption for {cursor_key}"),
+                    );
                     persist_diagnostic(store, &diagnostic)?;
                     diagnostics.push(diagnostic);
                     None
@@ -304,8 +314,11 @@ impl CcusageCommandProvider {
                 Some(value) => match serde_json::from_str::<RawTokenTotals>(&value) {
                     Ok(parsed) => parsed,
                     Err(_) => {
-                        let diagnostic =
-                            diagnostic(provider_surface, "cursor_corruption", "cursor_corruption");
+                        let diagnostic = diagnostic(
+                            provider_surface,
+                            "cursor_corruption",
+                            &format!("{provider_surface} cursor_corruption for {cursor_key}"),
+                        );
                         persist_diagnostic(store, &diagnostic)?;
                         diagnostics.push(diagnostic);
                         RawTokenTotals::default()
@@ -318,7 +331,7 @@ impl CcusageCommandProvider {
                 let diagnostic = diagnostic(
                     provider_surface,
                     "cursor_total_decreased",
-                    "cursor_total_decreased for provider cursor",
+                    &format!("{provider_surface} cursor_total_decreased for {cursor_key}"),
                 );
                 persist_diagnostic(store, &diagnostic)?;
                 diagnostics.push(diagnostic);
@@ -355,7 +368,7 @@ impl CcusageCommandProvider {
             // both the row and the unchanged cursor so the next successful run recovers
             // via `apply_unapplied_usage`.
             deltas.push(UsageDelta {
-                provider_surface: record.provider_surface.clone(),
+                provider_surface: record.source_identity.provider_surface.clone(),
                 source_identity: record.source_identity.clone(),
                 command: command_name.to_string(),
                 effective_tokens,
@@ -412,7 +425,11 @@ impl CcusageCommandProvider {
                     let diagnostic = diagnostic(
                         provider_surface,
                         "invalid_period_start",
-                        &format!("{provider_surface} returned invalid_period_start"),
+                        &format!(
+                            "{provider_surface} invalid_period_start for period {} model {}",
+                            record.period_start,
+                            record.model.as_deref().unwrap_or("none")
+                        ),
                     );
                     persist_diagnostic(store, &diagnostic)?;
                     diagnostics.push(diagnostic);
@@ -429,7 +446,7 @@ impl CcusageCommandProvider {
             );
 
             let key = ProviderCursorKey {
-                provider_surface: record.provider_surface.clone(),
+                provider_surface: record.source_identity.provider_surface.clone(),
                 command: command_name.to_string(),
                 source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
@@ -438,7 +455,7 @@ impl CcusageCommandProvider {
             let cursor_key = cursor_key(&key)?;
             let cursor_value = serde_json::to_string(&record.raw_totals)?;
             cursor_updates.push(ProviderCursorUpdate {
-                provider_surface: record.provider_surface.clone(),
+                provider_surface: record.source_identity.provider_surface.clone(),
                 cursor_key,
                 cursor_value,
                 provider_version: version.clone(),
@@ -516,6 +533,8 @@ impl UsageProvider for CcusageCommandProvider {
             self.helpers.unified.as_deref(),
             &["daily", "--json", "--offline", "--order", "asc"],
         )?;
+        // Unified is the preferred path. Only fall back to the legacy per-surface
+        // helpers when it reports no effective usage.
         if unified.total_effective_tokens > 0.0 {
             return Ok(unified);
         }
@@ -556,6 +575,8 @@ impl UsageProvider for CcusageCommandProvider {
             self.helpers.unified.as_deref(),
             &["daily", "--json", "--offline", "--order", "asc"],
         )?;
+        // Unified is the preferred path. Fall back to legacy helpers when it
+        // produced no daily usage or cursor updates.
         if !unified.daily_usage.is_empty() || !unified.cursor_updates.is_empty() {
             return Ok(unified);
         }

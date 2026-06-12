@@ -57,7 +57,6 @@ pub struct NormalizedUsageBatch {
 #[derive(Debug, Clone)]
 pub struct NormalizedUsageRecord {
     pub source_identity: SourceIdentity,
-    pub provider_surface: String,
     pub period_start: String,
     pub model: Option<String>,
     pub raw_totals: RawTokenTotals,
@@ -96,7 +95,7 @@ fn normalize_usage_value(provider_surface: &str, value: &Value) -> NormalizedUsa
     };
 
     for row in rows {
-        match normalize_row(provider_surface, row) {
+        match normalize_row(provider_surface, row, &mut batch.diagnostics) {
             Ok(records) => batch.records.extend(records),
             Err(diagnostic) => batch.diagnostics.push(diagnostic),
         }
@@ -105,7 +104,11 @@ fn normalize_usage_value(provider_surface: &str, value: &Value) -> NormalizedUsa
         a.period_start
             .cmp(&b.period_start)
             .then_with(|| a.model.cmp(&b.model))
-            .then_with(|| a.provider_surface.cmp(&b.provider_surface))
+            .then_with(|| {
+                a.source_identity
+                    .provider_surface
+                    .cmp(&b.source_identity.provider_surface)
+            })
     });
     batch
 }
@@ -124,12 +127,14 @@ fn source_identity_from_row(provider_surface: &str, row: &Value) -> SourceIdenti
 fn is_aggregate_all_row(row: &Value) -> bool {
     optional_string(row, "agent")
         .or_else(|| optional_string(row, "source"))
+        .or_else(|| first_string(row, "sources"))
         .is_some_and(|s| s.eq_ignore_ascii_case("all"))
 }
 
 fn normalize_row(
     provider_surface: &str,
     row: &Value,
+    diagnostics: &mut Vec<ProviderDiagnostic>,
 ) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
     let source = source_identity_from_row(provider_surface, row);
     let period_start = period_start_field(&source.provider_surface, row)?;
@@ -140,11 +145,15 @@ fn normalize_row(
             let child_source = source_identity_from_row(provider_surface, source_row);
             let child_period = period_start_field(&child_source.provider_surface, source_row)
                 .unwrap_or_else(|_| period_start.clone());
-            records.extend(normalize_single_source_record(
+            match normalize_single_source_record(
                 &child_source,
                 &child_period,
                 source_row,
-            )?);
+                diagnostics,
+            ) {
+                Ok(child_records) => records.extend(child_records),
+                Err(diagnostic) => diagnostics.push(diagnostic),
+            }
         }
         if !records.is_empty() {
             return Ok(records);
@@ -161,27 +170,29 @@ fn normalize_row(
         });
     }
 
-    normalize_single_source_record(&source, &period_start, row)
+    normalize_single_source_record(&source, &period_start, row, diagnostics)
 }
 
 fn normalize_single_source_record(
     source: &SourceIdentity,
     period_start: &str,
     row: &Value,
+    diagnostics: &mut Vec<ProviderDiagnostic>,
 ) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
     if let Some(breakdowns) = row.get("modelBreakdowns").and_then(Value::as_array) {
         let mut records = Vec::new();
         for model_row in breakdowns {
-            let raw_totals = parse_claude_style_totals(&source.provider_surface, model_row)?;
-            records.push(NormalizedUsageRecord {
-                source_identity: source.clone(),
-                provider_surface: source.provider_surface.clone(),
-                period_start: period_start.to_string(),
-                model: optional_string(model_row, "modelName"),
-                raw_totals,
-                display_cost_usd: optional_f64(model_row, "cost"),
-                confidence: "local-log-derived".to_string(),
-            });
+            match parse_claude_style_totals(&source.provider_surface, model_row) {
+                Ok(raw_totals) => records.push(NormalizedUsageRecord {
+                    source_identity: source.clone(),
+                    period_start: period_start.to_string(),
+                    model: optional_string(model_row, "modelName"),
+                    raw_totals,
+                    display_cost_usd: optional_f64(model_row, "cost"),
+                    confidence: "local-log-derived".to_string(),
+                }),
+                Err(diagnostic) => diagnostics.push(diagnostic),
+            }
         }
         if !records.is_empty() {
             return Ok(records);
@@ -191,17 +202,18 @@ fn normalize_single_source_record(
     if let Some(models) = row.get("models").and_then(Value::as_object) {
         let mut records = Vec::new();
         for (model, model_row) in models {
-            let raw_totals = parse_openai_style_totals(&source.provider_surface, model_row)?;
-            records.push(NormalizedUsageRecord {
-                source_identity: source.clone(),
-                provider_surface: source.provider_surface.clone(),
-                period_start: period_start.to_string(),
-                model: Some(model.clone()),
-                raw_totals,
-                display_cost_usd: optional_f64(model_row, "costUSD")
-                    .or_else(|| optional_f64(row, "costUSD")),
-                confidence: "local-log-derived".to_string(),
-            });
+            match parse_openai_style_totals(&source.provider_surface, model_row) {
+                Ok(raw_totals) => records.push(NormalizedUsageRecord {
+                    source_identity: source.clone(),
+                    period_start: period_start.to_string(),
+                    model: Some(model.clone()),
+                    raw_totals,
+                    display_cost_usd: optional_f64(model_row, "costUSD")
+                        .or_else(|| optional_f64(row, "costUSD")),
+                    confidence: "local-log-derived".to_string(),
+                }),
+                Err(diagnostic) => diagnostics.push(diagnostic),
+            }
         }
         if !records.is_empty() {
             return Ok(records);
@@ -211,7 +223,6 @@ fn normalize_single_source_record(
     let raw_totals = parse_row_totals_by_shape(&source.provider_surface, row)?;
     Ok(vec![NormalizedUsageRecord {
         source_identity: source.clone(),
-        provider_surface: source.provider_surface.clone(),
         period_start: period_start.to_string(),
         model: first_string(row, "modelsUsed").or_else(|| optional_string(row, "model")),
         raw_totals,

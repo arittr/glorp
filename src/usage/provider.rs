@@ -14,7 +14,10 @@ pub struct UsagePollResult {
 
 #[derive(Debug, Clone)]
 pub struct UsageDelta {
+    /// Stable provider surface used for grouping and storage lookups. Mirrors
+    /// `source_identity.provider_surface` for convenient downstream access.
     pub provider_surface: String,
+    /// Resolved identity of the source that produced this usage.
     pub source_identity: SourceIdentity,
     pub command: String,
     pub effective_tokens: f64,
