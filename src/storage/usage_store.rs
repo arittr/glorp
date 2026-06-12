@@ -318,7 +318,7 @@ impl UsageStore {
                     provider_delta_id,
                     0_i64,
                     1_i64,
-                    seeded_at_text.clone(),
+                    &seeded_at_text,
                     cursor_update.cursor_key,
                     cursor_update.cursor_value,
                 ],
@@ -1094,7 +1094,8 @@ impl UsageStore {
             .transpose()
     }
 
-    /// Whether the pet has ever eaten (any applied row). Newborn sleep gate.
+    /// Whether any applied ledger row exists (including seeded history).
+    /// Newborn sleep gate.
     pub fn has_any_applied_events(&self) -> crate::error::Result<bool> {
         self.conn
             .query_row(
@@ -1300,14 +1301,24 @@ fn migrate_provider_cursors_to_source_label(conn: &Connection) -> rusqlite::Resu
         .collect::<std::result::Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    for (_old_surface, key_json) in rows {
+    for (old_surface, key_json) in rows {
         if let Ok(key) = serde_json::from_str::<SourceKey>(&key_json) {
             conn.execute(
                 "UPDATE OR IGNORE provider_cursors
                  SET provider_surface = ?1
-                 WHERE cursor_key = ?2",
-                params![key.provider_surface, key_json],
+                 WHERE provider_surface = ?2 AND cursor_key = ?3",
+                params![key.provider_surface, old_surface, key_json],
             )?;
+            if conn.changes() == 0 && old_surface != key.provider_surface {
+                // The update was ignored because a source-label row with the
+                // same cursor key already exists. Drop the stale helper-surface
+                // row so the partition does not leak back to the helper.
+                conn.execute(
+                    "DELETE FROM provider_cursors
+                     WHERE provider_surface = ?1 AND cursor_key = ?2",
+                    params![old_surface, key_json],
+                )?;
+            }
         }
     }
     Ok(())
@@ -2114,6 +2125,29 @@ mod tests {
         assert_eq!(
             store.provider_cursor("gemini", key).unwrap().as_deref(),
             Some("v1")
+        );
+        assert_eq!(store.provider_cursor("ccusage", key).unwrap(), None);
+    }
+
+    #[test]
+    fn migrate_deletes_stale_helper_surface_row_on_conflict() {
+        let store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let key = r#"{"provider_surface":"gemini","command":"ccusage","source_surface":"daily","period_start":"2026-06-11","model":null}"#;
+
+        // Seed both the legacy helper-surface cursor and an already-migrated
+        // source-label cursor with the same key.
+        store
+            .set_provider_cursor("ccusage", key, "v1", "20.0.6", "20.0.6")
+            .unwrap();
+        store
+            .set_provider_cursor("gemini", key, "v2", "20.0.6", "20.0.6")
+            .unwrap();
+
+        store.migrate().unwrap();
+
+        assert_eq!(
+            store.provider_cursor("gemini", key).unwrap().as_deref(),
+            Some("v2")
         );
         assert_eq!(store.provider_cursor("ccusage", key).unwrap(), None);
     }

@@ -54,12 +54,12 @@ pub fn stage_usage_poll_deltas(
     now: OffsetDateTime,
 ) -> Result<Vec<i64>> {
     let baseline = state.calibration;
-    let refused_surfaces =
+    let skip_surfaces =
         handle_first_contact_and_discontinuity(usage_store, poll, state, guard_ratio, now)?;
     let mut ids = Vec::new();
     let current_bucket = floor_to_ten_minute_bucket(now);
     for delta in &poll.deltas {
-        if refused_surfaces.contains(&delta.provider_surface) {
+        if skip_surfaces.contains(&delta.provider_surface) {
             continue;
         }
         if usage_store
@@ -113,9 +113,11 @@ pub fn stage_usage_poll_deltas(
 /// `days_factor` = whole days since that provider's newest cursor
 /// `updated_at` + 1 — per-provider, so an honest multi-day catch-up after a
 /// single-helper outage is not pinned at factor 1 by its healthy sibling. A
-/// surface with no cursors at all is first contact and is refused outright
-/// (the calibration never-feed-history rule). Refusal narrates once and
-/// stamps `last_idle_narration_at` so the same pass cannot also narrate
+/// surface with no cursors at all is first contact: its historical rows are
+/// seeded as already-applied ledger entries, the source cursor advances, and
+/// a `source_first_contact` diagnostic is recorded, but nothing is staged for
+/// feeding (the calibration never-feed-history rule). Refusal narrates once
+/// and stamps `last_idle_narration_at` so the same pass cannot also narrate
 /// boredom. Refused tokens are never retro-fed; the config ratio is the
 /// escape hatch going forward.
 fn handle_first_contact_and_discontinuity(
@@ -147,7 +149,10 @@ fn handle_first_contact_and_discontinuity(
     for (surface, sum) in surface_sums {
         match usage_store.latest_cursor_updated_at(&surface)? {
             None => {
-                seed_first_contact_surface(usage_store, &surface, &surface_deltas[&surface], now)?;
+                let deltas = surface_deltas
+                    .get(&surface)
+                    .expect("surface_deltas must contain every surface in surface_sums");
+                seed_first_contact_surface(usage_store, &surface, deltas, now)?;
                 skip_surfaces.insert(surface);
             }
             Some(updated_at) => {
@@ -158,7 +163,10 @@ fn handle_first_contact_and_discontinuity(
                 if sum <= threshold {
                     continue;
                 }
-                let updates: Vec<_> = surface_deltas[&surface]
+                let deltas = surface_deltas
+                    .get(&surface)
+                    .expect("surface_deltas must contain every surface in surface_sums");
+                let updates: Vec<_> = deltas
                     .iter()
                     .map(|delta| delta.cursor_update.clone())
                     .collect();
