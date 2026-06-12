@@ -745,7 +745,6 @@ mod tests {
 
     #[test]
     fn source_accent_reflects_diversity() {
-        let _now = time::macros::datetime!(2026-06-05 12:00 UTC);
         let mix = AppliedSourceMix {
             claude_effective_tokens: 5_000.0,
             codex_effective_tokens: 5_000.0,

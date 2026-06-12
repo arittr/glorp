@@ -77,6 +77,22 @@ impl Default for ActivityIdentityProfile {
     }
 }
 
+// Source-diversity thresholds. A source must contribute at least this share
+// of the total to count as a participating lane.
+const SOURCE_LANE_MIN_SHARE: f64 = 0.20;
+// At least this many lanes must pass SOURCE_LANE_MIN_SHARE for an Ensemble.
+const ENSEMBLE_MIN_LANES: usize = 3;
+// A source must contribute at least this much to count as an ensemble member
+// when checking the lane count. This is intentionally smaller than
+// SOURCE_LANE_MIN_SHARE because ensemble rewards breadth over depth.
+const ENSEMBLE_MEMBER_MIN_SHARE: f64 = 0.10;
+// The top two lanes must cover at least this combined share to outrank a
+// broad ensemble as a tight DualLane.
+const DUAL_LANE_MIN_COMBINED_SHARE: f64 = 0.80;
+// A single source must dominate at least this much of the total to be called
+// SingleLane.
+const SINGLE_LANE_MIN_DOMINANCE: f64 = 0.85;
+
 pub fn derive_source_diversity(per_source: &[(String, f64)]) -> SourceDiversity {
     let total: f64 = per_source.iter().map(|(_, v)| v.max(0.0)).sum();
     if total <= 0.0 || !total.is_finite() {
@@ -93,15 +109,18 @@ pub fn derive_source_diversity(per_source: &[(String, f64)]) -> SourceDiversity 
             .then(a.0.cmp(&b.0))
     });
     let above = |threshold: f64| shares.iter().filter(|(_, s)| *s >= threshold).count();
-    if above(0.10) >= 3 {
+    if above(ENSEMBLE_MEMBER_MIN_SHARE) >= ENSEMBLE_MIN_LANES {
         SourceDiversity::Ensemble
     } else if shares.len() >= 2
-        && shares[0].1 >= 0.20
-        && shares[1].1 >= 0.20
-        && shares[0].1 + shares[1].1 >= 0.80
+        && shares[0].1 >= SOURCE_LANE_MIN_SHARE
+        && shares[1].1 >= SOURCE_LANE_MIN_SHARE
+        && shares[0].1 + shares[1].1 >= DUAL_LANE_MIN_COMBINED_SHARE
     {
         SourceDiversity::DualLane
-    } else if shares.first().is_some_and(|(_, s)| *s >= 0.85) {
+    } else if shares
+        .first()
+        .is_some_and(|(_, s)| *s >= SINGLE_LANE_MIN_DOMINANCE)
+    {
         SourceDiversity::SingleLane
     } else {
         SourceDiversity::Quiet
@@ -123,25 +142,24 @@ const BALANCED_REASONING_THRESHOLD: f64 = 0.10;
 /// Derive the dominant token-shape personality for an applied usage window.
 ///
 /// `AppliedShapeSums.effective_tokens` already reflects the real
-/// `cache_read_weight` configured by the caller, so the weighted cache-read
-/// contribution is recovered by subtracting the other (already-weighted)
-/// components from that total. `effective_tokens` is used as the denominator
-/// so the resulting shares are consistent with the weighted baseline.
+/// `cache_read_weight` configured by the caller, so the only truly weighted
+/// component recovered here is cache-read (by subtracting the other raw
+/// components from the effective total). `effective_tokens` is used as the
+/// denominator so the resulting shares are consistent with the weighted
+/// baseline.
 pub fn derive_token_shape_personality(shape: AppliedShapeSums) -> TokenShapePersonality {
-    let weighted_input = shape.input_tokens;
-    let weighted_output = shape.output_tokens;
-    let weighted_cache_creation = shape.cache_creation_tokens;
-    let weighted_reasoning = shape.reasoning_output_tokens;
+    let input = shape.input_tokens;
+    let output = shape.output_tokens;
+    let cache_creation = shape.cache_creation_tokens;
+    let reasoning = shape.reasoning_output_tokens;
     let total = shape.effective_tokens;
     if total <= 0.0 || !total.is_finite() {
         return TokenShapePersonality::UnknownShape;
     }
-    let weighted_cache_read =
-        (total - weighted_input - weighted_output - weighted_cache_creation - weighted_reasoning)
-            .max(0.0);
-    let cache = (weighted_cache_creation + weighted_cache_read) / total;
-    let output = weighted_output / total;
-    let reasoning = weighted_reasoning / total;
+    let weighted_cache_read = (total - input - output - cache_creation - reasoning).max(0.0);
+    let cache = (cache_creation + weighted_cache_read) / total;
+    let output = output / total;
+    let reasoning = reasoning / total;
     if cache >= CACHE_HEAVY_THRESHOLD {
         TokenShapePersonality::CacheHeavy
     } else if output >= OUTPUT_HEAVY_THRESHOLD {
