@@ -21,6 +21,7 @@ pub fn run() -> Result<()> {
     let mut usage_confidence = "estimated".to_string();
     let mut recent_effective = 0.0;
     let mut today_effective = 0.0;
+    let mut today_sources: Vec<(String, f64)> = Vec::new();
     let mut diagnostic_line = None;
     if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
         let config = crate::config::AppConfig::load_or_default(&paths.config_file)?;
@@ -60,6 +61,19 @@ pub fn run() -> Result<()> {
                         crate::storage::day_axis::LocalDayMapper::System,
                     )
                     .unwrap_or(0.0);
+                let today_start = status_now
+                    .to_offset(
+                        crate::storage::day_axis::LocalDayMapper::System.offset_at(status_now),
+                    )
+                    .date()
+                    .with_time(time::Time::MIDNIGHT)
+                    .assume_offset(
+                        crate::storage::day_axis::LocalDayMapper::System.offset_at(status_now),
+                    )
+                    .to_offset(time::UtcOffset::UTC);
+                today_sources = usage_store
+                    .token_totals_by_source_between(today_start, status_now)
+                    .unwrap_or_default();
                 if let Some(diagnostic) = result.diagnostics.first() {
                     provider_line = format!("provider: blocked ({})", diagnostic.code);
                     provider_health_line =
@@ -114,6 +128,12 @@ pub fn run() -> Result<()> {
         display_tokens(recent_effective),
         display_tokens(state.lifetime_effective_tokens)
     );
+    if !today_sources.is_empty() {
+        println!("sources today:");
+        for (name, tokens) in today_sources.iter() {
+            println!("  {}: {:.0}", name, display_tokens(*tokens));
+        }
+    }
     println!("{provider_line}");
     println!("{provider_health_line}");
     println!("cost: local-derived display metadata only");

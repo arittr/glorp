@@ -1,6 +1,6 @@
 use assert_cmd::Command;
 use glorp::storage::state::{write_state_for_test, PetState, PetStateFixture};
-use glorp::storage::usage_store::{ProviderCursorUpdate, UsageStore};
+use glorp::storage::usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore};
 use predicates::prelude::*;
 use tempfile::tempdir;
 use time::OffsetDateTime;
@@ -330,4 +330,39 @@ fn status_surfaces_first_contact_without_claiming_blocked() {
         saved.lifetime_effective_tokens, 0.0,
         "seeded first-contact tokens never feed"
     );
+}
+
+#[test]
+fn status_lists_today_sources_generically() {
+    let dir = tempdir().unwrap();
+    write_state_for_test(dir.path(), PetStateFixture::named("mochi")).unwrap();
+
+    let now = OffsetDateTime::now_utc();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    for (surface, tokens) in [("gemini", 12_000.0), ("opencode", 8_000.0)] {
+        usage_store
+            .insert_event(&NormalizedUsageEvent {
+                provider_surface: surface.to_string(),
+                observed_at: now,
+                bucket_at: now,
+                effective_tokens: tokens,
+                ..NormalizedUsageEvent::for_test_at(now, tokens)
+            })
+            .unwrap();
+    }
+    drop(usage_store);
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_CCUSAGE_BIN")
+        .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env("PATH", "/bin")
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sources today:"))
+        .stdout(predicate::str::contains("gemini"))
+        .stdout(predicate::str::contains("opencode"))
+        .stdout(predicate::str::contains("claude-code").not());
 }
