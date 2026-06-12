@@ -247,8 +247,10 @@ pub fn unlock_habitat_props(
 ) -> Vec<HabitatPropId> {
     let mut unlocked = Vec::new();
     unlock_lifetime_ladder(state, now, &mut unlocked);
-    unlock_first_codex(state, rows, now, &mut unlocked);
-    unlock_first_ensemble_day(state, current_batch_source_totals, now, &mut unlocked);
+    if !rows.is_empty() {
+        unlock_first_codex(state, rows, now, &mut unlocked);
+        unlock_first_ensemble_day(state, current_batch_source_totals, now, &mut unlocked);
+    }
     unlock_return_sprout(state, activity_profile, now, &mut unlocked);
     unlock_heavy_session(state, recent_effective_tokens, now, &mut unlocked);
     unlock_wilt_recovery(state, initial_mood, new_mood, now, &mut unlocked);

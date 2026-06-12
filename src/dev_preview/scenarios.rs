@@ -1422,6 +1422,8 @@ mod tests {
                 "room-mixed-full-wide",
                 "room-heavy-day-cozy-large",
                 "room-dawn-wake-small",
+                "watch-activity-identity-ensemble",
+                "watch-activity-identity-unknown",
                 "habitat-props-catalog",
                 "watch-habitat-early",
                 "watch-habitat-lived-in",
