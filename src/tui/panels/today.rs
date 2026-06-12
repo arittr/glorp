@@ -14,9 +14,17 @@ const MAX_VISIBLE_SOURCE_ROWS: usize = 2;
 pub struct TodayPanel;
 
 impl LegacyPanel for TodayPanel {
-    fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
-        // 1 row for the TOP border/title + 5 data rows (tokens, claude, codex, last_10m, 7-day).
-        Constraint::Length(6)
+    fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
+        // Dynamic height: 1 row for the TOP border/title + content rows.
+        // Content rows are: tokens, up to MAX_VISIBLE_SOURCE_ROWS source rows,
+        // an optional "other" overflow row, last 10m, and the 7-day sparkline.
+        // When there are more than MAX_VISIBLE_SOURCE_ROWS sources, the overflow
+        // row appears and we need one extra row to avoid clipping the footer.
+        if vm.source_breakdown.len() > MAX_VISIBLE_SOURCE_ROWS {
+            Constraint::Length(7)
+        } else {
+            Constraint::Length(6)
+        }
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
@@ -500,14 +508,91 @@ mod tests {
     }
 
     #[test]
-    fn today_panel_preferred_constraint_is_six() {
-        let vm = WatchViewModel::fixture();
+    fn today_panel_preferred_constraint_is_dynamic() {
         let panel = TodayPanel;
+
+        let vm = WatchViewModel::fixture();
         assert_eq!(
             panel.preferred_constraint(&vm),
             Constraint::Length(6),
-            "1 border + tokens + claude + codex + last_10m + 7-day footer"
+            "<=2 sources fit in 1 border + tokens + sources + last_10m + 7-day footer"
         );
+
+        let mut vm = WatchViewModel::fixture();
+        vm.source_breakdown.push(SourceUsageView {
+            name: "gemini".into(),
+            display_name: "gemini".into(),
+            effective_tokens: 3_000.0,
+        });
+        assert_eq!(
+            panel.preferred_constraint(&vm),
+            Constraint::Length(7),
+            "3+ sources add an overflow 'other' row and need 7 rows total"
+        );
+    }
+
+    #[test]
+    fn today_panel_wide_layout_renders_overflow_row_without_clipping() {
+        use crate::tui::component::{layout_watch, render_watch_layout, WatchComponentId};
+
+        let mut vm = WatchViewModel::fixture();
+        vm.source_breakdown = vec![
+            SourceUsageView {
+                name: "claude-code".into(),
+                display_name: "claude".into(),
+                effective_tokens: 12_000.0,
+            },
+            SourceUsageView {
+                name: "codex".into(),
+                display_name: "codex".into(),
+                effective_tokens: 5_000.0,
+            },
+            SourceUsageView {
+                name: "gemini".into(),
+                display_name: "gemini".into(),
+                effective_tokens: 3_000.0,
+            },
+        ];
+
+        let layout = layout_watch(ratatui::layout::Rect::new(0, 0, 120, 32), &vm);
+        let today = layout
+            .node(WatchComponentId::Today.path())
+            .expect("today node");
+        assert_eq!(
+            today.bounds.height, 7,
+            "today panel should grow to 7 rows when overflow row is present"
+        );
+
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ctx = test_context();
+        terminal
+            .draw(|f| {
+                let layout = layout_watch(f.area(), &vm);
+                render_watch_layout(&layout, f.buffer_mut(), &vm, &ctx);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(
+            text.contains("claude"),
+            "expected claude source row: {text}"
+        );
+        assert!(text.contains("codex"), "expected codex source row: {text}");
+        assert!(
+            text.contains("other"),
+            "overflow sources must collapse into 'other': {text}"
+        );
+        assert!(
+            !text.contains("gemini"),
+            "gemini should be hidden behind 'other': {text}"
+        );
+        assert!(text.contains("last 10m"), "expected last 10m row: {text}");
+        assert!(text.contains("7-day"), "expected 7-day footer row: {text}");
     }
 
     fn has_colored_word(

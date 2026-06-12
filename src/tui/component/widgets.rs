@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::tui::component::{ComponentStyle, GradientToken, TextTone};
 use crate::tui::panels::bars::{bar_spans, build_spark_line, format_tokens_short};
 use crate::tui::render_context::RenderContext;
@@ -112,8 +114,6 @@ impl<'a> TextRow<'a> {
         Paragraph::new(self.line()).render(area, buf);
     }
 }
-
-use std::borrow::Cow;
 
 pub struct MetricRow<'a> {
     label: Cow<'a, str>,
