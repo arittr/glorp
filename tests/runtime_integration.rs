@@ -937,3 +937,27 @@ fn first_contact_does_not_unlock_activity_milestones() {
         "first-contact history must not award activity milestones"
     );
 }
+
+#[test]
+fn unknown_source_feeds_neutrally_without_milestone() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 06 - 11 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "gemini", now);
+
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 20_000.0;
+    apply_usage_poll(
+        &mut state,
+        &mut usage_store,
+        &poll_with_surface("gemini", 20_000.0, now),
+        now,
+    )
+    .unwrap();
+
+    assert_eq!(state.lifetime_effective_tokens, 20_000.0);
+    assert!(
+        !habitat_prop_ids(&state).contains(&glorp::game::habitat::CODEX_SIGNAL_LAMP),
+        "unknown source should feed but keep legacy codex milestone isolated"
+    );
+}

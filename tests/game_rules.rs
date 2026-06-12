@@ -3,8 +3,11 @@ use glorp::game::calibration::{CalibrationBaseline, DailyUsage};
 use glorp::game::catchup::smear_catchup_delta;
 use glorp::game::effective_tokens::{EffectiveTokenWeights, TokenBuckets};
 use glorp::game::evolution::{apply_xp_delta, stage_for_xp, Stage};
+use glorp::game::habitat::unlock_habitat_props;
 use glorp::game::metabolism::{apply_decay, apply_food, Mood, RhythmProfile, Vitals};
-use glorp::storage::state::HabitatPropSource;
+use glorp::storage::state::{HabitatPropSource, PetState};
+use glorp::storage::usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageLedgerRow};
+use glorp::tui::identity::ActivityIdentityProfile;
 use time::macros::{date, datetime};
 
 #[test]
@@ -393,4 +396,54 @@ fn activity_milestone_source_round_trips() {
     let back: HabitatPropSource = serde_json::from_str(&json).unwrap();
     assert_eq!(back, source);
     assert!(json.contains("activity_milestone"));
+}
+
+#[test]
+fn unknown_source_does_not_unlock_codex_signal_lamp() {
+    let now = datetime!(2026 - 06 - 11 12:00 UTC);
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let rows = vec![UsageLedgerRow {
+        id: 1,
+        event: NormalizedUsageEvent {
+            provider_surface: "gemini".to_string(),
+            observed_at: now,
+            bucket_at: now,
+            effective_tokens: 12_000.0,
+            ..NormalizedUsageEvent::for_test_at(now, 12_000.0)
+        },
+        cursor_update: ProviderCursorUpdate {
+            provider_surface: "gemini".to_string(),
+            cursor_key: "gemini-cursor".to_string(),
+            cursor_value: "gemini-value".to_string(),
+            provider_version: "test-provider".to_string(),
+            parser_version: "test-parser".to_string(),
+        },
+    }];
+    let profile = ActivityIdentityProfile::default();
+    let source_totals = vec![("gemini".to_string(), 12_000.0)];
+
+    unlock_habitat_props(
+        &mut state,
+        &rows,
+        12_000.0,
+        glorp::game::metabolism::Mood::Content,
+        glorp::game::metabolism::Mood::Content,
+        now,
+        &profile,
+        &source_totals,
+    );
+
+    assert!(
+        !habitat_prop_ids(&state).contains(&glorp::game::habitat::CODEX_SIGNAL_LAMP),
+        "non-codex provider_surface must not award codex_signal_lamp"
+    );
+}
+
+fn habitat_prop_ids(state: &PetState) -> Vec<&str> {
+    state
+        .habitat
+        .earned_props
+        .iter()
+        .map(|prop| prop.id.as_str())
+        .collect()
 }
