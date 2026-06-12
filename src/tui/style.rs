@@ -411,6 +411,97 @@ pub fn codex_color() -> Color {
     Color::Rgb(0x8f, 0xcf, 0x90)
 }
 
+/// Stable palette for sources that do not have a dedicated brand color.
+const UNKNOWN_SOURCE_PALETTE: &[Color] = &[
+    Color::Rgb(0x7f, 0xc8, 0xd6), // cyan
+    Color::Rgb(0xe8, 0xc4, 0x74), // amber
+    Color::Rgb(0xe8, 0xa3, 0xc2), // pink
+    Color::Rgb(0x82, 0xbc, 0x83), // sage
+    Color::Rgb(0xb3, 0x9d, 0xf0), // violet
+    Color::Rgb(0xff, 0xa5, 0x66), // coral
+    Color::Rgb(0xa8, 0xd6, 0x90), // lime
+    Color::Rgb(0x97, 0x91, 0x8a), // warm grey
+];
+
+/// User-facing label for a normalized source surface. Keep it short and safe
+/// to truncate; never return paths or raw helper output.
+pub fn source_display_name(surface: &str) -> &str {
+    match surface {
+        "claude-code" | "claude" => "claude",
+        "codex" => "codex",
+        other => other,
+    }
+}
+
+/// Deterministic color for a source surface. Preserves the existing Claude
+/// violet and Codex green; every other source gets a stable palette slot so
+/// the feed and today panel do not silently fall back to one color.
+pub fn source_color(surface: &str) -> Color {
+    match surface {
+        "claude-code" | "claude" => claude_color(),
+        "codex" => codex_color(),
+        other => {
+            let hash = stable_source_hash(other);
+            UNKNOWN_SOURCE_PALETTE[hash as usize % UNKNOWN_SOURCE_PALETTE.len()]
+        }
+    }
+}
+
+fn stable_source_hash(surface: &str) -> u64 {
+    // djb2 — deterministic across Rust versions and platforms.
+    surface.bytes().fold(5381_u64, |h, b| {
+        (h << 5).wrapping_add(h).wrapping_add(b as u64)
+    })
+}
+
+#[cfg(test)]
+mod source_palette_tests {
+    use super::*;
+
+    #[test]
+    fn source_color_preserves_claude_and_codex() {
+        assert_eq!(source_color("claude"), claude_color());
+        assert_eq!(source_color("claude-code"), claude_color());
+        assert_eq!(source_color("codex"), codex_color());
+    }
+
+    #[test]
+    fn source_color_is_deterministic_for_unknown_sources() {
+        let a = source_color("gemini");
+        let b = source_color("gemini");
+        assert_eq!(a, b);
+        assert_ne!(a, claude_color());
+        assert_ne!(a, codex_color());
+    }
+
+    #[test]
+    fn source_color_distributes_unknown_sources_across_palette() {
+        let colors = [
+            source_color("gemini"),
+            source_color("kimi"),
+            source_color("opencode"),
+            source_color("copilot"),
+            source_color("unknown"),
+        ];
+        let distinct = colors
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(
+            distinct >= 3,
+            "palette should spread unknown sources, got {distinct} distinct colors"
+        );
+    }
+
+    #[test]
+    fn source_display_name_maps_claude_brand() {
+        assert_eq!(source_display_name("claude-code"), "claude");
+        assert_eq!(source_display_name("claude"), "claude");
+        assert_eq!(source_display_name("codex"), "codex");
+        assert_eq!(source_display_name("gemini"), "gemini");
+    }
+}
+
 #[cfg(test)]
 mod bar_ramp_tests {
     use super::*;
