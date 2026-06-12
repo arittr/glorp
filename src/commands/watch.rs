@@ -23,7 +23,7 @@ use crate::{
             derive_recovery_pattern, derive_relative_intensity, derive_source_diversity,
             derive_token_shape_personality, derive_work_rhythm, ActivityIdentityProfile,
         },
-        style::LogKind,
+        style::{source_display_name, LogKind},
         view_model::{
             BioView, EarnedHabitatPropView, EventView, HabitatView, PetRenderModel, ProgressView,
             SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel,
@@ -143,6 +143,7 @@ pub(crate) fn build_watch_view_model_at(
         .iter()
         .map(|(name, v)| SourceUsageView {
             name: name.clone(),
+            display_name: source_display_name(name).to_string(),
             effective_tokens: *v,
         })
         .collect();
@@ -559,7 +560,8 @@ fn source_health(
                 SourceStatus::Blocked
             };
             SourceHealthView {
-                name,
+                name: name.clone(),
+                display_name: source_display_name(&name).to_string(),
                 status,
                 today_effective_tokens: today_for_source,
                 bucket_effective_tokens,
@@ -1293,10 +1295,12 @@ mod tests {
         let sources = vec![
             SourceUsageView {
                 name: "claude-code".to_string(),
+                display_name: "claude".to_string(),
                 effective_tokens: 12_000.0,
             },
             SourceUsageView {
                 name: "codex".to_string(),
+                display_name: "codex".to_string(),
                 effective_tokens: 500.0,
             },
         ];

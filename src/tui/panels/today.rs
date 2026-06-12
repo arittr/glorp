@@ -322,6 +322,7 @@ mod tests {
         vm.source_health = vec![
             SourceHealthView {
                 name: "codex".to_string(),
+                display_name: "codex".to_string(),
                 status: SourceStatus::Blocked,
                 today_effective_tokens: 0.0,
                 bucket_effective_tokens: 0.0,
@@ -330,6 +331,7 @@ mod tests {
             },
             SourceHealthView {
                 name: "claude-code".to_string(),
+                display_name: "claude".to_string(),
                 status: SourceStatus::Ready,
                 today_effective_tokens: 12_900.0,
                 bucket_effective_tokens: 1_300.0,

@@ -418,6 +418,7 @@ fn blocked_provider_state_renders_calm_setup_view() {
         .push("install ccusage or use npm package with bundled helpers".into());
     vm.source_health = vec![SourceHealthView {
         name: "claude-code".into(),
+        display_name: "claude".into(),
         status: SourceStatus::Blocked,
         today_effective_tokens: 0.0,
         bucket_effective_tokens: 0.0,
@@ -618,6 +619,7 @@ fn source_health_rows_render_ready_and_diagnostic_states_together() {
     vm.source_health = vec![
         SourceHealthView {
             name: "claude-code".into(),
+            display_name: "claude".into(),
             status: SourceStatus::Ready,
             today_effective_tokens: 4_200.0,
             bucket_effective_tokens: 1_300.0,
@@ -626,6 +628,7 @@ fn source_health_rows_render_ready_and_diagnostic_states_together() {
         },
         SourceHealthView {
             name: "codex".into(),
+            display_name: "codex".into(),
             status: SourceStatus::Diagnostic,
             today_effective_tokens: 0.0,
             bucket_effective_tokens: 0.0,

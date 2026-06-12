@@ -94,6 +94,7 @@ pub struct EarnedHabitatPropView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceUsageView {
     pub name: String,
+    pub display_name: String,
     pub effective_tokens: f64,
 }
 
@@ -107,6 +108,7 @@ pub enum SourceStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceHealthView {
     pub name: String,
+    pub display_name: String,
     pub status: SourceStatus,
     pub today_effective_tokens: f64,
     pub bucket_effective_tokens: f64,
@@ -192,16 +194,19 @@ impl WatchViewModel {
             source_breakdown: vec![
                 SourceUsageView {
                     name: "claude-code".into(),
+                    display_name: "claude".into(),
                     effective_tokens: 12_900.0,
                 },
                 SourceUsageView {
                     name: "codex".into(),
+                    display_name: "codex".into(),
                     effective_tokens: 5_520.0,
                 },
             ],
             source_health: vec![
                 SourceHealthView {
                     name: "claude-code".into(),
+                    display_name: "claude".into(),
                     status: SourceStatus::Ready,
                     today_effective_tokens: 12_900.0,
                     bucket_effective_tokens: 1_300.0,
@@ -210,6 +215,7 @@ impl WatchViewModel {
                 },
                 SourceHealthView {
                     name: "codex".into(),
+                    display_name: "codex".into(),
                     status: SourceStatus::Ready,
                     today_effective_tokens: 5_520.0,
                     bucket_effective_tokens: 1_000.0,

@@ -28,7 +28,7 @@ use crate::{
             scene_effect_targets_from_layout,
         },
         render_context::RenderContext,
-        style::LogKind,
+        style::{source_display_name, LogKind},
         view_model::{EventView, SourceUsageView},
     },
 };
@@ -725,6 +725,7 @@ pub fn run_single_watch_tick_for_test(harness: &mut WatchTestHarness) -> Result<
     } else {
         vm.source_breakdown.push(SourceUsageView {
             name: harness.source_name.clone(),
+            display_name: source_display_name(&harness.source_name).to_string(),
             effective_tokens: harness.effective_delta,
         });
     }
