@@ -2,7 +2,7 @@ use crate::{
     error::{GlorpError, Result},
     game::runtime::{apply_unapplied_usage, stage_usage_poll_deltas},
     paths::AppPaths,
-    storage::{state::StateStore, usage_store::UsageStore},
+    storage::{day_axis::LocalDayMapper, state::StateStore, usage_store::UsageStore},
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
 use time::OffsetDateTime;
@@ -39,7 +39,7 @@ pub fn run() -> Result<()> {
                         config.discontinuity_guard_ratio,
                         now,
                     )?;
-                    let mapper = crate::storage::day_axis::LocalDayMapper::System;
+                    let mapper = LocalDayMapper::System;
                     let scene_asleep =
                         crate::tui::day::scene_asleep_for_poll(&usage_store, &state, now, mapper);
                     let update =
@@ -52,7 +52,7 @@ pub fn run() -> Result<()> {
                     recent_effective = update.recent_effective_tokens;
                 }
                 let status_now = OffsetDateTime::now_utc();
-                let mapper = crate::storage::day_axis::LocalDayMapper::System;
+                let mapper = LocalDayMapper::System;
                 today_effective = usage_store
                     .today_effective_tokens(status_now, mapper)
                     .unwrap_or(0.0);

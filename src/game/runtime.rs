@@ -10,6 +10,7 @@ use crate::{
     },
     pet::narration,
     storage::{
+        day_axis::LocalDayMapper,
         state::{NarrativeEvent, PetState, Vitals as StoredVitals},
         usage_store::{NormalizedUsageEvent, ProviderDiagnostic, UsageLedgerRow, UsageStore},
     },
@@ -379,7 +380,7 @@ pub fn apply_unapplied_usage(
             });
         }
     }
-    let mapper = crate::storage::day_axis::LocalDayMapper::System;
+    let mapper = LocalDayMapper::System;
     let today_start = mapper
         .local_day_start(mapper.local_date(now))
         .to_offset(time::UtcOffset::UTC);
