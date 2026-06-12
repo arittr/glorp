@@ -1,7 +1,7 @@
 use crate::tui::component::{ComponentStyle, GradientToken, TextTone};
 use crate::tui::panels::bars::{bar_spans, build_spark_line, format_tokens_short};
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{claude_color, codex_color, semantic_styles, tokenpet_palette, xp_color};
+use crate::tui::style::{semantic_styles, source_color, tokenpet_palette, xp_color};
 use crate::tui::view_model::WatchViewModel;
 use ratatui::{
     buffer::Buffer,
@@ -390,12 +390,22 @@ impl<'a> FeedList<'a> {
 
 fn build_feed_lines(vm: &WatchViewModel, max_rows: u16) -> Vec<Line<'_>> {
     let styles = semantic_styles();
+    let mut source_names: Vec<&str> = vm
+        .source_breakdown
+        .iter()
+        .map(|s| s.name.as_str())
+        .chain(vm.source_health.iter().map(|h| h.name.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    source_names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     vm.recent_events
         .iter()
         .take(max_rows as usize)
         .map(|event| {
             let text_style = styles.log(event.kind);
-            let (source_span, rest_span) = extract_source_span(&event.text, text_style);
+            let (source_span, rest_span) =
+                extract_source_span(&event.text, &source_names, text_style);
             let mut spans = vec![
                 Span::raw("  "),
                 Span::styled(event.timestamp.as_str(), styles.timestamp),
@@ -410,14 +420,14 @@ fn build_feed_lines(vm: &WatchViewModel, max_rows: u16) -> Vec<Line<'_>> {
         .collect()
 }
 
-fn extract_source_span(text: &str, fallback_style: Style) -> (Span<'_>, Option<Span<'_>>) {
-    for name in &["claude-code", "codex"] {
+fn extract_source_span<'a>(
+    text: &'a str,
+    source_names: &[&str],
+    fallback_style: Style,
+) -> (Span<'a>, Option<Span<'a>>) {
+    for name in source_names {
         if let Some(rest) = text.strip_prefix(name) {
-            let color = if *name == "claude-code" {
-                claude_color()
-            } else {
-                codex_color()
-            };
+            let color = source_color(name);
             let source_span = Span::styled(&text[..name.len()], Style::default().fg(color));
             let rest_span = if rest.is_empty() {
                 None
@@ -435,7 +445,7 @@ mod tests {
     use super::*;
     use crate::tui::component::{BorderTone, ComponentStyle, Insets, Surface, TextTone};
     use crate::tui::render_context::RenderContext;
-    use crate::tui::style::{fed_color, ColorCapability};
+    use crate::tui::style::{fed_color, ColorCapability, LogKind};
     use ratatui::{buffer::Buffer, layout::Rect};
 
     #[test]
@@ -539,6 +549,62 @@ mod tests {
         assert!(lines.iter().any(|line| line.spans.iter().any(|span| {
             span.content.contains("codex") && span.style.fg == Some(codex_color())
         })));
+    }
+
+    #[test]
+    fn feed_list_colors_unknown_source_names() {
+        use crate::tui::style::source_color;
+        use crate::tui::view_model::{EventView, SourceUsageView};
+        let mut vm = WatchViewModel::fixture_with_events();
+        vm.source_breakdown = vec![SourceUsageView {
+            name: "gemini".into(),
+            display_name: "gemini".into(),
+            effective_tokens: 1_000.0,
+        }];
+        vm.recent_events = vec![EventView {
+            timestamp: "13:42".into(),
+            kind: LogKind::Usage,
+            text: "gemini added 1.2k effective tokens".into(),
+        }];
+        let lines = FeedList::from_watch(&vm, 3).lines();
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("gemini") && span.style.fg == Some(source_color("gemini"))
+            })
+        }));
+    }
+
+    #[test]
+    fn feed_list_prefers_longest_source_prefix() {
+        use crate::tui::view_model::{EventView, SourceUsageView};
+        let mut vm = WatchViewModel::fixture_with_events();
+        vm.source_breakdown = vec![
+            SourceUsageView {
+                name: "claude".into(),
+                display_name: "claude".into(),
+                effective_tokens: 500.0,
+            },
+            SourceUsageView {
+                name: "claude-code".into(),
+                display_name: "claude".into(),
+                effective_tokens: 1_000.0,
+            },
+        ];
+        vm.recent_events = vec![EventView {
+            timestamp: "13:42".into(),
+            kind: LogKind::Usage,
+            text: "claude-code added 1.0k effective tokens".into(),
+        }];
+        let lines = FeedList::from_watch(&vm, 3).lines();
+        let first_source_span = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("claude"))
+            .expect("expected a colored claude span");
+        assert_eq!(
+            first_source_span.content, "claude-code",
+            "must color the full longest source prefix"
+        );
     }
 
     fn buffer_text(buf: &Buffer) -> String {
