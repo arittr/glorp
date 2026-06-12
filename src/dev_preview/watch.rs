@@ -68,6 +68,16 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
         frames.push(render_alive_room_watch_frame(ctx, scratch_dir, fixture)?);
     }
 
+    frames.push(render_activity_identity_watch_frame(
+        ctx,
+        scratch_dir,
+        "watch-activity-identity-ensemble",
+        "Watch Activity Identity Ensemble",
+        120,
+        32,
+        seed_usage_store_ensemble,
+    )?);
+
     Ok(frames)
 }
 
@@ -239,6 +249,38 @@ fn render_watch_frame_from_state_with_life(
         render_watch_frame_with_layout(frame, &vm, &render, &layout);
     })?;
 
+    let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
+    frame.layout = Some(preview_layout(id, &layout));
+    Ok(frame)
+}
+
+fn render_activity_identity_watch_frame(
+    ctx: &PreviewRenderContext,
+    scratch_dir: &Path,
+    id: &str,
+    title: &str,
+    width: u16,
+    height: u16,
+    seed_usage: fn(&Path, OffsetDateTime) -> Result<()>,
+) -> Result<PreviewFrame> {
+    let state = seeded_pet_state(ctx);
+    let usage_path = scratch_dir.join(format!("{id}.sqlite"));
+    seed_usage(&usage_path, ctx.fixed_now)?;
+    let render = RenderContext::with_clock(
+        ctx.render.color_capability,
+        WatchClock::fixed(ctx.fixed_now),
+    );
+    let vm = build_watch_view_model_at(
+        &state,
+        &usage_path,
+        ctx.fixed_now,
+        crate::storage::day_axis::LocalDayMapper::Fixed(UtcOffset::UTC),
+    )?;
+    let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &render);
+    let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+    terminal.draw(|frame| {
+        render_watch_frame_with_layout(frame, &vm, &render, &layout);
+    })?;
     let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
     frame.layout = Some(preview_layout(id, &layout));
     Ok(frame)
@@ -1567,6 +1609,34 @@ fn seed_usage_store(path: &Path, now: OffsetDateTime) -> Result<()> {
     Ok(())
 }
 
+fn seed_usage_store_ensemble(path: &Path, now: OffsetDateTime) -> Result<()> {
+    let mut usage = UsageStore::open(path)?;
+    for (surface, observed_at, effective_tokens, model) in [
+        (
+            "claude-code",
+            now - Duration::minutes(5),
+            12_000.0,
+            "claude-sonnet",
+        ),
+        ("codex", now - Duration::minutes(8), 8_000.0, "gpt-5-codex"),
+        (
+            "gemini",
+            now - Duration::minutes(12),
+            7_500.0,
+            "gemini-2.5-pro",
+        ),
+        ("opencode", now - Duration::minutes(15), 4_500.0, "unknown"),
+    ] {
+        usage.insert_event(&NormalizedUsageEvent {
+            provider_surface: surface.to_string(),
+            model: Some(model.to_string()),
+            provider_delta_id: Some(format!("preview-ensemble-{surface}-{effective_tokens}")),
+            ..NormalizedUsageEvent::for_test_at(observed_at, effective_tokens)
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1578,7 +1648,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 37);
+        assert_eq!(frames.len(), 38);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -1644,6 +1714,8 @@ mod tests {
         assert_eq!((frames[35].width, frames[35].height), (120, 32));
         assert_eq!(frames[36].id, "room-dawn-wake-small");
         assert_eq!((frames[36].width, frames[36].height), (72, 24));
+        assert_eq!(frames[37].id, "watch-activity-identity-ensemble");
+        assert_eq!((frames[37].width, frames[37].height), (120, 32));
     }
 
     #[test]

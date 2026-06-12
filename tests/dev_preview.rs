@@ -49,6 +49,8 @@ const ALIVE_ROOM_WATCH_IDS: [&str; 8] = [
     "room-dawn-wake-small",
 ];
 
+const ACTIVITY_IDENTITY_WATCH_IDS: [&str; 1] = ["watch-activity-identity-ensemble"];
+
 struct PreviewRun {
     _dir: TempDir,
     out: PathBuf,
@@ -195,6 +197,20 @@ fn dev_preview_watch_writes_expected_artifacts() {
         assert!(
             run.out.join(format!("frames/{id}.room.txt")).is_file(),
             "missing {id} room text artifact"
+        );
+    }
+    for id in ACTIVITY_IDENTITY_WATCH_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id} text artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.cells.json")).is_file(),
+            "missing {id} cells artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.layout.json")).is_file(),
+            "missing {id} layout artifact"
         );
     }
 
