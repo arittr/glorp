@@ -2,6 +2,7 @@ use crate::game::metabolism::Mood;
 use crate::game::{evolution::Stage, habitat::HabitatPropKind};
 use crate::pet::generation::Species;
 use crate::storage::state::{HabitatPropId, HabitatPropSource};
+use crate::tui::identity::ActivityIdentityProfile;
 use crate::tui::life::PetLifeProfile;
 use crate::tui::style::LogKind;
 
@@ -12,6 +13,7 @@ pub struct WatchViewModel {
     pub pet_render: PetRenderModel,
     pub habitat: HabitatView,
     pub life_profile: PetLifeProfile,
+    pub activity_identity: ActivityIdentityProfile,
     /// Derived time-of-day context. Built once per poll alongside the vm;
     /// per-frame consumers compare clock instants against its UTC boundaries.
     pub day_context: crate::tui::day::DayContext,
@@ -173,6 +175,7 @@ impl WatchViewModel {
                 earned_props: Vec::new(),
             },
             life_profile: PetLifeProfile::default(),
+            activity_identity: ActivityIdentityProfile::default(),
             day_context: crate::tui::day::DayContext::default(),
             pet_name: "miso".into(),
             species: "terminal sprout".into(),

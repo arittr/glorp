@@ -19,6 +19,10 @@ use crate::{
     },
     tui::{
         app::{WatchApp, WatchPollResult, WatchUsagePoller},
+        identity::{
+            derive_recovery_pattern, derive_relative_intensity, derive_source_diversity,
+            derive_token_shape_personality, derive_work_rhythm, ActivityIdentityProfile,
+        },
         style::LogKind,
         view_model::{
             BioView, EarnedHabitatPropView, EventView, HabitatView, PetRenderModel, ProgressView,
@@ -110,6 +114,28 @@ pub(crate) fn build_watch_view_model_at(
         .unwrap_or_default();
     let today_total_tokens: f64 = today_totals.iter().map(|(_, v)| *v).sum();
     let last_10m_total_tokens: f64 = last_10m_totals.iter().map(|(_, v)| *v).sum();
+    let today_applied_by_source = usage_store
+        .applied_effective_tokens_by_source_between(today_start, now + Duration::seconds(1))
+        .unwrap_or_default();
+    let source_diversity = derive_source_diversity(&today_applied_by_source);
+    let rhythm = derive_work_rhythm(&usage_store, today_start, now + Duration::seconds(1));
+    let today_shape = usage_store
+        .applied_token_shape_between(today_start, now + Duration::seconds(1))
+        .unwrap_or_default();
+    let token_shape = derive_token_shape_personality(today_shape);
+    let today_applied_total: f64 = usage_store
+        .applied_effective_tokens_between(today_start, now + Duration::seconds(1))
+        .unwrap_or(0.0);
+    let relative_intensity = derive_relative_intensity(today_applied_total, state.calibration);
+    let recovery = derive_recovery_pattern(&usage_store, now);
+    let activity_identity = ActivityIdentityProfile {
+        source_diversity,
+        rhythm,
+        token_shape,
+        relative_intensity,
+        recovery,
+        long_term_milestones: Vec::new(), // Phase E
+    };
     let source_breakdown: Vec<SourceUsageView> = today_totals
         .iter()
         .map(|(name, v)| SourceUsageView {
@@ -163,6 +189,7 @@ pub(crate) fn build_watch_view_model_at(
         },
         habitat: build_habitat_view(state),
         life_profile,
+        activity_identity,
         day_context,
         pet_name: state.pet.accepted_name.clone(),
         species: species.as_str().to_string(),
@@ -770,6 +797,7 @@ mod tests {
         state::PetState,
         usage_store::{ProviderCursorUpdate, UsageStore},
     };
+    use crate::tui::identity::SourceDiversity;
     use crate::usage::identity::SourceIdentity;
     use crate::usage::provider::{UsageDelta, UsagePollResult};
     use tempfile::tempdir;
@@ -1466,6 +1494,42 @@ mod tests {
         assert_eq!(
             vm.habitat.earned_props[0].source,
             crate::storage::state::HabitatPropSource::HeavySession
+        );
+    }
+
+    #[test]
+    fn view_model_carries_activity_identity() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut store = UsageStore::open(&db_path).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+        // Two sources today -> dual-lane.
+        let mut claude = NormalizedUsageEvent::for_test_at(now - Duration::minutes(5), 50_000.0);
+        claude.provider_surface = "claude-code".into();
+        let mut codex = NormalizedUsageEvent::for_test_at(now - Duration::minutes(5), 50_000.0);
+        codex.provider_surface = "codex".into();
+        store.insert_event(&claude).unwrap();
+        store.insert_event(&codex).unwrap();
+
+        drop(store);
+        let mut state = PetState::new_for_test("test", "Mochi");
+        state.calibration.daily_effective_tokens = 100_000.0;
+
+        let vm = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
+        assert_eq!(
+            vm.activity_identity.source_diversity,
+            SourceDiversity::DualLane
+        );
+        assert_eq!(
+            vm.activity_identity.relative_intensity,
+            crate::tui::identity::RelativeIntensity::Normal
         );
     }
 }
