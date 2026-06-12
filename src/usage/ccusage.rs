@@ -3,7 +3,6 @@ use crate::game::effective_tokens::EffectiveTokenWeights;
 use crate::storage::usage_store::{
     ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
 };
-use crate::usage::identity::SourceIdentity;
 use crate::usage::normalize::{normalize_usage_json, NormalizedUsageRecord, RawTokenTotals};
 use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
@@ -34,6 +33,7 @@ pub struct HelperCommand {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HelperPaths {
+    pub unified: Option<PathBuf>,
     pub claude: Option<PathBuf>,
     pub codex: Option<PathBuf>,
     pub node: Option<PathBuf>,
@@ -252,11 +252,12 @@ impl CcusageCommandProvider {
             };
 
             let cursor_key = cursor_key(&key)?;
-            let previous_raw = match store.provider_cursor(provider_surface, &cursor_key) {
+            let cursor_partition = record.provider_surface.clone();
+            let previous_raw = match store.provider_cursor(&cursor_partition, &cursor_key) {
                 Ok(Some(value)) => Some(value),
                 Ok(None) => match read_legacy_cursor_value(
                     store,
-                    provider_surface,
+                    &cursor_partition,
                     command_name,
                     &record.period_start,
                     record.model.clone(),
@@ -264,7 +265,7 @@ impl CcusageCommandProvider {
                 ) {
                     Ok(Some(value)) => {
                         store.set_provider_cursor(
-                            provider_surface,
+                            &cursor_partition,
                             &cursor_key,
                             &value,
                             &version,
@@ -315,7 +316,7 @@ impl CcusageCommandProvider {
                 // cursor_total_decreased is a hard reset (not a normal advance).
                 write_cursor(
                     store,
-                    provider_surface,
+                    &cursor_partition,
                     &cursor_key,
                     record.raw_totals,
                     &version,
@@ -333,7 +334,7 @@ impl CcusageCommandProvider {
             let effective_tokens = delta_totals.effective_tokens(weights);
             let cursor_value = serde_json::to_string(&record.raw_totals)?;
             let cursor_update = ProviderCursorUpdate {
-                provider_surface: provider_surface.to_string(),
+                provider_surface: cursor_partition,
                 cursor_key: cursor_key.clone(),
                 cursor_value,
                 provider_version: version.clone(),
@@ -346,7 +347,7 @@ impl CcusageCommandProvider {
             // via `apply_unapplied_usage`.
             deltas.push(UsageDelta {
                 provider_surface: record.provider_surface.clone(),
-                source_identity: SourceIdentity::from_provider_surface(&record.provider_surface),
+                source_identity: record.source_identity.clone(),
                 command: command_name.to_string(),
                 effective_tokens,
                 confidence: CONFIDENCE.to_string(),
@@ -423,7 +424,7 @@ impl CcusageCommandProvider {
             let cursor_key = cursor_key(&key)?;
             let cursor_value = serde_json::to_string(&record.raw_totals)?;
             cursor_updates.push(ProviderCursorUpdate {
-                provider_surface: provider_surface.to_string(),
+                provider_surface: record.provider_surface.clone(),
                 cursor_key,
                 cursor_value,
                 provider_version: version.clone(),
@@ -493,6 +494,17 @@ pub(crate) fn run_command_with_timeout(command: &mut Command, timeout: Duration)
 
 impl UsageProvider for CcusageCommandProvider {
     fn poll(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
+        let unified = self.poll_helper(
+            store,
+            "unified",
+            "ccusage",
+            self.helpers.unified.as_deref(),
+            &["daily", "--json", "--offline", "--order", "asc"],
+        )?;
+        if unified.total_effective_tokens > 0.0 {
+            return Ok(unified);
+        }
+
         let claude = self.poll_helper(
             store,
             CLAUDE_SURFACE,
@@ -510,7 +522,8 @@ impl UsageProvider for CcusageCommandProvider {
 
         let mut deltas = claude.deltas;
         deltas.extend(codex.deltas);
-        let mut diagnostics = claude.diagnostics;
+        let mut diagnostics = unified.diagnostics;
+        diagnostics.extend(claude.diagnostics);
         diagnostics.extend(codex.diagnostics);
         let total_effective_tokens = deltas.iter().map(|delta| delta.effective_tokens).sum();
         Ok(UsagePollResult {
@@ -521,6 +534,17 @@ impl UsageProvider for CcusageCommandProvider {
     }
 
     fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot> {
+        let unified = self.snapshot_helper(
+            store,
+            "unified",
+            "ccusage",
+            self.helpers.unified.as_deref(),
+            &["daily", "--json", "--offline", "--order", "asc"],
+        )?;
+        if !unified.daily_usage.is_empty() || !unified.cursor_updates.is_empty() {
+            return Ok(unified);
+        }
+
         let claude = self.snapshot_helper(
             store,
             CLAUDE_SURFACE,
@@ -540,9 +564,9 @@ impl UsageProvider for CcusageCommandProvider {
         daily_usage.extend(codex.daily_usage);
         let mut cursor_updates = claude.cursor_updates;
         cursor_updates.extend(codex.cursor_updates);
-        let mut diagnostics = claude.diagnostics;
+        let mut diagnostics = unified.diagnostics;
+        diagnostics.extend(claude.diagnostics);
         diagnostics.extend(codex.diagnostics);
-
         Ok(UsageSnapshot {
             daily_usage,
             cursor_updates,
@@ -599,6 +623,7 @@ impl HelperDiscovery {
 impl From<HelperDiscovery> for HelperPaths {
     fn from(discovery: HelperDiscovery) -> Self {
         Self {
+            unified: discovery.claude.clone(),
             claude: discovery.claude,
             codex: discovery.codex,
             node: discovery.node,

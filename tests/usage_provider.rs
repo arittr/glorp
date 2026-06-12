@@ -17,6 +17,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
 
 fn provider(claude: Option<&str>, codex: Option<&str>) -> CcusageCommandProvider {
     CcusageCommandProvider::new(HelperPaths {
+        unified: None,
         claude: claude.map(fixture),
         codex: codex.map(fixture),
         node: None,
@@ -152,7 +153,10 @@ fn missing_helpers_return_diagnostics_without_delta() {
 
     assert_eq!(result.total_effective_tokens, 0.0);
     assert!(result.deltas.is_empty());
-    assert_eq!(result.diagnostics.len(), 2);
+    assert_eq!(result.diagnostics.len(), 3);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.provider_surface == "unified" && diagnostic.code == "missing_helper"
+    }));
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.provider_surface == "claude-code" && diagnostic.code == "missing_helper"
     }));
@@ -166,6 +170,7 @@ fn missing_node_for_javascript_helper_returns_diagnostic_without_delta() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let provider = CcusageCommandProvider::new(HelperPaths {
+        unified: None,
         claude: Some(fixture("ccusage-ok.mjs")),
         codex: None,
         node: Some(dir.path().join("missing-node")),
@@ -196,7 +201,14 @@ fn transcript_like_fields_are_ignored() {
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let provider = provider(Some("ccusage-prompts.mjs"), Some("ccusage-codex-ok.mjs"));
     let result = provider.poll(&mut store).unwrap();
-    assert_eq!(result.diagnostics.len(), 0);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|d| d.code == "missing_helper"),
+        "expected only optional-helper-missing diagnostics, got {:?}",
+        result.diagnostics
+    );
 
     let mut state = PetState::new_for_test("test-seed", "test");
     state.calibration.daily_effective_tokens = 100_000.0;
@@ -269,6 +281,7 @@ fn provider_uses_configured_cache_read_weight_for_real_deltas() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let provider = CcusageCommandProvider::new(HelperPaths {
+        unified: None,
         claude: Some(fixture("ccusage-ok.mjs")),
         codex: None,
         node: None,
@@ -279,6 +292,7 @@ fn provider_uses_configured_cache_read_weight_for_real_deltas() {
 
     complete_poll_lifecycle(&provider, &mut store);
     let next_provider = CcusageCommandProvider::new(HelperPaths {
+        unified: None,
         claude: Some(fixture("ccusage-next.mjs")),
         codex: None,
         node: None,
