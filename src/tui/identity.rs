@@ -1,3 +1,6 @@
+use crate::game::calibration::CalibrationBaseline;
+use crate::game::effective_tokens::EffectiveTokenWeights;
+use crate::storage::usage_store::AppliedShapeSums;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +108,50 @@ pub fn derive_source_diversity(per_source: &[(String, f64)]) -> SourceDiversity 
     }
 }
 
+pub fn derive_token_shape_personality(shape: AppliedShapeSums) -> TokenShapePersonality {
+    let weights = EffectiveTokenWeights::default();
+    let weighted_input = shape.input_tokens;
+    let weighted_output = shape.output_tokens;
+    let weighted_cache_creation = shape.cache_creation_tokens;
+    let weighted_cache_read = shape.cache_read_tokens * weights.cache_read_weight;
+    let weighted_reasoning = shape.reasoning_output_tokens;
+    let total = weighted_input
+        + weighted_output
+        + weighted_cache_creation
+        + weighted_cache_read
+        + weighted_reasoning;
+    if total <= 0.0 || !total.is_finite() {
+        return TokenShapePersonality::UnknownShape;
+    }
+    let cache = (weighted_cache_creation + weighted_cache_read) / total;
+    let output = weighted_output / total;
+    let reasoning = weighted_reasoning / total;
+    if cache >= 0.55 {
+        TokenShapePersonality::CacheHeavy
+    } else if output >= 0.45 {
+        TokenShapePersonality::OutputHeavy
+    } else if reasoning >= 0.30 {
+        TokenShapePersonality::ReasoningHeavy
+    } else if cache >= 0.20 || output >= 0.20 || reasoning >= 0.10 {
+        TokenShapePersonality::Balanced
+    } else {
+        TokenShapePersonality::UnknownShape
+    }
+}
+
+pub fn derive_relative_intensity(
+    today_tokens: f64,
+    baseline: CalibrationBaseline,
+) -> RelativeIntensity {
+    let daily = baseline.daily_effective_tokens.max(1.0);
+    match today_tokens / daily {
+        r if r < 0.25 => RelativeIntensity::Quiet,
+        r if r <= 1.25 => RelativeIntensity::Normal,
+        r if r <= 3.0 => RelativeIntensity::Heavy,
+        _ => RelativeIntensity::Huge,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +205,71 @@ mod tests {
         assert_eq!(
             derive_source_diversity(&[("claude".into(), 60.0), ("codex".into(), 30.0)]),
             SourceDiversity::DualLane
+        );
+    }
+
+    #[test]
+    fn token_shape_and_intensity() {
+        let cache_heavy = AppliedShapeSums {
+            input_tokens: 10_000.0,
+            output_tokens: 10_000.0,
+            cache_creation_tokens: 0.0,
+            cache_read_tokens: 1_000_000.0,
+            reasoning_output_tokens: 0.0,
+            effective_tokens: 50_000.0,
+        };
+        assert_eq!(
+            derive_token_shape_personality(cache_heavy),
+            TokenShapePersonality::CacheHeavy
+        );
+
+        let output_heavy = AppliedShapeSums {
+            input_tokens: 10_000.0,
+            output_tokens: 60_000.0,
+            cache_creation_tokens: 0.0,
+            cache_read_tokens: 0.0,
+            reasoning_output_tokens: 0.0,
+            effective_tokens: 70_000.0,
+        };
+        assert_eq!(
+            derive_token_shape_personality(output_heavy),
+            TokenShapePersonality::OutputHeavy
+        );
+
+        let reasoning = AppliedShapeSums {
+            input_tokens: 10_000.0,
+            output_tokens: 10_000.0,
+            cache_creation_tokens: 0.0,
+            cache_read_tokens: 0.0,
+            reasoning_output_tokens: 40_000.0,
+            effective_tokens: 60_000.0,
+        };
+        assert_eq!(
+            derive_token_shape_personality(reasoning),
+            TokenShapePersonality::ReasoningHeavy
+        );
+
+        assert_eq!(
+            derive_token_shape_personality(AppliedShapeSums::default()),
+            TokenShapePersonality::UnknownShape
+        );
+
+        let baseline = CalibrationBaseline::default();
+        assert_eq!(
+            derive_relative_intensity(0.0, baseline),
+            RelativeIntensity::Quiet
+        );
+        assert_eq!(
+            derive_relative_intensity(50_000.0, baseline),
+            RelativeIntensity::Normal
+        );
+        assert_eq!(
+            derive_relative_intensity(150_000.0, baseline),
+            RelativeIntensity::Heavy
+        );
+        assert_eq!(
+            derive_relative_intensity(400_000.0, baseline),
+            RelativeIntensity::Huge
         );
     }
 }
