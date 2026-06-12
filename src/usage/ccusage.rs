@@ -178,8 +178,8 @@ impl CcusageCommandProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let records = match normalize_usage_json(provider_surface, &stdout) {
-            Ok(records) => records,
+        let batch = match normalize_usage_json(provider_surface, &stdout) {
+            Ok(batch) => batch,
             Err(diagnostic) => {
                 persist_diagnostic(store, &diagnostic)?;
                 return Ok(HelperInvocation::EarlyExit {
@@ -187,6 +187,10 @@ impl CcusageCommandProvider {
                 });
             }
         };
+        for diagnostic in batch.diagnostics {
+            persist_diagnostic(store, &diagnostic)?;
+        }
+        let records = batch.records;
 
         Ok(HelperInvocation::Records { version, records })
     }

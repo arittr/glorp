@@ -1,4 +1,5 @@
 use crate::game::effective_tokens::{EffectiveTokenWeights, TokenBuckets};
+use crate::usage::identity::SourceIdentity;
 use crate::usage::provider::ProviderDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,8 +48,15 @@ impl RawTokenTotals {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct NormalizedUsageBatch {
+    pub records: Vec<NormalizedUsageRecord>,
+    pub diagnostics: Vec<ProviderDiagnostic>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NormalizedUsageRecord {
+    pub source_identity: SourceIdentity,
     pub provider_surface: String,
     pub period_start: String,
     pub model: Option<String>,
@@ -60,58 +68,115 @@ pub struct NormalizedUsageRecord {
 pub fn normalize_usage_json(
     provider_surface: &str,
     text: &str,
-) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
+) -> std::result::Result<NormalizedUsageBatch, ProviderDiagnostic> {
     let value: Value = serde_json::from_str(text).map_err(|_| ProviderDiagnostic {
         provider_surface: provider_surface.to_string(),
         code: "invalid_json".to_string(),
         message: format!("{provider_surface} returned invalid_json"),
     })?;
-
-    normalize_usage_value(provider_surface, &value)
+    Ok(normalize_usage_value(provider_surface, &value))
 }
 
-fn normalize_usage_value(
-    provider_surface: &str,
-    value: &Value,
-) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
-    let rows = value
+fn normalize_usage_value(provider_surface: &str, value: &Value) -> NormalizedUsageBatch {
+    let mut batch = NormalizedUsageBatch::default();
+    let rows = match value
         .get("daily")
         .or_else(|| value.get("data"))
         .and_then(Value::as_array)
-        .ok_or_else(|| ProviderDiagnostic {
-            provider_surface: provider_surface.to_string(),
-            code: "missing_token_fields".to_string(),
-            message: format!("{provider_surface} missing fields daily/data"),
-        })?;
+    {
+        Some(rows) => rows,
+        None => {
+            batch.diagnostics.push(ProviderDiagnostic {
+                provider_surface: provider_surface.to_string(),
+                code: "missing_token_fields".to_string(),
+                message: format!("{provider_surface} missing fields daily/data"),
+            });
+            return batch;
+        }
+    };
 
-    let mut normalized = Vec::new();
     for row in rows {
-        if provider_surface == "codex" {
-            normalized.extend(normalize_codex_row(provider_surface, row)?);
-        } else {
-            normalized.extend(normalize_claude_row(provider_surface, row)?);
+        match normalize_row(provider_surface, row) {
+            Ok(records) => batch.records.extend(records),
+            Err(diagnostic) => batch.diagnostics.push(diagnostic),
         }
     }
-    normalized.sort_by(|a, b| {
+    batch.records.sort_by(|a, b| {
         a.period_start
             .cmp(&b.period_start)
             .then_with(|| a.model.cmp(&b.model))
+            .then_with(|| a.provider_surface.cmp(&b.provider_surface))
     });
-    Ok(normalized)
+    batch
 }
 
-fn normalize_claude_row(
+fn source_identity_from_row(provider_surface: &str, row: &Value) -> SourceIdentity {
+    if let Some(raw) = optional_string(row, "agent")
+        .or_else(|| optional_string(row, "source"))
+        .or_else(|| first_string(row, "sources"))
+    {
+        SourceIdentity::from_raw_agent(&raw)
+    } else {
+        SourceIdentity::from_provider_surface(provider_surface)
+    }
+}
+
+fn is_aggregate_all_row(row: &Value) -> bool {
+    optional_string(row, "agent")
+        .or_else(|| optional_string(row, "source"))
+        .is_some_and(|s| s.eq_ignore_ascii_case("all"))
+}
+
+fn normalize_row(
     provider_surface: &str,
     row: &Value,
 ) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
-    let period_start = period_start_field(provider_surface, row)?;
+    let source = source_identity_from_row(provider_surface, row);
+    let period_start = period_start_field(&source.provider_surface, row)?;
+
+    if let Some(breakdowns) = row.get("sourceBreakdowns").and_then(Value::as_array) {
+        let mut records = Vec::new();
+        for source_row in breakdowns {
+            let child_source = source_identity_from_row(provider_surface, source_row);
+            let child_period = period_start_field(&child_source.provider_surface, source_row)
+                .unwrap_or_else(|_| period_start.clone());
+            records.extend(normalize_single_source_record(
+                &child_source,
+                &child_period,
+                source_row,
+            )?);
+        }
+        if !records.is_empty() {
+            return Ok(records);
+        }
+    }
+
+    if source.provider_surface == "unknown" && is_aggregate_all_row(row) {
+        return Err(ProviderDiagnostic {
+            provider_surface: provider_surface.to_string(),
+            code: "aggregate_all_source_ignored".to_string(),
+            message: format!(
+                "{provider_surface} row has agent:all with no per-source breakdown; ignoring"
+            ),
+        });
+    }
+
+    normalize_single_source_record(&source, &period_start, row)
+}
+
+fn normalize_single_source_record(
+    source: &SourceIdentity,
+    period_start: &str,
+    row: &Value,
+) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
     if let Some(breakdowns) = row.get("modelBreakdowns").and_then(Value::as_array) {
         let mut records = Vec::new();
         for model_row in breakdowns {
-            let raw_totals = claude_totals(provider_surface, model_row)?;
+            let raw_totals = parse_claude_style_totals(&source.provider_surface, model_row)?;
             records.push(NormalizedUsageRecord {
-                provider_surface: provider_surface.to_string(),
-                period_start: period_start.clone(),
+                source_identity: source.clone(),
+                provider_surface: source.provider_surface.clone(),
+                period_start: period_start.to_string(),
                 model: optional_string(model_row, "modelName"),
                 raw_totals,
                 display_cost_usd: optional_f64(model_row, "cost"),
@@ -123,29 +188,14 @@ fn normalize_claude_row(
         }
     }
 
-    let raw_totals = claude_totals(provider_surface, row)?;
-    Ok(vec![NormalizedUsageRecord {
-        provider_surface: provider_surface.to_string(),
-        period_start,
-        model: first_string(row, "modelsUsed"),
-        raw_totals,
-        display_cost_usd: optional_f64(row, "totalCost"),
-        confidence: "local-log-derived".to_string(),
-    }])
-}
-
-fn normalize_codex_row(
-    provider_surface: &str,
-    row: &Value,
-) -> std::result::Result<Vec<NormalizedUsageRecord>, ProviderDiagnostic> {
-    let period_start = period_start_field(provider_surface, row)?;
     if let Some(models) = row.get("models").and_then(Value::as_object) {
         let mut records = Vec::new();
         for (model, model_row) in models {
-            let raw_totals = codex_totals(provider_surface, model_row)?;
+            let raw_totals = parse_openai_style_totals(&source.provider_surface, model_row)?;
             records.push(NormalizedUsageRecord {
-                provider_surface: provider_surface.to_string(),
-                period_start: period_start.clone(),
+                source_identity: source.clone(),
+                provider_surface: source.provider_surface.clone(),
+                period_start: period_start.to_string(),
                 model: Some(model.clone()),
                 raw_totals,
                 display_cost_usd: optional_f64(model_row, "costUSD")
@@ -158,18 +208,51 @@ fn normalize_codex_row(
         }
     }
 
-    let raw_totals = codex_totals(provider_surface, row)?;
+    let raw_totals = parse_row_totals_by_shape(&source.provider_surface, row)?;
     Ok(vec![NormalizedUsageRecord {
-        provider_surface: provider_surface.to_string(),
-        period_start,
-        model: None,
+        source_identity: source.clone(),
+        provider_surface: source.provider_surface.clone(),
+        period_start: period_start.to_string(),
+        model: first_string(row, "modelsUsed").or_else(|| optional_string(row, "model")),
         raw_totals,
-        display_cost_usd: optional_f64(row, "costUSD"),
+        display_cost_usd: optional_f64(row, "totalCost").or_else(|| optional_f64(row, "costUSD")),
         confidence: "local-log-derived".to_string(),
     }])
 }
 
-fn claude_totals(
+fn parse_row_totals_by_shape(
+    provider_surface: &str,
+    value: &Value,
+) -> std::result::Result<RawTokenTotals, ProviderDiagnostic> {
+    let has_cache_read = value.get("cacheReadTokens").is_some();
+    let has_cached_input = value.get("cachedInputTokens").is_some();
+
+    if has_cache_read && has_cached_input {
+        return Err(ProviderDiagnostic {
+            provider_surface: provider_surface.to_string(),
+            code: "ambiguous_token_shape".to_string(),
+            message: format!(
+                "{provider_surface} row has both cacheReadTokens and cachedInputTokens"
+            ),
+        });
+    }
+
+    if has_cache_read || value.get("cacheCreationTokens").is_some() {
+        return parse_claude_style_totals(provider_surface, value);
+    }
+
+    if has_cached_input {
+        return parse_openai_style_totals(provider_surface, value);
+    }
+
+    Err(ProviderDiagnostic {
+        provider_surface: provider_surface.to_string(),
+        code: "unsupported_token_shape".to_string(),
+        message: format!("{provider_surface} row has no recognizable cache token fields"),
+    })
+}
+
+fn parse_claude_style_totals(
     provider_surface: &str,
     value: &Value,
 ) -> std::result::Result<RawTokenTotals, ProviderDiagnostic> {
@@ -182,15 +265,10 @@ fn claude_totals(
     })
 }
 
-fn codex_totals(
+fn parse_openai_style_totals(
     provider_surface: &str,
     value: &Value,
 ) -> std::result::Result<RawTokenTotals, ProviderDiagnostic> {
-    // OpenAI/codex semantics: `inputTokens` is the TOTAL prompt size and
-    // `cachedInputTokens` is the cached subset of that total. So real
-    // uncached input is the difference. Claude's `inputTokens` is already
-    // exclusive of cache reads (separate field in Anthropic's API), so
-    // that path stays as-is.
     let total_input = required_u64(provider_surface, value, "inputTokens")?;
     let cached_input = required_u64(provider_surface, value, "cachedInputTokens")?;
     Ok(RawTokenTotals {
@@ -259,22 +337,18 @@ mod tests {
 
     #[test]
     fn codex_uncached_input_subtracts_cached_subset() {
-        // Real ccusage-codex emits `inputTokens` as the TOTAL prompt size
-        // and `cachedInputTokens` as the cached subset. Make sure we don't
-        // double-bill the cached portion at full input weight.
         let row = serde_json::json!({
             "inputTokens": 19_994_265,
             "outputTokens": 118_665,
             "cachedInputTokens": 19_074_688,
             "reasoningOutputTokens": 49_449
         });
-        let totals = codex_totals("codex", &row).unwrap();
+        let totals = parse_openai_style_totals("codex", &row).unwrap();
         assert_eq!(totals.uncached_input, 919_577);
         assert_eq!(totals.cache_read, 19_074_688);
 
         let weights = EffectiveTokenWeights::default();
         let effective = totals.effective_tokens(weights);
-        // Expected: 919_577 + 118_665 + 0 + 19_074_688 * 0.03 ≈ 1_610_482.64
         assert!(
             (1_610_000.0..1_611_000.0).contains(&effective),
             "got {effective}"
@@ -283,13 +357,10 @@ mod tests {
 
     #[test]
     fn ccusage_v20_period_field_is_accepted_for_claude_and_codex_rows() {
-        // ccusage 20.x renamed the daily row's `date` field to `period`
-        // (observed live 2026-06-10: helper 20.0.6 broke every claude poll
-        // with "missing field date"). Both spellings must normalize.
         let payload = serde_json::json!({
             "daily": [{
                 "period": "2026-06-10",
-                "agent": "all",
+                "agent": "claude",
                 "inputTokens": 30_344,
                 "outputTokens": 100_091,
                 "cacheCreationTokens": 1_893_797,
@@ -307,22 +378,29 @@ mod tests {
             }]
         })
         .to_string();
-        let records = normalize_usage_json("claude-code", &payload).unwrap();
-        assert!(!records.is_empty());
-        assert!(records.iter().all(|r| r.period_start == "2026-06-10"));
+        let batch = normalize_usage_json("claude-code", &payload).unwrap();
+        assert!(!batch.records.is_empty());
+        assert!(batch.records.iter().all(|r| r.period_start == "2026-06-10"));
 
         let codex_payload = serde_json::json!({
-            "daily": [{
-                "period": "2026-06-10",
-                "inputTokens": 100,
-                "outputTokens": 50,
-                "cachedInputTokens": 80,
-                "reasoningOutputTokens": 10
-            }]
+            "daily": [
+                {
+                    "period": "2026-06-10",
+                    "models": {
+                        "gpt-5": {
+                            "inputTokens": 900,
+                            "cachedInputTokens": 400,
+                            "outputTokens": 250,
+                            "reasoningOutputTokens": 50,
+                            "costUSD": 0.42
+                        }
+                    }
+                }
+            ]
         })
         .to_string();
-        let codex_records = normalize_usage_json("codex", &codex_payload).unwrap();
-        assert_eq!(codex_records[0].period_start, "2026-06-10");
+        let codex_batch = normalize_usage_json("codex", &codex_payload).unwrap();
+        assert_eq!(codex_batch.records[0].period_start, "2026-06-10");
     }
 
     #[test]
@@ -338,21 +416,19 @@ mod tests {
             }]
         })
         .to_string();
-        let records = normalize_usage_json("claude-code", &payload).unwrap();
-        assert_eq!(records[0].period_start, "2026-06-09");
+        let batch = normalize_usage_json("claude-code", &payload).unwrap();
+        assert_eq!(batch.records[0].period_start, "2026-06-09");
     }
 
     #[test]
     fn claude_input_already_excludes_cache_reads() {
-        // Claude's `inputTokens` is genuinely uncached input by API design,
-        // so the totals struct should mirror it 1:1.
         let row = serde_json::json!({
             "inputTokens": 100,
             "outputTokens": 200,
             "cacheCreationTokens": 50,
             "cacheReadTokens": 1000
         });
-        let totals = claude_totals("claude-code", &row).unwrap();
+        let totals = parse_claude_style_totals("claude-code", &row).unwrap();
         assert_eq!(totals.uncached_input, 100);
         assert_eq!(totals.cache_creation, 50);
         assert_eq!(totals.cache_read, 1000);
