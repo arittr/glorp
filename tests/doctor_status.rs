@@ -81,11 +81,9 @@ fn doctor_reports_helper_versions_when_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("helpers: found"))
+        .stdout(predicate::str::contains("provider command health: ok"))
         .stdout(predicate::str::contains(
-            "helper version: claude-code provider=ccusage 18.0.11 parser=ccusage 18.0.11",
-        ))
-        .stdout(predicate::str::contains(
-            "helper version: codex provider=ccusage-codex 18.0.11 parser=ccusage-codex 18.0.11",
+            "helper version: unified provider=ccusage 18.0.11 parser=ccusage 18.0.11",
         ));
 }
 
@@ -225,6 +223,9 @@ fn status_persists_real_usage_delta_into_pet_state() {
 
     let now = OffsetDateTime::now_utc();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    // The unified helper runs first; seed its cursor so the poll emits real
+    // deltas instead of being refused as first-contact history.
+    establish_provider_contact(&mut usage_store, "unified", now);
     establish_provider_contact(&mut usage_store, "claude-code", now);
     establish_provider_contact(&mut usage_store, "codex", now);
     drop(usage_store);
