@@ -382,6 +382,8 @@ pub fn apply_unapplied_usage(
         initial_mood,
         new_mood,
         now,
+        &crate::tui::identity::ActivityIdentityProfile::default(),
+        &[],
     );
     record_reflected_usage_event_ids(state, rows.iter().map(|row| row.id));
     state.previous_vitals = Some(initial_vitals);

@@ -6,6 +6,7 @@ use crate::{
         state::{EarnedHabitatProp, HabitatPropSource, PetState},
         usage_store::UsageLedgerRow,
     },
+    tui::identity::{ActivityIdentityProfile, RecoveryPattern},
 };
 
 pub use crate::storage::state::HabitatPropId;
@@ -78,6 +79,8 @@ pub const TOKEN_HANGING_VINE_25M: &str = "token_hanging_vine_25m";
 pub const CODEX_SIGNAL_LAMP: &str = "codex_signal_lamp";
 pub const HEAVY_SESSION_PLANTER: &str = "heavy_session_planter";
 pub const WILT_RECOVERY_SPROUT: &str = "wilt_recovery_sprout";
+pub const FIRST_ENSEMBLE_DAY: &str = "first_ensemble_day";
+pub const RETURN_SPROUT: &str = "return_sprout";
 
 pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
@@ -197,6 +200,24 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         pet_layer: HabitatPetLayer::Behind,
         color: (0x88, 0xc8, 0x78), // tender sprout
     },
+    HabitatPropSpec {
+        id: FIRST_ENSEMBLE_DAY,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::AirMid,
+        display_priority: 75,
+        lifetime_threshold: None,
+        pet_layer: HabitatPetLayer::Background,
+        color: (0xf0, 0xc4, 0x6a),
+    },
+    HabitatPropSpec {
+        id: RETURN_SPROUT,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::FloorLeft,
+        display_priority: 85,
+        lifetime_threshold: None,
+        pet_layer: HabitatPetLayer::Behind,
+        color: (0x88, 0xc8, 0x78),
+    },
 ];
 
 pub fn catalog_prop(id: &HabitatPropId) -> Option<&'static HabitatPropSpec> {
@@ -213,6 +234,7 @@ pub fn ladder_props() -> impl Iterator<Item = &'static HabitatPropSpec> {
         .filter(|prop| prop.lifetime_threshold.is_some())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn unlock_habitat_props(
     state: &mut PetState,
     rows: &[UsageLedgerRow],
@@ -220,10 +242,14 @@ pub fn unlock_habitat_props(
     initial_mood: Mood,
     new_mood: Mood,
     now: OffsetDateTime,
+    activity_profile: &ActivityIdentityProfile,
+    today_source_totals: &[(String, f64)],
 ) -> Vec<HabitatPropId> {
     let mut unlocked = Vec::new();
     unlock_lifetime_ladder(state, now, &mut unlocked);
     unlock_first_codex(state, rows, now, &mut unlocked);
+    unlock_first_ensemble_day(state, today_source_totals, now, &mut unlocked);
+    unlock_return_sprout(state, activity_profile, now, &mut unlocked);
     unlock_heavy_session(state, recent_effective_tokens, now, &mut unlocked);
     unlock_wilt_recovery(state, initial_mood, new_mood, now, &mut unlocked);
     unlocked
@@ -265,6 +291,52 @@ fn unlock_first_codex(
             HabitatPropId::new(CODEX_SIGNAL_LAMP),
             HabitatPropSource::ProviderFirstUse {
                 provider_surface: "codex".to_string(),
+            },
+            now,
+            unlocked,
+        );
+    }
+}
+
+fn unlock_first_ensemble_day(
+    state: &mut PetState,
+    today_source_totals: &[(String, f64)],
+    now: OffsetDateTime,
+    unlocked: &mut Vec<HabitatPropId>,
+) {
+    let total: f64 = today_source_totals.iter().map(|(_, v)| *v).sum();
+    if total <= 0.0 || !total.is_finite() {
+        return;
+    }
+    let significant = today_source_totals
+        .iter()
+        .filter(|(_, v)| *v / total >= 0.10)
+        .count();
+    if significant >= 3 {
+        record_prop(
+            state,
+            HabitatPropId::new(FIRST_ENSEMBLE_DAY),
+            HabitatPropSource::ActivityMilestone {
+                milestone: "first_ensemble_day".to_string(),
+            },
+            now,
+            unlocked,
+        );
+    }
+}
+
+fn unlock_return_sprout(
+    state: &mut PetState,
+    activity_profile: &ActivityIdentityProfile,
+    now: OffsetDateTime,
+    unlocked: &mut Vec<HabitatPropId>,
+) {
+    if matches!(activity_profile.recovery, RecoveryPattern::Returned) {
+        record_prop(
+            state,
+            HabitatPropId::new(RETURN_SPROUT),
+            HabitatPropSource::ActivityMilestone {
+                milestone: "return_sprout".to_string(),
             },
             now,
             unlocked,
@@ -435,5 +507,58 @@ mod tests {
                 "{id} should default to Background"
             );
         }
+    }
+
+    #[test]
+    fn first_ensemble_day_unlocks_with_three_sources() {
+        let mut state = PetState::new_for_test("seed", "miso");
+        let today = vec![
+            ("claude".to_string(), 4_000.0),
+            ("codex".to_string(), 3_000.0),
+            ("gemini".to_string(), 3_000.0),
+        ];
+        let mut unlocked = Vec::new();
+        unlock_first_ensemble_day(
+            &mut state,
+            &today,
+            OffsetDateTime::UNIX_EPOCH,
+            &mut unlocked,
+        );
+        assert!(unlocked.iter().any(|id| id.as_str() == FIRST_ENSEMBLE_DAY));
+    }
+
+    #[test]
+    fn first_ensemble_day_requires_three_significant_sources() {
+        let mut state = PetState::new_for_test("seed", "miso");
+        let today = vec![
+            ("claude".to_string(), 9_000.0),
+            ("codex".to_string(), 900.0),
+            ("gemini".to_string(), 100.0),
+        ];
+        let mut unlocked = Vec::new();
+        unlock_first_ensemble_day(
+            &mut state,
+            &today,
+            OffsetDateTime::UNIX_EPOCH,
+            &mut unlocked,
+        );
+        assert!(!unlocked.iter().any(|id| id.as_str() == FIRST_ENSEMBLE_DAY));
+    }
+
+    #[test]
+    fn return_sprout_unlocks_on_returned_recovery() {
+        let mut state = PetState::new_for_test("seed", "miso");
+        let profile = ActivityIdentityProfile {
+            recovery: RecoveryPattern::Returned,
+            ..Default::default()
+        };
+        let mut unlocked = Vec::new();
+        unlock_return_sprout(
+            &mut state,
+            &profile,
+            OffsetDateTime::UNIX_EPOCH,
+            &mut unlocked,
+        );
+        assert!(unlocked.iter().any(|id| id.as_str() == RETURN_SPROUT));
     }
 }

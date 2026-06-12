@@ -773,7 +773,7 @@ fn dev_preview_props_writes_habitat_prop_gallery_and_watch_variants() {
         ),
     );
     let scenario = scenario(&manifest, "habitat-props-catalog");
-    assert_eq!(scenario["inputs"]["prop_count"], 13);
+    assert_eq!(scenario["inputs"]["prop_count"], 15);
     assert_eq!(scenario["inputs"]["motion_phases"][0], 1_760_000_000i64);
     assert_eq!(scenario["inputs"]["motion_phases"][1], 1_760_000_004i64);
     assert_eq!(scenario["inputs"]["motion_phases"][2], 1_760_000_010i64);
