@@ -1,5 +1,4 @@
 use crate::game::calibration::CalibrationBaseline;
-use crate::game::effective_tokens::EffectiveTokenWeights;
 use crate::storage::usage_store::{AppliedShapeSums, UsageStore};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
@@ -109,36 +108,63 @@ pub fn derive_source_diversity(per_source: &[(String, f64)]) -> SourceDiversity 
     }
 }
 
+// Token-shape personality thresholds. Boundaries are inclusive on the lower
+// side (e.g. cache >= CACHE_HEAVY_THRESHOLD triggers CacheHeavy). The order
+// of evaluation is cache -> output -> reasoning -> balanced -> unknown, so a
+// value that satisfies multiple buckets is assigned to the first matching
+// personality.
+const CACHE_HEAVY_THRESHOLD: f64 = 0.55;
+const OUTPUT_HEAVY_THRESHOLD: f64 = 0.45;
+const REASONING_HEAVY_THRESHOLD: f64 = 0.30;
+const BALANCED_CACHE_THRESHOLD: f64 = 0.20;
+const BALANCED_OUTPUT_THRESHOLD: f64 = 0.20;
+const BALANCED_REASONING_THRESHOLD: f64 = 0.10;
+
+/// Derive the dominant token-shape personality for an applied usage window.
+///
+/// `AppliedShapeSums.effective_tokens` already reflects the real
+/// `cache_read_weight` configured by the caller, so the weighted cache-read
+/// contribution is recovered by subtracting the other (already-weighted)
+/// components from that total. `effective_tokens` is used as the denominator
+/// so the resulting shares are consistent with the weighted baseline.
 pub fn derive_token_shape_personality(shape: AppliedShapeSums) -> TokenShapePersonality {
-    let weights = EffectiveTokenWeights::default();
     let weighted_input = shape.input_tokens;
     let weighted_output = shape.output_tokens;
     let weighted_cache_creation = shape.cache_creation_tokens;
-    let weighted_cache_read = shape.cache_read_tokens * weights.cache_read_weight;
     let weighted_reasoning = shape.reasoning_output_tokens;
-    let total = weighted_input
-        + weighted_output
-        + weighted_cache_creation
-        + weighted_cache_read
-        + weighted_reasoning;
+    let total = shape.effective_tokens;
     if total <= 0.0 || !total.is_finite() {
         return TokenShapePersonality::UnknownShape;
     }
+    let weighted_cache_read =
+        (total - weighted_input - weighted_output - weighted_cache_creation - weighted_reasoning)
+            .max(0.0);
     let cache = (weighted_cache_creation + weighted_cache_read) / total;
     let output = weighted_output / total;
     let reasoning = weighted_reasoning / total;
-    if cache >= 0.55 {
+    if cache >= CACHE_HEAVY_THRESHOLD {
         TokenShapePersonality::CacheHeavy
-    } else if output >= 0.45 {
+    } else if output >= OUTPUT_HEAVY_THRESHOLD {
         TokenShapePersonality::OutputHeavy
-    } else if reasoning >= 0.30 {
+    } else if reasoning >= REASONING_HEAVY_THRESHOLD {
         TokenShapePersonality::ReasoningHeavy
-    } else if cache >= 0.20 || output >= 0.20 || reasoning >= 0.10 {
+    } else if cache >= BALANCED_CACHE_THRESHOLD
+        || output >= BALANCED_OUTPUT_THRESHOLD
+        || reasoning >= BALANCED_REASONING_THRESHOLD
+    {
         TokenShapePersonality::Balanced
     } else {
         TokenShapePersonality::UnknownShape
     }
 }
+
+// Relative-intensity thresholds, expressed as the ratio of today's effective
+// tokens to the calibrated daily baseline. Boundaries are inclusive on the
+// upper side for the lower buckets: Quiet < QUIET_INTENSITY_THRESHOLD,
+// Normal <= NORMAL_INTENSITY_HIGH, Heavy <= HUGE_INTENSITY_THRESHOLD.
+const QUIET_INTENSITY_THRESHOLD: f64 = 0.25;
+const NORMAL_INTENSITY_HIGH: f64 = 1.25;
+const HUGE_INTENSITY_THRESHOLD: f64 = 3.0;
 
 pub fn derive_relative_intensity(
     today_tokens: f64,
@@ -146,9 +172,9 @@ pub fn derive_relative_intensity(
 ) -> RelativeIntensity {
     let daily = baseline.daily_effective_tokens.max(1.0);
     match today_tokens / daily {
-        r if r < 0.25 => RelativeIntensity::Quiet,
-        r if r <= 1.25 => RelativeIntensity::Normal,
-        r if r <= 3.0 => RelativeIntensity::Heavy,
+        r if r < QUIET_INTENSITY_THRESHOLD => RelativeIntensity::Quiet,
+        r if r <= NORMAL_INTENSITY_HIGH => RelativeIntensity::Normal,
+        r if r <= HUGE_INTENSITY_THRESHOLD => RelativeIntensity::Heavy,
         _ => RelativeIntensity::Huge,
     }
 }

@@ -176,7 +176,7 @@ impl LifeSignalState {
         &mut self,
         signal: AppliedUsageSignal,
         activity_identity: &ActivityIdentityProfile,
-        _now: OffsetDateTime,
+        now: OffsetDateTime,
     ) -> PetLifeProfile {
         let freshness = self.profile_freshness(signal);
         let elapsed_secs = signal.elapsed_since_successful_poll.whole_seconds().max(1) as f64;
@@ -200,7 +200,7 @@ impl LifeSignalState {
         self.ema_activity_level = ((1.0 - EMA_ALPHA as f32) * self.ema_activity_level
             + EMA_ALPHA as f32 * activity_level)
             .clamp(0.0, 2.0);
-        self.last_observed_at = Some(_now);
+        self.last_observed_at = Some(now);
         let burst_level =
             if freshness == UsageSignalFreshness::Live && signal.applied_effective_tokens > 0.0 {
                 (relative - 1.0).max(0.0).clamp(0.0, 1.5)
@@ -317,7 +317,7 @@ pub fn build_prop_reactions(
             let reaction = match (id.as_str(), profile.source_accent) {
                 (
                     crate::game::habitat::CODEX_SIGNAL_LAMP,
-                    Some(SourceAccent::Codex | SourceAccent::Balanced),
+                    Some(SourceAccent::Codex | SourceAccent::Balanced | SourceAccent::Ensemble),
                 ) => Some(PropReactionKind::Glow),
                 (crate::game::habitat::TOKEN_SHELL_100K, Some(SourceAccent::Claude)) => {
                     Some(PropReactionKind::Glow)

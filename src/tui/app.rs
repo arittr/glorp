@@ -541,9 +541,11 @@ impl WatchApp {
 
     fn install_poll_result(&mut self, mut result: WatchPollResult) -> WatchViewModel {
         let now = time::OffsetDateTime::now_utc();
-        let profile =
-            self.life_signal_state
-                .observe(result.applied_signal, &self.vm.activity_identity, now);
+        let profile = self.life_signal_state.observe(
+            result.applied_signal,
+            &result.vm.activity_identity,
+            now,
+        );
         result.vm.life_profile = profile;
         // Night calm: full quiet only while the pet actually sleeps (spec:
         // calm_mode = night && asleep; asleep already implies Night). Must be
