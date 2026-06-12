@@ -4,6 +4,7 @@ use crate::{
     storage::{state::StateStore, usage_store::UsageStore},
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
+use time::OffsetDateTime;
 
 pub fn run() -> Result<()> {
     let paths = AppPaths::resolve()?;
@@ -34,9 +35,16 @@ pub fn run() -> Result<()> {
         println!("No usage helper was found.");
         println!("Install the npm package with bundled helpers:");
         println!("  npm install -g glorp");
-        println!("Or install helpers yourself and make sure these commands are on PATH:");
+        println!("Or make sure this command is on PATH:");
         println!("  ccusage");
-        println!("  ccusage-codex");
+        if result
+            .diagnostics
+            .iter()
+            .any(|d| d.provider_surface == "ccusage-codex")
+        {
+            println!("Legacy fallback also available:");
+            println!("  ccusage-codex");
+        }
     }
 
     for helper in usage_store.provider_versions()? {
@@ -44,6 +52,14 @@ pub fn run() -> Result<()> {
             "helper version: {} provider={} parser={}",
             helper.provider_surface, helper.provider_version, helper.parser_version
         );
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let recent_sources = usage_store
+        .token_totals_by_source_between(now - time::Duration::hours(24), now)
+        .unwrap_or_default();
+    for (source, total) in recent_sources {
+        println!("source: {} recent_24h={:.0}", source, total.max(0.0));
     }
 
     for diagnostic in usage_store.recent_diagnostics(5)? {
