@@ -7,8 +7,8 @@ use glorp::tui::app::{
     WatchPollResult, WatchTestHarness, WatchUsagePoller, WatchViewModel,
 };
 use glorp::tui::layout::render_watch_frame_with_capability;
-use glorp::tui::style::{semantic_styles, tokenpet_palette, ColorCapability};
-use glorp::tui::view_model::{SourceHealthView, SourceStatus};
+use glorp::tui::style::{semantic_styles, tokenpet_palette, ColorCapability, LogKind};
+use glorp::tui::view_model::{SourceHealthView, SourceStatus, SourceUsageView};
 use ratatui::{
     backend::TestBackend, buffer::Buffer, layout::Position, style::Color, Frame, Terminal,
 };
@@ -1262,4 +1262,108 @@ fn pet_panel_draw_order_keeps_pet_above_habitat_props() {
 
     assert!(ambient < props, "ambient must render before props");
     assert!(props < pet, "props must render before pet art");
+}
+
+#[test]
+fn multi_source_watch_frame_renders_today_and_feed() {
+    use glorp::tui::view_model::EventView;
+    let mut vm = WatchViewModel::fixture();
+    vm.source_breakdown = vec![
+        SourceUsageView {
+            name: "claude-code".into(),
+            display_name: "claude".into(),
+            effective_tokens: 12_000.0,
+        },
+        SourceUsageView {
+            name: "codex".into(),
+            display_name: "codex".into(),
+            effective_tokens: 5_000.0,
+        },
+        SourceUsageView {
+            name: "gemini".into(),
+            display_name: "gemini".into(),
+            effective_tokens: 3_000.0,
+        },
+        SourceUsageView {
+            name: "opencode".into(),
+            display_name: "opencode".into(),
+            effective_tokens: 1_500.0,
+        },
+    ];
+    vm.source_health = vec![
+        SourceHealthView {
+            name: "claude-code".into(),
+            display_name: "claude".into(),
+            status: SourceStatus::Ready,
+            today_effective_tokens: 12_000.0,
+            bucket_effective_tokens: 1_300.0,
+            diagnostic_code: None,
+            diagnostic_message: None,
+        },
+        SourceHealthView {
+            name: "codex".into(),
+            display_name: "codex".into(),
+            status: SourceStatus::Ready,
+            today_effective_tokens: 5_000.0,
+            bucket_effective_tokens: 1_000.0,
+            diagnostic_code: None,
+            diagnostic_message: None,
+        },
+        SourceHealthView {
+            name: "gemini".into(),
+            display_name: "gemini".into(),
+            status: SourceStatus::Ready,
+            today_effective_tokens: 3_000.0,
+            bucket_effective_tokens: 600.0,
+            diagnostic_code: None,
+            diagnostic_message: None,
+        },
+        SourceHealthView {
+            name: "opencode".into(),
+            display_name: "opencode".into(),
+            status: SourceStatus::Ready,
+            today_effective_tokens: 1_500.0,
+            bucket_effective_tokens: 200.0,
+            diagnostic_code: None,
+            diagnostic_message: None,
+        },
+    ];
+    vm.recent_events = vec![
+        EventView {
+            timestamp: "13:42".into(),
+            kind: LogKind::Usage,
+            text: "gemini added 1.2k effective tokens".into(),
+        },
+        EventView {
+            timestamp: "13:43".into(),
+            kind: LogKind::Usage,
+            text: "opencode added 0.8k effective tokens".into(),
+        },
+    ];
+
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+
+    assert!(
+        text.contains("claude"),
+        "today panel should show top source claude"
+    );
+    assert!(
+        text.contains("codex"),
+        "today panel should show top source codex"
+    );
+    assert!(
+        text.contains("other"),
+        "today panel should collapse remaining sources into 'other'"
+    );
+    assert!(
+        text.contains("gemini added"),
+        "feed should preserve literal source label"
+    );
+    assert!(
+        text.contains("opencode added"),
+        "feed should preserve literal source label"
+    );
 }
