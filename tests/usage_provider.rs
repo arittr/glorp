@@ -3,6 +3,7 @@ use glorp::game::runtime::apply_usage_poll;
 use glorp::storage::state::PetState;
 use glorp::storage::usage_store::{ProviderCursorUpdate, UsageStore};
 use glorp::usage::ccusage::{CcusageCommandProvider, HelperDiscovery, HelperPaths};
+use glorp::usage::identity::SourceFamily;
 use glorp::usage::normalize::RawTokenTotals;
 use glorp::usage::provider::{ProviderCursorKey, UsagePollResult, UsageProvider};
 use serde::Serialize;
@@ -20,6 +21,15 @@ fn provider(claude: Option<&str>, codex: Option<&str>) -> CcusageCommandProvider
         unified: None,
         claude: claude.map(fixture),
         codex: codex.map(fixture),
+        node: None,
+    })
+}
+
+fn unified_provider(name: &str) -> CcusageCommandProvider {
+    CcusageCommandProvider::new(HelperPaths {
+        unified: Some(fixture(name)),
+        claude: None,
+        codex: None,
         node: None,
     })
 }
@@ -495,4 +505,87 @@ fn ccusage_v20_uses_the_claude_scoped_subcommand() {
     // 100 + 200 + 0 + 0.03 * 1000 = 330 from the claude-scoped payload; the
     // all-agents payload would be ~2M.
     assert!((total - 330.0).abs() < 1.0, "got {total}");
+}
+
+#[test]
+fn unified_multi_source_emits_deltas_after_seeded_cursors() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = unified_provider("ccusage-unified-multi.mjs");
+
+    let snapshot = provider.snapshot_for_calibration(&mut store).unwrap();
+    assert_eq!(snapshot.cursor_updates.len(), 6);
+    let unique_keys: std::collections::HashSet<_> = snapshot
+        .cursor_updates
+        .iter()
+        .map(|u| u.cursor_key.clone())
+        .collect();
+    assert_eq!(unique_keys.len(), snapshot.cursor_updates.len());
+
+    let now = OffsetDateTime::now_utc();
+    store.advance_cursors(snapshot.cursor_updates, now).unwrap();
+
+    let next = unified_provider("ccusage-unified-multi-next.mjs");
+    let result = next.poll(&mut store).unwrap();
+    let surfaces: std::collections::HashSet<_> = result
+        .deltas
+        .iter()
+        .map(|d| d.provider_surface.as_str())
+        .collect();
+
+    assert!(surfaces.contains("claude-code"));
+    assert!(surfaces.contains("codex"));
+    assert!(surfaces.contains("gemini"));
+    assert!(surfaces.contains("kimi"));
+    assert!(surfaces.contains("opencode"));
+    assert!(!surfaces.contains("all"));
+    assert!(!surfaces.contains("unknown-bad"));
+
+    assert!(result.deltas.iter().all(|d| {
+        d.source_identity.provider_surface == d.provider_surface
+            && d.cursor_update.provider_surface == d.provider_surface
+    }));
+    assert!(result.deltas.iter().any(|d| {
+        d.provider_surface == "opencode"
+            && d.source_identity.source_family == SourceFamily::UnknownCodingAgent
+    }));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "aggregate_all_source_ignored"));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "unsupported_token_shape"));
+}
+
+#[test]
+fn unified_first_contact_seeds_cursors_without_feeding() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = unified_provider("ccusage-unified-multi.mjs");
+
+    let snapshot = provider.snapshot_for_calibration(&mut store).unwrap();
+    assert!(!snapshot.cursor_updates.is_empty());
+    let now = OffsetDateTime::now_utc();
+    store.advance_cursors(snapshot.cursor_updates, now).unwrap();
+
+    let result = provider.poll(&mut store).unwrap();
+    assert_eq!(result.total_effective_tokens, 0.0);
+    assert!(store
+        .latest_cursor_updated_at("claude-code")
+        .unwrap()
+        .is_some());
+    assert!(store.latest_cursor_updated_at("codex").unwrap().is_some());
+    assert!(store.latest_cursor_updated_at("gemini").unwrap().is_some());
+}
+
+#[test]
+fn repeated_unified_poll_after_cursor_advance_emits_zero_deltas() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = unified_provider("ccusage-unified-multi.mjs");
+    complete_poll_lifecycle(&provider, &mut store);
+    let second = provider.poll(&mut store).unwrap();
+    assert_eq!(second.total_effective_tokens, 0.0);
 }

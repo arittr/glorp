@@ -56,6 +56,7 @@ enum HelperInvocation {
     Records {
         version: String,
         records: Vec<NormalizedUsageRecord>,
+        diagnostics: Vec<ProviderDiagnostic>,
     },
     EarlyExit {
         diagnostics: Vec<ProviderDiagnostic>,
@@ -187,12 +188,16 @@ impl CcusageCommandProvider {
                 });
             }
         };
-        for diagnostic in batch.diagnostics {
-            persist_diagnostic(store, &diagnostic)?;
+        for diagnostic in &batch.diagnostics {
+            persist_diagnostic(store, diagnostic)?;
         }
         let records = batch.records;
 
-        Ok(HelperInvocation::Records { version, records })
+        Ok(HelperInvocation::Records {
+            version,
+            records,
+            diagnostics: batch.diagnostics,
+        })
     }
 
     fn poll_helper(
@@ -203,9 +208,13 @@ impl CcusageCommandProvider {
         helper: Option<&Path>,
         daily_args: &[&str],
     ) -> Result<UsagePollResult> {
-        let (version, records) =
+        let (version, records, invoke_diagnostics) =
             match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
-                HelperInvocation::Records { version, records } => (version, records),
+                HelperInvocation::Records {
+                    version,
+                    records,
+                    diagnostics,
+                } => (version, records, diagnostics),
                 HelperInvocation::EarlyExit { diagnostics } => {
                     return Ok(UsagePollResult {
                         deltas: Vec::new(),
@@ -360,6 +369,7 @@ impl CcusageCommandProvider {
         }
 
         let total_effective_tokens = deltas.iter().map(|delta| delta.effective_tokens).sum();
+        diagnostics.extend(invoke_diagnostics);
         Ok(UsagePollResult {
             deltas,
             diagnostics,
@@ -375,9 +385,13 @@ impl CcusageCommandProvider {
         helper: Option<&Path>,
         daily_args: &[&str],
     ) -> Result<UsageSnapshot> {
-        let (version, records) =
+        let (version, records, invoke_diagnostics) =
             match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
-                HelperInvocation::Records { version, records } => (version, records),
+                HelperInvocation::Records {
+                    version,
+                    records,
+                    diagnostics,
+                } => (version, records, diagnostics),
                 HelperInvocation::EarlyExit { diagnostics } => {
                     return Ok(UsageSnapshot {
                         daily_usage: Vec::new(),
@@ -432,6 +446,7 @@ impl CcusageCommandProvider {
             });
         }
 
+        diagnostics.extend(invoke_diagnostics);
         Ok(UsageSnapshot {
             daily_usage,
             cursor_updates,

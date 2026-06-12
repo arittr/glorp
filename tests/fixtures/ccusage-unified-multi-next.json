@@ -1,0 +1,99 @@
+{
+  "daily": [
+    {
+      "date": "2026-06-11",
+      "agent": "claude",
+      "inputTokens": 1100,
+      "outputTokens": 2050,
+      "cacheCreationTokens": 325,
+      "cacheReadTokens": 41000,
+      "totalCost": 1.26,
+      "modelsUsed": [
+        "claude-opus-4",
+        "claude-sonnet-4"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4",
+          "inputTokens": 700,
+          "outputTokens": 1250,
+          "cacheCreationTokens": 225,
+          "cacheReadTokens": 26000,
+          "cost": 0.86
+        },
+        {
+          "modelName": "claude-sonnet-4",
+          "inputTokens": 500,
+          "outputTokens": 850,
+          "cacheCreationTokens": 125,
+          "cacheReadTokens": 16000,
+          "cost": 0.41
+        }
+      ]
+    },
+    {
+      "date": "2026-06-11",
+      "agent": "codex",
+      "inputTokens": 5800,
+      "outputTokens": 950,
+      "cachedInputTokens": 5040,
+      "reasoningOutputTokens": 135,
+      "costUSD": 0.41,
+      "models": {
+        "gpt-5.2-codex": {
+          "inputTokens": 5800,
+          "outputTokens": 950,
+          "cachedInputTokens": 5040,
+          "reasoningOutputTokens": 135,
+          "costUSD": 0.41
+        }
+      }
+    },
+    {
+      "date": "2026-06-11",
+      "agent": "gemini",
+      "inputTokens": 900,
+      "outputTokens": 1250,
+      "cacheCreationTokens": 25,
+      "cacheReadTokens": 21000,
+      "totalCost": 0.11
+    },
+    {
+      "date": "2026-06-11",
+      "agent": "all",
+      "sourceBreakdowns": [
+        {
+          "source": "kimi",
+          "inputTokens": 600,
+          "outputTokens": 750,
+          "cacheCreationTokens": 25,
+          "cacheReadTokens": 9000,
+          "totalCost": 0.06
+        },
+        {
+          "source": "opencode",
+          "inputTokens": 400,
+          "outputTokens": 450,
+          "cacheCreationTokens": 25,
+          "cacheReadTokens": 6000,
+          "totalCost": 0.04
+        }
+      ]
+    },
+    {
+      "date": "2026-06-11",
+      "agent": "all",
+      "inputTokens": 1000099,
+      "outputTokens": 1000049,
+      "cacheCreationTokens": 1000024,
+      "cacheReadTokens": 1000999,
+      "totalCost": 100.0
+    },
+    {
+      "date": "2026-06-11",
+      "agent": "unknown-bad",
+      "inputTokens": 200,
+      "outputTokens": 100
+    }
+  ]
+}
