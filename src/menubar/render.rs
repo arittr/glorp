@@ -83,6 +83,7 @@ fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
     let colored = if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
         base
     } else {
+        // Activity identity wins over life-profile accent for accent/particle glyphs.
         match vm.activity_identity.source_diversity {
             SourceDiversity::Ensemble => Rgb(0xf0, 0xc4, 0x6a),
             _ => match vm.life_profile.source_accent {

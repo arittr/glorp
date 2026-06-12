@@ -6,7 +6,7 @@ use crate::{
         state::{EarnedHabitatProp, HabitatPropSource, PetState},
         usage_store::UsageLedgerRow,
     },
-    tui::identity::{ActivityIdentityProfile, RecoveryPattern},
+    tui::identity::{ActivityIdentityProfile, RecoveryPattern, ENSEMBLE_MEMBER_MIN_SHARE},
 };
 
 pub use crate::storage::state::HabitatPropId;
@@ -243,12 +243,12 @@ pub fn unlock_habitat_props(
     new_mood: Mood,
     now: OffsetDateTime,
     activity_profile: &ActivityIdentityProfile,
-    today_source_totals: &[(String, f64)],
+    current_batch_source_totals: &[(String, f64)],
 ) -> Vec<HabitatPropId> {
     let mut unlocked = Vec::new();
     unlock_lifetime_ladder(state, now, &mut unlocked);
     unlock_first_codex(state, rows, now, &mut unlocked);
-    unlock_first_ensemble_day(state, today_source_totals, now, &mut unlocked);
+    unlock_first_ensemble_day(state, current_batch_source_totals, now, &mut unlocked);
     unlock_return_sprout(state, activity_profile, now, &mut unlocked);
     unlock_heavy_session(state, recent_effective_tokens, now, &mut unlocked);
     unlock_wilt_recovery(state, initial_mood, new_mood, now, &mut unlocked);
@@ -298,26 +298,31 @@ fn unlock_first_codex(
     }
 }
 
+/// Unlocks `first_ensemble_day` when a single applied batch contains at least
+/// three significant sources. "Significant" means the source contributes at
+/// least `ENSEMBLE_MEMBER_MIN_SHARE` of the batch total. This intentionally
+/// checks the current batch rather than the whole local day so that
+/// first-contact seeded history does not count toward the milestone.
 fn unlock_first_ensemble_day(
     state: &mut PetState,
-    today_source_totals: &[(String, f64)],
+    current_batch_source_totals: &[(String, f64)],
     now: OffsetDateTime,
     unlocked: &mut Vec<HabitatPropId>,
 ) {
-    let total: f64 = today_source_totals.iter().map(|(_, v)| *v).sum();
+    let total: f64 = current_batch_source_totals.iter().map(|(_, v)| *v).sum();
     if total <= 0.0 || !total.is_finite() {
         return;
     }
-    let significant = today_source_totals
+    let significant = current_batch_source_totals
         .iter()
-        .filter(|(_, v)| *v / total >= 0.10)
+        .filter(|(_, v)| *v / total >= ENSEMBLE_MEMBER_MIN_SHARE)
         .count();
     if significant >= 3 {
         record_prop(
             state,
             HabitatPropId::new(FIRST_ENSEMBLE_DAY),
             HabitatPropSource::ActivityMilestone {
-                milestone: "first_ensemble_day".to_string(),
+                milestone: FIRST_ENSEMBLE_DAY.to_string(),
             },
             now,
             unlocked,
@@ -336,7 +341,7 @@ fn unlock_return_sprout(
             state,
             HabitatPropId::new(RETURN_SPROUT),
             HabitatPropSource::ActivityMilestone {
-                milestone: "return_sprout".to_string(),
+                milestone: RETURN_SPROUT.to_string(),
             },
             now,
             unlocked,

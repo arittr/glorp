@@ -382,16 +382,22 @@ pub fn apply_unapplied_usage(
     let today_start = crate::storage::day_axis::LocalDayMapper::System
         .local_day_start(crate::storage::day_axis::LocalDayMapper::System.local_date(now))
         .to_offset(time::UtcOffset::UTC);
-    let mut today_source_totals: std::collections::BTreeMap<String, f64> =
+    // E6 deviation: activity milestones intentionally use the current unapplied
+    // batch, not the applied ledger. First-contact seeded history is written as
+    // already-applied ledger rows, so counting the applied ledger would credit
+    // seeded sources toward milestones. The current batch only contains rows
+    // that are actually feeding the pet in this poll cycle.
+    let mut current_batch_source_totals: std::collections::BTreeMap<String, f64> =
         std::collections::BTreeMap::new();
     for row in &rows_to_apply {
-        *today_source_totals
+        *current_batch_source_totals
             .entry(row.event.provider_surface.clone())
             .or_insert(0.0) += row.event.effective_tokens.max(0.0);
     }
-    let today_source_totals: Vec<(String, f64)> = today_source_totals.into_iter().collect();
+    let current_batch_source_totals: Vec<(String, f64)> =
+        current_batch_source_totals.into_iter().collect();
     let activity_profile = ActivityIdentityProfile {
-        source_diversity: derive_source_diversity(&today_source_totals),
+        source_diversity: derive_source_diversity(&current_batch_source_totals),
         rhythm: derive_work_rhythm(usage_store, today_start, now),
         token_shape: derive_token_shape_personality(
             usage_store
@@ -415,7 +421,7 @@ pub fn apply_unapplied_usage(
         new_mood,
         now,
         &activity_profile,
-        &today_source_totals,
+        &current_batch_source_totals,
     );
     record_reflected_usage_event_ids(state, rows.iter().map(|row| row.id));
     state.previous_vitals = Some(initial_vitals);

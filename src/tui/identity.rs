@@ -49,7 +49,9 @@ pub enum RecoveryPattern {
 pub enum ActivityMilestone {
     FirstEnsembleDay,
     ReturnSprout,
+    // reserved for future phases
     CacheCraft,
+    // reserved for future phases
     SteadyWeek,
 }
 
@@ -85,7 +87,7 @@ const ENSEMBLE_MIN_LANES: usize = 3;
 // A source must contribute at least this much to count as an ensemble member
 // when checking the lane count. This is intentionally smaller than
 // SOURCE_LANE_MIN_SHARE because ensemble rewards breadth over depth.
-const ENSEMBLE_MEMBER_MIN_SHARE: f64 = 0.10;
+pub const ENSEMBLE_MEMBER_MIN_SHARE: f64 = 0.10;
 // The top two lanes must cover at least this combined share to outrank a
 // broad ensemble as a tight DualLane.
 const DUAL_LANE_MIN_COMBINED_SHARE: f64 = 0.80;

@@ -61,14 +61,9 @@ pub fn run() -> Result<()> {
                         crate::storage::day_axis::LocalDayMapper::System,
                     )
                     .unwrap_or(0.0);
-                let today_start = status_now
-                    .to_offset(
-                        crate::storage::day_axis::LocalDayMapper::System.offset_at(status_now),
-                    )
-                    .date()
-                    .with_time(time::Time::MIDNIGHT)
-                    .assume_offset(
-                        crate::storage::day_axis::LocalDayMapper::System.offset_at(status_now),
+                let today_start = crate::storage::day_axis::LocalDayMapper::System
+                    .local_day_start(
+                        crate::storage::day_axis::LocalDayMapper::System.local_date(status_now),
                     )
                     .to_offset(time::UtcOffset::UTC);
                 today_sources = usage_store
