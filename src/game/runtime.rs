@@ -59,6 +59,16 @@ pub fn stage_usage_poll_deltas(
         if refused_surfaces.contains(&delta.provider_surface) {
             continue;
         }
+        if usage_store
+            .provider_cursor(
+                &delta.cursor_update.provider_surface,
+                &delta.cursor_update.cursor_key,
+            )?
+            .as_deref()
+            == Some(delta.cursor_update.cursor_value.as_str())
+        {
+            continue;
+        }
         let buckets = crate::game::catchup::smear_catchup_delta(delta.effective_tokens, baseline);
         let bucket_count = buckets.len();
         let total_effective: f64 = buckets.iter().sum();
