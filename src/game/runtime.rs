@@ -52,7 +52,7 @@ pub fn stage_usage_poll_deltas(
 ) -> Result<Vec<i64>> {
     let baseline = state.calibration;
     let refused_surfaces =
-        refuse_discontinuous_surfaces(usage_store, poll, state, guard_ratio, now)?;
+        handle_first_contact_and_discontinuity(usage_store, poll, state, guard_ratio, now)?;
     let mut ids = Vec::new();
     let current_bucket = floor_to_ten_minute_bucket(now);
     for delta in &poll.deltas {
@@ -105,7 +105,7 @@ pub fn stage_usage_poll_deltas(
 /// stamps `last_idle_narration_at` so the same pass cannot also narrate
 /// boredom. Refused tokens are never retro-fed; the config ratio is the
 /// escape hatch going forward.
-fn refuse_discontinuous_surfaces(
+fn handle_first_contact_and_discontinuity(
     usage_store: &mut UsageStore,
     poll: &UsagePollResult,
     state: &mut PetState,
@@ -114,56 +114,114 @@ fn refuse_discontinuous_surfaces(
 ) -> Result<std::collections::BTreeSet<String>> {
     let mut surface_sums: std::collections::BTreeMap<String, f64> =
         std::collections::BTreeMap::new();
+    let mut surface_deltas: std::collections::BTreeMap<String, Vec<&UsageDelta>> =
+        std::collections::BTreeMap::new();
+
     for delta in &poll.deltas {
         *surface_sums
             .entry(delta.provider_surface.clone())
             .or_insert(0.0) += delta.effective_tokens.max(0.0);
+        surface_deltas
+            .entry(delta.provider_surface.clone())
+            .or_default()
+            .push(delta);
     }
 
-    let mut refused = std::collections::BTreeSet::new();
-    for (surface, sum) in &surface_sums {
-        let message = match usage_store.latest_cursor_updated_at(surface)? {
+    let mut skip_surfaces: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut discontinuity_surfaces: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+
+    for (surface, sum) in surface_sums {
+        match usage_store.latest_cursor_updated_at(&surface)? {
             None => {
-                format!("first contact: refused {sum:.0} effective tokens (history never feeds)")
+                seed_first_contact_surface(usage_store, &surface, &surface_deltas[&surface], now)?;
+                skip_surfaces.insert(surface);
             }
             Some(updated_at) => {
                 let days_factor = ((now - updated_at).whole_days().max(0) + 1) as f64;
                 let threshold =
                     (guard_ratio * state.calibration.daily_effective_tokens * days_factor)
                         .max(DISCONTINUITY_GUARD_FLOOR_TOKENS);
-                if *sum <= threshold {
+                if sum <= threshold {
                     continue;
                 }
-                format!("refused {sum:.0} effective tokens (threshold {threshold:.0})")
+                let updates: Vec<_> = surface_deltas[&surface]
+                    .iter()
+                    .map(|delta| delta.cursor_update.clone())
+                    .collect();
+                usage_store.refuse_poll_discontinuity(
+                    updates,
+                    &ProviderDiagnostic {
+                        provider_surface: surface.clone(),
+                        code: USAGE_DISCONTINUITY_CODE.to_string(),
+                        message: format!(
+                            "refused {sum:.0} effective tokens (threshold {threshold:.0})"
+                        ),
+                        recorded_at: now,
+                    },
+                    now,
+                )?;
+                skip_surfaces.insert(surface.clone());
+                discontinuity_surfaces.insert(surface);
             }
-        };
-        let updates: Vec<_> = poll
-            .deltas
-            .iter()
-            .filter(|delta| &delta.provider_surface == surface)
-            .map(|delta| delta.cursor_update.clone())
-            .collect();
-        usage_store.refuse_poll_discontinuity(
-            updates,
-            &ProviderDiagnostic {
-                provider_surface: surface.clone(),
-                code: USAGE_DISCONTINUITY_CODE.to_string(),
-                message,
-                recorded_at: now,
-            },
-            now,
-        )?;
-        refused.insert(surface.clone());
+        }
     }
 
-    if !refused.is_empty() {
+    if !discontinuity_surfaces.is_empty() {
         state.recent_events.push(NarrativeEvent {
             observed_at: now,
             text: format!("{} declined an implausible feast", state.pet.accepted_name),
         });
         state.last_idle_narration_at = Some(now);
     }
-    Ok(refused)
+
+    Ok(skip_surfaces)
+}
+
+fn seed_first_contact_surface(
+    usage_store: &mut UsageStore,
+    surface: &str,
+    deltas: &[&UsageDelta],
+    now: OffsetDateTime,
+) -> Result<()> {
+    let mut events = Vec::new();
+
+    for delta in deltas {
+        let totals = delta.token_totals.unwrap_or_default();
+        let event = NormalizedUsageEvent {
+            provider_surface: delta.provider_surface.clone(),
+            provider_version: delta.cursor_update.provider_version.clone(),
+            parser_version: delta.cursor_update.parser_version.clone(),
+            command: delta.command.clone(),
+            source_surface: "daily".to_string(),
+            period_start: delta.period_start,
+            observed_at: now,
+            bucket_at: delta.period_start,
+            model: delta.model.clone(),
+            input_tokens: totals.uncached_input as f64,
+            output_tokens: totals.output as f64,
+            cache_creation_tokens: totals.cache_creation as f64,
+            cache_read_tokens: totals.cache_read as f64,
+            reasoning_output_tokens: totals.reasoning_output as f64,
+            effective_tokens: delta.effective_tokens,
+            cost_usd: None,
+            confidence: delta.confidence.clone(),
+            provider_delta_id: None,
+        };
+        events.push((event, delta.cursor_update.clone()));
+    }
+
+    let diagnostic = ProviderDiagnostic {
+        provider_surface: surface.to_string(),
+        code: "source_first_contact".to_string(),
+        message: format!(
+            "first contact with {surface}: {} historical rows seeded without feeding",
+            events.len()
+        ),
+        recorded_at: now,
+    };
+
+    usage_store.seed_source_history(&events, Some(&diagnostic), now)
 }
 
 fn scaled_token_bucket(total: u64, effective_share: f64, total_effective: f64) -> f64 {
@@ -583,6 +641,8 @@ mod tests {
             usage_store::{ProviderCursorUpdate, UsageStore},
         },
         tui::life::{AppliedSourceMix, TokenShapeDelta, UsageSignalFreshness},
+        usage::identity::SourceIdentity,
+        usage::normalize::RawTokenTotals,
     };
     use tempfile::tempdir;
     use time::macros::datetime;
@@ -799,5 +859,131 @@ mod tests {
             ),
             UsageSignalFreshness::Backfill
         );
+    }
+
+    #[test]
+    fn first_contact_seeds_history_without_feeding() {
+        let dir = tempdir().unwrap();
+        let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+        let mut state = PetState::new_for_test("seed", "buddy");
+        state.calibration.daily_effective_tokens = 100_000.0;
+
+        let now = datetime!(2026-06-11 12:00 UTC);
+        let historical = datetime!(2026-06-10 00:00 UTC);
+
+        let poll = UsagePollResult {
+            deltas: vec![UsageDelta {
+                provider_surface: "gemini".into(),
+                source_identity: SourceIdentity::from_provider_surface("gemini"),
+                command: "ccusage daily".into(),
+                effective_tokens: 500_000.0,
+                confidence: "local-log-derived".into(),
+                period_start: historical,
+                observed_at: now,
+                model: Some("gemini-2.5-pro".into()),
+                cursor_update: ProviderCursorUpdate {
+                    provider_surface: "gemini".into(),
+                    cursor_key: r#"{"provider_surface":"gemini","command":"ccusage daily","source_surface":"daily","period_start":"2026-06-10","model":"gemini-2.5-pro"}"#.into(),
+                    cursor_value: r#"{"uncached_input":100000,"output":50000,"cache_creation":10000,"cache_read":200000,"reasoning_output":5000}"#.into(),
+                    provider_version: "ccusage 20.0.6".into(),
+                    parser_version: "ccusage 20.0.6".into(),
+                },
+                token_totals: Some(RawTokenTotals {
+                    uncached_input: 100_000,
+                    output: 50_000,
+                    cache_creation: 10_000,
+                    cache_read: 200_000,
+                    reasoning_output: 5_000,
+                }),
+            }],
+            diagnostics: vec![],
+            total_effective_tokens: 500_000.0,
+        };
+
+        let ids = stage_usage_poll_deltas(
+            &mut usage_store,
+            &poll,
+            &mut state,
+            DISCONTINUITY_GUARD_RATIO,
+            now,
+        )
+        .unwrap();
+
+        assert!(
+            ids.is_empty(),
+            "first-contact deltas must not stage for feeding"
+        );
+        assert_eq!(state.lifetime_effective_tokens, 0.0);
+        assert!(usage_store.has_any_applied_events().unwrap());
+
+        let diags = usage_store.recent_diagnostics(10).unwrap();
+        assert!(diags.iter().any(|d| d.code == "source_first_contact"));
+
+        let totals = usage_store
+            .applied_effective_tokens_by_source_between(
+                now - time::Duration::days(3),
+                now + time::Duration::seconds(1),
+            )
+            .unwrap();
+        assert!(totals
+            .iter()
+            .any(|(s, v)| s == "gemini" && (*v - 500_000.0).abs() < 0.1));
+    }
+
+    #[test]
+    fn discontinuity_guard_still_refuses_large_delta_after_cursor_exists() {
+        let dir = tempdir().unwrap();
+        let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+        let mut state = PetState::new_for_test("seed", "buddy");
+        state.calibration.daily_effective_tokens = 100_000.0;
+        let now = datetime!(2026-06-11 12:00 UTC);
+
+        usage_store
+            .advance_cursors(
+                vec![ProviderCursorUpdate {
+                    provider_surface: "gemini".into(),
+                    cursor_key: "contact".into(),
+                    cursor_value: "seeded".into(),
+                    provider_version: "test".into(),
+                    parser_version: "test".into(),
+                }],
+                now - time::Duration::hours(1),
+            )
+            .unwrap();
+
+        let poll = UsagePollResult {
+            deltas: vec![UsageDelta {
+                provider_surface: "gemini".into(),
+                source_identity: SourceIdentity::from_provider_surface("gemini"),
+                command: "ccusage daily".into(),
+                effective_tokens: 500_000_000.0,
+                confidence: "local-log-derived".into(),
+                period_start: now,
+                observed_at: now,
+                model: None,
+                cursor_update: ProviderCursorUpdate {
+                    provider_surface: "gemini".into(),
+                    cursor_key: "contact".into(),
+                    cursor_value: "totals".into(),
+                    provider_version: "test".into(),
+                    parser_version: "test".into(),
+                },
+                token_totals: None,
+            }],
+            diagnostics: vec![],
+            total_effective_tokens: 500_000_000.0,
+        };
+
+        let ids = stage_usage_poll_deltas(
+            &mut usage_store,
+            &poll,
+            &mut state,
+            DISCONTINUITY_GUARD_RATIO,
+            now,
+        )
+        .unwrap();
+        assert!(ids.is_empty());
+        let diags = usage_store.recent_diagnostics(10).unwrap();
+        assert!(diags.iter().any(|d| d.code == "usage_discontinuity"));
     }
 }
