@@ -80,7 +80,7 @@ impl Default for ActivityIdentityProfile {
 // Source-diversity thresholds. A source must contribute at least this share
 // of the total to count as a participating lane.
 const SOURCE_LANE_MIN_SHARE: f64 = 0.20;
-// At least this many lanes must pass SOURCE_LANE_MIN_SHARE for an Ensemble.
+// At least this many lanes must pass ENSEMBLE_MEMBER_MIN_SHARE for an Ensemble.
 const ENSEMBLE_MIN_LANES: usize = 3;
 // A source must contribute at least this much to count as an ensemble member
 // when checking the lane count. This is intentionally smaller than
@@ -158,17 +158,17 @@ pub fn derive_token_shape_personality(shape: AppliedShapeSums) -> TokenShapePers
     }
     let weighted_cache_read = (total - input - output - cache_creation - reasoning).max(0.0);
     let cache = (cache_creation + weighted_cache_read) / total;
-    let output = output / total;
-    let reasoning = reasoning / total;
+    let output_share = output / total;
+    let reasoning_share = reasoning / total;
     if cache >= CACHE_HEAVY_THRESHOLD {
         TokenShapePersonality::CacheHeavy
-    } else if output >= OUTPUT_HEAVY_THRESHOLD {
+    } else if output_share >= OUTPUT_HEAVY_THRESHOLD {
         TokenShapePersonality::OutputHeavy
-    } else if reasoning >= REASONING_HEAVY_THRESHOLD {
+    } else if reasoning_share >= REASONING_HEAVY_THRESHOLD {
         TokenShapePersonality::ReasoningHeavy
     } else if cache >= BALANCED_CACHE_THRESHOLD
-        || output >= BALANCED_OUTPUT_THRESHOLD
-        || reasoning >= BALANCED_REASONING_THRESHOLD
+        || output_share >= BALANCED_OUTPUT_THRESHOLD
+        || reasoning_share >= BALANCED_REASONING_THRESHOLD
     {
         TokenShapePersonality::Balanced
     } else {
