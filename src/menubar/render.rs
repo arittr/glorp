@@ -17,6 +17,7 @@ use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 
 use crate::format::format_tokens;
 use crate::pet::render::PaletteRoleName;
+use crate::tui::identity::SourceDiversity;
 use crate::tui::life::SourceAccent;
 use crate::tui::view_model::WatchViewModel;
 
@@ -82,11 +83,15 @@ fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
     let colored = if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
         base
     } else {
-        match vm.life_profile.source_accent {
-            Some(SourceAccent::Codex) => Rgb(0x86, 0xd9, 0xef),
-            Some(SourceAccent::Claude) => Rgb(0xb3, 0x9d, 0xff),
-            Some(SourceAccent::Balanced | SourceAccent::Ensemble) => Rgb(0xf0, 0xc4, 0x6a),
-            None => base,
+        match vm.activity_identity.source_diversity {
+            SourceDiversity::Ensemble => Rgb(0xf0, 0xc4, 0x6a),
+            _ => match vm.life_profile.source_accent {
+                Some(SourceAccent::Codex) => Rgb(0x86, 0xd9, 0xef),
+                Some(SourceAccent::Claude) => Rgb(0xb3, 0x9d, 0xff),
+                Some(SourceAccent::Balanced) => Rgb(0xf0, 0xc4, 0x6a),
+                Some(SourceAccent::Ensemble) => Rgb(0xf0, 0xc4, 0x6a),
+                None => base,
+            },
         }
     };
     if vm.day_context.asleep {
@@ -444,6 +449,31 @@ mod tests {
         append_pet(&mut runs, vm);
         runs.push(StyledRun::plain("\n"));
         runs
+    }
+
+    #[test]
+    fn menubar_uses_ensemble_diversity_accent() {
+        let mut vm = WatchViewModel::fixture();
+        vm.activity_identity.source_diversity = SourceDiversity::Ensemble;
+        vm.pet_art = vec!["EAPB".to_string()];
+        vm.pet_spans = vec![
+            StyledSegment {
+                line: 0,
+                start: 1,
+                end: 2,
+                role: PaletteRoleName::Accent,
+            },
+            StyledSegment {
+                line: 0,
+                start: 2,
+                end: 3,
+                role: PaletteRoleName::Particle,
+            },
+        ];
+
+        let runs = pet_runs_for_test(&vm);
+        assert_eq!(rgb_tuple(runs[1].color), (0xf0, 0xc4, 0x6a));
+        assert_eq!(rgb_tuple(runs[2].color), (0xf0, 0xc4, 0x6a));
     }
 
     fn rgb_tuple(rgb: Rgb) -> (u8, u8, u8) {
