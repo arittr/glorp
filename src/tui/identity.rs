@@ -45,6 +45,12 @@ pub enum RecoveryPattern {
     Dormant,
 }
 
+/// Spec-mandated scaffolding for durable milestone tracking.
+///
+/// Phase E defines the enum but intentionally does not construct or match
+/// its variants; it will be populated once long-term milestone persistence
+/// is implemented in a later phase.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivityMilestone {
     FirstEnsembleDay,
@@ -62,7 +68,11 @@ pub struct ActivityIdentityProfile {
     pub token_shape: TokenShapePersonality,
     pub relative_intensity: RelativeIntensity,
     pub recovery: RecoveryPattern,
-    /// Phase E will populate durable milestones; leave empty here.
+    /// Durable long-term milestones such as `FirstEnsembleDay` or `SteadyWeek`.
+    ///
+    /// Phase E intentionally leaves this empty: the `ActivityMilestone` enum
+    /// exists as scaffolding, and variants will be constructed and persisted
+    /// when durable milestone tracking is implemented.
     pub long_term_milestones: Vec<ActivityMilestone>,
 }
 

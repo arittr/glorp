@@ -379,8 +379,9 @@ pub fn apply_unapplied_usage(
             });
         }
     }
-    let today_start = crate::storage::day_axis::LocalDayMapper::System
-        .local_day_start(crate::storage::day_axis::LocalDayMapper::System.local_date(now))
+    let mapper = crate::storage::day_axis::LocalDayMapper::System;
+    let today_start = mapper
+        .local_day_start(mapper.local_date(now))
         .to_offset(time::UtcOffset::UTC);
     // E6 deviation: activity milestones intentionally use the current unapplied
     // batch, not the applied ledger. First-contact seeded history is written as

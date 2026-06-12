@@ -39,12 +39,9 @@ pub fn run() -> Result<()> {
                         config.discontinuity_guard_ratio,
                         now,
                     )?;
-                    let scene_asleep = crate::tui::day::scene_asleep_for_poll(
-                        &usage_store,
-                        &state,
-                        now,
-                        crate::storage::day_axis::LocalDayMapper::System,
-                    );
+                    let mapper = crate::storage::day_axis::LocalDayMapper::System;
+                    let scene_asleep =
+                        crate::tui::day::scene_asleep_for_poll(&usage_store, &state, now, mapper);
                     let update =
                         apply_unapplied_usage(&mut state, &mut usage_store, now, scene_asleep)?;
                     store.save(&state)?;
@@ -55,16 +52,12 @@ pub fn run() -> Result<()> {
                     recent_effective = update.recent_effective_tokens;
                 }
                 let status_now = OffsetDateTime::now_utc();
+                let mapper = crate::storage::day_axis::LocalDayMapper::System;
                 today_effective = usage_store
-                    .today_effective_tokens(
-                        status_now,
-                        crate::storage::day_axis::LocalDayMapper::System,
-                    )
+                    .today_effective_tokens(status_now, mapper)
                     .unwrap_or(0.0);
-                let today_start = crate::storage::day_axis::LocalDayMapper::System
-                    .local_day_start(
-                        crate::storage::day_axis::LocalDayMapper::System.local_date(status_now),
-                    )
+                let today_start = mapper
+                    .local_day_start(mapper.local_date(status_now))
                     .to_offset(time::UtcOffset::UTC);
                 today_sources = usage_store
                     .token_totals_by_source_between(today_start, status_now)
