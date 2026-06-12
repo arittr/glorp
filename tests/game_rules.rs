@@ -4,6 +4,7 @@ use glorp::game::catchup::smear_catchup_delta;
 use glorp::game::effective_tokens::{EffectiveTokenWeights, TokenBuckets};
 use glorp::game::evolution::{apply_xp_delta, stage_for_xp, Stage};
 use glorp::game::metabolism::{apply_decay, apply_food, Mood, RhythmProfile, Vitals};
+use glorp::storage::state::HabitatPropSource;
 use time::macros::{date, datetime};
 
 #[test]
@@ -381,4 +382,15 @@ fn sixty_daily_catchups_reach_s6_without_duplicate_transition_pressure() {
     }
     assert_eq!(stage_for_xp(xp), Stage::S6);
     assert!((60.0..=66.0).contains(&xp));
+}
+
+#[test]
+fn activity_milestone_source_round_trips() {
+    let source = HabitatPropSource::ActivityMilestone {
+        milestone: "first_ensemble_day".into(),
+    };
+    let json = serde_json::to_string(&source).unwrap();
+    let back: HabitatPropSource = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, source);
+    assert!(json.contains("activity_milestone"));
 }

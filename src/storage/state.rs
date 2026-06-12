@@ -51,6 +51,7 @@ pub enum HabitatPropSource {
     ProviderFirstUse { provider_surface: String },
     HeavySession,
     WiltRecovery,
+    ActivityMilestone { milestone: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

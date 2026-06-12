@@ -525,6 +525,7 @@ pub fn resonant_prop_for_day(
             HabitatPropSource::ProviderFirstUse { .. } => codex_heavy_yesterday,
             HabitatPropSource::WiltRecovery => prop.earned_at >= yesterday_started,
             HabitatPropSource::LifetimeTokens { .. } => false,
+            HabitatPropSource::ActivityMilestone { .. } => prop.earned_at >= yesterday_started,
         })
         .collect();
     if qualified.is_empty() {
