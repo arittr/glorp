@@ -171,6 +171,7 @@ fn render_liveliness_watch_frame(
         Some(&fixture.life),
         None,
         false,
+        seed_usage_store,
     )
 }
 
@@ -194,6 +195,7 @@ fn render_day_context_watch_frame(
         Some(&fixture.life),
         Some(fixture.day_context),
         fixture.hold_eyes_closed,
+        seed_usage_store,
     )
 }
 
@@ -202,7 +204,15 @@ pub(crate) fn render_watch_frame_from_state(
     scratch_dir: &Path,
     fixture: WatchFrameFixture<'_>,
 ) -> Result<PreviewFrame> {
-    render_watch_frame_from_state_with_life(ctx, scratch_dir, fixture, None, None, false)
+    render_watch_frame_from_state_with_life(
+        ctx,
+        scratch_dir,
+        fixture,
+        None,
+        None,
+        false,
+        seed_usage_store,
+    )
 }
 
 fn render_watch_frame_from_state_with_life(
@@ -212,6 +222,7 @@ fn render_watch_frame_from_state_with_life(
     life: Option<&WatchLifeFixture>,
     day_context: Option<DayContext>,
     hold_eyes_closed: bool,
+    seed_usage: fn(&Path, OffsetDateTime) -> Result<()>,
 ) -> Result<PreviewFrame> {
     let WatchFrameFixture {
         id,
@@ -222,7 +233,7 @@ fn render_watch_frame_from_state_with_life(
         now,
     } = fixture;
     let usage_path = scratch_dir.join(format!("{id}.sqlite"));
-    seed_usage_store(&usage_path, now)?;
+    seed_usage(&usage_path, now)?;
     let color_capability = life.map_or(ctx.render.color_capability, |life| life.color_capability);
     let render = RenderContext::with_clock(color_capability, WatchClock::fixed(now));
     let mut vm = build_watch_view_model_at(
@@ -274,26 +285,22 @@ fn render_activity_identity_watch_frame(
     seed_usage: fn(&Path, OffsetDateTime) -> Result<()>,
 ) -> Result<PreviewFrame> {
     let state = seeded_pet_state(ctx);
-    let usage_path = scratch_dir.join(format!("{id}.sqlite"));
-    seed_usage(&usage_path, ctx.fixed_now)?;
-    let render = RenderContext::with_clock(
-        ctx.render.color_capability,
-        WatchClock::fixed(ctx.fixed_now),
-    );
-    let vm = build_watch_view_model_at(
-        &state,
-        &usage_path,
-        ctx.fixed_now,
-        crate::storage::day_axis::LocalDayMapper::Fixed(UtcOffset::UTC),
-    )?;
-    let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &render);
-    let mut terminal = Terminal::new(TestBackend::new(width, height))?;
-    terminal.draw(|frame| {
-        render_watch_frame_with_layout(frame, &vm, &render, &layout);
-    })?;
-    let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
-    frame.layout = Some(preview_layout(id, &layout));
-    Ok(frame)
+    render_watch_frame_from_state_with_life(
+        ctx,
+        scratch_dir,
+        WatchFrameFixture {
+            id,
+            title,
+            width,
+            height,
+            state: &state,
+            now: ctx.fixed_now,
+        },
+        None,
+        None,
+        false,
+        seed_usage,
+    )
 }
 
 fn liveliness_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<LivelinessFrameFixture> {
@@ -1089,6 +1096,7 @@ fn render_alive_room_watch_frame(
         Some(&fixture.life),
         Some(fixture.day_context),
         false,
+        seed_usage_store,
     )?;
 
     let mut vm = crate::tui::view_model::WatchViewModel::fixture();

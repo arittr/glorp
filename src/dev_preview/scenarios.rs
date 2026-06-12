@@ -1250,9 +1250,12 @@ fn day_context_inputs_for_frame(
     ])
 }
 
+// The `activity_profile` values below are fixed scenario-intent tags, not
+// computed metrics. They describe the kind of activity identity contract each
+// preview frame is meant to exercise.
 fn activity_identity_inputs_for_frame(
     id: &str,
-    _frame: &PreviewFrame,
+    frame: &PreviewFrame,
     ctx: &PreviewRenderContext,
 ) -> BTreeMap<String, Value> {
     let (source_mix, source_diversity) = match id {
@@ -1269,8 +1272,8 @@ fn activity_identity_inputs_for_frame(
             "fixed_now".to_string(),
             Value::String(format_rfc3339_lossy(ctx.fixed_now)),
         ),
-        ("terminal_width".to_string(), json!(120)),
-        ("terminal_height".to_string(), json!(32)),
+        ("terminal_width".to_string(), json!(frame.width)),
+        ("terminal_height".to_string(), json!(frame.height)),
         ("source_mix".to_string(), source_mix),
         (
             "source_diversity".to_string(),

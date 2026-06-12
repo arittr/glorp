@@ -101,7 +101,7 @@ For a no-publish rehearsal, manually run the `publish` workflow with the default
 `dry_run` input. This exercises the test/build/smoke matrix and skips the
 publish jobs.
 
-## Activity Identity Release Notes
+## Activity Identity Preview Fixtures
 
 - The `@ccusage/codex` fallback dependency is retained for at least one release
   while the unified `ccusage daily --json` path is validated against real Codex

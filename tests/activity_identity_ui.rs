@@ -1,5 +1,5 @@
 // tests/activity_identity_ui.rs
-use glorp::tui::panels::{LegacyPanel, TodayPanel};
+use glorp::tui::panels::TodayPanel;
 use glorp::tui::render_context::RenderContext;
 use glorp::tui::style::{claude_color, codex_color, source_color};
 use glorp::tui::view_model::{SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel};
@@ -12,7 +12,9 @@ fn render_today_to_string(vm: &WatchViewModel, width: u16, height: u16) -> Strin
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|f| panel.render(f.area(), f.buffer_mut(), vm, &ctx))
+        .draw(|f| {
+            glorp::tui::panels::LegacyPanel::render(&panel, f.area(), f.buffer_mut(), vm, &ctx)
+        })
         .unwrap();
     terminal
         .backend()
