@@ -390,6 +390,32 @@ fn dev_preview_watch_includes_day_context_inputs() {
 }
 
 #[test]
+fn dev_preview_watch_manifest_records_activity_identity_intent() {
+    let run = PreviewRun::new();
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    for id in [
+        "watch-activity-identity-ensemble",
+        "watch-activity-identity-unknown",
+    ] {
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["intent"], "Review activity-identity driven watch layout with multi-source or unknown-source usage.");
+        let source_mix = scenario["inputs"]["source_mix"].as_array().unwrap();
+        assert!(!source_mix.is_empty(), "{id} should list source_mix");
+        assert!(
+            scenario["inputs"]["activity_profile"].is_object(),
+            "{id} should record activity_profile"
+        );
+        assert!(scenario["inputs"]["activity_profile"]["source_diversity"].is_string());
+        assert!(
+            scenario["inputs"]["raw_helper_output"].is_null(),
+            "{id} must not include raw payloads"
+        );
+    }
+}
+
+#[test]
 fn dev_preview_includes_room_phase_scenarios() {
     let run = PreviewRun::new();
     run.run_success("watch");

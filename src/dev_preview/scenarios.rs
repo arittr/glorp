@@ -318,6 +318,16 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     .to_string(),
             ],
         ),
+        id if id.starts_with("watch-activity-identity-") => (
+            PreviewScenarioKind::Watch,
+            "Review activity-identity driven watch layout with multi-source or unknown-source usage.",
+            activity_identity_inputs_for_frame(id, frame, ctx),
+            vec![
+                "Confirm the Today panel shows dynamic source rows and an 'other' row if needed.".to_string(),
+                "Check that source labels are colored deterministically, including unknown sources.".to_string(),
+                "Verify the manifest records source mix and activity profile intent without raw payloads.".to_string(),
+            ],
+        ),
         id if id.starts_with("room-") => (
             PreviewScenarioKind::Watch,
             "Review deterministic alive room inputs and rendered output.",
@@ -1237,6 +1247,46 @@ fn day_context_inputs_for_frame(
         ("terminal_height".to_string(), json!(frame.height)),
         ("day_context".to_string(), day_context),
         ("life_profile".to_string(), life_profile),
+    ])
+}
+
+fn activity_identity_inputs_for_frame(
+    id: &str,
+    _frame: &PreviewFrame,
+    ctx: &PreviewRenderContext,
+) -> BTreeMap<String, Value> {
+    let (source_mix, source_diversity) = match id {
+        "watch-activity-identity-ensemble" => (
+            json!(["claude-code", "codex", "gemini", "opencode"]),
+            "ensemble",
+        ),
+        "watch-activity-identity-unknown" => (json!(["unknown"]), "single-lane"),
+        _ => (json!([]), "quiet"),
+    };
+
+    BTreeMap::from([
+        (
+            "fixed_now".to_string(),
+            Value::String(format_rfc3339_lossy(ctx.fixed_now)),
+        ),
+        ("terminal_width".to_string(), json!(120)),
+        ("terminal_height".to_string(), json!(32)),
+        ("source_mix".to_string(), source_mix),
+        (
+            "source_diversity".to_string(),
+            Value::String(source_diversity.to_string()),
+        ),
+        (
+            "activity_profile".to_string(),
+            json!({
+                "source_diversity": source_diversity,
+                "rhythm": "bursty",
+                "token_shape": "balanced",
+                "relative_intensity": "normal",
+                "recovery": "sustained",
+                "long_term_milestones": []
+            }),
+        ),
     ])
 }
 
