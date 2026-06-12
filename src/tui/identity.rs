@@ -74,6 +74,37 @@ impl Default for ActivityIdentityProfile {
     }
 }
 
+pub fn derive_source_diversity(per_source: &[(String, f64)]) -> SourceDiversity {
+    let total: f64 = per_source.iter().map(|(_, v)| v.max(0.0)).sum();
+    if total <= 0.0 || !total.is_finite() {
+        return SourceDiversity::Quiet;
+    }
+    let mut shares: Vec<(String, f64)> = per_source
+        .iter()
+        .map(|(name, v)| (name.clone(), v.max(0.0) / total))
+        .filter(|(_, share)| share.is_finite() && *share > 0.0)
+        .collect();
+    shares.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    let above = |threshold: f64| shares.iter().filter(|(_, s)| *s >= threshold).count();
+    if above(0.10) >= 3 {
+        SourceDiversity::Ensemble
+    } else if shares.len() >= 2
+        && shares[0].1 >= 0.20
+        && shares[1].1 >= 0.20
+        && shares[0].1 + shares[1].1 >= 0.80
+    {
+        SourceDiversity::DualLane
+    } else if shares.first().is_some_and(|(_, s)| *s >= 0.85) {
+        SourceDiversity::SingleLane
+    } else {
+        SourceDiversity::Quiet
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +118,46 @@ mod tests {
         assert_eq!(p.relative_intensity, RelativeIntensity::Quiet);
         assert_eq!(p.recovery, RecoveryPattern::Dormant);
         assert!(p.long_term_milestones.is_empty());
+    }
+
+    #[test]
+    fn source_diversity_classifies_shapes() {
+        assert_eq!(derive_source_diversity(&[]), SourceDiversity::Quiet);
+        assert_eq!(
+            derive_source_diversity(&[("claude".into(), 90.0), ("codex".into(), 10.0)]),
+            SourceDiversity::SingleLane
+        );
+        assert_eq!(
+            derive_source_diversity(&[("claude".into(), 50.0), ("codex".into(), 50.0)]),
+            SourceDiversity::DualLane
+        );
+        assert_eq!(
+            derive_source_diversity(&[
+                ("claude".into(), 40.0),
+                ("codex".into(), 40.0),
+                ("gemini".into(), 20.0)
+            ]),
+            SourceDiversity::Ensemble
+        );
+        assert_eq!(
+            derive_source_diversity(&[
+                ("claude".into(), 40.0),
+                ("codex".into(), 30.0),
+                ("gemini".into(), 30.0)
+            ]),
+            SourceDiversity::Ensemble
+        );
+        assert_eq!(
+            derive_source_diversity(&[
+                ("claude".into(), 70.0),
+                ("codex".into(), 20.0),
+                ("gemini".into(), 10.0)
+            ]),
+            SourceDiversity::Ensemble
+        );
+        assert_eq!(
+            derive_source_diversity(&[("claude".into(), 60.0), ("codex".into(), 30.0)]),
+            SourceDiversity::DualLane
+        );
     }
 }
