@@ -1,13 +1,10 @@
 use time::{Duration, OffsetDateTime};
 
 use crate::storage::state::HabitatPropId;
+use crate::tui::identity::{ActivityIdentityProfile, SourceDiversity};
 
 const DEFAULT_REFERENCE_TOKENS_PER_MINUTE: f64 = 60_000.0;
-const MIN_REFERENCE_TOKENS_PER_MINUTE: f64 = 5_000.0;
-const MAX_ACTIVITY_LEVEL: f32 = 2.0;
-const MAX_BURST_LEVEL: f32 = 1.5;
 const EMA_ALPHA: f64 = 0.35;
-const IDLE_DECAY_PER_MINUTE: f32 = 0.82;
 
 /// Dedupe-applied usage signal used for presentation profile derivation.
 /// This represents usage that changed or reflected pet state, not raw provider
@@ -84,6 +81,7 @@ pub enum SourceAccent {
     Claude,
     Codex,
     Balanced,
+    Ensemble,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -174,7 +172,12 @@ impl Default for LifeSignalState {
 }
 
 impl LifeSignalState {
-    pub fn observe(&mut self, signal: AppliedUsageSignal, now: OffsetDateTime) -> PetLifeProfile {
+    pub fn observe(
+        &mut self,
+        signal: AppliedUsageSignal,
+        activity_identity: &ActivityIdentityProfile,
+        _now: OffsetDateTime,
+    ) -> PetLifeProfile {
         let freshness = self.profile_freshness(signal);
         let elapsed_secs = signal.elapsed_since_successful_poll.whole_seconds().max(1) as f64;
         let tokens_per_minute = signal.applied_effective_tokens.max(0.0) / elapsed_secs * 60.0;
@@ -182,44 +185,33 @@ impl LifeSignalState {
             self.reference_tokens_per_minute = ((1.0 - EMA_ALPHA)
                 * self.reference_tokens_per_minute
                 + EMA_ALPHA * tokens_per_minute)
-                .clamp(
-                    MIN_REFERENCE_TOKENS_PER_MINUTE,
-                    DEFAULT_REFERENCE_TOKENS_PER_MINUTE * 20.0,
-                );
+                .max(1.0);
         }
-
-        let target = activity_from_rate(tokens_per_minute, self.reference_tokens_per_minute);
-        if freshness == UsageSignalFreshness::Live {
-            self.ema_activity_level = ((1.0 - EMA_ALPHA as f32) * self.ema_activity_level
-                + EMA_ALPHA as f32 * target)
-                .clamp(0.0, MAX_ACTIVITY_LEVEL);
+        let relative = if self.reference_tokens_per_minute <= 0.0 {
+            0.0
         } else {
-            self.ema_activity_level = decay_activity(
-                self.ema_activity_level,
-                signal.elapsed_since_successful_poll,
-            );
-        }
-        if signal.applied_effective_tokens == 0.0 {
-            self.ema_activity_level = decay_activity(
-                self.ema_activity_level,
-                signal.elapsed_since_successful_poll,
-            );
-        }
-        self.last_observed_at = Some(now);
-
+            (tokens_per_minute / self.reference_tokens_per_minute) as f32
+        };
+        let activity_level = if freshness == UsageSignalFreshness::Live {
+            relative.clamp(0.0, 2.0)
+        } else {
+            0.0
+        };
+        self.ema_activity_level = ((1.0 - EMA_ALPHA as f32) * self.ema_activity_level
+            + EMA_ALPHA as f32 * activity_level)
+            .clamp(0.0, 2.0);
+        self.last_observed_at = Some(_now);
         let burst_level =
             if freshness == UsageSignalFreshness::Live && signal.applied_effective_tokens > 0.0 {
-                activity_from_rate(tokens_per_minute, self.reference_tokens_per_minute)
-                    .clamp(0.0, MAX_BURST_LEVEL)
+                (relative - 1.0).max(0.0).clamp(0.0, 1.5)
             } else {
                 0.0
             };
-
         PetLifeProfile {
             activity_level: self.ema_activity_level,
             burst_level,
             source_accent: if freshness == UsageSignalFreshness::Live {
-                classify_source_accent(signal.source_mix)
+                classify_source_accent(signal.source_mix, activity_identity.source_diversity)
             } else {
                 None
             },
@@ -246,32 +238,17 @@ impl LifeSignalState {
     }
 }
 
-fn activity_from_rate(tokens_per_minute: f64, reference_tokens_per_minute: f64) -> f32 {
-    if !tokens_per_minute.is_finite() || tokens_per_minute <= 0.0 {
-        return 0.0;
-    }
-    let reference = reference_tokens_per_minute
-        .max(MIN_REFERENCE_TOKENS_PER_MINUTE)
-        .max(1.0);
-    let ratio = tokens_per_minute / reference;
-    let level = (2.0 * ratio / (1.0 + ratio)) as f32;
-    if level.is_finite() {
-        level.clamp(0.0, MAX_ACTIVITY_LEVEL)
-    } else {
-        0.0
-    }
-}
-
-fn decay_activity(current: f32, elapsed: Duration) -> f32 {
-    let minutes = (elapsed.whole_seconds().max(0) as f32) / 60.0;
-    (current * IDLE_DECAY_PER_MINUTE.powf(minutes)).clamp(0.0, MAX_ACTIVITY_LEVEL)
-}
-
 fn idle_minutes(elapsed: Duration) -> u32 {
     elapsed.whole_minutes().max(0) as u32
 }
 
-pub fn classify_source_accent(source_mix: Option<AppliedSourceMix>) -> Option<SourceAccent> {
+pub fn classify_source_accent(
+    source_mix: Option<AppliedSourceMix>,
+    diversity: SourceDiversity,
+) -> Option<SourceAccent> {
+    if diversity == SourceDiversity::Ensemble {
+        return Some(SourceAccent::Ensemble);
+    }
     let mix = source_mix?;
     let total = mix.claude_effective_tokens + mix.codex_effective_tokens;
     if total <= 0.0 || !total.is_finite() {
@@ -469,6 +446,7 @@ mod tests {
 
         let idle = state.observe(
             AppliedUsageSignal::quiet(start, Duration::seconds(10)),
+            &ActivityIdentityProfile::default(),
             start,
         );
         assert_eq!(idle.activity_level, 0.0);
@@ -480,6 +458,7 @@ mod tests {
                 Duration::seconds(10),
                 start + Duration::seconds(10),
             ),
+            &ActivityIdentityProfile::default(),
             start + Duration::seconds(10),
         );
         let hot = state.observe(
@@ -488,10 +467,12 @@ mod tests {
                 Duration::seconds(10),
                 start + Duration::seconds(20),
             ),
+            &ActivityIdentityProfile::default(),
             start + Duration::seconds(20),
         );
         let cooling = state.observe(
             AppliedUsageSignal::quiet(start + Duration::seconds(90), Duration::seconds(70)),
+            &ActivityIdentityProfile::default(),
             start + Duration::seconds(90),
         );
 
@@ -512,14 +493,18 @@ mod tests {
             token_shape: Some(token_shape(100.0, 600.0, 0.0, 0.0, 0.0)),
             ..live_signal(80_000.0, Duration::seconds(10), now)
         };
-        let cold_profile = state.observe(cold, now);
+        let cold_profile = state.observe(cold, &ActivityIdentityProfile::default(), now);
         assert_eq!(cold_profile.burst_level, 0.0);
         assert_eq!(cold_profile.source_accent, None);
         assert_eq!(cold_profile.work_weather, WorkWeather::Clear);
 
         let live_missing_detail =
             live_signal(80_000.0, Duration::seconds(10), now + Duration::seconds(10));
-        let live_profile = state.observe(live_missing_detail, now + Duration::seconds(10));
+        let live_profile = state.observe(
+            live_missing_detail,
+            &ActivityIdentityProfile::default(),
+            now + Duration::seconds(10),
+        );
         assert!(live_profile.burst_level > 0.0);
     }
 
@@ -533,6 +518,7 @@ mod tests {
                 token_shape: Some(token_shape(100.0, 600.0, 0.0, 0.0, 0.0)),
                 ..live_signal(80_000.0, Duration::seconds(10), now)
             },
+            &ActivityIdentityProfile::default(),
             now,
         );
 
@@ -546,13 +532,18 @@ mod tests {
         let now = time::macros::datetime!(2026-06-05 12:00 UTC);
         let mut state = LifeSignalState::default();
 
-        state.observe(AppliedUsageSignal::quiet(now, Duration::seconds(10)), now);
+        state.observe(
+            AppliedUsageSignal::quiet(now, Duration::seconds(10)),
+            &ActivityIdentityProfile::default(),
+            now,
+        );
         let profile = state.observe(
             live_signal(
                 20_000_000.0,
                 Duration::seconds(10),
                 now + Duration::seconds(10),
             ),
+            &ActivityIdentityProfile::default(),
             now + Duration::seconds(10),
         );
 
@@ -561,22 +552,37 @@ mod tests {
 
     #[test]
     fn classify_source_accent_covers_source_mix_shapes() {
-        assert_eq!(classify_source_accent(None), None);
+        assert_eq!(classify_source_accent(None, SourceDiversity::Quiet), None);
         assert_eq!(
-            classify_source_accent(Some(source_mix(9_000.0, 1_000.0))),
+            classify_source_accent(
+                Some(source_mix(9_000.0, 1_000.0)),
+                SourceDiversity::SingleLane
+            ),
             Some(SourceAccent::Claude)
         );
         assert_eq!(
-            classify_source_accent(Some(source_mix(1_000.0, 9_000.0))),
+            classify_source_accent(
+                Some(source_mix(1_000.0, 9_000.0)),
+                SourceDiversity::SingleLane
+            ),
             Some(SourceAccent::Codex)
         );
         assert_eq!(
-            classify_source_accent(Some(source_mix(4_000.0, 6_000.0))),
+            classify_source_accent(
+                Some(source_mix(4_000.0, 6_000.0)),
+                SourceDiversity::DualLane
+            ),
             Some(SourceAccent::Balanced)
         );
-        assert_eq!(classify_source_accent(Some(source_mix(0.0, 0.0))), None);
         assert_eq!(
-            classify_source_accent(Some(source_mix(f64::INFINITY, 1_000.0))),
+            classify_source_accent(Some(source_mix(0.0, 0.0)), SourceDiversity::DualLane),
+            None
+        );
+        assert_eq!(
+            classify_source_accent(
+                Some(source_mix(f64::INFINITY, 1_000.0)),
+                SourceDiversity::DualLane
+            ),
             None
         );
     }
@@ -735,5 +741,31 @@ mod tests {
             .prop_reactions
             .iter()
             .any(|reaction| reaction.prop_id.as_str() == crate::game::habitat::TOKEN_SHELL_100K));
+    }
+
+    #[test]
+    fn source_accent_reflects_diversity() {
+        let _now = time::macros::datetime!(2026-06-05 12:00 UTC);
+        let mix = AppliedSourceMix {
+            claude_effective_tokens: 5_000.0,
+            codex_effective_tokens: 5_000.0,
+        };
+        assert_eq!(
+            classify_source_accent(Some(mix), SourceDiversity::Ensemble),
+            Some(SourceAccent::Ensemble)
+        );
+        assert_eq!(
+            classify_source_accent(Some(mix), SourceDiversity::DualLane),
+            Some(SourceAccent::Balanced)
+        );
+        let claude_dominant = AppliedSourceMix {
+            claude_effective_tokens: 9_000.0,
+            codex_effective_tokens: 1_000.0,
+        };
+        assert_eq!(
+            classify_source_accent(Some(claude_dominant), SourceDiversity::SingleLane),
+            Some(SourceAccent::Claude)
+        );
+        assert_eq!(classify_source_accent(None, SourceDiversity::Quiet), None);
     }
 }

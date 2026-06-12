@@ -85,7 +85,7 @@ fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
         match vm.life_profile.source_accent {
             Some(SourceAccent::Codex) => Rgb(0x86, 0xd9, 0xef),
             Some(SourceAccent::Claude) => Rgb(0xb3, 0x9d, 0xff),
-            Some(SourceAccent::Balanced) => Rgb(0xf0, 0xc4, 0x6a),
+            Some(SourceAccent::Balanced | SourceAccent::Ensemble) => Rgb(0xf0, 0xc4, 0x6a),
             None => base,
         }
     };

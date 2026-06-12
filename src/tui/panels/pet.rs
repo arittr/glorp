@@ -209,7 +209,9 @@ fn source_accent_color(accent: crate::tui::life::SourceAccent) -> Color {
     match accent {
         crate::tui::life::SourceAccent::Claude => Color::Rgb(0xb3, 0x9d, 0xff),
         crate::tui::life::SourceAccent::Codex => Color::Rgb(0x86, 0xd9, 0xef),
-        crate::tui::life::SourceAccent::Balanced => Color::Rgb(0xf0, 0xc4, 0x6a),
+        crate::tui::life::SourceAccent::Balanced | crate::tui::life::SourceAccent::Ensemble => {
+            Color::Rgb(0xf0, 0xc4, 0x6a)
+        }
     }
 }
 

@@ -385,9 +385,11 @@ fn drain_poll_results() {
     let mut vm = result.vm;
     let (text_view, status_item) = match APP_STATE.with(|cell| {
         cell.borrow_mut().as_mut().map(|s| {
-            let profile = s
-                .life_signal_state
-                .observe(result.applied_signal, time::OffsetDateTime::now_utc());
+            let profile = s.life_signal_state.observe(
+                result.applied_signal,
+                &vm.activity_identity,
+                time::OffsetDateTime::now_utc(),
+            );
             vm.life_profile = profile;
             (s.text_view.clone(), s.status_item.clone())
         })
