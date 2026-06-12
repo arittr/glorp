@@ -13,6 +13,10 @@ use crate::{
         state::{NarrativeEvent, PetState, Vitals as StoredVitals},
         usage_store::{NormalizedUsageEvent, ProviderDiagnostic, UsageLedgerRow, UsageStore},
     },
+    tui::identity::{
+        derive_recovery_pattern, derive_relative_intensity, derive_source_diversity,
+        derive_token_shape_personality, derive_work_rhythm, ActivityIdentityProfile,
+    },
     tui::life::{AppliedSourceMix, AppliedUsageSignal, TokenShapeDelta, UsageSignalFreshness},
     usage::provider::{UsageDelta, UsagePollResult},
 };
@@ -375,6 +379,34 @@ pub fn apply_unapplied_usage(
             });
         }
     }
+    let today_start = crate::storage::day_axis::LocalDayMapper::System
+        .local_day_start(crate::storage::day_axis::LocalDayMapper::System.local_date(now))
+        .to_offset(time::UtcOffset::UTC);
+    let mut today_source_totals: std::collections::BTreeMap<String, f64> =
+        std::collections::BTreeMap::new();
+    for row in &rows_to_apply {
+        *today_source_totals
+            .entry(row.event.provider_surface.clone())
+            .or_insert(0.0) += row.event.effective_tokens.max(0.0);
+    }
+    let today_source_totals: Vec<(String, f64)> = today_source_totals.into_iter().collect();
+    let activity_profile = ActivityIdentityProfile {
+        source_diversity: derive_source_diversity(&today_source_totals),
+        rhythm: derive_work_rhythm(usage_store, today_start, now),
+        token_shape: derive_token_shape_personality(
+            usage_store
+                .applied_token_shape_between(today_start, now)
+                .unwrap_or_default(),
+        ),
+        relative_intensity: derive_relative_intensity(
+            usage_store
+                .applied_effective_tokens_between(today_start, now)
+                .unwrap_or(0.0),
+            state.calibration,
+        ),
+        recovery: derive_recovery_pattern(usage_store, now),
+        long_term_milestones: Vec::new(),
+    };
     habitat::unlock_habitat_props(
         state,
         &rows_to_apply,
@@ -382,8 +414,8 @@ pub fn apply_unapplied_usage(
         initial_mood,
         new_mood,
         now,
-        &crate::tui::identity::ActivityIdentityProfile::default(),
-        &[],
+        &activity_profile,
+        &today_source_totals,
     );
     record_reflected_usage_event_ids(state, rows.iter().map(|row| row.id));
     state.previous_vitals = Some(initial_vitals);

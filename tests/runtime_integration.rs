@@ -857,3 +857,83 @@ fn guard_floor_passes_heavy_honest_days_over_a_low_median_baseline() {
     assert!((staged - 6_000_000.0).abs() < 0.01);
     assert!(usage_store.recent_diagnostics(5).unwrap().is_empty());
 }
+
+#[test]
+fn first_ensemble_day_unlocks_from_runtime() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 06 - 11 12:00 UTC);
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 60_000.0;
+
+    for (idx, surface) in ["claude-code", "codex", "gemini"].into_iter().enumerate() {
+        let event = NormalizedUsageEvent {
+            provider_surface: surface.to_string(),
+            observed_at: now,
+            bucket_at: now,
+            effective_tokens: 20_000.0,
+            ..NormalizedUsageEvent::for_test_at(now, 20_000.0)
+        };
+        usage_store
+            .insert_unapplied_event_bucket(
+                &event,
+                &ProviderCursorUpdate {
+                    provider_surface: surface.to_string(),
+                    cursor_key: format!("{surface}-cursor"),
+                    cursor_value: format!("{surface}-value"),
+                    provider_version: "test-provider".to_string(),
+                    parser_version: "test-parser".to_string(),
+                },
+                idx,
+                3,
+            )
+            .unwrap();
+    }
+
+    let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
+    usage_store
+        .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+        .unwrap();
+
+    assert!(
+        habitat_prop_ids(&state).contains(&glorp::game::habitat::FIRST_ENSEMBLE_DAY),
+        "three significant sources should award first_ensemble_day"
+    );
+}
+
+#[test]
+fn first_contact_does_not_unlock_activity_milestones() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 06 - 11 12:00 UTC);
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 60_000.0;
+
+    let mut poll = poll_with_surface("claude-code", 20_000.0, now);
+    poll.deltas
+        .extend(poll_with_surface("codex", 20_000.0, now).deltas);
+    poll.deltas
+        .extend(poll_with_surface("gemini", 20_000.0, now).deltas);
+    poll.total_effective_tokens = 60_000.0;
+
+    let staged = stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        now,
+    )
+    .unwrap();
+    assert!(
+        staged.is_empty(),
+        "first-contact history should seed cursors only"
+    );
+
+    let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
+    assert!(update.applied_event_ids.is_empty());
+    assert_eq!(state.lifetime_effective_tokens, 0.0);
+    assert!(
+        !habitat_prop_ids(&state).contains(&glorp::game::habitat::FIRST_ENSEMBLE_DAY),
+        "first-contact history must not award activity milestones"
+    );
+}
