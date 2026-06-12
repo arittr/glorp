@@ -1,6 +1,7 @@
 pub mod app;
 pub mod component;
 pub mod day;
+pub mod identity;
 pub mod layout;
 pub mod life;
 pub mod panels;
