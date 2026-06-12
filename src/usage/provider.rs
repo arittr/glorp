@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::storage::usage_store::{ProviderCursorUpdate, UsageStore};
+use crate::usage::identity::SourceIdentity;
 use crate::usage::normalize::RawTokenTotals;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -14,6 +15,7 @@ pub struct UsagePollResult {
 #[derive(Debug, Clone)]
 pub struct UsageDelta {
     pub provider_surface: String,
+    pub source_identity: SourceIdentity,
     pub command: String,
     pub effective_tokens: f64,
     pub confidence: String,

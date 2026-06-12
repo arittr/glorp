@@ -3,6 +3,7 @@ use crate::game::effective_tokens::EffectiveTokenWeights;
 use crate::storage::usage_store::{
     ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
 };
+use crate::usage::identity::SourceIdentity;
 use crate::usage::normalize::{normalize_usage_json, NormalizedUsageRecord, RawTokenTotals};
 use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
@@ -340,7 +341,8 @@ impl CcusageCommandProvider {
             // both the row and the unchanged cursor so the next successful run recovers
             // via `apply_unapplied_usage`.
             deltas.push(UsageDelta {
-                provider_surface: record.provider_surface,
+                provider_surface: record.provider_surface.clone(),
+                source_identity: SourceIdentity::from_provider_surface(&record.provider_surface),
                 command: command_name.to_string(),
                 effective_tokens,
                 confidence: CONFIDENCE.to_string(),

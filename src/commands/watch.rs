@@ -770,6 +770,7 @@ mod tests {
         state::PetState,
         usage_store::{ProviderCursorUpdate, UsageStore},
     };
+    use crate::usage::identity::SourceIdentity;
     use crate::usage::provider::{UsageDelta, UsagePollResult};
     use tempfile::tempdir;
     use time::{Date, Month, PrimitiveDateTime, Time};
@@ -1031,6 +1032,7 @@ mod tests {
         UsagePollResult {
             deltas: vec![UsageDelta {
                 provider_surface: "claude-code".into(),
+                source_identity: SourceIdentity::claude_code(),
                 command: "ccusage daily --json --offline".into(),
                 effective_tokens,
                 confidence: "local-log-derived".into(),
@@ -1055,6 +1057,7 @@ mod tests {
         UsagePollResult {
             deltas: vec![UsageDelta {
                 provider_surface: "claude-code".into(),
+                source_identity: SourceIdentity::claude_code(),
                 command: "ccusage daily --json --offline".into(),
                 effective_tokens,
                 confidence: "local-log-derived".into(),
