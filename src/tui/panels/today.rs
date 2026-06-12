@@ -4,11 +4,12 @@ use ratatui::layout::{Constraint, Rect};
 use crate::tui::component::{ComponentPanel, InlineSparkline, MetricRow};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::style::{claude_color, codex_color};
+use crate::tui::style::{source_color, tokenpet_palette};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
 
-/// Expected source surfaces and their display names.
-const EXPECTED_SOURCES: &[(&str, &str)] = &[("claude-code", "claude"), ("codex", "codex")];
+/// Number of individual source rows the fixed-height panel can show before
+/// collapsing the rest into an "other" row.
+const MAX_VISIBLE_SOURCE_ROWS: usize = 2;
 
 pub struct TodayPanel;
 
@@ -36,38 +37,57 @@ fn render_today_rows(area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &Re
     }
 
     let total = vm.today_effective_tokens.max(0.0);
-    for (index, (surface, display)) in EXPECTED_SOURCES.iter().enumerate() {
-        let row = 1 + index as u16;
-        if area.height <= row {
-            continue;
+    let mut sources: Vec<_> = vm.source_breakdown.iter().collect();
+    sources.sort_by(|a, b| {
+        b.effective_tokens
+            .partial_cmp(&a.effective_tokens)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let mut next_row = 1;
+    for source in sources.iter().take(MAX_VISIBLE_SOURCE_ROWS) {
+        if area.height <= next_row {
+            break;
         }
-        source_row(vm, surface, display, total).render(row_rect(area, row), buf, ctx);
+        source_row(vm, &source.name, &source.display_name, total).render(
+            row_rect(area, next_row),
+            buf,
+            ctx,
+        );
+        next_row += 1;
     }
 
-    if area.height > 3 {
+    let other_tokens: f64 = sources
+        .iter()
+        .skip(MAX_VISIBLE_SOURCE_ROWS)
+        .map(|s| s.effective_tokens)
+        .sum();
+    if other_tokens > 0.0 && area.height > next_row {
+        other_row(other_tokens, total).render(row_rect(area, next_row), buf, ctx);
+        next_row += 1;
+    }
+
+    if area.height > next_row {
         MetricRow::new(
             "last 10m",
             format_signed_tokens_short(vm.current_bucket_effective_tokens),
         )
         .annotation("this 10m")
-        .render(row_rect(area, 3), buf, ctx);
+        .render(row_rect(area, next_row), buf, ctx);
+        next_row += 1;
     }
 
-    if area.height > 4 {
+    if area.height > next_row {
         InlineSparkline::new(&vm.recent_daily_effective_tokens)
             .leading_width(2)
             .annotation_gap(9)
             .annotation("← 7-day")
-            .render(row_rect(area, 4), buf, ctx);
+            .render(row_rect(area, next_row), buf, ctx);
     }
 }
 
-fn source_row<'a>(
-    vm: &WatchViewModel,
-    surface: &str,
-    display: &'a str,
-    total: f64,
-) -> MetricRow<'a> {
+fn source_row(vm: &WatchViewModel, surface: &str, display: &str, total: f64) -> MetricRow<'static> {
     let value_opt = vm
         .source_breakdown
         .iter()
@@ -96,15 +116,31 @@ fn source_row<'a>(
         status,
         Some(SourceStatus::Blocked) | Some(SourceStatus::Diagnostic)
     );
-    let color = match surface {
-        "claude-code" => claude_color(),
-        "codex" => codex_color(),
-        _ => claude_color(),
-    };
-    MetricRow::new(display, value)
+    MetricRow::new(compact_label(display, 8), value)
         .annotation(share)
-        .label_color(color)
+        .label_color(source_color(surface))
         .diagnostic_marker(diagnostic)
+}
+
+fn other_row(tokens: f64, total: f64) -> MetricRow<'static> {
+    let share = if total > 0.0 {
+        format!("{}%", ((tokens / total) * 100.0).round() as u32)
+    } else {
+        "—".to_string()
+    };
+    MetricRow::new("other", format_tokens_full(tokens))
+        .annotation(share)
+        .label_color(tokenpet_palette().dim.rgb)
+}
+
+fn compact_label(text: &str, max_len: usize) -> String {
+    if text.chars().count() <= max_len {
+        text.to_string()
+    } else {
+        let mut out: String = text.chars().take(max_len.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn row_rect(area: Rect, index: u16) -> Rect {
@@ -154,6 +190,7 @@ fn format_signed_tokens_short(n: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::view_model::{SourceHealthView, SourceUsageView};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -208,15 +245,106 @@ mod tests {
     }
 
     #[test]
-    fn today_panel_renders_dash_for_absent_source() {
+    fn today_panel_does_not_render_absent_sources() {
         let mut vm = WatchViewModel::fixture();
         vm.source_breakdown.retain(|s| s.name != "codex");
         let s = render_to_string(50, 6, &vm);
         assert!(
-            s.contains("codex"),
-            "expected 'codex' label even when absent"
+            !s.contains("codex"),
+            "dynamic rows must not show sources with no today activity: {s}"
         );
-        assert!(s.contains('—'), "expected dash for absent source");
+    }
+
+    #[test]
+    fn today_panel_renders_top_sources_plus_other() {
+        let mut vm = WatchViewModel::fixture();
+        vm.source_breakdown = vec![
+            SourceUsageView {
+                name: "claude-code".into(),
+                display_name: "claude".into(),
+                effective_tokens: 12_000.0,
+            },
+            SourceUsageView {
+                name: "codex".into(),
+                display_name: "codex".into(),
+                effective_tokens: 5_000.0,
+            },
+            SourceUsageView {
+                name: "gemini".into(),
+                display_name: "gemini".into(),
+                effective_tokens: 3_000.0,
+            },
+            SourceUsageView {
+                name: "opencode".into(),
+                display_name: "opencode".into(),
+                effective_tokens: 1_500.0,
+            },
+        ];
+        let s = render_to_string(70, 8, &vm);
+        assert!(s.contains("claude"), "expected claude in today panel: {s}");
+        assert!(s.contains("codex"), "expected codex in today panel: {s}");
+        assert!(
+            s.contains("other"),
+            "overflow sources must collapse into 'other': {s}"
+        );
+        assert!(
+            !s.contains("gemini"),
+            "gemini should be hidden behind 'other': {s}"
+        );
+    }
+
+    #[test]
+    fn today_panel_long_source_name_compacts_safely() {
+        let mut vm = WatchViewModel::fixture();
+        vm.source_breakdown = vec![SourceUsageView {
+            name: "verylongsourcesuffix".into(),
+            display_name: "verylongsourcesuffix".into(),
+            effective_tokens: 10_000.0,
+        }];
+        vm.source_health = vec![SourceHealthView {
+            name: "verylongsourcesuffix".into(),
+            display_name: "verylongsourcesuffix".into(),
+            status: SourceStatus::Ready,
+            today_effective_tokens: 10_000.0,
+            bucket_effective_tokens: 1_000.0,
+            diagnostic_code: None,
+            diagnostic_message: None,
+        }];
+        // Should not panic or exceed geometry.
+        let s = render_to_string(40, 8, &vm);
+        assert!(
+            s.contains("verylon"),
+            "long source name should render a compacted prefix: {s}"
+        );
+    }
+
+    #[test]
+    fn today_panel_colors_unknown_sources_deterministically() {
+        use crate::tui::style::source_color;
+        let mut vm = WatchViewModel::fixture();
+        vm.source_breakdown = vec![SourceUsageView {
+            name: "gemini".into(),
+            display_name: "gemini".into(),
+            effective_tokens: 5_000.0,
+        }];
+        vm.source_health = vec![SourceHealthView {
+            name: "gemini".into(),
+            display_name: "gemini".into(),
+            status: SourceStatus::Ready,
+            today_effective_tokens: 5_000.0,
+            bucket_effective_tokens: 500.0,
+            diagnostic_code: None,
+            diagnostic_message: None,
+        }];
+        let panel = TodayPanel;
+        let ctx = test_context();
+        let backend = TestBackend::new(70, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert!(has_colored_word(buf, "gemini", source_color("gemini")));
     }
 
     #[test]

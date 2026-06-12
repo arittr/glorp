@@ -113,8 +113,10 @@ impl<'a> TextRow<'a> {
     }
 }
 
+use std::borrow::Cow;
+
 pub struct MetricRow<'a> {
-    label: &'a str,
+    label: Cow<'a, str>,
     value: String,
     annotation: Option<String>,
     label_color: Option<Color>,
@@ -124,9 +126,9 @@ pub struct MetricRow<'a> {
 }
 
 impl<'a> MetricRow<'a> {
-    pub fn new(label: &'a str, value: impl ToString) -> Self {
+    pub fn new(label: impl Into<Cow<'a, str>>, value: impl ToString) -> Self {
         Self {
-            label,
+            label: label.into(),
             value: value.to_string(),
             annotation: None,
             label_color: None,
