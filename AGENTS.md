@@ -100,3 +100,18 @@ Release flow:
 For a no-publish rehearsal, manually run the `publish` workflow with the default
 `dry_run` input. This exercises the test/build/smoke matrix and skips the
 publish jobs.
+
+## Activity Identity Release Notes
+
+- The `@ccusage/codex` fallback dependency is retained for at least one release
+  while the unified `ccusage daily --json` path is validated against real Codex
+  usage. Remove it only after provider tests confirm modern `ccusage` emits
+  distinct, correctly-normalized Codex rows and the preview ensemble fixture
+  renders Codex sources without regressions.
+- Preview Lab now includes `watch-activity-identity-ensemble` (four active
+  sources) and `watch-activity-identity-unknown` (one unrecognized source).
+  Run them with:
+  ```bash
+  cargo run -- dev-preview --scenario watch --out target/glorp-preview
+  open target/glorp-preview/index.html
+  ```
