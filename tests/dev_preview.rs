@@ -49,7 +49,10 @@ const ALIVE_ROOM_WATCH_IDS: [&str; 8] = [
     "room-dawn-wake-small",
 ];
 
-const ACTIVITY_IDENTITY_WATCH_IDS: [&str; 1] = ["watch-activity-identity-ensemble"];
+const ACTIVITY_IDENTITY_WATCH_IDS: [&str; 2] = [
+    "watch-activity-identity-ensemble",
+    "watch-activity-identity-unknown",
+];
 
 struct PreviewRun {
     _dir: TempDir,

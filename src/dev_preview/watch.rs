@@ -78,6 +78,16 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
         seed_usage_store_ensemble,
     )?);
 
+    frames.push(render_activity_identity_watch_frame(
+        ctx,
+        scratch_dir,
+        "watch-activity-identity-unknown",
+        "Watch Activity Identity Unknown Source",
+        120,
+        32,
+        seed_usage_store_unknown_source,
+    )?);
+
     Ok(frames)
 }
 
@@ -1637,6 +1647,17 @@ fn seed_usage_store_ensemble(path: &Path, now: OffsetDateTime) -> Result<()> {
     Ok(())
 }
 
+fn seed_usage_store_unknown_source(path: &Path, now: OffsetDateTime) -> Result<()> {
+    let mut usage = UsageStore::open(path)?;
+    usage.insert_event(&NormalizedUsageEvent {
+        provider_surface: "unknown".to_string(),
+        model: Some("unrecognized-agent".to_string()),
+        provider_delta_id: Some("preview-unknown-6000".to_string()),
+        ..NormalizedUsageEvent::for_test_at(now - Duration::minutes(6), 6_000.0)
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1648,7 +1669,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 38);
+        assert_eq!(frames.len(), 39);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -1716,6 +1737,8 @@ mod tests {
         assert_eq!((frames[36].width, frames[36].height), (72, 24));
         assert_eq!(frames[37].id, "watch-activity-identity-ensemble");
         assert_eq!((frames[37].width, frames[37].height), (120, 32));
+        assert_eq!(frames[38].id, "watch-activity-identity-unknown");
+        assert_eq!((frames[38].width, frames[38].height), (120, 32));
     }
 
     #[test]
