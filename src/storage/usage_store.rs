@@ -260,6 +260,91 @@ impl UsageStore {
         Ok(id)
     }
 
+    /// Writes historical rows as already-applied ledger entries and advances
+    /// their source cursors, but does NOT increment the lifetime counter or
+    /// stage anything for feeding. Used for first-contact history safety.
+    pub fn seed_source_history(
+        &mut self,
+        events: &[(NormalizedUsageEvent, ProviderCursorUpdate)],
+        diagnostic: Option<&ProviderDiagnostic>,
+        seeded_at: OffsetDateTime,
+    ) -> crate::error::Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let seeded_at_text = format_time(seeded_at)?;
+        let tx = self.conn.transaction()?;
+
+        for (event, cursor_update) in events {
+            let provider_delta_id = format!(
+                "{}|{}|{}",
+                cursor_update.provider_surface,
+                cursor_update.cursor_key,
+                cursor_update.cursor_value
+            );
+
+            tx.execute(
+                "INSERT OR IGNORE INTO usage_events (
+                    provider_surface, provider_version, parser_version, command, source_surface,
+                    period_start, observed_at, bucket_at, period_date, model,
+                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                    reasoning_output_tokens, effective_tokens, cost_usd, confidence,
+                    provider_delta_id, bucket_index, bucket_count, applied_at,
+                    provider_cursor_key, provider_cursor_value
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21, ?22, ?23, ?24
+                )",
+                params![
+                    event.provider_surface,
+                    event.provider_version,
+                    event.parser_version,
+                    event.command,
+                    event.source_surface,
+                    format_time(event.period_start)?,
+                    format_time(event.observed_at)?,
+                    format_time(event.bucket_at)?,
+                    event.period_start.date().to_string(),
+                    event.model,
+                    event.input_tokens,
+                    event.output_tokens,
+                    event.cache_creation_tokens,
+                    event.cache_read_tokens,
+                    event.reasoning_output_tokens,
+                    event.effective_tokens,
+                    event.cost_usd,
+                    event.confidence,
+                    provider_delta_id,
+                    0_i64,
+                    1_i64,
+                    seeded_at_text.clone(),
+                    cursor_update.cursor_key,
+                    cursor_update.cursor_value,
+                ],
+            )?;
+
+            upsert_provider_cursor(&tx, cursor_update, &seeded_at_text)?;
+        }
+
+        if let Some(d) = diagnostic {
+            tx.execute(
+                "INSERT INTO provider_diagnostics (
+                    provider_surface, code, message, recorded_at
+                ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    d.provider_surface,
+                    d.code,
+                    d.message,
+                    format_time(d.recorded_at)?,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Compacts usage events whose `period_start` and `bucket_at` are both
     /// strictly less than `cutoff` into `daily_aggregates`. Rows with a NULL
     /// `applied_at` (unapplied events) are never touched.
@@ -1939,5 +2024,49 @@ mod tests {
             None,
             "cursor upserts must roll back with the failed diagnostic insert"
         );
+    }
+
+    #[test]
+    fn seed_source_history_writes_applied_rows_and_cursors_without_feeding_lifetime() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let historical = now - time::Duration::days(2);
+
+        let event = NormalizedUsageEvent {
+            provider_surface: "gemini".into(),
+            effective_tokens: 50_000.0,
+            ..NormalizedUsageEvent::for_test_at(historical, 50_000.0)
+        };
+        let cursor = ProviderCursorUpdate {
+            provider_surface: "gemini".into(),
+            cursor_key: "gemini|daily|2026-06-09".into(),
+            cursor_value: "totals-v1".into(),
+            provider_version: "ccusage 20.0.6".into(),
+            parser_version: "ccusage 20.0.6".into(),
+        };
+
+        store
+            .seed_source_history(&[(event, cursor)], None, now)
+            .unwrap();
+
+        assert_eq!(store.lifetime_effective_tokens().unwrap(), 0.0);
+        assert!(store.has_any_applied_events().unwrap());
+        assert_eq!(
+            store
+                .provider_cursor("gemini", "gemini|daily|2026-06-09")
+                .unwrap()
+                .as_deref(),
+            Some("totals-v1")
+        );
+
+        let totals = store
+            .applied_effective_tokens_by_source_between(
+                now - time::Duration::days(3),
+                now + time::Duration::seconds(1),
+            )
+            .unwrap();
+        assert!(totals
+            .iter()
+            .any(|(s, v)| s == "gemini" && (*v - 50_000.0).abs() < 0.1));
     }
 }
