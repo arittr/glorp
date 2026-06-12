@@ -789,7 +789,7 @@ fn multi_day_vacation_catchup_passes_the_guard_via_days_factor() {
 }
 
 #[test]
-fn first_contact_provider_is_refused_without_staging_history() {
+fn first_contact_provider_seeds_history_without_staging_history() {
     let dir = tempdir().unwrap();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
@@ -814,7 +814,7 @@ fn first_contact_provider_is_refused_without_staging_history() {
     );
     let diagnostics = usage_store.recent_diagnostics(5).unwrap();
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code, "usage_discontinuity");
+    assert_eq!(diagnostics[0].code, "source_first_contact");
 
     let next = now + Duration::minutes(10);
     let staged_ids = stage_usage_poll_deltas(

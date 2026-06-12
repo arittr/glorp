@@ -297,7 +297,7 @@ fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
 }
 
 #[test]
-fn status_surfaces_usage_discontinuity_without_claiming_blocked() {
+fn status_surfaces_first_contact_without_claiming_blocked() {
     let dir = tempdir().unwrap();
     let mut state = PetState::new_for_test("fixture-seed", "mochi");
     state.calibration.daily_effective_tokens = 10_000.0;
@@ -305,7 +305,7 @@ fn status_surfaces_usage_discontinuity_without_claiming_blocked() {
         .save(&state)
         .unwrap();
     // Deliberately NO establish_provider_contact: the unified helper is first
-    // contact, so the guard refuses its history.
+    // contact, so its history is seeded without feeding the pet.
 
     Command::cargo_bin("glorp")
         .unwrap()
@@ -320,8 +320,7 @@ fn status_surfaces_usage_discontinuity_without_claiming_blocked() {
         .success()
         .stdout(predicate::str::contains("provider: local-log-derived"))
         .stdout(predicate::str::contains("provider health: ok"))
-        .stdout(predicate::str::contains("diagnostic: usage_discontinuity"))
-        .stdout(predicate::str::contains("declined an implausible feast"))
+        .stdout(predicate::str::contains("diagnostic: source_first_contact"))
         .stdout(predicate::str::contains("blocked").not());
 
     let saved: PetState =
@@ -329,6 +328,6 @@ fn status_surfaces_usage_discontinuity_without_claiming_blocked() {
             .unwrap();
     assert_eq!(
         saved.lifetime_effective_tokens, 0.0,
-        "refused tokens never feed"
+        "seeded first-contact tokens never feed"
     );
 }

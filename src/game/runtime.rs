@@ -35,6 +35,9 @@ pub const DISCONTINUITY_GUARD_FLOOR_TOKENS: f64 = 50_000_000.0;
 /// broken classification and the ready-today filter (the source is
 /// healthy — one poll was refused).
 pub const USAGE_DISCONTINUITY_CODE: &str = "usage_discontinuity";
+/// Diagnostic code persisted when a source is seen for the first time and
+/// its historical rows are seeded without feeding the pet.
+pub const SOURCE_FIRST_CONTACT_CODE: &str = "source_first_contact";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeUpdate {
@@ -223,7 +226,7 @@ fn seed_first_contact_surface(
 
     let diagnostic = ProviderDiagnostic {
         provider_surface: surface.to_string(),
-        code: "source_first_contact".to_string(),
+        code: SOURCE_FIRST_CONTACT_CODE.to_string(),
         message: format!(
             "first contact with {surface}: {} historical rows seeded without feeding",
             events.len()

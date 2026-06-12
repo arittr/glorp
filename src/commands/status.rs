@@ -70,16 +70,18 @@ pub fn run() -> Result<()> {
                     provider_health_line = "provider health: ok".into();
                     usage_confidence = "local-log-derived".into();
                 }
-                // A refused poll persists its diagnostic in the store (the
-                // guard writes it during staging); it never rides on
-                // result.diagnostics. Surface it without claiming blocked —
-                // the source is healthy, one poll was refused. Same 1h
-                // freshness rule as the watch vm's stale-diagnostic cutoff.
+                // A refused poll or first-contact seeding persists its
+                // diagnostic in the store (the guard writes it during staging);
+                // it never rides on result.diagnostics. Surface it without
+                // claiming blocked — the source is healthy. Same 1h freshness
+                // rule as the watch vm's stale-diagnostic cutoff.
                 if diagnostic_line.is_none() {
                     let fresh_cutoff = OffsetDateTime::now_utc() - time::Duration::hours(1);
                     if let Ok(stored) = usage_store.recent_diagnostics(5) {
                         if let Some(refusal) = stored.iter().find(|diagnostic| {
-                            diagnostic.code == crate::game::runtime::USAGE_DISCONTINUITY_CODE
+                            (diagnostic.code == crate::game::runtime::USAGE_DISCONTINUITY_CODE
+                                || diagnostic.code
+                                    == crate::game::runtime::SOURCE_FIRST_CONTACT_CODE)
                                 && diagnostic.recorded_at >= fresh_cutoff
                         }) {
                             diagnostic_line = Some(format!(
