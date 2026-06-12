@@ -1,7 +1,8 @@
 use crate::game::calibration::CalibrationBaseline;
 use crate::game::effective_tokens::EffectiveTokenWeights;
-use crate::storage::usage_store::AppliedShapeSums;
+use crate::storage::usage_store::{AppliedShapeSums, UsageStore};
 use serde::{Deserialize, Serialize};
+use time::{Duration, OffsetDateTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceDiversity {
@@ -152,9 +153,109 @@ pub fn derive_relative_intensity(
     }
 }
 
+const RHYTHM_BURST_DOMINANCE: f64 = 0.70;
+const RHYTHM_STEADY_BUCKETS: usize = 4;
+const RHYTHM_STEADY_TOP_SHARE: f64 = 0.40;
+const RETURNING_IDLE_GAP_MINUTES: i64 = 120;
+const SPORADIC_GAP_MINUTES: i64 = 60;
+const RECENT_BUCKET_MINUTES: i64 = 30;
+
+pub fn derive_work_rhythm(
+    usage_store: &UsageStore,
+    window_start: OffsetDateTime,
+    window_end: OffsetDateTime,
+) -> WorkRhythm {
+    let buckets = usage_store
+        .applied_bucket_sums_between(window_start, window_end)
+        .unwrap_or_default();
+    let active: Vec<(OffsetDateTime, f64)> = buckets
+        .into_iter()
+        .filter(|(_, t)| *t > 0.0 && t.is_finite())
+        .collect();
+    if active.is_empty() {
+        return WorkRhythm::Quiet;
+    }
+    let total: f64 = active.iter().map(|(_, t)| *t).sum();
+    if total <= 0.0 {
+        return WorkRhythm::Quiet;
+    }
+
+    // Returning: latest bucket is recent and follows a long idle gap.
+    let latest = active.last().map(|(at, _)| *at);
+    for window in active.windows(2) {
+        let gap = window[1].0 - window[0].0;
+        if gap.whole_minutes() >= RETURNING_IDLE_GAP_MINUTES
+            && latest.is_some_and(|l| l == window[1].0)
+        {
+            return WorkRhythm::Returning;
+        }
+    }
+
+    let mut by_tokens = active.clone();
+    by_tokens.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    let top_share = by_tokens[0].1 / total;
+    let top_two_share: f64 = by_tokens.iter().take(2).map(|(_, t)| *t).sum::<f64>() / total;
+
+    if top_two_share >= RHYTHM_BURST_DOMINANCE {
+        return WorkRhythm::Bursty;
+    }
+    if active.len() >= RHYTHM_STEADY_BUCKETS && top_share < RHYTHM_STEADY_TOP_SHARE {
+        return WorkRhythm::Steady;
+    }
+    if active
+        .windows(2)
+        .any(|w| (w[1].0 - w[0].0).whole_minutes() >= SPORADIC_GAP_MINUTES)
+    {
+        return WorkRhythm::Sporadic;
+    }
+    WorkRhythm::Steady
+}
+
+pub fn derive_recovery_pattern(usage_store: &UsageStore, now: OffsetDateTime) -> RecoveryPattern {
+    let Some(latest) = usage_store.latest_applied_bucket_at().unwrap_or(None) else {
+        return RecoveryPattern::Dormant;
+    };
+    let recent_cutoff = now - Duration::minutes(RECENT_BUCKET_MINUTES);
+    if latest < recent_cutoff {
+        let has_history = usage_store
+            .applied_effective_tokens_between(now - Duration::days(7), recent_cutoff)
+            .unwrap_or(0.0)
+            > 0.0;
+        return if has_history {
+            RecoveryPattern::Fading
+        } else {
+            RecoveryPattern::Dormant
+        };
+    }
+    let previous = usage_store
+        .latest_applied_bucket_at_before(latest)
+        .unwrap_or(None);
+    let gap = previous.map(|p| latest - p);
+    if gap.is_some_and(|g| g.whole_minutes() >= RETURNING_IDLE_GAP_MINUTES) {
+        RecoveryPattern::Returned
+    } else {
+        RecoveryPattern::Sustained
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::usage_store::NormalizedUsageEvent;
+
+    fn insert_applied(store: &mut UsageStore, at: OffsetDateTime, tokens: f64) {
+        store
+            .insert_event(&NormalizedUsageEvent {
+                observed_at: at,
+                bucket_at: at,
+                ..NormalizedUsageEvent::for_test_at(at, tokens)
+            })
+            .unwrap();
+    }
 
     #[test]
     fn activity_profile_defaults_are_quiet() {
@@ -270,6 +371,55 @@ mod tests {
         assert_eq!(
             derive_relative_intensity(400_000.0, baseline),
             RelativeIntensity::Huge
+        );
+    }
+
+    #[test]
+    fn rhythm_and_recovery() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let today_start = now - Duration::hours(8);
+
+        assert_eq!(
+            derive_work_rhythm(&store, today_start, now + Duration::seconds(1)),
+            WorkRhythm::Quiet
+        );
+        assert_eq!(
+            derive_recovery_pattern(&store, now),
+            RecoveryPattern::Dormant
+        );
+
+        // Bursty: all activity in one bucket.
+        insert_applied(&mut store, now - Duration::minutes(5), 100_000.0);
+        assert_eq!(
+            derive_work_rhythm(&store, today_start, now + Duration::seconds(1)),
+            WorkRhythm::Bursty
+        );
+        assert_eq!(
+            derive_recovery_pattern(&store, now),
+            RecoveryPattern::Sustained
+        );
+
+        // Additional buckets keep the day bursty because the first bucket still
+        // dominates the share under the plan's constants.
+        insert_applied(&mut store, now - Duration::hours(2), 20_000.0);
+        insert_applied(&mut store, now - Duration::hours(3), 20_000.0);
+        insert_applied(&mut store, now - Duration::hours(4), 20_000.0);
+        assert_eq!(
+            derive_work_rhythm(&store, today_start, now + Duration::seconds(1)),
+            WorkRhythm::Bursty
+        );
+
+        // Older activity after a long gap is still classified as bursty because
+        // the latest bucket is not the one immediately following the gap.
+        insert_applied(&mut store, now - Duration::hours(7), 5_000.0);
+        assert_eq!(
+            derive_work_rhythm(&store, today_start, now + Duration::seconds(1)),
+            WorkRhythm::Bursty
+        );
+        assert_eq!(
+            derive_recovery_pattern(&store, now),
+            RecoveryPattern::Sustained
         );
     }
 }
