@@ -262,6 +262,7 @@ impl CcusageCommandProvider {
                 source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
                 model: record.model.clone(),
+                raw_source_id: None,
             };
 
             let cursor_key = cursor_key(&key)?;
@@ -451,6 +452,7 @@ impl CcusageCommandProvider {
                 source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
                 model: record.model.clone(),
+                raw_source_id: None,
             };
             let cursor_key = cursor_key(&key)?;
             let cursor_value = serde_json::to_string(&record.raw_totals)?;

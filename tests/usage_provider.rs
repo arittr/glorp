@@ -357,6 +357,7 @@ fn legacy_cursor_with_parser_version_migrates_without_double_feeding() {
             source_surface: "daily".to_string(),
             period_start: period_start.to_string(),
             model: model.map(str::to_string),
+            raw_source_id: None,
         })
         .unwrap()
     }

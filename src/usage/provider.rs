@@ -50,9 +50,45 @@ pub struct ProviderCursorKey {
     pub source_surface: String,
     pub period_start: String,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_source_id: Option<String>,
 }
 
 pub trait UsageProvider {
     fn poll(&self, store: &mut UsageStore) -> Result<UsagePollResult>;
     fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_key(raw_source_id: Option<&str>) -> ProviderCursorKey {
+        ProviderCursorKey {
+            provider_surface: "gemini".into(),
+            command: "ccusage daily".into(),
+            source_surface: "daily".into(),
+            period_start: "2026-06-11".into(),
+            model: Some("gemini-2.5-pro".into()),
+            raw_source_id: raw_source_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cursor_key_omits_none_raw_source_id_and_parses_legacy_keys() {
+        let key = sample_key(None);
+        let json = serde_json::to_string(&key).unwrap();
+        assert!(!json.contains("raw_source_id"));
+
+        let legacy = r#"{"provider_surface":"claude-code","command":"ccusage","source_surface":"daily","period_start":"2026-06-11","model":"claude-opus-4"}"#;
+        let parsed: ProviderCursorKey = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.raw_source_id, None);
+    }
+
+    #[test]
+    fn raw_source_id_changes_cursor_identity() {
+        let base = serde_json::to_string(&sample_key(None)).unwrap();
+        let with_id = serde_json::to_string(&sample_key(Some("harness-abc"))).unwrap();
+        assert_ne!(base, with_id);
+    }
 }
