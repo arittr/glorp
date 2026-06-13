@@ -34,7 +34,20 @@ use crate::{
 use std::path::Path;
 use time::{Duration, OffsetDateTime};
 
+#[cfg(feature = "dev-preview")]
+pub fn run(dev_pet: Option<crate::pet::generation::Species>) -> Result<()> {
+    if let Some(species) = dev_pet {
+        return run_dev_pet(species);
+    }
+    run_against_real_state()
+}
+
+#[cfg(not(feature = "dev-preview"))]
 pub fn run() -> Result<()> {
+    run_against_real_state()
+}
+
+fn run_against_real_state() -> Result<()> {
     let paths = AppPaths::resolve()?;
     let state_store = StateStore::new(paths.state_file.clone());
     let Some(state) = state_store.load()? else {
@@ -54,6 +67,40 @@ pub fn run() -> Result<()> {
         }),
     )
     .run()
+}
+
+/// Dev-only entry for visual iteration. It renders a synthetic pet in the live
+/// watch UI, backed by a temp usage DB and no poller, so user state is untouched.
+#[cfg(feature = "dev-preview")]
+fn run_dev_pet(species: crate::pet::generation::Species) -> Result<()> {
+    let scratch = tempfile::tempdir().map_err(|err| GlorpError::Message(err.to_string()))?;
+    let usage_db = scratch.path().join("usage.sqlite");
+    UsageStore::open(&usage_db)?;
+    let vm = build_dev_pet_view_model(species, &usage_db)?;
+    let result = WatchApp::with_config(vm, Default::default()).run();
+    drop(scratch);
+    result
+}
+
+#[cfg(feature = "dev-preview")]
+pub fn build_dev_pet_view_model(
+    species: crate::pet::generation::Species,
+    usage_db: &Path,
+) -> Result<WatchViewModel> {
+    let mut state = PetState::new_for_test("glorp-dev-pet", "miso");
+    state.pet.generated_species = species;
+    state.stage = Stage::S4;
+    state.xp = 8.5;
+    state.lifetime_effective_tokens = 125_000.0;
+    state.vitals = crate::storage::state::Vitals {
+        fed: 70.0,
+        happiness: 72.0,
+        energy: 68.0,
+    };
+    let now = OffsetDateTime::now_utc();
+    state.created_at = now - Duration::days(18);
+    state.last_updated_at = now;
+    build_watch_view_model(&state, usage_db)
 }
 
 pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<WatchViewModel> {
@@ -833,6 +880,19 @@ mod tests {
                 now,
             )
             .unwrap();
+    }
+
+    #[cfg(feature = "dev-preview")]
+    #[test]
+    fn build_dev_pet_view_model_uses_requested_species() {
+        for species in Species::all() {
+            let dir = tempdir().unwrap();
+            let db_path = dir.path().join("usage.sqlite");
+            UsageStore::open(&db_path).unwrap();
+            let vm = build_dev_pet_view_model(species, &db_path).unwrap();
+
+            assert_eq!(vm.pet_render.generated_species, species);
+        }
     }
 
     #[test]

@@ -29,7 +29,14 @@ pub enum Command {
         yes: bool,
     },
     /// Run the live terminal pet beside your coding session.
-    Watch,
+    Watch {
+        /// Dev-only: render a synthetic pet of the chosen species instead of
+        /// loading on-disk state. Useful for iterating on visuals without
+        /// touching the real pet.
+        #[cfg(feature = "dev-preview")]
+        #[arg(long, value_enum, hide = true)]
+        pet: Option<DevPetSpecies>,
+    },
     /// Run as a macOS menu bar app (status item + popover).
     Menubar,
     /// Print a compact non-interactive pet and usage summary.
@@ -57,11 +64,36 @@ pub enum Command {
 }
 
 #[cfg(feature = "dev-preview")]
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum PreviewScenarioArg {
     All,
     Watch,
     Pets,
     Props,
     Animation,
+}
+
+#[cfg(feature = "dev-preview")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum DevPetSpecies {
+    Fuzz,
+    Blob,
+    Ghost,
+    Glitch,
+    Crystal,
+    Mech,
+}
+
+#[cfg(feature = "dev-preview")]
+impl From<DevPetSpecies> for crate::pet::generation::Species {
+    fn from(value: DevPetSpecies) -> Self {
+        match value {
+            DevPetSpecies::Fuzz => Self::Fuzz,
+            DevPetSpecies::Blob => Self::Blob,
+            DevPetSpecies::Ghost => Self::Ghost,
+            DevPetSpecies::Glitch => Self::Glitch,
+            DevPetSpecies::Crystal => Self::Crystal,
+            DevPetSpecies::Mech => Self::Mech,
+        }
+    }
 }

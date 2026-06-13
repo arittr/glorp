@@ -29,6 +29,17 @@ fn help_lists_mvp_commands_and_no_manual_feed() {
         .stdout(predicate::str::contains("feed").not());
 }
 
+#[cfg(feature = "dev-preview")]
+#[test]
+fn watch_accepts_hidden_dev_pet_selector() {
+    let mut cmd = Command::cargo_bin("glorp").unwrap();
+    cmd.args(["watch", "--pet", "ghost", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage: glorp watch"))
+        .stdout(predicate::str::contains("--pet").not());
+}
+
 #[test]
 fn init_without_name_presents_generated_name_and_uses_it_noninteractively() {
     let dir = tempfile::tempdir().unwrap();

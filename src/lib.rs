@@ -24,7 +24,10 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { seed, name, yes } => commands::init::run(seed, name, yes)?,
-        Command::Watch => commands::watch::run()?,
+        #[cfg(feature = "dev-preview")]
+        Command::Watch { pet } => commands::watch::run(pet.map(Into::into))?,
+        #[cfg(not(feature = "dev-preview"))]
+        Command::Watch {} => commands::watch::run()?,
         Command::Menubar => commands::menubar::run()?,
         Command::Status => commands::status::run()?,
         Command::Rename { name } => commands::rename::run(name)?,
