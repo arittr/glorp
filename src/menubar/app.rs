@@ -7,7 +7,6 @@
 
 use std::cell::RefCell;
 use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
 use objc2::declare_class;
@@ -24,9 +23,7 @@ use objc2_foundation::{
     MainThreadMarker, NSPoint, NSRange, NSRect, NSRectEdge, NSSize, NSString, NSTimer,
 };
 
-use crate::commands::watch::{
-    build_watch_view_model, poll_usage_and_apply, rerender_pet_for_view_model,
-};
+use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
 use crate::storage::state::{PetState, StateStore};
@@ -39,7 +36,7 @@ use super::render;
 const NS_VARIABLE_STATUS_ITEM_LENGTH: f64 = -1.0;
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// UI tick rate. Drives both pet animation (when popover is shown) and draining
-/// any PollResult delivered by the worker thread. Matches the watch TUI's idle
+/// any LiveWatchUpdate delivered by the worker thread. Matches the watch TUI's idle
 /// tick (`Duration::from_millis(250)` in `crate::tui::app`) so a menubar
 /// session and a watch session breathe in sync.
 const UI_TICK_INTERVAL_SECS: f64 = 0.25;
@@ -62,20 +59,11 @@ struct AppState {
     /// storage. Used as the `NSRange` upper bound when replacing only the
     /// pet rows during an animation frame.
     pet_block_char_len: usize,
-    /// Drained on each UI tick. The worker thread pushes a new PollResult
+    /// Drained on each UI tick. The worker thread pushes a new LiveWatchUpdate
     /// roughly every `POLL_INTERVAL`; the main thread applies the most
     /// recent one and discards stale ones.
-    poll_rx: mpsc::Receiver<PollResult>,
-    life_signal_state: crate::tui::life::LifeSignalState,
-}
-
-/// Snapshot of fresh provider data computed on the worker thread. All fields
-/// are owned and `Send`, so the worker can build them off-main-thread and ship
-/// them through the channel.
-struct PollResult {
-    pet_state: PetState,
-    vm: WatchViewModel,
-    applied_signal: crate::tui::life::AppliedUsageSignal,
+    poll_rx: mpsc::Receiver<crate::watch_live::LiveWatchUpdate>,
+    presentation_state: crate::watch_live::WatchPresentationState,
 }
 
 thread_local! {
@@ -132,7 +120,8 @@ pub fn run() -> Result<()> {
 
     let status_item = build_status_item(mtm, &controller, &initial_pet)?;
 
-    let poll_rx = spawn_poll_worker(paths);
+    let poll_rx =
+        crate::watch_live::spawn_live_watch_worker(paths, POLL_INTERVAL, "glorp-menubar-poll");
 
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -143,7 +132,7 @@ pub fn run() -> Result<()> {
             animation_frame: 0,
             pet_block_char_len,
             poll_rx,
-            life_signal_state: crate::tui::life::LifeSignalState::default(),
+            presentation_state: crate::watch_live::WatchPresentationState::default(),
         });
     });
 
@@ -159,44 +148,6 @@ pub fn run() -> Result<()> {
 
     unsafe { app.run() };
     Ok(())
-}
-
-/// Spawn the background poll worker. It runs `poll_usage_and_apply` and
-/// `build_watch_view_model` off the main thread — those calls shell out to
-/// ccusage / ccusage-codex (subprocess + JSON parse) and hit SQLite, which
-/// must never run on the run loop. The returned receiver is drained from
-/// the UI tick.
-fn spawn_poll_worker(paths: AppPaths) -> mpsc::Receiver<PollResult> {
-    let (tx, rx) = mpsc::channel::<PollResult>();
-    thread::Builder::new()
-        .name("glorp-menubar-poll".into())
-        .spawn(move || {
-            let state_store = StateStore::new(paths.state_file.clone());
-            loop {
-                thread::sleep(POLL_INTERVAL);
-                let outcome =
-                    match poll_usage_and_apply(&state_store, &paths.usage_db, &paths.config_file) {
-                        Ok(Some(outcome)) => outcome,
-                        Ok(None) | Err(_) => continue,
-                    };
-                let vm = match build_watch_view_model(&outcome.state, &paths.usage_db) {
-                    Ok(vm) => vm,
-                    Err(_) => continue,
-                };
-                if tx
-                    .send(PollResult {
-                        pet_state: outcome.state,
-                        vm,
-                        applied_signal: outcome.applied_signal,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        })
-        .expect("spawn glorp-menubar-poll worker");
-    rx
 }
 
 fn build_popover(
@@ -371,7 +322,7 @@ fn ui_tick() {
 }
 
 fn drain_poll_results() {
-    let mut latest: Option<PollResult> = None;
+    let mut latest: Option<crate::watch_live::LiveWatchUpdate> = None;
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow().as_ref() {
             while let Ok(result) = state.poll_rx.try_recv() {
@@ -385,19 +336,18 @@ fn drain_poll_results() {
     let mut vm = result.vm;
     let (text_view, status_item) = match APP_STATE.with(|cell| {
         cell.borrow_mut().as_mut().map(|s| {
-            let profile = s.life_signal_state.observe(
+            crate::watch_live::stamp_live_presentation(
+                &mut s.presentation_state,
+                &mut vm,
                 result.applied_signal,
-                &vm.activity_identity,
                 time::OffsetDateTime::now_utc(),
             );
-            vm.life_profile = profile;
             (s.text_view.clone(), s.status_item.clone())
         })
     }) {
         Some(pair) => pair,
         None => return,
     };
-    vm.life_profile.calm_mode = vm.day_context.asleep;
     let pet_len = write_full_text(&text_view, &vm);
     let mtm = MainThreadMarker::new().expect("ui_tick on non-main thread");
     if let Some(button) = unsafe { status_item.button(mtm) } {

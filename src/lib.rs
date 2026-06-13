@@ -15,6 +15,7 @@ pub mod storage;
 pub mod time;
 pub mod tui;
 pub mod usage;
+pub mod watch_live;
 
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
