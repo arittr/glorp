@@ -1,8 +1,8 @@
 use crate::dev_preview::export::{
     copy_assets, write_cells_json, write_index_html, write_layout_json, write_manifest,
-    write_review_markdown, write_room_text_frame, write_text_frame, ArtifactType, PreviewArtifact,
-    PreviewDimensions, PreviewManifest, PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind,
-    PRODUCER, SCHEMA_VERSION,
+    write_review_markdown, write_room_text_frame, write_room_text_frame_masked, write_text_frame,
+    ArtifactType, PreviewArtifact, PreviewDimensions, PreviewManifest, PreviewMaskRect,
+    PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::habitat_props::{
@@ -79,6 +79,8 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         }
     }
 
+    let masked_room_masks = masked_room_masks_for_species_dialect_pairs(&frames);
+
     for frame in &frames {
         write_text_frame(&staging_dir.join(text_path(frame)), frame)?;
         write_cells_json(&staging_dir.join(cells_path(frame)), frame)?;
@@ -90,6 +92,18 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                     frame,
                     "watch.room.effect",
                 )?;
+            }
+        }
+        if let Some(layout) = &frame.layout {
+            if layout.targets.contains_key("watch.room.effect") {
+                if let Some(masks) = masked_room_masks.get(&frame.id) {
+                    write_room_text_frame_masked(
+                        &staging_dir.join(room_masked_text_path(frame)),
+                        frame,
+                        "watch.room.effect",
+                        masks,
+                    )?;
+                }
             }
         }
     }
@@ -328,6 +342,16 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Verify the manifest records source mix and activity profile intent without raw payloads.".to_string(),
             ],
         ),
+        id if id.starts_with("watch-species-dialect-") => (
+            PreviewScenarioKind::Watch,
+            "Review species room dialect rendering under identical earned-room inputs.",
+            species_dialect_inputs_for_frame(id, frame),
+            vec![
+                "Compare paired .room.txt crops first to confirm the same earned room is present.".to_string(),
+                "Compare paired .room-masked.txt crops for species dialect differences outside pet art and shared props.".to_string(),
+                "Confirm earned props remain recognizable and species changes the room texture, not the prop identity.".to_string(),
+            ],
+        ),
         id if id.starts_with("room-") => (
             PreviewScenarioKind::Watch,
             "Review deterministic alive room inputs and rendered output.",
@@ -362,6 +386,15 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
             room_text: frame.layout.as_ref().and_then(|layout| {
                 if layout.targets.contains_key("watch.room.effect") {
                     Some(room_text_path(frame))
+                } else {
+                    None
+                }
+            }),
+            room_masked_text: frame.layout.as_ref().and_then(|layout| {
+                if layout.targets.contains_key("watch.room.effect")
+                    && is_strict_species_dialect_frame(&frame.id)
+                {
+                    Some(room_masked_text_path(frame))
                 } else {
                     None
                 }
@@ -411,6 +444,21 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 title: format!("{} Room", frame.title),
                 artifact_type: ArtifactType::Text,
                 path: room_text_path(frame),
+                width: Some(frame.width),
+                height: Some(frame.height),
+            });
+        }
+        if frame
+            .layout
+            .as_ref()
+            .is_some_and(|l| l.targets.contains_key("watch.room.effect"))
+            && is_strict_species_dialect_frame(&frame.id)
+        {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-room-masked", frame.id),
+                title: format!("{} Masked Room", frame.title),
+                artifact_type: ArtifactType::Text,
+                path: room_masked_text_path(frame),
                 width: Some(frame.width),
                 height: Some(frame.height),
             });
@@ -1293,6 +1341,90 @@ fn activity_identity_inputs_for_frame(
     ])
 }
 
+fn species_dialect_inputs_for_frame(id: &str, frame: &PreviewFrame) -> BTreeMap<String, Value> {
+    let species = id
+        .trim_start_matches("watch-species-dialect-")
+        .trim_end_matches("-flat");
+    let color_capability = if id.ends_with("-flat") {
+        "flat"
+    } else {
+        "truecolor"
+    };
+    let dialect_status = frame
+        .extra_inputs
+        .get("species_dialect")
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| match species {
+            "glitch" | "crystal" => "tuned".to_string(),
+            _ => "default".to_string(),
+        });
+    BTreeMap::from([
+        ("species".to_string(), Value::String(species.to_string())),
+        (
+            "room_dialect".to_string(),
+            Value::String(species.to_string()),
+        ),
+        (
+            "dialect_status".to_string(),
+            Value::String(dialect_status.to_string()),
+        ),
+        (
+            "comparison_group".to_string(),
+            Value::String(if matches!(species, "glitch" | "crystal") {
+                "species-dialect-glitch-crystal".to_string()
+            } else {
+                "species-dialect-matrix".to_string()
+            }),
+        ),
+        ("stage".to_string(), Value::String("s6".to_string())),
+        ("day_phase".to_string(), Value::String("day".to_string())),
+        (
+            "work_weather".to_string(),
+            Value::String("output-sparks".to_string()),
+        ),
+        (
+            "color_capability".to_string(),
+            Value::String(color_capability.to_string()),
+        ),
+        ("terminal_width".to_string(), json!(frame.width)),
+        ("terminal_height".to_string(), json!(frame.height)),
+        (
+            "earned_prop_ids".to_string(),
+            json!([
+                "codex_signal_lamp",
+                "token_shard_1m",
+                "token_orbit_5m",
+                "token_lantern_10m"
+            ]),
+        ),
+        (
+            "shared_input_invariants".to_string(),
+            json!({
+                "stage": "s6",
+                "day_phase": "day",
+                "work_weather": "output-sparks",
+                "terminal": [120, 32],
+                "earned_prop_ids": ["codex_signal_lamp", "token_shard_1m", "token_orbit_5m", "token_lantern_10m"]
+            }),
+        ),
+        (
+            "expected_changed_zones".to_string(),
+            json!(["floor-or-anchor", "upper-air-or-pet-adjacent"]),
+        ),
+        (
+            "prop_identity_invariants".to_string(),
+            json!([
+                "prop ids stay stable",
+                "target ids stay stable",
+                "catalog colors stay stable",
+                "base prop object class stays recognizable"
+            ]),
+        ),
+    ])
+}
+
 fn text_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.txt", frame.id))
 }
@@ -1307,6 +1439,88 @@ fn layout_path(frame: &PreviewFrame) -> PathBuf {
 
 fn room_text_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.room.txt", frame.id))
+}
+
+fn room_masked_text_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.room-masked.txt", frame.id))
+}
+
+fn is_strict_species_dialect_frame(id: &str) -> bool {
+    matches!(
+        id,
+        "watch-species-dialect-glitch"
+            | "watch-species-dialect-crystal"
+            | "watch-species-dialect-glitch-flat"
+            | "watch-species-dialect-crystal-flat"
+    )
+}
+
+fn preview_mask_rect(target: &crate::tui::component::PreviewTarget) -> PreviewMaskRect {
+    PreviewMaskRect {
+        x: target.x,
+        y: target.y,
+        width: target.width,
+        height: target.height,
+    }
+}
+
+fn species_dialect_pair_id(id: &str) -> Option<&'static str> {
+    if !is_strict_species_dialect_frame(id) {
+        return None;
+    }
+    if id.ends_with("-flat") {
+        Some("flat")
+    } else {
+        Some("truecolor")
+    }
+}
+
+fn masked_room_masks_for_species_dialect_pairs(
+    frames: &[PreviewFrame],
+) -> BTreeMap<String, Vec<PreviewMaskRect>> {
+    let mut grouped: BTreeMap<&'static str, Vec<&PreviewFrame>> = BTreeMap::new();
+    for frame in frames {
+        if let Some(pair_id) = species_dialect_pair_id(&frame.id) {
+            grouped.entry(pair_id).or_default().push(frame);
+        }
+    }
+
+    let mut masks_by_frame = BTreeMap::new();
+    for pair_frames in grouped.values() {
+        // The paired fixtures use identical earned props and layouts, so
+        // unioning prop target rects from both frames yields a stable mask
+        // that applies to both.
+        let mut prop_masks = Vec::new();
+        for frame in pair_frames {
+            let Some(layout) = &frame.layout else {
+                continue;
+            };
+            for (target_id, target) in &layout.targets {
+                if target_id.starts_with("watch.prop.") {
+                    prop_masks.push(preview_mask_rect(target));
+                }
+            }
+        }
+        prop_masks.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
+        prop_masks.dedup();
+
+        for frame in pair_frames {
+            let layout = frame
+                .layout
+                .as_ref()
+                .expect("strict species dialect frames should have layout");
+            let mut masks = Vec::new();
+            if let Some(target) = layout.targets.get("watch.pet.art") {
+                masks.push(preview_mask_rect(target));
+            }
+            if let Some(target) = layout.targets.get("watch.pet.speech") {
+                masks.push(preview_mask_rect(target));
+            }
+            masks.extend(prop_masks.iter().copied());
+            masks_by_frame.insert(frame.id.clone(), masks);
+        }
+    }
+    masks_by_frame
 }
 
 fn color_capability_name(capability: ColorCapability) -> &'static str {
@@ -1425,6 +1639,14 @@ mod tests {
                 "room-mixed-full-wide",
                 "room-heavy-day-cozy-large",
                 "room-dawn-wake-small",
+                "watch-species-dialect-fuzz",
+                "watch-species-dialect-blob",
+                "watch-species-dialect-ghost",
+                "watch-species-dialect-glitch",
+                "watch-species-dialect-crystal",
+                "watch-species-dialect-mech",
+                "watch-species-dialect-glitch-flat",
+                "watch-species-dialect-crystal-flat",
                 "watch-activity-identity-ensemble",
                 "watch-activity-identity-unknown",
                 "habitat-props-catalog",

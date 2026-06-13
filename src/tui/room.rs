@@ -4,6 +4,7 @@ use crate::game::habitat::{
     TOKEN_PEBBLE_25K, TOKEN_SHARD_1M, TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M,
     WILT_RECOVERY_SPROUT,
 };
+use crate::pet::generation::Species;
 use crate::storage::state::{EarnedHabitatProp, HabitatPropId};
 use crate::tui::day::{in_morning_after_window, resonant_prop_for_day, DayContext, DayPhase};
 use crate::tui::life::WorkWeather;
@@ -32,6 +33,76 @@ pub struct RoomLifeProfile {
     pub pet_performance: PetPerformance,
     pub scene_moments: Vec<SceneMoment>,
     pub identity_prop_ids: Vec<HabitatPropId>,
+    pub species_dialect: RoomSpeciesDialect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoomDialectKey {
+    Fuzz,
+    Blob,
+    Ghost,
+    Glitch,
+    Crystal,
+    Mech,
+}
+
+impl RoomDialectKey {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RoomDialectKey::Fuzz => "fuzz",
+            RoomDialectKey::Blob => "blob",
+            RoomDialectKey::Ghost => "ghost",
+            RoomDialectKey::Glitch => "glitch",
+            RoomDialectKey::Crystal => "crystal",
+            RoomDialectKey::Mech => "mech",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoomDialectStatus {
+    Tuned,
+    Default,
+}
+
+impl RoomDialectStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RoomDialectStatus::Tuned => "tuned",
+            RoomDialectStatus::Default => "default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RoomSpeciesDialect {
+    pub species: Species,
+    pub key: RoomDialectKey,
+    pub status: RoomDialectStatus,
+}
+
+impl RoomSpeciesDialect {
+    pub const fn for_species(species: Species) -> Self {
+        let key = match species {
+            Species::Fuzz => RoomDialectKey::Fuzz,
+            Species::Blob => RoomDialectKey::Blob,
+            Species::Ghost => RoomDialectKey::Ghost,
+            Species::Glitch => RoomDialectKey::Glitch,
+            Species::Crystal => RoomDialectKey::Crystal,
+            Species::Mech => RoomDialectKey::Mech,
+        };
+        let status = match species {
+            Species::Glitch | Species::Crystal => RoomDialectStatus::Tuned,
+            Species::Fuzz | Species::Blob | Species::Ghost | Species::Mech => {
+                RoomDialectStatus::Default
+            }
+        };
+        Self {
+            species,
+            key,
+            status,
+        }
+    }
 }
 
 /// Broad aesthetic category contributed by earned habitat props.
@@ -149,6 +220,7 @@ pub fn derive_room_life_profile(vm: &WatchViewModel, now: OffsetDateTime) -> Roo
     let visible_prop_ids = visible_identity_ids(&vm.habitat.earned_props);
     let resonant_emitter = select_emitter(vm, resonant.as_ref(), &visible_prop_ids);
     let scene_moments = scene_moments_for(vm, now, resonant_emitter.as_ref(), pet_performance);
+    let species_dialect = RoomSpeciesDialect::for_species(vm.pet_render.generated_species);
 
     RoomLifeProfile {
         biome,
@@ -157,6 +229,7 @@ pub fn derive_room_life_profile(vm: &WatchViewModel, now: OffsetDateTime) -> Roo
         pet_performance,
         scene_moments,
         identity_prop_ids: visible_prop_ids,
+        species_dialect,
     }
 }
 
@@ -516,18 +589,50 @@ pub(crate) fn rects_contain(rects: &[Rect], col: u16, row: u16) -> bool {
     })
 }
 
-fn biome_symbols(tag: RoomBiomeTag) -> &'static [char] {
-    match tag {
-        RoomBiomeTag::Starter => &['.', '·'],
-        RoomBiomeTag::Botanical => &['"', '\'', '`', ','],
-        RoomBiomeTag::Technical => &[':', ';', '+', '='],
-        RoomBiomeTag::Celestial => &['*', '·', '˚', '.'],
-        RoomBiomeTag::Artifact => &['.', 'o', '◇', '°'],
-        RoomBiomeTag::Cozy => &['~', '·', '⌞', '⌟'],
+fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &'static [char] {
+    match dialect.key {
+        RoomDialectKey::Glitch => match tag {
+            RoomBiomeTag::Starter => &[':', '.', '_'],
+            RoomBiomeTag::Botanical => &[';', '`', ',', '_'],
+            RoomBiomeTag::Technical => &[':', ';', '+', '='],
+            RoomBiomeTag::Celestial => &['.', ':', '+', '*'],
+            RoomBiomeTag::Artifact => &['#', ':', '[', ']'],
+            RoomBiomeTag::Cozy => &['_', '-', ':', '.'],
+        },
+        RoomDialectKey::Crystal => match tag {
+            RoomBiomeTag::Starter => &['.', '·', '◇'],
+            RoomBiomeTag::Botanical => &['\'', '·', '◇', ','],
+            RoomBiomeTag::Technical => &['◇', '+', '·', ':'],
+            RoomBiomeTag::Celestial => &['✦', '✧', '·', '*'],
+            RoomBiomeTag::Artifact => &['◇', '◆', '·', '°'],
+            RoomBiomeTag::Cozy => &['·', '◇', '⌞', '⌟'],
+        },
+        RoomDialectKey::Fuzz
+        | RoomDialectKey::Blob
+        | RoomDialectKey::Ghost
+        | RoomDialectKey::Mech => match tag {
+            RoomBiomeTag::Starter => &['.', '·'],
+            RoomBiomeTag::Botanical => &['"', '\'', '`', ','],
+            RoomBiomeTag::Technical => &[':', ';', '+', '='],
+            RoomBiomeTag::Celestial => &['*', '·', '˚', '.'],
+            RoomBiomeTag::Artifact => &['.', 'o', '◇', '°'],
+            RoomBiomeTag::Cozy => &['~', '·', '⌞', '⌟'],
+        },
     }
 }
 
 type ZoneAllocations = (Vec<(RoomZone, usize)>, Vec<(RoomZone, usize)>);
+
+fn dialect_zone_counts(dialect: RoomSpeciesDialect) -> Vec<(RoomZone, usize)> {
+    match dialect.key {
+        RoomDialectKey::Glitch => vec![(RoomZone::RightAnchor, 2), (RoomZone::Floor, 1)],
+        RoomDialectKey::Crystal => vec![(RoomZone::UpperAir, 2), (RoomZone::Floor, 1)],
+        RoomDialectKey::Fuzz
+        | RoomDialectKey::Blob
+        | RoomDialectKey::Ghost
+        | RoomDialectKey::Mech => Vec::new(),
+    }
+}
 
 fn zone_counts_for_biome(biome: RoomBiome) -> ZoneAllocations {
     let primary = match biome.primary {
@@ -689,7 +794,7 @@ fn biome_glyphs(
     let mut rng = Pcg32::seed_from_u64(seed);
     let (primary_counts, secondary_counts) = zone_counts_for_biome(profile.biome);
     let style = biome_style(profile.biome.primary, color_capability);
-    let symbols = biome_symbols(profile.biome.primary);
+    let symbols = biome_symbols(profile.biome.primary, profile.species_dialect);
     let mut glyphs = Vec::new();
     for (zone, count) in primary_counts {
         glyphs.extend(place_zone_glyphs(
@@ -698,7 +803,7 @@ fn biome_glyphs(
     }
     if let Some(secondary) = profile.biome.secondary {
         let sec_style = biome_style(secondary, color_capability);
-        let sec_symbols = biome_symbols(secondary);
+        let sec_symbols = biome_symbols(secondary, profile.species_dialect);
         for (zone, count) in secondary_counts {
             glyphs.extend(place_zone_glyphs(
                 area,
@@ -709,6 +814,12 @@ fn biome_glyphs(
                 &mut rng,
             ));
         }
+    }
+    let dialect_counts = dialect_zone_counts(profile.species_dialect);
+    for (zone, count) in dialect_counts {
+        glyphs.extend(place_zone_glyphs(
+            area, zone, count, symbols, style, &mut rng,
+        ));
     }
     glyphs
 }
@@ -1095,6 +1206,7 @@ mod tests {
             pet_performance: PetPerformance::RestedAwake,
             scene_moments: Vec::new(),
             identity_prop_ids: Vec::new(),
+            species_dialect: RoomSpeciesDialect::for_species(Species::Crystal),
         }
     }
 
@@ -1199,6 +1311,7 @@ mod tests {
             pet_performance: PetPerformance::RestedAwake,
             scene_moments: Vec::new(),
             identity_prop_ids: Vec::new(),
+            species_dialect: RoomSpeciesDialect::for_species(Species::Crystal),
         };
         let area = Rect::new(0, 0, 120, 32);
         let now = datetime!(2026-06-11 10:00 UTC);
@@ -1238,6 +1351,7 @@ mod tests {
             pet_performance: PetPerformance::RestedAwake,
             scene_moments: Vec::new(),
             identity_prop_ids: Vec::new(),
+            species_dialect: RoomSpeciesDialect::for_species(Species::Crystal),
         };
         let area = Rect::new(0, 0, 120, 32);
         let now = datetime!(2026-06-11 10:00 UTC);
@@ -1277,6 +1391,7 @@ mod tests {
             pet_performance: PetPerformance::RestedAwake,
             scene_moments: Vec::new(),
             identity_prop_ids: Vec::new(),
+            species_dialect: RoomSpeciesDialect::for_species(Species::Crystal),
         };
         let area = Rect::new(0, 0, 120, 32);
         let now = datetime!(2026-06-11 10:00 UTC);
@@ -1317,6 +1432,7 @@ mod tests {
                 pet_performance: PetPerformance::RestedAwake,
                 scene_moments: Vec::new(),
                 identity_prop_ids: vec![HabitatPropId::from(CODEX_SIGNAL_LAMP)],
+                species_dialect: RoomSpeciesDialect::for_species(Species::Crystal),
             };
             let area = Rect::new(0, 0, 120, 32);
             let now = datetime!(2026-06-11 10:00 UTC);
@@ -1329,6 +1445,70 @@ mod tests {
                 glyphs.len()
             );
         }
+    }
+
+    #[test]
+    fn room_profile_derives_species_dialect_from_pet_species() {
+        let mut vm = WatchViewModel::fixture();
+        vm.pet_render.generated_species = Species::Glitch;
+
+        let profile = derive_room_life_profile(&vm, datetime!(2026-06-11 10:00 UTC));
+
+        assert_eq!(profile.species_dialect.species, Species::Glitch);
+        assert_eq!(profile.species_dialect.key, RoomDialectKey::Glitch);
+        assert_eq!(profile.species_dialect.status, RoomDialectStatus::Tuned);
+    }
+
+    #[test]
+    fn room_glyphs_change_symbols_by_species_dialect_in_flat_mode() {
+        let mut glitch = phase_test_profile();
+        glitch.species_dialect = RoomSpeciesDialect::for_species(Species::Glitch);
+        glitch.biome = RoomBiome {
+            primary: RoomBiomeTag::Technical,
+            secondary: Some(RoomBiomeTag::Artifact),
+        };
+
+        let mut crystal = glitch.clone();
+        crystal.species_dialect = RoomSpeciesDialect::for_species(Species::Crystal);
+
+        let area = Rect::new(0, 0, 120, 32);
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let glitch_glyphs = room_glyphs_for(
+            &glitch,
+            area,
+            &[],
+            now,
+            ColorCapability::Flat,
+            DayPhase::Day,
+        );
+        let crystal_glyphs = room_glyphs_for(
+            &crystal,
+            area,
+            &[],
+            now,
+            ColorCapability::Flat,
+            DayPhase::Day,
+        );
+        let changed = glitch_glyphs
+            .iter()
+            .zip(&crystal_glyphs)
+            .filter(|(left, right)| left.glyph != right.glyph)
+            .count();
+        let changed_zones = glitch_glyphs
+            .iter()
+            .zip(&crystal_glyphs)
+            .filter(|(left, right)| left.glyph != right.glyph)
+            .map(|(left, _)| left.zone)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(
+            changed >= 6,
+            "expected at least 6 dialect symbol changes; got {changed}"
+        );
+        assert!(
+            changed_zones.len() >= 2,
+            "expected dialect changes in at least two zones; got {changed_zones:?}"
+        );
     }
 
     #[test]

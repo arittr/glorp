@@ -58,6 +58,8 @@ pub struct PreviewScenarioFiles {
     pub layout: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub room_text: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_masked_text: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,10 +145,36 @@ pub fn write_text_frame(path: &Path, frame: &PreviewFrame) -> Result<()> {
 }
 
 pub fn write_room_text_frame(path: &Path, frame: &PreviewFrame, target_id: &str) -> Result<()> {
+    write_room_text_frame_masked(path, frame, target_id, &[])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewMaskRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl PreviewMaskRect {
+    fn contains(self, col: u16, row: u16) -> bool {
+        col >= self.x
+            && col < self.x.saturating_add(self.width)
+            && row >= self.y
+            && row < self.y.saturating_add(self.height)
+    }
+}
+
+pub fn write_room_text_frame_masked(
+    path: &Path,
+    frame: &PreviewFrame,
+    target_id: &str,
+    masks: &[PreviewMaskRect],
+) -> Result<()> {
     let layout = frame
         .layout
         .as_ref()
-        .expect("frame should have layout for room text");
+        .expect("frame should have layout for masked room text");
     let target = layout
         .targets
         .get(target_id)
@@ -154,6 +182,10 @@ pub fn write_room_text_frame(path: &Path, frame: &PreviewFrame, target_id: &str)
     let mut text = String::new();
     for row in target.y..target.y + target.height {
         for col in target.x..target.x + target.width {
+            if masks.iter().any(|mask| mask.contains(col, row)) {
+                text.push(' ');
+                continue;
+            }
             let cell = frame
                 .cells
                 .iter()
@@ -553,6 +585,7 @@ mod tests {
                     cells: PathBuf::from("frames/frame-one.cells.json"),
                     layout: None,
                     room_text: None,
+                    room_masked_text: None,
                 },
                 inputs: BTreeMap::from([(
                     "fixed_now".to_string(),
@@ -694,6 +727,67 @@ mod tests {
         assert!(html.contains("&amp;"));
         assert!(html.contains("&quot;"));
         assert!(!html.contains(">Frame <One><"));
+    }
+
+    #[test]
+    fn masked_room_text_export_replaces_masked_cells_with_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("room-masked.txt");
+        let mut frame = sample_frame();
+        frame.layout = Some(crate::tui::component::PreviewLayout {
+            schema_version: 2,
+            frame_id: "frame-one".to_string(),
+            mode: "wide".to_string(),
+            frame: crate::tui::component::PreviewRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            content: crate::tui::component::PreviewRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            components: BTreeMap::new(),
+            targets: BTreeMap::from([(
+                "watch.room.effect".to_string(),
+                crate::tui::component::PreviewTarget {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                    owner: "watch.pet".to_string(),
+                    role: "RoomEffect".to_string(),
+                    clip: crate::tui::component::PreviewRect {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 2,
+                    },
+                    z: 5,
+                    layer: "room-background".to_string(),
+                    cell_count: None,
+                },
+            )]),
+            decisions: vec![],
+        });
+
+        write_room_text_frame_masked(
+            &path,
+            &frame,
+            "watch.room.effect",
+            &[PreviewMaskRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 2,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), " <\n \"\n");
     }
 
     #[test]

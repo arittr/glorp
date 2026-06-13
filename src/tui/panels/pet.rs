@@ -19,7 +19,7 @@ use crate::pet::render::PaletteRoleName;
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::day::{DayPhase, Season};
 use crate::tui::life::{
-    build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind, WorkWeather,
+    build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind, SourceAccent, WorkWeather,
 };
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
@@ -80,8 +80,8 @@ fn sky_palette_for(species: Species) -> &'static [char] {
         Species::Fuzz => &['·', ',', '\'', '*'],
         Species::Blob => &['°', 'o', '.', '·'],
         Species::Ghost => &['~', '\'', ',', '*'],
-        Species::Glitch => &['▒', '▓', '░', '▪'],
-        Species::Crystal => &['✦', '✧', '·', '◆'],
+        Species::Glitch => &[':', ';', '#', '░', '▒', '▪'],
+        Species::Crystal => &['✦', '✧', '◇', '◆', '·'],
         Species::Mech => &['~', '°', '·', '●'],
     }
 }
@@ -92,8 +92,8 @@ fn floor_palette_for(species: Species) -> &'static [char] {
         Species::Fuzz => &['·', ',', '.', ' ', ' '],
         Species::Blob => &['~', '.', ',', ' '],
         Species::Ghost => &['\'', ' ', ' ', ' '],
-        Species::Glitch => &['▒', '░', '▓', ' '],
-        Species::Crystal => &['·', '.', ' ', ' ', ' '],
+        Species::Glitch => &['_', '-', ':', ' ', '░'],
+        Species::Crystal => &['◇', '·', '.', ' ', ' '],
         Species::Mech => &['─', '·', '.', ' '],
     }
 }
@@ -205,13 +205,11 @@ fn activity_glyph_color(profile: &PetLifeProfile) -> Color {
     }
 }
 
-fn source_accent_color(accent: crate::tui::life::SourceAccent) -> Color {
+fn source_accent_color(accent: SourceAccent) -> Color {
     match accent {
-        crate::tui::life::SourceAccent::Claude => Color::Rgb(0xb3, 0x9d, 0xff),
-        crate::tui::life::SourceAccent::Codex => Color::Rgb(0x86, 0xd9, 0xef),
-        crate::tui::life::SourceAccent::Balanced | crate::tui::life::SourceAccent::Ensemble => {
-            Color::Rgb(0xf0, 0xc4, 0x6a)
-        }
+        SourceAccent::Claude => Color::Rgb(0xb3, 0x9d, 0xff),
+        SourceAccent::Codex => Color::Rgb(0x86, 0xd9, 0xef),
+        SourceAccent::Balanced | SourceAccent::Ensemble => Color::Rgb(0xf0, 0xc4, 0x6a),
     }
 }
 
@@ -278,22 +276,24 @@ fn sky_palette_for_phase(species: Species, phase: DayPhase, date_seed: u64) -> &
                     Species::Fuzz => &['*', '·', '`', '.'],
                     Species::Blob => &['o', '·', '°', '.'],
                     Species::Ghost => &['\'', '~', '·', ','],
-                    Species::Glitch => &['░', '▒', '▪', '·'],
-                    Species::Crystal => &['✧', '·', '✦', '◇'],
+                    Species::Glitch => &['░', '▒', '▪', ':', ';'],
+                    Species::Crystal => &['✧', '◆', '✦', '◇'],
                     Species::Mech => &['°', '·', '─', '○'],
                 }
             }
         }
         DayPhase::Dawn | DayPhase::Dusk => {
             let variants: [&'static [char]; 2] = match species {
-                Species::Glitch => [&['░', '▪', '·', ' '], &['·', '░', '▪', ' ']],
+                Species::Glitch => [&['░', '▪', ':', ' '], &['▒', '░', '▪', ' ']],
+                Species::Crystal => [&['✦', '✧', '·', ' '], &['◇', '◆', '·', ' ']],
                 _ => [&['·', '\'', '~', ' '], &['\'', ',', '·', ' ']],
             };
             variants[variant]
         }
         DayPhase::Night => {
             let variants: [&'static [char]; 2] = match species {
-                Species::Glitch => [&['▪', '·', ' ', ' '], &['·', '▪', '.', ' ']],
+                Species::Glitch => [&['▪', ':', ' ', ' '], &[';', '▪', '░', ' ']],
+                Species::Crystal => [&['✦', '◇', ' ', ' '], &['◆', '✧', '·', ' ']],
                 _ => [&['✦', '·', '*', ' '], &['*', '·', '✧', ' ']],
             };
             variants[variant]
@@ -1671,6 +1671,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use time::macros::datetime;
     use ColorCapability;
 
     fn test_context() -> RenderContext {
@@ -1919,7 +1920,7 @@ mod tests {
 
     #[test]
     fn activity_glyph_budget_caps_compact_hot_state() {
-        let profile = crate::tui::life::PetLifeProfile {
+        let profile = PetLifeProfile {
             activity_level: 2.0,
             burst_level: 1.5,
             ..Default::default()
@@ -1931,7 +1932,7 @@ mod tests {
 
     #[test]
     fn activity_glyph_budget_suppresses_calm_mode() {
-        let profile = crate::tui::life::PetLifeProfile {
+        let profile = PetLifeProfile {
             activity_level: 2.0,
             burst_level: 1.5,
             calm_mode: true,
@@ -1963,12 +1964,12 @@ mod tests {
     #[test]
     fn prop_reaction_style_lifts_rgb_and_preserves_flat() {
         let original = Style::default().fg(Color::Rgb(100, 110, 120));
-        let reaction = crate::tui::life::PropReaction {
+        let reaction = PropReaction {
             prop_id: crate::storage::state::HabitatPropId::new(
                 crate::game::habitat::CODEX_SIGNAL_LAMP,
             ),
             intensity: 0.5,
-            kind: crate::tui::life::PropReactionKind::Glow,
+            kind: PropReactionKind::Glow,
         };
 
         let lifted =
@@ -1981,12 +1982,12 @@ mod tests {
 
     #[test]
     fn activity_glyph_color_uses_source_accent_when_available() {
-        let claude = activity_glyph_color(&crate::tui::life::PetLifeProfile {
-            source_accent: Some(crate::tui::life::SourceAccent::Claude),
+        let claude = activity_glyph_color(&PetLifeProfile {
+            source_accent: Some(SourceAccent::Claude),
             ..Default::default()
         });
-        let codex = activity_glyph_color(&crate::tui::life::PetLifeProfile {
-            source_accent: Some(crate::tui::life::SourceAccent::Codex),
+        let codex = activity_glyph_color(&PetLifeProfile {
+            source_accent: Some(SourceAccent::Codex),
             ..Default::default()
         });
 
@@ -1997,14 +1998,14 @@ mod tests {
 
     #[test]
     fn activity_glyph_color_keeps_weather_visible_with_source_accent() {
-        let cache_claude = activity_glyph_color(&crate::tui::life::PetLifeProfile {
-            source_accent: Some(crate::tui::life::SourceAccent::Claude),
-            work_weather: crate::tui::life::WorkWeather::CacheMist,
+        let cache_claude = activity_glyph_color(&PetLifeProfile {
+            source_accent: Some(SourceAccent::Claude),
+            work_weather: WorkWeather::CacheMist,
             ..Default::default()
         });
-        let output_claude = activity_glyph_color(&crate::tui::life::PetLifeProfile {
-            source_accent: Some(crate::tui::life::SourceAccent::Claude),
-            work_weather: crate::tui::life::WorkWeather::OutputSparks,
+        let output_claude = activity_glyph_color(&PetLifeProfile {
+            source_accent: Some(SourceAccent::Claude),
+            work_weather: WorkWeather::OutputSparks,
             ..Default::default()
         });
 
@@ -2018,7 +2019,7 @@ mod tests {
 
         assert!(profile_token_pop(
             Some(pulse),
-            &crate::tui::life::PetLifeProfile {
+            &PetLifeProfile {
                 burst_level: 0.6,
                 ..Default::default()
             },
@@ -2028,7 +2029,7 @@ mod tests {
         .is_some());
         assert!(profile_token_pop(
             Some(pulse),
-            &crate::tui::life::PetLifeProfile {
+            &PetLifeProfile {
                 burst_level: 0.0,
                 ..Default::default()
             },
@@ -2038,7 +2039,7 @@ mod tests {
         .is_none());
         assert!(profile_token_pop(
             Some(pulse),
-            &crate::tui::life::PetLifeProfile {
+            &PetLifeProfile {
                 burst_level: 0.6,
                 ..Default::default()
             },
@@ -2050,9 +2051,9 @@ mod tests {
 
     #[test]
     fn activity_glyphs_are_suppressed_for_flat_color() {
-        let profile = crate::tui::life::PetLifeProfile {
+        let profile = PetLifeProfile {
             activity_level: 2.0,
-            work_weather: crate::tui::life::WorkWeather::OutputSparks,
+            work_weather: WorkWeather::OutputSparks,
             ..Default::default()
         };
         let glyphs = activity_glyphs_for(
@@ -2196,6 +2197,54 @@ mod tests {
             "expected ≥ stage_base + most of the floor row, got {}",
             glyphs.len()
         );
+    }
+
+    #[test]
+    fn glitch_and_crystal_ambient_floor_use_distinct_symbol_families() {
+        let habitat = Rect::new(0, 0, 80, 20);
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let glitch = ambient_glyphs_for_phase(
+            Species::Glitch,
+            Stage::S6,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+            1.0,
+            0,
+            Season::Summer,
+            None,
+        );
+        let crystal = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+            1.0,
+            0,
+            Season::Summer,
+            None,
+        );
+        let glitch_symbols = glitch
+            .iter()
+            .map(|g| g.glyph)
+            .collect::<std::collections::HashSet<_>>();
+        let crystal_symbols = crystal
+            .iter()
+            .map(|g| g.glyph)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(glitch_symbols
+            .iter()
+            .any(|c| ['#', ':', ';', '_', '░', '▒', '▪'].contains(c)));
+        assert!(crystal_symbols
+            .iter()
+            .any(|c| ['◇', '◆', '✦', '✧', '·'].contains(c)));
+        assert_ne!(glitch_symbols, crystal_symbols);
     }
 
     #[test]

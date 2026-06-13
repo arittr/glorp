@@ -38,7 +38,7 @@ pub struct HabitatPropPlacement {
     pub target_id: Option<TargetPath>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SpriteCell {
     dx: i16,
     dy: i16,
@@ -119,8 +119,15 @@ pub fn habitat_prop_placements_for(
     }
 
     if matches!(ctx.color_capability, ColorCapability::Truecolor) {
-        let accent_cells =
-            stable_accent_cells_by_id(habitat, scene, &occupied, silhouette_halo, seed, now);
+        let accent_cells = stable_accent_cells_by_id(
+            habitat,
+            scene,
+            &occupied,
+            silhouette_halo,
+            species,
+            seed,
+            now,
+        );
         for id in visible_accent_ids(habitat, now) {
             if let Some(cell) = accent_cells.get(id) {
                 let layer = prop_pet_layer(id);
@@ -380,7 +387,7 @@ fn push_anchor_candidate(
     }
 }
 
-fn trophy_sprite(id: &str, _species: Species, now: time::OffsetDateTime) -> &'static [SpriteCell] {
+fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'static [SpriteCell] {
     let phase = now.unix_timestamp().rem_euclid(8);
     match id {
         "token_moss_tuft_250k" if phase < 4 => &[
@@ -589,7 +596,75 @@ fn trophy_sprite(id: &str, _species: Species, now: time::OffsetDateTime) -> &'st
                 glyph: '╱',
             },
         ],
-        "codex_signal_lamp" if phase < 4 => &[
+        CODEX_SIGNAL_LAMP if matches!(species, Species::Glitch) && phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '╷',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '#',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '_',
+            },
+        ],
+        CODEX_SIGNAL_LAMP if matches!(species, Species::Glitch) => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '_',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: ':',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '╵',
+            },
+        ],
+        CODEX_SIGNAL_LAMP if matches!(species, Species::Crystal) && phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '╷',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '◆',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '╵',
+            },
+        ],
+        CODEX_SIGNAL_LAMP if matches!(species, Species::Crystal) => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '╷',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '◇',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '╵',
+            },
+        ],
+        CODEX_SIGNAL_LAMP if phase < 4 => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
@@ -606,7 +681,7 @@ fn trophy_sprite(id: &str, _species: Species, now: time::OffsetDateTime) -> &'st
                 glyph: '╵',
             },
         ],
-        "codex_signal_lamp" => &[
+        CODEX_SIGNAL_LAMP => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
@@ -782,6 +857,7 @@ fn stable_accent_cells_by_id<'a>(
     scene: &PetSceneLayout,
     occupied: &[Rect],
     silhouette_halo: &[Rect],
+    species: Species,
     seed: &str,
     now: time::OffsetDateTime,
 ) -> HashMap<&'a str, HabitatPropCell> {
@@ -797,7 +873,8 @@ fn stable_accent_cells_by_id<'a>(
         let layer_excl = exclusions_for_layer(layer, scene, &rendered, silhouette_halo);
         let mut blocked = layer_excl;
         blocked.extend(anchor_exclusions_except(&anchors, id));
-        if let Some(cell) = accent_cell_from_anchor(id, anchor, scene.habitat, &blocked, layer, now)
+        if let Some(cell) =
+            accent_cell_from_anchor(id, anchor, scene.habitat, &blocked, layer, species, now)
         {
             rendered.push(Rect::new(cell.col, cell.row, 1, 1));
             cells.insert(id, cell);
@@ -848,10 +925,19 @@ fn render_accent(
     habitat: Rect,
     exclusions: &[Rect],
     seed: &str,
+    species: Species,
     now: time::OffsetDateTime,
 ) -> Option<HabitatPropCell> {
     let anchor = accent_anchor_for(id, habitat, exclusions, seed)?;
-    accent_cell_from_anchor(id, anchor, habitat, exclusions, prop_pet_layer(id), now)
+    accent_cell_from_anchor(
+        id,
+        anchor,
+        habitat,
+        exclusions,
+        prop_pet_layer(id),
+        species,
+        now,
+    )
 }
 
 fn accent_anchor_for(id: &str, habitat: Rect, exclusions: &[Rect], seed: &str) -> Option<Position> {
@@ -891,6 +977,7 @@ fn accent_cell_from_anchor(
     habitat: Rect,
     exclusions: &[Rect],
     pet_layer: HabitatPetLayer,
+    species: Species,
     now: time::OffsetDateTime,
 ) -> Option<HabitatPropCell> {
     if habitat.width < 4 || habitat.height < 3 {
@@ -920,7 +1007,7 @@ fn accent_cell_from_anchor(
         prop_id: HabitatPropId::new(id),
         row: pos.y,
         col: pos.x,
-        glyph: accent_glyph(id, now),
+        glyph: accent_glyph(id, species, now),
         style: accent_style(id),
         pet_layer,
     })
@@ -948,17 +1035,25 @@ fn accent_motion_offset(id: &str, now: time::OffsetDateTime) -> (i8, i8) {
     }
 }
 
-fn accent_glyph(id: &str, now: time::OffsetDateTime) -> char {
+fn accent_glyph(id: &str, species: Species, now: time::OffsetDateTime) -> char {
     let twinkle = now.unix_timestamp().rem_euclid(12) < 2;
-    match id {
-        "token_pebble_25k" => '▲',
-        "token_shell_100k" => '◌',
-        "token_spark_500k" if twinkle => '✦',
-        "token_spark_500k" => '·',
-        "token_shard_1m" => '◆',
-        "token_orbit_5m" => '°',
-        "token_lantern_10m" if twinkle => '☼',
-        "token_lantern_10m" => '○',
+    match (id, species) {
+        (TOKEN_SHARD_1M, Species::Glitch) => '#',
+        (TOKEN_SHARD_1M, Species::Crystal) => '◆',
+        (TOKEN_ORBIT_5M, Species::Glitch) => ']',
+        (TOKEN_ORBIT_5M, Species::Crystal) => '°',
+        (TOKEN_LANTERN_10M, Species::Glitch) if twinkle => '_',
+        (TOKEN_LANTERN_10M, Species::Glitch) => ':',
+        (TOKEN_LANTERN_10M, Species::Crystal) if twinkle => '✦',
+        (TOKEN_LANTERN_10M, Species::Crystal) => '○',
+        (TOKEN_PEBBLE_25K, _) => '▲',
+        (TOKEN_SHELL_100K, _) => '◌',
+        (TOKEN_SPARK_500K, _) if twinkle => '✦',
+        (TOKEN_SPARK_500K, _) => '·',
+        (TOKEN_SHARD_1M, _) => '◆',
+        (TOKEN_ORBIT_5M, _) => '°',
+        (TOKEN_LANTERN_10M, _) if twinkle => '☼',
+        (TOKEN_LANTERN_10M, _) => '○',
         _ => '·',
     }
 }
@@ -967,7 +1062,7 @@ fn accent_glyph(id: &str, now: time::OffsetDateTime) -> char {
 fn prop_visual_glyphs_for_test() -> &'static [char] {
     &[
         '╷', '◉', '○', '╵', 'ѱ', '╲', '┃', '╱', '◌', '╿', '◈', '▝', '▲', '✦', '·', '◆', '°', '☼',
-        '▂', '☁', '◦', '◡', '˙', '╭', '─', '╮', '▣', '◇', '╽',
+        '▂', '☁', '◦', '◡', '˙', '╭', '─', '╮', '▣', '◇', '╽', '#', ']', '_', ':',
     ]
 }
 
@@ -1558,6 +1653,42 @@ mod tests {
     }
 
     #[test]
+    fn selected_accent_glyphs_can_vary_by_species_without_changing_identity() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+
+        assert_ne!(
+            accent_glyph(TOKEN_SHARD_1M, Species::Glitch, now),
+            accent_glyph(TOKEN_SHARD_1M, Species::Crystal, now)
+        );
+        assert_eq!(
+            prop_effect_target_path(TOKEN_SHARD_1M).unwrap().as_str(),
+            "watch.prop.token_shard_1m.effect"
+        );
+        assert_eq!(
+            catalog_prop_by_str(TOKEN_SHARD_1M).unwrap().color,
+            (0x82, 0xcc, 0xd8)
+        );
+    }
+
+    #[test]
+    fn codex_signal_lamp_sprite_can_vary_by_species_without_changing_target_or_color() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+
+        assert_ne!(
+            trophy_sprite(CODEX_SIGNAL_LAMP, Species::Glitch, now),
+            trophy_sprite(CODEX_SIGNAL_LAMP, Species::Crystal, now)
+        );
+        assert_eq!(
+            prop_effect_target_path(CODEX_SIGNAL_LAMP).unwrap().as_str(),
+            "watch.prop.codex_signal_lamp.effect"
+        );
+        assert_eq!(
+            catalog_prop_by_str(CODEX_SIGNAL_LAMP).unwrap().color,
+            (0xd8, 0x6c, 0x5c)
+        );
+    }
+
+    #[test]
     fn accent_retry_escapes_blocked_first_column() {
         let habitat = Rect::new(0, 0, 20, 8);
         let blocked_col = habitat.x
@@ -1575,6 +1706,7 @@ mod tests {
             habitat,
             &exclusions,
             "fixture-seed",
+            Species::Fuzz,
             datetime!(2026-05-11 12:00 UTC),
         )
         .expect("accent should find another free column");

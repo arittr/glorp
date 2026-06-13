@@ -54,6 +54,33 @@ const ACTIVITY_IDENTITY_WATCH_IDS: [&str; 2] = [
     "watch-activity-identity-unknown",
 ];
 
+const SPECIES_DIALECT_WATCH_IDS: [&str; 8] = [
+    "watch-species-dialect-fuzz",
+    "watch-species-dialect-blob",
+    "watch-species-dialect-ghost",
+    "watch-species-dialect-glitch",
+    "watch-species-dialect-crystal",
+    "watch-species-dialect-mech",
+    "watch-species-dialect-glitch-flat",
+    "watch-species-dialect-crystal-flat",
+];
+
+const SPECIES_DIALECT_STRICT_IDS: [&str; 4] = [
+    "watch-species-dialect-glitch",
+    "watch-species-dialect-crystal",
+    "watch-species-dialect-glitch-flat",
+    "watch-species-dialect-crystal-flat",
+];
+
+const SPECIES_DIALECT_MATRIX_IDS: [&str; 6] = [
+    "watch-species-dialect-fuzz",
+    "watch-species-dialect-blob",
+    "watch-species-dialect-ghost",
+    "watch-species-dialect-glitch",
+    "watch-species-dialect-crystal",
+    "watch-species-dialect-mech",
+];
+
 struct PreviewRun {
     _dir: TempDir,
     out: PathBuf,
@@ -202,6 +229,32 @@ fn dev_preview_watch_writes_expected_artifacts() {
             "missing {id} room text artifact"
         );
     }
+    for id in SPECIES_DIALECT_WATCH_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id} text artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.cells.json")).is_file(),
+            "missing {id} cells artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.layout.json")).is_file(),
+            "missing {id} layout artifact"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.room.txt")).is_file(),
+            "missing {id} room text artifact"
+        );
+    }
+    for id in SPECIES_DIALECT_STRICT_IDS {
+        assert!(
+            run.out
+                .join(format!("frames/{id}.room-masked.txt"))
+                .is_file(),
+            "missing {id} room-masked text artifact"
+        );
+    }
     for id in ACTIVITY_IDENTITY_WATCH_IDS {
         assert!(
             run.out.join(format!("frames/{id}.txt")).is_file(),
@@ -295,6 +348,26 @@ fn dev_preview_watch_writes_expected_artifacts() {
         assert_artifact_type(&manifest, &format!("{id}-cells"), "cells");
         assert_artifact_type(&manifest, &format!("{id}-layout"), "layout");
         assert_artifact_type(&manifest, &format!("{id}-room"), "text");
+    }
+    for id in SPECIES_DIALECT_WATCH_IDS {
+        assert_scenario(
+            &manifest,
+            id,
+            "watch",
+            (120, 32),
+            (
+                &format!("frames/{id}.txt"),
+                &format!("frames/{id}.cells.json"),
+                Some(&format!("frames/{id}.layout.json")),
+            ),
+        );
+        assert_artifact_type(&manifest, id, "text");
+        assert_artifact_type(&manifest, &format!("{id}-cells"), "cells");
+        assert_artifact_type(&manifest, &format!("{id}-layout"), "layout");
+        assert_artifact_type(&manifest, &format!("{id}-room"), "text");
+    }
+    for id in SPECIES_DIALECT_STRICT_IDS {
+        assert_artifact_type(&manifest, &format!("{id}-room-masked"), "text");
     }
 }
 
@@ -868,6 +941,26 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/room-mixed-full-wide.txt",
         "frames/room-heavy-day-cozy-large.txt",
         "frames/room-dawn-wake-small.txt",
+        "frames/watch-species-dialect-fuzz.txt",
+        "frames/watch-species-dialect-blob.txt",
+        "frames/watch-species-dialect-ghost.txt",
+        "frames/watch-species-dialect-glitch.txt",
+        "frames/watch-species-dialect-crystal.txt",
+        "frames/watch-species-dialect-mech.txt",
+        "frames/watch-species-dialect-glitch-flat.txt",
+        "frames/watch-species-dialect-crystal-flat.txt",
+        "frames/watch-species-dialect-glitch.cells.json",
+        "frames/watch-species-dialect-glitch.layout.json",
+        "frames/watch-species-dialect-glitch.room-masked.txt",
+        "frames/watch-species-dialect-crystal.cells.json",
+        "frames/watch-species-dialect-crystal.layout.json",
+        "frames/watch-species-dialect-crystal.room-masked.txt",
+        "frames/watch-species-dialect-glitch-flat.cells.json",
+        "frames/watch-species-dialect-glitch-flat.layout.json",
+        "frames/watch-species-dialect-glitch-flat.room-masked.txt",
+        "frames/watch-species-dialect-crystal-flat.cells.json",
+        "frames/watch-species-dialect-crystal-flat.layout.json",
+        "frames/watch-species-dialect-crystal-flat.room-masked.txt",
         "frames/watch-activity-identity-ensemble.txt",
         "frames/watch-activity-identity-ensemble.cells.json",
         "frames/watch-activity-identity-ensemble.layout.json",
@@ -926,6 +1019,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "room-mixed-full-wide".to_string(),
             "room-heavy-day-cozy-large".to_string(),
             "room-dawn-wake-small".to_string(),
+            "watch-species-dialect-fuzz".to_string(),
+            "watch-species-dialect-blob".to_string(),
+            "watch-species-dialect-ghost".to_string(),
+            "watch-species-dialect-glitch".to_string(),
+            "watch-species-dialect-crystal".to_string(),
+            "watch-species-dialect-mech".to_string(),
+            "watch-species-dialect-glitch-flat".to_string(),
+            "watch-species-dialect-crystal-flat".to_string(),
             "watch-activity-identity-ensemble".to_string(),
             "watch-activity-identity-unknown".to_string(),
             "habitat-props-catalog".to_string(),
@@ -935,6 +1036,131 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-habitat-full-phase-b".to_string(),
             "pet-species-stage".to_string(),
         ]
+    );
+}
+
+#[test]
+fn dev_preview_species_dialect_fixtures_have_manifest_contract() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    for id in SPECIES_DIALECT_STRICT_IDS {
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["kind"], "watch");
+        assert_eq!(
+            scenario["inputs"]["comparison_group"],
+            "species-dialect-glitch-crystal"
+        );
+        assert!(
+            scenario["inputs"]["room_dialect"].is_string(),
+            "{id} missing room_dialect"
+        );
+        assert!(
+            scenario["inputs"]["dialect_status"].is_string(),
+            "{id} missing dialect_status"
+        );
+        assert!(
+            scenario["inputs"]["shared_input_invariants"].is_object(),
+            "{id} missing shared invariants"
+        );
+        assert!(
+            scenario["inputs"]["prop_identity_invariants"].is_array(),
+            "{id} missing prop invariants"
+        );
+        assert_eq!(
+            scenario["files"]["room_masked_text"],
+            format!("frames/{id}.room-masked.txt")
+        );
+        assert!(
+            run.out
+                .join(format!("frames/{id}.room-masked.txt"))
+                .is_file(),
+            "missing masked room artifact for {id}"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_species_dialect_matrix_lists_all_species() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    let species: Vec<&str> = SPECIES_DIALECT_MATRIX_IDS
+        .iter()
+        .map(|id| {
+            scenario(&manifest, id)["inputs"]["species"]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+
+    assert_eq!(
+        species,
+        vec!["fuzz", "blob", "ghost", "glitch", "crystal", "mech"]
+    );
+
+    for id in SPECIES_DIALECT_MATRIX_IDS {
+        let scenario = scenario(&manifest, id);
+        assert!(
+            scenario["inputs"]["room_dialect"].is_string(),
+            "{id} missing dialect"
+        );
+        assert!(
+            scenario["inputs"]["dialect_status"].is_string(),
+            "{id} missing status"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_glitch_and_crystal_dialects_differ_after_masking() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    assert_species_dialect_pair_differs(
+        &run,
+        "watch-species-dialect-glitch",
+        "watch-species-dialect-crystal",
+    );
+    assert_species_dialect_pair_differs(
+        &run,
+        "watch-species-dialect-glitch-flat",
+        "watch-species-dialect-crystal-flat",
+    );
+}
+
+fn assert_species_dialect_pair_differs(run: &PreviewRun, left_id: &str, right_id: &str) {
+    let left_cells = read_cells(run, left_id);
+    let left_layout = read_layout(run, left_id);
+    let right_cells = read_cells(run, right_id);
+    let right_layout = read_layout(run, right_id);
+
+    let left_room = masked_room_cells(&left_cells, &left_layout, &right_layout);
+    let right_room = masked_room_cells(&right_cells, &right_layout, &left_layout);
+    let changed = changed_cells_by_symbol(&left_room, &right_room);
+    let rect = target_rect(&left_layout, "watch.room.effect");
+    let zones = changed_room_zones(&left_room, &right_room, rect.width, rect.height);
+
+    assert!(
+        changed >= MIN_DIALECT_SYMBOL_DIFFERENCES,
+        "{left_id} and {right_id} should differ by at least {MIN_DIALECT_SYMBOL_DIFFERENCES} masked room symbols; changed {changed}"
+    );
+    assert!(
+        zones.len() >= MIN_DIALECT_DIFFERENT_ZONES,
+        "{left_id} and {right_id} should differ across at least {MIN_DIALECT_DIFFERENT_ZONES} zones; got {zones:?}"
+    );
+    assert!(
+        zones.contains("floor") || zones.contains("left-anchor") || zones.contains("right-anchor"),
+        "expected floor or anchor-zone dialect difference; got {zones:?}"
+    );
+    assert!(
+        zones.contains("upper-air") || zones.contains("pet-adjacent"),
+        "expected upper-air or pet-adjacent dialect difference; got {zones:?}"
     );
 }
 
@@ -1324,6 +1550,84 @@ fn changed_room_zones(
         zones.insert(zone);
     }
     zones
+}
+
+/// Minimum number of masked room symbols that must differ between two species dialects.
+const MIN_DIALECT_SYMBOL_DIFFERENCES: usize = 12;
+/// Minimum number of room zones that must show dialect differences.
+const MIN_DIALECT_DIFFERENT_ZONES: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TestRect {
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+}
+
+fn target_rect(layout: &Value, target: &str) -> TestRect {
+    let rect = &layout["targets"][target];
+    TestRect {
+        x: rect["x"].as_u64().unwrap(),
+        y: rect["y"].as_u64().unwrap(),
+        width: rect["width"].as_u64().unwrap(),
+        height: rect["height"].as_u64().unwrap(),
+    }
+}
+
+fn rect_contains(rect: TestRect, cell: &Value) -> bool {
+    let x = cell["x"].as_u64().unwrap();
+    let y = cell["y"].as_u64().unwrap();
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+fn prop_target_ids(layout: &Value) -> Vec<&str> {
+    layout["targets"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|id| id.starts_with("watch.prop."))
+        .map(|s| s.as_str())
+        .collect()
+}
+
+/// Collects the union of prop mask regions from both layouts. Shared prop IDs
+/// may produce duplicate rects, which is harmless for masking.
+fn union_prop_mask_rects(left: &Value, right: &Value) -> Vec<TestRect> {
+    let mut ids = prop_target_ids(left);
+    ids.extend(prop_target_ids(right));
+    ids.sort();
+    ids.dedup();
+
+    let mut rects = Vec::new();
+    for id in ids {
+        if left["targets"].get(id).is_some() {
+            rects.push(target_rect(left, id));
+        }
+        if right["targets"].get(id).is_some() {
+            rects.push(target_rect(right, id));
+        }
+    }
+    rects
+}
+
+/// Blanks out pet art/speech and shared prop regions so only room-dialect differences remain.
+fn masked_room_cells(cells: &Value, layout: &Value, pair_layout: &Value) -> Vec<Value> {
+    let mut masks = vec![target_rect(layout, "watch.pet.art")];
+    if layout["targets"].get("watch.pet.speech").is_some() {
+        masks.push(target_rect(layout, "watch.pet.speech"));
+    }
+    masks.extend(union_prop_mask_rects(layout, pair_layout));
+
+    cells_for_target(cells, layout, "watch.room.effect")
+        .into_iter()
+        .map(|mut cell| {
+            if masks.iter().any(|mask| rect_contains(*mask, &cell)) {
+                cell["symbol"] = Value::String(" ".to_string());
+            }
+            cell
+        })
+        .collect()
 }
 
 fn local_asset_refs(html: &str) -> Vec<String> {

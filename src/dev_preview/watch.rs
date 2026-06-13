@@ -68,6 +68,10 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
         frames.push(render_alive_room_watch_frame(ctx, scratch_dir, fixture)?);
     }
 
+    for fixture in species_dialect_frame_fixtures(ctx) {
+        frames.push(render_alive_room_watch_frame(ctx, scratch_dir, fixture)?);
+    }
+
     frames.push(render_activity_identity_watch_frame(
         ctx,
         scratch_dir,
@@ -1068,6 +1072,125 @@ fn alive_room_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFi
     ]
 }
 
+fn species_dialect_props(fixed_now: OffsetDateTime) -> Vec<EarnedHabitatProp> {
+    vec![
+        EarnedHabitatProp {
+            id: HabitatPropId::new("codex_signal_lamp"),
+            earned_at: fixed_now - Duration::days(12),
+            source: HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".to_string(),
+            },
+        },
+        EarnedHabitatProp {
+            id: HabitatPropId::new("token_shard_1m"),
+            earned_at: fixed_now - Duration::days(11),
+            source: HabitatPropSource::LifetimeTokens {
+                threshold: 1_000_000.0,
+            },
+        },
+        EarnedHabitatProp {
+            id: HabitatPropId::new("token_orbit_5m"),
+            earned_at: fixed_now - Duration::days(9),
+            source: HabitatPropSource::LifetimeTokens {
+                threshold: 5_000_000.0,
+            },
+        },
+        EarnedHabitatProp {
+            id: HabitatPropId::new("token_lantern_10m"),
+            earned_at: fixed_now - Duration::days(6),
+            source: HabitatPropSource::LifetimeTokens {
+                threshold: 10_000_000.0,
+            },
+        },
+    ]
+}
+
+fn species_dialect_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFixture> {
+    let fixed_now = ctx.fixed_now;
+    let props = species_dialect_props(fixed_now);
+    let day_context = DayContext {
+        day_phase: DayPhase::Day,
+        mature: true,
+        ..DayContext::default()
+    };
+    let mut hot = hot_life_profile(false);
+    hot.work_weather = WorkWeather::OutputSparks;
+
+    let mk = |id: &'static str,
+              title: &'static str,
+              species: Species,
+              color_capability: ColorCapability| {
+        AliveRoomFrameFixture {
+            id,
+            title,
+            width: 120,
+            height: 32,
+            species,
+            stage: Stage::S6,
+            props: props.clone(),
+            life: WatchLifeFixture {
+                profile: hot.clone(),
+                color_capability,
+                last_feed_pulse_at: Some(fixed_now - Duration::seconds(5)),
+            },
+            day_context,
+            expected_biome: "Technical",
+            expected_emitter: Some("codex_signal_lamp"),
+        }
+    };
+
+    vec![
+        mk(
+            "watch-species-dialect-fuzz",
+            "Watch Species Dialect Fuzz",
+            Species::Fuzz,
+            ColorCapability::Truecolor,
+        ),
+        mk(
+            "watch-species-dialect-blob",
+            "Watch Species Dialect Blob",
+            Species::Blob,
+            ColorCapability::Truecolor,
+        ),
+        mk(
+            "watch-species-dialect-ghost",
+            "Watch Species Dialect Ghost",
+            Species::Ghost,
+            ColorCapability::Truecolor,
+        ),
+        mk(
+            "watch-species-dialect-glitch",
+            "Watch Species Dialect Glitch",
+            Species::Glitch,
+            ColorCapability::Truecolor,
+        ),
+        mk(
+            "watch-species-dialect-crystal",
+            "Watch Species Dialect Crystal",
+            Species::Crystal,
+            ColorCapability::Truecolor,
+        ),
+        mk(
+            "watch-species-dialect-mech",
+            "Watch Species Dialect Mech",
+            Species::Mech,
+            ColorCapability::Truecolor,
+        ),
+        mk(
+            "watch-species-dialect-glitch-flat",
+            "Watch Species Dialect Glitch Flat",
+            Species::Glitch,
+            ColorCapability::Flat,
+        ),
+        mk(
+            "watch-species-dialect-crystal-flat",
+            "Watch Species Dialect Crystal Flat",
+            Species::Crystal,
+            ColorCapability::Flat,
+        ),
+    ]
+}
+
 fn alive_room_pet_state(ctx: &PreviewRenderContext, fixture: &AliveRoomFrameFixture) -> PetState {
     let mut state = liveliness_pet_state(ctx);
     state.pet.generated_species = fixture.species;
@@ -1151,6 +1274,14 @@ fn render_alive_room_watch_frame(
                 "emitter": room_profile.resonant_emitter.as_ref().map(|emitter| emitter.prop_id.as_str().to_string()),
                 "pet_performance": format!("{:?}", room_profile.pet_performance),
                 "scene_moments": room_profile.scene_moments.iter().map(|moment| format!("{:?}", moment.key)).collect::<Vec<_>>(),
+            }),
+        ),
+        (
+            "species_dialect".to_string(),
+            json!({
+                "species": room_profile.species_dialect.species.as_str(),
+                "key": room_profile.species_dialect.key.as_str(),
+                "status": room_profile.species_dialect.status.as_str()
             }),
         ),
     ]);
@@ -1677,7 +1808,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 39);
+        assert_eq!(frames.len(), 47);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -1743,10 +1874,19 @@ mod tests {
         assert_eq!((frames[35].width, frames[35].height), (120, 32));
         assert_eq!(frames[36].id, "room-dawn-wake-small");
         assert_eq!((frames[36].width, frames[36].height), (72, 24));
-        assert_eq!(frames[37].id, "watch-activity-identity-ensemble");
+        assert_eq!(frames[37].id, "watch-species-dialect-fuzz");
         assert_eq!((frames[37].width, frames[37].height), (120, 32));
-        assert_eq!(frames[38].id, "watch-activity-identity-unknown");
-        assert_eq!((frames[38].width, frames[38].height), (120, 32));
+        assert_eq!(frames[38].id, "watch-species-dialect-blob");
+        assert_eq!(frames[39].id, "watch-species-dialect-ghost");
+        assert_eq!(frames[40].id, "watch-species-dialect-glitch");
+        assert_eq!(frames[41].id, "watch-species-dialect-crystal");
+        assert_eq!(frames[42].id, "watch-species-dialect-mech");
+        assert_eq!(frames[43].id, "watch-species-dialect-glitch-flat");
+        assert_eq!(frames[44].id, "watch-species-dialect-crystal-flat");
+        assert_eq!(frames[45].id, "watch-activity-identity-ensemble");
+        assert_eq!((frames[45].width, frames[45].height), (120, 32));
+        assert_eq!(frames[46].id, "watch-activity-identity-unknown");
+        assert_eq!((frames[46].width, frames[46].height), (120, 32));
     }
 
     #[test]
