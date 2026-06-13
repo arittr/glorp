@@ -163,6 +163,28 @@ fn rename_changes_display_name_without_changing_seed() {
 }
 
 #[test]
+fn help_lists_companion_but_hides_companion_app() {
+    let mut cmd = Command::cargo_bin("glorp").unwrap();
+    cmd.arg("help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("companion"))
+        .stdout(predicate::str::contains("companion-app").not());
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn companion_reports_macos_only_on_other_platforms() {
+    let mut cmd = Command::cargo_bin("glorp").unwrap();
+    cmd.arg("companion")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "glorp companion is only available on macOS",
+        ));
+}
+
+#[test]
 fn init_uses_historical_usage_for_calibration_without_initial_xp() {
     let dir = tempfile::tempdir().unwrap();
     Command::cargo_bin("glorp")

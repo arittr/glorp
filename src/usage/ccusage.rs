@@ -624,11 +624,32 @@ impl HelperDiscovery {
         let node = std::env::var_os("GLORP_NODE_BIN")
             .map(PathBuf::from)
             .or_else(|| find_on_path("node"));
-        Self {
+        let mut discovered = Self {
             claude,
             codex,
             node,
+        };
+        if discovered.claude.is_none() || discovered.codex.is_none() || discovered.node.is_none() {
+            if let Ok(paths) = crate::paths::AppPaths::resolve() {
+                let locator_path = paths
+                    .config_dir
+                    .join(crate::usage::helper_locator::HELPER_LOCATOR_FILE);
+                if let Ok(Some(locator)) =
+                    crate::usage::helper_locator::read_helper_locator(&locator_path)
+                {
+                    if discovered.claude.is_none() {
+                        discovered.claude = locator.ccusage_bin;
+                    }
+                    if discovered.codex.is_none() {
+                        discovered.codex = locator.ccusage_codex_bin;
+                    }
+                    if discovered.node.is_none() {
+                        discovered.node = locator.node_bin;
+                    }
+                }
+            }
         }
+        discovered
     }
 
     pub fn from_sources<'a, E, P>(env: E, path: P) -> Result<Self>

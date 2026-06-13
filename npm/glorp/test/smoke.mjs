@@ -28,6 +28,7 @@ fs.writeFileSync(${JSON.stringify(envLog)}, JSON.stringify({
   codex: process.env.GLORP_CCUSAGE_CODEX_BIN,
   node: process.env.GLORP_NODE_BIN,
   skip: process.env.GLORP_SKIP_BUNDLED_HELPERS_FOR_TEST,
+  companionApp: process.env.GLORP_COMPANION_APP,
   path: process.env.PATH
 }, null, 2));
 if (cmd === "help") {
@@ -136,3 +137,12 @@ const missing = run(["doctor"], {
 });
 assert.equal(missing.status, 0, missing.stderr);
 assert.match(missing.stdout, /not found|No usage helper|blocked/i);
+
+const fakeApp = path.join(tempRoot, "Glorp.app");
+fs.mkdirSync(fakeApp, { recursive: true });
+const companion = run(["companion"], {
+  GLORP_COMPANION_APP_FOR_TEST: fakeApp
+});
+assert.equal(companion.status, 0, companion.stderr);
+const companionEnv = JSON.parse(fs.readFileSync(envLog, "utf8"));
+assert.equal(companionEnv.companionApp, fakeApp);

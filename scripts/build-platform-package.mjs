@@ -102,3 +102,13 @@ fs.mkdirSync(destDir, { recursive: true });
 fs.copyFileSync(source, dest);
 if (!isWindows) fs.chmodSync(dest, 0o755);
 console.log(`copied ${path.relative(repoRoot, source)} to ${path.relative(repoRoot, dest)}`);
+
+if (platform.startsWith("darwin-")) {
+  const appSource = path.join(repoRoot, "target", "macos", "Glorp.app");
+  const appDest = path.join(repoRoot, "npm", "platform", platform, "app", "Glorp.app");
+  if (!fs.existsSync(appSource)) {
+    fail(`missing companion app ${appSource}; run \`node scripts/build-macos-companion-app.mjs\` first`);
+  }
+  fs.rmSync(appDest, { recursive: true, force: true });
+  fs.cpSync(appSource, appDest, { recursive: true });
+}

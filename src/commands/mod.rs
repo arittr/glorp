@@ -1,3 +1,5 @@
+pub mod companion;
+pub mod companion_app;
 #[cfg(feature = "dev-preview")]
 pub mod dev_preview;
 pub mod doctor;

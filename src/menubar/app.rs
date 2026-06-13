@@ -28,6 +28,9 @@ use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
 use crate::storage::state::{PetState, StateStore};
 use crate::tui::view_model::WatchViewModel;
+use crate::watch_live::{
+    spawn_live_watch_worker, stamp_live_presentation, LiveWatchUpdate, WatchPresentationState,
+};
 
 use super::render;
 
@@ -52,7 +55,7 @@ struct AppState {
     status_item: Retained<NSStatusItem>,
     /// Last view model written to the text view. The UI tick mutates a clone
     /// of this to advance pet animation without re-reading from disk; the
-    /// worker thread's PollResult replaces it wholesale.
+    /// worker thread's LiveWatchUpdate replaces it wholesale.
     vm: WatchViewModel,
     animation_frame: u64,
     /// Character length of the pet block region at the start of the text
@@ -62,8 +65,8 @@ struct AppState {
     /// Drained on each UI tick. The worker thread pushes a new LiveWatchUpdate
     /// roughly every `POLL_INTERVAL`; the main thread applies the most
     /// recent one and discards stale ones.
-    poll_rx: mpsc::Receiver<crate::watch_live::LiveWatchUpdate>,
-    presentation_state: crate::watch_live::WatchPresentationState,
+    poll_rx: mpsc::Receiver<LiveWatchUpdate>,
+    presentation_state: WatchPresentationState,
 }
 
 thread_local! {
@@ -120,8 +123,7 @@ pub fn run() -> Result<()> {
 
     let status_item = build_status_item(mtm, &controller, &initial_pet)?;
 
-    let poll_rx =
-        crate::watch_live::spawn_live_watch_worker(paths, POLL_INTERVAL, "glorp-menubar-poll");
+    let poll_rx = spawn_live_watch_worker(paths, POLL_INTERVAL, "glorp-menubar-poll");
 
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -132,7 +134,7 @@ pub fn run() -> Result<()> {
             animation_frame: 0,
             pet_block_char_len,
             poll_rx,
-            presentation_state: crate::watch_live::WatchPresentationState::default(),
+            presentation_state: WatchPresentationState::default(),
         });
     });
 
@@ -306,11 +308,11 @@ fn toggle_popover() {
     }
 }
 
-/// Main-thread UI tick. Drains any pending worker PollResults (applying the
-/// most recent one to the text view + status item title) and then advances
-/// the pet animation frame if the popover is shown. Never blocks on disk or
-/// subprocesses — those run on the worker thread spawned by
-/// `spawn_poll_worker`.
+/// Main-thread UI tick. Drains any pending worker LiveWatchUpdates (applying
+/// the most recent one to the text view + status item title) and then
+/// advances the pet animation frame if the popover is shown. Never blocks on
+/// disk or subprocesses — those run on the worker thread spawned by
+/// `spawn_live_watch_worker`.
 ///
 /// Animation writes are guarded by a `pet_art`/`pet_spans` diff so frames where
 /// the rendered pet is bit-for-bit identical produce zero AppKit work. Most
@@ -322,7 +324,7 @@ fn ui_tick() {
 }
 
 fn drain_poll_results() {
-    let mut latest: Option<crate::watch_live::LiveWatchUpdate> = None;
+    let mut latest: Option<LiveWatchUpdate> = None;
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow().as_ref() {
             while let Ok(result) = state.poll_rx.try_recv() {
@@ -336,7 +338,7 @@ fn drain_poll_results() {
     let mut vm = result.vm;
     let (text_view, status_item) = match APP_STATE.with(|cell| {
         cell.borrow_mut().as_mut().map(|s| {
-            crate::watch_live::stamp_live_presentation(
+            stamp_live_presentation(
                 &mut s.presentation_state,
                 &mut vm,
                 result.applied_signal,

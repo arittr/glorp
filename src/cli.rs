@@ -39,6 +39,10 @@ pub enum Command {
     },
     /// Run as a macOS menu bar app (status item + popover).
     Menubar,
+    /// Open the native macOS round companion app.
+    Companion,
+    #[command(hide = true)]
+    CompanionApp,
     /// Print a compact non-interactive pet and usage summary.
     Status,
     /// Rename the current pet without changing its seed-derived traits.

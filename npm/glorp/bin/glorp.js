@@ -55,12 +55,24 @@ function resolvePackageBin(pkg, binName) {
   }
 }
 
+function resolveCompanionApp(env) {
+  if (process.platform !== "darwin") return undefined;
+  if (env.GLORP_COMPANION_APP_FOR_TEST) return env.GLORP_COMPANION_APP_FOR_TEST;
+  const pkgJson = resolvePackageJson(platformPackageName());
+  if (!pkgJson) return undefined;
+  const app = path.join(path.dirname(pkgJson), "app", "Glorp.app");
+  return fs.existsSync(app) ? app : undefined;
+}
+
 const env = { ...process.env };
 if (env.GLORP_SKIP_BUNDLED_HELPERS_FOR_TEST !== "1") {
   env.GLORP_CCUSAGE_BIN ??= resolvePackageBin("ccusage", "ccusage");
   env.GLORP_CCUSAGE_CODEX_BIN ??= resolvePackageBin("@ccusage/codex", "ccusage-codex");
 }
 env.GLORP_NODE_BIN ??= process.execPath;
+
+const companionApp = resolveCompanionApp(env);
+if (companionApp) env.GLORP_COMPANION_APP ??= companionApp;
 
 let native;
 try {
