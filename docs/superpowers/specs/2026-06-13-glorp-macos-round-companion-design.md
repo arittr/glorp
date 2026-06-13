@@ -7,7 +7,12 @@
   - `docs/superpowers/specs/2026-05-13-watch-component-system-design.md`
   - `docs/superpowers/specs/2026-06-11-glorp-alive-room-design.md`
   - `docs/superpowers/specs/2026-06-11-glorp-activity-identity-design.md`
-  - `docs/superpowers/specs/2026-06-13-glorp-species-room-dialects-design.md`
+  - species room dialect direction, currently tracked in the active working tree
+    as `docs/superpowers/specs/2026-06-13-glorp-species-room-dialects-design.md`.
+    If that spec is not committed before this companion work begins, the
+    companion implementation must inline the minimal dialect contract it needs:
+    Glitch and Crystal round scenes must differ by non-color glyph/texture
+    language while preserving earned prop identity.
 
 ## Problem
 
@@ -40,7 +45,6 @@ The developer surfaces are:
 
 ```text
 glorp dev-preview --scenario round   # deterministic review artifacts
-glorp watch --view round             # optional hidden/debug harness only
 ```
 
 The round view is a porthole into the pet's room. It is not a shrunken watch
@@ -74,8 +78,10 @@ screen.
 - No rewrite of the watch TUI.
 - No new persisted pet-state schema unless implementation proves a tiny
   window-placement preference is necessary.
-- No publishing or packaging redesign in this spec. App bundling details can be
-  planned after the product and renderer boundaries are approved.
+- No full release-system redesign in this spec. V1 still needs an explicit
+  macOS launch/distribution contract before implementation planning; that
+  contract should be small and should not attempt to solve future hardware or
+  cross-platform app packaging.
 
 ## Product Model
 
@@ -92,16 +98,40 @@ The full watch remains the place for accounting and debugging:
 - bio details
 - keyboard controls
 
-The round companion keeps only ambient signals:
+The round companion keeps only ambient signals. After visual brainstorming, the
+approved V1 direction is **Active Halo constrained by Quiet Porthole
+restraint**:
+
+- Quiet Porthole is the emotional baseline: pet and room first, almost no UI.
+- Active Halo is the V1 default: the same porthole plus one real activity pulse
+  and a few tiny rim beads.
+- Night Calm is a state variant for asleep/night/calm mode, not the default.
+
+V1 required signals:
 
 - pet pose, blink, breath, asleep/awake state
 - room biome and earned-prop identity
 - day phase and calm/weather texture
-- species dialect, especially Glitch vs Crystal distinctiveness
 - recent activity pulse
-- source diversity as small color/shape accents
-- vitals or trouble state as tiny rim indicators
 - one clear degraded/helper-blocked signal
+
+V1 optional if cheap:
+
+- species dialect, especially Glitch vs Crystal distinctiveness
+- vitals as tiny lower rim beads
+- source diversity as abstract color/shape accents
+
+Post-V1:
+
+- richer source-diversity clusters
+- multiple simultaneous prop landmarks
+- detailed stage/progress aura variants
+
+Because this runs on an external display, source/activity signals default to
+abstract presentation. The companion may show that activity happened, but it
+must not reveal exact source names, exact counts, project context, or work
+cadence in a way that reads like surveillance. A future quiet/private display
+toggle can further suppress activity/source beads.
 
 ## Visual Design
 
@@ -170,6 +200,7 @@ pub struct RoundSceneModel {
     pub room: RoundRoomModel,
     pub halo: RoundHaloModel,
     pub lifecycle: RoundLifecycleModel,
+    pub moments: Vec<RoundSceneMoment>,
 }
 ```
 
@@ -178,6 +209,7 @@ Exact names can change, but the ownership should not:
 ```text
 WatchViewModel
   -> derive_round_scene_model(vm, now)
+  -> layout_round_scene(scene, aperture, capabilities)
   -> renderer-specific output
 ```
 
@@ -192,15 +224,73 @@ Future renderer targets:
 - hardware framebuffer
 - direct device protocol output
 
-The scene model must not contain AppKit types, terminal cell coordinates, or
-hardware-specific fields. It contains semantic choices: pet state, room biome,
-prop landmark choices, halo signal states, and animation seeds.
+The scene model must not contain AppKit types, terminal cell coordinates,
+terminal-rendered `pet_art`, or hardware-specific fields. It contains
+allowlisted semantic choices only:
+
+- pet seed/species/stage/mood and expression hints
+- coarse vitals buckets, not exact percentages
+- day phase, asleep/calm state, and work-weather category
+- room biome, species dialect key, and selected prop landmark IDs
+- source-diversity category, not source names in the companion surface
+- helper health category, not diagnostic text
+- abstract activity pulse state, not token counts or event rows
+- renderer-neutral scene moments
+
+It must not contain:
+
+- `recent_events`
+- `errors`
+- `helper_status`
+- exact token totals, rates, or costs
+- source display names for the visible companion
+- prompts, responses, command text, file paths, project names, or transcripts
+
+Renderer/capability geometry belongs in a separate layout layer:
+
+```rust
+pub struct RoundSceneLayout {
+    pub aperture: RoundAperture,
+    pub safe_inner_radius: f32,
+    pub pet_anchor: RoundAnchor,
+    pub prop_anchors: Vec<RoundAnchor>,
+    pub halo_anchors: Vec<RoundAnchor>,
+    pub motion_budget: RoundMotionBudget,
+}
+```
+
+Exact names can change. The split should not. Preview, AppKit, and future
+hardware renderers should derive layout from the same aperture size, safe
+radius, color capability, and motion budget so the "pet never clips" rule is
+not reimplemented differently in each renderer.
+
+Scene moments are also renderer-neutral:
+
+```rust
+pub struct RoundSceneMoment {
+    pub kind: RoundSceneMomentKind,
+    pub trigger_id: String,
+    pub anchor: RoundMomentAnchor,
+    pub duration_ms: u16,
+    pub replay_policy: RoundReplayPolicy,
+}
+```
+
+Renderers map anchors to native views, preview masks, or future framebuffer
+regions. The round model must not expose terminal target IDs such as
+`watch.pet.effect`.
+
+The pure round model and layout derivation must live outside the `dev-preview`
+feature. Only preview export and preview CLI plumbing are feature-gated. Release
+builds and the native companion must consume the same pure modules.
 
 ### Native macOS App
 
 The user-facing companion should behave like a normal macOS app:
 
 - It has Dock/app lifecycle rather than occupying a terminal session.
+- It is a regular app, not `LSUIElement`, and must not use the current
+  menubar-only accessory activation policy as-is.
 - The window can be placed on an external display.
 - The terminal command, if present, launches or opens the app and exits.
 - The app continues polling and animating after launch.
@@ -211,11 +301,72 @@ The user-facing companion should behave like a normal macOS app:
 - The V1 renderer should be native AppKit/Core Animation/Core Graphics code
   behind an `NSView`-style surface. A WebView/canvas renderer is a possible
   future target, not the first macOS facade.
+- AppKit/window/view ownership stays on the main thread. Background poll work
+  sends owned, sendable scene snapshots or stamped view models back to the main
+  thread; it never touches AppKit objects.
 
 The existing `glorp menubar` code is useful precedent because it already uses
 the same watch polling and view model inside AppKit. It should not define the
 product UX. Menubar remains a debug/internal-ish facade until separately
 designed.
+
+### V1 Launch And Distribution Contract
+
+Implementation planning must make "launched like a normal app" real before
+building renderer polish.
+
+V1 contract:
+
+- Artifact: a macOS `.app` bundle named `Glorp.app`.
+- Bundle identity: a new companion/default app identity, not the existing
+  menubar-only `dev.glorp.menubar` identity.
+- Activation: regular Dock-visible app; no `LSUIElement=true`.
+- Version: derived from the same release version surfaces as the Rust/npm
+  package.
+- Launcher: a CLI helper may exist, but it opens the installed app bundle via
+  LaunchServices/`open` and exits. It does not run a long-lived AppKit facade
+  inline through the npm `spawnSync` wrapper.
+- Repeated launch: focusing/reopening an already-running app restores the
+  companion window.
+- Unsupported platforms: the companion launcher reports a concise macOS-only
+  message and exits without affecting normal CLI commands.
+- Release ownership: decide during implementation planning whether the bundle
+  ships inside the macOS npm platform package or as a separate macOS artifact.
+  Do not start implementation with this unresolved.
+
+Helper discovery is part of this contract. A Dock/Finder-launched app does not
+inherit npm wrapper environment variables such as helper binary paths. V1 must
+choose one of these before implementation:
+
+- bundle helper binaries/resources inside `Glorp.app` and resolve them relative
+  to the bundle;
+- write a shared helper-locator config during npm install or first CLI launch
+  that the app can read without environment inheritance;
+- or make the app launch mediated by an installed helper that still exits
+  immediately after registering the required app environment.
+
+The selected path must include a smoke check for a no-env Dock/Finder launch.
+
+### V1 Window Contract
+
+The companion window is part of the product, not an AppKit afterthought.
+
+V1 window behavior:
+
+- default shape is visually round/porthole-like;
+- no dashboard labels inside the product surface;
+- default size is large enough for the current pet silhouette plus room
+  crescent; implementation planning should pick exact pixels after previewing
+  the smallest legible aperture;
+- minimum size preserves pet legibility before preserving optional halo detail;
+- default window level is normal or floating-above-normal only if Drew approves
+  that behavior during implementation planning;
+- closing the window keeps the app alive in the Dock;
+- Dock reopen restores or recreates the companion window;
+- placement should persist using macOS user defaults unless implementation
+  finds a strong reason to prefer Glorp config;
+- if the prior display is missing, restore on the main display without losing
+  the saved placement.
 
 ### Command Surface
 
@@ -225,25 +376,27 @@ Preferred product surface:
 Glorp.app
 ```
 
-Possible CLI launcher:
+V1 CLI launcher:
 
 ```bash
 glorp companion
 ```
 
-The launcher starts or opens the native app and exits. It does not run the
-facade inline.
+On macOS, the launcher starts or opens the installed native app and exits. On
+other platforms it reports that the native companion is macOS-only. If an
+installed app bundle cannot be found in development, the command may suggest
+the local app-build command once that command exists; it should not silently
+fall back to an inline terminal facade.
 
 Debug/developer surfaces:
 
 ```bash
 glorp dev-preview --scenario round
-glorp watch --view round
 ```
 
-`glorp watch --view round` is optional and should be hidden or clearly
-developer-only. It exists only if it materially helps debug the scene model or
-renderer.
+Do not add `glorp watch --view round` to V1. If a later implementation needs a
+terminal harness, it must be hidden/developer-only and omitted from README/npm
+docs.
 
 ## Data Flow
 
@@ -253,22 +406,41 @@ The companion uses the same source of truth as watch:
 state.json + usage.sqlite
   -> build_watch_view_model
   -> live usage poll/apply loop
-  -> WatchViewModel
+  -> LifeSignalState / presentation stamping
+  -> stamped WatchViewModel
   -> RoundSceneModel
+  -> RoundSceneLayout
   -> macOS renderer
 ```
 
 No new ingestion path is introduced. No source identity or cursor logic moves
 into the companion.
 
+The companion must reuse or extract the existing watch presentation stamping
+loop: poll result, applied usage signal, `LifeSignalState`, feed-pulse time,
+source accent/work weather, and calm-mode state are applied before deriving
+`RoundSceneModel`. Calling `build_watch_view_model` alone is not sufficient for
+live companion state.
+
 The native renderer may own transient animation state, but semantic scene
-selection remains derived from the view model.
+selection remains derived from the stamped view model and round scene model.
+
+Polling contract:
+
+- one in-flight poll per companion process;
+- helper subprocess and SQLite work always run off the AppKit main thread;
+- the main thread receives owned results or errors and updates native views;
+- if another Glorp process polls at the same time, rely on the existing ledger
+  idempotency and surface only the same degraded/source-health states watch
+  would surface;
+- do not create a companion-specific ingestion path or cursor identity.
 
 ## Error Handling
 
 If no pet exists, the launcher/native app should present a simple native
-message directing the user to initialize Glorp. The exact UI can be planned
-later; it must not panic or silently open an empty window.
+message directing the user to initialize Glorp from the CLI in V1. Native
+onboarding/init is post-V1 unless separately approved. The empty state must not
+panic or silently open an empty window.
 
 If usage helpers are blocked or degraded, the companion shows one small trouble
 bead/rim signal. Details remain in `glorp watch`, `glorp status`, or
@@ -290,6 +462,9 @@ If the display or window is too small, degrade in this order:
 
 Add a round scenario before implementing or trusting the live native facade.
 
+Preview Lab round work is part of the first implementation slice. It is not a
+post-AppKit cleanup task.
+
 Useful fixtures:
 
 - `round-normal`
@@ -300,14 +475,23 @@ Useful fixtures:
 - `round-glitch-dialect`
 - `round-crystal-dialect`
 
-Artifacts should include manifest entries with:
+The manifest should use a schema bump with first-class round metadata rather
+than burying everything in ad hoc `inputs` keys:
 
 - dimensions
+- scenario kind, such as `round`
+- target renderer, such as `preview-cells` or `native-reference`
 - scene model inputs
-- target renderer
 - color capability
-- privacy notes
+- privacy contract, especially which exact-count/text fields are excluded
+- aperture/mask metadata, including safe radius and transparent/outside-mask
+  regions
 - review prompts
+
+Cell artifacts alone are not enough for a round companion. Preview output must
+include either an explicit aperture-mask artifact or mask metadata in the cell
+artifact so tests can distinguish true outside-aperture transparency from blank
+opaque cells.
 
 Acceptance checks:
 
@@ -329,33 +513,39 @@ Preview tests should cover fixture presence, manifest metadata, and basic
 geometry/mask invariants.
 
 Native app tests can stay lighter in V1 because AppKit UI testing is expensive.
-The implementation plan should still include a local smoke path for launching
-the companion on macOS and confirming it can build a scene from real local
-state.
+The implementation plan should still include a local macOS smoke path covering:
+
+- app bundle launch;
+- CLI launcher exits after opening/focusing the app;
+- no-env Dock/Finder launch can find helpers or reports a clear helper state;
+- closing the companion window keeps the app running;
+- Dock reopen restores/recreates the companion window;
+- no-pet native empty state appears;
+- companion can build a scene from real local state.
 
 ## Open Implementation Questions
 
 These do not block the design direction, but they should be resolved during
 implementation planning:
 
-- Whether the app bundle is produced by the npm package, a macOS-only helper,
-  or a separate release artifact.
-- Whether `glorp companion` can open an installed app bundle or should run a
-  native facade in-process during development only.
-- Whether window placement/size should persist in user defaults or Glorp config.
 - Whether V1 needs any menu-bar affordance in addition to the required Dock
   lifecycle.
+- Whether the release artifact is carried by the macOS npm platform package or
+  a separate macOS artifact.
+- Which helper-discovery option the Dock-launched app uses.
+- Exact default/minimum window dimensions and window level.
 
 ## Recommendation
 
 Spec and build V1 as native macOS companion first:
 
 1. Define `RoundSceneModel`.
-2. Add Preview Lab round scenarios and acceptance checks.
-3. Add a native macOS companion facade that launches like an app and uses the
+2. Define `RoundSceneLayout` and renderer-neutral scene moments.
+3. Add Preview Lab round scenarios, schema/mask metadata, and acceptance checks.
+4. Add a native macOS companion facade that launches like an app and uses the
    same state/polling model as watch.
-4. Keep terminal round output hidden/debug-only, or skip it unless it helps
-   inspect the scene model.
+5. Keep terminal round output out of V1 unless a hidden harness later proves
+   necessary.
 
 This keeps the product honest: the round feature is a polished companion
 window, not a terminal trick. It also keeps future hardware plausible by
