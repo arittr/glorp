@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
-use crate::error::Result;
+pub mod app;
+pub mod render;
 
-pub fn run() -> Result<()> {
-    Ok(())
+pub fn run() -> crate::error::Result<()> {
+    app::run()
 }
