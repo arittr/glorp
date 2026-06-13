@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const PRODUCER: &str = "glorp-dev-preview";
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -33,7 +33,33 @@ pub struct PreviewScenario {
     pub dimensions: PreviewDimensions,
     pub files: PreviewScenarioFiles,
     pub inputs: BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<PreviewRoundMetadata>,
     pub review_prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewRoundMetadata {
+    pub target_renderer: &'static str,
+    pub aperture: PreviewRoundAperture,
+    pub privacy: PreviewRoundPrivacy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewRoundAperture {
+    pub shape: &'static str,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub radius: f32,
+    pub safe_inner_radius: f32,
+    pub transparent_outside_aperture: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewRoundPrivacy {
+    pub source_names_visible: bool,
+    pub exact_counts_visible: bool,
+    pub diagnostic_text_visible: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -42,6 +68,7 @@ pub enum PreviewScenarioKind {
     Watch,
     PetMatrix,
     HabitatProps,
+    Round,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -295,6 +322,7 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
         PreviewScenarioKind::Watch => "watch",
         PreviewScenarioKind::PetMatrix => "pet-matrix",
         PreviewScenarioKind::HabitatProps => "habitat-props",
+        PreviewScenarioKind::Round => "round",
     }
 }
 
@@ -485,6 +513,7 @@ mod tests {
                     fg: Some("#ffeeaa".to_string()),
                     bg: None,
                     modifiers: vec!["bold"],
+                    outside_aperture: false,
                 },
                 PreviewCell {
                     x: 1,
@@ -495,6 +524,7 @@ mod tests {
                     fg: None,
                     bg: Some("#000000".to_string()),
                     modifiers: vec![],
+                    outside_aperture: false,
                 },
                 PreviewCell {
                     x: 0,
@@ -505,6 +535,7 @@ mod tests {
                     fg: None,
                     bg: None,
                     modifiers: vec![],
+                    outside_aperture: false,
                 },
                 PreviewCell {
                     x: 1,
@@ -515,6 +546,7 @@ mod tests {
                     fg: None,
                     bg: None,
                     modifiers: vec![],
+                    outside_aperture: false,
                 },
             ],
             layout: None,
@@ -538,6 +570,7 @@ mod tests {
                     fg: None,
                     bg: None,
                     modifiers: vec![],
+                    outside_aperture: false,
                 },
                 PreviewCell {
                     x: 1,
@@ -548,6 +581,7 @@ mod tests {
                     fg: None,
                     bg: None,
                     modifiers: vec![],
+                    outside_aperture: false,
                 },
                 PreviewCell {
                     x: 2,
@@ -558,6 +592,7 @@ mod tests {
                     fg: None,
                     bg: None,
                     modifiers: vec![],
+                    outside_aperture: false,
                 },
             ],
             layout: None,
@@ -591,6 +626,7 @@ mod tests {
                     "fixed_now".to_string(),
                     Value::String("2026-05-12T00:00:00Z".to_string()),
                 )]),
+                round: None,
                 review_prompts: vec!["Check sample geometry.".to_string()],
             }],
             strips: vec![],
@@ -800,7 +836,7 @@ mod tests {
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
         assert_eq!(json["producer"], "glorp-dev-preview");
         assert_eq!(json["scenarios"][0]["kind"], "watch");
         assert_eq!(json["scenarios"][0]["dimensions"]["width"], 2);

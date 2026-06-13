@@ -71,6 +71,7 @@ pub enum PreviewScenarioArg {
     Pets,
     Props,
     Animation,
+    Round,
 }
 
 #[cfg(feature = "dev-preview")]

@@ -1,6 +1,6 @@
 use crate::round::model::{RoundHelperHealth, RoundSceneModel, RoundSourceDiversity};
 
-const SAFE_INNER_RADIUS_RATIO: f32 = 0.78;
+pub const SAFE_INNER_RADIUS_RATIO: f32 = 0.78;
 const SAFE_INNER_RADIUS_MIN: f32 = 5.0;
 const PET_RADIUS_RATIO: f32 = 0.58;
 const PET_RADIUS_MIN: f32 = 7.0;
@@ -95,6 +95,13 @@ impl RoundRenderCapabilities {
     pub fn preview_truecolor() -> Self {
         Self {
             truecolor: true,
+            transparent_outside_aperture: true,
+        }
+    }
+
+    pub fn preview_flat() -> Self {
+        Self {
+            truecolor: false,
             transparent_outside_aperture: true,
         }
     }

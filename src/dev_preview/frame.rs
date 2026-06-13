@@ -31,6 +31,12 @@ pub struct PreviewCell {
     pub fg: Option<String>,
     pub bg: Option<String>,
     pub modifiers: Vec<&'static str>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub outside_aperture: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn frame_from_buffer(
@@ -55,6 +61,7 @@ pub fn frame_from_buffer(
                 fg: color_to_css(cell.style().fg),
                 bg: color_to_css(cell.style().bg),
                 modifiers: modifier_names(cell.style().add_modifier),
+                outside_aperture: false,
             });
         }
     }
@@ -87,7 +94,7 @@ pub fn escape_html(input: &str) -> String {
     escaped
 }
 
-fn mark_continuations(cells: &mut [PreviewCell], width: u16) {
+pub fn mark_continuations(cells: &mut [PreviewCell], width: u16) {
     for index in 0..cells.len() {
         let display_width = cells[index].display_width;
         if display_width <= 1 {

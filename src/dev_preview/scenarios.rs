@@ -30,6 +30,7 @@ pub enum PreviewSelection {
     Pets,
     Props,
     Animation,
+    Round,
 }
 
 pub struct PreviewRenderContext {
@@ -67,6 +68,7 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
             frames.extend(watch_frames(&ctx, &scratch_dir)?);
             frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?);
             frames.extend(pet_frames(&ctx)?);
+            frames.extend(crate::dev_preview::round::round_frames(&ctx));
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips());
         }
@@ -77,6 +79,7 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips());
         }
+        PreviewSelection::Round => frames.extend(crate::dev_preview::round::round_frames(&ctx)),
     }
 
     let masked_room_masks = masked_room_masks_for_species_dialect_pairs(&frames);
@@ -362,6 +365,25 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     .to_string(),
             ],
         ),
+        id if id.starts_with("round-") => (
+            PreviewScenarioKind::Round,
+            "Review round macOS companion preview with aperture masking and privacy metadata.",
+            BTreeMap::from([
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+                ("fixture".to_string(), Value::String("seeded-pet-state-and-usage-sqlite".to_string())),
+                ("privacy_source_names_visible".to_string(), Value::Bool(false)),
+                ("privacy_exact_counts_visible".to_string(), Value::Bool(false)),
+                ("privacy_diagnostic_text_visible".to_string(), Value::Bool(false)),
+            ]),
+            vec![
+                "Confirm the circular aperture masks the frame corners.".to_string(),
+                "Check that dashboard labels and source diagnostics are not visible.".to_string(),
+                "Verify privacy metadata records all visibility flags as false.".to_string(),
+            ],
+        ),
         _ => (
             PreviewScenarioKind::Watch,
             "Review this generated preview frame.",
@@ -401,6 +423,28 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
             }),
         },
         inputs,
+        round: if frame.id.starts_with("round-") {
+            let aperture = crate::round::layout::RoundAperture::new(frame.width, frame.height);
+            Some(crate::dev_preview::export::PreviewRoundMetadata {
+                target_renderer: "preview-cells",
+                aperture: crate::dev_preview::export::PreviewRoundAperture {
+                    shape: "circle",
+                    center_x: aperture.center_x,
+                    center_y: aperture.center_y,
+                    radius: aperture.radius,
+                    safe_inner_radius: aperture.radius
+                        * crate::round::layout::SAFE_INNER_RADIUS_RATIO,
+                    transparent_outside_aperture: true,
+                },
+                privacy: crate::dev_preview::export::PreviewRoundPrivacy {
+                    source_names_visible: false,
+                    exact_counts_visible: false,
+                    diagnostic_text_visible: false,
+                },
+            })
+        } else {
+            None
+        },
         review_prompts,
     }
 }
@@ -1654,7 +1698,14 @@ mod tests {
                 "watch-habitat-lived-in",
                 "watch-habitat-full-phase-a",
                 "watch-habitat-full-phase-b",
-                "pet-species-stage"
+                "pet-species-stage",
+                "round-normal",
+                "round-active-pulse",
+                "round-asleep-night",
+                "round-helper-trouble",
+                "round-flat-color",
+                "round-glitch-dialect",
+                "round-crystal-dialect"
             ]
         );
     }

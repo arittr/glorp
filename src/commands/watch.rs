@@ -9,7 +9,7 @@ use crate::{
     paths::AppPaths,
     pet::{
         art::stage_label,
-        generation::generate_pet,
+        generation::{generate_pet, Species},
         render::{render_pet, work_accent_for_profile, AnimationFrame},
     },
     storage::{
@@ -35,19 +35,16 @@ use std::path::Path;
 use time::{Duration, OffsetDateTime};
 
 #[cfg(feature = "dev-preview")]
-pub fn run(dev_pet: Option<crate::pet::generation::Species>) -> Result<()> {
-    if let Some(species) = dev_pet {
-        return run_dev_pet(species);
-    }
-    run_against_real_state()
+pub fn run(dev_pet: Option<Species>) -> Result<()> {
+    run_against_real_state(dev_pet)
 }
 
 #[cfg(not(feature = "dev-preview"))]
 pub fn run() -> Result<()> {
-    run_against_real_state()
+    run_against_real_state(None)
 }
 
-fn run_against_real_state() -> Result<()> {
+fn run_against_real_state(dev_pet: Option<Species>) -> Result<()> {
     let paths = AppPaths::resolve()?;
     let state_store = StateStore::new(paths.state_file.clone());
     let Some(state) = state_store.load()? else {
@@ -56,7 +53,11 @@ fn run_against_real_state() -> Result<()> {
         ));
     };
 
-    let vm = build_watch_view_model(&state, &paths.usage_db)?;
+    let now = OffsetDateTime::now_utc();
+    let mut vm = build_watch_view_model_at(&state, &paths.usage_db, now, LocalDayMapper::System)?;
+    if let Some(species) = dev_pet {
+        apply_dev_pet_species_override(&mut vm, species, now)?;
+    }
     WatchApp::with_poll_callback(
         vm,
         Default::default(),
@@ -64,43 +65,38 @@ fn run_against_real_state() -> Result<()> {
             state_file: paths.state_file,
             usage_db: paths.usage_db,
             config_file: paths.config_file,
+            dev_pet,
         }),
     )
     .run()
 }
 
-/// Dev-only entry for visual iteration. It renders a synthetic pet in the live
-/// watch UI, backed by a temp usage DB and no poller, so user state is untouched.
 #[cfg(feature = "dev-preview")]
-fn run_dev_pet(species: crate::pet::generation::Species) -> Result<()> {
-    let scratch = tempfile::tempdir().map_err(|err| GlorpError::Message(err.to_string()))?;
-    let usage_db = scratch.path().join("usage.sqlite");
-    UsageStore::open(&usage_db)?;
-    let vm = build_dev_pet_view_model(species, &usage_db)?;
-    let result = WatchApp::with_config(vm, Default::default()).run();
-    drop(scratch);
-    result
+pub fn build_dev_pet_view_model(
+    state: &PetState,
+    usage_db: &Path,
+    species: Species,
+) -> Result<WatchViewModel> {
+    build_dev_pet_view_model_at(
+        state,
+        usage_db,
+        OffsetDateTime::now_utc(),
+        LocalDayMapper::System,
+        species,
+    )
 }
 
 #[cfg(feature = "dev-preview")]
-pub fn build_dev_pet_view_model(
-    species: crate::pet::generation::Species,
+pub fn build_dev_pet_view_model_at(
+    state: &PetState,
     usage_db: &Path,
+    now: OffsetDateTime,
+    mapper: LocalDayMapper,
+    species: Species,
 ) -> Result<WatchViewModel> {
-    let mut state = PetState::new_for_test("glorp-dev-pet", "miso");
-    state.pet.generated_species = species;
-    state.stage = Stage::S4;
-    state.xp = 8.5;
-    state.lifetime_effective_tokens = 125_000.0;
-    state.vitals = crate::storage::state::Vitals {
-        fed: 70.0,
-        happiness: 72.0,
-        energy: 68.0,
-    };
-    let now = OffsetDateTime::now_utc();
-    state.created_at = now - Duration::days(18);
-    state.last_updated_at = now;
-    build_watch_view_model(&state, usage_db)
+    let mut vm = build_watch_view_model_at(state, usage_db, now, mapper)?;
+    apply_dev_pet_species_override(&mut vm, species, now)?;
+    Ok(vm)
 }
 
 pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<WatchViewModel> {
@@ -399,6 +395,7 @@ struct RealWatchPoller {
     state_file: std::path::PathBuf,
     usage_db: std::path::PathBuf,
     config_file: std::path::PathBuf,
+    dev_pet: Option<Species>,
 }
 
 impl WatchUsagePoller for RealWatchPoller {
@@ -433,8 +430,14 @@ impl WatchUsagePoller for RealWatchPoller {
                 });
             }
         };
+        let now = OffsetDateTime::now_utc();
+        let mut vm =
+            build_watch_view_model_at(&outcome.state, &self.usage_db, now, LocalDayMapper::System)?;
+        if let Some(species) = self.dev_pet {
+            apply_dev_pet_species_override(&mut vm, species, now)?;
+        }
         Ok(WatchPollResult {
-            vm: build_watch_view_model(&outcome.state, &self.usage_db)?,
+            vm,
             applied_signal: outcome.applied_signal,
         })
     }
@@ -538,6 +541,34 @@ pub fn rerender_pet_for_view_model(
     vm.pet_art = rendered.lines;
     vm.pet_spans = rendered.spans;
     Ok(())
+}
+
+fn apply_dev_pet_species_override(
+    vm: &mut WatchViewModel,
+    species: Species,
+    now: OffsetDateTime,
+) -> Result<()> {
+    vm.pet_render.generated_species = species;
+    vm.species = species.as_str().to_string();
+    vm.stage = stage_label(species, vm.pet_render.stage).to_string();
+    vm.progress.stage_label = stage_label(species, vm.pet_render.stage).to_string();
+    vm.progress.next_stage_label = if vm.progress.is_max_stage {
+        "—".to_string()
+    } else {
+        let next = Stage::from_index((vm.pet_render.stage.index() + 1).min(Stage::S6.index()))
+            .unwrap_or(Stage::S6);
+        stage_label(species, next).to_string()
+    };
+    vm.breath_offset_y = crate::pet::animator::compute_breath_offset_with_rhythm(
+        Some(species),
+        now,
+        crate::pet::animator::breath_rhythm_for_day(&vm.day_context),
+    );
+    rerender_pet_for_view_model(
+        vm,
+        now.unix_timestamp().max(0) as u64,
+        vm.day_context.asleep,
+    )
 }
 
 fn next_stage_xp_target(stage: Stage) -> f64 {
@@ -884,15 +915,57 @@ mod tests {
 
     #[cfg(feature = "dev-preview")]
     #[test]
-    fn build_dev_pet_view_model_uses_requested_species() {
-        for species in Species::all() {
-            let dir = tempdir().unwrap();
-            let db_path = dir.path().join("usage.sqlite");
-            UsageStore::open(&db_path).unwrap();
-            let vm = build_dev_pet_view_model(species, &db_path).unwrap();
+    fn build_dev_pet_view_model_preserves_real_watch_context() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        let mut usage_store = UsageStore::open(&db_path).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        usage_store
+            .insert_event(&NormalizedUsageEvent {
+                provider_surface: "codex".into(),
+                observed_at: now,
+                bucket_at: now,
+                effective_tokens: 4_200.0,
+                ..NormalizedUsageEvent::for_test_at(now, 4_200.0)
+            })
+            .unwrap();
 
-            assert_eq!(vm.pet_render.generated_species, species);
-        }
+        let mut state = PetState::new_for_test("real-seed", "buddy");
+        state.pet.generated_species = Species::Mech;
+        state.stage = Stage::S4;
+        state.vitals.fed = 88.0;
+        state.vitals.happiness = 82.0;
+        state.vitals.energy = 61.0;
+        state.habitat.earned_props = vec![crate::storage::state::EarnedHabitatProp {
+            id: crate::storage::state::HabitatPropId::new(crate::game::habitat::CODEX_SIGNAL_LAMP),
+            earned_at: now,
+            source: crate::storage::state::HabitatPropSource::ProviderFirstUse {
+                provider_surface: "codex".into(),
+            },
+        }];
+
+        let vm = build_dev_pet_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+            Species::Ghost,
+        )
+        .unwrap();
+
+        assert_eq!(state.pet.generated_species, Species::Mech);
+        assert_eq!(vm.pet_render.generated_species, Species::Ghost);
+        assert_eq!(vm.species, Species::Ghost.as_str());
+        assert_eq!(vm.stage, stage_label(Species::Ghost, Stage::S4));
+        assert_eq!(vm.today_effective_tokens, 4_200.0);
+        assert_eq!(vm.source_breakdown.len(), 1);
+        assert_eq!(vm.source_breakdown[0].name, "codex");
+        assert_eq!(vm.source_breakdown[0].effective_tokens, 4_200.0);
+        assert_eq!(vm.habitat.earned_props.len(), 1);
+        assert_eq!(vm.habitat.earned_props[0].id.as_str(), "codex_signal_lamp");
+        assert_eq!(vm.fed, 0.88);
+        assert_eq!(vm.happiness, 0.82);
+        assert_eq!(vm.energy, 0.61);
     }
 
     #[test]

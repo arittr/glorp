@@ -271,7 +271,7 @@ fn dev_preview_watch_writes_expected_artifacts() {
     }
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 2);
+    assert_eq!(manifest["schema_version"], 3);
     assert_eq!(manifest["producer"], "glorp-dev-preview");
     assert!(!manifest["glorp_version"].as_str().unwrap().is_empty());
     assert!(manifest["generated_at"].as_str().unwrap().ends_with('Z'));
@@ -648,7 +648,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         .is_file());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 2);
+    assert_eq!(manifest["schema_version"], 3);
     let wide = scenario(&manifest, "watch-wide-normal");
     assert_eq!(
         wide["files"]["layout"],
@@ -973,6 +973,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-habitat-full-phase-a.txt",
         "frames/watch-habitat-full-phase-b.txt",
         "frames/pet-species-stage.txt",
+        "frames/round-normal.txt",
+        "frames/round-normal.cells.json",
+        "frames/round-active-pulse.txt",
+        "frames/round-asleep-night.txt",
+        "frames/round-helper-trouble.txt",
+        "frames/round-flat-color.txt",
+        "frames/round-glitch-dialect.txt",
+        "frames/round-crystal-dialect.txt",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1035,6 +1043,13 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-habitat-full-phase-a".to_string(),
             "watch-habitat-full-phase-b".to_string(),
             "pet-species-stage".to_string(),
+            "round-normal".to_string(),
+            "round-active-pulse".to_string(),
+            "round-asleep-night".to_string(),
+            "round-helper-trouble".to_string(),
+            "round-flat-color".to_string(),
+            "round-glitch-dialect".to_string(),
+            "round-crystal-dialect".to_string(),
         ]
     );
 }
@@ -1270,7 +1285,7 @@ fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
     assert!(!run.out.join("frames/watch-wide-normal.txt").exists());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 2);
+    assert_eq!(manifest["schema_version"], 3);
     assert!(
         manifest["scenarios"].as_array().unwrap().is_empty(),
         "animation-only bundles should not write static scenarios"
@@ -1394,6 +1409,113 @@ fn dev_preview_watch_daycontext_heavy_day_evening_frame_snapshot() {
     .unwrap();
 
     insta::assert_snapshot!("watch_daycontext_heavy_day_evening_frame", frame);
+}
+
+const ROUND_IDS: [&str; 7] = [
+    "round-normal",
+    "round-active-pulse",
+    "round-asleep-night",
+    "round-helper-trouble",
+    "round-flat-color",
+    "round-glitch-dialect",
+    "round-crystal-dialect",
+];
+
+#[test]
+fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let manifest = run.manifest();
+    assert_eq!(manifest["schema_version"], 3);
+    for id in ROUND_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id}.txt"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.cells.json")).is_file(),
+            "missing {id}.cells.json"
+        );
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["kind"], "round");
+        assert_eq!(scenario["round"]["target_renderer"], "preview-cells");
+        assert_eq!(scenario["round"]["aperture"]["shape"], "circle");
+        assert!(
+            scenario["round"]["aperture"]["safe_inner_radius"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+        assert_eq!(scenario["round"]["privacy"]["source_names_visible"], false);
+        assert_eq!(scenario["round"]["privacy"]["exact_counts_visible"], false);
+        assert_eq!(
+            scenario["round"]["privacy"]["diagnostic_text_visible"],
+            false
+        );
+    }
+}
+
+#[test]
+fn dev_preview_round_output_has_no_dashboard_labels_or_private_source_text() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    for id in ROUND_IDS {
+        let text = std::fs::read_to_string(run.out.join(format!("frames/{id}.txt"))).unwrap();
+        for forbidden in ["today", "rate", "helper", "tokens", "claude", "codex", "xp"] {
+            assert!(
+                !text.to_ascii_lowercase().contains(forbidden),
+                "{id} leaked dashboard text {forbidden}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dev_preview_round_aperture_corners_are_masked() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let cells = read_cells(&run, "round-normal");
+    let top_left = cells["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|cell| cell["x"] == 0 && cell["y"] == 0)
+        .unwrap();
+    assert_eq!(top_left["symbol"], " ");
+    assert_eq!(top_left["outside_aperture"], true);
+
+    let center = cells["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|cell| cell["x"] == 26 && cell["y"] == 26)
+        .unwrap();
+    assert!(
+        !center["outside_aperture"].as_bool().unwrap_or(false),
+        "center cell should be inside the aperture"
+    );
+}
+
+#[test]
+fn dev_preview_round_glitch_and_crystal_differ_by_symbols() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let glitch = read_cells(&run, "round-glitch-dialect");
+    let crystal = read_cells(&run, "round-crystal-dialect");
+    let glitch_cells = glitch["cells"].as_array().unwrap();
+    let crystal_cells = crystal["cells"].as_array().unwrap();
+    assert!(
+        changed_cells_by_symbol(glitch_cells, crystal_cells) >= 6,
+        "Glitch and Crystal round previews should differ by symbols"
+    );
 }
 
 fn assert_scenario(
