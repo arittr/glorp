@@ -80,12 +80,14 @@ fn render_pet_cell(area: Rect, buffer: &mut Buffer, species: Species, stage: Sta
         format!("s{} {}", stage_index(stage), stage_label(species, stage)),
         styles.label,
     )];
+    let palette = crate::pet::palette::default_theme_palette();
     for (line_index, art_line) in rendered.lines.iter().enumerate() {
         lines.push(Line::from(pet_role_spans_for_line(
             art_line,
             line_index,
             &rendered.spans,
             &styles,
+            &palette,
             None,
         )));
     }

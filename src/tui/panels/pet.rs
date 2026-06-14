@@ -3,7 +3,7 @@ use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -1430,11 +1430,13 @@ fn build_pet_lines(
                 spans.push(Span::raw(" ".repeat(left_pad)));
             }
             let eye_override = cursor_eye;
+            let palette = crate::pet::palette::default_theme_palette();
             spans.extend(build_owned_spans_for_line(
                 &art_line,
                 line_index,
                 &art_spans,
                 styles,
+                &palette,
                 eye_override,
                 twinkle_col,
             ));
@@ -1500,6 +1502,7 @@ fn build_owned_spans_for_line(
     line_index: usize,
     pet_spans: &[crate::pet::render::StyledSegment],
     styles: &SemanticStyles,
+    palette: &crate::pet::palette::ResolvedPalette,
     eye_override: Option<char>,
     twinkle_col: Option<(usize, char)>,
 ) -> Vec<Span<'static>> {
@@ -1537,7 +1540,7 @@ fn build_owned_spans_for_line(
             let body_text = apply_twinkle_in_range(body_text, cursor, start, twinkle_col);
             spans.push(Span::styled(body_text, styles.pet_body));
         }
-        let style = pet_role_style(segment.role, styles);
+        let style = pet_role_style(segment.role, palette);
         let value = if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
             (eye_override, segment.role)
         {
@@ -1586,8 +1589,10 @@ pub(crate) fn pet_role_spans_for_line<'a>(
     line_index: usize,
     pet_spans: &'a [crate::pet::render::StyledSegment],
     styles: &'a SemanticStyles,
+    palette: &'a crate::pet::palette::ResolvedPalette,
     eye_override: Option<char>,
 ) -> Vec<Span<'a>> {
+    let _ = styles;
     let total_chars = art_line.chars().count();
     if total_chars == 0 {
         return Vec::new();
@@ -1600,7 +1605,10 @@ pub(crate) fn pet_role_spans_for_line<'a>(
     segments.sort_by_key(|s| s.start);
 
     if segments.is_empty() {
-        return vec![Span::styled(art_line, styles.pet_body)];
+        return vec![Span::styled(
+            art_line,
+            pet_role_style(PaletteRoleName::Body, palette),
+        )];
     }
 
     let char_indices = char_byte_indices(art_line);
@@ -1615,9 +1623,12 @@ pub(crate) fn pet_role_spans_for_line<'a>(
         }
         if start > cursor {
             let body = char_slice(art_line, &char_indices, cursor, start);
-            spans.push(Span::styled(body, styles.pet_body));
+            spans.push(Span::styled(
+                body,
+                pet_role_style(PaletteRoleName::Body, palette),
+            ));
         }
-        let style = pet_role_style(segment.role, styles);
+        let style = pet_role_style(segment.role, palette);
         if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
             (eye_override, segment.role)
         {
@@ -1637,7 +1648,10 @@ pub(crate) fn pet_role_spans_for_line<'a>(
 
     if cursor < total_chars {
         let tail = char_slice(art_line, &char_indices, cursor, total_chars);
-        spans.push(Span::styled(tail, styles.pet_body));
+        spans.push(Span::styled(
+            tail,
+            pet_role_style(PaletteRoleName::Body, palette),
+        ));
     }
 
     spans
@@ -1655,15 +1669,16 @@ fn char_slice<'a>(line: &'a str, indices: &[usize], start_char: usize, end_char:
     &line[start..end]
 }
 
-pub(crate) fn pet_role_style(role: PaletteRoleName, styles: &SemanticStyles) -> Style {
-    match role {
-        PaletteRoleName::Body => styles.pet_body,
-        PaletteRoleName::Eye => styles.pet_eye,
-        PaletteRoleName::Mouth => styles.pet_mouth,
-        PaletteRoleName::Accent => styles.pet_accent,
-        PaletteRoleName::Pattern => styles.pet_pattern,
-        PaletteRoleName::Particle => styles.pet_accent,
+pub(crate) fn pet_role_style(
+    role: PaletteRoleName,
+    palette: &crate::pet::palette::ResolvedPalette,
+) -> Style {
+    let rgb = crate::pet::palette::role_color(role, palette);
+    let mut style = Style::default().fg(Color::Rgb(rgb.r, rgb.g, rgb.b));
+    if matches!(role, PaletteRoleName::Eye) {
+        style = style.add_modifier(Modifier::BOLD);
     }
+    style
 }
 
 #[cfg(test)]
@@ -1720,12 +1735,17 @@ mod tests {
     }
 
     #[test]
-    fn pet_role_style_maps_eye_role_to_eye_style() {
-        let styles = semantic_styles();
-        assert_eq!(
-            pet_role_style(PaletteRoleName::Eye, &styles),
-            styles.pet_eye
-        );
+    fn pet_role_style_uses_resolved_palette_with_bold_eye() {
+        use crate::pet::palette::{default_theme_palette, Rgb};
+        use crate::pet::render::PaletteRoleName;
+        let p = default_theme_palette();
+        let eye = pet_role_style(PaletteRoleName::Eye, &p);
+        assert_eq!(eye.fg, Some(ratatui::style::Color::Rgb(0x82, 0xbc, 0x83)));
+        assert!(eye.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        let body = pet_role_style(PaletteRoleName::Body, &p);
+        assert_eq!(body.fg, Some(ratatui::style::Color::Rgb(0xef, 0xeb, 0xe4)));
+        assert!(!body.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        let _ = Rgb::new(0, 0, 0); // keep import used
     }
 
     #[test]
