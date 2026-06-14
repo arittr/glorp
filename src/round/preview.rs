@@ -4,7 +4,6 @@ use crate::round::layout::{
     layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
 };
 use crate::round::model::{derive_round_scene_model, RoundHelperHealth, RoundSceneModel};
-use crate::tui::room::RoomDialectKey;
 use crate::tui::view_model::WatchViewModel;
 use ratatui::text::Line;
 
@@ -73,7 +72,7 @@ fn paint_room(
             // Sparse grid: texture glyphs appear on roughly 1 in 5 cells so the
             // room reads as ambient grain rather than solid fill.
             if (x + y) % 5 == 0 {
-                let (symbol, fg) = room_symbol(scene, truecolor);
+                let (symbol, fg) = room_symbol_at(scene, x, y, truecolor);
                 set_cell(cells, width, x as i32, y as i32, symbol, Some(fg));
             }
         }
@@ -169,32 +168,24 @@ fn paint_halo(
     }
 }
 
-fn room_symbol(scene: &RoundSceneModel, truecolor: bool) -> (String, String) {
-    // Dialect-to-color mapping: Glitch reads as cool circuitry, Crystal as warm
-    // prisms, and the default biome as neutral stone. Flat mode uses named ANSI
-    // colors so the preview still renders without truecolor support.
-    let fg = palette_color(scene.room.dialect, truecolor);
-    match scene.room.dialect {
-        RoomDialectKey::Glitch => ("#".to_string(), fg),
-        RoomDialectKey::Crystal => ("^".to_string(), fg),
-        _ => (".".to_string(), fg),
-    }
-}
-
-fn palette_color(dialect: RoomDialectKey, truecolor: bool) -> String {
-    if truecolor {
-        match dialect {
-            RoomDialectKey::Glitch => "#86d9ef".to_string(),
-            RoomDialectKey::Crystal => "#b39dff".to_string(),
-            _ => "#808080".to_string(),
-        }
-    } else {
-        match dialect {
-            RoomDialectKey::Glitch => "cyan".to_string(),
-            RoomDialectKey::Crystal => "magenta".to_string(),
-            _ => "gray".to_string(),
-        }
-    }
+fn room_symbol_at(scene: &RoundSceneModel, x: u16, y: u16, truecolor: bool) -> (String, String) {
+    use crate::tui::room::{biome_style, biome_symbols, RoomSpeciesDialect};
+    let dialect = RoomSpeciesDialect::for_species(scene.pet.species);
+    let symbols = biome_symbols(scene.room.biome.primary, dialect);
+    let glyph = symbols
+        .get((x as usize + y as usize) % symbols.len().max(1))
+        .copied()
+        .unwrap_or('·');
+    let style = biome_style(
+        scene.room.biome.primary,
+        crate::tui::style::ColorCapability::Truecolor,
+    );
+    let fg = match (truecolor, style.fg) {
+        (true, Some(ratatui::style::Color::Rgb(r, g, b))) => format!("#{r:02x}{g:02x}{b:02x}"),
+        (true, _) => "#808080".to_string(),
+        (false, _) => "gray".to_string(),
+    };
+    (glyph.to_string(), fg)
 }
 
 fn set_cell(
@@ -273,5 +264,30 @@ mod tests {
             fgs.contains(&eye_fg),
             "expected an eye-colored pet cell ({eye_fg}), got {fgs:?}"
         );
+    }
+
+    #[test]
+    fn preview_room_varies_by_biome() {
+        use crate::tui::view_model::WatchViewModel;
+        use time::macros::datetime;
+        // Two fixtures with different earned biomes should produce different
+        // room glyph sets in the preview frame.
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let frame = render_round_preview_frame_from_vm(
+            "round-biome",
+            "Round Biome",
+            &vm,
+            datetime!(2026-06-14 12:00 UTC),
+            52,
+            52,
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let room_syms: std::collections::HashSet<_> = frame
+            .cells
+            .iter()
+            .filter(|c| !c.outside_aperture && !c.symbol.trim().is_empty())
+            .map(|c| c.symbol.clone())
+            .collect();
+        assert!(!room_syms.is_empty());
     }
 }
