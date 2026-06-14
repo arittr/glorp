@@ -1,6 +1,7 @@
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
 use crate::pet::generation::Species;
+use crate::pet::render::StyledSegment;
 use crate::storage::state::HabitatPropId;
 use crate::tui::day::DayPhase;
 use crate::tui::identity::SourceDiversity;
@@ -25,6 +26,7 @@ pub struct RoundPetModel {
     pub stage: Stage,
     pub mood: Mood,
     pub art_lines: Vec<String>,
+    pub art_spans: Vec<StyledSegment>,
     pub asleep: bool,
     pub breath_offset_y: u8,
     pub facing: i8,
@@ -136,6 +138,7 @@ pub fn derive_round_scene_model(vm: &WatchViewModel, now: OffsetDateTime) -> Rou
             stage: vm.pet_render.stage,
             mood: vm.pet_render.mood,
             art_lines: vm.pet_art.clone(),
+            art_spans: vm.pet_spans.clone(),
             asleep: vm.day_context.asleep,
             breath_offset_y: vm.breath_offset_y,
             facing: vm.facing,

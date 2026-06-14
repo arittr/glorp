@@ -129,7 +129,9 @@ pub fn layout_round_scene(
     let pet_anchor = RoundAnchor {
         kind: RoundAnchorKind::Pet,
         x: aperture.center_x,
-        y: aperture.center_y + aperture.radius * PET_VERTICAL_OFFSET_RATIO,
+        y: aperture.center_y
+            + aperture.radius * PET_VERTICAL_OFFSET_RATIO
+            + f32::from(scene.pet.breath_offset_y),
         radius: (safe_inner_radius * PET_RADIUS_RATIO).max(PET_RADIUS_MIN),
     };
     let prop_limit = match detail_level {
@@ -230,6 +232,29 @@ mod tests {
             .aperture
             .contains(layout.pet_anchor.x, layout.pet_anchor.y));
         assert!(layout.pet_anchor.radius <= layout.safe_inner_radius);
+    }
+
+    #[test]
+    fn layout_applies_pet_breath_offset_to_anchor() {
+        let mut still = WatchViewModel::fixture_with_habitat_props();
+        still.breath_offset_y = 0;
+        let mut breathed = still.clone();
+        breathed.breath_offset_y = 2;
+
+        let still_scene = derive_round_scene_model(&still, datetime!(2026-06-13 18:00 UTC));
+        let breathed_scene = derive_round_scene_model(&breathed, datetime!(2026-06-13 18:00 UTC));
+        let still_layout = layout_round_scene(
+            &still_scene,
+            RoundAperture::new(52, 52),
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let breathed_layout = layout_round_scene(
+            &breathed_scene,
+            RoundAperture::new(52, 52),
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+
+        assert!(breathed_layout.pet_anchor.y > still_layout.pet_anchor.y);
     }
 
     #[test]

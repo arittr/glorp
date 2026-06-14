@@ -1,6 +1,6 @@
+use crate::pet::render::StyledSegment;
 use crate::round::layout::{RoundAnchorKind, RoundSceneLayout};
 use crate::round::model::RoundSceneModel;
-use ratatui::text::Line;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundDrawCommand {
@@ -9,6 +9,8 @@ pub struct RoundDrawCommand {
     pub y: f32,
     pub radius: f32,
     pub label: Option<char>,
+    pub text: Option<String>,
+    pub spans: Vec<StyledSegment>,
     pub color: RoundColor,
 }
 
@@ -44,9 +46,11 @@ pub fn build_draw_commands(
         y: layout.aperture.center_y,
         radius: layout.aperture.radius,
         label: None,
+        text: None,
+        spans: Vec::new(),
         color: BACKGROUND_COLOR,
     }];
-    push_pet_art_commands(&mut commands, scene, layout);
+    push_pet_art_command(&mut commands, scene, layout);
     for anchor in &layout.prop_anchors {
         commands.push(RoundDrawCommand {
             kind: RoundDrawKind::PropGlyph,
@@ -54,6 +58,8 @@ pub fn build_draw_commands(
             y: anchor.y,
             radius: anchor.radius,
             label: Some('*'),
+            text: None,
+            spans: Vec::new(),
             color: PROP_GLYPH_COLOR,
         });
     }
@@ -69,6 +75,8 @@ pub fn build_draw_commands(
             y: anchor.y,
             radius: anchor.radius,
             label: None,
+            text: None,
+            spans: Vec::new(),
             color: if is_trouble {
                 TROUBLE_GLYPH_COLOR
             } else if scene.lifecycle.calm {
@@ -81,51 +89,26 @@ pub fn build_draw_commands(
     commands
 }
 
-fn push_pet_art_commands(
+fn push_pet_art_command(
     commands: &mut Vec<RoundDrawCommand>,
     scene: &RoundSceneModel,
     layout: &RoundSceneLayout,
 ) {
-    let (art_width, art_height) = pet_art_dimensions(&scene.pet.art_lines);
-    if art_width == 0.0 || art_height == 0.0 {
+    let text = scene.pet.art_lines.join("\n");
+    if text.trim().is_empty() {
         return;
     }
 
-    let cell_size = ((layout.pet_anchor.radius * 2.0) / art_width.max(art_height)).max(1.0);
-    let glyph_radius = (cell_size * 0.48).clamp(5.0, 18.0);
-    let left = layout.pet_anchor.x - (art_width * cell_size) / 2.0;
-    let top = layout.pet_anchor.y + ((art_height - 1.0) * cell_size) / 2.0;
-
-    for (row, line) in scene.pet.art_lines.iter().enumerate() {
-        let mut col = 0.0;
-        for ch in line.chars() {
-            let width = char_display_width(ch) as f32;
-            if ch != ' ' {
-                commands.push(RoundDrawCommand {
-                    kind: RoundDrawKind::PetGlyph,
-                    x: left + (col + width / 2.0) * cell_size,
-                    y: top - row as f32 * cell_size,
-                    radius: glyph_radius,
-                    label: Some(ch),
-                    color: PET_GLYPH_COLOR,
-                });
-            }
-            col += width;
-        }
-    }
-}
-
-fn pet_art_dimensions(lines: &[String]) -> (f32, f32) {
-    let width = lines
-        .iter()
-        .map(|line| Line::from(line.as_str()).width())
-        .max()
-        .unwrap_or(0) as f32;
-    (width, lines.len() as f32)
-}
-
-fn char_display_width(ch: char) -> usize {
-    Line::from(ch.to_string()).width().max(1)
+    commands.push(RoundDrawCommand {
+        kind: RoundDrawKind::PetGlyph,
+        x: layout.pet_anchor.x,
+        y: layout.pet_anchor.y,
+        radius: layout.pet_anchor.radius,
+        label: None,
+        text: Some(text),
+        spans: scene.pet.art_spans.clone(),
+        color: PET_GLYPH_COLOR,
+    });
 }
 
 #[cfg(test)]
@@ -160,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_commands_emit_pet_art_glyphs() {
+    fn draw_commands_emit_one_pet_art_block() {
         let mut vm = WatchViewModel::fixture_with_habitat_props();
         vm.pet_art = vec!["AB".to_string(), " C".to_string()];
         let scene = derive_round_scene_model(&vm, datetime!(2026-06-13 18:00 UTC));
@@ -170,12 +153,15 @@ mod tests {
             RoundRenderCapabilities::preview_truecolor(),
         );
 
-        let labels: Vec<_> = build_draw_commands(&scene, &layout)
+        let commands = build_draw_commands(&scene, &layout);
+        let pet_commands: Vec<_> = commands
             .into_iter()
             .filter(|command| command.kind == RoundDrawKind::PetGlyph)
-            .filter_map(|command| command.label)
             .collect();
 
-        assert_eq!(labels, vec!['A', 'B', 'C']);
+        assert_eq!(pet_commands.len(), 1);
+        assert_eq!(pet_commands[0].label, None);
+        assert_eq!(pet_commands[0].text.as_deref(), Some("AB\n C"));
+        assert_eq!(pet_commands[0].spans, vm.pet_spans);
     }
 }

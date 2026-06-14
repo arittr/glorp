@@ -61,6 +61,7 @@ fn round_scene_excludes_watch_dashboard_and_private_fields() {
             stage: Stage::S0,
             mood: Mood::Content,
             art_lines: vm.pet_art.clone(),
+            art_spans: vm.pet_spans.clone(),
             asleep: false,
             breath_offset_y: 0,
             facing: 1,
