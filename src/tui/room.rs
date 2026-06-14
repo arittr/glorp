@@ -589,7 +589,7 @@ pub(crate) fn rects_contain(rects: &[Rect], col: u16, row: u16) -> bool {
     })
 }
 
-fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &'static [char] {
+pub(crate) fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &'static [char] {
     match dialect.key {
         RoomDialectKey::Glitch => match tag {
             RoomBiomeTag::Starter => &[':', '.', '_'],
@@ -623,7 +623,7 @@ fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &'static [ch
 
 type ZoneAllocations = (Vec<(RoomZone, usize)>, Vec<(RoomZone, usize)>);
 
-fn dialect_zone_counts(dialect: RoomSpeciesDialect) -> Vec<(RoomZone, usize)> {
+pub(crate) fn dialect_zone_counts(dialect: RoomSpeciesDialect) -> Vec<(RoomZone, usize)> {
     match dialect.key {
         RoomDialectKey::Glitch => vec![(RoomZone::RightAnchor, 2), (RoomZone::Floor, 1)],
         RoomDialectKey::Crystal => vec![(RoomZone::UpperAir, 2), (RoomZone::Floor, 1)],
@@ -634,7 +634,7 @@ fn dialect_zone_counts(dialect: RoomSpeciesDialect) -> Vec<(RoomZone, usize)> {
     }
 }
 
-fn zone_counts_for_biome(biome: RoomBiome) -> ZoneAllocations {
+pub(crate) fn zone_counts_for_biome(biome: RoomBiome) -> ZoneAllocations {
     let primary = match biome.primary {
         RoomBiomeTag::Starter => vec![(RoomZone::Floor, 2), (RoomZone::UpperAir, 1)],
         RoomBiomeTag::Botanical => vec![
@@ -767,7 +767,7 @@ fn place_zone_glyphs<R: Rng>(
     glyphs
 }
 
-fn biome_style(tag: RoomBiomeTag, color_capability: ColorCapability) -> Style {
+pub(crate) fn biome_style(tag: RoomBiomeTag, color_capability: ColorCapability) -> Style {
     let base = Style::default();
     if matches!(color_capability, ColorCapability::Flat) {
         return base.fg(crate::tui::style::tokenpet_palette().faint.rgb);
@@ -1049,6 +1049,15 @@ mod tests {
             ..DayContext::default()
         };
         vm
+    }
+
+    #[test]
+    fn selection_atoms_are_crate_visible() {
+        // Compile-time proof these are reusable by other modules (e.g. the companion).
+        let dialect = RoomSpeciesDialect::for_species(crate::pet::generation::Species::Crystal);
+        let syms = biome_symbols(RoomBiomeTag::Celestial, dialect);
+        assert!(!syms.is_empty());
+        let _style = biome_style(RoomBiomeTag::Celestial, ColorCapability::Truecolor);
     }
 
     #[test]
