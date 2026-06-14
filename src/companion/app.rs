@@ -408,8 +408,9 @@ fn draw_command(command: &RoundDrawCommand, palette: &crate::pet::palette::Resol
             path.fill();
         },
         RoundDrawKind::RoomGlyph => {
-            // RoomGlyph is intentionally a no-op in V1; background fill provides the room
-            // texture. A future iteration may add sparse dialect glyphs here.
+            if let Some(label) = command.label {
+                draw_label(label, command.x, command.y, command.radius, &command.color);
+            }
         }
     }
 }

@@ -63,6 +63,7 @@ pub fn build_draw_commands(
         spans: Vec::new(),
         color: biome_background_color(scene.room.biome.primary),
     }];
+    push_room_glyph_commands(&mut commands, scene, layout);
     push_pet_art_command(&mut commands, scene, layout);
     for anchor in &layout.prop_anchors {
         commands.push(RoundDrawCommand {
@@ -100,6 +101,73 @@ pub fn build_draw_commands(
         });
     }
     commands
+}
+
+/// Scatter a sparse set of biome/dialect room glyphs across the aperture using
+/// the SAME selection vocabulary as the watch (room::biome_symbols / biome_style),
+/// placed on a deterministic lattice clipped to the circle.
+fn push_room_glyph_commands(
+    commands: &mut Vec<RoundDrawCommand>,
+    scene: &RoundSceneModel,
+    layout: &RoundSceneLayout,
+) {
+    use crate::tui::room::{biome_style, biome_symbols, RoomSpeciesDialect};
+    let dialect = RoomSpeciesDialect::for_species(scene.pet.species);
+    let symbols = biome_symbols(scene.room.biome.primary, dialect);
+    if symbols.is_empty() {
+        return;
+    }
+    let style = biome_style(
+        scene.room.biome.primary,
+        crate::tui::style::ColorCapability::Truecolor,
+    );
+    let color = match style.fg {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => RoundColor(
+            f32::from(r) / 255.0,
+            f32::from(g) / 255.0,
+            f32::from(b) / 255.0,
+            0.55,
+        ),
+        _ => PROP_GLYPH_COLOR,
+    };
+    let ap = layout.aperture;
+    let cell = ap.radius / 5.0; // ~10 glyph slots across the diameter
+    if cell <= 0.0 {
+        return;
+    }
+    let mut i = 0usize;
+    let steps = 11i32;
+    for gy in 0..steps {
+        for gx in 0..steps {
+            // Sparse: ~1 in 3 lattice points.
+            if (gx + gy) % 3 != 0 {
+                continue;
+            }
+            let x = ap.center_x - ap.radius + cell * gx as f32 + cell * 0.5;
+            let y = ap.center_y - ap.radius + cell * gy as f32 + cell * 0.5;
+            if !ap.contains(x, y) {
+                continue;
+            }
+            // Keep clear of the pet's center disc.
+            let dx = x - layout.pet_anchor.x;
+            let dy = y - layout.pet_anchor.y;
+            if dx * dx + dy * dy < layout.pet_anchor.radius * layout.pet_anchor.radius {
+                continue;
+            }
+            let glyph = symbols[i % symbols.len()];
+            i += 1;
+            commands.push(RoundDrawCommand {
+                kind: RoundDrawKind::RoomGlyph,
+                x,
+                y,
+                radius: cell * 0.5,
+                label: Some(glyph),
+                text: None,
+                spans: Vec::new(),
+                color,
+            });
+        }
+    }
 }
 
 fn push_pet_art_command(
@@ -186,5 +254,33 @@ mod tests {
         assert_eq!(pet_commands[0].label, None);
         assert_eq!(pet_commands[0].text.as_deref(), Some("AB\n C"));
         assert_eq!(pet_commands[0].spans, vm.pet_spans);
+    }
+
+    #[test]
+    fn emits_room_glyphs_inside_the_aperture() {
+        use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
+        use crate::round::model::derive_round_scene_model;
+        use crate::tui::view_model::WatchViewModel;
+        use time::macros::datetime;
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let scene = derive_round_scene_model(&vm, datetime!(2026-06-14 12:00 UTC));
+        let layout = layout_round_scene(
+            &scene,
+            RoundAperture::new(52, 52),
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let commands = build_draw_commands(&scene, &layout);
+        let room: Vec<_> = commands
+            .iter()
+            .filter(|c| c.kind == RoundDrawKind::RoomGlyph)
+            .collect();
+        assert!(!room.is_empty(), "companion should emit room glyphs");
+        for c in &room {
+            assert!(
+                layout.aperture.contains(c.x, c.y),
+                "room glyph outside aperture"
+            );
+            assert!(c.label.is_some(), "room glyph needs a char");
+        }
     }
 }
