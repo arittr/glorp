@@ -95,6 +95,9 @@ jobs:
         # --no-default-features strips the hidden dev-preview command so it
         # does not ship in the published npm binaries.
         run: cargo build --release --locked --no-default-features --target ${{ matrix.rust_target }}
+      - name: build companion app bundle
+        if: startsWith(matrix.target, 'darwin-')
+        run: node scripts/build-macos-companion-app.mjs --binary "target/${{ matrix.rust_target }}/release/glorp"
       - name: stage binary at workspace root for upload
         # Upload-artifact preserves paths relative to the workspace, and the
         # publish-platforms job downloads into `target/release/`. Copy the
@@ -115,6 +118,17 @@ jobs:
           path: |
             glorp
             glorp.exe
+          if-no-files-found: error
+      - name: stage companion app artifact
+        if: startsWith(matrix.target, 'darwin-')
+        shell: bash
+        run: tar -czf "glorp-app-${{ matrix.target }}.tgz" -C target/macos Glorp.app
+      - name: upload companion app artifact
+        if: startsWith(matrix.target, 'darwin-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: glorp-app-${{ matrix.target }}
+          path: glorp-app-${{ matrix.target }}.tgz
           if-no-files-found: error
 
   smoke:
@@ -173,6 +187,16 @@ jobs:
         with:
           name: glorp-${{ matrix.target }}
           path: target/release/
+      - name: download companion app artifact
+        if: startsWith(matrix.target, 'darwin-')
+        uses: actions/download-artifact@v4
+        with:
+          name: glorp-app-${{ matrix.target }}
+          path: target/macos/
+      - name: unpack companion app artifact
+        if: startsWith(matrix.target, 'darwin-')
+        shell: bash
+        run: tar -xzf "target/macos/glorp-app-${{ matrix.target }}.tgz" -C target/macos
       - name: stage binary into platform package
         run: |
           chmod +x target/release/glorp 2>/dev/null || true

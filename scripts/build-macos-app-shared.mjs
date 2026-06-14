@@ -21,6 +21,7 @@ export function buildMacosApp({
   lsuiElement,
   out,
   profile,
+  binary,
 }) {
   const scriptName = `build-macos-${mode}-app`;
 
@@ -38,22 +39,20 @@ export function buildMacosApp({
   const outAppPath = out
     ? path.resolve(out)
     : path.join(repoRoot, "target", "macos", "Glorp.app");
-  const targetDir = path.join(repoRoot, "target", profile);
-  const binaryPath = path.join(targetDir, "glorp");
+  const binaryPath = resolveMacosBinaryPath({ repoRoot, profile, binary });
 
-  const cargoArgs = ["build", "--bin", "glorp"];
-  if (profile === "release") cargoArgs.push("--release");
-  console.log(`${scriptName}: cargo ${cargoArgs.join(" ")}`);
-  execFileSync("cargo", cargoArgs, { cwd: repoRoot, stdio: "inherit" });
+  if (!binary) {
+    const cargoArgs = ["build", "--bin", "glorp"];
+    if (profile === "release") cargoArgs.push("--release");
+    console.log(`${scriptName}: cargo ${cargoArgs.join(" ")}`);
+    execFileSync("cargo", cargoArgs, { cwd: repoRoot, stdio: "inherit" });
+  }
 
   if (!fs.existsSync(binaryPath)) {
     fail(scriptName, `built binary missing at ${binaryPath}`);
   }
 
-  const pkgJson = JSON.parse(
-    fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
-  );
-  const version = pkgJson.version || "0.0.0";
+  const version = readAppVersion(repoRoot);
 
   const contentsDir = path.join(outAppPath, "Contents");
   const macosDir = path.join(contentsDir, "MacOS");
@@ -103,4 +102,17 @@ ${lsuiElementPlist}  <key>NSHumanReadableCopyright</key><string>MIT-licensed. Se
   console.log(
     `  install: cp -R '${outAppPath}' /Applications && open /Applications/Glorp.app`,
   );
+}
+
+export function resolveMacosBinaryPath({ repoRoot, profile, binary }) {
+  if (binary) return path.resolve(binary);
+  const targetDir = path.join(repoRoot, "target", profile);
+  return path.join(targetDir, "glorp");
+}
+
+export function readAppVersion(root = repoRoot) {
+  const pkgJson = JSON.parse(
+    fs.readFileSync(path.join(root, "npm", "glorp", "package.json"), "utf8"),
+  );
+  return pkgJson.version || "0.0.0";
 }
