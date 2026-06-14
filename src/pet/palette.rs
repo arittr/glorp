@@ -1,5 +1,7 @@
 //! Pet color resolution: OKLCH -> sRGB, and per-pet/species palettes.
 
+use crate::pet::render::PaletteRoleName;
+
 /// Backend-neutral 8-bit color. Each surface adapts this to its own type
 /// (ratatui `Color::Rgb`, the companion `RoundColor`, the menubar `Rgb`, or a
 /// `#rrggbb` preview string).
@@ -111,6 +113,38 @@ fn rgb_to_oklab_ab(c: Rgb) -> (f32, f32) {
     (a, b)
 }
 
+/// Resolved per-role colors for one pet. `eye` is always the green signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedPalette {
+    pub body: Rgb,
+    pub eye: Rgb,
+    pub mouth: Rgb,
+    pub accent: Rgb,
+    pub pattern: Rgb,
+}
+
+pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
+    match role {
+        PaletteRoleName::Body => palette.body,
+        PaletteRoleName::Eye => palette.eye,
+        PaletteRoleName::Mouth => palette.mouth,
+        PaletteRoleName::Accent => palette.accent,
+        PaletteRoleName::Pattern => palette.pattern,
+        PaletteRoleName::Particle => palette.accent,
+    }
+}
+
+/// The pre-color fixed theme, reproducing `semantic_styles()` pet colors exactly.
+pub fn default_theme_palette() -> ResolvedPalette {
+    ResolvedPalette {
+        body: Rgb::new(0xef, 0xeb, 0xe4),
+        eye: Rgb::new(0x82, 0xbc, 0x83),
+        mouth: Rgb::new(0x97, 0x91, 0x8a),
+        accent: Rgb::new(0xf0, 0xa6, 0x46),
+        pattern: Rgb::new(0x50, 0x4c, 0x49),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +201,17 @@ mod tests {
     fn rgb_hue(c: Rgb) -> f32 {
         let (a, b) = rgb_to_oklab_ab(c);
         b.atan2(a).to_degrees().rem_euclid(360.0)
+    }
+
+    #[test]
+    fn default_theme_matches_current_fixed_colors() {
+        use crate::pet::render::PaletteRoleName::*;
+        let p = default_theme_palette();
+        assert_eq!(role_color(Body, &p), Rgb::new(0xef, 0xeb, 0xe4));
+        assert_eq!(role_color(Eye, &p), Rgb::new(0x82, 0xbc, 0x83));
+        assert_eq!(role_color(Mouth, &p), Rgb::new(0x97, 0x91, 0x8a));
+        assert_eq!(role_color(Accent, &p), Rgb::new(0xf0, 0xa6, 0x46));
+        assert_eq!(role_color(Pattern, &p), Rgb::new(0x50, 0x4c, 0x49));
+        assert_eq!(role_color(Particle, &p), Rgb::new(0xf0, 0xa6, 0x46));
     }
 }
