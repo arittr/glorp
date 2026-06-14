@@ -8,10 +8,11 @@ use crate::pet::{
     render::{render_pet, AnimationFrame},
 };
 use crate::tui::panels::pet::pet_role_spans_for_line;
-use crate::tui::style::semantic_styles;
+use crate::tui::style::{semantic_styles, ColorCapability};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::style::Color;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 const FRAME_WIDTH: u16 = 120;
@@ -30,11 +31,28 @@ const STAGES: [Stage; 7] = [
 ];
 
 pub fn pet_frames(ctx: &PreviewRenderContext) -> Result<Vec<PreviewFrame>> {
-    Ok(vec![render_pet_matrix(ctx)])
+    Ok(vec![
+        render_pet_matrix(
+            ctx,
+            "pet-species-stage",
+            "Pet Species Stage",
+            ColorCapability::Truecolor,
+        ),
+        render_pet_matrix(
+            ctx,
+            "pet-species-stage-flat",
+            "Pet Species Stage (Flat)",
+            ColorCapability::Flat,
+        ),
+    ])
 }
 
-fn render_pet_matrix(ctx: &PreviewRenderContext) -> PreviewFrame {
-    let _capability = ctx.render.color_capability;
+fn render_pet_matrix(
+    _ctx: &PreviewRenderContext,
+    id: &str,
+    title: &str,
+    capability: ColorCapability,
+) -> PreviewFrame {
     let styles = semantic_styles();
     let mut buffer = Buffer::empty(Rect::new(0, 0, FRAME_WIDTH, FRAME_HEIGHT));
 
@@ -52,16 +70,23 @@ fn render_pet_matrix(ctx: &PreviewRenderContext) -> PreviewFrame {
                 COLUMN_WIDTH,
                 ROW_HEIGHT,
             );
-            render_pet_cell(area, &mut buffer, species, stage);
+            render_pet_cell(area, &mut buffer, species, stage, capability);
         }
     }
 
-    frame_from_buffer("pet-species-stage", "Pet Species Stage", &buffer)
+    frame_from_buffer(id, title, &buffer)
 }
 
-fn render_pet_cell(area: Rect, buffer: &mut Buffer, species: Species, stage: Stage) {
+fn render_pet_cell(
+    area: Rect,
+    buffer: &mut Buffer,
+    species: Species,
+    stage: Stage,
+    capability: ColorCapability,
+) {
     let styles = semantic_styles();
     let pet = generate_pet(&format!("glorp-preview-{}", species.as_str())).with_species(species);
+    let palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
     let rendered = render_pet(
         &pet,
         stage,
@@ -80,19 +105,57 @@ fn render_pet_cell(area: Rect, buffer: &mut Buffer, species: Species, stage: Sta
         format!("s{} {}", stage_index(stage), stage_label(species, stage)),
         styles.label,
     )];
-    let palette = crate::pet::palette::default_theme_palette();
     for (line_index, art_line) in rendered.lines.iter().enumerate() {
-        lines.push(Line::from(pet_role_spans_for_line(
+        let spans = pet_role_spans_for_line(
             art_line,
             line_index,
             &rendered.spans,
             &styles,
             &palette,
             None,
-        )));
+        );
+        lines.push(Line::from(adapt_spans_to_capability(spans, capability)));
     }
 
     Paragraph::new(lines).render(area, buffer);
+}
+
+/// Truecolor keeps the resolved `Color::Rgb`; Flat maps each foreground to the
+/// nearest xterm-256 indexed color, mirroring how a non-truecolor terminal
+/// downgrades the palette while keeping species distinguishable.
+fn adapt_spans_to_capability(spans: Vec<Span<'_>>, capability: ColorCapability) -> Vec<Span<'_>> {
+    if matches!(capability, ColorCapability::Truecolor) {
+        return spans;
+    }
+    spans
+        .into_iter()
+        .map(|span| {
+            if let Some(Color::Rgb(r, g, b)) = span.style.fg {
+                let style = span.style.fg(nearest_ansi_color(r, g, b));
+                Span::styled(span.content, style)
+            } else {
+                span
+            }
+        })
+        .collect()
+}
+
+/// Nearest xterm-256 indexed color to an sRGB triple, by squared distance.
+fn nearest_ansi_color(r: u8, g: u8, b: u8) -> Color {
+    let mut best_index = 0u8;
+    let mut best_distance = u32::MAX;
+    for index in 0u8..=255 {
+        let (sr, sg, sb) = crate::dev_preview::frame::ansi_256_to_rgb(index);
+        let dr = i32::from(r) - i32::from(sr);
+        let dg = i32::from(g) - i32::from(sg);
+        let db = i32::from(b) - i32::from(sb);
+        let distance = (dr * dr + dg * dg + db * db) as u32;
+        if distance < best_distance {
+            best_distance = distance;
+            best_index = index;
+        }
+    }
+    Color::Indexed(best_index)
 }
 
 #[cfg(test)]

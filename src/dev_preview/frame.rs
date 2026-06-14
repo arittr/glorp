@@ -136,8 +136,48 @@ fn color_to_css(color: Option<Color>) -> Option<String> {
         Color::LightMagenta => Some("#ff66ff".to_string()),
         Color::LightCyan => Some("#66ffff".to_string()),
         Color::White => Some("#ffffff".to_string()),
-        Color::Indexed(index) => Some(format!("ansi-{index}")),
+        Color::Indexed(index) => {
+            let (r, g, b) = ansi_256_to_rgb(index);
+            Some(format!("#{r:02x}{g:02x}{b:02x}"))
+        }
         Color::Rgb(red, green, blue) => Some(format!("#{red:02x}{green:02x}{blue:02x}")),
+    }
+}
+
+pub(crate) fn ansi_256_to_rgb(index: u8) -> (u8, u8, u8) {
+    const SYSTEM: [(u8, u8, u8); 16] = [
+        (0x00, 0x00, 0x00),
+        (0x80, 0x00, 0x00),
+        (0x00, 0x80, 0x00),
+        (0x80, 0x80, 0x00),
+        (0x00, 0x00, 0x80),
+        (0x80, 0x00, 0x80),
+        (0x00, 0x80, 0x80),
+        (0xc0, 0xc0, 0xc0),
+        (0x80, 0x80, 0x80),
+        (0xff, 0x00, 0x00),
+        (0x00, 0xff, 0x00),
+        (0xff, 0xff, 0x00),
+        (0x00, 0x00, 0xff),
+        (0xff, 0x00, 0xff),
+        (0x00, 0xff, 0xff),
+        (0xff, 0xff, 0xff),
+    ];
+    match index {
+        0..=15 => SYSTEM[index as usize],
+        16..=231 => {
+            let i = index - 16;
+            let steps = [0u8, 95, 135, 175, 215, 255];
+            (
+                steps[(i / 36) as usize],
+                steps[((i / 6) % 6) as usize],
+                steps[(i % 6) as usize],
+            )
+        }
+        232..=255 => {
+            let v = 8 + (index - 232) * 10;
+            (v, v, v)
+        }
     }
 }
 
@@ -218,7 +258,18 @@ mod tests {
         assert_eq!(frame.cells[1].display_width, 2);
         assert!(!frame.cells[1].continuation);
         assert!(frame.cells[2].continuation);
-        assert_eq!(frame.cells[1].fg.as_deref(), Some("ansi-42"));
+        assert_eq!(frame.cells[1].fg.as_deref(), Some("#00d787"));
+    }
+
+    #[test]
+    fn indexed_color_resolves_to_hex() {
+        let css = color_to_css(Some(Color::Indexed(42)));
+        assert!(
+            css.as_deref()
+                .map(|c| c.starts_with('#') && c.len() == 7)
+                .unwrap_or(false),
+            "indexed color did not resolve to hex: {css:?}"
+        );
     }
 
     #[test]
