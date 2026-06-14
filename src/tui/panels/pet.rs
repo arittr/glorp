@@ -1430,7 +1430,7 @@ fn build_pet_lines(
                 spans.push(Span::raw(" ".repeat(left_pad)));
             }
             let eye_override = cursor_eye;
-            let palette = crate::pet::palette::default_theme_palette();
+            let palette = palette_from_styles(styles);
             spans.extend(build_owned_spans_for_line(
                 &art_line,
                 line_index,
@@ -1681,6 +1681,27 @@ pub(crate) fn pet_role_style(
     style
 }
 
+/// Snapshot the per-role foreground colors of the live `SemanticStyles` into a
+/// `ResolvedPalette`. The watch passes the dim/lift/shimmer-mutated `live_styles`
+/// here so the role-colored glyphs track exactly the same lightness changes as
+/// the body-gap fills (`styles.pet_body`), keeping the pet internally coherent.
+/// Non-RGB foregrounds (none occur on the pet roles today) fall back to the
+/// default theme color for that role.
+fn palette_from_styles(styles: &SemanticStyles) -> crate::pet::palette::ResolvedPalette {
+    let default = crate::pet::palette::default_theme_palette();
+    let rgb = |style: Style, fallback: crate::pet::palette::Rgb| match style.fg {
+        Some(Color::Rgb(r, g, b)) => crate::pet::palette::Rgb::new(r, g, b),
+        _ => fallback,
+    };
+    crate::pet::palette::ResolvedPalette {
+        body: rgb(styles.pet_body, default.body),
+        eye: rgb(styles.pet_eye, default.eye),
+        mouth: rgb(styles.pet_mouth, default.mouth),
+        accent: rgb(styles.pet_accent, default.accent),
+        pattern: rgb(styles.pet_pattern, default.pattern),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1746,6 +1767,80 @@ mod tests {
         assert_eq!(body.fg, Some(ratatui::style::Color::Rgb(0xef, 0xeb, 0xe4)));
         assert!(!body.add_modifier.contains(ratatui::style::Modifier::BOLD));
         let _ = Rgb::new(0, 0, 0); // keep import used
+    }
+
+    /// Foreground colors of every non-blank glyph span in the rendered pet
+    /// lines, paired with whether the span carries the eye signature (BOLD +
+    /// green-dominant base). Used to assert that role glyphs honor the live
+    /// (dimmed/lifted) styles, not a frozen default palette.
+    fn glyph_fg_colors(lines: &[Line<'static>]) -> Vec<Color> {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.content.chars().any(|c| c != ' '))
+            .filter_map(|span| span.style.fg)
+            .collect()
+    }
+
+    #[test]
+    fn build_pet_lines_role_glyphs_dim_with_live_styles() {
+        // Sleep/low-energy darkens the whole pet via darken_pet_styles. The
+        // role-colored glyphs (eyes/mouth/accent/pattern/body) must dim with
+        // the body-gap fills, not stay frozen at the default theme color.
+        let vm = vm_with_real_pet();
+        let base = semantic_styles();
+        let dimmed = darken_pet_styles(&base, 0.6);
+
+        let bright = build_pet_lines(&vm, 13, &base, None, None);
+        let dark = build_pet_lines(&vm, 13, &dimmed, None, None);
+
+        let bright_fgs = glyph_fg_colors(&bright);
+        let dark_fgs = glyph_fg_colors(&dark);
+        assert_eq!(
+            bright_fgs.len(),
+            dark_fgs.len(),
+            "dimming must not change which cells render"
+        );
+        assert!(!bright_fgs.is_empty(), "pet should render glyph spans");
+        assert_ne!(
+            bright_fgs, dark_fgs,
+            "role glyphs must dim with the live styles, not stay at the default theme"
+        );
+        for (bright_fg, dark_fg) in bright_fgs.iter().zip(dark_fgs.iter()) {
+            if let (Color::Rgb(br, bg, bb), Color::Rgb(dr, dg, db)) = (bright_fg, dark_fg) {
+                assert!(
+                    dr <= br && dg <= bg && db <= bb,
+                    "each glyph channel must be no brighter when dimmed: \
+                     {bright_fg:?} -> {dark_fg:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_pet_lines_role_glyphs_match_unmutated_default_theme() {
+        // With unmutated styles the watch pet must remain byte-identical to the
+        // fixed default theme: this is the byte-identity guarantee of Task 5.
+        let vm = vm_with_real_pet();
+        let lines = build_pet_lines(&vm, 13, &semantic_styles(), None, None);
+        let default_palette = crate::pet::palette::default_theme_palette();
+        let expected_eye = {
+            let rgb = crate::pet::palette::role_color(PaletteRoleName::Eye, &default_palette);
+            Color::Rgb(rgb.r, rgb.g, rgb.b)
+        };
+        let expected_body = {
+            let rgb = crate::pet::palette::role_color(PaletteRoleName::Body, &default_palette);
+            Color::Rgb(rgb.r, rgb.g, rgb.b)
+        };
+        let fgs = glyph_fg_colors(&lines);
+        assert!(
+            fgs.contains(&expected_eye),
+            "expected the green eye signature {expected_eye:?} in {fgs:?}"
+        );
+        assert!(
+            fgs.contains(&expected_body),
+            "expected the cream body color {expected_body:?} in {fgs:?}"
+        );
     }
 
     #[test]
