@@ -542,7 +542,7 @@ fn phase_density_scale(phase: DayPhase) -> f64 {
         DayPhase::Day => 1.0,
         DayPhase::Dawn => 0.7,
         DayPhase::Dusk => 0.85,
-        DayPhase::Night => 0.5,
+        DayPhase::Night => 0.35,
     }
 }
 
@@ -1564,6 +1564,13 @@ mod tests {
         assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dusk));
         assert!(phase_density_scale(DayPhase::Dawn) < phase_density_scale(DayPhase::Day));
         assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dawn));
+    }
+
+    #[test]
+    fn night_density_is_clearly_lower_than_day() {
+        // Night should drop to <= 40% of day density (was 50%, too subtle).
+        assert!(phase_density_scale(DayPhase::Night) <= 0.40);
+        assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dusk));
     }
 
     #[test]

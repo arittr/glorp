@@ -335,7 +335,7 @@ fn phase_count_scale(phase: DayPhase) -> f64 {
         DayPhase::Day => 1.0,
         DayPhase::Dawn => 0.7,
         DayPhase::Dusk => 0.8,
-        DayPhase::Night => 0.6,
+        DayPhase::Night => 0.45,
     }
 }
 
@@ -392,7 +392,7 @@ fn sky_color_for_phase(
         DayPhase::Day => base,
         DayPhase::Dawn => warm_shift(base, 0.25),
         DayPhase::Dusk => warm_shift(base, 0.40),
-        DayPhase::Night => dim_shift(base, 0.40),
+        DayPhase::Night => dim_shift(base, 0.58),
     };
     climate_tint(
         season_hue_drift(lerp_color(base, target, blend), season),
@@ -559,7 +559,7 @@ pub fn ambient_glyphs_for_phase(
     // Floor gradually dims into Night; Dawn/Dusk keep the neutral base so the
     // pet remains readable against warm grain.
     let floor_color = if phase == DayPhase::Night {
-        dim_shift(base, 0.40 * phase_blend)
+        dim_shift(base, 0.55 * phase_blend)
     } else {
         base
     };
