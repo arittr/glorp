@@ -100,6 +100,32 @@ fn biome_floor_palette(tag: crate::tui::room::RoomBiomeTag) -> &'static [char] {
     }
 }
 
+/// A whisper-quiet per-biome background wash: the theme bg nudged a few points
+/// toward the biome's hue, so the habitat reads as a place even in a screenshot
+/// without overpowering the pet/panels.
+fn biome_wash_color(tag: crate::tui::room::RoomBiomeTag) -> ratatui::style::Color {
+    use crate::tui::room::RoomBiomeTag;
+    use ratatui::style::Color;
+    let Color::Rgb(r, g, b) = crate::tui::style::tokenpet_palette().bg.rgb else {
+        return crate::tui::style::tokenpet_palette().bg.rgb;
+    };
+    // Small signed nudges per channel (kept within +-16 so it stays subtle).
+    let (dr, dg, db): (i16, i16, i16) = match tag {
+        RoomBiomeTag::Starter => (0, 0, 0),
+        RoomBiomeTag::Botanical => (-2, 8, -2),
+        RoomBiomeTag::Technical => (-2, 2, 12),
+        RoomBiomeTag::Celestial => (2, 2, 10),
+        RoomBiomeTag::Artifact => (10, 4, -4),
+        RoomBiomeTag::Cozy => (10, 2, -2),
+    };
+    let clamp = |v: i16| v.clamp(0, 255) as u8;
+    Color::Rgb(
+        clamp(r as i16 + dr),
+        clamp(g as i16 + dg),
+        clamp(b as i16 + db),
+    )
+}
+
 /// Sky-glyph count by stage tier.
 fn stage_base_count(stage: Stage) -> usize {
     match stage {
@@ -890,6 +916,21 @@ impl LegacyPanel for PetPanel {
         // drawn before the existing ambient/mote/activity passes so they set
         // the room's silhouette without replacing pet or speech cells.
         let room_profile = crate::tui::room::derive_room_life_profile(vm, now);
+
+        // Base layer: a subtle per-biome background wash over the habitat, so the
+        // room reads as a place. Set BEFORE room/ambient glyphs (which set fg only,
+        // leaving this bg intact underneath).
+        {
+            let wash = biome_wash_color(room_profile.biome.primary);
+            for wy in scene.habitat.y..scene.habitat.y.saturating_add(scene.habitat.height) {
+                for wx in scene.habitat.x..scene.habitat.x.saturating_add(scene.habitat.width) {
+                    if !rects_contain(&ambient_exclusions, wx, wy) {
+                        buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
+                    }
+                }
+            }
+        }
+
         let room_glyphs = crate::tui::room::room_glyphs_for(
             &room_profile,
             scene.habitat,
@@ -1743,6 +1784,27 @@ mod tests {
         assert_ne!(botanical, technical);
         assert_ne!(technical, artifact);
         assert_ne!(botanical, artifact);
+    }
+
+    #[test]
+    fn biome_wash_is_subtle_and_biome_distinct() {
+        use crate::tui::room::RoomBiomeTag;
+        use ratatui::style::Color;
+        let base = crate::tui::style::tokenpet_palette().bg.rgb;
+        let Color::Rgb(br, bg_, bb) = base else {
+            panic!("bg is rgb")
+        };
+        let bot = biome_wash_color(RoomBiomeTag::Botanical);
+        let tech = biome_wash_color(RoomBiomeTag::Technical);
+        assert_ne!(bot, tech, "biomes must wash differently");
+        // Subtle: each channel within 24 of the base theme bg.
+        if let Color::Rgb(r, g, b) = bot {
+            assert!((r as i16 - br as i16).abs() <= 24);
+            assert!((g as i16 - bg_ as i16).abs() <= 24);
+            assert!((b as i16 - bb as i16).abs() <= 24);
+        } else {
+            panic!("wash must be rgb");
+        }
     }
 
     fn test_context() -> RenderContext {
