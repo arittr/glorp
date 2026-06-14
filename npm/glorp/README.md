@@ -14,6 +14,12 @@ glorp watch
 
 The npm package bundles the native binary for your platform plus the `ccusage` and `@ccusage/codex` helpers, so no extra setup is needed.
 
+### Native macOS companion
+
+On macOS, `glorp companion` opens the Dock-visible Glorp companion app. The
+companion is a quiet round pet window for a normal display; detailed usage
+diagnostics remain in `glorp watch`, `glorp status`, and `glorp doctor`.
+
 ## Privacy
 
 Glorp is local-only. No telemetry, no upload, no transcripts. It never stores prompt text, response text, tool-call payloads, or source files — only normalized numeric usage metadata.
