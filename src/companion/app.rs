@@ -22,7 +22,6 @@ use objc2_app_kit::{
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
-use ratatui::style::{Color as TuiColor, Style as TuiStyle};
 use ratatui::text::Line as RatatuiLine;
 
 use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model};
@@ -33,7 +32,6 @@ use crate::pet::render::{PaletteRoleName, StyledSegment};
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::storage::state::StateStore;
-use crate::tui::style::semantic_styles;
 use crate::tui::view_model::WatchViewModel;
 use crate::watch_live::{LiveWatchUpdate, WatchPresentationState};
 
@@ -501,28 +499,8 @@ fn role_for_pet_cell(spans: &[StyledSegment], row: usize, char_index: usize) -> 
 }
 
 fn pet_role_color(role: PaletteRoleName) -> Option<RoundColor> {
-    let styles = semantic_styles();
-    let style = match role {
-        PaletteRoleName::Body => styles.pet_body,
-        PaletteRoleName::Eye => styles.pet_eye,
-        PaletteRoleName::Mouth => styles.pet_mouth,
-        PaletteRoleName::Accent | PaletteRoleName::Particle => styles.pet_accent,
-        PaletteRoleName::Pattern => styles.pet_pattern,
-    };
-    style_color(style)
-}
-
-fn style_color(style: TuiStyle) -> Option<RoundColor> {
-    match style.fg? {
-        TuiColor::Rgb(r, g, b) => Some(rgb_color(r, g, b)),
-        TuiColor::White => Some(rgb_color(0xef, 0xeb, 0xe4)),
-        TuiColor::Gray => Some(rgb_color(0x97, 0x91, 0x8a)),
-        TuiColor::DarkGray => Some(rgb_color(0x50, 0x4c, 0x49)),
-        TuiColor::Yellow => Some(rgb_color(0xf0, 0xa6, 0x46)),
-        TuiColor::Green => Some(rgb_color(0xa8, 0xc9, 0x6a)),
-        TuiColor::Red => Some(rgb_color(0xe4, 0x68, 0x5d)),
-        _ => None,
-    }
+    let rgb = crate::pet::palette::role_color(role, &crate::pet::palette::default_theme_palette());
+    Some(rgb_color(rgb.r, rgb.g, rgb.b))
 }
 
 fn rgb_color(r: u8, g: u8, b: u8) -> RoundColor {
@@ -650,5 +628,16 @@ mod tests {
 
         assert_eq!(grid.cells[0].role, PaletteRoleName::Eye);
         assert_eq!(grid.cells[1].role, PaletteRoleName::Body);
+    }
+
+    #[test]
+    fn companion_pet_role_color_matches_resolved_palette() {
+        use crate::pet::palette::{default_theme_palette, role_color};
+        use crate::pet::render::PaletteRoleName::*;
+        let p = default_theme_palette();
+        for role in [Body, Eye, Mouth, Accent, Pattern, Particle] {
+            let rgb = role_color(role, &p);
+            assert_eq!(pet_role_color(role), Some(rgb_color(rgb.r, rgb.g, rgb.b)));
+        }
     }
 }
