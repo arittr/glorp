@@ -607,16 +607,37 @@ pub(crate) fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &
             RoomBiomeTag::Artifact => &['◇', '◆', '·', '°'],
             RoomBiomeTag::Cozy => &['·', '◇', '⌞', '⌟'],
         },
-        RoomDialectKey::Fuzz
-        | RoomDialectKey::Blob
-        | RoomDialectKey::Ghost
-        | RoomDialectKey::Mech => match tag {
-            RoomBiomeTag::Starter => &['.', '·'],
-            RoomBiomeTag::Botanical => &['"', '\'', '`', ','],
-            RoomBiomeTag::Technical => &[':', ';', '+', '='],
-            RoomBiomeTag::Celestial => &['*', '·', '˚', '.'],
-            RoomBiomeTag::Artifact => &['.', 'o', '◇', '°'],
-            RoomBiomeTag::Cozy => &['~', '·', '⌞', '⌟'],
+        RoomDialectKey::Fuzz => match tag {
+            RoomBiomeTag::Starter => &['·', '.'],
+            RoomBiomeTag::Botanical => &['\'', '`', ',', '·'],
+            RoomBiomeTag::Technical => &['·', ':', '\'', '.'],
+            RoomBiomeTag::Celestial => &['·', '\'', '˚', '.'],
+            RoomBiomeTag::Artifact => &['·', '.', '∘', '°'],
+            RoomBiomeTag::Cozy => &['·', '\'', ',', '~'],
+        },
+        RoomDialectKey::Blob => match tag {
+            RoomBiomeTag::Starter => &['.', '°'],
+            RoomBiomeTag::Botanical => &['°', 'o', '·', ','],
+            RoomBiomeTag::Technical => &['°', 'o', ':', '·'],
+            RoomBiomeTag::Celestial => &['°', 'o', '∘', '·'],
+            RoomBiomeTag::Artifact => &['o', '°', '∘', '·'],
+            RoomBiomeTag::Cozy => &['~', '°', 'o', '·'],
+        },
+        RoomDialectKey::Ghost => match tag {
+            RoomBiomeTag::Starter => &['\'', ' ', '·'],
+            RoomBiomeTag::Botanical => &['\'', '`', ' ', '·'],
+            RoomBiomeTag::Technical => &['\'', ':', ' ', '·'],
+            RoomBiomeTag::Celestial => &['˚', '\'', ' ', '·'],
+            RoomBiomeTag::Artifact => &['\'', '°', ' ', '·'],
+            RoomBiomeTag::Cozy => &['~', '\'', ' ', '·'],
+        },
+        RoomDialectKey::Mech => match tag {
+            RoomBiomeTag::Starter => &['·', '─'],
+            RoomBiomeTag::Botanical => &['┄', '·', ',', '─'],
+            RoomBiomeTag::Technical => &['─', '┄', '╌', '·'],
+            RoomBiomeTag::Celestial => &['·', '°', '─', '˚'],
+            RoomBiomeTag::Artifact => &['─', '·', '□', '°'],
+            RoomBiomeTag::Cozy => &['─', '·', '┄', '~'],
         },
     }
 }
@@ -1058,6 +1079,23 @@ mod tests {
         let syms = biome_symbols(RoomBiomeTag::Celestial, dialect);
         assert!(!syms.is_empty());
         let _style = biome_style(RoomBiomeTag::Celestial, ColorCapability::Truecolor);
+    }
+
+    #[test]
+    fn default_dialects_have_distinct_symbol_families() {
+        use crate::pet::generation::Species;
+        let tag = RoomBiomeTag::Botanical;
+        let fuzz = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Fuzz));
+        let blob = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Blob));
+        let ghost = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Ghost));
+        let mech = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Mech));
+        // No two of the four Default dialects share an identical symbol set.
+        let sets = [fuzz, blob, ghost, mech];
+        for i in 0..sets.len() {
+            for j in (i + 1)..sets.len() {
+                assert_ne!(sets[i], sets[j], "dialects {i} and {j} share symbols");
+            }
+        }
     }
 
     #[test]
