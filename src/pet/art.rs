@@ -447,15 +447,17 @@ const GHOST_TINY: &[Template; 3] = &[
 ];
 
 // ── Glitch ────────────────────────────────────────────────────────
+// S3 thread: a torn, misaligned frame (the broken silhouette is the point) —
+// matches the adult morphs' offset \u{258c}\u{2590} edges rather than a clean box.
 const GLITCH_PUP: &[Template] = &[[
     "           ",
-    "           ",
-    "   \u{2593}\u{2591}\u{2592}\u{2591}\u{2593}   ",
-    "  \u{2588}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2588}  ",
-    "  \u{2588} {eyes} \u{2588}  ",
-    "  \u{2588}\u{2593} {mouth} \u{2593}\u{2588}  ",
-    "  \u{2588} {pattern} \u{2588}  ",
-    "   \u{2591} {accent} \u{2591}   ",
+    "   \u{2593}\u{2591}\u{2592}\u{2591} \u{2591}  ",
+    "  \u{258c}\u{2580}\u{2580} \u{2580}\u{2590}   ",
+    "  \u{258c} {eyes}\u{2590}#  ",
+    "  :_{mouth} \u{258c}    ",
+    "  \u{258c}{pattern} \u{2590}   ",
+    "   \u{2580}\u{2584}{accent}\u{2584}\u{2580}   ",
+    "   \u{2591} _ \u{2591}   ",
 ]];
 
 const GLITCH_ADULT: &[Template] = &[
@@ -614,15 +616,17 @@ const CRYSTAL_TINY: &[Template; 3] = &[
 // Chunky industrial chassis using \u{2588}/\u{2592} for armor plating and
 // double-line \u{2550}/\u{2551} chrome. Elder morphs upgrade the chassis:
 // heavier wide frame, hovering drone, or bracketed titan plating.
+// S3 drone: an articulated chassis with bolt-shoulders (\u{2534}), a hip plate
+// (\u{252c}), and split legs (\u{2575}) — reads as a little robot, not a plain box.
 const MECH_PUP: &[Template] = &[[
-    "           ",
     "           ",
     "    _._    ",
     "   \u{250c}\u{2500}\u{2500}\u{2500}\u{2510}   ",
-    "  \u{250c}\u{2518}{eyes}\u{2514}\u{2510}  ",
-    "  \u{2502}\u{b7}\u{b7}{mouth}\u{b7}\u{b7}\u{2502}  ",
-    "  \u{2514}\u{2500}{pattern}\u{2500}\u{2518}  ",
-    "    \u{2500}{accent}\u{2500}    ",
+    "   \u{2502}{eyes}\u{2502}   ",
+    "  \u{250c}\u{2534}\u{2500}{mouth}\u{2500}\u{2534}\u{2510}  ",
+    "  \u{2502}\u{2591}{pattern}\u{2591}\u{2502}  ",
+    "  \u{2514}\u{252c}\u{2500}{accent}\u{2500}\u{252c}\u{2518}  ",
+    "   \u{2575}   \u{2575}   ",
 ]];
 
 const MECH_ADULT: &[Template] = &[
