@@ -38,7 +38,6 @@ const DEFAULT_WINDOW_SIZE: f64 = 360.0;
 const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
 const MIN_WINDOW_SIZE: f64 = 260.0;
-const GLYPH_OFFSET_STEP: f64 = 10.0; // horizontal spacing between cluster glyphs
 
 struct AppState {
     /// Retained to keep the window alive after makeKeyAndOrderFront.
@@ -257,7 +256,9 @@ fn draw_command(command: &RoundDrawCommand) {
             path.fill();
         },
         RoundDrawKind::PetGlyph => {
-            draw_glyph_cluster(command);
+            if let Some(label) = command.label {
+                draw_label(label, command.x, command.y, command.radius, &command.color);
+            }
         }
         RoundDrawKind::PropGlyph => {
             if let Some(label) = command.label {
@@ -290,26 +291,6 @@ fn draw_command(command: &RoundDrawCommand) {
             // RoomGlyph is intentionally a no-op in V1; background fill provides the room
             // texture. A future iteration may add sparse dialect glyphs here.
         }
-    }
-}
-
-fn draw_glyph_cluster(command: &RoundDrawCommand) {
-    let step = GLYPH_OFFSET_STEP as f32;
-    let glyphs: &[(f32, f32, char)] = &[
-        (-step / 2.0, step / 2.0, 'g'),
-        (step / 2.0, step / 2.0, 'l'),
-        (0.0, -step / 6.0, 'o'),
-        (-step / 3.0, -step * 5.0 / 6.0, 'r'),
-        (step / 3.0, -step * 5.0 / 6.0, 'p'),
-    ];
-    for (dx, dy, ch) in glyphs {
-        draw_label(
-            *ch,
-            command.x + *dx,
-            command.y + *dy,
-            command.radius * 0.55,
-            &command.color,
-        );
     }
 }
 

@@ -60,6 +60,7 @@ fn round_scene_excludes_watch_dashboard_and_private_fields() {
             species: Species::Fuzz,
             stage: Stage::S0,
             mood: Mood::Content,
+            art_lines: vm.pet_art.clone(),
             asleep: false,
             breath_offset_y: 0,
             facing: 1,

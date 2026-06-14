@@ -1,5 +1,6 @@
 use crate::round::layout::{RoundAnchorKind, RoundSceneLayout};
 use crate::round::model::RoundSceneModel;
+use ratatui::text::Line;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundDrawCommand {
@@ -45,15 +46,7 @@ pub fn build_draw_commands(
         label: None,
         color: BACKGROUND_COLOR,
     }];
-    commands.push(RoundDrawCommand {
-        kind: RoundDrawKind::PetGlyph,
-        x: layout.pet_anchor.x,
-        y: layout.pet_anchor.y,
-        radius: layout.pet_anchor.radius,
-        // V1 draws a fixed "glorp" glyph cluster centered on the pet anchor.
-        label: None,
-        color: PET_GLYPH_COLOR,
-    });
+    push_pet_art_commands(&mut commands, scene, layout);
     for anchor in &layout.prop_anchors {
         commands.push(RoundDrawCommand {
             kind: RoundDrawKind::PropGlyph,
@@ -88,6 +81,53 @@ pub fn build_draw_commands(
     commands
 }
 
+fn push_pet_art_commands(
+    commands: &mut Vec<RoundDrawCommand>,
+    scene: &RoundSceneModel,
+    layout: &RoundSceneLayout,
+) {
+    let (art_width, art_height) = pet_art_dimensions(&scene.pet.art_lines);
+    if art_width == 0.0 || art_height == 0.0 {
+        return;
+    }
+
+    let cell_size = ((layout.pet_anchor.radius * 2.0) / art_width.max(art_height)).max(1.0);
+    let glyph_radius = (cell_size * 0.48).clamp(5.0, 18.0);
+    let left = layout.pet_anchor.x - (art_width * cell_size) / 2.0;
+    let top = layout.pet_anchor.y + ((art_height - 1.0) * cell_size) / 2.0;
+
+    for (row, line) in scene.pet.art_lines.iter().enumerate() {
+        let mut col = 0.0;
+        for ch in line.chars() {
+            let width = char_display_width(ch) as f32;
+            if ch != ' ' {
+                commands.push(RoundDrawCommand {
+                    kind: RoundDrawKind::PetGlyph,
+                    x: left + (col + width / 2.0) * cell_size,
+                    y: top - row as f32 * cell_size,
+                    radius: glyph_radius,
+                    label: Some(ch),
+                    color: PET_GLYPH_COLOR,
+                });
+            }
+            col += width;
+        }
+    }
+}
+
+fn pet_art_dimensions(lines: &[String]) -> (f32, f32) {
+    let width = lines
+        .iter()
+        .map(|line| Line::from(line.as_str()).width())
+        .max()
+        .unwrap_or(0) as f32;
+    (width, lines.len() as f32)
+}
+
+fn char_display_width(ch: char) -> usize {
+    Line::from(ch.to_string()).width().max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +157,25 @@ mod tests {
         assert!(commands
             .iter()
             .any(|command| command.kind == RoundDrawKind::Halo));
+    }
+
+    #[test]
+    fn draw_commands_emit_pet_art_glyphs() {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_art = vec!["AB".to_string(), " C".to_string()];
+        let scene = derive_round_scene_model(&vm, datetime!(2026-06-13 18:00 UTC));
+        let layout = layout_round_scene(
+            &scene,
+            RoundAperture::new(360, 360),
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+
+        let labels: Vec<_> = build_draw_commands(&scene, &layout)
+            .into_iter()
+            .filter(|command| command.kind == RoundDrawKind::PetGlyph)
+            .filter_map(|command| command.label)
+            .collect();
+
+        assert_eq!(labels, vec!['A', 'B', 'C']);
     }
 }

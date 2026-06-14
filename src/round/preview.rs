@@ -21,7 +21,7 @@ pub fn render_round_preview_frame_from_vm(
     let layout = layout_round_scene(&scene, aperture, capabilities);
     let mut cells = blank_cells(width, height, aperture);
     paint_room(&mut cells, width, &scene, &layout, capabilities.truecolor);
-    paint_pet_art(&mut cells, width, vm, &layout, capabilities.truecolor);
+    paint_pet_art(&mut cells, width, &scene, &layout, capabilities.truecolor);
     paint_halo(&mut cells, width, &scene, &layout, capabilities.truecolor);
     mark_continuations(&mut cells, width);
     PreviewFrame {
@@ -82,12 +82,13 @@ fn paint_room(
 fn paint_pet_art(
     cells: &mut [PreviewCell],
     width: u16,
-    vm: &WatchViewModel,
+    scene: &RoundSceneModel,
     layout: &RoundSceneLayout,
     truecolor: bool,
 ) {
-    let art_width = vm
-        .pet_art
+    let art_width = scene
+        .pet
+        .art_lines
         .iter()
         .map(|line| {
             line.chars()
@@ -96,10 +97,10 @@ fn paint_pet_art(
         })
         .max()
         .unwrap_or(0) as i32;
-    let art_height = vm.pet_art.len() as i32;
+    let art_height = scene.pet.art_lines.len() as i32;
     let start_x = layout.pet_anchor.x.round() as i32 - art_width / 2;
     let start_y = layout.pet_anchor.y.round() as i32 - art_height / 2;
-    for (row, line) in vm.pet_art.iter().enumerate() {
+    for (row, line) in scene.pet.art_lines.iter().enumerate() {
         let mut col = 0i32;
         for ch in line.chars() {
             let display_width = Line::from(ch.to_string()).width() as i32;
