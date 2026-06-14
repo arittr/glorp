@@ -542,7 +542,7 @@ fn phase_density_scale(phase: DayPhase) -> f64 {
         DayPhase::Day => 1.0,
         DayPhase::Dawn => 0.7,
         DayPhase::Dusk => 0.85,
-        DayPhase::Night => 0.5,
+        DayPhase::Night => 0.35,
     }
 }
 
@@ -589,7 +589,7 @@ pub(crate) fn rects_contain(rects: &[Rect], col: u16, row: u16) -> bool {
     })
 }
 
-fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &'static [char] {
+pub(crate) fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &'static [char] {
     match dialect.key {
         RoomDialectKey::Glitch => match tag {
             RoomBiomeTag::Starter => &[':', '.', '_'],
@@ -607,23 +607,44 @@ fn biome_symbols(tag: RoomBiomeTag, dialect: RoomSpeciesDialect) -> &'static [ch
             RoomBiomeTag::Artifact => &['◇', '◆', '·', '°'],
             RoomBiomeTag::Cozy => &['·', '◇', '⌞', '⌟'],
         },
-        RoomDialectKey::Fuzz
-        | RoomDialectKey::Blob
-        | RoomDialectKey::Ghost
-        | RoomDialectKey::Mech => match tag {
-            RoomBiomeTag::Starter => &['.', '·'],
-            RoomBiomeTag::Botanical => &['"', '\'', '`', ','],
-            RoomBiomeTag::Technical => &[':', ';', '+', '='],
-            RoomBiomeTag::Celestial => &['*', '·', '˚', '.'],
-            RoomBiomeTag::Artifact => &['.', 'o', '◇', '°'],
-            RoomBiomeTag::Cozy => &['~', '·', '⌞', '⌟'],
+        RoomDialectKey::Fuzz => match tag {
+            RoomBiomeTag::Starter => &['·', '.'],
+            RoomBiomeTag::Botanical => &['\'', '`', ',', '·'],
+            RoomBiomeTag::Technical => &['·', ':', '\'', '.'],
+            RoomBiomeTag::Celestial => &['·', '\'', '˚', '.'],
+            RoomBiomeTag::Artifact => &['·', '.', '∘', '°'],
+            RoomBiomeTag::Cozy => &['·', '\'', ',', '~'],
+        },
+        RoomDialectKey::Blob => match tag {
+            RoomBiomeTag::Starter => &['.', '°'],
+            RoomBiomeTag::Botanical => &['°', 'o', '·', ','],
+            RoomBiomeTag::Technical => &['°', 'o', ':', '·'],
+            RoomBiomeTag::Celestial => &['°', 'o', '∘', '·'],
+            RoomBiomeTag::Artifact => &['o', '°', '∘', '·'],
+            RoomBiomeTag::Cozy => &['~', '°', 'o', '·'],
+        },
+        RoomDialectKey::Ghost => match tag {
+            RoomBiomeTag::Starter => &['\'', ' ', '·'],
+            RoomBiomeTag::Botanical => &['\'', '`', ' ', '·'],
+            RoomBiomeTag::Technical => &['\'', ':', ' ', '·'],
+            RoomBiomeTag::Celestial => &['˚', '\'', ' ', '·'],
+            RoomBiomeTag::Artifact => &['\'', '°', ' ', '·'],
+            RoomBiomeTag::Cozy => &['~', '\'', ' ', '·'],
+        },
+        RoomDialectKey::Mech => match tag {
+            RoomBiomeTag::Starter => &['·', '─'],
+            RoomBiomeTag::Botanical => &['┄', '·', ',', '─'],
+            RoomBiomeTag::Technical => &['─', '┄', '╌', '·'],
+            RoomBiomeTag::Celestial => &['·', '°', '─', '˚'],
+            RoomBiomeTag::Artifact => &['─', '·', '□', '°'],
+            RoomBiomeTag::Cozy => &['─', '·', '┄', '~'],
         },
     }
 }
 
 type ZoneAllocations = (Vec<(RoomZone, usize)>, Vec<(RoomZone, usize)>);
 
-fn dialect_zone_counts(dialect: RoomSpeciesDialect) -> Vec<(RoomZone, usize)> {
+pub(crate) fn dialect_zone_counts(dialect: RoomSpeciesDialect) -> Vec<(RoomZone, usize)> {
     match dialect.key {
         RoomDialectKey::Glitch => vec![(RoomZone::RightAnchor, 2), (RoomZone::Floor, 1)],
         RoomDialectKey::Crystal => vec![(RoomZone::UpperAir, 2), (RoomZone::Floor, 1)],
@@ -634,7 +655,7 @@ fn dialect_zone_counts(dialect: RoomSpeciesDialect) -> Vec<(RoomZone, usize)> {
     }
 }
 
-fn zone_counts_for_biome(biome: RoomBiome) -> ZoneAllocations {
+pub(crate) fn zone_counts_for_biome(biome: RoomBiome) -> ZoneAllocations {
     let primary = match biome.primary {
         RoomBiomeTag::Starter => vec![(RoomZone::Floor, 2), (RoomZone::UpperAir, 1)],
         RoomBiomeTag::Botanical => vec![
@@ -767,7 +788,7 @@ fn place_zone_glyphs<R: Rng>(
     glyphs
 }
 
-fn biome_style(tag: RoomBiomeTag, color_capability: ColorCapability) -> Style {
+pub(crate) fn biome_style(tag: RoomBiomeTag, color_capability: ColorCapability) -> Style {
     let base = Style::default();
     if matches!(color_capability, ColorCapability::Flat) {
         return base.fg(crate::tui::style::tokenpet_palette().faint.rgb);
@@ -1049,6 +1070,32 @@ mod tests {
             ..DayContext::default()
         };
         vm
+    }
+
+    #[test]
+    fn selection_atoms_are_crate_visible() {
+        // Compile-time proof these are reusable by other modules (e.g. the companion).
+        let dialect = RoomSpeciesDialect::for_species(crate::pet::generation::Species::Crystal);
+        let syms = biome_symbols(RoomBiomeTag::Celestial, dialect);
+        assert!(!syms.is_empty());
+        let _style = biome_style(RoomBiomeTag::Celestial, ColorCapability::Truecolor);
+    }
+
+    #[test]
+    fn default_dialects_have_distinct_symbol_families() {
+        use crate::pet::generation::Species;
+        let tag = RoomBiomeTag::Botanical;
+        let fuzz = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Fuzz));
+        let blob = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Blob));
+        let ghost = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Ghost));
+        let mech = biome_symbols(tag, RoomSpeciesDialect::for_species(Species::Mech));
+        // No two of the four Default dialects share an identical symbol set.
+        let sets = [fuzz, blob, ghost, mech];
+        for i in 0..sets.len() {
+            for j in (i + 1)..sets.len() {
+                assert_ne!(sets[i], sets[j], "dialects {i} and {j} share symbols");
+            }
+        }
     }
 
     #[test]
@@ -1517,6 +1564,13 @@ mod tests {
         assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dusk));
         assert!(phase_density_scale(DayPhase::Dawn) < phase_density_scale(DayPhase::Day));
         assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dawn));
+    }
+
+    #[test]
+    fn night_density_is_clearly_lower_than_day() {
+        // Night should drop to <= 40% of day density (was 50%, too subtle).
+        assert!(phase_density_scale(DayPhase::Night) <= 0.40);
+        assert!(phase_density_scale(DayPhase::Night) < phase_density_scale(DayPhase::Dusk));
     }
 
     #[test]

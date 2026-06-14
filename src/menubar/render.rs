@@ -55,31 +55,23 @@ pub fn render_stats_block(vm: &WatchViewModel) -> RenderedBlock {
     materialize(runs)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Rgb(u8, u8, u8);
 
 const COLOR_FG: Rgb = Rgb(0xef, 0xeb, 0xe4);
 const COLOR_DIM: Rgb = Rgb(0x97, 0x91, 0x8a);
-const COLOR_FAINT: Rgb = Rgb(0x50, 0x4c, 0x49);
 const COLOR_ACCENT: Rgb = Rgb(0xf0, 0xa6, 0x46);
-const COLOR_GOOD: Rgb = Rgb(0x82, 0xbc, 0x83);
 
-fn role_color(role: PaletteRoleName) -> Rgb {
-    match role {
-        PaletteRoleName::Body => COLOR_FG,
-        PaletteRoleName::Eye => COLOR_GOOD,
-        PaletteRoleName::Mouth => COLOR_DIM,
-        PaletteRoleName::Accent => COLOR_ACCENT,
-        PaletteRoleName::Pattern => COLOR_FAINT,
-        PaletteRoleName::Particle => COLOR_ACCENT,
-    }
+fn role_color_base(role: PaletteRoleName, palette: &crate::pet::palette::ResolvedPalette) -> Rgb {
+    let rgb = crate::pet::palette::role_color(role, palette);
+    Rgb(rgb.r, rgb.g, rgb.b)
 }
 
 /// Sleep dim factor for the popover pet (the menubar's only palette channel).
 const SLEEP_DIM: f32 = 0.7;
 
 fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
-    let base = role_color(role);
+    let base = role_color_base(role, &vm.pet_palette);
     let colored = if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
         base
     } else {
@@ -306,6 +298,17 @@ mod tests {
     use crate::tui::life::{PetLifeProfile, SourceAccent};
     use crate::tui::view_model::WatchViewModel;
 
+    #[test]
+    fn menubar_role_base_matches_resolved_palette() {
+        use crate::pet::palette::{default_theme_palette, role_color};
+        use crate::pet::render::PaletteRoleName::*;
+        let p = default_theme_palette();
+        for role in [Body, Eye, Mouth, Pattern] {
+            let rgb = role_color(role, &p);
+            assert_eq!(role_color_base(role, &p), Rgb(rgb.r, rgb.g, rgb.b));
+        }
+    }
+
     /// The animation tick uses `pet_block.char_len` as the upper bound of the
     /// `NSRange` it replaces in the text storage. If that count ever drifts
     /// from the actual UTF-16 length of the materialized attributed string,
@@ -377,7 +380,7 @@ mod tests {
         assert_eq!(runs[0].text, "E");
         assert_eq!(
             rgb_tuple(runs[0].color),
-            rgb_tuple(role_color(PaletteRoleName::Eye))
+            rgb_tuple(role_color_base(PaletteRoleName::Eye, &vm.pet_palette))
         );
         assert_eq!(runs[1].text, "A");
         assert_eq!(rgb_tuple(runs[1].color), (0x86, 0xd9, 0xef));
@@ -386,10 +389,10 @@ mod tests {
         assert_eq!(runs[3].text, "B");
         assert_eq!(
             rgb_tuple(runs[3].color),
-            rgb_tuple(role_color(PaletteRoleName::Body))
+            rgb_tuple(role_color_base(PaletteRoleName::Body, &vm.pet_palette))
         );
 
-        let base_accent = rgb_tuple(role_color(PaletteRoleName::Accent));
+        let base_accent = rgb_tuple(role_color_base(PaletteRoleName::Accent, &vm.pet_palette));
         let profile_accent = rgb_tuple(role_color_for_profile(PaletteRoleName::Accent, &vm));
         assert_ne!(
             profile_accent, base_accent,
@@ -438,7 +441,7 @@ mod tests {
         );
 
         let dimmed = rgb_tuple(role_color_for_profile(PaletteRoleName::Body, &vm));
-        let base = rgb_tuple(role_color(PaletteRoleName::Body));
+        let base = rgb_tuple(role_color_base(PaletteRoleName::Body, &vm.pet_palette));
         assert!(
             dimmed.0 < base.0 && dimmed.1 < base.1 && dimmed.2 < base.2,
             "asleep must dim every role: {dimmed:?} vs {base:?}"

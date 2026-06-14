@@ -286,6 +286,32 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Confirm stage labels and role colors line up with watch pet styling.".to_string(),
             ],
         ),
+        "pet-species-stage-flat" => (
+            PreviewScenarioKind::PetMatrix,
+            "Review every Slice 1 pet species across all seven growth stages on a flat (non-truecolor) terminal.",
+            BTreeMap::from([
+                ("mood".to_string(), Value::String("content".to_string())),
+                ("tick".to_string(), json!(0)),
+                ("species_count".to_string(), json!(6)),
+                ("stage_count".to_string(), json!(7)),
+                (
+                    "species".to_string(),
+                    json!(Species::all()
+                        .into_iter()
+                        .map(Species::as_str)
+                        .collect::<Vec<_>>()),
+                ),
+                ("stages".to_string(), json!(stage_inputs())),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ColorCapability::Flat).to_string()),
+                ),
+            ]),
+            vec![
+                "Check species silhouettes remain distinct across stages.".to_string(),
+                "Confirm the flat ANSI fallback still distinguishes species.".to_string(),
+            ],
+        ),
         "habitat-props-catalog" => (
             PreviewScenarioKind::HabitatProps,
             "Review every habitat prop in isolated tanks across three deterministic motion phases.",
@@ -1699,6 +1725,7 @@ mod tests {
                 "watch-habitat-full-phase-a",
                 "watch-habitat-full-phase-b",
                 "pet-species-stage",
+                "pet-species-stage-flat",
                 "round-normal",
                 "round-active-pulse",
                 "round-asleep-night",

@@ -3,7 +3,7 @@ use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -86,16 +86,44 @@ fn sky_palette_for(species: Species) -> &'static [char] {
     }
 }
 
-/// Per-species floor-glyph palette (each cell of the floor row is drawn from this).
-fn floor_palette_for(species: Species) -> &'static [char] {
-    match species {
-        Species::Fuzz => &['·', ',', '.', ' ', ' '],
-        Species::Blob => &['~', '.', ',', ' '],
-        Species::Ghost => &['\'', ' ', ' ', ' '],
-        Species::Glitch => &['_', '-', ':', ' ', '░'],
-        Species::Crystal => &['◇', '·', '.', ' ', ' '],
-        Species::Mech => &['─', '·', '.', ' '],
+/// Per-biome floor-glyph palette — the ground texture under the pet, keyed to
+/// the earned biome rather than species so the floor reads as a place.
+fn biome_floor_palette(tag: crate::tui::room::RoomBiomeTag) -> &'static [char] {
+    use crate::tui::room::RoomBiomeTag;
+    match tag {
+        RoomBiomeTag::Starter => &['·', '.', ' ', ' '],
+        RoomBiomeTag::Botanical => &[',', '·', '"', '.', ' '],
+        RoomBiomeTag::Technical => &['─', '┄', '·', '.', ' '],
+        RoomBiomeTag::Celestial => &['·', '˚', '.', ' ', ' '],
+        RoomBiomeTag::Artifact => &['◦', '·', '°', '.', ' '],
+        RoomBiomeTag::Cozy => &['·', '~', ',', '.', ' '],
     }
+}
+
+/// A whisper-quiet per-biome background wash: the theme bg nudged a few points
+/// toward the biome's hue, so the habitat reads as a place even in a screenshot
+/// without overpowering the pet/panels.
+fn biome_wash_color(tag: crate::tui::room::RoomBiomeTag) -> ratatui::style::Color {
+    use crate::tui::room::RoomBiomeTag;
+    use ratatui::style::Color;
+    let Color::Rgb(r, g, b) = crate::tui::style::tokenpet_palette().bg.rgb else {
+        return crate::tui::style::tokenpet_palette().bg.rgb;
+    };
+    // Small signed nudges per channel (kept within +-16 so it stays subtle).
+    let (dr, dg, db): (i16, i16, i16) = match tag {
+        RoomBiomeTag::Starter => (0, 0, 0),
+        RoomBiomeTag::Botanical => (-2, 8, -2),
+        RoomBiomeTag::Technical => (-2, 2, 12),
+        RoomBiomeTag::Celestial => (2, 2, 10),
+        RoomBiomeTag::Artifact => (10, 4, -4),
+        RoomBiomeTag::Cozy => (10, 2, -2),
+    };
+    let clamp = |v: i16| v.clamp(0, 255) as u8;
+    Color::Rgb(
+        clamp(r as i16 + dr),
+        clamp(g as i16 + dg),
+        clamp(b as i16 + db),
+    )
 }
 
 /// Sky-glyph count by stage tier.
@@ -261,6 +289,47 @@ fn dim_shift(base: Color, amount: f32) -> Color {
     )
 }
 
+/// Apply the day-phase "ambient light" to one style's fg: warmer at dusk,
+/// cooler and dimmer at night, neutral by day. Mirrors the sky's phase curve
+/// (warm_shift/dim_shift) so pet and room share one light.
+fn tint_style_for_phase(style: Style, phase: DayPhase, blend: f32) -> Style {
+    let Some(fg) = style.fg else { return style };
+    let Color::Rgb(..) = fg else { return style };
+    let tinted = match phase {
+        DayPhase::Day => fg,
+        DayPhase::Dawn => warm_shift(fg, 0.10 * blend),
+        DayPhase::Dusk => warm_shift(fg, 0.18 * blend),
+        DayPhase::Night => dim_shift(cool_shift(fg, 0.18 * blend), 0.28 * blend),
+    };
+    style.fg(tinted)
+}
+
+/// Nudge a color toward cool (more blue, less red) for night ambience.
+fn cool_shift(color: Color, amount: f32) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    let amt = amount.clamp(0.0, 1.0);
+    let r2 = (f32::from(r) * (1.0 - 0.5 * amt)).round() as u8;
+    let b2 = (f32::from(b) + (255.0 - f32::from(b)) * 0.25 * amt).round() as u8;
+    Color::Rgb(r2, g, b2)
+}
+
+/// Apply the phase tint to all five pet roles of a SemanticStyles.
+fn tint_pet_styles_for_phase(
+    styles: &SemanticStyles,
+    phase: DayPhase,
+    blend: f32,
+) -> SemanticStyles {
+    let mut s = styles.clone();
+    s.pet_body = tint_style_for_phase(s.pet_body, phase, blend);
+    s.pet_eye = tint_style_for_phase(s.pet_eye, phase, blend);
+    s.pet_mouth = tint_style_for_phase(s.pet_mouth, phase, blend);
+    s.pet_accent = tint_style_for_phase(s.pet_accent, phase, blend);
+    s.pet_pattern = tint_style_for_phase(s.pet_pattern, phase, blend);
+    s
+}
+
 /// Per-phase sky glyph family, with `date_seed` picking among authored
 /// variants per (species, phase) — the day's character is visual texture
 /// only, never personality content (locked rule). Night stays a sparse
@@ -307,7 +376,7 @@ fn phase_count_scale(phase: DayPhase) -> f64 {
         DayPhase::Day => 1.0,
         DayPhase::Dawn => 0.7,
         DayPhase::Dusk => 0.8,
-        DayPhase::Night => 0.6,
+        DayPhase::Night => 0.45,
     }
 }
 
@@ -364,7 +433,7 @@ fn sky_color_for_phase(
         DayPhase::Day => base,
         DayPhase::Dawn => warm_shift(base, 0.25),
         DayPhase::Dusk => warm_shift(base, 0.40),
-        DayPhase::Night => dim_shift(base, 0.40),
+        DayPhase::Night => dim_shift(base, 0.58),
     };
     climate_tint(
         season_hue_drift(lerp_color(base, target, blend), season),
@@ -457,7 +526,7 @@ fn overlaps_any(g: &AmbientGlyph, exclusions: &[Rect]) -> bool {
 /// within a minute and drifts across minutes. Any glyph that would land inside
 /// an exclusion rect is rejected; the caller is responsible for inflating
 /// exclusions to enforce a desired margin. A floor row fills the bottom of the
-/// habitat with species-appropriate ground cover.
+/// habitat with the Starter-biome ground cover.
 pub fn ambient_glyphs_for(
     species: Species,
     stage: Stage,
@@ -469,6 +538,7 @@ pub fn ambient_glyphs_for(
     ambient_glyphs_for_phase(
         species,
         stage,
+        crate::tui::room::RoomBiomeTag::Starter,
         habitat,
         exclusions,
         now,
@@ -490,6 +560,7 @@ pub fn ambient_glyphs_for(
 pub fn ambient_glyphs_for_phase(
     species: Species,
     stage: Stage,
+    biome: crate::tui::room::RoomBiomeTag,
     habitat: Rect,
     exclusions: &[Rect],
     now: time::OffsetDateTime,
@@ -521,7 +592,7 @@ pub fn ambient_glyphs_for_phase(
     let mut rng = Pcg32::seed_from_u64(seed);
 
     let sky = sky_palette_for_phase(species, phase, date_seed);
-    let floor = floor_palette_for(species);
+    let floor = biome_floor_palette(biome);
 
     let p = crate::tui::style::tokenpet_palette();
     let base = p.dim.rgb;
@@ -529,7 +600,7 @@ pub fn ambient_glyphs_for_phase(
     // Floor gradually dims into Night; Dawn/Dusk keep the neutral base so the
     // pet remains readable against warm grain.
     let floor_color = if phase == DayPhase::Night {
-        dim_shift(base, 0.40 * phase_blend)
+        dim_shift(base, 0.55 * phase_blend)
     } else {
         base
     };
@@ -886,6 +957,20 @@ impl LegacyPanel for PetPanel {
         // drawn before the existing ambient/mote/activity passes so they set
         // the room's silhouette without replacing pet or speech cells.
         let room_profile = crate::tui::room::derive_room_life_profile(vm, now);
+
+        // Base layer: a subtle per-biome background wash over the ENTIRE habitat,
+        // including under the pet and speech bubble. Set BEFORE every glyph pass
+        // (room/ambient/pet all set fg only), so this bg stays seamless underneath
+        // — washing around the pet's exclusion rect would carve a visible hole.
+        {
+            let wash = biome_wash_color(room_profile.biome.primary);
+            for wy in scene.habitat.y..scene.habitat.y.saturating_add(scene.habitat.height) {
+                for wx in scene.habitat.x..scene.habitat.x.saturating_add(scene.habitat.width) {
+                    buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
+                }
+            }
+        }
+
         let room_glyphs = crate::tui::room::room_glyphs_for(
             &room_profile,
             scene.habitat,
@@ -909,6 +994,7 @@ impl LegacyPanel for PetPanel {
         let glyphs = ambient_glyphs_for_phase(
             species,
             stage,
+            room_profile.biome.primary,
             scene.habitat,
             &ambient_exclusions,
             now,
@@ -1149,7 +1235,12 @@ fn render_pet_inside(
     color_capability: ColorCapability,
     pet_performance: crate::tui::room::PetPerformance,
 ) {
-    let base = semantic_styles();
+    let base = seed_pet_palette(&semantic_styles(), &vm.pet_palette);
+    let phase_blend = {
+        let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
+        (since / (crate::tui::day::PHASE_BLEND_MINUTES as f32 * 60.0)).clamp(0.0, 1.0)
+    };
+    let base = tint_pet_styles_for_phase(&base, vm.day_context.day_phase, phase_blend);
     let energy_m = low_energy_lightness_multiplier(vm.energy);
     let perf_m = performance_lightness_multiplier(pet_performance);
     let droop = darken_pet_styles(&base, energy_m * perf_m);
@@ -1430,11 +1521,13 @@ fn build_pet_lines(
                 spans.push(Span::raw(" ".repeat(left_pad)));
             }
             let eye_override = cursor_eye;
+            let palette = palette_from_styles(styles);
             spans.extend(build_owned_spans_for_line(
                 &art_line,
                 line_index,
                 &art_spans,
                 styles,
+                &palette,
                 eye_override,
                 twinkle_col,
             ));
@@ -1500,6 +1593,7 @@ fn build_owned_spans_for_line(
     line_index: usize,
     pet_spans: &[crate::pet::render::StyledSegment],
     styles: &SemanticStyles,
+    palette: &crate::pet::palette::ResolvedPalette,
     eye_override: Option<char>,
     twinkle_col: Option<(usize, char)>,
 ) -> Vec<Span<'static>> {
@@ -1537,7 +1631,7 @@ fn build_owned_spans_for_line(
             let body_text = apply_twinkle_in_range(body_text, cursor, start, twinkle_col);
             spans.push(Span::styled(body_text, styles.pet_body));
         }
-        let style = pet_role_style(segment.role, styles);
+        let style = pet_role_style(segment.role, palette);
         let value = if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
             (eye_override, segment.role)
         {
@@ -1586,8 +1680,10 @@ pub(crate) fn pet_role_spans_for_line<'a>(
     line_index: usize,
     pet_spans: &'a [crate::pet::render::StyledSegment],
     styles: &'a SemanticStyles,
+    palette: &'a crate::pet::palette::ResolvedPalette,
     eye_override: Option<char>,
 ) -> Vec<Span<'a>> {
+    let _ = styles;
     let total_chars = art_line.chars().count();
     if total_chars == 0 {
         return Vec::new();
@@ -1600,7 +1696,10 @@ pub(crate) fn pet_role_spans_for_line<'a>(
     segments.sort_by_key(|s| s.start);
 
     if segments.is_empty() {
-        return vec![Span::styled(art_line, styles.pet_body)];
+        return vec![Span::styled(
+            art_line,
+            pet_role_style(PaletteRoleName::Body, palette),
+        )];
     }
 
     let char_indices = char_byte_indices(art_line);
@@ -1615,9 +1714,12 @@ pub(crate) fn pet_role_spans_for_line<'a>(
         }
         if start > cursor {
             let body = char_slice(art_line, &char_indices, cursor, start);
-            spans.push(Span::styled(body, styles.pet_body));
+            spans.push(Span::styled(
+                body,
+                pet_role_style(PaletteRoleName::Body, palette),
+            ));
         }
-        let style = pet_role_style(segment.role, styles);
+        let style = pet_role_style(segment.role, palette);
         if let (Some(glyph), crate::pet::render::PaletteRoleName::Eye) =
             (eye_override, segment.role)
         {
@@ -1637,7 +1739,10 @@ pub(crate) fn pet_role_spans_for_line<'a>(
 
     if cursor < total_chars {
         let tail = char_slice(art_line, &char_indices, cursor, total_chars);
-        spans.push(Span::styled(tail, styles.pet_body));
+        spans.push(Span::styled(
+            tail,
+            pet_role_style(PaletteRoleName::Body, palette),
+        ));
     }
 
     spans
@@ -1655,14 +1760,55 @@ fn char_slice<'a>(line: &'a str, indices: &[usize], start_char: usize, end_char:
     &line[start..end]
 }
 
-pub(crate) fn pet_role_style(role: PaletteRoleName, styles: &SemanticStyles) -> Style {
-    match role {
-        PaletteRoleName::Body => styles.pet_body,
-        PaletteRoleName::Eye => styles.pet_eye,
-        PaletteRoleName::Mouth => styles.pet_mouth,
-        PaletteRoleName::Accent => styles.pet_accent,
-        PaletteRoleName::Pattern => styles.pet_pattern,
-        PaletteRoleName::Particle => styles.pet_accent,
+pub(crate) fn pet_role_style(
+    role: PaletteRoleName,
+    palette: &crate::pet::palette::ResolvedPalette,
+) -> Style {
+    let rgb = crate::pet::palette::role_color(role, palette);
+    let mut style = Style::default().fg(Color::Rgb(rgb.r, rgb.g, rgb.b));
+    if matches!(role, PaletteRoleName::Eye) {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
+}
+
+/// Overlays a per-pet `ResolvedPalette` onto the pet roles of `base`, keeping
+/// every role's modifiers (e.g. the bold eye). The live dim/lift/shimmer chain
+/// then mutates these seeded colors, so role-tagged glyphs and body-gap fills
+/// both track per-pet color and brightness coherently.
+fn seed_pet_palette(
+    base: &SemanticStyles,
+    palette: &crate::pet::palette::ResolvedPalette,
+) -> SemanticStyles {
+    let with_rgb =
+        |style: Style, rgb: crate::pet::palette::Rgb| style.fg(Color::Rgb(rgb.r, rgb.g, rgb.b));
+    let mut s = base.clone();
+    s.pet_body = with_rgb(s.pet_body, palette.body);
+    s.pet_eye = with_rgb(s.pet_eye, palette.eye);
+    s.pet_mouth = with_rgb(s.pet_mouth, palette.mouth);
+    s.pet_accent = with_rgb(s.pet_accent, palette.accent);
+    s.pet_pattern = with_rgb(s.pet_pattern, palette.pattern);
+    s
+}
+
+/// Snapshot the per-role foreground colors of the live `SemanticStyles` into a
+/// `ResolvedPalette`. The watch passes the dim/lift/shimmer-mutated `live_styles`
+/// here so the role-colored glyphs track exactly the same lightness changes as
+/// the body-gap fills (`styles.pet_body`), keeping the pet internally coherent.
+/// Non-RGB foregrounds (none occur on the pet roles today) fall back to the
+/// default theme color for that role.
+fn palette_from_styles(styles: &SemanticStyles) -> crate::pet::palette::ResolvedPalette {
+    let default = crate::pet::palette::default_theme_palette();
+    let rgb = |style: Style, fallback: crate::pet::palette::Rgb| match style.fg {
+        Some(Color::Rgb(r, g, b)) => crate::pet::palette::Rgb::new(r, g, b),
+        _ => fallback,
+    };
+    crate::pet::palette::ResolvedPalette {
+        body: rgb(styles.pet_body, default.body),
+        eye: rgb(styles.pet_eye, default.eye),
+        mouth: rgb(styles.pet_mouth, default.mouth),
+        accent: rgb(styles.pet_accent, default.accent),
+        pattern: rgb(styles.pet_pattern, default.pattern),
     }
 }
 
@@ -1673,6 +1819,38 @@ mod tests {
     use ratatui::Terminal;
     use time::macros::datetime;
     use ColorCapability;
+
+    #[test]
+    fn floor_palette_is_biome_keyed() {
+        use crate::tui::room::RoomBiomeTag;
+        let botanical = biome_floor_palette(RoomBiomeTag::Botanical);
+        let technical = biome_floor_palette(RoomBiomeTag::Technical);
+        let artifact = biome_floor_palette(RoomBiomeTag::Artifact);
+        assert_ne!(botanical, technical);
+        assert_ne!(technical, artifact);
+        assert_ne!(botanical, artifact);
+    }
+
+    #[test]
+    fn biome_wash_is_subtle_and_biome_distinct() {
+        use crate::tui::room::RoomBiomeTag;
+        use ratatui::style::Color;
+        let base = crate::tui::style::tokenpet_palette().bg.rgb;
+        let Color::Rgb(br, bg_, bb) = base else {
+            panic!("bg is rgb")
+        };
+        let bot = biome_wash_color(RoomBiomeTag::Botanical);
+        let tech = biome_wash_color(RoomBiomeTag::Technical);
+        assert_ne!(bot, tech, "biomes must wash differently");
+        // Subtle: each channel within 24 of the base theme bg.
+        if let Color::Rgb(r, g, b) = bot {
+            assert!((r as i16 - br as i16).abs() <= 24);
+            assert!((g as i16 - bg_ as i16).abs() <= 24);
+            assert!((b as i16 - bb as i16).abs() <= 24);
+        } else {
+            panic!("wash must be rgb");
+        }
+    }
 
     fn test_context() -> RenderContext {
         use crate::tui::render_context::WatchClock;
@@ -1720,11 +1898,90 @@ mod tests {
     }
 
     #[test]
-    fn pet_role_style_maps_eye_role_to_eye_style() {
-        let styles = semantic_styles();
+    fn pet_role_style_uses_resolved_palette_with_bold_eye() {
+        use crate::pet::palette::{default_theme_palette, Rgb};
+        use crate::pet::render::PaletteRoleName;
+        let p = default_theme_palette();
+        let eye = pet_role_style(PaletteRoleName::Eye, &p);
+        assert_eq!(eye.fg, Some(ratatui::style::Color::Rgb(0x82, 0xbc, 0x83)));
+        assert!(eye.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        let body = pet_role_style(PaletteRoleName::Body, &p);
+        assert_eq!(body.fg, Some(ratatui::style::Color::Rgb(0xef, 0xeb, 0xe4)));
+        assert!(!body.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        let _ = Rgb::new(0, 0, 0); // keep import used
+    }
+
+    /// Foreground colors of every non-blank glyph span in the rendered pet
+    /// lines, paired with whether the span carries the eye signature (BOLD +
+    /// green-dominant base). Used to assert that role glyphs honor the live
+    /// (dimmed/lifted) styles, not a frozen default palette.
+    fn glyph_fg_colors(lines: &[Line<'static>]) -> Vec<Color> {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.content.chars().any(|c| c != ' '))
+            .filter_map(|span| span.style.fg)
+            .collect()
+    }
+
+    #[test]
+    fn build_pet_lines_role_glyphs_dim_with_live_styles() {
+        // Sleep/low-energy darkens the whole pet via darken_pet_styles. The
+        // role-colored glyphs (eyes/mouth/accent/pattern/body) must dim with
+        // the body-gap fills, not stay frozen at the default theme color.
+        let vm = vm_with_real_pet();
+        let base = semantic_styles();
+        let dimmed = darken_pet_styles(&base, 0.6);
+
+        let bright = build_pet_lines(&vm, 13, &base, None, None);
+        let dark = build_pet_lines(&vm, 13, &dimmed, None, None);
+
+        let bright_fgs = glyph_fg_colors(&bright);
+        let dark_fgs = glyph_fg_colors(&dark);
         assert_eq!(
-            pet_role_style(PaletteRoleName::Eye, &styles),
-            styles.pet_eye
+            bright_fgs.len(),
+            dark_fgs.len(),
+            "dimming must not change which cells render"
+        );
+        assert!(!bright_fgs.is_empty(), "pet should render glyph spans");
+        assert_ne!(
+            bright_fgs, dark_fgs,
+            "role glyphs must dim with the live styles, not stay at the default theme"
+        );
+        for (bright_fg, dark_fg) in bright_fgs.iter().zip(dark_fgs.iter()) {
+            if let (Color::Rgb(br, bg, bb), Color::Rgb(dr, dg, db)) = (bright_fg, dark_fg) {
+                assert!(
+                    dr <= br && dg <= bg && db <= bb,
+                    "each glyph channel must be no brighter when dimmed: \
+                     {bright_fg:?} -> {dark_fg:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_pet_lines_role_glyphs_match_unmutated_default_theme() {
+        // With unmutated styles the watch pet must remain byte-identical to the
+        // fixed default theme: this is the byte-identity guarantee of Task 5.
+        let vm = vm_with_real_pet();
+        let lines = build_pet_lines(&vm, 13, &semantic_styles(), None, None);
+        let default_palette = crate::pet::palette::default_theme_palette();
+        let expected_eye = {
+            let rgb = crate::pet::palette::role_color(PaletteRoleName::Eye, &default_palette);
+            Color::Rgb(rgb.r, rgb.g, rgb.b)
+        };
+        let expected_body = {
+            let rgb = crate::pet::palette::role_color(PaletteRoleName::Body, &default_palette);
+            Color::Rgb(rgb.r, rgb.g, rgb.b)
+        };
+        let fgs = glyph_fg_colors(&lines);
+        assert!(
+            fgs.contains(&expected_eye),
+            "expected the green eye signature {expected_eye:?} in {fgs:?}"
+        );
+        assert!(
+            fgs.contains(&expected_body),
+            "expected the cream body color {expected_body:?} in {fgs:?}"
         );
     }
 
@@ -2206,6 +2463,7 @@ mod tests {
         let glitch = ambient_glyphs_for_phase(
             Species::Glitch,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2219,6 +2477,7 @@ mod tests {
         let crystal = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2517,6 +2776,7 @@ mod tests {
         let day = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2530,6 +2790,7 @@ mod tests {
         let night = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2569,6 +2830,7 @@ mod tests {
         let glyphs = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -3009,5 +3271,27 @@ mod tests {
         assert!(tired < rested, "tired sits below rested");
         assert!(asleep < tired, "asleep is the dimmest");
         assert!(asleep > 0.5, "never fully dark");
+    }
+
+    #[test]
+    fn phase_tint_cools_pet_at_night() {
+        use crate::tui::day::DayPhase;
+        use ratatui::style::{Color, Style};
+        let day = Style::default().fg(Color::Rgb(0xc0, 0xa0, 0x60));
+        let night = tint_style_for_phase(day, DayPhase::Night, 1.0);
+        let (Color::Rgb(_, _, db), Color::Rgb(_, _, nb)) = (day.fg.unwrap(), night.fg.unwrap())
+        else {
+            panic!("rgb");
+        };
+        // Night dims overall; assert it changed and is not brighter than day on red.
+        assert_ne!(day.fg, night.fg, "night must retint");
+        let Color::Rgb(dr, _, _) = day.fg.unwrap() else {
+            panic!()
+        };
+        let Color::Rgb(nr, _, _) = night.fg.unwrap() else {
+            panic!()
+        };
+        assert!(nr <= dr, "night should not warm/brighten red channel");
+        let _ = (db, nb);
     }
 }

@@ -225,6 +225,8 @@ pub(crate) fn build_watch_view_model_at(
         .map(|diagnostic| diagnostic.message.clone())
         .collect::<Vec<_>>();
 
+    let pet_palette = crate::pet::palette::resolve_pet_palette(species, &generated.traits);
+
     Ok(WatchViewModel {
         pet_art: rendered.lines,
         pet_spans: rendered.spans,
@@ -234,6 +236,7 @@ pub(crate) fn build_watch_view_model_at(
             stage: state.stage,
             mood,
         },
+        pet_palette,
         habitat: build_habitat_view(state),
         life_profile,
         activity_identity,
@@ -549,6 +552,8 @@ fn apply_dev_pet_species_override(
     now: OffsetDateTime,
 ) -> Result<()> {
     vm.pet_render.generated_species = species;
+    let generated = generate_pet(&vm.pet_render.seed).with_species(species);
+    vm.pet_palette = crate::pet::palette::resolve_pet_palette(species, &generated.traits);
     vm.species = species.as_str().to_string();
     vm.stage = stage_label(species, vm.pet_render.stage).to_string();
     vm.progress.stage_label = stage_label(species, vm.pet_render.stage).to_string();
@@ -957,6 +962,11 @@ mod tests {
         assert_eq!(vm.pet_render.generated_species, Species::Ghost);
         assert_eq!(vm.species, Species::Ghost.as_str());
         assert_eq!(vm.stage, stage_label(Species::Ghost, Stage::S4));
+        let ghost_pet = generate_pet(&state.pet.seed).with_species(Species::Ghost);
+        assert_eq!(
+            vm.pet_palette,
+            crate::pet::palette::resolve_pet_palette(Species::Ghost, &ghost_pet.traits)
+        );
         assert_eq!(vm.today_effective_tokens, 4_200.0);
         assert_eq!(vm.source_breakdown.len(), 1);
         assert_eq!(vm.source_breakdown[0].name, "codex");

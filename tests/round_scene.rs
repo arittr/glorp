@@ -65,6 +65,7 @@ fn round_scene_excludes_watch_dashboard_and_private_fields() {
             asleep: false,
             breath_offset_y: 0,
             facing: 1,
+            palette: vm.pet_palette,
         },
         "private data leaked into RoundSceneModel"
     );

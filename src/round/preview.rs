@@ -1,9 +1,9 @@
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
+use crate::pet::render::{PaletteRoleName, StyledSegment};
 use crate::round::layout::{
     layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
 };
 use crate::round::model::{derive_round_scene_model, RoundHelperHealth, RoundSceneModel};
-use crate::tui::room::RoomDialectKey;
 use crate::tui::view_model::WatchViewModel;
 use ratatui::text::Line;
 
@@ -72,7 +72,7 @@ fn paint_room(
             // Sparse grid: texture glyphs appear on roughly 1 in 5 cells so the
             // room reads as ambient grain rather than solid fill.
             if (x + y) % 5 == 0 {
-                let (symbol, fg) = room_symbol(scene, truecolor);
+                let (symbol, fg) = room_symbol_at(scene, x, y, truecolor);
                 set_cell(cells, width, x as i32, y as i32, symbol, Some(fg));
             }
         }
@@ -102,21 +102,43 @@ fn paint_pet_art(
     let start_y = layout.pet_anchor.y.round() as i32 - art_height / 2;
     for (row, line) in scene.pet.art_lines.iter().enumerate() {
         let mut col = 0i32;
-        for ch in line.chars() {
+        for (char_index, ch) in line.chars().enumerate() {
             let display_width = Line::from(ch.to_string()).width() as i32;
             if ch != ' ' {
-                let fg = if truecolor { "#efebe4" } else { "white" };
+                let role = role_for_pet_cell(&scene.pet.art_spans, row, char_index);
+                let rgb = crate::pet::palette::role_color(role, &scene.pet.palette);
+                let fg = if truecolor {
+                    format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)
+                } else {
+                    flat_role_name(role).to_string()
+                };
                 set_cell(
                     cells,
                     width,
                     start_x + col,
                     start_y + row as i32,
                     ch.to_string(),
-                    Some(fg.to_string()),
+                    Some(fg),
                 );
             }
             col += display_width;
         }
+    }
+}
+
+fn role_for_pet_cell(spans: &[StyledSegment], row: usize, char_index: usize) -> PaletteRoleName {
+    spans
+        .iter()
+        .find(|span| span.line == row && char_index >= span.start && char_index < span.end)
+        .map(|span| span.role)
+        .unwrap_or(PaletteRoleName::Body)
+}
+
+fn flat_role_name(role: PaletteRoleName) -> &'static str {
+    match role {
+        PaletteRoleName::Eye => "green",
+        PaletteRoleName::Accent | PaletteRoleName::Particle => "yellow",
+        _ => "white",
     }
 }
 
@@ -146,32 +168,24 @@ fn paint_halo(
     }
 }
 
-fn room_symbol(scene: &RoundSceneModel, truecolor: bool) -> (String, String) {
-    // Dialect-to-color mapping: Glitch reads as cool circuitry, Crystal as warm
-    // prisms, and the default biome as neutral stone. Flat mode uses named ANSI
-    // colors so the preview still renders without truecolor support.
-    let fg = palette_color(scene.room.dialect, truecolor);
-    match scene.room.dialect {
-        RoomDialectKey::Glitch => ("#".to_string(), fg),
-        RoomDialectKey::Crystal => ("^".to_string(), fg),
-        _ => (".".to_string(), fg),
-    }
-}
-
-fn palette_color(dialect: RoomDialectKey, truecolor: bool) -> String {
-    if truecolor {
-        match dialect {
-            RoomDialectKey::Glitch => "#86d9ef".to_string(),
-            RoomDialectKey::Crystal => "#b39dff".to_string(),
-            _ => "#808080".to_string(),
-        }
-    } else {
-        match dialect {
-            RoomDialectKey::Glitch => "cyan".to_string(),
-            RoomDialectKey::Crystal => "magenta".to_string(),
-            _ => "gray".to_string(),
-        }
-    }
+fn room_symbol_at(scene: &RoundSceneModel, x: u16, y: u16, truecolor: bool) -> (String, String) {
+    use crate::tui::room::{biome_style, biome_symbols, RoomSpeciesDialect};
+    let dialect = RoomSpeciesDialect::for_species(scene.pet.species);
+    let symbols = biome_symbols(scene.room.biome.primary, dialect);
+    let glyph = symbols
+        .get((x as usize + y as usize) % symbols.len().max(1))
+        .copied()
+        .unwrap_or('·');
+    let style = biome_style(
+        scene.room.biome.primary,
+        crate::tui::style::ColorCapability::Truecolor,
+    );
+    let fg = match (truecolor, style.fg) {
+        (true, Some(ratatui::style::Color::Rgb(r, g, b))) => format!("#{r:02x}{g:02x}{b:02x}"),
+        (true, _) => "#808080".to_string(),
+        (false, _) => "gray".to_string(),
+    };
+    (glyph.to_string(), fg)
 }
 
 fn set_cell(
@@ -194,4 +208,86 @@ fn set_cell(
     cells[idx].display_width = Line::from(symbol.clone()).width();
     cells[idx].symbol = symbol;
     cells[idx].fg = fg;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_pet_colors_eye_and_body_differently() {
+        use crate::pet::render::PaletteRoleName;
+        use crate::tui::view_model::WatchViewModel;
+        use time::macros::datetime;
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        // Give the pet a known eye span so the assertion exercises span-aware
+        // coloring rather than the room's ambient texture color.
+        vm.pet_art = vec!["o o".to_string()];
+        vm.pet_spans = vec![
+            StyledSegment {
+                line: 0,
+                start: 0,
+                end: 1,
+                role: PaletteRoleName::Eye,
+            },
+            StyledSegment {
+                line: 0,
+                start: 2,
+                end: 3,
+                role: PaletteRoleName::Eye,
+            },
+        ];
+        let frame = render_round_preview_frame_from_vm(
+            "round-color",
+            "Round Color",
+            &vm,
+            datetime!(2026-06-13 18:00 UTC),
+            52,
+            52,
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let fgs: std::collections::HashSet<_> = frame
+            .cells
+            .iter()
+            .filter(|c| !c.symbol.trim().is_empty())
+            .filter_map(|c| c.fg.clone())
+            .collect();
+        // More than one distinct pet/room fg means spans are honored (not flat cream).
+        assert!(fgs.len() > 1, "expected multiple fg colors, got {fgs:?}");
+        // The eye role resolves to green; a flat-cream pet would never produce it.
+        let eye = crate::pet::palette::role_color(
+            PaletteRoleName::Eye,
+            &crate::pet::palette::default_theme_palette(),
+        );
+        let eye_fg = format!("#{:02x}{:02x}{:02x}", eye.r, eye.g, eye.b);
+        assert!(
+            fgs.contains(&eye_fg),
+            "expected an eye-colored pet cell ({eye_fg}), got {fgs:?}"
+        );
+    }
+
+    #[test]
+    fn preview_room_varies_by_biome() {
+        use crate::tui::view_model::WatchViewModel;
+        use time::macros::datetime;
+        // Two fixtures with different earned biomes should produce different
+        // room glyph sets in the preview frame.
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let frame = render_round_preview_frame_from_vm(
+            "round-biome",
+            "Round Biome",
+            &vm,
+            datetime!(2026-06-14 12:00 UTC),
+            52,
+            52,
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let room_syms: std::collections::HashSet<_> = frame
+            .cells
+            .iter()
+            .filter(|c| !c.outside_aperture && !c.symbol.trim().is_empty())
+            .map(|c| c.symbol.clone())
+            .collect();
+        assert!(!room_syms.is_empty());
+    }
 }

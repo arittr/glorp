@@ -11,6 +11,7 @@ pub struct WatchViewModel {
     pub pet_art: Vec<String>,
     pub pet_spans: Vec<crate::pet::render::StyledSegment>,
     pub pet_render: PetRenderModel,
+    pub pet_palette: crate::pet::palette::ResolvedPalette,
     pub habitat: HabitatView,
     pub life_profile: PetLifeProfile,
     pub activity_identity: ActivityIdentityProfile,
@@ -173,6 +174,7 @@ impl WatchViewModel {
                 stage: Stage::S0,
                 mood: Mood::Content,
             },
+            pet_palette: crate::pet::palette::default_theme_palette(),
             habitat: HabitatView {
                 earned_props: Vec::new(),
             },

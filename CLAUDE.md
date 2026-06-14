@@ -107,7 +107,7 @@ read or write real user pet state.
 
 ### Pet rendering (`src/pet/`)
 
-- `art.rs` holds the 11×8 grid templates per species × stage × morph, ported character-for-character from `docs/tokenpet/project/pet.jsx`. Slot markers `{eyes}`, `{pattern}`, `{mouth}`, `{accent}` get substituted at render time.
+- `art.rs` holds the 11×8 grid templates per species × stage × morph and is the source of truth for them (the filled-block art has diverged from `docs/tokenpet/project/pet.jsx` and is no longer ported back). Slot markers `{eyes}`, `{pattern}`, `{mouth}`, `{accent}` get substituted at render time. Templates must stay exactly 11 display columns × 8 lines (enforced by the invariant tests in `art.rs`).
 - `render.rs` wraps the 11×8 art in a 13×10 particle frame, applies role-tagged `StyledSegment` spans (which `tui/layout.rs::role_spans_for_line` turns into colored ratatui spans), applies glitch corruption for the glitch species, and frames S6 with sage sparkle top/bottom.
 
 The **renderer is content-agnostic** — adding species or stage variation is template work in `art.rs`, not renderer changes.
@@ -125,7 +125,7 @@ Stale diagnostics (>1h old) are filtered out at view-model build time so old tra
 - Effective tokens combine `uncached_input + output + cache_creation + cache_read_weight * cache_read`. `cache_read_weight` defaults to 0.03 and is configurable in `config.toml`.
 - Cost (USD) is display-only metadata — never affects food, XP, mood, or stage.
 - Templates in `art.rs` must stay at exactly 11 characters wide per line. The renderer assumes this for particle frame wrapping.
-- The 4 brainstorm/spec directories under `docs/` describe the design intent. `docs/tokenpet/project/pet.jsx` is the source of truth for templates, stage labels (`SPECIES_ARCS`), animation profiles (`SPECIES_ANIM`), and mood eye/mouth overrides — port from there, don't invent.
+- The 4 brainstorm/spec directories under `docs/` describe the design intent. `src/pet/art.rs` is the source of truth for pet templates and silhouettes (the filled-block art has diverged from `pet.jsx` and is not ported back). `docs/tokenpet/project/pet.jsx` remains the reference only for stage labels (`SPECIES_ARCS`), animation profiles (`SPECIES_ANIM`), and mood eye/mouth overrides (`EYES_BY_MOOD`) — port those from there, don't invent.
 
 ## Test isolation
 
