@@ -1,4 +1,5 @@
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
+use crate::pet::render::{PaletteRoleName, StyledSegment};
 use crate::round::layout::{
     layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
 };
@@ -102,21 +103,46 @@ fn paint_pet_art(
     let start_y = layout.pet_anchor.y.round() as i32 - art_height / 2;
     for (row, line) in scene.pet.art_lines.iter().enumerate() {
         let mut col = 0i32;
-        for ch in line.chars() {
+        for (char_index, ch) in line.chars().enumerate() {
             let display_width = Line::from(ch.to_string()).width() as i32;
             if ch != ' ' {
-                let fg = if truecolor { "#efebe4" } else { "white" };
+                let role = role_for_pet_cell(&scene.pet.art_spans, row, char_index);
+                let rgb = crate::pet::palette::role_color(
+                    role,
+                    &crate::pet::palette::default_theme_palette(),
+                );
+                let fg = if truecolor {
+                    format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)
+                } else {
+                    flat_role_name(role).to_string()
+                };
                 set_cell(
                     cells,
                     width,
                     start_x + col,
                     start_y + row as i32,
                     ch.to_string(),
-                    Some(fg.to_string()),
+                    Some(fg),
                 );
             }
             col += display_width;
         }
+    }
+}
+
+fn role_for_pet_cell(spans: &[StyledSegment], row: usize, char_index: usize) -> PaletteRoleName {
+    spans
+        .iter()
+        .find(|span| span.line == row && char_index >= span.start && char_index < span.end)
+        .map(|span| span.role)
+        .unwrap_or(PaletteRoleName::Body)
+}
+
+fn flat_role_name(role: PaletteRoleName) -> &'static str {
+    match role {
+        PaletteRoleName::Eye => "green",
+        PaletteRoleName::Accent | PaletteRoleName::Particle => "yellow",
+        _ => "white",
     }
 }
 
@@ -194,4 +220,61 @@ fn set_cell(
     cells[idx].display_width = Line::from(symbol.clone()).width();
     cells[idx].symbol = symbol;
     cells[idx].fg = fg;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_pet_colors_eye_and_body_differently() {
+        use crate::pet::render::PaletteRoleName;
+        use crate::tui::view_model::WatchViewModel;
+        use time::macros::datetime;
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        // Give the pet a known eye span so the assertion exercises span-aware
+        // coloring rather than the room's ambient texture color.
+        vm.pet_art = vec!["o o".to_string()];
+        vm.pet_spans = vec![
+            StyledSegment {
+                line: 0,
+                start: 0,
+                end: 1,
+                role: PaletteRoleName::Eye,
+            },
+            StyledSegment {
+                line: 0,
+                start: 2,
+                end: 3,
+                role: PaletteRoleName::Eye,
+            },
+        ];
+        let frame = render_round_preview_frame_from_vm(
+            "round-color",
+            "Round Color",
+            &vm,
+            datetime!(2026-06-13 18:00 UTC),
+            52,
+            52,
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let fgs: std::collections::HashSet<_> = frame
+            .cells
+            .iter()
+            .filter(|c| !c.symbol.trim().is_empty())
+            .filter_map(|c| c.fg.clone())
+            .collect();
+        // More than one distinct pet/room fg means spans are honored (not flat cream).
+        assert!(fgs.len() > 1, "expected multiple fg colors, got {fgs:?}");
+        // The eye role resolves to green; a flat-cream pet would never produce it.
+        let eye = crate::pet::palette::role_color(
+            PaletteRoleName::Eye,
+            &crate::pet::palette::default_theme_palette(),
+        );
+        let eye_fg = format!("#{:02x}{:02x}{:02x}", eye.r, eye.g, eye.b);
+        assert!(
+            fgs.contains(&eye_fg),
+            "expected an eye-colored pet cell ({eye_fg}), got {fgs:?}"
+        );
+    }
 }
