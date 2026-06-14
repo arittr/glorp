@@ -172,11 +172,11 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
     let role = |lightness: f32, chroma: f32, hue: f32| oklch_to_rgb(lightness, chroma * sat, hue);
 
     ResolvedPalette {
-        body: role(0.72, 0.16, h),
-        eye: oklch_to_rgb(0.82, 0.18, EYE_HUE),
-        mouth: role(0.66, 0.13, h + 30.0),
-        accent: role(0.74, 0.21, h + 90.0),
-        pattern: role(0.60, 0.12, h + 150.0),
+        body: role(0.74, 0.10, h),
+        eye: oklch_to_rgb(0.82, 0.19, EYE_HUE),
+        mouth: role(0.70, 0.16, h + 35.0),
+        accent: role(0.76, 0.24, h + 120.0),
+        pattern: role(0.64, 0.20, h + 210.0),
     }
 }
 
