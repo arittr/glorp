@@ -243,69 +243,71 @@ const FUZZ_TINY: &[Template; 3] = &[
 ];
 
 // ── Blob ──────────────────────────────────────────────────────────
-// Chunky filled gelatinous bodies using ( ) rounded walls + \u{2591}/\u{2592}
-// density for jelly translucency. Variants differ in cap silhouette, body
-// width, and trailing bubble pattern.
+// Gooey gelatin: ( ) rounded walls (Blob owns "round"), gravity shading
+// (light \u{2591} cap -> heavy \u{2592}\u{2593} belly) with a \u{b0} specular
+// highlight, a lopsided cap, and uneven trailing drips so it reads as melting
+// rather than a tidy capsule.
 const BLOB_PUP: &[Template] = &[[
     "           ",
-    "   .---.   ",
-    "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
-    " (\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}) ",
+    "   .--.    ",
+    "  (\u{2591}\u{2591}\u{2591}\u{b0})   ",
     " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
-    " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
-    "  \\\u{2591}{pattern}\u{2591}/  ",
-    "   '_{accent}_'   ",
+    " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
+    " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
+    "  (\u{2592}\u{2593}{accent}\u{2593}\u{2592})  ",
+    "   \u{b0}  .    ",
 ]];
 
 const BLOB_ADULT: &[Template] = &[
-    // Morph 0 — classic round chunky blob with trailing dribbles.
+    // Morph 0 — classic gooey melt: lopsided cap, \u{b0} specular, heavy belly,
+    // uneven drips.
+    [
+        "   .--.    ",
+        "  (\u{2591}\u{2591}\u{2591}\u{b0})   ",
+        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
+        " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
+        " (\u{2592}\u{2593}\u{2593}{accent}\u{2593}\u{2593}\u{2592}) ",
+        "  \\\u{2592}\u{2593}\u{2593}\u{2592}/   ",
+        "   \u{b0}. \u{b0}    ",
+    ],
+    // Morph 1 — wobble blob shedding bubbles up off the top.
+    [
+        "  \u{b0} . \u{b0}    ",
+        "  (\u{2591}\u{2591}\u{2591}\u{2591})   ",
+        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
+        " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
+        " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
+        " (\u{2592}\u{2593}\u{2591}{accent}\u{2591}\u{2593}\u{2592}) ",
+        "  \\\u{2592}\u{2593}\u{2592}/    ",
+        "   \u{b0} \u{b0}     ",
+    ],
+    // Morph 2 — mega-blob: full-width body, gravity-shaded, sits low.
     [
         "   .---.   ",
         "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
-        " (\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}) ",
-        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2592}{pattern}\u{2592}\u{2591}) ",
-        "  \\\u{2591}\u{2592}{accent}\u{2592}\u{2591}/  ",
-        "   \u{b0} o \u{b0}   ",
-    ],
-    // Morph 1 — wobble blob with bubbles drifting up off the top.
-    [
-        "  \u{b0} . o .  ",
-        "  .-._.-.  ",
-        " (\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2592}{eyes}\u{2592}\u{2591}) ",
-        " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2591}{pattern}\u{2591}\u{2591}) ",
-        "  \\\u{2591}\u{2591}{accent}\u{2591}\u{2591}/  ",
-        "   \u{b0} \u{b0} \u{b0}   ",
-    ],
-    // Morph 2 — mega-blob: full-width body extends to the edges, wide cap.
-    [
-        "           ",
-        "  .\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}.  ",
         " /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\ ",
         "(\u{2591}\u{2592}\u{2591}{eyes}\u{2591}\u{2592}\u{2591})",
         "(\u{2591}\u{2592}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2592}\u{2591})",
-        "(\u{2591}\u{2592}\u{2591}{pattern}\u{2591}\u{2592}\u{2591})",
-        "  \\\u{2591}\u{2591}{accent}\u{2591}\u{2591}/  ",
-        " ' . \u{b0} . ' ",
+        "(\u{2592}\u{2593}\u{2591}{pattern}\u{2591}\u{2593}\u{2592})",
+        "(\u{2592}\u{2593}\u{2593}\u{2591}{accent}\u{2591}\u{2593}\u{2593}\u{2592})",
+        " \\\u{2592}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2592}/ ",
     ],
-    // Morph 3 — twin blob: main body with two tiny co-blobs budding at base.
+    // Morph 3 — twin blob: main body with two co-blobs budding at the base.
     [
-        "   .---.   ",
-        "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
-        " (\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}) ",
+        "   .--.    ",
+        "  (\u{2591}\u{2591}\u{2591})    ",
         " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2592}{pattern}\u{2592}\u{2591}) ",
-        "  \\\u{2591}\u{2591}{accent}\u{2591}\u{2591}/  ",
+        " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
+        " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
+        " (\u{2592}\u{2593}\u{2591}{accent}\u{2591}\u{2593}\u{2592}) ",
+        "  \\\u{2592}\u{2593}\u{2592}/    ",
         " (o) \u{b0} (o) ",
     ],
 ];
 
 const BLOB_TINY: &[Template; 3] = &[
-    // S0 droplet — single drop forming.
+    // S0 droplet — a single drop forming, with a tiny specular glint.
     [
         "           ",
         "           ",
@@ -313,30 +315,30 @@ const BLOB_TINY: &[Template; 3] = &[
         "           ",
         "           ",
         "     .     ",
-        "    o.o    ",
-        "    '.'    ",
+        "    \u{2591}\u{2591}\u{2591}    ",
+        "    \u{b0}.\u{b0}    ",
     ],
-    // S1 blip — small chunky droplet.
+    // S1 blip — small gooey droplet.
     [
         "           ",
         "           ",
         "           ",
         "           ",
         "    .-.    ",
-        "   /\u{2591}\u{2591}\u{2591}\\   ",
-        "   (\u{2591}\u{2592}\u{2591})   ",
-        "    '_'    ",
+        "   (\u{2591}\u{2591}\u{2591})   ",
+        "   (\u{2592}\u{2592}\u{2592})   ",
+        "    \u{b0} .    ",
     ],
-    // S2 globule — small round blob with eyes and mouth.
+    // S2 globule — small melting blob with eyes and mouth.
     [
         "           ",
         "           ",
         "           ",
-        "   .---.   ",
-        "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
+        "   .--.    ",
+        "  (\u{2591}\u{2591}\u{2591}\u{b0})   ",
         "  (\u{2591}{eyes}\u{2591})  ",
-        "  (\u{2591}\u{2591}{mouth}\u{2591}\u{2591})  ",
-        "   '___'   ",
+        "  (\u{2592}\u{2592}{mouth}\u{2592}\u{2592})  ",
+        "   \u{b0}. .    ",
     ],
 ];
 
