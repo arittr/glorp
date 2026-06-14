@@ -958,16 +958,15 @@ impl LegacyPanel for PetPanel {
         // the room's silhouette without replacing pet or speech cells.
         let room_profile = crate::tui::room::derive_room_life_profile(vm, now);
 
-        // Base layer: a subtle per-biome background wash over the habitat, so the
-        // room reads as a place. Set BEFORE room/ambient glyphs (which set fg only,
-        // leaving this bg intact underneath).
+        // Base layer: a subtle per-biome background wash over the ENTIRE habitat,
+        // including under the pet and speech bubble. Set BEFORE every glyph pass
+        // (room/ambient/pet all set fg only), so this bg stays seamless underneath
+        // — washing around the pet's exclusion rect would carve a visible hole.
         {
             let wash = biome_wash_color(room_profile.biome.primary);
             for wy in scene.habitat.y..scene.habitat.y.saturating_add(scene.habitat.height) {
                 for wx in scene.habitat.x..scene.habitat.x.saturating_add(scene.habitat.width) {
-                    if !rects_contain(&ambient_exclusions, wx, wy) {
-                        buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
-                    }
+                    buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
                 }
             }
         }
