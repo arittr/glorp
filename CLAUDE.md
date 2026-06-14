@@ -125,7 +125,7 @@ Stale diagnostics (>1h old) are filtered out at view-model build time so old tra
 - Effective tokens combine `uncached_input + output + cache_creation + cache_read_weight * cache_read`. `cache_read_weight` defaults to 0.03 and is configurable in `config.toml`.
 - Cost (USD) is display-only metadata — never affects food, XP, mood, or stage.
 - Templates in `art.rs` must stay at exactly 11 characters wide per line. The renderer assumes this for particle frame wrapping.
-- The 4 brainstorm/spec directories under `docs/` describe the design intent. `docs/tokenpet/project/pet.jsx` is the source of truth for templates, stage labels (`SPECIES_ARCS`), animation profiles (`SPECIES_ANIM`), and mood eye/mouth overrides — port from there, don't invent.
+- The 4 brainstorm/spec directories under `docs/` describe the design intent. `src/pet/art.rs` is the source of truth for pet templates and silhouettes (the filled-block art has diverged from `pet.jsx` and is not ported back). `docs/tokenpet/project/pet.jsx` remains the reference only for stage labels (`SPECIES_ARCS`), animation profiles (`SPECIES_ANIM`), and mood eye/mouth overrides (`EYES_BY_MOOD`) — port those from there, don't invent.
 
 ## Test isolation
 
