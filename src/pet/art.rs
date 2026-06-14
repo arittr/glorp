@@ -341,105 +341,106 @@ const BLOB_TINY: &[Template; 3] = &[
 ];
 
 // ── Ghost ─────────────────────────────────────────────────────────
-// Chunky filled bodies (\u{2588} outline + \u{2592}/\u{2591} two-tone interior
-// shimmer) with dangling tentacles below. Each morph varies head silhouette
-// AND tentacle style+count, so pets at the same stage read as distinct
-// specters rather than recolored siblings.
+// Billowing edgeless sheet: rounded dome crown, soft two-tone \u{2592}/\u{2591}
+// body that fades at the edges (no rigid side walls), and a scalloped \_/ hem.
+// Each morph varies the crown (dome / hood / tattered / dense) and the hem
+// (bumps / wavy tail / ragged / tangled tendrils) so same-stage pets read as
+// distinct specters rather than recolored siblings.
 const GHOST_PUP: &[Template] = &[[
     "           ",
-    "   _____   ",
-    "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
-    " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
-    " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
-    "  \\\u{2588}{pattern}\u{2588}/  ",
-    "   \\\u{2588}{accent}\u{2588}/   ",
-    "    |~|    ",
+    "   .---.   ",
+    "  \u{2591}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2591}  ",
+    "  \u{2591}\u{2592}{eyes}\u{2592}\u{2591}  ",
+    "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
+    "  \u{2591}\u{2592}{pattern}\u{2592}\u{2591}  ",
+    " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
+    "  \\_/\\_/\\  ",
 ]];
 
 const GHOST_ADULT: &[Template] = &[
-    // Morph 0 — classic S4 ghost: rounded cap, full chunky body, four
-    // short tentacle stubs with sharp drip tips.
+    // Morph 0 — classic ghost: dome crown, body billows wider toward the
+    // base, three rounded \_/ hem bumps.
     [
-        "   _____   ",
-        "  /\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\\  ",
-        " |\u{2588}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2588}| ",
-        " |\u{2588}\u{2591}{eyes}\u{2591}\u{2588}| ",
-        " |\u{2588}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2588}| ",
-        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
-        "  | |{accent}| |  ",
-        "  ' ' ' '  ",
+        "   .---.   ",
+        "  \u{2591}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2591}  ",
+        "  \u{2591}\u{2592}{eyes}\u{2592}\u{2591}  ",
+        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
+        " \u{2591}\u{2592}\u{2592}{pattern}\u{2592}\u{2592}\u{2591} ",
+        " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
+        " \u{2591}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2591} ",
+        " \\_/\\_/\\_/ ",
     ],
-    // Morph 1 — hooded wraith: peaked _-^-_ hood, compact body, three
-    // curled tendrils meeting in a wavy drip.
+    // Morph 1 — hooded wraith: peaked crown, narrow tapering body, a single
+    // wavy tail trailing off.
     [
-        "   _-^-_   ",
-        "  /\u{2588}\u{2592}\u{2588}\u{2592}\u{2588}\\  ",
-        " |\u{2588}\u{2592}{eyes}\u{2592}\u{2588}| ",
-        " |\u{2588}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2588}| ",
-        " |\u{2588}\u{2592}{pattern}\u{2592}\u{2588}| ",
-        "   | | |   ",
-        "   ) {accent} (   ",
-        "   ' ~ '   ",
+        "    .^.    ",
+        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
+        "   \u{2591}{eyes}\u{2591}   ",
+        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
+        "  \u{2591}\u{2592}{pattern}\u{2592}\u{2591}  ",
+        "  \u{2591}\u{2592}\u{2592}{accent}\u{2592}\u{2592}\u{2591}  ",
+        "   \\_/\\_   ",
+        "    ~ ~    ",
     ],
-    // Morph 2 — tattered specter: jagged ~v~v~ torn top, lighter dappled
-    // body, four wavy tendrils staggered for asymmetric drip.
+    // Morph 2 — tattered specter: frayed ~^~ crown, dappled body, ragged
+    // uneven hem.
     [
-        "   ~v~v~   ",
-        "  \u{2591}\u{2588}\u{2591}\u{2588}\u{2591}\u{2588}\u{2591}  ",
-        " |\u{2591}\u{2592}{eyes}\u{2592}\u{2591}| ",
-        " |\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}| ",
-        " |\u{2591}\u{2592}{pattern}\u{2592}\u{2591}| ",
-        "  \u{2307} \u{2307}{accent}\u{2307} \u{2307}  ",
-        "   \u{2307}  \u{2307}    ",
-        "  \u{2307}  \u{2307}  \u{2307}  ",
+        "   ~^~^~   ",
+        "  \u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}  ",
+        "  \u{2591}\u{2592}{eyes}\u{2592}\u{2591}  ",
+        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
+        " \u{2591}\u{2592}\u{2591}{pattern}\u{2591}\u{2592}\u{2591} ",
+        " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
+        "  \u{2592}\u{2591} \u{2591} \u{2591}\u{2592}  ",
+        "  ~  ~  ~  ",
     ],
-    // Morph 3 — chaotic phantom: torn jagged shroud, dense ▓░ dappled body,
-    // V-pattern tendrils that tangle as they fall.
+    // Morph 3 — dense revenant: dark \u{2593}-cored body, billowing wide, with
+    // long tangled tendrils.
     [
-        "   \\v/v\\   ",
-        "  /\u{2593}\u{2591}\u{2593}\u{2591}\u{2593}\\  ",
-        " |\u{2593}\u{2591}{eyes}\u{2591}\u{2593}| ",
-        " |\u{2593}\u{2591}\u{2592}{mouth}\u{2592}\u{2591}\u{2593}| ",
-        " |\u{2593}\u{2591}{pattern}\u{2591}\u{2593}| ",
-        "  / \\{accent}/ \\  ",
-        "   \\ v /   ",
-        "    \\/     ",
+        "   .---.   ",
+        "  \u{2591}\u{2592}\u{2593}\u{2593}\u{2593}\u{2592}\u{2591}  ",
+        "  \u{2591}\u{2593}{eyes}\u{2593}\u{2591}  ",
+        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
+        " \u{2591}\u{2592}\u{2593}{pattern}\u{2593}\u{2592}\u{2591} ",
+        " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
+        "  \u{2591} \u{2592} \u{2591} \u{2592}  ",
+        "  \\ \\ / /  ",
     ],
 ];
 
 const GHOST_TINY: &[Template; 3] = &[
-    // S0 whisper — just a wispy mark drifting.
+    // S0 whisper — a wispy mark drifting.
     [
         "           ",
         "           ",
         "           ",
         "           ",
         "           ",
-        "     '     ",
-        "    . .    ",
-        "     ~     ",
-    ],
-    // S1 wisp — small forming shape, two-tone shimmer.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    ___    ",
-        "   /\u{2588}\u{2588}\u{2588}\\   ",
-        "   \\\u{2591}\u{2592}\u{2591}/   ",
+        "    .-.    ",
+        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
         "    ~ ~    ",
     ],
-    // S2 shade — small chunky ghost with eyes and mouth.
+    // S1 wisp — small forming sheet, two-tone shimmer.
     [
         "           ",
         "           ",
         "           ",
-        "    ___    ",
-        "   /\u{2588}\u{2588}\u{2588}\\   ",
-        "  |\u{2588}{eyes}\u{2588}|  ",
-        "  |\u{2588}\u{2591}{mouth}\u{2591}\u{2588}|  ",
-        "   \\\u{2588}\u{2592}\u{2588}/   ",
+        "           ",
+        "    .-.    ",
+        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
+        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
+        "   \\_/\\_   ",
+    ],
+    // S2 shade — small ghost sheet with eyes and mouth.
+    [
+        "           ",
+        "           ",
+        "    .-.    ",
+        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
+        "   \u{2591}{eyes}\u{2591}   ",
+        "   \u{2591}\u{2591}{mouth}\u{2591}\u{2591}   ",
+        "   \\_/\\_   ",
+        "           ",
     ],
 ];
 
