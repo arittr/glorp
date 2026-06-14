@@ -146,30 +146,30 @@ fn tiny_template(species: Species, index: usize) -> &'static Template {
 
 // ── Fuzz ──────────────────────────────────────────────────────────
 // Chunky filled cat-creature: /\_/\ ears, two-tone ░▒ fur shading, and a tail
-// that grows at elder stages. Morph 0 is the tail-less S4 form; morphs 1-3
-// (S5+ via elder_morph_index) each sport a distinct tail.
+// present from the pup (S3) onward. Morph 0 wears a small resting curl; morphs
+// 1-3 (S5+ via elder_morph_index) each sport a distinct, showier tail.
 const FUZZ_PUP: &[Template] = &[[
-    "           ",
     "           ",
     "   /\\_/\\   ",
     "  (\u{2591}{eyes}\u{2591})  ",
     "   ='{mouth}'=   ",
-    " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\ ",
-    "  \\\u{2591}{accent}\u{2591}/    ",
-    "    d b    ",
+    " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
+    "  \\\u{2591}{accent}\u{2591}/ ~  ",
+    "    d b ~  ",
+    "           ",
 ]];
 
 const FUZZ_ADULT: &[Template] = &[
-    // Morph 0 — S4 fuzz: chunky cat-body with no tail yet.
+    // Morph 0 — S4 fuzz: chunky cat-body with a small resting tail curl.
     [
-        "           ",
         "   /\\_/\\   ",
         "  (\u{2591}{eyes}\u{2591})  ",
         "   ='{mouth}'=   ",
         " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\ ",
         " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}) ",
-        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/  ",
-        "   d   b   ",
+        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/\\ ",
+        "   d   b ) ",
+        "           ",
     ],
     // Morph 1 — short curved tail extending behind to the right.
     [
