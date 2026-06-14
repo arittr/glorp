@@ -289,6 +289,47 @@ fn dim_shift(base: Color, amount: f32) -> Color {
     )
 }
 
+/// Apply the day-phase "ambient light" to one style's fg: warmer at dusk,
+/// cooler and dimmer at night, neutral by day. Mirrors the sky's phase curve
+/// (warm_shift/dim_shift) so pet and room share one light.
+fn tint_style_for_phase(style: Style, phase: DayPhase, blend: f32) -> Style {
+    let Some(fg) = style.fg else { return style };
+    let Color::Rgb(..) = fg else { return style };
+    let tinted = match phase {
+        DayPhase::Day => fg,
+        DayPhase::Dawn => warm_shift(fg, 0.10 * blend),
+        DayPhase::Dusk => warm_shift(fg, 0.18 * blend),
+        DayPhase::Night => dim_shift(cool_shift(fg, 0.18 * blend), 0.28 * blend),
+    };
+    style.fg(tinted)
+}
+
+/// Nudge a color toward cool (more blue, less red) for night ambience.
+fn cool_shift(color: Color, amount: f32) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    let amt = amount.clamp(0.0, 1.0);
+    let r2 = (f32::from(r) * (1.0 - 0.5 * amt)).round() as u8;
+    let b2 = (f32::from(b) + (255.0 - f32::from(b)) * 0.25 * amt).round() as u8;
+    Color::Rgb(r2, g, b2)
+}
+
+/// Apply the phase tint to all five pet roles of a SemanticStyles.
+fn tint_pet_styles_for_phase(
+    styles: &SemanticStyles,
+    phase: DayPhase,
+    blend: f32,
+) -> SemanticStyles {
+    let mut s = styles.clone();
+    s.pet_body = tint_style_for_phase(s.pet_body, phase, blend);
+    s.pet_eye = tint_style_for_phase(s.pet_eye, phase, blend);
+    s.pet_mouth = tint_style_for_phase(s.pet_mouth, phase, blend);
+    s.pet_accent = tint_style_for_phase(s.pet_accent, phase, blend);
+    s.pet_pattern = tint_style_for_phase(s.pet_pattern, phase, blend);
+    s
+}
+
 /// Per-phase sky glyph family, with `date_seed` picking among authored
 /// variants per (species, phase) — the day's character is visual texture
 /// only, never personality content (locked rule). Night stays a sparse
@@ -1196,6 +1237,11 @@ fn render_pet_inside(
     pet_performance: crate::tui::room::PetPerformance,
 ) {
     let base = seed_pet_palette(&semantic_styles(), &vm.pet_palette);
+    let phase_blend = {
+        let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
+        (since / (crate::tui::day::PHASE_BLEND_MINUTES as f32 * 60.0)).clamp(0.0, 1.0)
+    };
+    let base = tint_pet_styles_for_phase(&base, vm.day_context.day_phase, phase_blend);
     let energy_m = low_energy_lightness_multiplier(vm.energy);
     let perf_m = performance_lightness_multiplier(pet_performance);
     let droop = darken_pet_styles(&base, energy_m * perf_m);
@@ -3226,5 +3272,27 @@ mod tests {
         assert!(tired < rested, "tired sits below rested");
         assert!(asleep < tired, "asleep is the dimmest");
         assert!(asleep > 0.5, "never fully dark");
+    }
+
+    #[test]
+    fn phase_tint_cools_pet_at_night() {
+        use crate::tui::day::DayPhase;
+        use ratatui::style::{Color, Style};
+        let day = Style::default().fg(Color::Rgb(0xc0, 0xa0, 0x60));
+        let night = tint_style_for_phase(day, DayPhase::Night, 1.0);
+        let (Color::Rgb(_, _, db), Color::Rgb(_, _, nb)) = (day.fg.unwrap(), night.fg.unwrap())
+        else {
+            panic!("rgb");
+        };
+        // Night dims overall; assert it changed and is not brighter than day on red.
+        assert_ne!(day.fg, night.fg, "night must retint");
+        let Color::Rgb(dr, _, _) = day.fg.unwrap() else {
+            panic!()
+        };
+        let Color::Rgb(nr, _, _) = night.fg.unwrap() else {
+            panic!()
+        };
+        assert!(nr <= dr, "night should not warm/brighten red channel");
+        let _ = (db, nb);
     }
 }
