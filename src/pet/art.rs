@@ -755,6 +755,55 @@ mod tests {
     }
 
     #[test]
+    fn every_template_line_is_eleven_display_columns() {
+        use unicode_width::UnicodeWidthStr;
+        // Terminal columns, not code points. Policy: art uses only glyphs that
+        // are width-1 under the ambiguous=narrow assumption (unicode-width's
+        // default `width()`); this catches any always-width-2 (CJK/emoji) glyph
+        // that `.chars().count()` would miss.
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                for morph_index in 0..6 {
+                    for morph_pup_index in 0..6 {
+                        let lines = template_lines(species, stage, morph_index, morph_pup_index);
+                        for (row, line) in lines.iter().enumerate() {
+                            let rendered = substitute_slots(line);
+                            let columns = UnicodeWidthStr::width(rendered.as_str());
+                            assert_eq!(
+                                columns, 11,
+                                "display width != 11 for species={species:?} stage={stage:?} \
+                                 morph={morph_index} pup_morph={morph_pup_index} row={row}: \
+                                 {rendered:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_template_is_eight_lines() {
+        // frame_with_particles overlays exactly 8 art rows (render.rs `.take(8)`);
+        // a template with a different line count would silently clip or shift.
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                for morph_index in 0..6 {
+                    for morph_pup_index in 0..6 {
+                        let lines = template_lines(species, stage, morph_index, morph_pup_index);
+                        assert_eq!(
+                            lines.len(),
+                            8,
+                            "template height != 8 for species={species:?} stage={stage:?} \
+                             morph={morph_index} pup_morph={morph_pup_index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn elder_morph_skips_singleton_for_carved_species() {
         // Pets in this set evolve a distinct elder silhouette; the singleton
         // morph 0 is the S4 form and must never be reused at S5/S6.
