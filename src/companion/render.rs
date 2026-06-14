@@ -49,6 +49,22 @@ pub(crate) fn biome_background_color(tag: crate::tui::room::RoomBiomeTag) -> Rou
     }
 }
 
+/// Biome background scaled down by day-phase so night reads darker.
+pub(crate) fn phase_dim_background(
+    tag: crate::tui::room::RoomBiomeTag,
+    phase: crate::tui::day::DayPhase,
+) -> RoundColor {
+    use crate::tui::day::DayPhase;
+    let base = biome_background_color(tag);
+    let k = match phase {
+        DayPhase::Day => 1.0,
+        DayPhase::Dawn => 0.85,
+        DayPhase::Dusk => 0.8,
+        DayPhase::Night => 0.6,
+    };
+    RoundColor(base.0 * k, base.1 * k, base.2 * k, base.3)
+}
+
 pub fn build_draw_commands(
     scene: &RoundSceneModel,
     layout: &RoundSceneLayout,
@@ -61,7 +77,7 @@ pub fn build_draw_commands(
         label: None,
         text: None,
         spans: Vec::new(),
-        color: biome_background_color(scene.room.biome.primary),
+        color: phase_dim_background(scene.room.biome.primary, scene.room.day_phase),
     }];
     push_room_glyph_commands(&mut commands, scene, layout);
     push_pet_art_command(&mut commands, scene, layout);
@@ -208,6 +224,16 @@ mod tests {
         assert_ne!(botanical, technical);
         // Stays dark (each rgb channel <= 0.22) so the pet pops.
         assert!(botanical.0 <= 0.22 && botanical.1 <= 0.22 && botanical.2 <= 0.22);
+    }
+
+    #[test]
+    fn night_background_is_darker_than_day() {
+        use crate::tui::day::DayPhase;
+        use crate::tui::room::RoomBiomeTag;
+        let day = phase_dim_background(RoomBiomeTag::Botanical, DayPhase::Day);
+        let night = phase_dim_background(RoomBiomeTag::Botanical, DayPhase::Night);
+        assert!(night.0 <= day.0 && night.1 <= day.1 && night.2 <= day.2);
+        assert!(night != day);
     }
 
     #[test]
