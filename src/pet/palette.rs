@@ -145,6 +145,41 @@ pub fn default_theme_palette() -> ResolvedPalette {
     }
 }
 
+use crate::pet::generation::{Species, VisibleTraits};
+
+/// Hue (OKLCH degrees) each species leans toward.
+fn species_base_hue(species: Species) -> f32 {
+    match species {
+        Species::Fuzz => 70.0,     // warm amber
+        Species::Blob => 195.0,    // teal
+        Species::Ghost => 300.0,   // violet
+        Species::Glitch => 135.0,  // acid green
+        Species::Crystal => 230.0, // ice blue
+        Species::Mech => 250.0,    // steel
+    }
+}
+
+/// Pinned green eye signature (same for every species).
+const EYE_HUE: f32 = 142.0;
+
+pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> ResolvedPalette {
+    let base = species_base_hue(species);
+    // Per-pet hue jitter: map seed_hue (0..360) to +-18 degrees off the family.
+    let jitter = (f32::from(traits.seed_hue) / 360.0 - 0.5) * 36.0;
+    let h = (base + jitter).rem_euclid(360.0);
+    let sat = f32::from(traits.saturation_percent) / 100.0; // 0.82..1.0
+
+    let role = |lightness: f32, chroma: f32, hue: f32| oklch_to_rgb(lightness, chroma * sat, hue);
+
+    ResolvedPalette {
+        body: role(0.80, 0.11, h),
+        eye: oklch_to_rgb(0.84, 0.15, EYE_HUE),
+        mouth: role(0.78, 0.09, h + 30.0),
+        accent: role(0.80, 0.17, h + 90.0),
+        pattern: role(0.70, 0.07, h + 150.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +248,57 @@ mod tests {
         assert_eq!(role_color(Accent, &p), Rgb::new(0xf0, 0xa6, 0x46));
         assert_eq!(role_color(Pattern, &p), Rgb::new(0x50, 0x4c, 0x49));
         assert_eq!(role_color(Particle, &p), Rgb::new(0xf0, 0xa6, 0x46));
+    }
+
+    fn traits_with_hue(hue: u16) -> crate::pet::generation::VisibleTraits {
+        crate::pet::generation::VisibleTraits {
+            eyes: "o o".into(),
+            mouth: "w".into(),
+            pattern: "...".into(),
+            accent: "*".into(),
+            palette_index: 0,
+            morph_index: 0,
+            morph_pup_index: 0,
+            seed_hue: hue,
+            saturation_percent: 90,
+        }
+    }
+
+    #[test]
+    fn resolve_is_deterministic() {
+        use crate::pet::generation::Species;
+        let a = resolve_pet_palette(Species::Fuzz, &traits_with_hue(42));
+        let b = resolve_pet_palette(Species::Fuzz, &traits_with_hue(42));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn eyes_are_green_for_every_species() {
+        use crate::pet::generation::Species;
+        let green = resolve_pet_palette(Species::Fuzz, &traits_with_hue(0)).eye;
+        for s in Species::all() {
+            let p = resolve_pet_palette(s, &traits_with_hue(123));
+            assert_eq!(p.eye, green, "eye drifted for {s:?}");
+        }
+        assert!(
+            green.g > green.r && green.g > green.b,
+            "eye not green: {green:?}"
+        );
+    }
+
+    #[test]
+    fn species_lean_separates_bodies() {
+        use crate::pet::generation::Species;
+        let fuzz = resolve_pet_palette(Species::Fuzz, &traits_with_hue(0)).body;
+        let blob = resolve_pet_palette(Species::Blob, &traits_with_hue(0)).body;
+        assert_ne!(fuzz, blob);
+    }
+
+    #[test]
+    fn per_pet_variety_within_species() {
+        use crate::pet::generation::Species;
+        let a = resolve_pet_palette(Species::Fuzz, &traits_with_hue(10)).body;
+        let b = resolve_pet_palette(Species::Fuzz, &traits_with_hue(300)).body;
+        assert_ne!(a, b);
     }
 }

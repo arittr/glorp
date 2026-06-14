@@ -225,6 +225,8 @@ pub(crate) fn build_watch_view_model_at(
         .map(|diagnostic| diagnostic.message.clone())
         .collect::<Vec<_>>();
 
+    let pet_palette = crate::pet::palette::resolve_pet_palette(species, &generated.traits);
+
     Ok(WatchViewModel {
         pet_art: rendered.lines,
         pet_spans: rendered.spans,
@@ -234,6 +236,7 @@ pub(crate) fn build_watch_view_model_at(
             stage: state.stage,
             mood,
         },
+        pet_palette,
         habitat: build_habitat_view(state),
         life_profile,
         activity_identity,

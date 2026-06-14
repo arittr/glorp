@@ -343,7 +343,7 @@ fn draw_scene(bounds: NSRect) {
         clip.addClip();
 
         for command in &commands {
-            draw_command(command);
+            draw_command(command, &scene.pet.palette);
         }
 
         if dim_overlay {
@@ -354,7 +354,7 @@ fn draw_scene(bounds: NSRect) {
     }
 }
 
-fn draw_command(command: &RoundDrawCommand) {
+fn draw_command(command: &RoundDrawCommand, palette: &crate::pet::palette::ResolvedPalette) {
     match command.kind {
         RoundDrawKind::Background => unsafe {
             let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
@@ -372,6 +372,7 @@ fn draw_command(command: &RoundDrawCommand) {
                 draw_pet_art_block(
                     text,
                     &command.spans,
+                    palette,
                     command.x,
                     command.y,
                     command.radius,
@@ -416,6 +417,7 @@ fn draw_command(command: &RoundDrawCommand) {
 fn draw_pet_art_block(
     text: &str,
     spans: &[StyledSegment],
+    palette: &crate::pet::palette::ResolvedPalette,
     x: f32,
     y: f32,
     radius: f32,
@@ -445,7 +447,7 @@ fn draw_pet_art_block(
         let left = x as f64 - total_width / 2.0;
         let top = y as f64 + total_height / 2.0;
         for cell in grid.cells {
-            let cell_color = pet_role_color(cell.role).unwrap_or(*color);
+            let cell_color = pet_role_color(cell.role, palette).unwrap_or(*color);
             let attr = attributed_pet_glyph(&cell.ch.to_string(), font_size, &cell_color);
             let point = NSPoint::new(
                 left + cell.col as f64 * cell_width,
@@ -498,8 +500,11 @@ fn role_for_pet_cell(spans: &[StyledSegment], row: usize, char_index: usize) -> 
         .unwrap_or(PaletteRoleName::Body)
 }
 
-fn pet_role_color(role: PaletteRoleName) -> Option<RoundColor> {
-    let rgb = crate::pet::palette::role_color(role, &crate::pet::palette::default_theme_palette());
+fn pet_role_color(
+    role: PaletteRoleName,
+    palette: &crate::pet::palette::ResolvedPalette,
+) -> Option<RoundColor> {
+    let rgb = crate::pet::palette::role_color(role, palette);
     Some(rgb_color(rgb.r, rgb.g, rgb.b))
 }
 
@@ -637,7 +642,10 @@ mod tests {
         let p = default_theme_palette();
         for role in [Body, Eye, Mouth, Accent, Pattern, Particle] {
             let rgb = role_color(role, &p);
-            assert_eq!(pet_role_color(role), Some(rgb_color(rgb.r, rgb.g, rgb.b)));
+            assert_eq!(
+                pet_role_color(role, &p),
+                Some(rgb_color(rgb.r, rgb.g, rgb.b))
+            );
         }
     }
 }

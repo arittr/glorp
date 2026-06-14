@@ -62,8 +62,8 @@ const COLOR_FG: Rgb = Rgb(0xef, 0xeb, 0xe4);
 const COLOR_DIM: Rgb = Rgb(0x97, 0x91, 0x8a);
 const COLOR_ACCENT: Rgb = Rgb(0xf0, 0xa6, 0x46);
 
-fn role_color_base(role: PaletteRoleName) -> Rgb {
-    let rgb = crate::pet::palette::role_color(role, &crate::pet::palette::default_theme_palette());
+fn role_color_base(role: PaletteRoleName, palette: &crate::pet::palette::ResolvedPalette) -> Rgb {
+    let rgb = crate::pet::palette::role_color(role, palette);
     Rgb(rgb.r, rgb.g, rgb.b)
 }
 
@@ -71,7 +71,7 @@ fn role_color_base(role: PaletteRoleName) -> Rgb {
 const SLEEP_DIM: f32 = 0.7;
 
 fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
-    let base = role_color_base(role);
+    let base = role_color_base(role, &vm.pet_palette);
     let colored = if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
         base
     } else {
@@ -305,7 +305,7 @@ mod tests {
         let p = default_theme_palette();
         for role in [Body, Eye, Mouth, Pattern] {
             let rgb = role_color(role, &p);
-            assert_eq!(role_color_base(role), Rgb(rgb.r, rgb.g, rgb.b));
+            assert_eq!(role_color_base(role, &p), Rgb(rgb.r, rgb.g, rgb.b));
         }
     }
 
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(runs[0].text, "E");
         assert_eq!(
             rgb_tuple(runs[0].color),
-            rgb_tuple(role_color_base(PaletteRoleName::Eye))
+            rgb_tuple(role_color_base(PaletteRoleName::Eye, &vm.pet_palette))
         );
         assert_eq!(runs[1].text, "A");
         assert_eq!(rgb_tuple(runs[1].color), (0x86, 0xd9, 0xef));
@@ -389,10 +389,10 @@ mod tests {
         assert_eq!(runs[3].text, "B");
         assert_eq!(
             rgb_tuple(runs[3].color),
-            rgb_tuple(role_color_base(PaletteRoleName::Body))
+            rgb_tuple(role_color_base(PaletteRoleName::Body, &vm.pet_palette))
         );
 
-        let base_accent = rgb_tuple(role_color_base(PaletteRoleName::Accent));
+        let base_accent = rgb_tuple(role_color_base(PaletteRoleName::Accent, &vm.pet_palette));
         let profile_accent = rgb_tuple(role_color_for_profile(PaletteRoleName::Accent, &vm));
         assert_ne!(
             profile_accent, base_accent,
@@ -441,7 +441,7 @@ mod tests {
         );
 
         let dimmed = rgb_tuple(role_color_for_profile(PaletteRoleName::Body, &vm));
-        let base = rgb_tuple(role_color_base(PaletteRoleName::Body));
+        let base = rgb_tuple(role_color_base(PaletteRoleName::Body, &vm.pet_palette));
         assert!(
             dimmed.0 < base.0 && dimmed.1 < base.1 && dimmed.2 < base.2,
             "asleep must dim every role: {dimmed:?} vs {base:?}"

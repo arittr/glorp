@@ -1149,7 +1149,7 @@ fn render_pet_inside(
     color_capability: ColorCapability,
     pet_performance: crate::tui::room::PetPerformance,
 ) {
-    let base = semantic_styles();
+    let base = seed_pet_palette(&semantic_styles(), &vm.pet_palette);
     let energy_m = low_energy_lightness_multiplier(vm.energy);
     let perf_m = performance_lightness_multiplier(pet_performance);
     let droop = darken_pet_styles(&base, energy_m * perf_m);
@@ -1679,6 +1679,25 @@ pub(crate) fn pet_role_style(
         style = style.add_modifier(Modifier::BOLD);
     }
     style
+}
+
+/// Overlays a per-pet `ResolvedPalette` onto the pet roles of `base`, keeping
+/// every role's modifiers (e.g. the bold eye). The live dim/lift/shimmer chain
+/// then mutates these seeded colors, so role-tagged glyphs and body-gap fills
+/// both track per-pet color and brightness coherently.
+fn seed_pet_palette(
+    base: &SemanticStyles,
+    palette: &crate::pet::palette::ResolvedPalette,
+) -> SemanticStyles {
+    let with_rgb =
+        |style: Style, rgb: crate::pet::palette::Rgb| style.fg(Color::Rgb(rgb.r, rgb.g, rgb.b));
+    let mut s = base.clone();
+    s.pet_body = with_rgb(s.pet_body, palette.body);
+    s.pet_eye = with_rgb(s.pet_eye, palette.eye);
+    s.pet_mouth = with_rgb(s.pet_mouth, palette.mouth);
+    s.pet_accent = with_rgb(s.pet_accent, palette.accent);
+    s.pet_pattern = with_rgb(s.pet_pattern, palette.pattern);
+    s
 }
 
 /// Snapshot the per-role foreground colors of the live `SemanticStyles` into a

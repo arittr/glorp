@@ -107,10 +107,7 @@ fn paint_pet_art(
             let display_width = Line::from(ch.to_string()).width() as i32;
             if ch != ' ' {
                 let role = role_for_pet_cell(&scene.pet.art_spans, row, char_index);
-                let rgb = crate::pet::palette::role_color(
-                    role,
-                    &crate::pet::palette::default_theme_palette(),
-                );
+                let rgb = crate::pet::palette::role_color(role, &scene.pet.palette);
                 let fg = if truecolor {
                     format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)
                 } else {
