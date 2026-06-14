@@ -306,10 +306,13 @@ fn encode_srgb(linear: f32) -> u8 {
     (encoded * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-/// Recover the OKLab a/b chromatic axes from an sRGB color. Used only by tests
-/// and by the (test-supporting) hue checks; kept here so the matrices stay
-/// co-located with their inverse.
-pub(crate) fn rgb_to_oklab_ab(c: Rgb) -> (f32, f32) {
+/// Recover the OKLab a/b chromatic axes from an sRGB color. Test-only (the
+/// production path is forward-only); kept here so the matrices stay co-located
+/// with their inverse. Must be `#[cfg(test)]`, not `pub(crate)`: the repo's
+/// `clippy --all-targets -D warnings` gate flags a non-test-gated test-only fn
+/// as dead code in the plain lib build.
+#[cfg(test)]
+fn rgb_to_oklab_ab(c: Rgb) -> (f32, f32) {
     let lin = |v: u8| {
         let v = f32::from(v) / 255.0;
         if v <= 0.040_45 {
