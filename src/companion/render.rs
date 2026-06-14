@@ -29,12 +29,25 @@ pub struct RoundColor(pub f32, pub f32, pub f32, pub f32);
 
 /// V1 round companion palette. These colors are tuned for the truecolor
 /// round aperture and should be kept in sync with the preview lab fixtures.
-const BACKGROUND_COLOR: RoundColor = RoundColor(0.08, 0.09, 0.10, 1.0);
 const PET_GLYPH_COLOR: RoundColor = RoundColor(0.93, 0.92, 0.89, 1.0);
 const PROP_GLYPH_COLOR: RoundColor = RoundColor(0.70, 0.82, 0.52, 1.0);
 const HALO_CALM_COLOR: RoundColor = RoundColor(0.36, 0.40, 0.55, 0.8);
 const HALO_ACTIVE_COLOR: RoundColor = RoundColor(0.94, 0.65, 0.28, 0.9);
 const TROUBLE_GLYPH_COLOR: RoundColor = RoundColor(0.92, 0.30, 0.25, 0.95);
+
+/// A dark, biome-tinted background for the companion aperture — keeps the pet
+/// dominant (all channels stay low) while giving each place its own cast.
+pub(crate) fn biome_background_color(tag: crate::tui::room::RoomBiomeTag) -> RoundColor {
+    use crate::tui::room::RoomBiomeTag;
+    match tag {
+        RoomBiomeTag::Starter => RoundColor(0.08, 0.09, 0.10, 1.0),
+        RoomBiomeTag::Botanical => RoundColor(0.07, 0.11, 0.08, 1.0),
+        RoomBiomeTag::Technical => RoundColor(0.07, 0.09, 0.13, 1.0),
+        RoomBiomeTag::Celestial => RoundColor(0.08, 0.08, 0.14, 1.0),
+        RoomBiomeTag::Artifact => RoundColor(0.12, 0.10, 0.07, 1.0),
+        RoomBiomeTag::Cozy => RoundColor(0.13, 0.09, 0.08, 1.0),
+    }
+}
 
 pub fn build_draw_commands(
     scene: &RoundSceneModel,
@@ -48,7 +61,7 @@ pub fn build_draw_commands(
         label: None,
         text: None,
         spans: Vec::new(),
-        color: BACKGROUND_COLOR,
+        color: biome_background_color(scene.room.biome.primary),
     }];
     push_pet_art_command(&mut commands, scene, layout);
     for anchor in &layout.prop_anchors {
@@ -118,6 +131,16 @@ mod tests {
     use crate::round::model::derive_round_scene_model;
     use crate::tui::view_model::WatchViewModel;
     use time::macros::datetime;
+
+    #[test]
+    fn background_is_biome_tinted() {
+        use crate::tui::room::RoomBiomeTag;
+        let botanical = biome_background_color(RoomBiomeTag::Botanical);
+        let technical = biome_background_color(RoomBiomeTag::Technical);
+        assert_ne!(botanical, technical);
+        // Stays dark (each rgb channel <= 0.22) so the pet pops.
+        assert!(botanical.0 <= 0.22 && botanical.1 <= 0.22 && botanical.2 <= 0.22);
+    }
 
     #[test]
     fn draw_commands_keep_all_points_inside_aperture() {
