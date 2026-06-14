@@ -86,15 +86,17 @@ fn sky_palette_for(species: Species) -> &'static [char] {
     }
 }
 
-/// Per-species floor-glyph palette (each cell of the floor row is drawn from this).
-fn floor_palette_for(species: Species) -> &'static [char] {
-    match species {
-        Species::Fuzz => &['·', ',', '.', ' ', ' '],
-        Species::Blob => &['~', '.', ',', ' '],
-        Species::Ghost => &['\'', ' ', ' ', ' '],
-        Species::Glitch => &['_', '-', ':', ' ', '░'],
-        Species::Crystal => &['◇', '·', '.', ' ', ' '],
-        Species::Mech => &['─', '·', '.', ' '],
+/// Per-biome floor-glyph palette — the ground texture under the pet, keyed to
+/// the earned biome rather than species so the floor reads as a place.
+fn biome_floor_palette(tag: crate::tui::room::RoomBiomeTag) -> &'static [char] {
+    use crate::tui::room::RoomBiomeTag;
+    match tag {
+        RoomBiomeTag::Starter => &['·', '.', ' ', ' '],
+        RoomBiomeTag::Botanical => &[',', '·', '"', '.', ' '],
+        RoomBiomeTag::Technical => &['─', '┄', '·', '.', ' '],
+        RoomBiomeTag::Celestial => &['·', '˚', '.', ' ', ' '],
+        RoomBiomeTag::Artifact => &['◦', '·', '°', '.', ' '],
+        RoomBiomeTag::Cozy => &['·', '~', ',', '.', ' '],
     }
 }
 
@@ -457,7 +459,7 @@ fn overlaps_any(g: &AmbientGlyph, exclusions: &[Rect]) -> bool {
 /// within a minute and drifts across minutes. Any glyph that would land inside
 /// an exclusion rect is rejected; the caller is responsible for inflating
 /// exclusions to enforce a desired margin. A floor row fills the bottom of the
-/// habitat with species-appropriate ground cover.
+/// habitat with the Starter-biome ground cover.
 pub fn ambient_glyphs_for(
     species: Species,
     stage: Stage,
@@ -469,6 +471,7 @@ pub fn ambient_glyphs_for(
     ambient_glyphs_for_phase(
         species,
         stage,
+        crate::tui::room::RoomBiomeTag::Starter,
         habitat,
         exclusions,
         now,
@@ -490,6 +493,7 @@ pub fn ambient_glyphs_for(
 pub fn ambient_glyphs_for_phase(
     species: Species,
     stage: Stage,
+    biome: crate::tui::room::RoomBiomeTag,
     habitat: Rect,
     exclusions: &[Rect],
     now: time::OffsetDateTime,
@@ -521,7 +525,7 @@ pub fn ambient_glyphs_for_phase(
     let mut rng = Pcg32::seed_from_u64(seed);
 
     let sky = sky_palette_for_phase(species, phase, date_seed);
-    let floor = floor_palette_for(species);
+    let floor = biome_floor_palette(biome);
 
     let p = crate::tui::style::tokenpet_palette();
     let base = p.dim.rgb;
@@ -909,6 +913,7 @@ impl LegacyPanel for PetPanel {
         let glyphs = ambient_glyphs_for_phase(
             species,
             stage,
+            room_profile.biome.primary,
             scene.habitat,
             &ambient_exclusions,
             now,
@@ -1729,6 +1734,17 @@ mod tests {
     use time::macros::datetime;
     use ColorCapability;
 
+    #[test]
+    fn floor_palette_is_biome_keyed() {
+        use crate::tui::room::RoomBiomeTag;
+        let botanical = biome_floor_palette(RoomBiomeTag::Botanical);
+        let technical = biome_floor_palette(RoomBiomeTag::Technical);
+        let artifact = biome_floor_palette(RoomBiomeTag::Artifact);
+        assert_ne!(botanical, technical);
+        assert_ne!(technical, artifact);
+        assert_ne!(botanical, artifact);
+    }
+
     fn test_context() -> RenderContext {
         use crate::tui::render_context::WatchClock;
         // Fixed clock so wander position is deterministic across test runs.
@@ -2340,6 +2356,7 @@ mod tests {
         let glitch = ambient_glyphs_for_phase(
             Species::Glitch,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2353,6 +2370,7 @@ mod tests {
         let crystal = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2651,6 +2669,7 @@ mod tests {
         let day = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2664,6 +2683,7 @@ mod tests {
         let night = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
@@ -2703,6 +2723,7 @@ mod tests {
         let glyphs = ambient_glyphs_for_phase(
             Species::Crystal,
             Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
             habitat,
             &[],
             now,
