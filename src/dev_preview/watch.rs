@@ -276,6 +276,14 @@ fn render_watch_frame_from_state_with_life(
 
     let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
     frame.layout = Some(preview_layout(id, &layout));
+    frame.contract.scene = Some(
+        crate::dev_preview::contract::PreviewSceneArtifact::from_watch_view_model(
+            id,
+            &vm,
+            now,
+            frame.layout.as_ref(),
+        ),
+    );
     Ok(frame)
 }
 

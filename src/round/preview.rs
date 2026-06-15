@@ -1,4 +1,3 @@
-use crate::dev_preview::contract::PreviewFrameContract;
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
 use crate::pet::render::{PaletteRoleName, StyledSegment};
 use crate::round::layout::{
@@ -25,7 +24,8 @@ pub fn render_round_preview_frame_from_vm(
     paint_pet_art(&mut cells, width, &scene, &layout, capabilities.truecolor);
     paint_halo(&mut cells, width, &scene, &layout, capabilities.truecolor);
     mark_continuations(&mut cells, width);
-    PreviewFrame {
+    let commands = crate::round::draw::build_draw_commands(&scene, &layout);
+    let mut frame = PreviewFrame {
         id: id.into(),
         title: title.into(),
         width,
@@ -33,8 +33,22 @@ pub fn render_round_preview_frame_from_vm(
         cells,
         layout: None,
         extra_inputs: Default::default(),
-        contract: PreviewFrameContract::default(),
-    }
+        contract: Default::default(),
+    };
+    frame.contract.scene = Some(
+        crate::dev_preview::contract::PreviewSceneArtifact::from_round_scene(
+            &frame.id, &scene, now,
+        ),
+    );
+    frame.contract.round_layout = Some(
+        crate::dev_preview::contract::PreviewRoundLayoutArtifact::from_layout(&frame.id, &layout),
+    );
+    frame.contract.round_commands = Some(
+        crate::dev_preview::contract::PreviewRoundCommandsArtifact::from_commands(
+            &frame.id, &scene, &commands,
+        ),
+    );
+    frame
 }
 
 fn blank_cells(width: u16, height: u16, aperture: RoundAperture) -> Vec<PreviewCell> {
