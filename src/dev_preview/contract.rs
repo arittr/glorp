@@ -1,4 +1,5 @@
 use crate::pet::render::StyledSegment;
+use crate::round::draw::{RoundDrawCommand, RoundDrawKind};
 use crate::round::layout::{RoundAnchor, RoundAnchorKind, RoundMotionBudget, RoundSceneLayout};
 use crate::round::model::RoundSceneModel;
 use crate::tui::component::PreviewLayout;
@@ -441,9 +442,81 @@ pub struct PreviewRoundCommandArtifact {
     pub color_rgba: [f32; 4],
 }
 
+impl PreviewRoundCommandsArtifact {
+    pub fn from_commands(
+        frame_id: &str,
+        scene: &RoundSceneModel,
+        commands: &[RoundDrawCommand],
+    ) -> Self {
+        let mut command_counts = BTreeMap::new();
+        for command in commands {
+            *command_counts
+                .entry(round_draw_kind_name(command.kind).to_string())
+                .or_insert(0) += 1;
+        }
+        let pet = commands
+            .iter()
+            .find(|command| command.kind == RoundDrawKind::PetGlyph)
+            .map(|command| PreviewRoundPetCommandSummary {
+                text: command.text.clone().unwrap_or_default(),
+                span_count: command.spans.len(),
+            })
+            .unwrap_or_else(|| PreviewRoundPetCommandSummary {
+                text: String::new(),
+                span_count: 0,
+            });
+        let room_dialect = RoomSpeciesDialect::for_species(scene.pet.species);
+        let glyph_vocabulary = biome_symbols(scene.room.biome.primary, room_dialect)
+            .iter()
+            .map(|ch| ch.to_string())
+            .collect();
+
+        Self {
+            schema_version: CONTRACT_SCHEMA_VERSION,
+            frame_id: frame_id.to_string(),
+            fixture_id: frame_id.to_string(),
+            privacy_projection: PreviewPrivacyProjection::sanitized("round-preview"),
+            command_counts,
+            room: PreviewRoundRoomCommandSummary { glyph_vocabulary },
+            pet,
+            commands: commands.iter().map(round_command_artifact).collect(),
+        }
+    }
+}
+
+fn round_command_artifact(command: &RoundDrawCommand) -> PreviewRoundCommandArtifact {
+    PreviewRoundCommandArtifact {
+        kind: round_draw_kind_name(command.kind).to_string(),
+        x: command.x,
+        y: command.y,
+        radius: command.radius,
+        label: command.label.map(|ch| ch.to_string()),
+        text_len: command.text.as_ref().map(|text| text.len()).unwrap_or(0),
+        span_count: command.spans.len(),
+        color_rgba: [
+            command.color.0,
+            command.color.1,
+            command.color.2,
+            command.color.3,
+        ],
+    }
+}
+
+fn round_draw_kind_name(kind: RoundDrawKind) -> &'static str {
+    match kind {
+        RoundDrawKind::Background => "background",
+        RoundDrawKind::RoomGlyph => "room-glyph",
+        RoundDrawKind::PropGlyph => "prop-glyph",
+        RoundDrawKind::PetGlyph => "pet-glyph",
+        RoundDrawKind::Halo => "halo",
+        RoundDrawKind::Trouble => "trouble",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::round::draw::RoundColor;
     use crate::round::layout::{
         RoundAnchor, RoundAnchorKind, RoundAperture, RoundDetailLevel, RoundMotionBudget,
         RoundSceneLayout,
@@ -586,5 +659,64 @@ mod tests {
         assert_eq!(artifact.halo_anchors[0].kind, "activity-pulse");
         assert!(artifact.motion_budget.pet_breath);
         assert!(!artifact.motion_budget.activity_sweep);
+    }
+
+    #[test]
+    fn round_command_contract_summarizes_draw_commands() {
+        let now = datetime!(2026-06-13 18:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let scene = derive_round_scene_model(&vm, now);
+        let commands = vec![
+            RoundDrawCommand {
+                kind: RoundDrawKind::Background,
+                x: 26.0,
+                y: 20.0,
+                radius: 18.0,
+                label: None,
+                text: None,
+                spans: Vec::new(),
+                color: RoundColor(0.1, 0.2, 0.3, 1.0),
+            },
+            RoundDrawCommand {
+                kind: RoundDrawKind::RoomGlyph,
+                x: 10.0,
+                y: 12.0,
+                radius: 2.0,
+                label: Some('~'),
+                text: None,
+                spans: Vec::new(),
+                color: RoundColor(0.4, 0.5, 0.6, 0.55),
+            },
+            RoundDrawCommand {
+                kind: RoundDrawKind::PetGlyph,
+                x: 26.0,
+                y: 22.0,
+                radius: 9.0,
+                label: None,
+                text: Some("AB\n C".to_string()),
+                spans: vm.pet_spans.clone(),
+                color: RoundColor(0.9, 0.8, 0.7, 1.0),
+            },
+        ];
+
+        let artifact =
+            PreviewRoundCommandsArtifact::from_commands("round-commands", &scene, &commands);
+
+        assert_eq!(artifact.schema_version, CONTRACT_SCHEMA_VERSION);
+        assert_eq!(artifact.frame_id, "round-commands");
+        assert_eq!(artifact.fixture_id, "round-commands");
+        assert_eq!(artifact.privacy_projection.surface, "round-preview");
+        assert_eq!(artifact.command_counts["background"], 1);
+        assert_eq!(artifact.command_counts["room-glyph"], 1);
+        assert_eq!(artifact.command_counts["pet-glyph"], 1);
+        assert_eq!(artifact.pet.text, "AB\n C");
+        assert_eq!(artifact.pet.span_count, vm.pet_spans.len());
+        assert!(!artifact.room.glyph_vocabulary.is_empty());
+        assert_eq!(artifact.commands[1].kind, "room-glyph");
+        assert_eq!(artifact.commands[1].label.as_deref(), Some("~"));
+        assert_eq!(artifact.commands[1].text_len, 0);
+        assert_eq!(artifact.commands[2].text_len, 5);
+        assert_eq!(artifact.commands[2].span_count, vm.pet_spans.len());
+        assert_eq!(artifact.commands[2].color_rgba, [0.9, 0.8, 0.7, 1.0]);
     }
 }
