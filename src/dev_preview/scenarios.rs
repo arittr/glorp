@@ -1784,6 +1784,7 @@ mod tests {
             cells: Vec::new(),
             layout: None,
             extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
         };
 
         let scenario = scenario_metadata(&frame, &ctx);
@@ -1815,6 +1816,7 @@ mod tests {
             cells: Vec::new(),
             layout: None,
             extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
         };
 
         let scenario = scenario_metadata(&frame, &ctx);

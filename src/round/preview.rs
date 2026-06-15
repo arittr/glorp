@@ -1,3 +1,4 @@
+use crate::dev_preview::contract::PreviewFrameContract;
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
 use crate::pet::render::{PaletteRoleName, StyledSegment};
 use crate::round::layout::{
@@ -32,6 +33,7 @@ pub fn render_round_preview_frame_from_vm(
         cells,
         layout: None,
         extra_inputs: Default::default(),
+        contract: PreviewFrameContract::default(),
     }
 }
 

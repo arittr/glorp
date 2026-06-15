@@ -605,6 +605,7 @@ mod tests {
             ],
             layout: None,
             extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
         }
     }
 
@@ -651,6 +652,7 @@ mod tests {
             ],
             layout: None,
             extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
         }
     }
 

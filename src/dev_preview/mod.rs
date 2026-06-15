@@ -1,3 +1,4 @@
+pub mod contract;
 pub mod export;
 pub mod frame;
 pub mod habitat_props;

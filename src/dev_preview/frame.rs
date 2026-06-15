@@ -1,3 +1,4 @@
+use crate::dev_preview::contract::PreviewFrameContract;
 use crate::tui::component::PreviewLayout;
 use ratatui::{
     buffer::Buffer,
@@ -9,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreviewFrame {
     pub id: String,
     pub title: String,
@@ -19,6 +20,8 @@ pub struct PreviewFrame {
     pub layout: Option<PreviewLayout>,
     #[serde(skip)]
     pub extra_inputs: BTreeMap<String, Value>,
+    #[serde(skip)]
+    pub contract: PreviewFrameContract,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -76,6 +79,7 @@ pub fn frame_from_buffer(
         cells,
         layout: None,
         extra_inputs: BTreeMap::new(),
+        contract: PreviewFrameContract::default(),
     }
 }
 
@@ -278,5 +282,20 @@ mod tests {
             escape_html("<tag data='x' title=\"&\">"),
             "&lt;tag data=&#39;x&#39; title=&quot;&amp;&quot;&gt;"
         );
+    }
+
+    #[test]
+    fn frame_contract_defaults_empty_and_is_skipped_during_serialization() {
+        let buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
+
+        let frame = frame_from_buffer("contract", "Contract", &buffer);
+
+        assert_eq!(
+            frame.contract,
+            crate::dev_preview::contract::PreviewFrameContract::default()
+        );
+        let json = serde_json::to_value(&frame).unwrap();
+        assert!(json.get("contract").is_none());
+        assert!(json.get("extra_inputs").is_none());
     }
 }
