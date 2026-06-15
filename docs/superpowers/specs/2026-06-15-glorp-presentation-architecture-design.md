@@ -172,21 +172,45 @@ The exact Rust names can change, but the model should contain:
   effect targets
 - activity/life/day snapshot: day phase, calm mode, source diversity, helper
   health, recent activity pulse, vitals buckets
-- privacy classification: what may be shown on glanceable/native surfaces
+- privacy projection: the surface-specific sanitized view, not the raw runtime
+  state
 - target map: stable semantic anchors for pet, room, speech, prop effects, halo,
-  and dashboard panels where relevant
+  and dashboard panels where relevant, using presentation-owned ids rather than
+  watch `TargetPath`s
 
 `PresentationScene` should initially be derived from `WatchViewModel + now`.
 That keeps the current VM as the compatibility anchor and avoids changing the
 runtime data flow while presentation files are being untangled.
+
+Pose and timing ownership must be explicit before this model ships. Today the
+watch renderer recomputes wander and facing inside `PetPanel::render` from the
+render clock, while round/companion paths copy or mutate VM pose fields. The
+shared scene derivation must use the same animation helpers as the current watch
+render path. Fields such as `WatchViewModel.wander_offset_x`, `facing`, and
+breath/posture values remain compatibility/cache fields until a later design
+explicitly replaces that contract.
+
+Privacy is also a projection, not one boolean. The scene may know enough to
+derive every surface, but each surface receives only the allowed projection:
+
+| Surface | Privacy projection |
+| --- | --- |
+| Watch TUI | Full interactive dashboard; may show source labels, exact counts, feed rows, and diagnostics already allowed by watch. |
+| Native round companion | Glanceable sanitized view; no source names, exact counts, feed rows, file paths, project names, transcript-like text, or productivity-pressure labels. |
+| Round Preview Lab | Same sanitized view as native round plus semantic artifacts needed to prove privacy. |
+| Menubar popover | Interactive/privileged surface if it continues to show exact token/helper details; must be marked as such and not treated as a glanceable-safe projection. |
+| Preview Lab artifacts | Sanitized by default unless a scenario explicitly documents a privileged review artifact. |
 
 ### Visual primitives
 
 Add small backend-neutral primitives only when a migrated surface needs them.
 Expected primitives:
 
-- `GlyphCell` or equivalent: symbol, role/style/color, layer, target id
-- `TextBlock`: lines plus role spans
+- `GlyphCell` or equivalent: symbol, role/style/color, layer, presentation target
+  id
+- `TextBlock`: lines plus role spans; spans stay character-indexed while they
+  wrap existing `StyledSegment` data, and any display-column spans must be named
+  separately
 - `VisualColor`: enough information to map to ratatui, Preview Lab hex/named
   colors, or AppKit colors
 - `Layer`: background, room, ambient, prop behind, pet, prop foreground, halo,
@@ -209,6 +233,11 @@ Each surface remains free to choose its output format:
 
 The adapters should not independently decide pet role colors, room vocabulary,
 or sanitized activity meaning.
+
+Presentation-domain target ids must be owned, neutral ids such as
+`EffectTargetId` or `SurfaceTargetId`. Watch adapters may map them to existing
+`TargetPath` values like `watch.pet.art`, but `src/presentation` must not depend
+on `tui::component::TargetPath` or on watch-specific `watch.*` ids.
 
 ## Architecture options considered
 
@@ -268,9 +297,22 @@ Decision: choose this path.
 
 ## Implementation plan tracks
 
-The spec should be implemented through four separate plan documents. Each plan
-must include allowed write sets, forbidden changes, red-green checks,
-verification commands, and stop conditions for overnight work.
+The spec should be implemented through ordered plan tracks. Each plan must
+include allowed write sets, forbidden changes, red-green checks, verification
+commands, and stop conditions for overnight work.
+
+The dependency order is strict:
+
+1. Contract Freeze merges first.
+2. PetPanel Mechanical Split merges second.
+3. Presentation Domain Extraction is split into smaller subplans after the first
+   two are green.
+4. Renderer Adapter Consolidation is split by adapter after the domain seam
+   exists.
+
+Do not run these tracks in parallel against the same branch. They touch the same
+Preview Lab, PetPanel, and adapter surfaces and would create avoidable merge
+conflicts.
 
 ### Plan 1: Contract Freeze
 
@@ -278,15 +320,35 @@ Purpose: make Preview Lab strong enough to protect the refactor.
 
 Scope:
 
-- add additive scene artifacts, likely `frames/<id>.scene.json` where useful
+- add mandatory typed scene artifacts for every watch or round frame derived
+  from `WatchViewModel`
 - add round layout/draw-command artifacts so round preview and native companion
   can be compared through the same semantic source
-- make animation strips use the deterministic preview clock
+- make animation strips use the deterministic preview clock by fixing
+  `scene_strip_bundle` and the `RenderContext::new` seam in `src/dev_preview/strips.rs`
 - add cross-renderer fixture checks for normal, active pulse, asleep/night,
   helper trouble, full props, Glitch vs Crystal dialect, and flat color where
   practical
-- correct stale docs that describe Preview Lab manifest schema `2` when the code
-  now uses schema `3`
+- correct living docs that describe Preview Lab manifest schema `2` when the
+  code now uses schema `3`; update `AGENTS.md` and any actively maintained
+  Preview Lab docs, but do not churn historical plans/specs except with a small
+  "superseded by schema 3" note if needed
+
+Artifact contract:
+
+| Artifact | Path | Manifest/files contract | Producer contract | Required checks |
+| --- | --- | --- | --- | --- |
+| Scene snapshot | `frames/<id>.scene.json` | Add `PreviewScenarioFiles.scene` and `ArtifactType::Scene`. Link it from `review.md` and `index.html`. | Small sanitized DTO, not a raw `WatchViewModel` dump. Include schema version, pet summary, room summary, target ids, surface privacy projection, and fixture inputs needed for comparison. | Privacy/redaction test: no transcript-like strings, file paths, project names, exact round counts, or raw source details in sanitized surfaces. |
+| Round layout | `frames/<id>.round-layout.json` | Add `PreviewScenarioFiles.round_layout` and `ArtifactType::RoundLayout` for round frames. | Serializable DTO around aperture, safe radius, detail level, pet anchor, prop anchors, halo anchors, and motion budget. | Assert aperture, safe radius, pet/prop/halo anchor counts and coordinates stay inside bounds. |
+| Round commands | `frames/<id>.round-commands.json` | Add `PreviewScenarioFiles.round_commands` and `ArtifactType::RoundCommands` for round frames. | Serializable DTO around `RoundDrawCommand` data, or a deliberately shaped export DTO if the internal command type stays non-serializable. | Assert command-kind counts, `PetGlyph` text/spans, room glyph vocabulary, trouble/halo commands, and privacy flags. |
+| Deterministic strip frame | existing `strips/<id>/frame-NNN.*` plus optional scene artifact only if the implementation plan scopes it | Preserve existing strip paths. | `scene_strip_bundle` must receive/use a fixed preview clock. | Repeated-output test compares strip text/cells across two runs, excluding `generated_at` if it remains wall-clock. |
+
+Round equivalence checks must compare semantics, not pixels only. Required
+equivalence includes: same derived round scene fixture id, aperture dimensions,
+safe radius, pet anchor, prop/halo anchor counts, command-kind counts, pet text
+and spans, room glyph vocabulary, and privacy projection. `round-normal` is the
+current full-props round fixture unless Plan 1 intentionally adds a
+`round-full-props` fixture.
 
 Non-goals:
 
@@ -299,7 +361,7 @@ Expected verification:
 
 ```bash
 cargo test --test dev_preview
-cargo test round_scene
+cargo test --test round_scene
 cargo run -- dev-preview --scenario all --out target/glorp-preview
 ```
 
@@ -307,7 +369,9 @@ Stop conditions:
 
 - any existing preview artifact path must be renamed or removed
 - a visual diff appears that is not caused by a newly-added artifact
-- deterministic preview output depends on wall-clock time
+- deterministic preview text/cell/scene content depends on wall-clock time; the
+  only allowed wall-clock value is `generated_at`, and deterministic diff tests
+  must either exclude it or the plan must make it fixed for dev-preview
 
 ### Plan 2: PetPanel Mechanical Split
 
@@ -315,13 +379,16 @@ Purpose: reduce the largest hotspot without changing behavior.
 
 Scope:
 
-- split `src/tui/panels/pet.rs` into smaller modules
-- likely modules:
+- split `src/tui/panels/pet.rs` into smaller modules while keeping
+  `src/tui/panels/pet.rs` as the module root
+- initial child modules:
   - `src/tui/panels/pet/ambient.rs`
   - `src/tui/panels/pet/colors.rs`
   - `src/tui/panels/pet/art_lines.rs`
   - `src/tui/panels/pet/composition.rs` if needed
 - keep public behavior and existing call sites stable
+- do not move the root file to `src/tui/panels/pet/mod.rs`; that would create a
+  large noisy diff and unnecessary merge risk
 - preserve current visual output except for snapshots intentionally updated only
   if formatting/module movement changes nothing semantically but snapshot tooling
   requires refresh
@@ -336,7 +403,7 @@ Non-goals:
 Expected verification:
 
 ```bash
-cargo test tui::panels::pet
+cargo test --lib tui::panels::pet
 cargo test --test tui_render
 cargo test --test dev_preview
 cargo run -- dev-preview --scenario all --out target/glorp-preview
@@ -350,7 +417,9 @@ Stop conditions:
 
 ### Plan 3: Presentation Domain Extraction
 
-Purpose: introduce the shared backend-neutral presentation layer.
+Purpose: introduce the shared backend-neutral presentation layer. This is a
+track, not a single overnight task; split it into smaller plans after Plan 1 and
+Plan 2 are merged.
 
 Scope:
 
@@ -364,6 +433,17 @@ Scope:
 - keep old module paths as thin wrappers where that reduces churn
 - derive `RoundSceneModel` from the shared scene, or make it a surface-specific
   projection of the shared scene
+- introduce neutral owned target ids such as `EffectTargetId` or
+  `SurfaceTargetId`; watch adapters map those to `TargetPath`
+- keep habitat props behind wrappers until `PetSceneLayout` is no longer the
+  presentation-domain input
+
+Suggested subplans:
+
+- 3a: scene skeleton, privacy projections, neutral ids, and serialization tests
+- 3b: pet role/span/color helper extraction behind the new module
+- 3c: room profile/glyph vocabulary projection without moving placement yet
+- 3d: habitat prop wrappers, only after `PetSceneLayout` coupling is understood
 
 Non-goals:
 
@@ -375,9 +455,9 @@ Non-goals:
 Expected verification:
 
 ```bash
-cargo test tui::room
-cargo test tui::component::habitat_props
-cargo test round_scene
+cargo test --lib tui::room
+cargo test --lib tui::component::habitat_props
+cargo test --test round_scene
 cargo test --test watch_integration
 cargo test --test dev_preview
 cargo run -- dev-preview --scenario all --out target/glorp-preview
@@ -393,18 +473,30 @@ Stop conditions:
 
 ### Plan 4: Renderer Adapter Consolidation
 
-Purpose: retire duplicated surface-specific interpretations.
+Purpose: retire duplicated surface-specific interpretations. This is an adapter
+track and must be split by adapter; do not hand the full track to one overnight
+agent.
 
 Scope:
 
 - make watch, round preview, native companion, menubar, and Preview Lab consume
-  shared scene/primitives where useful
+  shared scene/primitives once that adapter has matching contract coverage
 - unify pet role color and span interpretation
 - make round preview consume the same command/layout vocabulary as native
   companion where possible
 - keep Preview Lab fixtures near the review harness, but make fixture builders
   return frame plus scenario contract together instead of relying on frame-id
   pattern matching
+
+Suggested subplans:
+
+- 4a: round preview and native companion command/layout convergence
+- 4b: watch TUI adapter migration for the pieces already covered by
+  `PresentationScene`
+- 4c: menubar pet/stat projection, preserving its explicitly privileged surface
+  behavior
+- 4d: Preview Lab fixture/contract builder cleanup after the artifact contract is
+  stable
 
 Non-goals:
 
@@ -416,6 +508,10 @@ Non-goals:
 Expected verification:
 
 ```bash
+cargo test --test round_scene
+cargo test --test tui_render
+cargo test --test dev_preview
+cargo test --test watch_integration
 cargo test --features dev-preview
 cargo run -- dev-preview --scenario all --out target/glorp-preview
 ```
