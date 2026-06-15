@@ -71,14 +71,14 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
             frames.extend(pet_frames(&ctx)?);
             frames.extend(crate::dev_preview::round::round_frames(&ctx));
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
-            strips.extend(crate::dev_preview::strips::scene_strips());
+            strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
         PreviewSelection::Watch => frames.extend(watch_frames(&ctx, &scratch_dir)?),
         PreviewSelection::Pets => frames.extend(pet_frames(&ctx)?),
         PreviewSelection::Props => frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?),
         PreviewSelection::Animation => {
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
-            strips.extend(crate::dev_preview::strips::scene_strips());
+            strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
         PreviewSelection::Round => frames.extend(crate::dev_preview::round::round_frames(&ctx)),
     }

@@ -3,22 +3,24 @@ use crate::dev_preview::export::{
     PreviewStripKind,
 };
 use crate::dev_preview::frame::{frame_from_buffer, PreviewFrame};
-use crate::pet::animator::SceneAnimator;
+use crate::dev_preview::scenarios::PreviewRenderContext;
+use crate::pet::animator::{SceneAnimator, SceneEffectTargets};
 use crate::tui::component::layout_watch_with_context;
 use crate::tui::layout::{render_watch_frame_with_layout, scene_effect_targets_from_layout};
-use crate::tui::render_context::RenderContext;
+use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 use ratatui::{
     backend::TestBackend,
     buffer::Buffer,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Color, Style},
     Terminal,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use tachyonfx::{Duration as FxDuration, Effect, EffectTimer, Interpolation};
 
 #[derive(Debug, Clone)]
 pub struct PreviewStripBundle {
@@ -105,13 +107,18 @@ fn scene_strip_bundle(
     width: u16,
     height: u16,
     moment: &crate::tui::room::SceneMoment,
+    fixed_now: time::OffsetDateTime,
 ) -> PreviewStripBundle {
-    let ctx = RenderContext::new(ColorCapability::Truecolor);
+    let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(fixed_now));
     let layout = layout_watch_with_context(Rect::new(0, 0, width, height), vm, &ctx);
     let targets = scene_effect_targets_from_layout(&layout);
 
     let mut animator = SceneAnimator::new();
-    animator.update_scene_moments(std::slice::from_ref(moment), &targets);
+    let mut deterministic_effect =
+        deterministic_preview_effect_for_moment(moment, &targets, fixed_now, strip_id);
+    if deterministic_effect.is_none() {
+        animator.update_scene_moments(std::slice::from_ref(moment), &targets);
+    }
 
     let duration = moment.duration_ms as u32;
     let samples = [0_u32, duration / 2, duration];
@@ -129,7 +136,15 @@ fn scene_strip_bundle(
         terminal
             .draw(|frame| {
                 render_watch_frame_with_layout(frame, vm, &ctx, &layout);
-                animator.apply(&targets, frame.buffer_mut(), delta);
+                if let Some(effect) = deterministic_effect.as_mut() {
+                    effect.process(
+                        FxDuration::from_millis(delta),
+                        frame.buffer_mut(),
+                        targets.frame,
+                    );
+                } else {
+                    animator.apply(&targets, frame.buffer_mut(), delta);
+                }
             })
             .unwrap();
 
@@ -174,7 +189,59 @@ fn scene_strip_bundle(
     }
 }
 
-pub fn scene_prop_resonance_ripple() -> PreviewStripBundle {
+fn deterministic_preview_effect_for_moment(
+    moment: &crate::tui::room::SceneMoment,
+    targets: &SceneEffectTargets,
+    fixed_now: time::OffsetDateTime,
+    strip_id: &str,
+) -> Option<Effect> {
+    if moment.key != crate::tui::room::SceneMomentKey::PropResonanceRipple {
+        return None;
+    }
+
+    targets.props.get(moment.target_id).map(|rect| {
+        deterministic_coalesce(fixed_now, strip_id, moment.duration_ms as u32).with_area(*rect)
+    })
+}
+
+fn deterministic_coalesce(
+    fixed_now: time::OffsetDateTime,
+    strip_id: &str,
+    duration_ms: u32,
+) -> Effect {
+    let seed = deterministic_effect_seed(fixed_now, strip_id);
+    let timer = EffectTimer::from_ms(duration_ms, Interpolation::Linear).mirrored();
+    tachyonfx::fx::effect_fn(seed, timer, |seed, ctx, cells| {
+        let alpha = ctx.alpha();
+        cells.for_each_cell(|pos, cell| {
+            if alpha > deterministic_cell_fraction(*seed, pos) {
+                cell.set_char(' ');
+            }
+        });
+    })
+}
+
+fn deterministic_effect_seed(fixed_now: time::OffsetDateTime, strip_id: &str) -> u32 {
+    let mut seed = fixed_now.unix_timestamp() as u32;
+    for byte in strip_id.bytes() {
+        seed = seed.wrapping_mul(16_777_619) ^ u32::from(byte);
+    }
+    seed
+}
+
+fn deterministic_cell_fraction(seed: u32, pos: Position) -> f32 {
+    let mut value = seed
+        ^ u32::from(pos.x).wrapping_mul(0x9E37_79B9)
+        ^ u32::from(pos.y).wrapping_mul(0x85EB_CA6B);
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7FEB_352D);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846C_A68B);
+    value ^= value >> 16;
+    f32::from_bits(0x3F80_0000 | (value >> 9)) - 1.0
+}
+
+pub fn scene_prop_resonance_ripple(ctx: &PreviewRenderContext) -> PreviewStripBundle {
     let vm = WatchViewModel::fixture_with_habitat_props();
     let moment = crate::tui::room::SceneMoment {
         key: crate::tui::room::SceneMomentKey::PropResonanceRipple,
@@ -192,10 +259,11 @@ pub fn scene_prop_resonance_ripple() -> PreviewStripBundle {
         120,
         32,
         &moment,
+        ctx.fixed_now,
     )
 }
 
-pub fn scene_feed_sweep() -> PreviewStripBundle {
+pub fn scene_feed_sweep(ctx: &PreviewRenderContext) -> PreviewStripBundle {
     let mut vm = WatchViewModel::fixture();
     vm.life_profile.burst_level = 0.8;
     vm.last_feed_pulse_at = Some(time::OffsetDateTime::from_unix_timestamp(1_000).unwrap());
@@ -215,10 +283,11 @@ pub fn scene_feed_sweep() -> PreviewStripBundle {
         120,
         32,
         &moment,
+        ctx.fixed_now,
     )
 }
 
-pub fn scene_dawn_wake_wipe() -> PreviewStripBundle {
+pub fn scene_dawn_wake_wipe(ctx: &PreviewRenderContext) -> PreviewStripBundle {
     let vm = WatchViewModel::fixture();
     let moment = crate::tui::room::SceneMoment {
         key: crate::tui::room::SceneMomentKey::DawnWakeWipe,
@@ -236,10 +305,11 @@ pub fn scene_dawn_wake_wipe() -> PreviewStripBundle {
         120,
         32,
         &moment,
+        ctx.fixed_now,
     )
 }
 
-pub fn scene_heavy_session_shimmer() -> PreviewStripBundle {
+pub fn scene_heavy_session_shimmer(ctx: &PreviewRenderContext) -> PreviewStripBundle {
     let vm = WatchViewModel::fixture();
     let moment = crate::tui::room::SceneMoment {
         key: crate::tui::room::SceneMomentKey::HeavySessionShimmer,
@@ -257,15 +327,16 @@ pub fn scene_heavy_session_shimmer() -> PreviewStripBundle {
         120,
         32,
         &moment,
+        ctx.fixed_now,
     )
 }
 
 /// Return all real scene strip bundles.
-pub fn scene_strips() -> Vec<PreviewStripBundle> {
+pub fn scene_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
     vec![
-        scene_prop_resonance_ripple(),
-        scene_feed_sweep(),
-        scene_dawn_wake_wipe(),
-        scene_heavy_session_shimmer(),
+        scene_prop_resonance_ripple(ctx),
+        scene_feed_sweep(ctx),
+        scene_dawn_wake_wipe(ctx),
+        scene_heavy_session_shimmer(ctx),
     ]
 }
