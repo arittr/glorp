@@ -1,9 +1,9 @@
 use crate::dev_preview::export::{
-    copy_assets, has_masked_room_artifact, write_cells_json, write_index_html, write_layout_json,
-    write_manifest, write_review_markdown, write_room_text_frame, write_room_text_frame_masked,
-    write_text_frame, ArtifactType, PreviewArtifact, PreviewDimensions, PreviewManifest,
-    PreviewMaskRect, PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER,
-    SCHEMA_VERSION,
+    copy_assets, has_masked_room_artifact, write_cells_json, write_index_html, write_json_artifact,
+    write_layout_json, write_manifest, write_review_markdown, write_room_text_frame,
+    write_room_text_frame_masked, write_text_frame, ArtifactType, PreviewArtifact,
+    PreviewDimensions, PreviewManifest, PreviewMaskRect, PreviewScenario, PreviewScenarioFiles,
+    PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::habitat_props::{
@@ -109,6 +109,18 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                     )?;
                 }
             }
+        }
+        if let Some(scene) = &frame.contract.scene {
+            write_json_artifact(&staging_dir.join(scene_path(frame)), scene)?;
+        }
+        if let Some(round_layout) = &frame.contract.round_layout {
+            write_json_artifact(&staging_dir.join(round_layout_path(frame)), round_layout)?;
+        }
+        if let Some(round_commands) = &frame.contract.round_commands {
+            write_json_artifact(
+                &staging_dir.join(round_commands_path(frame)),
+                round_commands,
+            )?;
         }
     }
 
@@ -485,6 +497,17 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     None
                 }
             }),
+            scene: frame.contract.scene.as_ref().map(|_| scene_path(frame)),
+            round_layout: frame
+                .contract
+                .round_layout
+                .as_ref()
+                .map(|_| round_layout_path(frame)),
+            round_commands: frame
+                .contract
+                .round_commands
+                .as_ref()
+                .map(|_| round_commands_path(frame)),
         },
         inputs,
         round: if frame.id.starts_with("round-") {
@@ -569,6 +592,36 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 path: room_masked_text_path(frame),
                 width: Some(frame.width),
                 height: Some(frame.height),
+            });
+        }
+        if frame.contract.scene.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-scene", frame.id),
+                title: format!("{} Scene", frame.title),
+                artifact_type: ArtifactType::Scene,
+                path: scene_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.round_layout.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-round-layout", frame.id),
+                title: format!("{} Round Layout", frame.title),
+                artifact_type: ArtifactType::RoundLayout,
+                path: round_layout_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.round_commands.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-round-commands", frame.id),
+                title: format!("{} Round Commands", frame.title),
+                artifact_type: ArtifactType::RoundCommands,
+                path: round_commands_path(frame),
+                width: None,
+                height: None,
             });
         }
     }
@@ -1543,6 +1596,18 @@ fn cells_path(frame: &PreviewFrame) -> PathBuf {
 
 fn layout_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.layout.json", frame.id))
+}
+
+fn scene_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.scene.json", frame.id))
+}
+
+fn round_layout_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.round-layout.json", frame.id))
+}
+
+fn round_commands_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.round-commands.json", frame.id))
 }
 
 fn room_text_path(frame: &PreviewFrame) -> PathBuf {

@@ -87,6 +87,12 @@ pub struct PreviewScenarioFiles {
     pub room_text: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub room_masked_text: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_layout: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_commands: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +152,9 @@ pub enum ArtifactType {
     Text,
     Cells,
     Layout,
+    Scene,
+    RoundLayout,
+    RoundCommands,
     Html,
     Review,
     Asset,
@@ -251,6 +260,11 @@ pub fn write_layout_json(path: &Path, layout: &PreviewLayout) -> Result<()> {
     Ok(())
 }
 
+pub fn write_json_artifact<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    fs::write(path, serde_json::to_string_pretty(value)?)?;
+    Ok(())
+}
+
 pub fn write_manifest(path: &Path, manifest: &PreviewManifest) -> Result<()> {
     fs::write(path, serde_json::to_string_pretty(manifest)?)?;
     Ok(())
@@ -289,6 +303,18 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             }
             if let Some(masked_room) = &scenario.files.room_masked_text {
                 markdown.push_str(&format!("- Masked room: `{}`\n", masked_room.display()));
+            }
+            if let Some(scene) = &scenario.files.scene {
+                markdown.push_str(&format!("- Scene: `{}`\n", scene.display()));
+            }
+            if let Some(round_layout) = &scenario.files.round_layout {
+                markdown.push_str(&format!("- Round layout: `{}`\n", round_layout.display()));
+            }
+            if let Some(round_commands) = &scenario.files.round_commands {
+                markdown.push_str(&format!(
+                    "- Round commands: `{}`\n",
+                    round_commands.display()
+                ));
             }
             markdown.push('\n');
             markdown.push_str("Review prompts:\n");
@@ -423,6 +449,24 @@ fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
         links.push(format!(
             r#"<a href="{}">masked room</a>"#,
             escape_html(&format!("frames/{}.room-masked.txt", frame.id))
+        ));
+    }
+    if frame.contract.scene.is_some() {
+        links.push(format!(
+            r#"<a href="{}">scene</a>"#,
+            escape_html(&format!("frames/{}.scene.json", frame.id))
+        ));
+    }
+    if frame.contract.round_layout.is_some() {
+        links.push(format!(
+            r#"<a href="{}">round layout</a>"#,
+            escape_html(&format!("frames/{}.round-layout.json", frame.id))
+        ));
+    }
+    if frame.contract.round_commands.is_some() {
+        links.push(format!(
+            r#"<a href="{}">round commands</a>"#,
+            escape_html(&format!("frames/{}.round-commands.json", frame.id))
         ));
     }
 
@@ -677,6 +721,9 @@ mod tests {
                     layout: None,
                     room_text: None,
                     room_masked_text: None,
+                    scene: None,
+                    round_layout: None,
+                    round_commands: None,
                 },
                 inputs: BTreeMap::from([(
                     "fixed_now".to_string(),
