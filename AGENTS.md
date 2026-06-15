@@ -14,25 +14,32 @@ open target/glorp-preview/index.html
 
 Scenario options:
 
-- `--scenario all` renders watch frames, the habitat prop QA frames, the pet
-  matrix, and scene animation strips.
+- `--scenario all` renders watch frames, habitat prop QA frames, the pet
+  matrix, round companion frames, and scene animation strips.
 - `--scenario watch` renders `watch-wide-normal` at `120x32` and
-  `watch-tall-wide` at `180x50`, and `watch-compact-normal` at `72x24`.
+  `watch-tall-wide` at `180x50`, `watch-compact-normal` at `72x24`, plus
+  deterministic liveliness, day-context, room, species-dialect, and activity
+  identity fixtures.
 - `--scenario props` renders `habitat-props-catalog` plus early, lived-in, and
   full watch frames for prop-density review.
-- `--scenario pets` renders `pet-species-stage`, covering all six species
-  across all seven growth stages.
-- `--scenario animation` renders scene animation strips (currently
-  `scene-strip-smoke`) for paused playback review.
+- `--scenario pets` renders `pet-species-stage`, `pet-species-stage-flat`,
+  and live-state species fixtures.
+- `--scenario round` renders the circular companion previews, including normal,
+  activity, asleep, helper-trouble, flat-color, and species-dialect frames.
+- `--scenario animation` renders deterministic scene animation strips for
+  paused playback review.
 
 The bundle includes `index.html`, `review.md`, `manifest.json`, local assets,
-`frames/*.txt` / `frames/*.cells.json` captures, and for animation scenarios
+`frames/*.txt` / `frames/*.cells.json` captures, optional
+`frames/*.layout.json` captures, optional cropped room artifacts
+`frames/*.room.txt` / `frames/*.room-masked.txt`, and for animation scenarios
 `strips/<id>/frame-NNN.txt` / `strips/<id>/frame-NNN.cells.json` captures.
 Treat `manifest.json` as the review contract; it lists scenario intent,
-dimensions, files, inputs, and review prompts. `manifest.json` uses
-`schema_version` 2 and includes a `strips` array whose entries have
-`kind: "scene-moment"` along with `playback`, `target_id`, and per-frame
-`phase` / `elapsed_ms` values.
+dimensions, files, inputs, artifact inventory, and review prompts.
+`manifest.json` uses `schema_version` 3. Round scenarios include a `round`
+metadata object with target renderer, circular aperture, and privacy claims.
+Animation strips are listed in the `strips` array with `kind: "scene-moment"`,
+`playback`, `target_id`, and per-frame `phase` / `elapsed_ms` values.
 
 `dev-preview` is intentionally hidden from normal help output. It is a local
 development tool and does not read or write real user pet state. Output
@@ -43,10 +50,11 @@ producer.
 Useful checks after preview changes:
 
 ```bash
-cargo test --test dev_preview
-cargo test dev_preview::scenarios
-cargo test dev_preview::export
-cargo test dev_preview::habitat_props
+cargo test --features dev-preview --test dev_preview
+cargo test --features dev-preview dev_preview::scenarios
+cargo test --features dev-preview dev_preview::export
+cargo test --features dev-preview dev_preview::habitat_props
+cargo test --test round_scene
 ```
 
 ## Release Procedure

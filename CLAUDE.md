@@ -22,13 +22,13 @@ open target/glorp-preview/index.html                        # inspect determinis
 
 Test & lint:
 ```bash
-cargo test                                                  # full suite (~14 binaries, ~178 tests)
+cargo test                                                  # full suite
 cargo test --test usage_provider                            # one integration test file
 cargo test --lib parse_period_start_tests                   # just unit tests in a module
 cargo test -- forty_nine_daily_catchups                     # filter by test name
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings    # CI gate; must stay clean
-cargo test --test dev_preview                               # preview-lab integration coverage
+cargo test --features dev-preview --test dev_preview        # preview-lab integration coverage
 ```
 
 npm packaging (rarely touched):
@@ -84,20 +84,31 @@ open target/glorp-preview/index.html
 
 Scenarios:
 
-- `all` renders watch + pet previews.
-- `watch` renders `watch-wide-normal` (`120x32`) and
-  `watch-compact-normal` (`72x24`).
-- `pets` renders `pet-species-stage`, covering all six species across all
-  seven stages.
+- `all` renders watch, habitat prop, pet, round companion, and scene-strip
+  previews.
+- `watch` renders the standard wide/tall/compact watch frames plus
+  deterministic liveliness, day-context, room, species-dialect, and activity
+  identity fixtures.
+- `props` renders the habitat prop catalog plus early, lived-in, and full
+  watch frames.
+- `pets` renders species/stage matrices and live-state species fixtures.
+- `round` renders the circular companion previews.
+- `animation` renders deterministic scene animation strips.
 
 The preview bundle contains:
 
 - `index.html` — static contact sheet.
 - `review.md` — manifest-driven checklist with scenario prompts.
 - `manifest.json` — review contract with scenario ids, kinds, intents,
-  dimensions, files, inputs, and artifact inventory.
+  dimensions, files, inputs, round metadata, and artifact inventory. Current
+  manifest schema version is 3.
 - `frames/*.txt` — plain visible terminal cells.
 - `frames/*.cells.json` — per-cell geometry/style data.
+- `frames/*.layout.json` — optional component layout target captures.
+- `frames/*.room.txt` / `frames/*.room-masked.txt` — optional cropped room
+  captures for room-focused review.
+- `strips/<id>/frame-NNN.txt` / `strips/<id>/frame-NNN.cells.json` —
+  deterministic animation-strip frames.
 
 Output safety is deliberate: preview generation only overwrites a missing,
 empty, or previously owned preview directory marked by `.glorp-preview` and a
