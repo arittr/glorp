@@ -9,6 +9,8 @@ use crate::pet::animator::{
     low_energy_lightness_multiplier,
 };
 use crate::pet::render::PaletteRoleName;
+use crate::presentation::privacy::PresentationSurface;
+use crate::presentation::scene::PresentationScene;
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind};
 use crate::tui::panels::LegacyPanel;
@@ -206,6 +208,8 @@ impl LegacyPanel for PetPanel {
             std::borrow::Cow::Borrowed(vm)
         };
         let vm = vm.as_ref();
+        let presentation_scene =
+            PresentationScene::from_watch_view_model(vm, now, PresentationSurface::WatchTui);
         let scene = PetScene::compute_layout(area, vm, ctx);
 
         // Per-cell pet silhouette + 1-cell halo, shared by every pass that
@@ -213,6 +217,7 @@ impl LegacyPanel for PetPanel {
         // content can fill the diamond's negative space while keeping a
         // breathing margin around the actual pet outline.
         let species = vm.pet_render.generated_species;
+        let _presentation_species = presentation_scene.pet.species.as_str();
         let stage = vm.pet_render.stage;
         let mirror = vm.facing == -1;
         let silhouette_halo = pet_silhouette_halo_rects(&vm.pet_art, scene.pet_art, mirror);
@@ -231,6 +236,14 @@ impl LegacyPanel for PetPanel {
         // drawn before the existing ambient/mote/activity passes so they set
         // the room's silhouette without replacing pet or speech cells.
         let room_profile = crate::tui::room::derive_room_life_profile(vm, now);
+        debug_assert_eq!(
+            presentation_scene.room.primary_biome,
+            format!("{:?}", room_profile.biome.primary)
+        );
+        debug_assert_eq!(
+            presentation_scene.room.species_dialect,
+            room_profile.species_dialect.key.as_str()
+        );
 
         // Base layer: a subtle per-biome background wash over the ENTIRE habitat,
         // including under the pet and speech bubble. Set BEFORE every glyph pass
