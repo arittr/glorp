@@ -38,4 +38,9 @@ impl PresentationRoom {
             placements: Vec::new(),
         }
     }
+
+    pub(crate) fn debug_assert_matches_profile(&self, profile: &RoomLifeProfile) {
+        debug_assert_eq!(self.primary_biome, format!("{:?}", profile.biome.primary));
+        debug_assert_eq!(self.species_dialect, profile.species_dialect.key.as_str());
+    }
 }

@@ -9,8 +9,7 @@ use crate::pet::animator::{
     low_energy_lightness_multiplier,
 };
 use crate::pet::render::PaletteRoleName;
-use crate::presentation::privacy::PresentationSurface;
-use crate::presentation::scene::PresentationScene;
+use crate::presentation::{privacy::PresentationSurface, scene::PresentationScene};
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind};
 use crate::tui::panels::LegacyPanel;
@@ -236,14 +235,8 @@ impl LegacyPanel for PetPanel {
         // drawn before the existing ambient/mote/activity passes so they set
         // the room's silhouette without replacing pet or speech cells.
         let room_profile = crate::tui::room::derive_room_life_profile(vm, now);
-        debug_assert_eq!(
-            presentation_scene.room.primary_biome,
-            format!("{:?}", room_profile.biome.primary)
-        );
-        debug_assert_eq!(
-            presentation_scene.room.species_dialect,
-            room_profile.species_dialect.key.as_str()
-        );
+        let presentation_room = &presentation_scene.room;
+        presentation_room.debug_assert_matches_profile(&room_profile);
 
         // Base layer: a subtle per-biome background wash over the ENTIRE habitat,
         // including under the pet and speech bubble. Set BEFORE every glyph pass
