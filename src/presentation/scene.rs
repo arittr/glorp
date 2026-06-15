@@ -1,6 +1,7 @@
 use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
+use crate::presentation::room::PresentationRoom;
 use crate::presentation::target::SurfaceTargetId;
-use crate::tui::room::{biome_symbols, derive_room_life_profile};
+use crate::tui::room::derive_room_life_profile;
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
@@ -9,7 +10,7 @@ use time::OffsetDateTime;
 pub struct PresentationScene {
     pub privacy: PrivacyProjection,
     pub pet: PresentationPetSnapshot,
-    pub room: PresentationRoomSnapshot,
+    pub room: PresentationRoom,
     pub activity: PresentationActivitySnapshot,
     pub targets: BTreeMap<SurfaceTargetId, PresentationTargetAnchor>,
 }
@@ -25,17 +26,6 @@ pub struct PresentationPetSnapshot {
     pub facing: i8,
     pub breath_offset_y: u8,
     pub asleep: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PresentationRoomSnapshot {
-    pub primary_biome: String,
-    pub secondary_biome: Option<String>,
-    pub species_dialect: String,
-    pub work_weather: String,
-    pub day_phase: String,
-    pub prop_landmarks: Vec<String>,
-    pub glyph_vocabulary: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,12 +73,11 @@ impl PresentationScene {
     ) -> Self {
         let privacy = PrivacyProjection::for_surface(surface);
         let room_profile = derive_room_life_profile(vm, now);
-        let glyph_vocabulary =
-            biome_symbols(room_profile.biome.primary, room_profile.species_dialect)
-                .iter()
-                .map(|ch| ch.to_string())
-                .collect();
         let redacts_runtime_ids = redacts_runtime_ids(privacy);
+        let mut room = PresentationRoom::from_profile(&room_profile);
+        if redacts_runtime_ids {
+            room.prop_landmarks.clear();
+        }
 
         Self {
             privacy,
@@ -107,23 +96,7 @@ impl PresentationScene {
                 breath_offset_y: vm.breath_offset_y,
                 asleep: vm.day_context.asleep,
             },
-            room: PresentationRoomSnapshot {
-                primary_biome: format!("{:?}", room_profile.biome.primary),
-                secondary_biome: room_profile.biome.secondary.map(|tag| format!("{tag:?}")),
-                species_dialect: room_profile.species_dialect.key.as_str().to_string(),
-                work_weather: format!("{:?}", vm.life_profile.work_weather),
-                day_phase: format!("{:?}", vm.day_context.day_phase),
-                prop_landmarks: if redacts_runtime_ids {
-                    Vec::new()
-                } else {
-                    room_profile
-                        .identity_prop_ids
-                        .iter()
-                        .map(|id| id.as_str().to_string())
-                        .collect()
-                },
-                glyph_vocabulary,
-            },
+            room,
             activity: PresentationActivitySnapshot {
                 source_diversity: format!("{:?}", vm.activity_identity.source_diversity),
                 helper_health: if vm
