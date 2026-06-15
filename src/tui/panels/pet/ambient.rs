@@ -10,10 +10,8 @@ use crate::tui::day::{DayContext, DayPhase, Season};
 use crate::tui::life::{PetLifeProfile, WorkWeather};
 use crate::tui::style::ColorCapability;
 
-use super::{
-    activity_glyph_color, dim_shift, lerp_color, warm_shift, AmbientGlyph, MOTE_BUDGET_SHARE,
-    MOTE_GLYPHS,
-};
+use super::colors::{activity_glyph_color, dim_shift, lerp_color, warm_shift};
+use super::{AmbientGlyph, MOTE_BUDGET_SHARE, MOTE_GLYPHS};
 
 /// Per-species sky-glyph palette.
 pub(super) fn sky_palette_for(species: Species) -> &'static [char] {
