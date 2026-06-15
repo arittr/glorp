@@ -37,10 +37,11 @@ use art_lines::{
 };
 pub(crate) use colors::pet_role_style;
 use colors::{
-    activity_glyph_budget, apply_prop_reaction_style, brighten_pet_role, darken_pet_styles,
-    lift_pet_styles_for_activity, performance_lightness_multiplier, performance_posture_offset,
-    profile_token_pop, seed_pet_palette, tint_pet_styles_for_phase,
+    activity_glyph_budget, brighten_pet_role, darken_pet_styles, lift_pet_styles_for_activity,
+    performance_lightness_multiplier, performance_posture_offset, profile_token_pop,
+    seed_pet_palette, tint_pet_styles_for_phase,
 };
+use performance::apply_pet_performance_cues;
 
 #[cfg(test)]
 use crate::game::evolution::Stage;
@@ -58,7 +59,9 @@ use ambient::{
 #[cfg(test)]
 use art_lines::{build_cursor_eye_string, cursor_eye_glyph};
 #[cfg(test)]
-use colors::{activity_glyph_color, activity_lift_style, tint_style_for_phase};
+use colors::{
+    activity_glyph_color, activity_lift_style, apply_prop_reaction_style, tint_style_for_phase,
+};
 #[cfg(test)]
 use ratatui::text::Line;
 
@@ -343,25 +346,14 @@ impl LegacyPanel for PetPanel {
             &vm.pet_render.seed,
             ctx,
         );
-        for prop in &prop_cells {
-            if matches!(
-                prop.pet_layer,
-                HabitatPetLayer::Background | HabitatPetLayer::Behind
-            ) && habitat_contains(&scene, prop)
-            {
-                let reaction = life_profile
-                    .prop_reactions
-                    .iter()
-                    .find(|reaction| reaction.prop_id == prop.prop_id);
-                let cell = &mut buf[(prop.col, prop.row)];
-                cell.set_char(prop.glyph);
-                cell.set_style(apply_prop_reaction_style(
-                    prop.style,
-                    reaction,
-                    ctx.color_capability,
-                ));
-            }
-        }
+        props::render_prop_layers(
+            buf,
+            &prop_cells,
+            &scene,
+            &life_profile.prop_reactions,
+            ctx.color_capability,
+            &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
+        );
 
         // Pet art with shimmer, twinkle, and token-pop overlays — paints over
         // any Background / Behind cells it touches via the silhouette.
@@ -385,93 +377,14 @@ impl LegacyPanel for PetPanel {
         // Foreground props paint on top of the pet, for whenever depth in
         // front of the pet is wanted (no foreground props in the catalog
         // today; the pass exists so adding one only requires a catalog flip).
-        for prop in &prop_cells {
-            if matches!(prop.pet_layer, HabitatPetLayer::Foreground)
-                && habitat_contains(&scene, prop)
-            {
-                let reaction = life_profile
-                    .prop_reactions
-                    .iter()
-                    .find(|reaction| reaction.prop_id == prop.prop_id);
-                let cell = &mut buf[(prop.col, prop.row)];
-                cell.set_char(prop.glyph);
-                cell.set_style(apply_prop_reaction_style(
-                    prop.style,
-                    reaction,
-                    ctx.color_capability,
-                ));
-            }
-        }
-    }
-}
-
-fn habitat_contains(scene: &PetSceneLayout, prop: &crate::tui::component::HabitatPropCell) -> bool {
-    prop.col >= scene.habitat.x
-        && prop.row >= scene.habitat.y
-        && prop.col < scene.habitat.x.saturating_add(scene.habitat.width)
-        && prop.row < scene.habitat.y.saturating_add(scene.habitat.height)
-}
-
-/// Overwrites one or two cells near the pet with a tiny performance cue glyph.
-/// Keeps the rest of the pet template untouched — this is punctuation, not a
-/// rewrite.
-fn apply_pet_performance_cues(
-    buf: &mut Buffer,
-    scene: &PetSceneLayout,
-    performance: crate::tui::room::PetPerformance,
-    color_capability: ColorCapability,
-) {
-    let style = performance_cue_style(color_capability);
-    match performance {
-        crate::tui::room::PetPerformance::TiredAwake => mark_pet_floor(buf, scene, '˙', style),
-        crate::tui::room::PetPerformance::HeavyDayCozy => mark_pet_floor(buf, scene, '~', style),
-        crate::tui::room::PetPerformance::AsleepDreaming => mark_pet_air(buf, scene, 'z', style),
-        crate::tui::room::PetPerformance::CatchUpWake => mark_pet_air(buf, scene, '^', style),
-        crate::tui::room::PetPerformance::SourceBurstPerk => mark_pet_air(buf, scene, '!', style),
-        crate::tui::room::PetPerformance::RestedAwake => {}
-    }
-}
-
-fn performance_cue_style(color_capability: ColorCapability) -> Style {
-    let color = if matches!(color_capability, ColorCapability::Flat) {
-        crate::tui::style::tokenpet_palette().faint.rgb
-    } else {
-        Color::Rgb(0xd4, 0xa6, 0x57)
-    };
-    Style::default().fg(color)
-}
-
-/// Places `symbol` on the floor cell just below the pet's bounding rect,
-/// clipped to the habitat area.
-fn mark_pet_floor(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: Style) {
-    let x = scene.pet_art.x + scene.pet_art.width / 2;
-    let y = scene.pet_art.y.saturating_add(scene.pet_art.height);
-    let within_habitat = x >= scene.habitat.x
-        && y >= scene.habitat.y
-        && x < scene.habitat.x.saturating_add(scene.habitat.width)
-        && y < scene.habitat.y.saturating_add(scene.habitat.height);
-    if within_habitat {
-        let cell = &mut buf[(x, y)];
-        cell.set_char(symbol);
-        cell.set_style(style);
-    }
-}
-
-/// Places `symbol` on the air cell just above the pet's bounding rect,
-/// clipped to the habitat area. Skips the write when there is no row above
-/// the pet, so the cue never overwrites pet art.
-fn mark_pet_air(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: Style) {
-    let x = scene.pet_art.x + scene.pet_art.width / 2;
-    let y = scene.pet_art.y.saturating_sub(1);
-    let above_pet = y < scene.pet_art.y;
-    let within_habitat = x >= scene.habitat.x
-        && y >= scene.habitat.y
-        && x < scene.habitat.x.saturating_add(scene.habitat.width)
-        && y < scene.habitat.y.saturating_add(scene.habitat.height);
-    if above_pet && within_habitat {
-        let cell = &mut buf[(x, y)];
-        cell.set_char(symbol);
-        cell.set_style(style);
+        props::render_prop_layer(
+            buf,
+            &prop_cells,
+            &scene,
+            &life_profile.prop_reactions,
+            ctx.color_capability,
+            HabitatPetLayer::Foreground,
+        );
     }
 }
 
