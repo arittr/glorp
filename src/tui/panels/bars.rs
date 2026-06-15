@@ -20,6 +20,11 @@ pub fn bar_spans<'a>(
     let n_filled = ((clamped * BAR_CELLS as f64).round() as usize).min(BAR_CELLS);
     let n_empty = BAR_CELLS - n_filled;
     let value_pct = (clamped * 100.0).round() as u32;
+    let value_label = if clamped > 0.0 && value_pct == 0 {
+        "<1".to_string()
+    } else {
+        value_pct.to_string()
+    };
     let stat_style = Style::default().fg(color);
 
     let mut spans: Vec<Span<'a>> = Vec::with_capacity(BAR_CELLS + 6);
@@ -46,7 +51,7 @@ pub fn bar_spans<'a>(
         spans.push(Span::styled("░".repeat(n_empty), styles.empty_bar));
     }
     spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("{value_pct}"), stat_style));
+    spans.push(Span::styled(value_label, stat_style));
     spans
 }
 
@@ -128,6 +133,27 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().filter(|c| *c == '░').count(), 12);
         assert_eq!(text.chars().filter(|c| *c == '█').count(), 0);
+    }
+
+    #[test]
+    fn bar_spans_nonzero_sub_percent_progress_does_not_render_as_zero() {
+        let styles = semantic_styles();
+        let spans = bar_spans(
+            "xp",
+            0.0016,
+            fed_color(),
+            ColorCapability::Truecolor,
+            &styles,
+        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("<1"),
+            "positive sub-percent progress should not read as zero: {text:?}"
+        );
+        assert!(
+            !text.ends_with("  0"),
+            "positive sub-percent progress should not render the zero value: {text:?}"
+        );
     }
 
     #[test]

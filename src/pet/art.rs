@@ -479,23 +479,23 @@ const GLITCH_ADULT: &[Template] = &[
     ],
     [
         " \u{2591}\u{2592}\u{2593}\u{2593}\u{2593}\u{2592}\u{2591}   ",
-        "\u{2590}\u{2580}\u{2580}\u{2580} \u{2580}\u{2580}\u{258c}   ",
-        "\u{2590} {eyes} \u{258c}    ",
-        "\u{2590}  {mouth}  \u{258c}    ",
-        "\u{2590}{pattern} \u{258c}     ",
-        " \u{2580}\u{2584}{accent}\u{2584}\u{2580}     ",
-        " _\u{258c}\u{2591}\u{2591}\u{2590}_    ",
-        " :_#\u{2591}#_:   ",
+        "\u{2590}\u{2580}\u{2580}\u{2580}\u{2588}\u{2580}\u{2580}\u{258c}   ",
+        "\u{2590}\u{2593}{eyes}\u{2593}\u{258c}    ",
+        "\u{2590}\u{2593}\u{2593}{mouth}\u{2593}\u{2593}\u{258c}    ",
+        "\u{2590}{pattern}\u{2593}\u{2593}\u{258c}    ",
+        "\u{2590}\u{2593}\u{2584}{accent}\u{2584}\u{2593}\u{258c}    ",
+        "\u{2590}_\u{258c}\u{2591}\u{2591}\u{2590}_\u{258c}   ",
+        "\u{2570}:#\u{2591}#::\u{256f}   ",
     ],
     [
-        "  \u{2591}\u{2593}\u{2591}#\u{2591}    ",
-        " \u{258c}\u{2580}\u{2580}\u{2580}\u{2580}\u{2590}_   ",
-        " \u{258c} {eyes}\u{2590}#   ",
-        " \u{258c}  {mouth} \u{2590}    ",
-        " \u{258c}{pattern}\u{2590}     ",
-        " \u{2580}\u{2584}{accent}\u{2584}\u{258c}     ",
-        " _\u{2590}\u{2591} \u{2591}\u{258c}_   ",
-        "  :#_#:    ",
+        "  \u{2591}\u{2593}\u{2588}\u{2593}#\u{2591}   ",
+        " \u{258c}\u{2580}\u{2580}\u{2588}\u{2588}\u{2590}_   ",
+        " \u{258c}\u{2593}{eyes}\u{2590}#   ",
+        " \u{258c}\u{2593}\u{2593}{mouth}\u{2593}\u{2590}    ",
+        " \u{258c}{pattern}\u{2593}\u{2590}    ",
+        " \u{2580}\u{2584}{accent}\u{2584}\u{2593}\u{258c}    ",
+        " _\u{2590}\u{2591}\u{2593}\u{2591}\u{258c}_   ",
+        "  :#\u{2588}#:_   ",
     ],
 ];
 
@@ -858,5 +858,33 @@ mod tests {
                 "Glitch elder stage reused the weaker S4 morph for morph={morph_index}"
             );
         }
+    }
+
+    #[test]
+    fn glitch_daemon_silhouette_is_visibly_denser_than_glitch_form() {
+        let glitch_form = template_lines(Species::Glitch, Stage::S4, 0, 0);
+        let glitch_density = visible_cell_count(&glitch_form);
+
+        for morph_index in 0..6 {
+            let daemon = template_lines(Species::Glitch, Stage::S5, morph_index, 0);
+            let daemon_density = visible_cell_count(&daemon);
+            assert!(
+                daemon_density >= glitch_density + 6,
+                "Glitch daemon morph={morph_index} should visibly outgrow S4: \
+                 S4 density={glitch_density}, S5 density={daemon_density}"
+            );
+        }
+    }
+
+    fn visible_cell_count(lines: &[&str]) -> usize {
+        lines
+            .iter()
+            .map(|line| {
+                substitute_slots(line)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count()
+            })
+            .sum()
     }
 }
