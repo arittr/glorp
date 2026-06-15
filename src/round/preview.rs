@@ -1,10 +1,11 @@
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
 use crate::pet::render::PaletteRoleName;
 use crate::presentation::pet::{role_for_cell, PetTextBlock};
+use crate::round::draw::{RoundDrawCommand, RoundDrawKind};
 use crate::round::layout::{
-    layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
+    layout_round_scene, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
 };
-use crate::round::model::{derive_round_scene_model, RoundHelperHealth, RoundSceneModel};
+use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::tui::view_model::WatchViewModel;
 use ratatui::text::Line;
 
@@ -21,11 +22,16 @@ pub fn render_round_preview_frame_from_vm(
     let aperture = RoundAperture::new(width, height);
     let layout = layout_round_scene(&scene, aperture, capabilities);
     let mut cells = blank_cells(width, height, aperture);
-    paint_room(&mut cells, width, &scene, &layout, capabilities.truecolor);
-    paint_pet_art(&mut cells, width, &scene, &layout, capabilities.truecolor);
-    paint_halo(&mut cells, width, &scene, &layout, capabilities.truecolor);
-    mark_continuations(&mut cells, width);
     let commands = crate::round::draw::build_draw_commands(&scene, &layout);
+    paint_commands(
+        &mut cells,
+        width,
+        &scene,
+        &layout,
+        &commands,
+        capabilities.truecolor,
+    );
+    mark_continuations(&mut cells, width);
     let mut frame = PreviewFrame {
         id: id.into(),
         title: title.into(),
@@ -71,6 +77,48 @@ fn blank_cells(width: u16, height: u16, aperture: RoundAperture) -> Vec<PreviewC
         }
     }
     cells
+}
+
+fn paint_commands(
+    cells: &mut [PreviewCell],
+    width: u16,
+    scene: &RoundSceneModel,
+    layout: &RoundSceneLayout,
+    commands: &[RoundDrawCommand],
+    truecolor: bool,
+) {
+    let mut room_painted = false;
+    let mut pet_painted = false;
+
+    for command in commands {
+        match command.kind {
+            RoundDrawKind::Background => {}
+            RoundDrawKind::RoomGlyph => {
+                if !room_painted {
+                    paint_room(cells, width, scene, layout, truecolor);
+                    room_painted = true;
+                }
+            }
+            RoundDrawKind::PetGlyph => {
+                if !pet_painted {
+                    paint_pet_art(cells, width, scene, layout, truecolor);
+                    pet_painted = true;
+                }
+            }
+            RoundDrawKind::Trouble => {
+                let fg = if truecolor { "#f0a646" } else { "yellow" };
+                set_cell(
+                    cells,
+                    width,
+                    command.x.round() as i32,
+                    command.y.round() as i32,
+                    "!".to_string(),
+                    Some(fg.to_string()),
+                );
+            }
+            RoundDrawKind::Halo | RoundDrawKind::PropGlyph => {}
+        }
+    }
 }
 
 fn paint_room(
@@ -149,32 +197,6 @@ fn flat_role_name(role: PaletteRoleName) -> &'static str {
         PaletteRoleName::Eye => "green",
         PaletteRoleName::Accent | PaletteRoleName::Particle => "yellow",
         _ => "white",
-    }
-}
-
-fn paint_halo(
-    cells: &mut [PreviewCell],
-    width: u16,
-    scene: &RoundSceneModel,
-    layout: &RoundSceneLayout,
-    truecolor: bool,
-) {
-    if scene.halo.helper_health == RoundHelperHealth::Trouble {
-        for anchor in layout
-            .halo_anchors
-            .iter()
-            .filter(|a| a.kind == RoundAnchorKind::HelperTrouble)
-        {
-            let fg = if truecolor { "#f0a646" } else { "yellow" };
-            set_cell(
-                cells,
-                width,
-                anchor.x.round() as i32,
-                anchor.y.round() as i32,
-                "!".to_string(),
-                Some(fg.to_string()),
-            );
-        }
     }
 }
 
