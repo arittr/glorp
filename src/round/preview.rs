@@ -1,5 +1,6 @@
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
-use crate::pet::render::{PaletteRoleName, StyledSegment};
+use crate::pet::render::PaletteRoleName;
+use crate::presentation::pet::{role_for_cell, PetTextBlock};
 use crate::round::layout::{
     layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
 };
@@ -102,6 +103,7 @@ fn paint_pet_art(
     layout: &RoundSceneLayout,
     truecolor: bool,
 ) {
+    let block = PetTextBlock::new(scene.pet.art_lines.clone(), scene.pet.art_spans.clone());
     let art_width = scene
         .pet
         .art_lines
@@ -121,7 +123,7 @@ fn paint_pet_art(
         for (char_index, ch) in line.chars().enumerate() {
             let display_width = Line::from(ch.to_string()).width() as i32;
             if ch != ' ' {
-                let role = role_for_pet_cell(&scene.pet.art_spans, row, char_index);
+                let role = role_for_cell(&block, row, char_index);
                 let rgb = crate::pet::palette::role_color(role, &scene.pet.palette);
                 let fg = if truecolor {
                     format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)
@@ -140,14 +142,6 @@ fn paint_pet_art(
             col += display_width;
         }
     }
-}
-
-fn role_for_pet_cell(spans: &[StyledSegment], row: usize, char_index: usize) -> PaletteRoleName {
-    spans
-        .iter()
-        .find(|span| span.line == row && char_index >= span.start && char_index < span.end)
-        .map(|span| span.role)
-        .unwrap_or(PaletteRoleName::Body)
 }
 
 fn flat_role_name(role: PaletteRoleName) -> &'static str {
@@ -229,6 +223,7 @@ fn set_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pet::render::StyledSegment;
 
     #[test]
     fn preview_pet_colors_eye_and_body_differently() {
