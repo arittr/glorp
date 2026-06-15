@@ -1119,7 +1119,7 @@ fn dev_preview_scene_artifacts_are_sanitized_contracts_not_raw_runtime_state() {
         let scene_text =
             std::fs::read_to_string(run.out.join(format!("frames/{id}.scene.json"))).unwrap();
         for forbidden in [
-            "/Users/",
+            "/users/",
             "/tmp/",
             "prompt",
             "response",
