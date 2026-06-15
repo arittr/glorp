@@ -12,6 +12,7 @@ pub mod game;
 pub mod menubar;
 pub mod paths;
 pub mod pet;
+pub mod presentation;
 pub mod round;
 pub mod storage;
 pub mod time;
