@@ -608,3 +608,336 @@ pub(super) fn ambient_glyph_is_inside_area(glyph: &AmbientGlyph, area: Rect) -> 
         && glyph.col < area.x.saturating_add(area.width)
         && glyph.row < area.y.saturating_add(area.height)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn night_sky_uses_the_night_family_and_a_smaller_budget() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let day = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+            1.0,
+            0,
+            Season::Summer,
+            None,
+        );
+        let night = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Night,
+            1.0,
+            0,
+            Season::Summer,
+            None,
+        );
+        // Night never adds: sky glyph count (excluding the floor row) must be
+        // <= day's. Floor-row glyphs share a row coordinate — partition on it.
+        let floor_row = habitat.y + habitat.height - 1;
+        let day_sky = day.iter().filter(|g| g.row != floor_row).count();
+        let night_sky = night.iter().filter(|g| g.row != floor_row).count();
+        assert!(night_sky <= day_sky, "night {night_sky} > day {day_sky}");
+        assert!(night_sky > 0, "the starfield exists");
+        // And the night family differs from the day family for this species.
+        let night_chars: std::collections::HashSet<char> = night
+            .iter()
+            .filter(|g| g.row != floor_row)
+            .map(|g| g.glyph)
+            .collect();
+        assert!(
+            night_chars
+                .iter()
+                .any(|c| !sky_palette_for(Species::Crystal).contains(c))
+                || night.iter().filter(|g| g.row != floor_row).count() < day_sky,
+            "night must read differently than day"
+        );
+    }
+
+    #[test]
+    fn flat_tier_still_renders_zero_ambient_glyphs_at_night() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let glyphs = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            crate::tui::room::RoomBiomeTag::Starter,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Flat,
+            DayPhase::Night,
+            1.0,
+            0,
+            Season::Summer,
+            None,
+        );
+        assert!(
+            glyphs.is_empty(),
+            "Flat keeps the existing zero-ambient contract"
+        );
+    }
+
+    #[test]
+    fn phase_blend_interpolates_the_sky_color() {
+        let p = crate::tui::style::tokenpet_palette();
+        let base = p.dim.rgb;
+        for phase in [
+            DayPhase::Dawn,
+            DayPhase::Day,
+            DayPhase::Dusk,
+            DayPhase::Night,
+        ] {
+            let c0 = sky_color_for_phase(phase, 0.0, Season::Summer, None);
+            let c1 = sky_color_for_phase(phase, 1.0, Season::Summer, None);
+            let mid = sky_color_for_phase(phase, 0.5, Season::Summer, None);
+            assert_eq!(c0, base, "boundary starts from neutral base for {phase:?}");
+            if phase == DayPhase::Day {
+                assert_eq!(c1, base, "Day stays at the neutral base");
+                assert_eq!(mid, base, "Day midpoint is also base");
+            } else {
+                assert_ne!(c1, c0, "settled color differs from base for {phase:?}");
+                assert_ne!(mid, c0, "midpoint is not base for {phase:?}");
+                assert_ne!(mid, c1, "midpoint is not settled for {phase:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn mote_density_soft_saturates_with_no_learnable_full_state() {
+        let step01 = mote_density(1.0) - mote_density(0.0);
+        let step24 = mote_density(4.0) - mote_density(2.0);
+        assert!(
+            step24 < step01,
+            "saturating: step24 {step24} must be < step01 {step01}"
+        );
+        assert!(mote_density(4.0) > mote_density(2.0), "still rising");
+        assert!(mote_density(10.0) < 1.0, "asymptotic, never full");
+        assert_eq!(mote_density(0.0), 0.0, "no work, no motes");
+    }
+
+    #[test]
+    fn motes_cap_at_the_budget_share_of_the_ambient_allocation() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let day = crate::tui::day::DayContext {
+            mature: true,
+            today_ratio: 100.0,
+            ..crate::tui::day::DayContext::default()
+        };
+        let motes = mote_glyphs_for(&day, habitat, &[], now, ColorCapability::Truecolor);
+        assert!(!motes.is_empty(), "a heavy day shows motes");
+        assert!(motes.len() <= 4, "cap is half the stage-floor allocation");
+        let floor_row = habitat.y + habitat.height - 1; // 11
+        for g in &motes {
+            assert!(g.row < floor_row, "motes never overwrite the floor row");
+            assert!(g.row >= 7, "motes stay in the lower band");
+        }
+        let blocked = mote_glyphs_for(&day, habitat, &[habitat], now, ColorCapability::Truecolor);
+        assert!(blocked.is_empty(), "fully excluded habitat places nothing");
+    }
+
+    #[test]
+    fn mote_tidy_fade_thins_yesterdays_motes_after_rollover() {
+        let habitat = Rect::new(0, 0, 60, 15);
+        let day_start = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let day = crate::tui::day::DayContext {
+            mature: true,
+            today_ratio: 0.0,
+            yesterday: Some(crate::tui::day::DaySummary {
+                ratio: 3.0,
+                dominant_shape: None,
+            }),
+            local_day_started_utc: day_start,
+            date_seed: 7,
+            ..crate::tui::day::DayContext::default()
+        };
+        let at = |minutes: i64| {
+            mote_glyphs_for(
+                &day,
+                habitat,
+                &[],
+                day_start + time::Duration::minutes(minutes),
+                ColorCapability::Truecolor,
+            )
+        };
+        let t0 = at(0);
+        let t15 = at(15);
+        let t30 = at(30);
+        assert!(!t0.is_empty(), "yesterday's motes are still in the room");
+        assert!(!t15.is_empty(), "mid-window the fade is partial");
+        assert!(
+            t15.len() < t0.len(),
+            "fade is monotonic: {} -> {}",
+            t0.len(),
+            t15.len()
+        );
+        assert!(t30.is_empty(), "tidy fade completes at the window edge");
+        for g in &t15 {
+            assert!(
+                t0.contains(g),
+                "fade removes from the end, never reshuffles"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_and_immature_pets_render_zero_motes() {
+        let habitat = Rect::new(0, 0, 40, 12);
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let mature = crate::tui::day::DayContext {
+            mature: true,
+            today_ratio: 5.0,
+            ..crate::tui::day::DayContext::default()
+        };
+        assert!(
+            mote_glyphs_for(&mature, habitat, &[], now, ColorCapability::Flat).is_empty(),
+            "Flat keeps the zero-ambient contract"
+        );
+        let immature = crate::tui::day::DayContext {
+            mature: false,
+            today_ratio: 5.0,
+            ..crate::tui::day::DayContext::default()
+        };
+        assert!(
+            mote_glyphs_for(&immature, habitat, &[], now, ColorCapability::Truecolor).is_empty(),
+            "the default 100k baseline must not render a fabricated feast"
+        );
+    }
+
+    #[test]
+    fn sky_family_is_stable_for_a_seed_and_authors_two_variants_per_phase() {
+        let all_species = [
+            Species::Fuzz,
+            Species::Blob,
+            Species::Ghost,
+            Species::Glitch,
+            Species::Crystal,
+            Species::Mech,
+        ];
+        let phases = [
+            DayPhase::Dawn,
+            DayPhase::Day,
+            DayPhase::Dusk,
+            DayPhase::Night,
+        ];
+        for species in all_species {
+            for phase in phases {
+                assert_eq!(
+                    sky_palette_for_phase(species, phase, 9),
+                    sky_palette_for_phase(species, phase, 9),
+                    "{species:?}/{phase:?} family must be a pure function of the seed"
+                );
+                assert_ne!(
+                    sky_palette_for_phase(species, phase, 8),
+                    sky_palette_for_phase(species, phase, 9),
+                    "{species:?}/{phase:?} needs at least two authored variants"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn climate_clear_and_none_tint_nothing_and_a_real_climate_tints() {
+        for phase in [
+            DayPhase::Dawn,
+            DayPhase::Day,
+            DayPhase::Dusk,
+            DayPhase::Night,
+        ] {
+            assert_eq!(
+                sky_color_for_phase(phase, 1.0, Season::Summer, None),
+                sky_color_for_phase(phase, 1.0, Season::Summer, Some(WorkWeather::Clear)),
+                "Clear must render exactly like None for {phase:?}"
+            );
+        }
+        assert_ne!(
+            sky_color_for_phase(DayPhase::Day, 1.0, Season::Summer, None),
+            sky_color_for_phase(
+                DayPhase::Day,
+                1.0,
+                Season::Summer,
+                Some(WorkWeather::CacheMist)
+            ),
+            "a real climate biases the ambient tint"
+        );
+    }
+
+    #[test]
+    fn season_drift_is_bounded_and_summer_is_the_neutral_reference() {
+        let c = Color::Rgb(110, 110, 110);
+        assert_eq!(season_hue_drift(c, Season::Summer), c);
+        for season in [
+            crate::tui::day::Season::Spring,
+            crate::tui::day::Season::Autumn,
+            crate::tui::day::Season::Winter,
+        ] {
+            let drifted = season_hue_drift(c, season);
+            assert_ne!(drifted, c, "{season:?} must drift the hue");
+            let Color::Rgb(r, g, b) = drifted else {
+                panic!("rgb in, rgb out");
+            };
+            for channel in [r, g, b] {
+                assert!(
+                    (i16::from(channel) - 110).abs() <= i16::from(SEASON_DRIFT_MAX_CHANNEL_NUDGE),
+                    "{season:?} drift must stay subtle (channel {channel})"
+                );
+            }
+        }
+        assert_eq!(season_hue_drift(Color::Reset, Season::Winter), Color::Reset);
+    }
+
+    #[test]
+    fn live_activity_always_wins_over_weekend_softening() {
+        let day = crate::tui::day::DayContext {
+            is_weekend: true,
+            mature: true,
+            weekend_share: 0.05,
+            ..crate::tui::day::DayContext::default()
+        };
+        let idle = PetLifeProfile::idle();
+        assert!(
+            (effective_weekend_softening(&day, &idle) - 1.0).abs() < 1e-6,
+            "quiet weekend, idle pet: full softening"
+        );
+        let mut active = PetLifeProfile::idle();
+        active.activity_level = 0.8;
+        assert_eq!(
+            effective_weekend_softening(&day, &active),
+            0.0,
+            "live activity suppresses softening entirely"
+        );
+        let mut bursting = PetLifeProfile::idle();
+        bursting.burst_level = 0.4;
+        assert_eq!(
+            effective_weekend_softening(&day, &bursting),
+            0.0,
+            "a live burst suppresses softening entirely"
+        );
+    }
+
+    #[test]
+    fn weekend_softening_pulls_scene_colors_toward_the_dim_base() {
+        let c = Color::Rgb(200, 120, 40);
+        assert_eq!(weekend_soften_color(c, 0.0), c, "no softening, no change");
+        assert_ne!(
+            weekend_soften_color(c, 1.0),
+            c,
+            "full softening shifts the color"
+        );
+        assert_eq!(weekend_soften_color(Color::Reset, 1.0), Color::Reset);
+    }
+}
