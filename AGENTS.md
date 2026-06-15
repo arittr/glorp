@@ -32,10 +32,13 @@ Scenario options:
 The bundle includes `index.html`, `review.md`, `manifest.json`, local assets,
 `frames/*.txt` / `frames/*.cells.json` captures, optional
 `frames/*.layout.json` captures, optional cropped room artifacts
-`frames/*.room.txt` / `frames/*.room-masked.txt`, and for animation scenarios
+`frames/*.room.txt` / `frames/*.room-masked.txt`, and typed contract artifacts
+such as `frames/*.scene.json`, `frames/*.round-layout.json`, and
+`frames/*.round-commands.json`. For animation scenarios the bundle includes
 `strips/<id>/frame-NNN.txt` / `strips/<id>/frame-NNN.cells.json` captures.
 Treat `manifest.json` as the review contract; it lists scenario intent,
-dimensions, files, inputs, artifact inventory, and review prompts.
+dimensions, files, inputs, typed artifacts, artifact inventory, and review
+prompts.
 `manifest.json` uses `schema_version` 3. Round scenarios include a `round`
 metadata object with target renderer, circular aperture, and privacy claims.
 Animation strips are listed in the `strips` array with `kind: "scene-moment"`,
