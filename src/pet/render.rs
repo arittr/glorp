@@ -64,7 +64,7 @@ pub struct RenderedPet {
     pub spans: Vec<StyledSegment>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledSegment {
     pub line: usize,
     pub start: usize,
