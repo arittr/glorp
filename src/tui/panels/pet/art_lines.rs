@@ -312,6 +312,8 @@ fn apply_twinkle_in_range(
     chars.into_iter().collect()
 }
 
+// Compatibility wrapper for watch and Preview Lab callers; the shared
+// presentation role lookup owns the domain semantics.
 pub(crate) fn pet_role_spans_for_line<'a>(
     art_line: &'a str,
     line_index: usize,
