@@ -88,11 +88,16 @@ impl PresentationScene {
                 .iter()
                 .map(|ch| ch.to_string())
                 .collect();
+        let redacts_runtime_ids = redacts_runtime_ids(privacy);
 
         Self {
             privacy,
             pet: PresentationPetSnapshot {
-                seed: vm.pet_render.seed.clone(),
+                seed: if redacts_runtime_ids {
+                    "redacted".to_string()
+                } else {
+                    vm.pet_render.seed.clone()
+                },
                 species: vm.pet_render.generated_species.as_str().to_string(),
                 stage: format!("{:?}", vm.pet_render.stage).to_lowercase(),
                 mood: format!("{:?}", vm.pet_render.mood).to_lowercase(),
@@ -108,11 +113,15 @@ impl PresentationScene {
                 species_dialect: room_profile.species_dialect.key.as_str().to_string(),
                 work_weather: format!("{:?}", vm.life_profile.work_weather),
                 day_phase: format!("{:?}", vm.day_context.day_phase),
-                prop_landmarks: room_profile
-                    .identity_prop_ids
-                    .iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
+                prop_landmarks: if redacts_runtime_ids {
+                    Vec::new()
+                } else {
+                    room_profile
+                        .identity_prop_ids
+                        .iter()
+                        .map(|id| id.as_str().to_string())
+                        .collect()
+                },
                 glyph_vocabulary,
             },
             activity: PresentationActivitySnapshot {
@@ -147,6 +156,10 @@ impl PresentationScene {
             ]),
         }
     }
+}
+
+fn redacts_runtime_ids(privacy: PrivacyProjection) -> bool {
+    !privacy.source_names_visible && !privacy.exact_counts_visible
 }
 
 fn vital_bucket(value: f64) -> PresentationVitalBucket {

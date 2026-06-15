@@ -44,6 +44,30 @@ fn presentation_scene_glanceable_projection_excludes_private_runtime_text() {
 }
 
 #[test]
+fn presentation_scene_glanceable_projection_redacts_stable_runtime_ids() {
+    let mut vm = WatchViewModel::fixture_with_habitat_props();
+    vm.pet_render.seed = "client-secret-seed".into();
+
+    let scene = PresentationScene::from_watch_view_model(
+        &vm,
+        datetime!(2026-06-15 12:00 UTC),
+        PresentationSurface::RoundCompanion,
+    );
+    let debug = format!("{scene:?}").to_ascii_lowercase();
+
+    for forbidden in [
+        "client-secret-seed",
+        "codex_signal_lamp",
+        "token_pebble_25k",
+    ] {
+        assert!(
+            !debug.contains(forbidden),
+            "scene leaked stable runtime id {forbidden}: {debug}"
+        );
+    }
+}
+
+#[test]
 fn presentation_targets_are_owned_ids_not_watch_paths() {
     let pet = SurfaceTargetId::new("pet.art");
     let room = SurfaceTargetId::new("room.effect");
