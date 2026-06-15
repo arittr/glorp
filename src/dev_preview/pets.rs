@@ -5,7 +5,7 @@ use crate::game::{evolution::Stage, metabolism::Mood};
 use crate::pet::{
     art::stage_label,
     generation::{generate_pet, Species},
-    render::{render_pet, AnimationFrame},
+    render::{render_pet, AnimationFrame, WorkAccent},
 };
 use crate::tui::panels::pet::pet_role_spans_for_line;
 use crate::tui::style::{semantic_styles, ColorCapability};
@@ -20,6 +20,9 @@ const COLUMN_WIDTH: u16 = FRAME_WIDTH / 6;
 const HEADER_HEIGHT: u16 = 2;
 const ROW_HEIGHT: u16 = 12;
 const FRAME_HEIGHT: u16 = HEADER_HEIGHT + ROW_HEIGHT * 7;
+const GLITCH_STATE_COLUMNS: u16 = 4;
+const GLITCH_STATE_CELL_WIDTH: u16 = FRAME_WIDTH / GLITCH_STATE_COLUMNS;
+const GLITCH_STATE_HEIGHT: u16 = 14;
 const STAGES: [Stage; 7] = [
     Stage::S0,
     Stage::S1,
@@ -44,6 +47,7 @@ pub fn pet_frames(ctx: &PreviewRenderContext) -> Result<Vec<PreviewFrame>> {
             "Pet Species Stage (Flat)",
             ColorCapability::Flat,
         ),
+        render_glitch_live_states(ctx),
     ])
 }
 
@@ -117,6 +121,97 @@ fn render_pet_cell(
         lines.push(Line::from(adapt_spans_to_capability(spans, capability)));
     }
 
+    Paragraph::new(lines).render(area, buffer);
+}
+
+#[derive(Clone, Copy)]
+struct GlitchStateFixture {
+    label: &'static str,
+    stage: Stage,
+    mood: Mood,
+    work_accent: WorkAccent,
+    tick: u64,
+}
+
+fn render_glitch_live_states(_ctx: &PreviewRenderContext) -> PreviewFrame {
+    let fixtures = [
+        GlitchStateFixture {
+            label: "s4 content",
+            stage: Stage::S4,
+            mood: Mood::Content,
+            work_accent: WorkAccent::None,
+            tick: 1,
+        },
+        GlitchStateFixture {
+            label: "s4 ecstatic",
+            stage: Stage::S4,
+            mood: Mood::Ecstatic,
+            work_accent: WorkAccent::None,
+            tick: 1,
+        },
+        GlitchStateFixture {
+            label: "s4 ecstatic cache",
+            stage: Stage::S4,
+            mood: Mood::Ecstatic,
+            work_accent: WorkAccent::Dreamy,
+            tick: 1,
+        },
+        GlitchStateFixture {
+            label: "s6 focused",
+            stage: Stage::S6,
+            mood: Mood::Happy,
+            work_accent: WorkAccent::Focused,
+            tick: 37,
+        },
+    ];
+    let mut buffer = Buffer::empty(Rect::new(0, 0, FRAME_WIDTH, GLITCH_STATE_HEIGHT));
+
+    for (index, fixture) in fixtures.into_iter().enumerate() {
+        let area = Rect::new(
+            index as u16 * GLITCH_STATE_CELL_WIDTH,
+            0,
+            GLITCH_STATE_CELL_WIDTH,
+            GLITCH_STATE_HEIGHT,
+        );
+        render_glitch_state_cell(area, &mut buffer, fixture);
+    }
+
+    frame_from_buffer("pet-glitch-live-states", "Pet Glitch Live States", &buffer)
+}
+
+fn render_glitch_state_cell(area: Rect, buffer: &mut Buffer, fixture: GlitchStateFixture) {
+    let styles = semantic_styles();
+    let pet = generate_pet("glorp-preview-glitch-live").with_species(Species::Glitch);
+    let palette = crate::pet::palette::resolve_pet_palette(Species::Glitch, &pet.traits);
+    let rendered = render_pet(
+        &pet,
+        fixture.stage,
+        fixture.mood,
+        AnimationFrame {
+            tick: fixture.tick,
+            blink_suppression_ticks: 0,
+            hold_eyes_closed: false,
+            blink_slowdown: 0,
+            soft_eyes: false,
+            work_accent: fixture.work_accent,
+        },
+    );
+
+    let mut lines = vec![Line::styled(fixture.label, styles.label)];
+    for (line_index, art_line) in rendered.lines.iter().enumerate() {
+        let spans = pet_role_spans_for_line(
+            art_line,
+            line_index,
+            &rendered.spans,
+            &styles,
+            &palette,
+            None,
+        );
+        lines.push(Line::from(adapt_spans_to_capability(
+            spans,
+            ColorCapability::Truecolor,
+        )));
+    }
     Paragraph::new(lines).render(area, buffer);
 }
 
@@ -217,6 +312,21 @@ mod tests {
         assert_eq!(
             species_stage_cells().len(),
             Species::all().len() * STAGES.len()
+        );
+    }
+
+    #[test]
+    fn pets_preview_includes_glitch_live_state_fixture() {
+        let ctx = PreviewRenderContext::deterministic();
+        let frames = pet_frames(&ctx).unwrap();
+        let ids = frames
+            .iter()
+            .map(|frame| frame.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            ids.contains(&"pet-glitch-live-states"),
+            "pets preview should include a focused Glitch live-state fixture; got {ids:?}"
         );
     }
 

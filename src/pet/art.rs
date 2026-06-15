@@ -87,7 +87,8 @@ pub(crate) fn template_lines(
 
 // Most species visibly transform at S5+: Crystal pets cluster, Ghost pets grow
 // longer tentacles, Blob pets bubble and bud co-blobs, Fuzz pets grow a tail,
-// Mech pets upgrade chassis. Skip the singleton morph 0 at elder stages so
+// Glitch pets become denser packets, Mech pets upgrade chassis. Skip the
+// singleton morph 0 at elder stages so
 // every elder pet reads as the evolved form while still preserving
 // morph-driven variation across the remaining morphs.
 fn elder_morph_index(species: Species, morph_index: usize, templates: &[Template]) -> usize {
@@ -95,7 +96,12 @@ fn elder_morph_index(species: Species, morph_index: usize, templates: &[Template
     let len = templates.len();
     let skip_first = matches!(
         species,
-        Species::Crystal | Species::Ghost | Species::Blob | Species::Fuzz | Species::Mech
+        Species::Crystal
+            | Species::Ghost
+            | Species::Blob
+            | Species::Fuzz
+            | Species::Glitch
+            | Species::Mech
     ) && len > 1;
     if skip_first {
         1 + (morph_index % (len - 1))
@@ -451,13 +457,13 @@ const GHOST_TINY: &[Template; 3] = &[
 // matches the adult morphs' offset \u{258c}\u{2590} edges rather than a clean box.
 const GLITCH_PUP: &[Template] = &[[
     "           ",
-    "   \u{2593}\u{2591}\u{2592}\u{2591} \u{2591}  ",
+    "   \u{2591}#_\u{2591}    ",
     "  \u{258c}\u{2580}\u{2580} \u{2580}\u{2590}   ",
     "  \u{258c} {eyes}\u{2590}#  ",
-    "  :_{mouth} \u{258c}    ",
-    "  \u{258c}{pattern} \u{2590}   ",
+    "  \u{258c} {mouth}_\u{258c}    ",
+    "  \u{258c}{pattern}\u{2590}    ",
     "   \u{2580}\u{2584}{accent}\u{2584}\u{2580}   ",
-    "   \u{2591} _ \u{2591}   ",
+    "  _\u{258c}\u{2591} \u{2591}\u{2590}_  ",
 ]];
 
 const GLITCH_ADULT: &[Template] = &[
@@ -465,31 +471,31 @@ const GLITCH_ADULT: &[Template] = &[
         "  \u{2591}#::_ \u{2591}  ",
         " \u{258c}\u{2580}\u{2580}\u{2580} \u{2580}\u{2590}   ",
         " \u{258c} {eyes} \u{2590}#  ",
-        " :_ {mouth}  \u{258c}   ",
-        " \u{258c} {pattern} \u{2590}   ",
-        "  \u{2580}\u{2584}{accent}_\u{258c}    ",
-        "  _ \u{2591}_ #   ",
-        " :  \u{2591}  _#  ",
+        " \u{258c}  {mouth}_ \u{258c}   ",
+        " \u{258c}{pattern} \u{2590}    ",
+        "  \u{2580}\u{2584}{accent}\u{2584}\u{258c}    ",
+        " _\u{258c}\u{2591} \u{2591}\u{2590}_   ",
+        " :_#\u{2591}#_:   ",
     ],
     [
-        " \u{2591}\u{2592}\u{2593}\u{2593}\u{2593}\u{2593}\u{2592}\u{2591}  ",
-        " \u{2590} :::   \u{258c} ",
-        " \u{2590} {eyes}   \u{258c} ",
-        " \u{2590}   {mouth}   \u{258c} ",
-        " \u{2590}{pattern}    \u{258c} ",
-        "  \u{2580}\u{2584}{accent}\u{2584}\u{2580}    ",
-        "  _ \u{2591} \u{2591} _  ",
-        " : _#\u{2591}#_ : ",
+        " \u{2591}\u{2592}\u{2593}\u{2593}\u{2593}\u{2592}\u{2591}   ",
+        "\u{2590}\u{2580}\u{2580}\u{2580} \u{2580}\u{2580}\u{258c}   ",
+        "\u{2590} {eyes} \u{258c}    ",
+        "\u{2590}  {mouth}  \u{258c}    ",
+        "\u{2590}{pattern} \u{258c}     ",
+        " \u{2580}\u{2584}{accent}\u{2584}\u{2580}     ",
+        " _\u{258c}\u{2591}\u{2591}\u{2590}_    ",
+        " :_#\u{2591}#_:   ",
     ],
     [
-        "   \u{2591}\u{2591} \u{2591}\u{2591}   ",
-        "   \u{258c}   \u{2590}   ",
-        "   \u{258c}{eyes}\u{2590}   ",
-        "   \u{258c} {mouth} \u{2590}   ",
-        "   \u{258c}{pattern}\u{2590}   ",
-        "   \u{2580}\u{2584}{accent}\u{2584}\u{2580}   ",
-        "  \u{2591}  \u{2591}  \u{2591}  ",
-        "  ~  :  ~  ",
+        "  \u{2591}\u{2593}\u{2591}#\u{2591}    ",
+        " \u{258c}\u{2580}\u{2580}\u{2580}\u{2580}\u{2590}_   ",
+        " \u{258c} {eyes}\u{2590}#   ",
+        " \u{258c}  {mouth} \u{2590}    ",
+        " \u{258c}{pattern}\u{2590}     ",
+        " \u{2580}\u{2584}{accent}\u{2584}\u{258c}     ",
+        " _\u{2590}\u{2591} \u{2591}\u{258c}_   ",
+        "  :#_#:    ",
     ],
 ];
 
@@ -819,6 +825,7 @@ mod tests {
             Species::Ghost,
             Species::Blob,
             Species::Fuzz,
+            Species::Glitch,
             Species::Mech,
         ];
         for species in carved {
@@ -838,14 +845,17 @@ mod tests {
     }
 
     #[test]
-    fn elder_morph_passes_through_for_glitch() {
+    fn elder_morph_skips_singleton_for_glitch() {
         let templates = adult_templates(Species::Glitch);
+        assert!(
+            templates.len() > 1,
+            "Glitch needs at least 2 adult morphs for elder skip to apply"
+        );
         for morph_index in 0..6 {
-            let expected = morph_index % templates.len();
-            assert_eq!(
-                elder_morph_index(Species::Glitch, morph_index, templates),
-                expected,
-                "Glitch elder_morph_index should not skip morph 0"
+            let idx = elder_morph_index(Species::Glitch, morph_index, templates);
+            assert!(
+                idx >= 1,
+                "Glitch elder stage reused the weaker S4 morph for morph={morph_index}"
             );
         }
     }

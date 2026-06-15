@@ -284,6 +284,12 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             if let Some(layout) = &scenario.files.layout {
                 markdown.push_str(&format!("- Layout: `{}`\n", layout.display()));
             }
+            if let Some(room_text) = &scenario.files.room_text {
+                markdown.push_str(&format!("- Room: `{}`\n", room_text.display()));
+            }
+            if let Some(masked_room) = &scenario.files.room_masked_text {
+                markdown.push_str(&format!("- Masked room: `{}`\n", masked_room.display()));
+            }
             markdown.push('\n');
             markdown.push_str("Review prompts:\n");
             for prompt in &scenario.review_prompts {
@@ -373,6 +379,7 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
         r#"<p class="frame-meta">{} x {} cells</p>"#,
         frame.width, frame.height
     ));
+    html.push_str(&render_frame_artifact_links(frame));
     html.push_str(r#"<div class="preview-grid-shell">"#);
     html.push_str(&render_grid_html(frame));
     if frame.layout.is_some() {
@@ -383,6 +390,53 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
     }
     html.push_str("</div></article>");
     html
+}
+
+fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
+    let mut links = vec![
+        format!(
+            r#"<a href="{}">text</a>"#,
+            escape_html(&format!("frames/{}.txt", frame.id))
+        ),
+        format!(
+            r#"<a href="{}">cells</a>"#,
+            escape_html(&format!("frames/{}.cells.json", frame.id))
+        ),
+    ];
+    if frame.layout.is_some() {
+        links.push(format!(
+            r#"<a href="{}">layout</a>"#,
+            escape_html(&format!("frames/{}.layout.json", frame.id))
+        ));
+    }
+    if frame
+        .layout
+        .as_ref()
+        .is_some_and(|layout| layout.targets.contains_key("watch.room.effect"))
+    {
+        links.push(format!(
+            r#"<a href="{}">room</a>"#,
+            escape_html(&format!("frames/{}.room.txt", frame.id))
+        ));
+    }
+    if has_masked_room_artifact(&frame.id) {
+        links.push(format!(
+            r#"<a href="{}">masked room</a>"#,
+            escape_html(&format!("frames/{}.room-masked.txt", frame.id))
+        ));
+    }
+
+    format!(r#"<p class="frame-links">{}</p>"#, links.join(" · "))
+}
+
+pub(crate) fn has_masked_room_artifact(frame_id: &str) -> bool {
+    matches!(
+        frame_id,
+        "watch-species-dialect-glitch"
+            | "watch-species-dialect-crystal"
+            | "watch-species-dialect-glitch-flat"
+            | "watch-species-dialect-crystal-flat"
+    )
 }
 
 fn render_grid_html(frame: &PreviewFrame) -> String {
@@ -865,5 +919,33 @@ mod tests {
         assert!(markdown.contains("- Cells: `frames/frame-one.cells.json`"));
         assert!(markdown.contains("Review prompts:"));
         assert!(markdown.contains("- Check sample geometry."));
+    }
+
+    #[test]
+    fn review_markdown_lists_room_artifacts_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.md");
+        let mut manifest = sample_manifest();
+        manifest.scenarios[0].files.room_text = Some(PathBuf::from("frames/frame-one.room.txt"));
+        manifest.scenarios[0].files.room_masked_text =
+            Some(PathBuf::from("frames/frame-one.room-masked.txt"));
+
+        write_review_markdown(&path, &manifest).unwrap();
+
+        let markdown = fs::read_to_string(path).unwrap();
+        assert!(markdown.contains("- Room: `frames/frame-one.room.txt`"));
+        assert!(markdown.contains("- Masked room: `frames/frame-one.room-masked.txt`"));
+    }
+
+    #[test]
+    fn html_export_links_frame_source_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.html");
+
+        write_index_html(&path, &[sample_frame()], &[], "2026-05-12T00:00:00Z").unwrap();
+
+        let html = fs::read_to_string(path).unwrap();
+        assert!(html.contains(r#"href="frames/frame-one.txt""#));
+        assert!(html.contains(r#"href="frames/frame-one.cells.json""#));
     }
 }

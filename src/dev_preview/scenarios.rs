@@ -1,8 +1,9 @@
 use crate::dev_preview::export::{
-    copy_assets, write_cells_json, write_index_html, write_layout_json, write_manifest,
-    write_review_markdown, write_room_text_frame, write_room_text_frame_masked, write_text_frame,
-    ArtifactType, PreviewArtifact, PreviewDimensions, PreviewManifest, PreviewMaskRect,
-    PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
+    copy_assets, has_masked_room_artifact, write_cells_json, write_index_html, write_layout_json,
+    write_manifest, write_review_markdown, write_room_text_frame, write_room_text_frame_masked,
+    write_text_frame, ArtifactType, PreviewArtifact, PreviewDimensions, PreviewManifest,
+    PreviewMaskRect, PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER,
+    SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::habitat_props::{
@@ -312,6 +313,43 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Confirm the flat ANSI fallback still distinguishes species.".to_string(),
             ],
         ),
+        "pet-glitch-live-states" => (
+            PreviewScenarioKind::PetMatrix,
+            "Review Glitch pet expression and elder silhouette under live work-state accents.",
+            BTreeMap::from([
+                ("species".to_string(), Value::String("glitch".to_string())),
+                ("color_capability".to_string(), Value::String("truecolor".to_string())),
+                (
+                    "states".to_string(),
+                    json!([
+                        {
+                            "stage": "s4",
+                            "mood": "content",
+                            "work_accent": "none"
+                        },
+                        {
+                            "stage": "s4",
+                            "mood": "ecstatic",
+                            "work_accent": "none"
+                        },
+                        {
+                            "stage": "s4",
+                            "mood": "ecstatic",
+                            "work_accent": "dreamy"
+                        },
+                        {
+                            "stage": "s6",
+                            "mood": "happy",
+                            "work_accent": "focused"
+                        }
+                    ]),
+                ),
+            ]),
+            vec![
+                "Confirm ecstatic Glitch never reads as sleepy when cache-mist work is active.".to_string(),
+                "Compare S4 and S6 silhouettes for visible elder progression.".to_string(),
+            ],
+        ),
         "habitat-props-catalog" => (
             PreviewScenarioKind::HabitatProps,
             "Review every habitat prop in isolated tanks across three deterministic motion phases.",
@@ -440,7 +478,7 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
             }),
             room_masked_text: frame.layout.as_ref().and_then(|layout| {
                 if layout.targets.contains_key("watch.room.effect")
-                    && is_strict_species_dialect_frame(&frame.id)
+                    && has_masked_room_artifact(&frame.id)
                 {
                     Some(room_masked_text_path(frame))
                 } else {
@@ -522,7 +560,7 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
             .layout
             .as_ref()
             .is_some_and(|l| l.targets.contains_key("watch.room.effect"))
-            && is_strict_species_dialect_frame(&frame.id)
+            && has_masked_room_artifact(&frame.id)
         {
             artifacts.push(PreviewArtifact {
                 id: format!("{}-room-masked", frame.id),
@@ -1515,16 +1553,6 @@ fn room_masked_text_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.room-masked.txt", frame.id))
 }
 
-fn is_strict_species_dialect_frame(id: &str) -> bool {
-    matches!(
-        id,
-        "watch-species-dialect-glitch"
-            | "watch-species-dialect-crystal"
-            | "watch-species-dialect-glitch-flat"
-            | "watch-species-dialect-crystal-flat"
-    )
-}
-
 fn preview_mask_rect(target: &crate::tui::component::PreviewTarget) -> PreviewMaskRect {
     PreviewMaskRect {
         x: target.x,
@@ -1535,7 +1563,7 @@ fn preview_mask_rect(target: &crate::tui::component::PreviewTarget) -> PreviewMa
 }
 
 fn species_dialect_pair_id(id: &str) -> Option<&'static str> {
-    if !is_strict_species_dialect_frame(id) {
+    if !has_masked_room_artifact(id) {
         return None;
     }
     if id.ends_with("-flat") {
@@ -1726,6 +1754,7 @@ mod tests {
                 "watch-habitat-full-phase-b",
                 "pet-species-stage",
                 "pet-species-stage-flat",
+                "pet-glitch-live-states",
                 "round-normal",
                 "round-active-pulse",
                 "round-asleep-night",

@@ -813,12 +813,17 @@ fn dev_preview_pets_writes_species_stage_matrix() {
             None,
         ),
     );
-    let scenario = scenario(&manifest, "pet-species-stage");
-    assert_eq!(scenario["inputs"]["species"][0], "fuzz");
+    let matrix = scenario(&manifest, "pet-species-stage");
+    assert_eq!(matrix["inputs"]["species"][0], "fuzz");
     assert_eq!(
-        scenario["inputs"]["stages"][6]["labels_by_species"]["mech"],
+        matrix["inputs"]["stages"][6]["labels_by_species"]["mech"],
         "titan"
     );
+    assert!(run.out.join("frames/pet-glitch-live-states.txt").is_file());
+    let glitch = scenario(&manifest, "pet-glitch-live-states");
+    assert_eq!(glitch["inputs"]["species"], "glitch");
+    assert_eq!(glitch["inputs"]["states"][2]["mood"], "ecstatic");
+    assert_eq!(glitch["inputs"]["states"][2]["work_accent"], "dreamy");
 }
 
 #[test]
@@ -974,6 +979,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-habitat-full-phase-b.txt",
         "frames/pet-species-stage.txt",
         "frames/pet-species-stage-flat.txt",
+        "frames/pet-glitch-live-states.txt",
         "frames/round-normal.txt",
         "frames/round-normal.cells.json",
         "frames/round-active-pulse.txt",
@@ -1045,6 +1051,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-habitat-full-phase-b".to_string(),
             "pet-species-stage".to_string(),
             "pet-species-stage-flat".to_string(),
+            "pet-glitch-live-states".to_string(),
             "round-normal".to_string(),
             "round-active-pulse".to_string(),
             "round-asleep-night".to_string(),

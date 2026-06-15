@@ -301,7 +301,7 @@ fn expression_for(
     if frame.soft_eyes && matches!(mood, Mood::Content | Mood::Happy) {
         expr.eyes = "\u{02d8}.\u{02d8}".to_string(); // ˘.˘ relaxed, heavy-lidded
     }
-    if matches!(mood, Mood::Happy | Mood::Content | Mood::Ecstatic) {
+    if matches!(mood, Mood::Happy | Mood::Content) {
         match frame.work_accent {
             WorkAccent::None => {}
             WorkAccent::Alert => expr.eyes = "^o^".to_string(),
@@ -599,28 +599,28 @@ fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
                 particles.push(Particle {
                     row,
                     col,
-                    glyph: '\u{2592}',
+                    glyph: ':',
                 });
             }
             if tick % 11 < 2 {
                 particles.push(Particle {
                     row: 0,
                     col: 2,
-                    glyph: '\u{2592}',
+                    glyph: '\u{b7}',
                 });
             }
             if tick % 13 < 2 {
                 particles.push(Particle {
                     row: 9,
                     col: 4,
-                    glyph: '\u{2591}',
+                    glyph: '.',
                 });
             }
             if tick % 17 < 2 {
                 particles.push(Particle {
                     row: 0,
                     col: 10,
-                    glyph: '\u{2593}',
+                    glyph: ':',
                 });
             }
         }
@@ -847,6 +847,45 @@ mod tests {
         assert!(
             !should_blink(&pet, Mood::Ecstatic, frame, profile),
             "ecstatic mood should block blinking"
+        );
+    }
+
+    #[test]
+    fn ecstatic_keeps_star_eyes_when_work_accent_is_dreamy() {
+        let pet = generate_pet("ecstatic-dreamy-seed");
+        let frame = AnimationFrame {
+            tick: 1,
+            work_accent: WorkAccent::Dreamy,
+            ..AnimationFrame::default()
+        };
+
+        let art = render_pet(&pet, Stage::S4, Mood::Ecstatic, frame)
+            .lines
+            .join("\n");
+
+        assert!(
+            art.contains("*o*"),
+            "ecstatic must stay visibly ecstatic, got:\n{art}"
+        );
+        assert!(
+            !art.contains("u.u"),
+            "dreamy work accent must not make an ecstatic pet look sleepy, got:\n{art}"
+        );
+    }
+
+    #[test]
+    fn glitch_particles_stay_punctuation_sized() {
+        let particles = particles_for_species(Species::Glitch, 1);
+
+        assert!(
+            particles
+                .iter()
+                .all(|particle| !matches!(particle.glyph, '▒' | '▓')),
+            "Glitch particles should be light punctuation, got {:?}",
+            particles
+                .iter()
+                .map(|particle| particle.glyph)
+                .collect::<Vec<_>>()
         );
     }
 

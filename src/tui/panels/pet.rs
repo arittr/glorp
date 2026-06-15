@@ -80,7 +80,7 @@ fn sky_palette_for(species: Species) -> &'static [char] {
         Species::Fuzz => &['·', ',', '\'', '*'],
         Species::Blob => &['°', 'o', '.', '·'],
         Species::Ghost => &['~', '\'', ',', '*'],
-        Species::Glitch => &[':', ';', '#', '░', '▒', '▪'],
+        Species::Glitch => &[':', ';', '·', '░', '▪'],
         Species::Crystal => &['✦', '✧', '◇', '◆', '·'],
         Species::Mech => &['~', '°', '·', '●'],
     }
@@ -93,10 +93,28 @@ fn biome_floor_palette(tag: crate::tui::room::RoomBiomeTag) -> &'static [char] {
     match tag {
         RoomBiomeTag::Starter => &['·', '.', ' ', ' '],
         RoomBiomeTag::Botanical => &[',', '·', '"', '.', ' '],
-        RoomBiomeTag::Technical => &['─', '┄', '·', '.', ' '],
+        RoomBiomeTag::Technical => &['·', '.', '.', ' ', ' '],
         RoomBiomeTag::Celestial => &['·', '˚', '.', ' ', ' '],
         RoomBiomeTag::Artifact => &['◦', '·', '°', '.', ' '],
         RoomBiomeTag::Cozy => &['·', '~', ',', '.', ' '],
+    }
+}
+
+fn biome_floor_fill_percent(tag: crate::tui::room::RoomBiomeTag, phase: DayPhase) -> u16 {
+    use crate::tui::room::RoomBiomeTag;
+    let base = match tag {
+        RoomBiomeTag::Starter => 58,
+        RoomBiomeTag::Botanical => 64,
+        RoomBiomeTag::Technical => 68,
+        RoomBiomeTag::Celestial => 54,
+        RoomBiomeTag::Artifact => 60,
+        RoomBiomeTag::Cozy => 62,
+    };
+    match phase {
+        DayPhase::Day => base,
+        DayPhase::Dawn => base.saturating_sub(8),
+        DayPhase::Dusk => base.saturating_sub(4),
+        DayPhase::Night => base.saturating_sub(16),
     }
 }
 
@@ -630,14 +648,23 @@ pub fn ambient_glyphs_for_phase(
         }
     }
 
-    // Floor row: anchored to the bottom of habitat.
+    // Floor row: anchored to the bottom of habitat, but deliberately patchy so
+    // it reads as ground texture rather than a full-width divider.
     let floor_row = habitat.y + habitat.height.saturating_sub(1);
+    let floor_fill_percent = biome_floor_fill_percent(biome, phase);
     for dx in 0..habitat.width {
+        if rng.gen_range(0..100_u16) >= floor_fill_percent {
+            continue;
+        }
+        let glyph = *floor.choose(&mut rng).unwrap_or(&' ');
+        if glyph == ' ' {
+            continue;
+        }
         let col = habitat.x + dx;
         let candidate = AmbientGlyph {
             row: floor_row,
             col,
-            glyph: *floor.choose(&mut rng).unwrap_or(&' '),
+            glyph,
             color: floor_color,
         };
         if !overlaps_any(&candidate, exclusions) {
@@ -2448,11 +2475,74 @@ mod tests {
             now,
             ColorCapability::Truecolor,
         );
-        // 8 sky glyphs (S4) + 52-cell floor minus the exclusion overlap (none, since pet is mid-panel).
+        let floor_row = habitat.y + habitat.height - 1;
+        let floor_count = glyphs.iter().filter(|g| g.row == floor_row).count();
         assert!(
-            glyphs.len() >= 8 + 30,
-            "expected ≥ stage_base + most of the floor row, got {}",
-            glyphs.len()
+            floor_count >= 10,
+            "expected enough floor texture to ground the scene, got {floor_count}"
+        );
+    }
+
+    #[test]
+    fn ambient_floor_row_is_patchy_not_solid_line() {
+        let habitat = Rect::new(0, 0, 52, 20);
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let glyphs = ambient_glyphs_for_phase(
+            Species::Glitch,
+            Stage::S6,
+            crate::tui::room::RoomBiomeTag::Technical,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+            1.0,
+            0,
+            Season::Summer,
+            None,
+        );
+        let floor_row = habitat.y + habitat.height - 1;
+        let floor_count = glyphs.iter().filter(|g| g.row == floor_row).count();
+
+        assert!(
+            floor_count < habitat.width as usize * 3 / 4,
+            "floor should be patchy, not full-width; got {floor_count}/{} cells",
+            habitat.width
+        );
+        assert!(
+            floor_count >= habitat.width as usize / 4,
+            "floor should still read as ground texture; got {floor_count}/{} cells",
+            habitat.width
+        );
+    }
+
+    #[test]
+    fn technical_floor_avoids_rule_glyphs() {
+        let habitat = Rect::new(0, 0, 52, 20);
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let glyphs = ambient_glyphs_for_phase(
+            Species::Crystal,
+            Stage::S6,
+            crate::tui::room::RoomBiomeTag::Technical,
+            habitat,
+            &[],
+            now,
+            ColorCapability::Truecolor,
+            DayPhase::Day,
+            1.0,
+            0,
+            Season::Summer,
+            None,
+        );
+        let floor_row = habitat.y + habitat.height - 1;
+        let rule_count = glyphs
+            .iter()
+            .filter(|g| g.row == floor_row && matches!(g.glyph, '─' | '┄'))
+            .count();
+
+        assert_eq!(
+            rule_count, 0,
+            "technical floor should use dot texture instead of dashed-rule glyphs"
         );
     }
 

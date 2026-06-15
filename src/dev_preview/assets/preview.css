@@ -63,6 +63,21 @@
   margin-bottom: 8px;
 }
 
+.frame-links {
+  margin: -4px 0 8px;
+  color: #8f877e;
+  font-size: 12px;
+}
+
+.frame-links a {
+  color: #d6a657;
+  text-decoration: none;
+}
+
+.frame-links a:hover {
+  text-decoration: underline;
+}
+
 .preview-grid-shell {
   position: relative;
   display: inline-block;
