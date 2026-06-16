@@ -2,8 +2,8 @@ use crate::dev_preview::export::{
     copy_assets, has_masked_room_artifact, write_cells_json, write_index_html, write_json_artifact,
     write_layout_json, write_manifest, write_review_markdown, write_room_text_frame,
     write_room_text_frame_masked, write_text_frame, ArtifactType, PreviewArtifact,
-    PreviewDimensions, PreviewManifest, PreviewMaskRect, PreviewScenario, PreviewScenarioFiles,
-    PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
+    PreviewDimensions, PreviewManifest, PreviewMaskRect, PreviewRoundMetadata, PreviewScenario,
+    PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::habitat_props::{
@@ -49,6 +49,18 @@ impl PreviewScenarioBundle {
         let scenario = scenario_metadata(&frame, ctx);
         Self { frame, scenario }
     }
+
+    pub fn from_parts(
+        frame: PreviewFrame,
+        kind: PreviewScenarioKind,
+        intent: &str,
+        inputs: BTreeMap<String, Value>,
+        round: Option<PreviewRoundMetadata>,
+        review_prompts: Vec<String>,
+    ) -> Self {
+        let scenario = scenario_from_parts(&frame, kind, intent, inputs, round, review_prompts);
+        Self { frame, scenario }
+    }
 }
 
 impl PreviewRenderContext {
@@ -74,31 +86,51 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
     fs::create_dir_all(&frames_dir)?;
     fs::create_dir_all(&scratch_dir)?;
 
-    let mut frames = Vec::new();
+    let mut bundles = Vec::new();
     let mut strips = Vec::new();
     match selection {
         PreviewSelection::All => {
-            frames.extend(watch_frames(&ctx, &scratch_dir)?);
-            frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?);
-            frames.extend(pet_frames(&ctx)?);
-            frames.extend(crate::dev_preview::round::round_frames(&ctx));
+            bundles.extend(
+                watch_frames(&ctx, &scratch_dir)?
+                    .into_iter()
+                    .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+            );
+            bundles.extend(
+                habitat_prop_frames(&ctx, &scratch_dir)?
+                    .into_iter()
+                    .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+            );
+            bundles.extend(
+                pet_frames(&ctx)?
+                    .into_iter()
+                    .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+            );
+            bundles.extend(crate::dev_preview::round::round_bundles(&ctx));
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
-        PreviewSelection::Watch => frames.extend(watch_frames(&ctx, &scratch_dir)?),
-        PreviewSelection::Pets => frames.extend(pet_frames(&ctx)?),
-        PreviewSelection::Props => frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?),
+        PreviewSelection::Watch => bundles.extend(
+            watch_frames(&ctx, &scratch_dir)?
+                .into_iter()
+                .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+        ),
+        PreviewSelection::Pets => bundles.extend(
+            pet_frames(&ctx)?
+                .into_iter()
+                .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+        ),
+        PreviewSelection::Props => bundles.extend(
+            habitat_prop_frames(&ctx, &scratch_dir)?
+                .into_iter()
+                .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+        ),
         PreviewSelection::Animation => {
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
-        PreviewSelection::Round => frames.extend(crate::dev_preview::round::round_frames(&ctx)),
+        PreviewSelection::Round => bundles.extend(crate::dev_preview::round::round_bundles(&ctx)),
     }
 
-    let bundles = frames
-        .into_iter()
-        .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx))
-        .collect::<Vec<_>>();
     let frames = bundles
         .iter()
         .map(|bundle| bundle.frame.clone())
@@ -461,25 +493,6 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     .to_string(),
             ],
         ),
-        id if id.starts_with("round-") => (
-            PreviewScenarioKind::Round,
-            "Review round macOS companion preview with aperture masking and privacy metadata.",
-            BTreeMap::from([
-                (
-                    "color_capability".to_string(),
-                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
-                ),
-                ("fixture".to_string(), Value::String("seeded-pet-state-and-usage-sqlite".to_string())),
-                ("privacy_source_names_visible".to_string(), Value::Bool(false)),
-                ("privacy_exact_counts_visible".to_string(), Value::Bool(false)),
-                ("privacy_diagnostic_text_visible".to_string(), Value::Bool(false)),
-            ]),
-            vec![
-                "Confirm the circular aperture masks the frame corners.".to_string(),
-                "Check that dashboard labels and source diagnostics are not visible.".to_string(),
-                "Verify privacy metadata records all visibility flags as false.".to_string(),
-            ],
-        ),
         _ => (
             PreviewScenarioKind::Watch,
             "Review this generated preview frame.",
@@ -488,6 +501,17 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
         ),
     };
 
+    scenario_from_parts(frame, kind, intent, inputs, None, review_prompts)
+}
+
+fn scenario_from_parts(
+    frame: &PreviewFrame,
+    kind: PreviewScenarioKind,
+    intent: &str,
+    inputs: BTreeMap<String, Value>,
+    round: Option<PreviewRoundMetadata>,
+    review_prompts: Vec<String>,
+) -> PreviewScenario {
     PreviewScenario {
         id: frame.id.clone(),
         kind,
@@ -530,28 +554,7 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 .map(|_| round_commands_path(frame)),
         },
         inputs,
-        round: if frame.id.starts_with("round-") {
-            let aperture = crate::round::layout::RoundAperture::new(frame.width, frame.height);
-            Some(crate::dev_preview::export::PreviewRoundMetadata {
-                target_renderer: "preview-cells",
-                aperture: crate::dev_preview::export::PreviewRoundAperture {
-                    shape: "circle",
-                    center_x: aperture.center_x,
-                    center_y: aperture.center_y,
-                    radius: aperture.radius,
-                    safe_inner_radius: aperture.radius
-                        * crate::round::layout::SAFE_INNER_RADIUS_RATIO,
-                    transparent_outside_aperture: true,
-                },
-                privacy: crate::dev_preview::export::PreviewRoundPrivacy {
-                    source_names_visible: false,
-                    exact_counts_visible: false,
-                    diagnostic_text_visible: false,
-                },
-            })
-        } else {
-            None
-        },
+        round,
         review_prompts,
     }
 }
@@ -1706,7 +1709,7 @@ fn masked_room_masks_for_species_dialect_pairs(
     masks_by_frame
 }
 
-fn color_capability_name(capability: ColorCapability) -> &'static str {
+pub(crate) fn color_capability_name(capability: ColorCapability) -> &'static str {
     match capability {
         ColorCapability::Truecolor => "truecolor",
         ColorCapability::Flat => "flat",
