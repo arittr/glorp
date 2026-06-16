@@ -104,7 +104,7 @@ pub fn build_draw_commands(
             x: anchor.x,
             y: anchor.y,
             radius: anchor.radius,
-            label: None,
+            label: Some(if is_trouble { '!' } else { '○' }),
             text: None,
             spans: Vec::new(),
             color: if is_trouble {

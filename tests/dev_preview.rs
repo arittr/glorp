@@ -1143,6 +1143,18 @@ fn dev_preview_scene_artifacts_are_sanitized_contracts_not_raw_runtime_state() {
     for id in preview_scenarios_with_contract_scene(&manifest) {
         let scene_text =
             std::fs::read_to_string(run.out.join(format!("frames/{id}.scene.json"))).unwrap();
+        let scene: Value = serde_json::from_str(&scene_text).unwrap();
+        assert_eq!(
+            scene["pet"]["seed"], "redacted",
+            "{id}.scene.json should redact stable pet seed"
+        );
+        assert!(
+            scene["room"]["prop_landmarks"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{id}.scene.json should omit stable prop landmark ids"
+        );
         for forbidden in [
             "/users/",
             "/tmp/",
@@ -1153,6 +1165,9 @@ fn dev_preview_scene_artifacts_are_sanitized_contracts_not_raw_runtime_state() {
             "client-secret-project",
             "123456",
             "99999",
+            "fixture-seed",
+            "codex_signal_lamp",
+            "token_pebble_25k",
         ] {
             assert!(
                 !scene_text.to_ascii_lowercase().contains(forbidden),

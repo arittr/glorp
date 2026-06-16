@@ -18,7 +18,7 @@ use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 use crate::format::format_tokens;
 use crate::pet::render::PaletteRoleName;
 use crate::presentation::privacy::PresentationSurface;
-use crate::presentation::scene::PresentationScene;
+use crate::presentation::scene::{PresentationHelperHealth, PresentationScene};
 use crate::tui::identity::SourceDiversity;
 use crate::tui::life::SourceAccent;
 use crate::tui::view_model::WatchViewModel;
@@ -172,6 +172,13 @@ fn append_pet(runs: &mut Vec<StyledRun>, vm: &WatchViewModel) {
 }
 
 fn append_stats(runs: &mut Vec<StyledRun>, vm: &WatchViewModel) {
+    let scene = PresentationScene::from_watch_view_model(
+        vm,
+        time::OffsetDateTime::now_utc(),
+        PresentationSurface::MenubarPopover,
+    );
+    debug_assert!(!scene.privacy.diagnostic_text_visible);
+
     runs.push(StyledRun::accent(vm.pet_name.clone()));
     runs.push(StyledRun::dim(format!("  ({})", vm.bio.age_label)));
     runs.push(StyledRun::plain("\n"));
@@ -202,9 +209,13 @@ fn append_stats(runs: &mut Vec<StyledRun>, vm: &WatchViewModel) {
         "rate",
         format!("{} / hr", format_tokens(vm.progress.rate_per_hour)),
     );
-    push_stat_row(runs, "helper", vm.helper_status.clone());
+    let helper_status = match scene.activity.helper_health {
+        PresentationHelperHealth::Ok => "ok",
+        PresentationHelperHealth::Trouble => "trouble",
+    };
+    push_stat_row(runs, "helper", helper_status.to_string());
 
-    if !vm.errors.is_empty() {
+    if scene.privacy.diagnostic_text_visible && !vm.errors.is_empty() {
         runs.push(StyledRun::plain("\n"));
         for err in vm.errors.iter().take(2) {
             runs.push(StyledRun::new(err.clone(), Rgb(0xea, 0x6a, 0x64)));
@@ -306,7 +317,7 @@ mod tests {
     use super::*;
     use crate::pet::render::StyledSegment;
     use crate::tui::life::{PetLifeProfile, SourceAccent};
-    use crate::tui::view_model::WatchViewModel;
+    use crate::tui::view_model::{SourceStatus, WatchViewModel};
 
     #[test]
     fn menubar_role_base_matches_resolved_palette() {
@@ -488,6 +499,31 @@ mod tests {
         let runs = pet_runs_for_test(&vm);
         assert_eq!(rgb_tuple(runs[1].color), (0xf0, 0xc4, 0x6a));
         assert_eq!(rgb_tuple(runs[2].color), (0xf0, 0xc4, 0x6a));
+    }
+
+    #[test]
+    fn stats_block_omits_raw_helper_diagnostics_for_menubar_privacy() {
+        let mut vm = WatchViewModel::fixture();
+        vm.helper_status = "helper failed in /Users/drew/private/project".into();
+        vm.errors = vec!["prompt response tool payload /tmp/private.rs".into()];
+        vm.source_health[0].status = SourceStatus::Diagnostic;
+
+        let text = stats_text_for_test(&vm);
+
+        assert!(text.contains("helper"));
+        assert!(text.contains("trouble"));
+        for forbidden in ["/Users/drew", "/tmp/", "prompt", "response", "tool payload"] {
+            assert!(
+                !text.contains(forbidden),
+                "menubar stats leaked {forbidden}: {text:?}"
+            );
+        }
+    }
+
+    fn stats_text_for_test(vm: &WatchViewModel) -> String {
+        let mut runs = Vec::new();
+        append_stats(&mut runs, vm);
+        runs.into_iter().map(|run| run.text).collect()
     }
 
     fn rgb_tuple(rgb: Rgb) -> (u8, u8, u8) {

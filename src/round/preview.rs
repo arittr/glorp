@@ -87,74 +87,55 @@ fn paint_commands(
     commands: &[RoundDrawCommand],
     truecolor: bool,
 ) {
-    let mut room_painted = false;
-    let mut pet_painted = false;
-
     for command in commands {
         match command.kind {
             RoundDrawKind::Background => {}
-            RoundDrawKind::RoomGlyph => {
-                if !room_painted {
-                    paint_room(cells, width, scene, layout, truecolor);
-                    room_painted = true;
-                }
-            }
+            RoundDrawKind::RoomGlyph
+            | RoundDrawKind::PropGlyph
+            | RoundDrawKind::Halo
+            | RoundDrawKind::Trouble => paint_labeled_command(cells, width, command, truecolor),
             RoundDrawKind::PetGlyph => {
-                if !pet_painted {
-                    paint_pet_art(cells, width, scene, layout, truecolor);
-                    pet_painted = true;
-                }
-            }
-            RoundDrawKind::Trouble => {
-                let fg = if truecolor { "#f0a646" } else { "yellow" };
-                set_cell(
-                    cells,
-                    width,
-                    command.x.round() as i32,
-                    command.y.round() as i32,
-                    "!".to_string(),
-                    Some(fg.to_string()),
-                );
-            }
-            RoundDrawKind::Halo | RoundDrawKind::PropGlyph => {}
-        }
-    }
-}
-
-fn paint_room(
-    cells: &mut [PreviewCell],
-    width: u16,
-    scene: &RoundSceneModel,
-    layout: &RoundSceneLayout,
-    truecolor: bool,
-) {
-    for y in 0..layout.aperture.height {
-        for x in 0..layout.aperture.width {
-            let idx = y as usize * width as usize + x as usize;
-            if cells[idx].outside_aperture {
-                continue;
-            }
-            // Sparse grid: texture glyphs appear on roughly 1 in 5 cells so the
-            // room reads as ambient grain rather than solid fill.
-            if (x + y) % 5 == 0 {
-                let (symbol, fg) = room_symbol_at(scene, x, y, truecolor);
-                set_cell(cells, width, x as i32, y as i32, symbol, Some(fg));
+                paint_pet_art_command(cells, width, scene, layout, command, truecolor);
             }
         }
     }
 }
 
-fn paint_pet_art(
+fn paint_labeled_command(
+    cells: &mut [PreviewCell],
+    width: u16,
+    command: &RoundDrawCommand,
+    truecolor: bool,
+) {
+    if let Some(label) = command.label {
+        set_cell(
+            cells,
+            width,
+            command.x.round() as i32,
+            command.y.round() as i32,
+            label.to_string(),
+            Some(command_color(command, truecolor)),
+        );
+    }
+}
+
+fn paint_pet_art_command(
     cells: &mut [PreviewCell],
     width: u16,
     scene: &RoundSceneModel,
     layout: &RoundSceneLayout,
+    command: &RoundDrawCommand,
     truecolor: bool,
 ) {
-    let block = PetTextBlock::new(scene.pet.art_lines.clone(), scene.pet.art_spans.clone());
-    let art_width = scene
-        .pet
-        .art_lines
+    let art_lines = command
+        .text
+        .as_deref()
+        .unwrap_or_default()
+        .split('\n')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let block = PetTextBlock::new(art_lines.clone(), command.spans.clone());
+    let art_width = art_lines
         .iter()
         .map(|line| {
             line.chars()
@@ -163,10 +144,10 @@ fn paint_pet_art(
         })
         .max()
         .unwrap_or(0) as i32;
-    let art_height = scene.pet.art_lines.len() as i32;
+    let art_height = art_lines.len() as i32;
     let start_x = layout.pet_anchor.x.round() as i32 - art_width / 2;
     let start_y = layout.pet_anchor.y.round() as i32 - art_height / 2;
-    for (row, line) in scene.pet.art_lines.iter().enumerate() {
+    for (row, line) in art_lines.iter().enumerate() {
         let mut col = 0i32;
         for (char_index, ch) in line.chars().enumerate() {
             let display_width = Line::from(ch.to_string()).width() as i32;
@@ -200,24 +181,24 @@ fn flat_role_name(role: PaletteRoleName) -> &'static str {
     }
 }
 
-fn room_symbol_at(scene: &RoundSceneModel, x: u16, y: u16, truecolor: bool) -> (String, String) {
-    use crate::tui::room::{biome_style, biome_symbols, RoomSpeciesDialect};
-    let dialect = RoomSpeciesDialect::for_species(scene.pet.species);
-    let symbols = biome_symbols(scene.room.biome.primary, dialect);
-    let glyph = symbols
-        .get((x as usize + y as usize) % symbols.len().max(1))
-        .copied()
-        .unwrap_or('·');
-    let style = biome_style(
-        scene.room.biome.primary,
-        crate::tui::style::ColorCapability::Truecolor,
-    );
-    let fg = match (truecolor, style.fg) {
-        (true, Some(ratatui::style::Color::Rgb(r, g, b))) => format!("#{r:02x}{g:02x}{b:02x}"),
-        (true, _) => "#808080".to_string(),
-        (false, _) => "gray".to_string(),
-    };
-    (glyph.to_string(), fg)
+fn command_color(command: &RoundDrawCommand, truecolor: bool) -> String {
+    if truecolor {
+        let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        return format!(
+            "#{:02x}{:02x}{:02x}",
+            channel(command.color.0),
+            channel(command.color.1),
+            channel(command.color.2)
+        );
+    }
+
+    match command.kind {
+        RoundDrawKind::RoomGlyph => "gray",
+        RoundDrawKind::PropGlyph | RoundDrawKind::Halo => "yellow",
+        RoundDrawKind::Trouble => "red",
+        RoundDrawKind::Background | RoundDrawKind::PetGlyph => "white",
+    }
+    .to_string()
 }
 
 fn set_cell(

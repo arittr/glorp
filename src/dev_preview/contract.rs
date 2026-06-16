@@ -1,4 +1,6 @@
 use crate::pet::render::StyledSegment;
+use crate::presentation::privacy::PresentationSurface;
+use crate::presentation::scene::PresentationScene;
 use crate::round::draw::{RoundDrawCommand, RoundDrawKind};
 use crate::round::layout::{RoundAnchor, RoundAnchorKind, RoundMotionBudget, RoundSceneLayout};
 use crate::round::model::RoundSceneModel;
@@ -10,6 +12,7 @@ use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 pub const CONTRACT_SCHEMA_VERSION: u32 = 1;
+const REDACTED_RUNTIME_ID: &str = "redacted";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PreviewFrameContract {
@@ -99,6 +102,11 @@ impl PreviewSceneArtifact {
         now: OffsetDateTime,
         layout: Option<&PreviewLayout>,
     ) -> Self {
+        let presentation_scene = PresentationScene::from_watch_view_model(
+            vm,
+            now,
+            PresentationSurface::PreviewLabArtifact,
+        );
         let room_profile = derive_room_life_profile(vm, now);
         let dialect = &room_profile.species_dialect;
         let room_dialect = RoomSpeciesDialect::for_species(vm.pet_render.generated_species);
@@ -116,7 +124,7 @@ impl PreviewSceneArtifact {
                 fixed_now_unix: now.unix_timestamp(),
             },
             privacy_projection: PreviewPrivacyProjection::sanitized("preview-lab-scene"),
-            pet: PreviewPetArtifact::from_watch(vm),
+            pet: PreviewPetArtifact::from_watch(vm, &presentation_scene.pet.seed),
             room: PreviewRoomArtifact {
                 primary_biome: format!("{:?}", room_profile.biome.primary),
                 secondary_biome: room_profile.biome.secondary.map(|tag| format!("{tag:?}")),
@@ -124,8 +132,9 @@ impl PreviewSceneArtifact {
                 dialect_status: Some(dialect.status.as_str().to_string()),
                 work_weather: format!("{:?}", vm.life_profile.work_weather),
                 day_phase: format!("{:?}", vm.day_context.day_phase),
-                prop_landmarks: room_profile
-                    .identity_prop_ids
+                prop_landmarks: presentation_scene
+                    .room
+                    .prop_landmarks
                     .iter()
                     .map(|id| id.as_str().to_string())
                     .collect(),
@@ -153,7 +162,7 @@ impl PreviewSceneArtifact {
             },
             privacy_projection: PreviewPrivacyProjection::sanitized("round-preview"),
             pet: PreviewPetArtifact {
-                seed: scene.pet.seed.clone(),
+                seed: REDACTED_RUNTIME_ID.to_string(),
                 species: scene.pet.species.as_str().to_string(),
                 stage: format!("{:?}", scene.pet.stage).to_lowercase(),
                 mood: format!("{:?}", scene.pet.mood).to_lowercase(),
@@ -171,12 +180,7 @@ impl PreviewSceneArtifact {
                 dialect_status: None,
                 work_weather: format!("{:?}", scene.room.work_weather),
                 day_phase: format!("{:?}", scene.room.day_phase),
-                prop_landmarks: scene
-                    .room
-                    .prop_landmarks
-                    .iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
+                prop_landmarks: Vec::new(),
                 glyph_vocabulary,
             },
             activity: PreviewActivityArtifact::from_round(scene),
@@ -200,9 +204,9 @@ impl PreviewPrivacyProjection {
 }
 
 impl PreviewPetArtifact {
-    fn from_watch(vm: &WatchViewModel) -> Self {
+    fn from_watch(vm: &WatchViewModel, seed: &str) -> Self {
         Self {
-            seed: vm.pet_render.seed.clone(),
+            seed: seed.to_string(),
             species: vm.pet_render.generated_species.as_str().to_string(),
             stage: format!("{:?}", vm.pet_render.stage).to_lowercase(),
             mood: format!("{:?}", vm.pet_render.mood).to_lowercase(),
@@ -275,9 +279,10 @@ fn targets_from_preview_layout(layout: &PreviewLayout) -> BTreeMap<String, Previ
     layout
         .targets
         .iter()
-        .map(|(id, target)| {
+        .enumerate()
+        .map(|(index, (_id, target))| {
             (
-                id.to_string(),
+                format!("target-{index:02}"),
                 PreviewTargetArtifact {
                     role: target.role.clone(),
                     layer: target.layer.clone(),
@@ -590,8 +595,14 @@ mod tests {
         assert_eq!(artifact.activity.vitals["fed"], "low");
         assert_eq!(artifact.activity.vitals["happiness"], "medium");
         assert_eq!(artifact.activity.vitals["energy"], "high");
-        assert_eq!(artifact.targets["watch.pet"].role, "Pet");
-        assert_eq!(artifact.targets["watch.pet"].layer, "component");
+        let target = artifact
+            .targets
+            .values()
+            .find(|target| target.role == "Pet" && target.layer == "component")
+            .expect("expected neutral pet target");
+        assert_eq!(target.width, 20);
+        assert_eq!(artifact.pet.seed, REDACTED_RUNTIME_ID);
+        assert!(artifact.room.prop_landmarks.is_empty());
         assert!(!artifact.room.glyph_vocabulary.is_empty());
     }
 
@@ -607,10 +618,11 @@ mod tests {
         assert_eq!(artifact.schema_version, CONTRACT_SCHEMA_VERSION);
         assert_eq!(artifact.fixture.source, "round-scene-model");
         assert_eq!(artifact.privacy_projection.surface, "round-preview");
-        assert_eq!(artifact.pet.seed, vm.pet_render.seed);
+        assert_eq!(artifact.pet.seed, REDACTED_RUNTIME_ID);
         assert!(artifact.pet.asleep);
         assert_eq!(artifact.room.species_dialect, "fuzz");
         assert_eq!(artifact.room.dialect_status, None);
+        assert!(artifact.room.prop_landmarks.is_empty());
         assert_eq!(artifact.targets, BTreeMap::new());
     }
 
