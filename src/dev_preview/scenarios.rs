@@ -39,6 +39,18 @@ pub struct PreviewRenderContext {
     pub render: RenderContext,
 }
 
+pub struct PreviewScenarioBundle {
+    pub frame: PreviewFrame,
+    pub scenario: PreviewScenario,
+}
+
+impl PreviewScenarioBundle {
+    pub fn from_frame(frame: PreviewFrame, ctx: &PreviewRenderContext) -> Self {
+        let scenario = scenario_metadata(&frame, ctx);
+        Self { frame, scenario }
+    }
+}
+
 impl PreviewRenderContext {
     pub fn deterministic() -> Self {
         let fixed_now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
@@ -1868,6 +1880,30 @@ mod tests {
         assert_eq!(scenario.inputs["species"], "fuzz");
         assert_eq!(scenario.inputs["stage"], "s4");
         assert!(!scenario.review_prompts.is_empty());
+    }
+
+    #[test]
+    fn scenario_bundle_pairs_frame_with_manifest_metadata() {
+        let ctx = PreviewRenderContext::deterministic();
+        let frame = PreviewFrame {
+            id: "watch-wide-normal".to_string(),
+            title: "Watch Wide Normal".to_string(),
+            width: 120,
+            height: 32,
+            cells: Vec::new(),
+            layout: None,
+            extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
+        };
+
+        let bundle = PreviewScenarioBundle::from_frame(frame, &ctx);
+
+        assert_eq!(bundle.frame.id, "watch-wide-normal");
+        assert_eq!(bundle.scenario.id, "watch-wide-normal");
+        assert_eq!(
+            bundle.scenario.files.text,
+            PathBuf::from("frames/watch-wide-normal.txt")
+        );
     }
 
     #[test]
