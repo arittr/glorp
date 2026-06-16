@@ -903,6 +903,31 @@ fn dev_preview_props_writes_habitat_prop_gallery_and_watch_variants() {
 }
 
 #[test]
+fn dev_preview_manifest_paths_remain_stable_during_builder_cleanup() {
+    let run = PreviewRun::new();
+    run.run_success("all");
+    let manifest = run.manifest();
+
+    for (id, expected_text) in [
+        ("watch-wide-normal", "frames/watch-wide-normal.txt"),
+        (
+            "watch-species-dialect-glitch",
+            "frames/watch-species-dialect-glitch.txt",
+        ),
+        ("round-normal", "frames/round-normal.txt"),
+        ("pet-species-stage", "frames/pet-species-stage.txt"),
+        ("habitat-props-catalog", "frames/habitat-props-catalog.txt"),
+    ] {
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["files"]["text"], expected_text);
+    }
+
+    let ids = scenario_ids(&manifest);
+    assert_eq!(ids.first().unwrap(), "watch-wide-normal");
+    assert!(ids.contains(&"round-normal".to_string()));
+}
+
+#[test]
 fn dev_preview_all_writes_watch_and_pet_artifacts() {
     let run = PreviewRun::new();
 
