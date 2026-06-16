@@ -95,6 +95,14 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         PreviewSelection::Round => frames.extend(crate::dev_preview::round::round_frames(&ctx)),
     }
 
+    let bundles = frames
+        .into_iter()
+        .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx))
+        .collect::<Vec<_>>();
+    let frames = bundles
+        .iter()
+        .map(|bundle| bundle.frame.clone())
+        .collect::<Vec<_>>();
     let masked_room_masks = masked_room_masks_for_species_dialect_pairs(&frames);
 
     for frame in &frames {
@@ -145,9 +153,9 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
     }
 
     let generated_at = format_rfc3339(OffsetDateTime::now_utc())?;
-    let scenarios = frames
+    let scenarios = bundles
         .iter()
-        .map(|frame| scenario_metadata(frame, &ctx))
+        .map(|bundle| bundle.scenario.clone())
         .collect();
     let manifest = PreviewManifest {
         schema_version: SCHEMA_VERSION,
