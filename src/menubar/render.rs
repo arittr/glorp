@@ -17,6 +17,8 @@ use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 
 use crate::format::format_tokens;
 use crate::pet::render::PaletteRoleName;
+use crate::presentation::privacy::PresentationSurface;
+use crate::presentation::scene::PresentationScene;
 use crate::tui::identity::SourceDiversity;
 use crate::tui::life::SourceAccent;
 use crate::tui::view_model::WatchViewModel;
@@ -41,6 +43,14 @@ pub struct RenderedBlock {
 /// 13-char art rows sit centered in the wider popover instead of pinned to
 /// the left text-container inset.
 pub fn render_pet_block(vm: &WatchViewModel) -> RenderedBlock {
+    let scene = PresentationScene::from_watch_view_model(
+        vm,
+        time::OffsetDateTime::now_utc(),
+        PresentationSurface::MenubarPopover,
+    );
+    debug_assert!(scene.privacy.source_names_visible);
+    debug_assert!(scene.privacy.exact_counts_visible);
+
     let mut runs: Vec<StyledRun> = Vec::new();
     append_pet(&mut runs, vm);
     runs.push(StyledRun::plain("\n"));
