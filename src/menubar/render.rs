@@ -209,11 +209,7 @@ fn append_stats(runs: &mut Vec<StyledRun>, vm: &WatchViewModel) {
         "rate",
         format!("{} / hr", format_tokens(vm.progress.rate_per_hour)),
     );
-    let helper_status = match scene.activity.helper_health {
-        PresentationHelperHealth::Ok => "ok",
-        PresentationHelperHealth::Trouble => "trouble",
-    };
-    push_stat_row(runs, "helper", helper_status.to_string());
+    push_stat_row(runs, "helper", helper_status_for_menubar(vm, &scene));
 
     if scene.privacy.diagnostic_text_visible && !vm.errors.is_empty() {
         runs.push(StyledRun::plain("\n"));
@@ -230,6 +226,28 @@ fn push_stat_row(runs: &mut Vec<StyledRun>, label: &str, value: String) {
     runs.push(StyledRun::dim(format!("{label:<8}")));
     runs.push(StyledRun::plain(value));
     runs.push(StyledRun::plain("\n"));
+}
+
+fn helper_status_for_menubar(vm: &WatchViewModel, scene: &PresentationScene) -> String {
+    if scene.privacy.diagnostic_text_visible || !looks_like_private_diagnostic(&vm.helper_status) {
+        return vm.helper_status.clone();
+    }
+
+    match scene.activity.helper_health {
+        PresentationHelperHealth::Ok => "ok".to_string(),
+        PresentationHelperHealth::Trouble => "trouble".to_string(),
+    }
+}
+
+fn looks_like_private_diagnostic(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("/users/")
+        || lower.contains("/tmp/")
+        || lower.contains("\\users\\")
+        || lower.contains("prompt")
+        || lower.contains("response")
+        || lower.contains("tool payload")
+        || lower.contains("transcript")
 }
 
 fn percent(fraction: f64) -> String {
@@ -518,6 +536,16 @@ mod tests {
                 "menubar stats leaked {forbidden}: {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn stats_block_preserves_safe_helper_status_for_menubar_privacy() {
+        let mut vm = WatchViewModel::fixture();
+        vm.helper_status = "helper ready: claude-code, codex".into();
+
+        let text = stats_text_for_test(&vm);
+
+        assert!(text.contains("helper ready: claude-code, codex"));
     }
 
     fn stats_text_for_test(vm: &WatchViewModel) -> String {

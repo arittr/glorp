@@ -2,9 +2,7 @@ use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
 use crate::pet::render::PaletteRoleName;
 use crate::presentation::pet::{role_for_cell, PetTextBlock};
 use crate::round::draw::{RoundDrawCommand, RoundDrawKind};
-use crate::round::layout::{
-    layout_round_scene, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
-};
+use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::tui::view_model::WatchViewModel;
 use ratatui::text::Line;
@@ -23,14 +21,7 @@ pub fn render_round_preview_frame_from_vm(
     let layout = layout_round_scene(&scene, aperture, capabilities);
     let mut cells = blank_cells(width, height, aperture);
     let commands = crate::round::draw::build_draw_commands(&scene, &layout);
-    paint_commands(
-        &mut cells,
-        width,
-        &scene,
-        &layout,
-        &commands,
-        capabilities.truecolor,
-    );
+    paint_commands(&mut cells, width, &scene, &commands, capabilities.truecolor);
     mark_continuations(&mut cells, width);
     let mut frame = PreviewFrame {
         id: id.into(),
@@ -83,7 +74,6 @@ fn paint_commands(
     cells: &mut [PreviewCell],
     width: u16,
     scene: &RoundSceneModel,
-    layout: &RoundSceneLayout,
     commands: &[RoundDrawCommand],
     truecolor: bool,
 ) {
@@ -95,7 +85,7 @@ fn paint_commands(
             | RoundDrawKind::Halo
             | RoundDrawKind::Trouble => paint_labeled_command(cells, width, command, truecolor),
             RoundDrawKind::PetGlyph => {
-                paint_pet_art_command(cells, width, scene, layout, command, truecolor);
+                paint_pet_art_command(cells, width, scene, command, truecolor);
             }
         }
     }
@@ -123,7 +113,6 @@ fn paint_pet_art_command(
     cells: &mut [PreviewCell],
     width: u16,
     scene: &RoundSceneModel,
-    layout: &RoundSceneLayout,
     command: &RoundDrawCommand,
     truecolor: bool,
 ) {
@@ -145,8 +134,8 @@ fn paint_pet_art_command(
         .max()
         .unwrap_or(0) as i32;
     let art_height = art_lines.len() as i32;
-    let start_x = layout.pet_anchor.x.round() as i32 - art_width / 2;
-    let start_y = layout.pet_anchor.y.round() as i32 - art_height / 2;
+    let start_x = command.x.round() as i32 - art_width / 2;
+    let start_y = command.y.round() as i32 - art_height / 2;
     for (row, line) in art_lines.iter().enumerate() {
         let mut col = 0i32;
         for (char_index, ch) in line.chars().enumerate() {
@@ -303,5 +292,44 @@ mod tests {
             .map(|c| c.symbol.clone())
             .collect();
         assert!(!room_syms.is_empty());
+    }
+
+    #[test]
+    fn preview_pet_text_is_positioned_from_command_anchor() {
+        use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
+        use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
+        use crate::round::model::derive_round_scene_model;
+        use crate::tui::view_model::WatchViewModel;
+        use time::macros::datetime;
+
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_art = vec!["x".to_string()];
+        vm.pet_spans = Vec::new();
+        let now = datetime!(2026-06-15 12:00 UTC);
+        let scene = derive_round_scene_model(&vm, now);
+        let layout = layout_round_scene(
+            &scene,
+            RoundAperture::new(52, 52),
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let command = RoundDrawCommand {
+            kind: RoundDrawKind::PetGlyph,
+            x: 8.0,
+            y: 9.0,
+            radius: 1.0,
+            label: None,
+            text: Some("x".into()),
+            spans: Vec::new(),
+            color: RoundColor(1.0, 1.0, 1.0, 1.0),
+        };
+        let mut cells = blank_cells(52, 52, layout.aperture);
+
+        paint_commands(&mut cells, 52, &scene, &[command], true);
+
+        let command_cell = cells
+            .iter()
+            .find(|cell| cell.x == 8 && cell.y == 9)
+            .expect("expected command cell");
+        assert_eq!(command_cell.symbol, "x");
     }
 }
