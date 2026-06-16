@@ -318,13 +318,27 @@ fn wide_layout_centers_full_pet_stage_with_dashed_divider() {
     let backend = TestBackend::new(120, 32);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
-    let text = buffer_text(terminal.backend().buffer());
-    assert!(text.contains("✦ ✧ ✦"));
 
-    let stage_line = buffer_lines(terminal.backend().buffer())
-        .into_iter()
-        .find(|line| line.contains("/ o.o \\"))
+    let lines = buffer_lines(terminal.backend().buffer());
+    let stage_y = lines
+        .iter()
+        .position(|line| line.contains("/ o.o \\"))
         .unwrap();
+    let sparkle_line = lines
+        .get(stage_y + 5)
+        .expect("expected bottom sparkle row to remain visible");
+    let sparkle_chars = sparkle_line.chars().collect::<Vec<_>>();
+    let sparkle_center = sparkle_chars
+        .iter()
+        .position(|ch| *ch == '✧')
+        .expect("expected center sparkle glyph on bottom pet-art row");
+    assert!(
+        sparkle_chars[..sparkle_center].contains(&'✦')
+            && sparkle_chars[sparkle_center + 1..].contains(&'✦'),
+        "expected flanking sparkle glyphs around center glyph: {sparkle_line:?}"
+    );
+
+    let stage_line = &lines[stage_y];
     assert!(
         stage_line.find('/').unwrap_or_default() > 5,
         "pet art should be padded away from the left edge: {stage_line:?}"
