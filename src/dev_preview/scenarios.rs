@@ -1,9 +1,9 @@
 use crate::dev_preview::export::{
-    copy_assets, has_masked_room_artifact, write_cells_json, write_index_html, write_layout_json,
-    write_manifest, write_review_markdown, write_room_text_frame, write_room_text_frame_masked,
-    write_text_frame, ArtifactType, PreviewArtifact, PreviewDimensions, PreviewManifest,
-    PreviewMaskRect, PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER,
-    SCHEMA_VERSION,
+    copy_assets, has_masked_room_artifact, write_cells_json, write_index_html, write_json_artifact,
+    write_layout_json, write_manifest, write_review_markdown, write_room_text_frame,
+    write_room_text_frame_masked, write_text_frame, ArtifactType, PreviewArtifact,
+    PreviewDimensions, PreviewManifest, PreviewMaskRect, PreviewRoundMetadata, PreviewScenario,
+    PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::habitat_props::{
@@ -39,6 +39,30 @@ pub struct PreviewRenderContext {
     pub render: RenderContext,
 }
 
+pub struct PreviewScenarioBundle {
+    pub frame: PreviewFrame,
+    pub scenario: PreviewScenario,
+}
+
+impl PreviewScenarioBundle {
+    pub fn from_frame(frame: PreviewFrame, ctx: &PreviewRenderContext) -> Self {
+        let scenario = scenario_metadata(&frame, ctx);
+        Self { frame, scenario }
+    }
+
+    pub fn from_parts(
+        frame: PreviewFrame,
+        kind: PreviewScenarioKind,
+        intent: &str,
+        inputs: BTreeMap<String, Value>,
+        round: Option<PreviewRoundMetadata>,
+        review_prompts: Vec<String>,
+    ) -> Self {
+        let scenario = scenario_from_parts(&frame, kind, intent, inputs, round, review_prompts);
+        Self { frame, scenario }
+    }
+}
+
 impl PreviewRenderContext {
     pub fn deterministic() -> Self {
         let fixed_now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
@@ -62,27 +86,55 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
     fs::create_dir_all(&frames_dir)?;
     fs::create_dir_all(&scratch_dir)?;
 
-    let mut frames = Vec::new();
+    let mut bundles = Vec::new();
     let mut strips = Vec::new();
     match selection {
         PreviewSelection::All => {
-            frames.extend(watch_frames(&ctx, &scratch_dir)?);
-            frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?);
-            frames.extend(pet_frames(&ctx)?);
-            frames.extend(crate::dev_preview::round::round_frames(&ctx));
+            bundles.extend(
+                watch_frames(&ctx, &scratch_dir)?
+                    .into_iter()
+                    .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+            );
+            bundles.extend(
+                habitat_prop_frames(&ctx, &scratch_dir)?
+                    .into_iter()
+                    .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+            );
+            bundles.extend(
+                pet_frames(&ctx)?
+                    .into_iter()
+                    .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+            );
+            bundles.extend(crate::dev_preview::round::round_bundles(&ctx));
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
-            strips.extend(crate::dev_preview::strips::scene_strips());
+            strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
-        PreviewSelection::Watch => frames.extend(watch_frames(&ctx, &scratch_dir)?),
-        PreviewSelection::Pets => frames.extend(pet_frames(&ctx)?),
-        PreviewSelection::Props => frames.extend(habitat_prop_frames(&ctx, &scratch_dir)?),
+        PreviewSelection::Watch => bundles.extend(
+            watch_frames(&ctx, &scratch_dir)?
+                .into_iter()
+                .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+        ),
+        PreviewSelection::Pets => bundles.extend(
+            pet_frames(&ctx)?
+                .into_iter()
+                .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+        ),
+        PreviewSelection::Props => bundles.extend(
+            habitat_prop_frames(&ctx, &scratch_dir)?
+                .into_iter()
+                .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
+        ),
         PreviewSelection::Animation => {
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
-            strips.extend(crate::dev_preview::strips::scene_strips());
+            strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
-        PreviewSelection::Round => frames.extend(crate::dev_preview::round::round_frames(&ctx)),
+        PreviewSelection::Round => bundles.extend(crate::dev_preview::round::round_bundles(&ctx)),
     }
 
+    let frames = bundles
+        .iter()
+        .map(|bundle| bundle.frame.clone())
+        .collect::<Vec<_>>();
     let masked_room_masks = masked_room_masks_for_species_dialect_pairs(&frames);
 
     for frame in &frames {
@@ -110,6 +162,18 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                 }
             }
         }
+        if let Some(scene) = &frame.contract.scene {
+            write_json_artifact(&staging_dir.join(scene_path(frame)), scene)?;
+        }
+        if let Some(round_layout) = &frame.contract.round_layout {
+            write_json_artifact(&staging_dir.join(round_layout_path(frame)), round_layout)?;
+        }
+        if let Some(round_commands) = &frame.contract.round_commands {
+            write_json_artifact(
+                &staging_dir.join(round_commands_path(frame)),
+                round_commands,
+            )?;
+        }
     }
 
     for strip in &strips {
@@ -121,9 +185,9 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
     }
 
     let generated_at = format_rfc3339(OffsetDateTime::now_utc())?;
-    let scenarios = frames
+    let scenarios = bundles
         .iter()
-        .map(|frame| scenario_metadata(frame, &ctx))
+        .map(|bundle| bundle.scenario.clone())
         .collect();
     let manifest = PreviewManifest {
         schema_version: SCHEMA_VERSION,
@@ -429,25 +493,6 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     .to_string(),
             ],
         ),
-        id if id.starts_with("round-") => (
-            PreviewScenarioKind::Round,
-            "Review round macOS companion preview with aperture masking and privacy metadata.",
-            BTreeMap::from([
-                (
-                    "color_capability".to_string(),
-                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
-                ),
-                ("fixture".to_string(), Value::String("seeded-pet-state-and-usage-sqlite".to_string())),
-                ("privacy_source_names_visible".to_string(), Value::Bool(false)),
-                ("privacy_exact_counts_visible".to_string(), Value::Bool(false)),
-                ("privacy_diagnostic_text_visible".to_string(), Value::Bool(false)),
-            ]),
-            vec![
-                "Confirm the circular aperture masks the frame corners.".to_string(),
-                "Check that dashboard labels and source diagnostics are not visible.".to_string(),
-                "Verify privacy metadata records all visibility flags as false.".to_string(),
-            ],
-        ),
         _ => (
             PreviewScenarioKind::Watch,
             "Review this generated preview frame.",
@@ -456,6 +501,17 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
         ),
     };
 
+    scenario_from_parts(frame, kind, intent, inputs, None, review_prompts)
+}
+
+fn scenario_from_parts(
+    frame: &PreviewFrame,
+    kind: PreviewScenarioKind,
+    intent: &str,
+    inputs: BTreeMap<String, Value>,
+    round: Option<PreviewRoundMetadata>,
+    review_prompts: Vec<String>,
+) -> PreviewScenario {
     PreviewScenario {
         id: frame.id.clone(),
         kind,
@@ -485,30 +541,20 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     None
                 }
             }),
+            scene: frame.contract.scene.as_ref().map(|_| scene_path(frame)),
+            round_layout: frame
+                .contract
+                .round_layout
+                .as_ref()
+                .map(|_| round_layout_path(frame)),
+            round_commands: frame
+                .contract
+                .round_commands
+                .as_ref()
+                .map(|_| round_commands_path(frame)),
         },
         inputs,
-        round: if frame.id.starts_with("round-") {
-            let aperture = crate::round::layout::RoundAperture::new(frame.width, frame.height);
-            Some(crate::dev_preview::export::PreviewRoundMetadata {
-                target_renderer: "preview-cells",
-                aperture: crate::dev_preview::export::PreviewRoundAperture {
-                    shape: "circle",
-                    center_x: aperture.center_x,
-                    center_y: aperture.center_y,
-                    radius: aperture.radius,
-                    safe_inner_radius: aperture.radius
-                        * crate::round::layout::SAFE_INNER_RADIUS_RATIO,
-                    transparent_outside_aperture: true,
-                },
-                privacy: crate::dev_preview::export::PreviewRoundPrivacy {
-                    source_names_visible: false,
-                    exact_counts_visible: false,
-                    diagnostic_text_visible: false,
-                },
-            })
-        } else {
-            None
-        },
+        round,
         review_prompts,
     }
 }
@@ -569,6 +615,36 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 path: room_masked_text_path(frame),
                 width: Some(frame.width),
                 height: Some(frame.height),
+            });
+        }
+        if frame.contract.scene.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-scene", frame.id),
+                title: format!("{} Scene", frame.title),
+                artifact_type: ArtifactType::Scene,
+                path: scene_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.round_layout.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-round-layout", frame.id),
+                title: format!("{} Round Layout", frame.title),
+                artifact_type: ArtifactType::RoundLayout,
+                path: round_layout_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.round_commands.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-round-commands", frame.id),
+                title: format!("{} Round Commands", frame.title),
+                artifact_type: ArtifactType::RoundCommands,
+                path: round_commands_path(frame),
+                width: None,
+                height: None,
             });
         }
     }
@@ -1545,6 +1621,18 @@ fn layout_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.layout.json", frame.id))
 }
 
+fn scene_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.scene.json", frame.id))
+}
+
+fn round_layout_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.round-layout.json", frame.id))
+}
+
+fn round_commands_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.round-commands.json", frame.id))
+}
+
 fn room_text_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.room.txt", frame.id))
 }
@@ -1621,7 +1709,7 @@ fn masked_room_masks_for_species_dialect_pairs(
     masks_by_frame
 }
 
-fn color_capability_name(capability: ColorCapability) -> &'static str {
+pub(crate) fn color_capability_name(capability: ColorCapability) -> &'static str {
     match capability {
         ColorCapability::Truecolor => "truecolor",
         ColorCapability::Flat => "flat",
@@ -1784,6 +1872,7 @@ mod tests {
             cells: Vec::new(),
             layout: None,
             extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
         };
 
         let scenario = scenario_metadata(&frame, &ctx);
@@ -1805,6 +1894,30 @@ mod tests {
     }
 
     #[test]
+    fn scenario_bundle_pairs_frame_with_manifest_metadata() {
+        let ctx = PreviewRenderContext::deterministic();
+        let frame = PreviewFrame {
+            id: "watch-wide-normal".to_string(),
+            title: "Watch Wide Normal".to_string(),
+            width: 120,
+            height: 32,
+            cells: Vec::new(),
+            layout: None,
+            extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
+        };
+
+        let bundle = PreviewScenarioBundle::from_frame(frame, &ctx);
+
+        assert_eq!(bundle.frame.id, "watch-wide-normal");
+        assert_eq!(bundle.scenario.id, "watch-wide-normal");
+        assert_eq!(
+            bundle.scenario.files.text,
+            PathBuf::from("frames/watch-wide-normal.txt")
+        );
+    }
+
+    #[test]
     fn pet_matrix_metadata_lists_species_and_stages() {
         let ctx = PreviewRenderContext::deterministic();
         let frame = PreviewFrame {
@@ -1815,6 +1928,7 @@ mod tests {
             cells: Vec::new(),
             layout: None,
             extra_inputs: BTreeMap::new(),
+            contract: crate::dev_preview::contract::PreviewFrameContract::default(),
         };
 
         let scenario = scenario_metadata(&frame, &ctx);

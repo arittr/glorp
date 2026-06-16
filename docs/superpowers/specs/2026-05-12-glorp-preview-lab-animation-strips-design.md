@@ -15,6 +15,11 @@ This version incorporates the Slice 2 review pass. The important hardening
 decisions are:
 
 - Slice 2 manifest output is schema version `2`.
+
+  Historical note: the current Preview Lab manifest is schema version `3`; this
+  slice documents the older schema `2` transition and should not be used as the
+  active schema reference.
+
 - `manifest.json`, `review.md`, and `index.html` are generated from one
   internal preview-bundle model.
 - Manifest paths are normalized relative UTF-8 `/` paths, not arbitrary

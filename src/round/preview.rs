@@ -1,9 +1,9 @@
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
-use crate::pet::render::{PaletteRoleName, StyledSegment};
-use crate::round::layout::{
-    layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities, RoundSceneLayout,
-};
-use crate::round::model::{derive_round_scene_model, RoundHelperHealth, RoundSceneModel};
+use crate::pet::render::PaletteRoleName;
+use crate::presentation::pet::{role_for_cell, PetTextBlock};
+use crate::round::draw::{RoundDrawCommand, RoundDrawKind};
+use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
+use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::tui::view_model::WatchViewModel;
 use ratatui::text::Line;
 
@@ -20,11 +20,10 @@ pub fn render_round_preview_frame_from_vm(
     let aperture = RoundAperture::new(width, height);
     let layout = layout_round_scene(&scene, aperture, capabilities);
     let mut cells = blank_cells(width, height, aperture);
-    paint_room(&mut cells, width, &scene, &layout, capabilities.truecolor);
-    paint_pet_art(&mut cells, width, &scene, &layout, capabilities.truecolor);
-    paint_halo(&mut cells, width, &scene, &layout, capabilities.truecolor);
+    let commands = crate::round::draw::build_draw_commands(&scene, &layout);
+    paint_commands(&mut cells, width, &scene, &commands, capabilities.truecolor);
     mark_continuations(&mut cells, width);
-    PreviewFrame {
+    let mut frame = PreviewFrame {
         id: id.into(),
         title: title.into(),
         width,
@@ -32,7 +31,22 @@ pub fn render_round_preview_frame_from_vm(
         cells,
         layout: None,
         extra_inputs: Default::default(),
-    }
+        contract: Default::default(),
+    };
+    frame.contract.scene = Some(
+        crate::dev_preview::contract::PreviewSceneArtifact::from_round_scene(
+            &frame.id, &scene, now,
+        ),
+    );
+    frame.contract.round_layout = Some(
+        crate::dev_preview::contract::PreviewRoundLayoutArtifact::from_layout(&frame.id, &layout),
+    );
+    frame.contract.round_commands = Some(
+        crate::dev_preview::contract::PreviewRoundCommandsArtifact::from_commands(
+            &frame.id, &scene, &commands,
+        ),
+    );
+    frame
 }
 
 fn blank_cells(width: u16, height: u16, aperture: RoundAperture) -> Vec<PreviewCell> {
@@ -56,39 +70,61 @@ fn blank_cells(width: u16, height: u16, aperture: RoundAperture) -> Vec<PreviewC
     cells
 }
 
-fn paint_room(
+fn paint_commands(
     cells: &mut [PreviewCell],
     width: u16,
     scene: &RoundSceneModel,
-    layout: &RoundSceneLayout,
+    commands: &[RoundDrawCommand],
     truecolor: bool,
 ) {
-    for y in 0..layout.aperture.height {
-        for x in 0..layout.aperture.width {
-            let idx = y as usize * width as usize + x as usize;
-            if cells[idx].outside_aperture {
-                continue;
-            }
-            // Sparse grid: texture glyphs appear on roughly 1 in 5 cells so the
-            // room reads as ambient grain rather than solid fill.
-            if (x + y) % 5 == 0 {
-                let (symbol, fg) = room_symbol_at(scene, x, y, truecolor);
-                set_cell(cells, width, x as i32, y as i32, symbol, Some(fg));
+    for command in commands {
+        match command.kind {
+            RoundDrawKind::Background => {}
+            RoundDrawKind::RoomGlyph
+            | RoundDrawKind::PropGlyph
+            | RoundDrawKind::Halo
+            | RoundDrawKind::Trouble => paint_labeled_command(cells, width, command, truecolor),
+            RoundDrawKind::PetGlyph => {
+                paint_pet_art_command(cells, width, scene, command, truecolor);
             }
         }
     }
 }
 
-fn paint_pet_art(
+fn paint_labeled_command(
+    cells: &mut [PreviewCell],
+    width: u16,
+    command: &RoundDrawCommand,
+    truecolor: bool,
+) {
+    if let Some(label) = command.label {
+        set_cell(
+            cells,
+            width,
+            command.x.round() as i32,
+            command.y.round() as i32,
+            label.to_string(),
+            Some(command_color(command, truecolor)),
+        );
+    }
+}
+
+fn paint_pet_art_command(
     cells: &mut [PreviewCell],
     width: u16,
     scene: &RoundSceneModel,
-    layout: &RoundSceneLayout,
+    command: &RoundDrawCommand,
     truecolor: bool,
 ) {
-    let art_width = scene
-        .pet
-        .art_lines
+    let art_lines = command
+        .text
+        .as_deref()
+        .unwrap_or_default()
+        .split('\n')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let block = PetTextBlock::new(art_lines.clone(), command.spans.clone());
+    let art_width = art_lines
         .iter()
         .map(|line| {
             line.chars()
@@ -97,15 +133,15 @@ fn paint_pet_art(
         })
         .max()
         .unwrap_or(0) as i32;
-    let art_height = scene.pet.art_lines.len() as i32;
-    let start_x = layout.pet_anchor.x.round() as i32 - art_width / 2;
-    let start_y = layout.pet_anchor.y.round() as i32 - art_height / 2;
-    for (row, line) in scene.pet.art_lines.iter().enumerate() {
+    let art_height = art_lines.len() as i32;
+    let start_x = command.x.round() as i32 - art_width / 2;
+    let start_y = command.y.round() as i32 - art_height / 2;
+    for (row, line) in art_lines.iter().enumerate() {
         let mut col = 0i32;
         for (char_index, ch) in line.chars().enumerate() {
             let display_width = Line::from(ch.to_string()).width() as i32;
             if ch != ' ' {
-                let role = role_for_pet_cell(&scene.pet.art_spans, row, char_index);
+                let role = role_for_cell(&block, row, char_index);
                 let rgb = crate::pet::palette::role_color(role, &scene.pet.palette);
                 let fg = if truecolor {
                     format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)
@@ -126,14 +162,6 @@ fn paint_pet_art(
     }
 }
 
-fn role_for_pet_cell(spans: &[StyledSegment], row: usize, char_index: usize) -> PaletteRoleName {
-    spans
-        .iter()
-        .find(|span| span.line == row && char_index >= span.start && char_index < span.end)
-        .map(|span| span.role)
-        .unwrap_or(PaletteRoleName::Body)
-}
-
 fn flat_role_name(role: PaletteRoleName) -> &'static str {
     match role {
         PaletteRoleName::Eye => "green",
@@ -142,50 +170,24 @@ fn flat_role_name(role: PaletteRoleName) -> &'static str {
     }
 }
 
-fn paint_halo(
-    cells: &mut [PreviewCell],
-    width: u16,
-    scene: &RoundSceneModel,
-    layout: &RoundSceneLayout,
-    truecolor: bool,
-) {
-    if scene.halo.helper_health == RoundHelperHealth::Trouble {
-        for anchor in layout
-            .halo_anchors
-            .iter()
-            .filter(|a| a.kind == RoundAnchorKind::HelperTrouble)
-        {
-            let fg = if truecolor { "#f0a646" } else { "yellow" };
-            set_cell(
-                cells,
-                width,
-                anchor.x.round() as i32,
-                anchor.y.round() as i32,
-                "!".to_string(),
-                Some(fg.to_string()),
-            );
-        }
+fn command_color(command: &RoundDrawCommand, truecolor: bool) -> String {
+    if truecolor {
+        let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        return format!(
+            "#{:02x}{:02x}{:02x}",
+            channel(command.color.0),
+            channel(command.color.1),
+            channel(command.color.2)
+        );
     }
-}
 
-fn room_symbol_at(scene: &RoundSceneModel, x: u16, y: u16, truecolor: bool) -> (String, String) {
-    use crate::tui::room::{biome_style, biome_symbols, RoomSpeciesDialect};
-    let dialect = RoomSpeciesDialect::for_species(scene.pet.species);
-    let symbols = biome_symbols(scene.room.biome.primary, dialect);
-    let glyph = symbols
-        .get((x as usize + y as usize) % symbols.len().max(1))
-        .copied()
-        .unwrap_or('·');
-    let style = biome_style(
-        scene.room.biome.primary,
-        crate::tui::style::ColorCapability::Truecolor,
-    );
-    let fg = match (truecolor, style.fg) {
-        (true, Some(ratatui::style::Color::Rgb(r, g, b))) => format!("#{r:02x}{g:02x}{b:02x}"),
-        (true, _) => "#808080".to_string(),
-        (false, _) => "gray".to_string(),
-    };
-    (glyph.to_string(), fg)
+    match command.kind {
+        RoundDrawKind::RoomGlyph => "gray",
+        RoundDrawKind::PropGlyph | RoundDrawKind::Halo => "yellow",
+        RoundDrawKind::Trouble => "red",
+        RoundDrawKind::Background | RoundDrawKind::PetGlyph => "white",
+    }
+    .to_string()
 }
 
 fn set_cell(
@@ -213,6 +215,7 @@ fn set_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pet::render::StyledSegment;
 
     #[test]
     fn preview_pet_colors_eye_and_body_differently() {
@@ -289,5 +292,44 @@ mod tests {
             .map(|c| c.symbol.clone())
             .collect();
         assert!(!room_syms.is_empty());
+    }
+
+    #[test]
+    fn preview_pet_text_is_positioned_from_command_anchor() {
+        use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
+        use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
+        use crate::round::model::derive_round_scene_model;
+        use crate::tui::view_model::WatchViewModel;
+        use time::macros::datetime;
+
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_art = vec!["x".to_string()];
+        vm.pet_spans = Vec::new();
+        let now = datetime!(2026-06-15 12:00 UTC);
+        let scene = derive_round_scene_model(&vm, now);
+        let layout = layout_round_scene(
+            &scene,
+            RoundAperture::new(52, 52),
+            RoundRenderCapabilities::preview_truecolor(),
+        );
+        let command = RoundDrawCommand {
+            kind: RoundDrawKind::PetGlyph,
+            x: 8.0,
+            y: 9.0,
+            radius: 1.0,
+            label: None,
+            text: Some("x".into()),
+            spans: Vec::new(),
+            color: RoundColor(1.0, 1.0, 1.0, 1.0),
+        };
+        let mut cells = blank_cells(52, 52, layout.aperture);
+
+        paint_commands(&mut cells, 52, &scene, &[command], true);
+
+        let command_cell = cells
+            .iter()
+            .find(|cell| cell.x == 8 && cell.y == 9)
+            .expect("expected command cell");
+        assert_eq!(command_cell.symbol, "x");
     }
 }

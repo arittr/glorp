@@ -903,6 +903,31 @@ fn dev_preview_props_writes_habitat_prop_gallery_and_watch_variants() {
 }
 
 #[test]
+fn dev_preview_manifest_paths_remain_stable_during_builder_cleanup() {
+    let run = PreviewRun::new();
+    run.run_success("all");
+    let manifest = run.manifest();
+
+    for (id, expected_text) in [
+        ("watch-wide-normal", "frames/watch-wide-normal.txt"),
+        (
+            "watch-species-dialect-glitch",
+            "frames/watch-species-dialect-glitch.txt",
+        ),
+        ("round-normal", "frames/round-normal.txt"),
+        ("pet-species-stage", "frames/pet-species-stage.txt"),
+        ("habitat-props-catalog", "frames/habitat-props-catalog.txt"),
+    ] {
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["files"]["text"], expected_text);
+    }
+
+    let ids = scenario_ids(&manifest);
+    assert_eq!(ids.first().unwrap(), "watch-wide-normal");
+    assert!(ids.contains(&"round-normal".to_string()));
+}
+
+#[test]
 fn dev_preview_all_writes_watch_and_pet_artifacts() {
     let run = PreviewRun::new();
 
@@ -1061,6 +1086,95 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "round-crystal-dialect".to_string(),
         ]
     );
+}
+
+#[test]
+fn dev_preview_watch_and_round_frames_write_scene_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("all");
+
+    let manifest = run.manifest();
+    let scene_ids = preview_scenarios_with_contract_scene(&manifest);
+    assert!(
+        scene_ids.len() >= 50,
+        "expected every watch and round scenario to carry a scene artifact; got {}",
+        scene_ids.len()
+    );
+
+    for id in scene_ids {
+        assert!(
+            run.out.join(format!("frames/{id}.scene.json")).is_file(),
+            "missing {id}.scene.json"
+        );
+        let scenario = scenario(&manifest, &id);
+        assert_eq!(
+            scenario["files"]["scene"],
+            format!("frames/{id}.scene.json"),
+            "{id} manifest files.scene"
+        );
+        assert_artifact_type(&manifest, &format!("{id}-scene"), "scene");
+
+        let scene = read_scene(&run, &id);
+        assert_eq!(scene["schema_version"], 1);
+        assert_eq!(scene["frame_id"], id);
+        assert!(scene["pet"]["species"].is_string(), "{id} pet species");
+        assert!(scene["pet"]["stage"].is_string(), "{id} pet stage");
+        assert!(
+            scene["room"]["primary_biome"].is_string(),
+            "{id} primary biome"
+        );
+        assert!(
+            scene["privacy_projection"]["surface"].is_string(),
+            "{id} surface"
+        );
+        assert!(scene["privacy_projection"]["source_names_visible"].is_boolean());
+        assert!(scene["targets"].is_object(), "{id} target map");
+    }
+}
+
+#[test]
+fn dev_preview_scene_artifacts_are_sanitized_contracts_not_raw_runtime_state() {
+    let run = PreviewRun::new();
+
+    run.run_success("all");
+
+    let manifest = run.manifest();
+    for id in preview_scenarios_with_contract_scene(&manifest) {
+        let scene_text =
+            std::fs::read_to_string(run.out.join(format!("frames/{id}.scene.json"))).unwrap();
+        let scene: Value = serde_json::from_str(&scene_text).unwrap();
+        assert_eq!(
+            scene["pet"]["seed"], "redacted",
+            "{id}.scene.json should redact stable pet seed"
+        );
+        assert!(
+            scene["room"]["prop_landmarks"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{id}.scene.json should omit stable prop landmark ids"
+        );
+        for forbidden in [
+            "/users/",
+            "/tmp/",
+            "prompt",
+            "response",
+            "tool payload",
+            "transcript",
+            "client-secret-project",
+            "123456",
+            "99999",
+            "fixture-seed",
+            "codex_signal_lamp",
+            "token_pebble_25k",
+        ] {
+            assert!(
+                !scene_text.to_ascii_lowercase().contains(forbidden),
+                "{id}.scene.json leaked forbidden text {forbidden}: {scene_text}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1381,6 +1495,37 @@ fn dev_preview_html_contains_paused_strip_controls() {
     assert!(!html.contains("http://"));
 }
 
+#[test]
+fn dev_preview_animation_strip_text_and_cells_are_repeatable() {
+    let first = PreviewRun::new();
+    let second = PreviewRun::new();
+
+    first.run_success("animation");
+    second.run_success("animation");
+
+    for strip_id in [
+        "scene-prop-resonance-ripple",
+        "scene-feed-sweep",
+        "scene-dawn-wake-wipe",
+        "scene-heavy-session-shimmer",
+    ] {
+        for index in 0..3 {
+            let text_path = format!("strips/{strip_id}/frame-{index:03}.txt");
+            let cells_path = format!("strips/{strip_id}/frame-{index:03}.cells.json");
+            assert_eq!(
+                std::fs::read_to_string(first.out.join(&text_path)).unwrap(),
+                std::fs::read_to_string(second.out.join(&text_path)).unwrap(),
+                "{text_path} should be deterministic"
+            );
+            assert_eq!(
+                std::fs::read_to_string(first.out.join(&cells_path)).unwrap(),
+                std::fs::read_to_string(second.out.join(&cells_path)).unwrap(),
+                "{cells_path} should be deterministic"
+            );
+        }
+    }
+}
+
 // Snapshot guard for the deterministic `watch-wide-normal` preview frame. Any
 // silent rendering regression (palette swap, layout drift, off-by-one in the
 // composer, etc.) will diff the .snap file and fail the test. To accept an
@@ -1463,6 +1608,124 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
             scenario["round"]["privacy"]["diagnostic_text_visible"],
             false
         );
+    }
+}
+
+#[test]
+fn dev_preview_round_writes_layout_and_command_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let manifest = run.manifest();
+    for id in ROUND_IDS {
+        assert!(
+            run.out
+                .join(format!("frames/{id}.round-layout.json"))
+                .is_file(),
+            "missing {id}.round-layout.json"
+        );
+        assert!(
+            run.out
+                .join(format!("frames/{id}.round-commands.json"))
+                .is_file(),
+            "missing {id}.round-commands.json"
+        );
+        let scenario = scenario(&manifest, id);
+        assert_eq!(
+            scenario["files"]["round_layout"],
+            format!("frames/{id}.round-layout.json")
+        );
+        assert_eq!(
+            scenario["files"]["round_commands"],
+            format!("frames/{id}.round-commands.json")
+        );
+        assert_artifact_type(&manifest, &format!("{id}-round-layout"), "round-layout");
+        assert_artifact_type(&manifest, &format!("{id}-round-commands"), "round-commands");
+
+        let layout = read_round_layout_artifact(&run, id);
+        assert_eq!(layout["schema_version"], 1);
+        assert_eq!(layout["frame_id"], id);
+        assert_eq!(layout["aperture"]["width"], 52);
+        assert_eq!(layout["aperture"]["height"], 52);
+        assert!(layout["safe_inner_radius"].as_f64().unwrap() > 0.0);
+        assert_eq!(layout["pet_anchor"]["kind"], "pet");
+        assert!(layout["prop_anchors"].as_array().unwrap().len() <= 2);
+        assert!(layout["motion_budget"]["pet_breath"].is_boolean());
+
+        let commands = read_round_commands_artifact(&run, id);
+        assert_eq!(commands["schema_version"], 1);
+        assert_eq!(commands["frame_id"], id);
+        assert!(commands["command_counts"]["background"].as_u64().unwrap() >= 1);
+        assert!(commands["command_counts"]["pet-glyph"].as_u64().unwrap() >= 1);
+        assert!(
+            commands["command_counts"]["room-glyph"].as_u64().unwrap() >= 1,
+            "{id} should expose room glyph commands"
+        );
+        assert_eq!(
+            commands["privacy_projection"]["source_names_visible"], false,
+            "{id} command artifact should be glanceable-safe"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_round_artifacts_match_scene_semantics() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    for id in ROUND_IDS {
+        let scene = read_scene(&run, id);
+        let layout = read_round_layout_artifact(&run, id);
+        let commands = read_round_commands_artifact(&run, id);
+
+        assert_eq!(
+            layout["fixture_id"], scene["fixture"]["id"],
+            "{id} fixture id"
+        );
+        assert_eq!(
+            commands["fixture_id"], scene["fixture"]["id"],
+            "{id} command fixture id"
+        );
+        assert_eq!(
+            layout["pet_anchor"]["kind"], "pet",
+            "{id} pet anchor should be semantic"
+        );
+        assert_eq!(
+            commands["pet"]["text"], scene["pet"]["art_text"],
+            "{id} pet glyph command should use scene pet text"
+        );
+        assert_eq!(
+            commands["pet"]["span_count"], scene["pet"]["span_count"],
+            "{id} pet span count"
+        );
+        assert_eq!(
+            commands["room"]["glyph_vocabulary"], scene["room"]["glyph_vocabulary"],
+            "{id} room glyph vocabulary"
+        );
+        assert_eq!(
+            commands["privacy_projection"], scene["privacy_projection"],
+            "{id} privacy projection"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_review_surfaces_link_typed_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+    let review = std::fs::read_to_string(run.out.join("review.md")).unwrap();
+    for needle in [
+        "frames/round-normal.scene.json",
+        "frames/round-normal.round-layout.json",
+        "frames/round-normal.round-commands.json",
+    ] {
+        assert!(html.contains(needle), "index.html missing {needle}");
+        assert!(review.contains(needle), "review.md missing {needle}");
     }
 }
 
@@ -1608,6 +1871,28 @@ fn read_cells(run: &PreviewRun, id: &str) -> Value {
 
 fn read_layout(run: &PreviewRun, id: &str) -> Value {
     read_json(run.out.join(format!("frames/{id}.layout.json")))
+}
+
+fn read_scene(run: &PreviewRun, id: &str) -> Value {
+    read_json(run.out.join(format!("frames/{id}.scene.json")))
+}
+
+fn read_round_layout_artifact(run: &PreviewRun, id: &str) -> Value {
+    read_json(run.out.join(format!("frames/{id}.round-layout.json")))
+}
+
+fn read_round_commands_artifact(run: &PreviewRun, id: &str) -> Value {
+    read_json(run.out.join(format!("frames/{id}.round-commands.json")))
+}
+
+fn preview_scenarios_with_contract_scene(manifest: &Value) -> Vec<String> {
+    manifest["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|scenario| matches!(scenario["kind"].as_str(), Some("watch" | "round")))
+        .map(|scenario| scenario["id"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn read_json(path: PathBuf) -> Value {
