@@ -96,3 +96,15 @@ fn privacy_projection_is_surface_specific() {
     assert!(menubar.source_names_visible);
     assert!(menubar.exact_counts_visible);
 }
+
+#[test]
+fn menubar_projection_is_privileged_but_not_path_or_transcript_visible() {
+    let projection = PrivacyProjection::for_surface(PresentationSurface::MenubarPopover);
+
+    assert!(projection.source_names_visible);
+    assert!(projection.exact_counts_visible);
+    assert!(!projection.diagnostic_text_visible);
+    assert!(!projection.file_paths_visible);
+    assert!(!projection.project_names_visible);
+    assert!(!projection.feed_rows_visible);
+}
