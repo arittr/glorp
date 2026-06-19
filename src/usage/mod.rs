@@ -1,3 +1,4 @@
+pub mod agentsview;
 pub mod ccusage;
 pub mod day_axis;
 pub mod helper_locator;

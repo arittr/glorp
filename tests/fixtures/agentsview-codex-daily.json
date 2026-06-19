@@ -1,0 +1,39 @@
+{
+  "daily": [
+    {
+      "date": "2026-06-18",
+      "inputTokens": 42530006,
+      "outputTokens": 4084648,
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 697197568,
+      "totalCost": 539.397275,
+      "modelsUsed": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+      "modelBreakdowns": [
+        {
+          "modelName": "gpt-5.5",
+          "inputTokens": 31028179,
+          "outputTokens": 2463075,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 517477376,
+          "cost": 487.7718330000001
+        },
+        {
+          "modelName": "gpt-5.4",
+          "inputTokens": 10928897,
+          "outputTokens": 1578707,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 176103808,
+          "cost": 51.002847499999945
+        },
+        {
+          "modelName": "gpt-5.4-mini",
+          "inputTokens": 572930,
+          "outputTokens": 42866,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 3616384,
+          "cost": 0.6225945
+        }
+      ]
+    }
+  ]
+}

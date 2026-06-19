@@ -56,6 +56,26 @@ impl SourceIdentity {
         Self::new(provider_surface, display_name, None)
     }
 
+    pub fn from_tokenmaxxing_source(surface: &str) -> Self {
+        let normalized = surface.trim().to_ascii_lowercase();
+        let provider_surface = match normalized.as_str() {
+            "claude" | "claude-code" => "claude".to_string(),
+            "codex" | "ccusage-codex" => "codex".to_string(),
+            other if other.is_empty() || other == "all" => "unknown".to_string(),
+            other => other.to_string(),
+        };
+        let source_family = match provider_surface.as_str() {
+            "claude" | "codex" => SourceFamily::KnownCodingAgent,
+            _ => SourceFamily::UnknownCodingAgent,
+        };
+        Self {
+            display_name: provider_surface.clone(),
+            provider_surface,
+            raw_agent: Some(surface.to_string()),
+            source_family,
+        }
+    }
+
     pub fn claude_code() -> Self {
         Self::from_provider_surface("claude-code")
     }

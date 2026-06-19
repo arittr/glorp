@@ -83,6 +83,63 @@ pub fn normalize_usage_json(
     Ok(normalize_usage_value(provider_surface, &value))
 }
 
+pub fn normalize_agentsview_json(
+    agent: &str,
+    text: &str,
+) -> std::result::Result<NormalizedUsageBatch, ProviderDiagnostic> {
+    let value: Value = serde_json::from_str(text).map_err(|_| ProviderDiagnostic {
+        provider_surface: agent.to_string(),
+        code: "invalid_json".to_string(),
+        message: format!("agentsview {agent} returned invalid_json"),
+    })?;
+    Ok(normalize_agentsview_value(agent, &value))
+}
+
+fn normalize_agentsview_value(agent: &str, value: &Value) -> NormalizedUsageBatch {
+    let mut batch = NormalizedUsageBatch::default();
+    let Some(rows) = value.get("daily").and_then(Value::as_array) else {
+        batch.diagnostics.push(ProviderDiagnostic {
+            provider_surface: agent.to_string(),
+            code: "missing_daily".to_string(),
+            message: format!("agentsview {agent} missing daily"),
+        });
+        return batch;
+    };
+
+    let source = SourceIdentity::from_tokenmaxxing_source(agent);
+    for row in rows {
+        let period_start = match period_start_field(&source.provider_surface, row) {
+            Ok(period) => period,
+            Err(diagnostic) => {
+                batch.diagnostics.push(diagnostic);
+                continue;
+            }
+        };
+
+        if let Some(breakdowns) = row.get("modelBreakdowns").and_then(Value::as_array) {
+            for model_row in breakdowns {
+                batch.records.push(NormalizedUsageRecord {
+                    source_identity: source.clone(),
+                    period_start: period_start.clone(),
+                    model: optional_string(model_row, "modelName"),
+                    raw_totals: RawTokenTotals {
+                        uncached_input: optional_u64(model_row, "inputTokens").unwrap_or(0),
+                        output: optional_u64(model_row, "outputTokens").unwrap_or(0),
+                        cache_creation: optional_u64(model_row, "cacheCreationTokens").unwrap_or(0),
+                        cache_read: optional_u64(model_row, "cacheReadTokens").unwrap_or(0),
+                        reasoning_output: optional_u64(model_row, "reasoningOutputTokens")
+                            .unwrap_or(0),
+                    },
+                    display_cost_usd: optional_f64(model_row, "cost"),
+                    confidence: "local-log-derived".to_string(),
+                });
+            }
+        }
+    }
+
+    batch
+}
+
 fn normalize_usage_value(provider_surface: &str, value: &Value) -> NormalizedUsageBatch {
     let mut batch = NormalizedUsageBatch::default();
     let rows = match value

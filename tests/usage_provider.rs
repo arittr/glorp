@@ -16,6 +16,12 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+fn agentsview_fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/helpers")
+        .join(name)
+}
+
 fn provider(claude: Option<&str>, codex: Option<&str>) -> CcusageCommandProvider {
     CcusageCommandProvider::new(HelperPaths {
         unified: None,
@@ -589,4 +595,89 @@ fn repeated_unified_poll_after_cursor_advance_emits_zero_deltas() {
     complete_poll_lifecycle(&provider, &mut store);
     let second = provider.poll(&mut store).unwrap();
     assert_eq!(second.total_effective_tokens, 0.0);
+}
+
+#[test]
+fn agentsview_provider_normalizes_full_cache_totals_and_external_source_labels() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(agentsview_fixture("agentsview-ok.mjs")),
+        },
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+    let codex = result
+        .deltas
+        .iter()
+        .find(|delta| {
+            delta.provider_surface == "codex" && delta.model.as_deref() == Some("gpt-5.5")
+        })
+        .unwrap();
+    let claude = result
+        .deltas
+        .iter()
+        .find(|delta| {
+            delta.provider_surface == "claude" && delta.model.as_deref() == Some("claude-opus-4-8")
+        })
+        .unwrap();
+
+    assert_eq!(codex.source_identity.display_name, "codex");
+    assert_eq!(claude.source_identity.display_name, "claude");
+    assert_eq!(
+        codex.token_contract,
+        glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1
+    );
+    assert_eq!(codex.total_tokens, 31028179.0 + 2463075.0 + 517477376.0);
+    assert_eq!(
+        claude.total_tokens,
+        612992.0 + 1072059.0 + 5083568.0 + 34477061.0
+    );
+    assert_eq!(
+        result.total_tokens,
+        result.deltas.iter().map(|d| d.total_tokens).sum::<f64>()
+    );
+}
+
+#[test]
+fn agentsview_provider_requires_los_angeles_timezone_arg() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(agentsview_fixture("agentsview-ok.mjs")),
+        },
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn agentsview_invalid_json_and_helper_stderr_are_sanitized() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let invalid = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(agentsview_fixture("agentsview-invalid-json.mjs")),
+        },
+    )
+    .poll(&mut store)
+    .unwrap();
+    let stderr = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(agentsview_fixture("agentsview-secret-stderr.mjs")),
+        },
+    )
+    .poll(&mut store)
+    .unwrap();
+    let rendered = format!("{:?}{:?}", invalid.diagnostics, stderr.diagnostics);
+
+    assert!(rendered.contains("invalid_json"));
+    assert!(rendered.contains("helper_exit"));
+    assert!(!rendered.contains("secret prompt"));
+    assert!(!rendered.contains("secret response"));
+    assert!(!rendered.contains("/Users/drew/private"));
 }
