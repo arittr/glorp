@@ -502,6 +502,20 @@ pub(crate) fn run_command_with_timeout(command: &mut Command, timeout: Duration)
     command.stderr(Stdio::piped());
     command.stdin(Stdio::null());
     let mut child = command.spawn().map_err(GlorpError::from)?;
+    let stdout_handle = child.stdout.take().map(|mut handle| {
+        std::thread::spawn(move || {
+            let mut stdout = Vec::new();
+            let _ = handle.read_to_end(&mut stdout);
+            stdout
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut handle| {
+        std::thread::spawn(move || {
+            let mut stderr = Vec::new();
+            let _ = handle.read_to_end(&mut stderr);
+            stderr
+        })
+    });
 
     let status = match child.wait_timeout(timeout).map_err(GlorpError::from)? {
         Some(status) => status,
@@ -517,14 +531,12 @@ pub(crate) fn run_command_with_timeout(command: &mut Command, timeout: Duration)
         }
     };
 
-    let mut stdout = Vec::new();
-    if let Some(mut handle) = child.stdout.take() {
-        let _ = handle.read_to_end(&mut stdout);
-    }
-    let mut stderr = Vec::new();
-    if let Some(mut handle) = child.stderr.take() {
-        let _ = handle.read_to_end(&mut stderr);
-    }
+    let stdout = stdout_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
 
     Ok(Output {
         status,
@@ -1022,5 +1034,18 @@ mod run_command_timeout_tests {
             .expect("fast child should succeed");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"hello");
+    }
+
+    /// Helpers can emit enough JSON to fill an OS pipe. The runner must drain
+    /// stdout while waiting so a fast, chatty helper does not look hung.
+    #[test]
+    fn large_stdout_child_returns_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes agentsview-json-line | head -n 9000"]);
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(2))
+            .expect("large stdout child should not deadlock on a full pipe");
+
+        assert!(output.status.success());
+        assert!(output.stdout.len() > 100_000);
     }
 }
