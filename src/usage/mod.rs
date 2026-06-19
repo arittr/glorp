@@ -1,4 +1,5 @@
 pub mod ccusage;
+pub mod day_axis;
 pub mod helper_locator;
 pub mod identity;
 pub mod normalize;

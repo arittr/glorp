@@ -429,3 +429,47 @@ fn rate_per_hour_grows_with_more_recent_events() {
         "rate must grow with more recent contribution (a={rate_a}, b={rate_b})"
     );
 }
+
+#[test]
+fn tokenmaxxing_day_axis_interprets_date_as_los_angeles_midnight() {
+    use glorp::usage::day_axis::{parse_agentsview_period_date, tokenmaxxing_day_start};
+    use time::{Date, Month};
+
+    let date = Date::from_calendar_date(2026, Month::June, 18).unwrap();
+    assert_eq!(
+        tokenmaxxing_day_start(date),
+        datetime!(2026-06-18 07:00 UTC)
+    );
+
+    let (parsed_date, parsed_start) = parse_agentsview_period_date("2026-06-18").unwrap();
+    assert_eq!(parsed_date, date);
+    assert_eq!(parsed_start, datetime!(2026-06-18 07:00 UTC));
+}
+
+#[test]
+fn tokenmaxxing_day_axis_handles_los_angeles_dst_boundaries() {
+    use glorp::usage::day_axis::tokenmaxxing_day_start;
+    use time::{Date, Month};
+
+    let before_spring = Date::from_calendar_date(2026, Month::March, 8).unwrap();
+    let after_spring = Date::from_calendar_date(2026, Month::March, 9).unwrap();
+    let fall_back_day = Date::from_calendar_date(2026, Month::November, 1).unwrap();
+    let after_fall = Date::from_calendar_date(2026, Month::November, 2).unwrap();
+
+    assert_eq!(
+        tokenmaxxing_day_start(before_spring),
+        datetime!(2026-03-08 08:00 UTC)
+    );
+    assert_eq!(
+        tokenmaxxing_day_start(after_spring),
+        datetime!(2026-03-09 07:00 UTC)
+    );
+    assert_eq!(
+        tokenmaxxing_day_start(fall_back_day),
+        datetime!(2026-11-01 07:00 UTC)
+    );
+    assert_eq!(
+        tokenmaxxing_day_start(after_fall),
+        datetime!(2026-11-02 08:00 UTC)
+    );
+}
