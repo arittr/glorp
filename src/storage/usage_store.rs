@@ -513,6 +513,33 @@ impl UsageStore {
         Ok(())
     }
 
+    pub fn is_token_contract_active(&self, contract: &str) -> crate::error::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM token_contract_state WHERE token_contract = ?1
+                )",
+                params![contract],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| value != 0)
+            .map_err(Into::into)
+    }
+
+    pub fn mark_token_contract_active(
+        &self,
+        contract: &str,
+        now: OffsetDateTime,
+    ) -> crate::error::Result<()> {
+        self.conn.execute(
+            "INSERT INTO token_contract_state (token_contract, activated_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(token_contract) DO UPDATE SET activated_at = excluded.activated_at",
+            params![contract, format_time(now)?],
+        )?;
+        Ok(())
+    }
+
     /// Newest `provider_cursors.updated_at` for one provider surface — the
     /// discontinuity guard's per-provider "last fed" instant. `None` means
     /// the surface has never had a cursor (first contact). MAX is computed
@@ -1234,6 +1261,11 @@ impl UsageStore {
                 parser_version TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (provider_surface, cursor_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS token_contract_state (
+                token_contract TEXT PRIMARY KEY,
+                activated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS usage_events (

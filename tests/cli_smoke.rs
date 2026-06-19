@@ -1,6 +1,8 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+const AGENTSVIEW_OK: &str = "tests/fixtures/helpers/agentsview-ok.mjs";
+
 #[test]
 fn help_hides_dev_preview_command() {
     let mut cmd = Command::cargo_bin("glorp").unwrap();
@@ -48,6 +50,7 @@ fn init_without_name_presents_generated_name_and_uses_it_noninteractively() {
         .env("GLORP_CONFIG_DIR", dir.path())
         .env_remove("GLORP_CCUSAGE_BIN")
         .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env_remove("GLORP_AGENTSVIEW_BIN")
         .env("PATH", "/bin")
         .args(["init", "--seed", "mochi-7f3a"])
         .assert()
@@ -65,6 +68,8 @@ fn init_creates_state_and_blocks_second_init() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success()
@@ -73,6 +78,8 @@ fn init_creates_state_and_blocks_second_init() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
         .args(["init", "--seed", "other"])
         .assert()
         .failure()
@@ -85,6 +92,8 @@ fn reset_requires_confirmation_and_removes_pet_state() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -117,6 +126,8 @@ fn init_with_confirmed_reinit_replaces_pet_state_without_touching_usage_db() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -125,6 +136,8 @@ fn init_with_confirmed_reinit_replaces_pet_state_without_touching_usage_db() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
         .args(["init", "--seed", "ori-shard", "--name", "ori", "--yes"])
         .assert()
         .success()
@@ -144,6 +157,8 @@ fn rename_changes_display_name_without_changing_seed() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -190,11 +205,7 @@ fn init_uses_historical_usage_for_calibration_without_initial_xp() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
-        .env(
-            "GLORP_CCUSAGE_CODEX_BIN",
-            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
-        )
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -212,11 +223,7 @@ fn init_does_not_feed_pet_or_persist_history_as_usage_events() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
-        .env(
-            "GLORP_CCUSAGE_CODEX_BIN",
-            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
-        )
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();

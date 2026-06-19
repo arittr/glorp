@@ -29,7 +29,7 @@ use crate::{
             SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel,
         },
     },
-    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
+    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
 };
 use std::path::Path;
 use time::{Duration, OffsetDateTime};
@@ -461,10 +461,18 @@ pub(crate) fn poll_usage_and_apply(
     };
     let mut usage_store = UsageStore::open(usage_db)?;
     let config = crate::config::AppConfig::load_or_default(config_file)?;
-    let weights = crate::game::effective_tokens::EffectiveTokenWeights::from_config(config);
-    let result =
-        CcusageCommandProvider::from_environment_with_weights(weights).poll(&mut usage_store)?;
     let now = OffsetDateTime::now_utc();
+    let provider = AgentsviewCommandProvider::from_environment();
+    let cutover = crate::usage::cutover::ensure_tokenmaxxing_contract_active(
+        &mut state,
+        &mut usage_store,
+        &provider,
+        now,
+    )?;
+    if cutover.activated {
+        state_store.save(&state)?;
+    }
+    let result = provider.poll(&mut usage_store)?;
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
         // Stage smeared ledger rows for new provider deltas before applying.
         stage_usage_poll_deltas(

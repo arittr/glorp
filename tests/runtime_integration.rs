@@ -7,13 +7,13 @@ use glorp::{
         },
     },
     storage::{
-        state::{PetState, Vitals},
+        state::{NarrativeEvent, PetState, Vitals},
         usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore},
     },
     usage::{
         identity::SourceIdentity,
         normalize::RawTokenTotals,
-        provider::{UsageDelta, UsagePollResult},
+        provider::{UsageDelta, UsagePollResult, UsageProvider},
     },
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -216,6 +216,89 @@ fn staged_usage_apportions_token_buckets_across_smear_rows() {
     assert!((cache_creation_sum - 2_000.0).abs() < 0.01);
     assert!((cache_read_sum - 1_000.0).abs() < 0.01);
     assert!((reasoning_sum - 500.0).abs() < 0.01);
+}
+
+#[test]
+fn tokenmaxxing_cutover_seeds_agentsview_cursors_without_feeding_existing_pet() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    state.xp = 0.25;
+    state.lifetime_effective_tokens = 12_345.0;
+    state.stage = Stage::S2;
+    state.vitals.fed = 44.0;
+    state.recent_events.push(NarrativeEvent {
+        observed_at: datetime!(2026 - 06 - 18 12:00 UTC),
+        text: "existing event".into(),
+    });
+    usage_store
+        .advance_cursors(
+            vec![ProviderCursorUpdate {
+                provider_surface: "codex".into(),
+                cursor_key: "old-ccusage-cursor".into(),
+                cursor_value: "old".into(),
+                provider_version: "ccusage-codex".into(),
+                parser_version: "ccusage-codex".into(),
+            }],
+            datetime!(2026 - 06 - 18 12:00 UTC),
+        )
+        .unwrap();
+
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/helpers/agentsview-ok.mjs"),
+            ),
+        },
+    );
+
+    let outcome = glorp::usage::cutover::ensure_tokenmaxxing_contract_active(
+        &mut state,
+        &mut usage_store,
+        &provider,
+        datetime!(2026 - 06 - 18 20:00 UTC),
+    )
+    .unwrap();
+
+    assert!(outcome.activated);
+    assert_eq!(state.xp, 0.25);
+    assert_eq!(state.lifetime_effective_tokens, 12_345.0);
+    assert_eq!(state.stage, Stage::S2);
+    assert_eq!(state.vitals.fed, 44.0);
+    assert_eq!(state.recent_events.last().unwrap().text, "existing event");
+    assert!(usage_store
+        .is_token_contract_active(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1)
+        .unwrap());
+
+    let after_cutover_poll = provider.poll(&mut usage_store).unwrap();
+    assert_eq!(after_cutover_poll.total_tokens, 0.0);
+}
+
+#[test]
+fn tokenmaxxing_cutover_missing_agentsview_does_not_activate_contract() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(dir.path().join("missing-agentsview")),
+        },
+    );
+
+    let outcome = glorp::usage::cutover::ensure_tokenmaxxing_contract_active(
+        &mut state,
+        &mut usage_store,
+        &provider,
+        datetime!(2026 - 06 - 18 20:00 UTC),
+    )
+    .unwrap();
+
+    assert!(!outcome.activated);
+    assert!(!usage_store
+        .is_token_contract_active(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1)
+        .unwrap());
 }
 
 fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePollResult {

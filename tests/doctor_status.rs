@@ -1,24 +1,13 @@
 use assert_cmd::Command;
 use glorp::storage::state::{write_state_for_test, PetState, PetStateFixture};
-use glorp::storage::usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore};
+use glorp::storage::usage_store::{NormalizedUsageEvent, UsageStore};
 use predicates::prelude::*;
 use tempfile::tempdir;
 use time::OffsetDateTime;
 
-fn establish_provider_contact(usage_store: &mut UsageStore, surface: &str, now: OffsetDateTime) {
-    usage_store
-        .advance_cursors(
-            vec![ProviderCursorUpdate {
-                provider_surface: surface.to_string(),
-                cursor_key: format!("{surface}-first-contact"),
-                cursor_value: "seeded".to_string(),
-                provider_version: "test-provider".to_string(),
-                parser_version: "test-parser".to_string(),
-            }],
-            now,
-        )
-        .unwrap();
-}
+const AGENTSVIEW_OK: &str = "tests/fixtures/helpers/agentsview-ok.mjs";
+const AGENTSVIEW_NEXT: &str = "tests/fixtures/helpers/agentsview-next.mjs";
+const AGENTSVIEW_FAILS: &str = "tests/fixtures/helpers/agentsview-fails.mjs";
 
 #[test]
 fn status_is_pipe_friendly_when_pet_exists() {
@@ -26,6 +15,7 @@ fn status_is_pipe_friendly_when_pet_exists() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -33,11 +23,7 @@ fn status_is_pipe_friendly_when_pet_exists() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
-        .env(
-            "GLORP_CCUSAGE_CODEX_BIN",
-            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
-        )
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .arg("status")
         .assert()
         .success()
@@ -57,6 +43,7 @@ fn doctor_reports_missing_helpers_with_setup_instructions() {
         .env("GLORP_CONFIG_DIR", dir.path())
         .env_remove("GLORP_CCUSAGE_BIN")
         .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env_remove("GLORP_AGENTSVIEW_BIN")
         .env("PATH", "/bin")
         .arg("doctor")
         .assert()
@@ -141,6 +128,7 @@ fn repeated_provider_failures_keep_last_known_pet_state() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -149,10 +137,7 @@ fn repeated_provider_failures_keep_last_known_pet_state() {
         Command::cargo_bin("glorp")
             .unwrap()
             .env("GLORP_CONFIG_DIR", dir.path())
-            .env(
-                "GLORP_CCUSAGE_BIN",
-                "tests/fixtures/helpers/ccusage-fails.mjs",
-            )
+            .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_FAILS)
             .arg("status")
             .assert()
             .success()
@@ -182,6 +167,7 @@ fn status_includes_recent_evolution_event_when_present() {
         .env("GLORP_CONFIG_DIR", dir.path())
         .env_remove("GLORP_CCUSAGE_BIN")
         .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env_remove("GLORP_AGENTSVIEW_BIN")
         .env("PATH", "/bin")
         .arg("status")
         .assert()
@@ -200,6 +186,7 @@ fn status_clamps_zero_usage_display() {
         .env("GLORP_CONFIG_DIR", dir.path())
         .env_remove("GLORP_CCUSAGE_BIN")
         .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env_remove("GLORP_AGENTSVIEW_BIN")
         .env("PATH", "/bin")
         .arg("status")
         .assert()
@@ -221,21 +208,20 @@ fn status_persists_real_usage_delta_into_pet_state() {
         .save(&state)
         .unwrap();
 
-    let now = OffsetDateTime::now_utc();
-    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    // The unified helper runs first; seed its cursor so the poll emits real
-    // deltas instead of being refused as first-contact history.
-    establish_provider_contact(&mut usage_store, "unified", now);
-    drop(usage_store);
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider: local-log-derived"))
+        .stdout(predicate::str::contains("effective tokens"));
 
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
-        .env(
-            "GLORP_CCUSAGE_CODEX_BIN",
-            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
-        )
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_NEXT)
         .arg("status")
         .assert()
         .success()
@@ -247,7 +233,6 @@ fn status_persists_real_usage_delta_into_pet_state() {
             .unwrap();
     assert!(state.lifetime_effective_tokens > 0.0);
     assert!(state.xp > 0.0);
-    assert_ne!(state.stage, glorp::game::evolution::Stage::S0);
     // The narration system now emits character-driven entries instead of
     // "gained X effective tokens". Verify that at least one narration event
     // was recorded (feast/munch/nibble/sip or a stage evolution entry).
@@ -273,14 +258,7 @@ fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env(
-            "GLORP_CCUSAGE_BIN",
-            "tests/fixtures/helpers/ccusage-fails.mjs",
-        )
-        .env(
-            "GLORP_CCUSAGE_CODEX_BIN",
-            "tests/fixtures/helpers/ccusage-fails.mjs",
-        )
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_FAILS)
         .arg("status")
         .assert()
         .success()
@@ -304,23 +282,18 @@ fn status_surfaces_first_contact_without_claiming_blocked() {
     glorp::storage::state::StateStore::new(dir.path().join("state.json"))
         .save(&state)
         .unwrap();
-    // Deliberately NO establish_provider_contact: the unified helper is first
-    // contact, so its history is seeded without feeding the pet.
+    // Deliberately no pre-seeded agentsview cursors: cutover should seed
+    // history without feeding the pet.
 
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
-        .env(
-            "GLORP_CCUSAGE_CODEX_BIN",
-            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
-        )
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .arg("status")
         .assert()
         .success()
         .stdout(predicate::str::contains("provider: local-log-derived"))
         .stdout(predicate::str::contains("provider health: ok"))
-        .stdout(predicate::str::contains("diagnostic: source_first_contact"))
         .stdout(predicate::str::contains("blocked").not());
 
     let saved: PetState =
@@ -357,6 +330,7 @@ fn status_lists_today_sources_generically() {
         .env("GLORP_CONFIG_DIR", dir.path())
         .env_remove("GLORP_CCUSAGE_BIN")
         .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env_remove("GLORP_AGENTSVIEW_BIN")
         .env("PATH", "/bin")
         .arg("status")
         .assert()

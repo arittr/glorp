@@ -1,17 +1,13 @@
 use crate::{
-    config::AppConfig,
     error::{GlorpError, Result},
-    game::{
-        calibration::CalibrationBaseline, effective_tokens::EffectiveTokenWeights,
-        evolution::Stage, metabolism::RhythmProfile,
-    },
+    game::{calibration::CalibrationBaseline, evolution::Stage, metabolism::RhythmProfile},
     paths::AppPaths,
     pet::generation::{generate_pet, resolve_accepted_name},
     storage::{
         state::{HabitatState, NarrativeEvent, PetIdentity, PetState, StateStore, Vitals},
         usage_store::UsageStore,
     },
-    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
+    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
 };
 use std::io::{self, IsTerminal, Write};
 use time::OffsetDateTime;
@@ -35,14 +31,19 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
     let mut calibration = CalibrationBaseline::default();
     let mut rhythm = RhythmProfile::default();
     if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
-        let config = AppConfig::load_or_default(&paths.config_file).unwrap_or_default();
-        let weights = EffectiveTokenWeights::from_config(config);
-        if let Ok(snapshot) = CcusageCommandProvider::from_environment_with_weights(weights)
-            .snapshot_for_calibration(&mut usage_store)
+        if let Ok(snapshot) =
+            AgentsviewCommandProvider::from_environment().snapshot_for_calibration(&mut usage_store)
         {
-            calibration = CalibrationBaseline::from_history(&snapshot.daily_usage);
-            rhythm = RhythmProfile::from_history(&snapshot.daily_usage);
-            usage_store.advance_cursors(snapshot.cursor_updates, OffsetDateTime::now_utc())?;
+            let now = OffsetDateTime::now_utc();
+            if snapshot.diagnostics.is_empty() {
+                calibration = CalibrationBaseline::from_history(&snapshot.daily_usage);
+                rhythm = RhythmProfile::from_history(&snapshot.daily_usage);
+                usage_store.advance_cursors(snapshot.cursor_updates, now)?;
+                usage_store.mark_token_contract_active(
+                    crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                    now,
+                )?;
+            }
         }
     }
 
