@@ -87,6 +87,7 @@ pub fn stage_usage_poll_deltas(
             event.observed_at = now;
             event.bucket_at = bucket_at;
             event.effective_tokens = effective_tokens;
+            event.total_tokens = effective_tokens;
             if let Some(totals) = delta.token_totals {
                 event.input_tokens =
                     scaled_token_bucket(totals.uncached_input, effective_tokens, total_effective);
@@ -230,6 +231,8 @@ fn seed_first_contact_surface(
             cache_read_tokens: totals.cache_read as f64,
             reasoning_output_tokens: totals.reasoning_output as f64,
             effective_tokens: delta.effective_tokens,
+            total_tokens: delta.total_tokens,
+            token_contract: delta.token_contract.clone(),
             cost_usd: None,
             confidence: delta.confidence.clone(),
             provider_delta_id: None,
@@ -277,6 +280,8 @@ fn event_for_delta(delta: &UsageDelta, now: OffsetDateTime) -> NormalizedUsageEv
         cache_read_tokens: 0.0,
         reasoning_output_tokens: 0.0,
         effective_tokens: 0.0,
+        total_tokens: delta.total_tokens,
+        token_contract: delta.token_contract.clone(),
         cost_usd: None,
         confidence: delta.confidence.clone(),
         provider_delta_id: None,
@@ -940,6 +945,8 @@ mod tests {
                 source_identity: SourceIdentity::from_provider_surface("gemini"),
                 command: "ccusage daily".into(),
                 effective_tokens: 500_000.0,
+                total_tokens: 500_000.0,
+                token_contract: crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
                 confidence: "local-log-derived".into(),
                 period_start: historical,
                 observed_at: now,
@@ -961,6 +968,7 @@ mod tests {
             }],
             diagnostics: vec![],
             total_effective_tokens: 500_000.0,
+            total_tokens: 500_000.0,
         };
 
         let ids = stage_usage_poll_deltas(
@@ -1020,6 +1028,8 @@ mod tests {
                 source_identity: SourceIdentity::from_provider_surface("gemini"),
                 command: "ccusage daily".into(),
                 effective_tokens: 500_000_000.0,
+                total_tokens: 500_000_000.0,
+                token_contract: crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
                 confidence: "local-log-derived".into(),
                 period_start: now,
                 observed_at: now,
@@ -1035,6 +1045,7 @@ mod tests {
             }],
             diagnostics: vec![],
             total_effective_tokens: 500_000_000.0,
+            total_tokens: 500_000_000.0,
         };
 
         let ids = stage_usage_poll_deltas(

@@ -14,6 +14,13 @@ pub struct RawTokenTotals {
 }
 
 impl RawTokenTotals {
+    pub fn total_tokens(self) -> f64 {
+        self.uncached_input as f64
+            + self.output as f64
+            + self.cache_creation as f64
+            + self.cache_read as f64
+    }
+
     pub fn effective_tokens(self, weights: EffectiveTokenWeights) -> f64 {
         weights.compute(TokenBuckets {
             uncached_input: self.uncached_input,

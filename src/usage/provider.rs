@@ -10,6 +10,7 @@ pub struct UsagePollResult {
     pub deltas: Vec<UsageDelta>,
     pub diagnostics: Vec<ProviderDiagnostic>,
     pub total_effective_tokens: f64,
+    pub total_tokens: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +22,8 @@ pub struct UsageDelta {
     pub source_identity: SourceIdentity,
     pub command: String,
     pub effective_tokens: f64,
+    pub total_tokens: f64,
+    pub token_contract: String,
     pub confidence: String,
     pub period_start: OffsetDateTime,
     pub observed_at: OffsetDateTime,

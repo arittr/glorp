@@ -8,6 +8,7 @@ use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
     UsageSnapshot,
 };
+use crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1;
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -220,6 +221,7 @@ impl CcusageCommandProvider {
                         deltas: Vec::new(),
                         diagnostics,
                         total_effective_tokens: 0.0,
+                        total_tokens: 0.0,
                     });
                 }
             };
@@ -373,6 +375,8 @@ impl CcusageCommandProvider {
                 source_identity: record.source_identity.clone(),
                 command: command_name.to_string(),
                 effective_tokens,
+                total_tokens: effective_tokens,
+                token_contract: WEIGHTED_EFFECTIVE_V1.to_string(),
                 confidence: CONFIDENCE.to_string(),
                 period_start: parsed_period_start,
                 observed_at,
@@ -388,6 +392,7 @@ impl CcusageCommandProvider {
             deltas,
             diagnostics,
             total_effective_tokens,
+            total_tokens: total_effective_tokens,
         })
     }
 
@@ -566,6 +571,7 @@ impl UsageProvider for CcusageCommandProvider {
             deltas,
             diagnostics,
             total_effective_tokens,
+            total_tokens: total_effective_tokens,
         })
     }
 

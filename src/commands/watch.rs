@@ -1211,6 +1211,8 @@ mod tests {
                 source_identity: SourceIdentity::claude_code(),
                 command: "ccusage daily --json --offline".into(),
                 effective_tokens,
+                total_tokens: effective_tokens,
+                token_contract: crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
                 confidence: "local-log-derived".into(),
                 period_start: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
                 observed_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
@@ -1226,6 +1228,7 @@ mod tests {
             }],
             diagnostics: vec![],
             total_effective_tokens: effective_tokens,
+            total_tokens: effective_tokens,
         }
     }
 
@@ -1236,6 +1239,8 @@ mod tests {
                 source_identity: SourceIdentity::claude_code(),
                 command: "ccusage daily --json --offline".into(),
                 effective_tokens,
+                total_tokens: effective_tokens,
+                token_contract: crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
                 confidence: "local-log-derived".into(),
                 period_start: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
                 observed_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
@@ -1251,6 +1256,7 @@ mod tests {
             }],
             diagnostics: vec![],
             total_effective_tokens: effective_tokens,
+            total_tokens: effective_tokens,
         }
     }
 

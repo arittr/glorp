@@ -20,6 +20,8 @@ pub struct NormalizedUsageEvent {
     pub cache_read_tokens: f64,
     pub reasoning_output_tokens: f64,
     pub effective_tokens: f64,
+    pub total_tokens: f64,
+    pub token_contract: String,
     pub cost_usd: Option<f64>,
     pub confidence: String,
     pub provider_delta_id: Option<String>,
@@ -95,6 +97,8 @@ impl NormalizedUsageEvent {
             cache_read_tokens: 0.0,
             reasoning_output_tokens: 0.0,
             effective_tokens,
+            total_tokens: effective_tokens,
+            token_contract: crate::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
             cost_usd: None,
             confidence: "local-log-derived".to_string(),
             provider_delta_id: None,
@@ -145,12 +149,14 @@ impl UsageStore {
                 cache_read_tokens,
                 reasoning_output_tokens,
                 effective_tokens,
+                total_tokens,
+                token_contract,
                 cost_usd,
                 confidence,
                 applied_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
             )",
             params![
                 event.provider_surface,
@@ -169,6 +175,8 @@ impl UsageStore {
                 event.cache_read_tokens,
                 event.reasoning_output_tokens,
                 event.effective_tokens,
+                event.total_tokens,
+                event.token_contract,
                 event.cost_usd,
                 event.confidence,
                 format_time(event.observed_at)?,
@@ -211,6 +219,8 @@ impl UsageStore {
                 cache_read_tokens,
                 reasoning_output_tokens,
                 effective_tokens,
+                total_tokens,
+                token_contract,
                 cost_usd,
                 confidence,
                 provider_delta_id,
@@ -222,7 +232,7 @@ impl UsageStore {
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                ?19, ?20, ?21, NULL, ?22, ?23
+                ?19, ?20, ?21, ?22, ?23, NULL, ?24, ?25
             )",
             params![
                 event.provider_surface,
@@ -241,6 +251,8 @@ impl UsageStore {
                 event.cache_read_tokens,
                 event.reasoning_output_tokens,
                 event.effective_tokens,
+                event.total_tokens,
+                event.token_contract,
                 event.cost_usd,
                 event.confidence,
                 provider_delta_id,
@@ -288,13 +300,14 @@ impl UsageStore {
                     provider_surface, provider_version, parser_version, command, source_surface,
                     period_start, observed_at, bucket_at, period_date, model,
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-                    reasoning_output_tokens, effective_tokens, cost_usd, confidence,
+                    reasoning_output_tokens, effective_tokens, total_tokens, token_contract,
+                    cost_usd, confidence,
                     provider_delta_id, bucket_index, bucket_count, applied_at,
                     provider_cursor_key, provider_cursor_value
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                     ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                    ?19, ?20, ?21, ?22, ?23, ?24
+                    ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
                 )",
                 params![
                     event.provider_surface,
@@ -313,6 +326,8 @@ impl UsageStore {
                     event.cache_read_tokens,
                     event.reasoning_output_tokens,
                     event.effective_tokens,
+                    event.total_tokens,
+                    event.token_contract,
                     event.cost_usd,
                     event.confidence,
                     provider_delta_id,
@@ -597,6 +612,8 @@ impl UsageStore {
                 cache_read_tokens,
                 reasoning_output_tokens,
                 effective_tokens,
+                total_tokens,
+                token_contract,
                 cost_usd,
                 confidence,
                 provider_delta_id
@@ -625,9 +642,11 @@ impl UsageStore {
                     cache_read_tokens: row.get(12)?,
                     reasoning_output_tokens: row.get(13)?,
                     effective_tokens: row.get(14)?,
-                    cost_usd: row.get(15)?,
-                    confidence: row.get(16)?,
-                    provider_delta_id: row.get(17)?,
+                    total_tokens: row.get(15)?,
+                    token_contract: row.get(16)?,
+                    cost_usd: row.get(17)?,
+                    confidence: row.get(18)?,
+                    provider_delta_id: row.get(19)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -652,6 +671,8 @@ impl UsageStore {
                 cache_read_tokens,
                 reasoning_output_tokens,
                 effective_tokens,
+                total_tokens,
+                token_contract,
                 cost_usd,
                 confidence,
                 provider_delta_id
@@ -680,9 +701,11 @@ impl UsageStore {
                     cache_read_tokens: row.get(12)?,
                     reasoning_output_tokens: row.get(13)?,
                     effective_tokens: row.get(14)?,
-                    cost_usd: row.get(15)?,
-                    confidence: row.get(16)?,
-                    provider_delta_id: row.get(17)?,
+                    total_tokens: row.get(15)?,
+                    token_contract: row.get(16)?,
+                    cost_usd: row.get(17)?,
+                    confidence: row.get(18)?,
+                    provider_delta_id: row.get(19)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -708,6 +731,8 @@ impl UsageStore {
                 cache_read_tokens,
                 reasoning_output_tokens,
                 effective_tokens,
+                total_tokens,
+                token_contract,
                 cost_usd,
                 confidence,
                 provider_cursor_key,
@@ -726,8 +751,8 @@ impl UsageStore {
                 let provider_surface: String = row.get(1)?;
                 let provider_version: String = row.get(2)?;
                 let parser_version: String = row.get(3)?;
-                let cursor_key: Option<String> = row.get(18)?;
-                let cursor_value: Option<String> = row.get(19)?;
+                let cursor_key: Option<String> = row.get(20)?;
+                let cursor_value: Option<String> = row.get(21)?;
                 let event = NormalizedUsageEvent {
                     provider_surface: provider_surface.clone(),
                     provider_version: provider_version.clone(),
@@ -744,9 +769,11 @@ impl UsageStore {
                     cache_read_tokens: row.get(13)?,
                     reasoning_output_tokens: row.get(14)?,
                     effective_tokens: row.get(15)?,
-                    cost_usd: row.get(16)?,
-                    confidence: row.get(17)?,
-                    provider_delta_id: row.get(20)?,
+                    total_tokens: row.get(16)?,
+                    token_contract: row.get(17)?,
+                    cost_usd: row.get(18)?,
+                    confidence: row.get(19)?,
+                    provider_delta_id: row.get(22)?,
                 };
                 let cursor_update = ProviderCursorUpdate {
                     provider_surface,
@@ -960,6 +987,57 @@ impl UsageStore {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    pub fn canonical_total_tokens_between(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> crate::error::Result<f64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(total_tokens), 0.0)
+                 FROM usage_events
+                 WHERE applied_at IS NOT NULL
+                   AND token_contract = ?1
+                   AND bucket_at >= ?2
+                   AND bucket_at < ?3",
+                params![
+                    crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                    format_time(start)?,
+                    format_time(end)?,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn canonical_total_tokens_by_source_between(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> crate::error::Result<Vec<(String, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT provider_surface, COALESCE(SUM(total_tokens), 0.0)
+             FROM usage_events
+             WHERE applied_at IS NOT NULL
+               AND token_contract = ?1
+               AND bucket_at >= ?2
+               AND bucket_at < ?3
+             GROUP BY provider_surface
+             ORDER BY provider_surface",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                    format_time(start)?,
+                    format_time(end)?,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Applied-only per-source effective sums over the half-open bucket_at
@@ -1176,6 +1254,8 @@ impl UsageStore {
                 cache_read_tokens REAL NOT NULL,
                 reasoning_output_tokens REAL NOT NULL,
                 effective_tokens REAL NOT NULL,
+                total_tokens REAL NOT NULL DEFAULT 0.0,
+                token_contract TEXT NOT NULL DEFAULT 'weighted_effective_v1',
                 cost_usd REAL,
                 confidence TEXT NOT NULL,
                 provider_delta_id TEXT,
@@ -1266,6 +1346,18 @@ impl UsageStore {
             &self.conn,
             "provider_cursor_value",
             "ALTER TABLE usage_events ADD COLUMN provider_cursor_value TEXT;",
+            "",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "total_tokens",
+            "ALTER TABLE usage_events ADD COLUMN total_tokens REAL NOT NULL DEFAULT 0.0;",
+            "UPDATE usage_events SET total_tokens = effective_tokens WHERE total_tokens = 0.0;",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "token_contract",
+            "ALTER TABLE usage_events ADD COLUMN token_contract TEXT NOT NULL DEFAULT 'weighted_effective_v1';",
             "",
         )?;
         self.conn.execute_batch(

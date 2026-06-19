@@ -140,6 +140,44 @@ fn usage_events_store_observed_and_bucket_times_separately_from_period_start() {
 }
 
 #[test]
+fn canonical_total_queries_exclude_legacy_weighted_rows() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_config_dir(dir.path().to_path_buf());
+    let mut store = UsageStore::open(&paths.usage_db).unwrap();
+    let now = datetime!(2026-06-18 19:10 UTC);
+
+    let legacy = NormalizedUsageEvent {
+        token_contract: glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
+        total_tokens: 999_999.0,
+        effective_tokens: 999_999.0,
+        ..NormalizedUsageEvent::for_test_at(now, 999_999.0)
+    };
+    let canonical = NormalizedUsageEvent {
+        provider_surface: "codex".to_string(),
+        token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+        total_tokens: 715_380_912.0,
+        effective_tokens: 715_380_912.0,
+        ..NormalizedUsageEvent::for_test_at(now, 715_380_912.0)
+    };
+
+    store.insert_event(&legacy).unwrap();
+    store.insert_event(&canonical).unwrap();
+
+    let total = store
+        .canonical_total_tokens_between(now - Duration::minutes(1), now + Duration::minutes(1))
+        .unwrap();
+    let by_source = store
+        .canonical_total_tokens_by_source_between(
+            now - Duration::minutes(1),
+            now + Duration::minutes(1),
+        )
+        .unwrap();
+
+    assert_eq!(total, 715_380_912.0);
+    assert_eq!(by_source, vec![("codex".to_string(), 715_380_912.0)]);
+}
+
+#[test]
 fn old_usage_rows_migrate_with_conservative_event_times() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("usage.sqlite");

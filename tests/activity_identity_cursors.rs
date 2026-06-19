@@ -21,6 +21,8 @@ fn repeated_poll_after_first_contact_emits_zero_new_deltas() {
             source_identity: SourceIdentity::from_provider_surface("gemini"),
             command: "ccusage daily".into(),
             effective_tokens: 10_000.0,
+            total_tokens: 10_000.0,
+            token_contract: glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
             confidence: "local-log-derived".into(),
             period_start: now - time::Duration::days(1),
             observed_at: now,
@@ -42,6 +44,7 @@ fn repeated_poll_after_first_contact_emits_zero_new_deltas() {
         }],
         diagnostics: vec![],
         total_effective_tokens: 10_000.0,
+        total_tokens: 10_000.0,
     };
 
     let first = apply_usage_poll(&mut state, &mut store, &poll, now).unwrap();
@@ -65,6 +68,8 @@ fn unknown_source_first_contact_does_not_unlock_codex_signal_lamp() {
             source_identity: SourceIdentity::from_provider_surface("unknown-agent"),
             command: "ccusage daily".into(),
             effective_tokens: 10_000.0,
+            total_tokens: 10_000.0,
+            token_contract: glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
             confidence: "local-log-derived".into(),
             period_start: now - time::Duration::days(1),
             observed_at: now,
@@ -86,6 +91,7 @@ fn unknown_source_first_contact_does_not_unlock_codex_signal_lamp() {
         }],
         diagnostics: vec![],
         total_effective_tokens: 10_000.0,
+        total_tokens: 10_000.0,
     };
 
     apply_usage_poll(&mut state, &mut store, &poll, now).unwrap();

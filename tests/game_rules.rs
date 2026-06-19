@@ -8,6 +8,7 @@ use glorp::game::metabolism::{apply_decay, apply_food, Mood, RhythmProfile, Vita
 use glorp::storage::state::{HabitatPropSource, PetState};
 use glorp::storage::usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageLedgerRow};
 use glorp::tui::identity::ActivityIdentityProfile;
+use glorp::usage::normalize::RawTokenTotals;
 use time::macros::{date, datetime};
 
 #[test]
@@ -44,6 +45,43 @@ fn cache_read_weight_is_configurable() {
         reasoning_output: 999_999,
     };
     assert_eq!(weights.compute(buckets), 50.0);
+}
+
+#[test]
+fn tokenmaxxing_total_counts_cache_reads_fully_and_excludes_reasoning() {
+    let totals = RawTokenTotals {
+        uncached_input: 100,
+        output: 200,
+        cache_creation: 300,
+        cache_read: 4_000,
+        reasoning_output: 9_999,
+    };
+
+    assert_eq!(totals.total_tokens(), 4_600.0);
+}
+
+#[test]
+fn legacy_cache_read_weight_does_not_define_canonical_total_tokens() {
+    let config = AppConfig {
+        cache_read_weight: 0.05,
+        ..AppConfig::default()
+    };
+    let weights = EffectiveTokenWeights::from_config(config);
+    let buckets = TokenBuckets {
+        uncached_input: 0,
+        output: 0,
+        cache_creation: 0,
+        cache_read: 1_000,
+        reasoning_output: 999_999,
+    };
+    let totals = RawTokenTotals {
+        cache_read: 1_000,
+        reasoning_output: 999_999,
+        ..RawTokenTotals::default()
+    };
+
+    assert_eq!(weights.compute(buckets), 50.0);
+    assert_eq!(totals.total_tokens(), 1_000.0);
 }
 
 #[test]

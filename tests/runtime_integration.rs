@@ -228,6 +228,8 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
             source_identity: SourceIdentity::claude_code(),
             command: "ccusage".to_string(),
             effective_tokens,
+            total_tokens: effective_tokens,
+            token_contract: glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
             confidence: "local-log-derived".to_string(),
             period_start: now,
             observed_at: now,
@@ -246,6 +248,7 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
         }],
         diagnostics: Vec::new(),
         total_effective_tokens: effective_tokens,
+        total_tokens: effective_tokens,
     }
 }
 
@@ -278,6 +281,7 @@ fn empty_poll() -> UsagePollResult {
         deltas: Vec::new(),
         diagnostics: Vec::new(),
         total_effective_tokens: 0.0,
+        total_tokens: 0.0,
     }
 }
 
