@@ -665,17 +665,15 @@ fn live_local_agentsview_fixture_normalizes_its_own_full_cache_totals() {
         .iter()
         .map(|delta| delta.total_tokens)
         .sum::<f64>();
-    let public_tokenmaxxing_total = serde_json::from_str::<Value>(
-        &std::fs::read_to_string(fixture_json("agentsview-drew-2026-06-18-tokenmaxxing.json"))
-            .unwrap(),
-    )
-    .unwrap()["total"]
-        .as_u64()
-        .unwrap() as f64;
 
-    assert_ne!(
-        live_local_total, public_tokenmaxxing_total,
-        "live-local agentsview fixtures are not forced to match the captured public comparison fixture"
+    // This test asserts the live-local agentsview fixture's own normalization
+    // semantics. The captured public Tokenmaxxing comparison fixture is
+    // asserted independently in
+    // `tokenmaxxing_comparison_fixture_preserves_captured_public_totals`.
+    assert_eq!(
+        live_local_total,
+        46_011_892.0 + 743_812_222.0,
+        "live-local fixture total should be derived from its own agentsview rows"
     );
     assert_eq!(codex.source_identity.display_name, "codex");
     assert_eq!(claude.source_identity.display_name, "claude");
@@ -688,6 +686,15 @@ fn live_local_agentsview_fixture_normalizes_its_own_full_cache_totals() {
         claude.total_tokens,
         612992.0 + 1072059.0 + 5083568.0 + 34477061.0
     );
+    let live_local_by_source = result.deltas.iter().fold(
+        std::collections::BTreeMap::<&str, f64>::new(),
+        |mut totals, delta| {
+            *totals.entry(delta.provider_surface.as_str()).or_default() += delta.total_tokens;
+            totals
+        },
+    );
+    assert_eq!(live_local_by_source.get("claude"), Some(&46_011_892.0));
+    assert_eq!(live_local_by_source.get("codex"), Some(&743_812_222.0));
     assert_eq!(
         result.total_tokens,
         result.deltas.iter().map(|d| d.total_tokens).sum::<f64>()
