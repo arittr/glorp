@@ -410,14 +410,16 @@ fn rate_per_hour_grows_with_more_recent_events() {
     let vm_a = build_watch_view_model_for_test_at(&state, &db_path, now).unwrap();
     let rate_a = vm_a.progress.rate_per_hour;
 
-    // Add one large event right at now — it lands inside the 1-hour window.
+    // Add one large event just before now so it lands inside the canonical
+    // half-open 1-hour window.
+    let recent_at = now - Duration::seconds(1);
     store
         .insert_event(&NormalizedUsageEvent {
-            observed_at: now,
-            bucket_at: now,
+            observed_at: recent_at,
+            bucket_at: recent_at,
             effective_tokens: 50_000.0,
             provider_surface: "codex".to_string(),
-            ..NormalizedUsageEvent::for_test_at(now, 50_000.0)
+            ..NormalizedUsageEvent::for_test_at(recent_at, 50_000.0)
         })
         .unwrap();
     drop(store);
@@ -428,6 +430,44 @@ fn rate_per_hour_grows_with_more_recent_events() {
         rate_b > rate_a,
         "rate must grow with more recent contribution (a={rate_a}, b={rate_b})"
     );
+}
+
+#[test]
+fn rate_per_hour_uses_only_canonical_tokenmaxxing_totals() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let mut store = UsageStore::open(&db_path).unwrap();
+    let now = datetime!(2026-06-19 18:00:00 UTC);
+    let canonical_at = now - Duration::minutes(5);
+    let legacy_at = now - Duration::minutes(10);
+
+    store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "codex".to_string(),
+            observed_at: canonical_at,
+            bucket_at: canonical_at,
+            total_tokens: 42_000.0,
+            effective_tokens: 7.0,
+            token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+            ..NormalizedUsageEvent::for_test_at(canonical_at, 7.0)
+        })
+        .unwrap();
+    store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "legacy-claude".to_string(),
+            observed_at: legacy_at,
+            bucket_at: legacy_at,
+            total_tokens: 1_000_000.0,
+            effective_tokens: 1_000_000.0,
+            token_contract: glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
+            ..NormalizedUsageEvent::for_test_at(legacy_at, 1_000_000.0)
+        })
+        .unwrap();
+    drop(store);
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &db_path, now).unwrap();
+
+    assert_eq!(vm.progress.rate_per_hour, 42_000.0);
 }
 
 #[test]

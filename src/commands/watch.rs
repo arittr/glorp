@@ -273,11 +273,8 @@ pub(crate) fn build_watch_view_model_at(
         last_feed_pulse_at: None, // populated by WatchApp when a token spike fires
         progress: {
             let rate_per_hour: f64 = usage_store
-                .token_totals_by_source_between(now - Duration::hours(1), now)
-                .unwrap_or_default()
-                .iter()
-                .map(|(_, v)| *v)
-                .sum();
+                .canonical_total_tokens_between(now - Duration::hours(1), now)
+                .unwrap_or(0.0);
             let is_max = matches!(stage, Stage::S6);
             let stage_start = stage_start_xp(stage);
             let xp_in_stage = state.xp - stage_start;
