@@ -1038,7 +1038,10 @@ mod tests {
         let mut store = UsageStore::open(&db_path).unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         store
-            .insert_event(&sample_event_at_for_test(now, 50_000.0))
+            .insert_event(&sample_event_at_for_test(
+                now - Duration::minutes(1),
+                50_000.0,
+            ))
             .unwrap();
         drop(store);
 
@@ -1276,16 +1279,18 @@ mod tests {
                 ..NormalizedUsageEvent::for_test_at(late, 3_000.0)
             })
             .unwrap();
-        // Now = 00:30 local June 9 (08:30 UTC): the late-night row is YESTERDAY.
+        // Now = 00:30 in the fixed local mapper, but Tokenmaxxing's Los Angeles
+        // day is on DST in June and starts at 07:00 UTC, so the 07:30 UTC row is
+        // part of today's canonical Tokenmaxxing total.
         let now = late + Duration::hours(1);
         let state = PetState::new_for_test("test", "buddy");
         let vm = build_watch_view_model_at(&state, &db_path, now, mapper).unwrap();
-        let status_today = usage.today_effective_tokens(now, mapper).unwrap();
-        assert_eq!(vm.today_effective_tokens, status_today);
-        assert_eq!(
-            status_today, 0.0,
-            "yesterday's local work must not be today"
-        );
+        let (today_start, today_end) = crate::usage::day_axis::tokenmaxxing_today_window(now);
+        let canonical_today = usage
+            .canonical_total_tokens_between(today_start, today_end)
+            .unwrap();
+        assert_eq!(vm.today_effective_tokens, canonical_today);
+        assert_eq!(canonical_today, 3_000.0);
     }
 
     #[test]
