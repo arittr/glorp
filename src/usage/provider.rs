@@ -49,6 +49,8 @@ pub struct ProviderDiagnostic {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCursorKey {
     pub provider_surface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_contract: Option<String>,
     pub command: String,
     pub source_surface: String,
     pub period_start: String,
@@ -69,6 +71,7 @@ mod tests {
     fn sample_key(raw_source_id: Option<&str>) -> ProviderCursorKey {
         ProviderCursorKey {
             provider_surface: "gemini".into(),
+            token_contract: None,
             command: "ccusage daily".into(),
             source_surface: "daily".into(),
             period_start: "2026-06-11".into(),

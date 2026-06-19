@@ -12,6 +12,7 @@ use crate::usage::provider::{
 use crate::usage::token_contract::TOKENMAXXING_TOTAL_V1;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 use time::OffsetDateTime;
 
 pub const AGENTSVIEW_COMMAND: &str = "agentsview usage daily";
@@ -102,6 +103,7 @@ impl AgentsviewCommandProvider {
 
             let key = ProviderCursorKey {
                 provider_surface: record.source_identity.provider_surface.clone(),
+                token_contract: Some(TOKENMAXXING_TOTAL_V1.to_string()),
                 command: AGENTSVIEW_COMMAND.to_string(),
                 source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
@@ -184,11 +186,7 @@ impl AgentsviewCommandProvider {
     }
 
     fn version(&self, helper: &Path) -> Option<String> {
-        let output = Command::new(helper).arg("--version").output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        safe_version_line(&output.stdout)
+        version_with_timeout(helper, HELPER_SUBPROCESS_TIMEOUT)
     }
 
     fn run_usage(&self, helper: &Path, agent: &str, no_sync: bool) -> Result<std::process::Output> {
@@ -262,6 +260,25 @@ impl AgentsviewDiscovery {
             .or_else(|| which::which("agentsview").ok());
         Self { agentsview }
     }
+
+    pub fn from_sources<'a, E, P>(env: E, path: P) -> Result<Self>
+    where
+        E: IntoIterator<Item = (&'a str, &'a Path)>,
+        P: IntoIterator<Item = &'a Path>,
+    {
+        let mut discovered = Self::default();
+        for (name, value) in env {
+            if name == "GLORP_AGENTSVIEW_BIN" {
+                discovered.agentsview = Some(value.to_path_buf());
+            }
+        }
+        for candidate in path {
+            if discovered.agentsview.is_none() {
+                discovered.agentsview = Some(candidate.to_path_buf());
+            }
+        }
+        Ok(discovered)
+    }
 }
 
 impl From<AgentsviewDiscovery> for AgentsviewPaths {
@@ -327,6 +344,16 @@ fn write_cursor(
     )
 }
 
+fn version_with_timeout(helper: &Path, timeout: Duration) -> Option<String> {
+    let mut command = Command::new(helper);
+    command.arg("--version");
+    let output = run_command_with_timeout(&mut command, timeout).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    safe_version_line(&output.stdout)
+}
+
 fn safe_version_line(bytes: &[u8]) -> Option<String> {
     let line = String::from_utf8_lossy(bytes)
         .lines()
@@ -350,4 +377,37 @@ fn safe_version_line(bytes: &[u8]) -> Option<String> {
         return None;
     }
     line.chars().any(|ch| ch.is_ascii_digit()).then_some(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn version_probe_uses_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("sleeping-version-helper");
+        let mut file = std::fs::File::create(&helper).unwrap();
+        writeln!(
+            file,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == \"--version\" ]]; then sleep 2; echo 'agentsview v0.32.1'; exit 0; fi\nexit 0"
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let started = Instant::now();
+        let version = version_with_timeout(&helper, Duration::from_millis(25));
+
+        assert_eq!(version, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "version probe should time out quickly"
+        );
+    }
 }

@@ -1,0 +1,16 @@
+{
+  "daily": [
+    {
+      "date": "2026-06-18",
+      "modelBreakdowns": [
+        {
+          "modelName": "gpt-5.4-mini",
+          "inputTokens": "secret prompt should not leak",
+          "outputTokens": 20,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 30
+        }
+      ]
+    }
+  ]
+}

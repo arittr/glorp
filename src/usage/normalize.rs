@@ -118,18 +118,19 @@ fn normalize_agentsview_value(agent: &str, value: &Value) -> NormalizedUsageBatc
 
         if let Some(breakdowns) = row.get("modelBreakdowns").and_then(Value::as_array) {
             for model_row in breakdowns {
+                let raw_totals = match parse_agentsview_totals(&source.provider_surface, model_row)
+                {
+                    Ok(raw_totals) => raw_totals,
+                    Err(diagnostic) => {
+                        batch.diagnostics.push(diagnostic);
+                        continue;
+                    }
+                };
                 batch.records.push(NormalizedUsageRecord {
                     source_identity: source.clone(),
                     period_start: period_start.clone(),
                     model: optional_string(model_row, "modelName"),
-                    raw_totals: RawTokenTotals {
-                        uncached_input: optional_u64(model_row, "inputTokens").unwrap_or(0),
-                        output: optional_u64(model_row, "outputTokens").unwrap_or(0),
-                        cache_creation: optional_u64(model_row, "cacheCreationTokens").unwrap_or(0),
-                        cache_read: optional_u64(model_row, "cacheReadTokens").unwrap_or(0),
-                        reasoning_output: optional_u64(model_row, "reasoningOutputTokens")
-                            .unwrap_or(0),
-                    },
+                    raw_totals,
                     display_cost_usd: optional_f64(model_row, "cost"),
                     confidence: "local-log-derived".to_string(),
                 });
@@ -138,6 +139,34 @@ fn normalize_agentsview_value(agent: &str, value: &Value) -> NormalizedUsageBatc
     }
 
     batch
+}
+
+fn parse_agentsview_totals(
+    provider_surface: &str,
+    value: &Value,
+) -> std::result::Result<RawTokenTotals, ProviderDiagnostic> {
+    Ok(RawTokenTotals {
+        uncached_input: agentsview_u64(provider_surface, value, "inputTokens")?,
+        output: agentsview_u64(provider_surface, value, "outputTokens")?,
+        cache_creation: agentsview_u64(provider_surface, value, "cacheCreationTokens")?,
+        cache_read: agentsview_u64(provider_surface, value, "cacheReadTokens")?,
+        reasoning_output: agentsview_u64(provider_surface, value, "reasoningOutputTokens")?,
+    })
+}
+
+fn agentsview_u64(
+    provider_surface: &str,
+    value: &Value,
+    field: &str,
+) -> std::result::Result<u64, ProviderDiagnostic> {
+    match value.get(field) {
+        None => Ok(0),
+        Some(raw) => raw.as_u64().ok_or_else(|| ProviderDiagnostic {
+            provider_surface: provider_surface.to_string(),
+            code: "malformed_token_field".to_string(),
+            message: format!("{provider_surface} malformed_token_field"),
+        }),
+    }
 }
 
 fn normalize_usage_value(provider_surface: &str, value: &Value) -> NormalizedUsageBatch {

@@ -7,6 +7,7 @@ use glorp::usage::identity::SourceFamily;
 use glorp::usage::normalize::RawTokenTotals;
 use glorp::usage::provider::{ProviderCursorKey, UsagePollResult, UsageProvider};
 use serde::Serialize;
+use serde_json::Value;
 use tempfile::tempdir;
 use time::OffsetDateTime;
 
@@ -19,6 +20,12 @@ fn fixture(name: &str) -> std::path::PathBuf {
 fn agentsview_fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/helpers")
+        .join(name)
+}
+
+fn fixture_json(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
         .join(name)
 }
 
@@ -359,6 +366,7 @@ fn legacy_cursor_with_parser_version_migrates_without_double_feeding() {
     fn new_key_json(period_start: &str, model: Option<&str>) -> String {
         serde_json::to_string(&ProviderCursorKey {
             provider_surface: "claude-code".to_string(),
+            token_contract: None,
             command: "ccusage".to_string(),
             source_surface: "daily".to_string(),
             period_start: period_start.to_string(),
@@ -598,7 +606,36 @@ fn repeated_unified_poll_after_cursor_advance_emits_zero_deltas() {
 }
 
 #[test]
-fn agentsview_provider_normalizes_full_cache_totals_and_external_source_labels() {
+fn tokenmaxxing_comparison_fixture_preserves_captured_public_totals() {
+    let comparison: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture_json("agentsview-drew-2026-06-18-tokenmaxxing.json"))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(comparison["date"], "2026-06-18");
+    assert_eq!(
+        comparison["captured_from"],
+        "https://tokenmaxxing.odio.dev/api/user/drew"
+    );
+    assert_eq!(comparison["sources"]["claude"].as_u64(), Some(46_011_892));
+    assert_eq!(comparison["sources"]["codex"].as_u64(), Some(669_369_020));
+    assert_eq!(comparison["total"].as_u64(), Some(715_380_912));
+
+    let source_labels = comparison["sources"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        source_labels,
+        std::collections::HashSet::from(["claude", "codex"])
+    );
+}
+
+#[test]
+fn live_local_agentsview_fixture_normalizes_its_own_full_cache_totals() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
@@ -623,6 +660,23 @@ fn agentsview_provider_normalizes_full_cache_totals_and_external_source_labels()
         })
         .unwrap();
 
+    let live_local_total = result
+        .deltas
+        .iter()
+        .map(|delta| delta.total_tokens)
+        .sum::<f64>();
+    let public_tokenmaxxing_total = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(fixture_json("agentsview-drew-2026-06-18-tokenmaxxing.json"))
+            .unwrap(),
+    )
+    .unwrap()["total"]
+        .as_u64()
+        .unwrap() as f64;
+
+    assert_ne!(
+        live_local_total, public_tokenmaxxing_total,
+        "live-local agentsview fixtures are not forced to match the captured public comparison fixture"
+    );
     assert_eq!(codex.source_identity.display_name, "codex");
     assert_eq!(claude.source_identity.display_name, "claude");
     assert_eq!(
@@ -680,4 +734,109 @@ fn agentsview_invalid_json_and_helper_stderr_are_sanitized() {
     assert!(!rendered.contains("secret prompt"));
     assert!(!rendered.contains("secret response"));
     assert!(!rendered.contains("/Users/drew/private"));
+}
+
+#[test]
+fn agentsview_present_malformed_token_field_rejects_row_with_sanitized_diagnostic() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(agentsview_fixture("agentsview-malformed-number.mjs")),
+        },
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+    let rendered = format!("{:?}", result.diagnostics);
+
+    assert!(result.deltas.is_empty());
+    assert!(rendered.contains("malformed_token_field"));
+    assert!(!rendered.contains("secret prompt"));
+    assert!(!rendered.contains("secret response"));
+    assert!(!rendered.contains("inputTokens"));
+}
+
+#[test]
+fn agentsview_omitted_token_bucket_fields_still_default_to_zero() {
+    let text = std::fs::read_to_string(fixture_json("agentsview-omitted-zeros.json")).unwrap();
+    let batch = glorp::usage::normalize::normalize_agentsview_json("codex", &text).unwrap();
+    let record = batch.records.first().unwrap();
+
+    assert!(batch.diagnostics.is_empty(), "{:?}", batch.diagnostics);
+    assert_eq!(
+        record.raw_totals,
+        RawTokenTotals {
+            uncached_input: 10,
+            output: 20,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        }
+    );
+}
+
+#[test]
+fn agentsview_cursor_key_carries_token_contract_for_cutover_replay_protection() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(agentsview_fixture("agentsview-ok.mjs")),
+        },
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+    let codex = result
+        .deltas
+        .iter()
+        .find(|delta| {
+            delta.provider_surface == "codex" && delta.model.as_deref() == Some("gpt-5.5")
+        })
+        .unwrap();
+    let cursor_key: Value = serde_json::from_str(&codex.cursor_update.cursor_key).unwrap();
+
+    assert_eq!(
+        cursor_key["token_contract"],
+        glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1
+    );
+    assert_eq!(cursor_key["provider_surface"], "codex");
+    assert_eq!(cursor_key["raw_source_id"], "codex");
+    assert_eq!(cursor_key["command"], "agentsview usage daily");
+    assert_ne!(cursor_key["command"], "ccusage-codex");
+}
+
+#[test]
+fn agentsview_discovery_prefers_env_bin_before_path_candidate() {
+    let env_path = agentsview_fixture("agentsview-ok.mjs");
+    let path_path = agentsview_fixture("agentsview-fails.mjs");
+    let discovered = glorp::usage::agentsview::AgentsviewDiscovery::from_sources(
+        [("GLORP_AGENTSVIEW_BIN", env_path.as_path())],
+        [path_path.as_path()],
+    )
+    .unwrap();
+
+    assert_eq!(discovered.agentsview.unwrap(), env_path);
+}
+
+#[test]
+fn agentsview_configured_missing_path_returns_sanitized_diagnostic() {
+    let dir = tempdir().unwrap();
+    let missing_helper = dir.path().join("missing-agentsview");
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(missing_helper),
+        },
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+    let rendered = format!("{:?}", result.diagnostics);
+
+    assert!(result.deltas.is_empty());
+    assert_eq!(result.diagnostics.len(), 2);
+    assert!(result
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.code == "missing_helper"));
+    assert!(!rendered.contains("missing-agentsview"));
 }

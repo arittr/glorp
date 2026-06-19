@@ -260,6 +260,7 @@ impl CcusageCommandProvider {
 
             let key = ProviderCursorKey {
                 provider_surface: record.source_identity.provider_surface.clone(),
+                token_contract: None,
                 command: command_name.to_string(),
                 source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
@@ -453,6 +454,7 @@ impl CcusageCommandProvider {
 
             let key = ProviderCursorKey {
                 provider_surface: record.source_identity.provider_surface.clone(),
+                token_contract: None,
                 command: command_name.to_string(),
                 source_surface: "daily".to_string(),
                 period_start: record.period_start.clone(),
