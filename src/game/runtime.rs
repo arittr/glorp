@@ -77,7 +77,7 @@ pub fn stage_usage_poll_deltas(
         {
             continue;
         }
-        let buckets = crate::game::catchup::smear_catchup_delta(delta.effective_tokens, baseline);
+        let buckets = crate::game::catchup::smear_catchup_delta(delta.total_tokens, baseline);
         let bucket_count = buckets.len();
         let total_effective: f64 = buckets.iter().sum();
         for (bucket_index, effective_tokens) in buckets.into_iter().enumerate() {
@@ -87,8 +87,7 @@ pub fn stage_usage_poll_deltas(
             event.observed_at = now;
             event.bucket_at = bucket_at;
             event.effective_tokens = effective_tokens;
-            event.total_tokens =
-                scaled_bucket_value(delta.total_tokens, effective_tokens, total_effective);
+            event.total_tokens = effective_tokens;
             if let Some(totals) = delta.token_totals {
                 event.input_tokens =
                     scaled_token_bucket(totals.uncached_input, effective_tokens, total_effective);
@@ -113,7 +112,7 @@ pub fn stage_usage_poll_deltas(
 }
 
 /// The usage discontinuity guard (spec Amendment 2026-06-10). Per provider
-/// surface, a poll whose summed effective delta exceeds
+/// surface, a poll whose summed canonical total-token delta exceeds
 /// `max(guard_ratio x baseline x days_factor, DISCONTINUITY_GUARD_FLOOR_TOKENS)`
 /// is refused alone: its cursors advance with a persisted
 /// `usage_discontinuity` diagnostic in one transaction, and nothing stages.
@@ -142,7 +141,7 @@ fn handle_first_contact_and_discontinuity(
     for delta in &poll.deltas {
         *surface_sums
             .entry(delta.provider_surface.clone())
-            .or_insert(0.0) += delta.effective_tokens.max(0.0);
+            .or_insert(0.0) += delta.total_tokens.max(0.0);
         surface_deltas
             .entry(delta.provider_surface.clone())
             .or_default()
@@ -183,7 +182,7 @@ fn handle_first_contact_and_discontinuity(
                         provider_surface: surface.clone(),
                         code: USAGE_DISCONTINUITY_CODE.to_string(),
                         message: format!(
-                            "refused {sum:.0} effective tokens (threshold {threshold:.0})"
+                            "refused {sum:.0} total tokens (threshold {threshold:.0})"
                         ),
                         recorded_at: now,
                     },
@@ -231,7 +230,7 @@ fn seed_first_contact_surface(
             cache_creation_tokens: totals.cache_creation as f64,
             cache_read_tokens: totals.cache_read as f64,
             reasoning_output_tokens: totals.reasoning_output as f64,
-            effective_tokens: delta.effective_tokens,
+            effective_tokens: delta.total_tokens,
             total_tokens: delta.total_tokens,
             token_contract: delta.token_contract.clone(),
             cost_usd: None,
@@ -287,7 +286,7 @@ fn event_for_delta(delta: &UsageDelta, now: OffsetDateTime) -> NormalizedUsageEv
         cache_creation_tokens: 0.0,
         cache_read_tokens: 0.0,
         reasoning_output_tokens: 0.0,
-        effective_tokens: 0.0,
+        effective_tokens: delta.total_tokens,
         total_tokens: delta.total_tokens,
         token_contract: delta.token_contract.clone(),
         cost_usd: None,
@@ -310,6 +309,9 @@ pub fn apply_unapplied_usage(
         .filter(|row| !state.reflected_usage_event_ids.contains(&row.id))
         .cloned()
         .collect::<Vec<_>>();
+    // Transitional naming: for tokenmaxxing_total_v1 rows, effective_tokens is
+    // deliberately equal to canonical total_tokens so old presentation structs
+    // can keep their field names while the product contract has changed.
     let recent_effective_tokens = rows_to_apply
         .iter()
         .map(|row| row.event.effective_tokens.max(0.0))

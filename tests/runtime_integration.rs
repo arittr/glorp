@@ -219,6 +219,71 @@ fn staged_usage_apportions_token_buckets_across_smear_rows() {
 }
 
 #[test]
+fn runtime_feeds_cached_tokens_at_full_value_for_tokenmaxxing_deltas() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 1_000_000_000.0;
+    establish_provider_contact(
+        &mut usage_store,
+        "codex",
+        datetime!(2026 - 06 - 18 20:00 UTC),
+    );
+
+    let now = datetime!(2026 - 06 - 18 20:10 UTC);
+    let poll = UsagePollResult {
+        deltas: vec![UsageDelta {
+            provider_surface: "codex".into(),
+            source_identity: SourceIdentity::from_tokenmaxxing_source("codex"),
+            command: glorp::usage::agentsview::AGENTSVIEW_COMMAND.into(),
+            effective_tokens: 21_006_000.0,
+            total_tokens: 700_000_000.0,
+            token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+            confidence: "local-log-derived".into(),
+            period_start: datetime!(2026 - 06 - 18 07:00 UTC),
+            observed_at: now,
+            model: Some("gpt-5.5".into()),
+            cursor_update: ProviderCursorUpdate {
+                provider_surface: "codex".into(),
+                cursor_key: "codex-tokenmaxxing".into(),
+                cursor_value: "v1".into(),
+                provider_version: "agentsview v0.32.1".into(),
+                parser_version: "agentsview v0.32.1".into(),
+            },
+            token_totals: Some(RawTokenTotals {
+                uncached_input: 1_000,
+                output: 2_000,
+                cache_creation: 3_000,
+                cache_read: 699_994_000,
+                reasoning_output: 123_456,
+            }),
+        }],
+        diagnostics: Vec::new(),
+        total_effective_tokens: 21_006_000.0,
+        total_tokens: 700_000_000.0,
+    };
+
+    let update = apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
+
+    assert_eq!(update.recent_effective_tokens, 700_000_000.0);
+    assert_eq!(state.lifetime_effective_tokens, 700_000_000.0);
+    let rows = usage_store.recent_events(20).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.total_tokens).sum::<f64>(),
+        700_000_000.0
+    );
+    assert!(rows.iter().all(|row| {
+        row.token_contract == glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1
+            && row.effective_tokens == row.total_tokens
+    }));
+    let reasoning_sum = rows
+        .iter()
+        .map(|row| row.reasoning_output_tokens)
+        .sum::<f64>();
+    assert!((reasoning_sum - 123_456.0).abs() < 0.01);
+}
+
+#[test]
 fn tokenmaxxing_cutover_seeds_agentsview_cursors_without_feeding_existing_pet() {
     let dir = tempdir().unwrap();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
