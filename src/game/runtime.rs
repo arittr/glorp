@@ -87,7 +87,8 @@ pub fn stage_usage_poll_deltas(
             event.observed_at = now;
             event.bucket_at = bucket_at;
             event.effective_tokens = effective_tokens;
-            event.total_tokens = effective_tokens;
+            event.total_tokens =
+                scaled_bucket_value(delta.total_tokens, effective_tokens, total_effective);
             if let Some(totals) = delta.token_totals {
                 event.input_tokens =
                     scaled_token_bucket(totals.uncached_input, effective_tokens, total_effective);
@@ -254,10 +255,17 @@ fn seed_first_contact_surface(
 }
 
 fn scaled_token_bucket(total: u64, effective_share: f64, total_effective: f64) -> f64 {
+    scaled_bucket_value(total as f64, effective_share, total_effective)
+}
+
+fn scaled_bucket_value(total: f64, effective_share: f64, total_effective: f64) -> f64 {
     if !effective_share.is_finite() || !total_effective.is_finite() || total_effective <= 0.0 {
         return 0.0;
     }
-    (total as f64) * (effective_share / total_effective).clamp(0.0, 1.0)
+    if !total.is_finite() {
+        return 0.0;
+    }
+    total * (effective_share / total_effective).clamp(0.0, 1.0)
 }
 
 // `bucket_at` and `effective_tokens` are placeholders here because Rust struct
@@ -831,6 +839,81 @@ mod tests {
                 reasoning_output_tokens: 0.0,
             })
         );
+    }
+
+    #[test]
+    fn staging_preserves_total_token_sum_when_effective_tokens_differ() {
+        let dir = tempdir().unwrap();
+        let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+        let mut state = PetState::new_for_test("seed", "buddy");
+        state.calibration.daily_effective_tokens = 100_000.0;
+        let now = datetime!(2026-06-18 19:10 UTC);
+
+        usage_store
+            .advance_cursors(
+                vec![ProviderCursorUpdate {
+                    provider_surface: "codex".into(),
+                    cursor_key: "contact".into(),
+                    cursor_value: "seeded".into(),
+                    provider_version: "test".into(),
+                    parser_version: "test".into(),
+                }],
+                now - Duration::hours(1),
+            )
+            .unwrap();
+
+        let poll = UsagePollResult {
+            deltas: vec![UsageDelta {
+                provider_surface: "codex".into(),
+                source_identity: SourceIdentity::from_provider_surface("codex"),
+                command: "agentsview daily".into(),
+                effective_tokens: 120_000.0,
+                total_tokens: 600_000.0,
+                token_contract: crate::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+                confidence: "local-log-derived".into(),
+                period_start: now,
+                observed_at: now,
+                model: Some("gpt-5.2-codex".into()),
+                cursor_update: ProviderCursorUpdate {
+                    provider_surface: "codex".into(),
+                    cursor_key: "codex-canonical".into(),
+                    cursor_value: "totals-v1".into(),
+                    provider_version: "test".into(),
+                    parser_version: "test".into(),
+                },
+                token_totals: Some(RawTokenTotals {
+                    uncached_input: 100_000,
+                    output: 100_000,
+                    cache_creation: 100_000,
+                    cache_read: 300_000,
+                    reasoning_output: 999_999,
+                }),
+            }],
+            diagnostics: vec![],
+            total_effective_tokens: 120_000.0,
+            total_tokens: 600_000.0,
+        };
+
+        let ids = stage_usage_poll_deltas(
+            &mut usage_store,
+            &poll,
+            &mut state,
+            DISCONTINUITY_GUARD_RATIO,
+            now,
+        )
+        .unwrap();
+        assert!(ids.len() > 1);
+
+        let rows = usage_store.unapplied_events(100).unwrap();
+        let effective_sum: f64 = rows.iter().map(|row| row.event.effective_tokens).sum();
+        let total_sum: f64 = rows.iter().map(|row| row.event.total_tokens).sum();
+
+        assert_eq!(rows.len(), ids.len());
+        assert_eq!(effective_sum, 120_000.0);
+        assert_eq!(total_sum, 600_000.0);
+        assert!(rows.iter().all(|row| {
+            row.event.token_contract == crate::usage::token_contract::TOKENMAXXING_TOTAL_V1
+        }));
     }
 
     #[test]
