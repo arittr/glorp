@@ -228,10 +228,16 @@ fn tokenmaxxing_cutover_seeds_agentsview_cursors_without_feeding_existing_pet() 
     state.lifetime_effective_tokens = 12_345.0;
     state.stage = Stage::S2;
     state.vitals.fed = 44.0;
+    state.pet.generated_species = glorp::pet::generation::Species::Mech;
+    state.seen_stage_transitions = vec![Stage::S1, Stage::S2];
+    state.habitat.reconciled_lifetime_tokens_at = Some(12_345.0);
     state.recent_events.push(NarrativeEvent {
         observed_at: datetime!(2026 - 06 - 18 12:00 UTC),
         text: "existing event".into(),
     });
+    let pre_cutover_identity = state.pet.clone();
+    let pre_cutover_habitat = state.habitat.clone();
+    let pre_cutover_seen_stage_transitions = state.seen_stage_transitions.clone();
     usage_store
         .advance_cursors(
             vec![ProviderCursorUpdate {
@@ -267,6 +273,12 @@ fn tokenmaxxing_cutover_seeds_agentsview_cursors_without_feeding_existing_pet() 
     assert_eq!(state.lifetime_effective_tokens, 12_345.0);
     assert_eq!(state.stage, Stage::S2);
     assert_eq!(state.vitals.fed, 44.0);
+    assert_eq!(state.pet, pre_cutover_identity);
+    assert_eq!(state.habitat, pre_cutover_habitat);
+    assert_eq!(
+        state.seen_stage_transitions,
+        pre_cutover_seen_stage_transitions
+    );
     assert_eq!(state.recent_events.last().unwrap().text, "existing event");
     assert!(usage_store
         .is_token_contract_active(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1)
