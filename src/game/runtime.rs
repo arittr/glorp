@@ -844,11 +844,11 @@ mod tests {
     }
 
     #[test]
-    fn staging_preserves_total_token_sum_when_effective_tokens_differ() {
+    fn staging_stores_tokenmaxxing_total_as_effective_and_total_tokens() {
         let dir = tempdir().unwrap();
         let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
         let mut state = PetState::new_for_test("seed", "buddy");
-        state.calibration.daily_effective_tokens = 100_000.0;
+        state.calibration.daily_effective_tokens = 1_000_000.0;
         let now = datetime!(2026-06-18 19:10 UTC);
 
         usage_store
@@ -911,10 +911,11 @@ mod tests {
         let total_sum: f64 = rows.iter().map(|row| row.event.total_tokens).sum();
 
         assert_eq!(rows.len(), ids.len());
-        assert_eq!(effective_sum, 120_000.0);
+        assert_eq!(effective_sum, 600_000.0);
         assert_eq!(total_sum, 600_000.0);
         assert!(rows.iter().all(|row| {
             row.event.token_contract == crate::usage::token_contract::TOKENMAXXING_TOTAL_V1
+                && row.event.effective_tokens == row.event.total_tokens
         }));
     }
 

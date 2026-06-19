@@ -1,14 +1,14 @@
 use crate::game::calibration::CalibrationBaseline;
 
-pub fn smear_catchup_delta(effective_tokens: f64, baseline: CalibrationBaseline) -> Vec<f64> {
-    let effective_tokens = effective_tokens.max(0.0);
-    if effective_tokens == 0.0 {
+pub fn smear_catchup_delta(token_amount: f64, baseline: CalibrationBaseline) -> Vec<f64> {
+    let token_amount = token_amount.max(0.0);
+    if token_amount == 0.0 {
         return Vec::new();
     }
 
     let daily = baseline.daily_effective_tokens.max(1.0);
-    let bucket_count = ((effective_tokens / (daily * 0.125)).ceil() as usize).clamp(6, 12);
-    let mut buckets = vec![effective_tokens / bucket_count as f64; bucket_count];
+    let bucket_count = ((token_amount / (daily * 0.125)).ceil() as usize).clamp(6, 12);
+    let mut buckets = vec![token_amount / bucket_count as f64; bucket_count];
     let max_bucket = daily * 0.25;
     for bucket in &mut buckets {
         *bucket = bucket.min(max_bucket);
@@ -34,8 +34,8 @@ mod tests {
     //    pace; downstream XP math assumes this bound.
     //
     // 3. `sum_at_or_below_input` — the total of all buckets never exceeds the
-    //    raw effective-token input. This documents an intentional silent
-    //    clipping behavior: for `effective_tokens > daily * 3.0` the per-bucket
+    //    input token amount. This documents an intentional silent clipping
+    //    behavior: for `token_amount > daily * 3.0` the per-bucket
     //    cap times 12 buckets is `daily * 3.0`, so anything beyond that point
     //    is silently dropped on the floor. Anyone changing this should know
     //    they are changing a load-bearing semantic decision (huge backfills
@@ -43,22 +43,22 @@ mod tests {
     proptest! {
         #[test]
         fn bucket_count_is_six_to_twelve(
-            effective in 1.0..1e12f64,
+            token_amount in 1.0..1e12f64,
             daily in 1.0..1e10f64,
         ) {
             let baseline = CalibrationBaseline { daily_effective_tokens: daily };
-            let buckets = smear_catchup_delta(effective, baseline);
+            let buckets = smear_catchup_delta(token_amount, baseline);
             prop_assert!(buckets.len() >= 6 && buckets.len() <= 12,
                 "expected 6..=12 buckets, got {}", buckets.len());
         }
 
         #[test]
         fn each_bucket_at_or_below_daily_cap(
-            effective in 1.0..1e12f64,
+            token_amount in 1.0..1e12f64,
             daily in 1.0..1e10f64,
         ) {
             let baseline = CalibrationBaseline { daily_effective_tokens: daily };
-            let buckets = smear_catchup_delta(effective, baseline);
+            let buckets = smear_catchup_delta(token_amount, baseline);
             let cap = daily * 0.25;
             for (idx, bucket) in buckets.iter().enumerate() {
                 prop_assert!(*bucket <= cap,
@@ -70,16 +70,16 @@ mod tests {
 
         #[test]
         fn sum_at_or_below_input(
-            effective in 1.0..1e12f64,
+            token_amount in 1.0..1e12f64,
             daily in 1.0..1e10f64,
         ) {
             let baseline = CalibrationBaseline { daily_effective_tokens: daily };
-            let buckets = smear_catchup_delta(effective, baseline);
+            let buckets = smear_catchup_delta(token_amount, baseline);
             let sum: f64 = buckets.iter().sum();
             // Allow a small tolerance for floating-point summation error.
-            let tolerance = (effective.abs() * 1e-9).max(1e-9);
-            prop_assert!(sum <= effective + tolerance,
-                "sum {} exceeds input {} (tolerance {})", sum, effective, tolerance);
+            let tolerance = (token_amount.abs() * 1e-9).max(1e-9);
+            prop_assert!(sum <= token_amount + tolerance,
+                "sum {} exceeds input {} (tolerance {})", sum, token_amount, tolerance);
         }
     }
 }
