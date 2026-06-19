@@ -3,7 +3,7 @@ use glorp::storage::state::{write_state_for_test, PetState, PetStateFixture};
 use glorp::storage::usage_store::{NormalizedUsageEvent, UsageStore};
 use predicates::prelude::*;
 use tempfile::tempdir;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 const AGENTSVIEW_OK: &str = "tests/fixtures/helpers/agentsview-ok.mjs";
 const AGENTSVIEW_NEXT: &str = "tests/fixtures/helpers/agentsview-next.mjs";
@@ -248,6 +248,52 @@ fn status_clamps_zero_usage_display() {
         .stdout(predicate::str::contains("effective tokens").not())
         .stdout(predicate::str::contains("provider health: blocked"))
         .stdout(predicate::str::contains("-0").not());
+}
+
+#[test]
+fn status_uses_tokenmaxxing_day_axis_under_non_los_angeles_tz() {
+    let dir = tempdir().unwrap();
+    write_state_for_test(dir.path(), PetStateFixture::named("mochi")).unwrap();
+
+    let now = OffsetDateTime::now_utc();
+    let (today_start, today_end) = glorp::usage::day_axis::tokenmaxxing_today_window(now);
+    let utc_today = now.date();
+    let event_at = if today_start.date() == utc_today {
+        today_end - Duration::seconds(1)
+    } else {
+        today_start + Duration::seconds(1)
+    };
+    assert_ne!(
+        event_at.date(),
+        utc_today,
+        "fixture must be outside the process UTC day"
+    );
+
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "codex".into(),
+            observed_at: event_at,
+            bucket_at: event_at,
+            total_tokens: 123_456.0,
+            effective_tokens: 123_456.0,
+            ..NormalizedUsageEvent::for_test_at(event_at, 123_456.0)
+        })
+        .unwrap();
+    drop(usage_store);
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("TZ", "UTC")
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_FAILS)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "tokens (estimated): today 123456 recent 0 lifetime 0",
+        ))
+        .stdout(predicate::str::contains("effective tokens").not());
 }
 
 #[test]

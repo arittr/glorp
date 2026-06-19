@@ -1,7 +1,7 @@
 # Glorp Tokenmaxxing Token Contract - design
 
 - Date: 2026-06-19
-- Status: direction approved by Drew; staff review revisions applied
+- Status: implemented and verified
 - Linear: PRI-2283
 - Builds on:
   - `docs/superpowers/specs/2026-05-09-glorp-core-mvp-repair-design.md`

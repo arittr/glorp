@@ -55,6 +55,16 @@ impl AgentsviewCommandProvider {
         agent: &str,
         no_sync: bool,
     ) -> Result<UsagePollResult> {
+        self.poll_agent_with_timeout(store, agent, no_sync, HELPER_SUBPROCESS_TIMEOUT)
+    }
+
+    fn poll_agent_with_timeout(
+        &self,
+        store: &mut UsageStore,
+        agent: &str,
+        no_sync: bool,
+        timeout: Duration,
+    ) -> Result<UsagePollResult> {
         let Some(helper) = self.paths.agentsview.as_deref() else {
             let diagnostic = diagnostic(agent, "missing_helper", "agentsview helper was not found");
             persist_diagnostic(store, &diagnostic)?;
@@ -67,9 +77,24 @@ impl AgentsviewCommandProvider {
         }
 
         let version = self
-            .version(helper)
+            .version_with_timeout(helper, timeout)
             .unwrap_or_else(|| "unknown".to_string());
-        let output = self.run_usage(helper, agent, no_sync)?;
+        let output = match self.run_usage_with_timeout(helper, agent, no_sync, timeout) {
+            Ok(output) => output,
+            Err(GlorpError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
+                let diagnostic = diagnostic(
+                    agent,
+                    "helper_timeout",
+                    &format!(
+                        "agentsview did not return within {}s",
+                        HELPER_SUBPROCESS_TIMEOUT.as_secs()
+                    ),
+                );
+                persist_diagnostic(store, &diagnostic)?;
+                return Ok(empty_poll(vec![diagnostic]));
+            }
+            Err(err) => return Err(err),
+        };
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
             let diagnostic = diagnostic(
@@ -194,10 +219,20 @@ impl AgentsviewCommandProvider {
     }
 
     fn version(&self, helper: &Path) -> Option<String> {
-        version_with_timeout(helper, HELPER_SUBPROCESS_TIMEOUT)
+        self.version_with_timeout(helper, HELPER_SUBPROCESS_TIMEOUT)
     }
 
-    fn run_usage(&self, helper: &Path, agent: &str, no_sync: bool) -> Result<std::process::Output> {
+    fn version_with_timeout(&self, helper: &Path, timeout: Duration) -> Option<String> {
+        version_with_timeout(helper, timeout)
+    }
+
+    fn run_usage_with_timeout(
+        &self,
+        helper: &Path,
+        agent: &str,
+        no_sync: bool,
+        timeout: Duration,
+    ) -> Result<std::process::Output> {
         let mut command = Command::new(helper);
         command.args([
             "usage",
@@ -214,7 +249,7 @@ impl AgentsviewCommandProvider {
         if no_sync {
             command.arg("--no-sync");
         }
-        match run_command_with_timeout(&mut command, HELPER_SUBPROCESS_TIMEOUT) {
+        match run_command_with_timeout(&mut command, timeout) {
             Ok(output) => Ok(output),
             Err(GlorpError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
                 Err(GlorpError::Io(err))
@@ -423,5 +458,46 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "version probe should time out quickly"
         );
+    }
+
+    #[test]
+    fn usage_timeout_returns_helper_timeout_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("sleeping-usage-helper");
+        let mut file = std::fs::File::create(&helper).unwrap();
+        writeln!(
+            file,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == \"--version\" ]]; then echo 'agentsview v0.32.1'; exit 0; fi\nsleep 2\necho '{{\"daily\":[]}}'"
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let provider = AgentsviewCommandProvider::new(AgentsviewPaths {
+            agentsview: Some(helper),
+        });
+        let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+
+        let started = Instant::now();
+        let result = provider
+            .poll_agent_with_timeout(&mut store, "claude", false, Duration::from_millis(25))
+            .unwrap();
+
+        assert!(result.deltas.is_empty());
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].provider_surface, "claude");
+        assert_eq!(result.diagnostics[0].code, "helper_timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "usage timeout path should not wait for the sleeping helper"
+        );
+        assert!(store
+            .recent_diagnostics(5)
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic.provider_surface == "claude"
+                && diagnostic.code == "helper_timeout"));
     }
 }

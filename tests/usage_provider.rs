@@ -618,9 +618,15 @@ fn tokenmaxxing_comparison_fixture_preserves_captured_public_totals() {
         comparison["captured_from"],
         "https://tokenmaxxing.odio.dev/api/user/drew"
     );
-    assert_eq!(comparison["sources"]["claude"].as_u64(), Some(46_011_892));
-    assert_eq!(comparison["sources"]["codex"].as_u64(), Some(669_369_020));
-    assert_eq!(comparison["total"].as_u64(), Some(715_380_912));
+    assert_eq!(
+        comparison["sources"]["claude"].as_u64().unwrap(),
+        46_011_892
+    );
+    assert_eq!(
+        comparison["sources"]["codex"].as_u64().unwrap(),
+        669_369_020
+    );
+    assert_eq!(comparison["total"].as_u64().unwrap(), 715_380_912);
 
     let source_labels = comparison["sources"]
         .as_object()
