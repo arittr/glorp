@@ -6,6 +6,8 @@ tags: usage, metabolism, xp, cache
 depends_on: [story-001, story-002]
 ---
 
+> Legacy note: current canonical usage accounting is Tokenmaxxing-compatible `agentsview` total tokens. This story describes the original ccusage/effective-token MVP behavior.
+
 As a user, I want Glorp to respond to meaningful token activity rather than raw cache churn so that my pet grows from real work without speedrunning its lifecycle.
 
 ## Acceptance Criteria

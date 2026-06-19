@@ -7,6 +7,7 @@ pub const HELPER_LOCATOR_FILE: &str = "helper-locator.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelperLocator {
+    pub agentsview_bin: Option<PathBuf>,
     pub ccusage_bin: Option<PathBuf>,
     pub ccusage_codex_bin: Option<PathBuf>,
     pub node_bin: Option<PathBuf>,
@@ -15,6 +16,7 @@ pub struct HelperLocator {
 impl HelperLocator {
     pub fn from_current_environment() -> Self {
         Self {
+            agentsview_bin: std::env::var_os("GLORP_AGENTSVIEW_BIN").map(PathBuf::from),
             ccusage_bin: std::env::var_os("GLORP_CCUSAGE_BIN").map(PathBuf::from),
             ccusage_codex_bin: std::env::var_os("GLORP_CCUSAGE_CODEX_BIN").map(PathBuf::from),
             node_bin: std::env::var_os("GLORP_NODE_BIN").map(PathBuf::from),
@@ -22,7 +24,10 @@ impl HelperLocator {
     }
 
     pub fn has_any_path(&self) -> bool {
-        self.ccusage_bin.is_some() || self.ccusage_codex_bin.is_some() || self.node_bin.is_some()
+        self.agentsview_bin.is_some()
+            || self.ccusage_bin.is_some()
+            || self.ccusage_codex_bin.is_some()
+            || self.node_bin.is_some()
     }
 }
 

@@ -24,6 +24,7 @@ fs.writeFileSync(
   `import fs from "node:fs";
 const cmd = process.argv[2] || "help";
 fs.writeFileSync(${JSON.stringify(envLog)}, JSON.stringify({
+  agentsview: process.env.GLORP_AGENTSVIEW_BIN,
   ccusage: process.env.GLORP_CCUSAGE_BIN,
   codex: process.env.GLORP_CCUSAGE_CODEX_BIN,
   node: process.env.GLORP_NODE_BIN,
@@ -137,6 +138,22 @@ const missing = run(["doctor"], {
 });
 assert.equal(missing.status, 0, missing.stderr);
 assert.match(missing.stdout, /not found|No usage helper|blocked/i);
+
+const externalAgentsview = path.join(tempRoot, process.platform === "win32" ? "agentsview.cmd" : "agentsview");
+if (process.platform === "win32") {
+  fs.writeFileSync(externalAgentsview, "@echo agentsview fixture\r\n");
+} else {
+  fs.writeFileSync(externalAgentsview, "#!/bin/sh\necho agentsview fixture\n");
+  fs.chmodSync(externalAgentsview, 0o755);
+}
+
+const withAgentsview = run(["doctor"], {
+  GLORP_AGENTSVIEW_BIN: externalAgentsview,
+  GLORP_CONFIG_DIR: path.join(tempRoot, "config-agentsview")
+});
+assert.equal(withAgentsview.status, 0, withAgentsview.stderr);
+const agentsviewEnv = JSON.parse(fs.readFileSync(envLog, "utf8"));
+assert.equal(agentsviewEnv.agentsview, externalAgentsview);
 
 const fakeApp = path.join(tempRoot, "Glorp.app");
 fs.mkdirSync(fakeApp, { recursive: true });

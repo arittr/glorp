@@ -6,6 +6,8 @@ tags: usage, ccusage, codex, claude-code, provider
 depends_on: []
 ---
 
+> Legacy note: current canonical usage accounting is Tokenmaxxing-compatible `agentsview` total tokens. This story describes the original ccusage/effective-token MVP behavior.
+
 As a user, I want Glorp to read real AI coding token usage through ccusage-family tools so that my pet feeds from actual work rather than simulated commands.
 
 ## Acceptance Criteria

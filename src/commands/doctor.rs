@@ -2,7 +2,7 @@ use crate::{
     error::Result,
     paths::AppPaths,
     storage::{state::StateStore, usage_store::UsageStore},
-    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
+    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
 };
 use time::OffsetDateTime;
 
@@ -20,38 +20,52 @@ pub fn run() -> Result<()> {
     }
 
     let mut usage_store = UsageStore::open(&paths.usage_db)?;
-    let result = CcusageCommandProvider::from_environment().poll(&mut usage_store)?;
+    let provider = AgentsviewCommandProvider::from_environment();
+    let version = provider.discovered_version();
+    let result = provider.poll(&mut usage_store)?;
+    println!("provider: agentsview");
     if result.diagnostics.is_empty() {
         println!("helpers: found");
         println!("provider command health: ok");
+        println!("Tokenmaxxing-compatible: yes");
     } else {
         println!("helpers: not found or blocked");
+        println!("Tokenmaxxing-compatible: no");
         for diagnostic in &result.diagnostics {
             println!(
                 "{}: {} - {}",
                 diagnostic.provider_surface, diagnostic.code, diagnostic.message
             );
         }
-        println!("No usage helper was found.");
-        println!("Install the npm package with bundled helpers:");
-        println!("  npm install -g glorp");
-        println!("Or make sure this command is on PATH:");
-        println!("  ccusage");
         if result
             .diagnostics
             .iter()
-            .any(|d| d.provider_surface == "ccusage-codex")
+            .any(|diagnostic| diagnostic.code == "missing_helper")
         {
-            println!("Legacy fallback also available:");
-            println!("  ccusage-codex");
+            println!("Canonical provider blocked.");
+            println!("Install agentsview or set GLORP_AGENTSVIEW_BIN to its executable path.");
         }
     }
+    if let Some(version) = version {
+        println!("helper version: agentsview provider={version} parser={version}");
+    }
 
-    for helper in usage_store.provider_versions()? {
-        println!(
-            "helper version: {} provider={} parser={}",
-            helper.provider_surface, helper.provider_version, helper.parser_version
-        );
+    let provider_versions = usage_store.provider_versions()?;
+    if provider_versions.iter().any(is_legacy_provider_version) {
+        println!("legacy provider data: present");
+    }
+    for helper in provider_versions {
+        if is_legacy_provider_version(&helper) {
+            println!(
+                "legacy helper version: {} provider={} parser={}",
+                helper.provider_surface, helper.provider_version, helper.parser_version
+            );
+        } else {
+            println!(
+                "helper version: {} provider={} parser={}",
+                helper.provider_surface, helper.provider_version, helper.parser_version
+            );
+        }
     }
 
     let now = OffsetDateTime::now_utc();
@@ -69,4 +83,8 @@ pub fn run() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn is_legacy_provider_version(helper: &crate::storage::usage_store::ProviderVersionInfo) -> bool {
+    helper.provider_version.contains("ccusage") || helper.parser_version.contains("ccusage")
 }

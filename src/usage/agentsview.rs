@@ -41,6 +41,14 @@ impl AgentsviewCommandProvider {
         Self::new(AgentsviewDiscovery::discover().into())
     }
 
+    pub fn discovered_version(&self) -> Option<String> {
+        let helper = self.paths.agentsview.as_deref()?;
+        if !helper.exists() {
+            return None;
+        }
+        self.version(helper)
+    }
+
     fn poll_agent(
         &self,
         store: &mut UsageStore,
@@ -355,9 +363,15 @@ fn version_with_timeout(helper: &Path, timeout: Duration) -> Option<String> {
 }
 
 fn safe_version_line(bytes: &[u8]) -> Option<String> {
-    let line = String::from_utf8_lossy(bytes)
+    let raw_line = String::from_utf8_lossy(bytes)
         .lines()
         .next()?
+        .trim()
+        .to_string();
+    let line = raw_line
+        .split(" (")
+        .next()
+        .unwrap_or(raw_line.as_str())
         .trim()
         .to_string();
     if line.len() > 80
@@ -372,7 +386,7 @@ fn safe_version_line(bytes: &[u8]) -> Option<String> {
     }
     if line
         .chars()
-        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '/' | '@')))
+        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '@')))
     {
         return None;
     }

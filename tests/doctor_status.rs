@@ -49,9 +49,62 @@ fn doctor_reports_missing_helpers_with_setup_instructions() {
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicate::str::contains("ccusage"))
-        .stdout(predicate::str::contains("not found"))
-        .stdout(predicate::str::contains("npm install -g glorp"));
+        .stdout(predicate::str::contains("provider: agentsview"))
+        .stdout(predicate::str::contains("Tokenmaxxing-compatible: no"))
+        .stdout(predicate::str::contains("Canonical provider blocked."))
+        .stdout(predicate::str::contains("GLORP_AGENTSVIEW_BIN"));
+}
+
+#[test]
+fn doctor_reports_agentsview_provider_as_tokenmaxxing_compatible() {
+    let dir = tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider: agentsview"))
+        .stdout(predicate::str::contains("Tokenmaxxing-compatible: yes"))
+        .stdout(predicate::str::contains("agentsview v0.32.1"));
+}
+
+#[test]
+fn doctor_reports_missing_agentsview_as_canonical_provider_blocked() {
+    let dir = tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tokenmaxxing-compatible: no"))
+        .stdout(predicate::str::contains("Canonical provider blocked."))
+        .stdout(predicate::str::contains("agentsview helper was not found"))
+        .stdout(predicate::str::contains("GLORP_AGENTSVIEW_BIN"));
+}
+
+#[test]
+fn doctor_sanitizes_agentsview_helper_stderr() {
+    let dir = tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env(
+            "GLORP_AGENTSVIEW_BIN",
+            "tests/fixtures/helpers/agentsview-secret-stderr.mjs",
+        )
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("helper_exit"))
+        .stdout(predicate::str::contains("secret prompt").not())
+        .stdout(predicate::str::contains("secret response").not())
+        .stdout(predicate::str::contains("tool payload").not())
+        .stdout(predicate::str::contains("/Users/drew/private").not());
 }
 
 #[test]
@@ -60,18 +113,15 @@ fn doctor_reports_helper_versions_when_available() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_CCUSAGE_BIN", "tests/fixtures/helpers/ccusage-ok.mjs")
-        .env(
-            "GLORP_CCUSAGE_CODEX_BIN",
-            "tests/fixtures/helpers/ccusage-codex-ok.mjs",
-        )
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .arg("doctor")
         .assert()
         .success()
         .stdout(predicate::str::contains("helpers: found"))
         .stdout(predicate::str::contains("provider command health: ok"))
+        .stdout(predicate::str::contains("provider: agentsview"))
         .stdout(predicate::str::contains(
-            "helper version: unified provider=ccusage 18.0.11 parser=ccusage 18.0.11",
+            "helper version: agentsview provider=agentsview v0.32.1 parser=agentsview v0.32.1",
         ));
 }
 
@@ -82,8 +132,8 @@ fn diagnostics_do_not_print_raw_transcript_content() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env(
-            "GLORP_CCUSAGE_BIN",
-            "tests/fixtures/helpers/ccusage-prompts.mjs",
+            "GLORP_AGENTSVIEW_BIN",
+            "tests/fixtures/helpers/agentsview-secret-stderr.mjs",
         )
         .arg("doctor")
         .assert()
@@ -100,8 +150,8 @@ fn doctor_sanitizes_invalid_json_and_helper_stderr() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env(
-            "GLORP_CCUSAGE_BIN",
-            "tests/fixtures/helpers/ccusage-invalid-json.mjs",
+            "GLORP_AGENTSVIEW_BIN",
+            "tests/fixtures/helpers/agentsview-invalid-json.mjs",
         )
         .arg("doctor")
         .assert()
@@ -113,8 +163,8 @@ fn doctor_sanitizes_invalid_json_and_helper_stderr() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env(
-            "GLORP_CCUSAGE_BIN",
-            "tests/fixtures/helpers/ccusage-secret-stderr.mjs",
+            "GLORP_AGENTSVIEW_BIN",
+            "tests/fixtures/helpers/agentsview-secret-stderr.mjs",
         )
         .arg("doctor")
         .assert()
@@ -371,6 +421,6 @@ fn doctor_lists_discovered_sources_generically() {
         .assert()
         .success()
         .stdout(predicate::str::contains("source: gemini"))
-        .stdout(predicate::str::contains("ccusage"))
+        .stdout(predicate::str::contains("agentsview"))
         .stdout(predicate::str::contains("claude-code provider=").not());
 }

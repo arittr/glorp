@@ -154,6 +154,39 @@ fn wrapper_wires_bundled_helpers_without_disabling_path_fallback() {
 }
 
 #[test]
+fn tokenmaxxing_provider_contract_is_agentsview_canonical() {
+    let provider = read("src/usage/agentsview.rs");
+    assert!(provider.contains("GLORP_AGENTSVIEW_BIN"));
+    assert!(provider.contains("which::which(\"agentsview\")"));
+    assert!(provider.contains("--timezone"));
+    assert!(provider.contains("TOKENMAXXING_TIMEZONE"));
+    assert!(read("src/usage/day_axis.rs").contains("America/Los_Angeles"));
+
+    let readme = read("README.md");
+    assert!(readme.contains("agentsview"));
+    assert!(readme.contains("GLORP_AGENTSVIEW_BIN"));
+    assert!(!readme.contains("Glorp polls `ccusage` and `ccusage-codex` every ten seconds"));
+    assert!(readme.contains("`cache_read_weight` is accepted for older local config files"));
+    assert!(readme.contains("no longer affects canonical pet progression"));
+
+    let npm_readme = read("npm/glorp/README.md");
+    assert!(npm_readme.contains("agentsview"));
+    assert!(npm_readme.contains("GLORP_AGENTSVIEW_BIN"));
+
+    let legacy_note = "Legacy note: current canonical usage accounting is Tokenmaxxing-compatible `agentsview` total tokens.";
+    for story in [
+        "docs/superpowers/stories/story-001-usage-provider-ccusage.md",
+        "docs/superpowers/stories/story-004-effective-token-model.md",
+        "docs/superpowers/stories/story-010-npm-rust-packaging.md",
+    ] {
+        assert!(
+            read(story).contains(legacy_note),
+            "{story} is missing the legacy note"
+        );
+    }
+}
+
+#[test]
 fn cli_surface_excludes_forbidden_prototype_features() {
     let cli = read("src/cli.rs");
     for forbidden in [

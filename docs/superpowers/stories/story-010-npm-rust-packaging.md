@@ -6,6 +6,8 @@ tags: packaging, npm, rust, distribution
 depends_on: [story-001, story-007, story-009]
 ---
 
+> Legacy note: current canonical usage accounting is Tokenmaxxing-compatible `agentsview` total tokens. This story describes the original ccusage/effective-token MVP behavior.
+
 As a user, I want to install Glorp from npm and run it without manually wiring helper paths so that trying the pet is easy even though the core app is Rust.
 
 ## Acceptance Criteria

@@ -23,7 +23,11 @@ glorp init
 glorp watch
 ```
 
-The npm package bundles the native binary for your platform plus the `ccusage` helpers.
+The npm package bundles the native binary for your platform. Glorp's canonical
+usage provider is `agentsview`; install it separately and make sure
+`agentsview` is on `PATH`, or set `GLORP_AGENTSVIEW_BIN` to the executable
+path. Glorp counts cached input fully so its visible totals match
+Tokenmaxxing-style token totals.
 
 ### From source
 
@@ -32,7 +36,8 @@ cargo install --path .
 glorp doctor
 ```
 
-When installing from source, make sure `ccusage` and `ccusage-codex` are on `PATH`. `glorp doctor` will tell you what's missing.
+When installing from source, make sure `agentsview` is on `PATH` or set
+`GLORP_AGENTSVIEW_BIN`. `glorp doctor` will tell you what's missing.
 
 ## Quickstart
 
@@ -78,7 +83,10 @@ bundle also writes `manifest.json`, `review.md`, local assets, and
 
 ## How it works
 
-Glorp polls `ccusage` and `ccusage-codex` every ten seconds, diffs the running totals against a saved cursor, and turns positive deltas into pet food. Each delta is smeared across 6–12 ten-minute buckets so a heavy hour of coding doesn't crush a single tick.
+Glorp polls `agentsview` every ten seconds, diffs Tokenmaxxing-compatible
+running totals against a saved cursor, and turns positive deltas into pet food.
+Each delta is smeared across 6–12 ten-minute buckets so a heavy hour of coding
+doesn't crush a single tick.
 
 Stages are gated by **calibrated XP**: roughly "one active day at your typical pace." A 500M-token/day user and a 50k-token/day user evolve at the same wall-clock cadence.
 
@@ -94,16 +102,20 @@ S0 fluff   →  S1 fuzzling  →  S2 kit     →  S3 pup       →  S4 fuzz   �
 Config lives at `~/.config/glorp/config.toml` (or `$GLORP_CONFIG_DIR/config.toml`).
 
 ```toml
-# How much to weight cache_read tokens when computing effective tokens.
-# Default 0.03 reflects that cache reads are real work but cheap.
+# Legacy setting for old local config files. Canonical pet progression now
+# uses Tokenmaxxing-compatible total tokens, so this no longer changes normal
+# feeding or XP.
 cache_read_weight = 0.03
 ```
+
+`cache_read_weight` is accepted for older local config files but no longer affects canonical pet progression.
 
 ### Environment variables
 
 | Var | Purpose |
 |---|---|
 | `GLORP_CONFIG_DIR` | Override `~/.config/glorp/` (handy for sandboxing). |
+| `GLORP_AGENTSVIEW_BIN` | Pin a specific `agentsview` binary for canonical Tokenmaxxing-compatible usage. |
 | `GLORP_CCUSAGE_BIN` | Pin a specific `ccusage` binary. |
 | `GLORP_CCUSAGE_CODEX_BIN` | Pin a specific `ccusage-codex` binary. |
 | `GLORP_NODE_BIN` | Pin a specific `node` binary for JS helpers. |
