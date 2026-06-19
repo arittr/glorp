@@ -60,15 +60,13 @@ pub fn run() -> Result<()> {
                     recent_effective = update.recent_effective_tokens;
                 }
                 let status_now = OffsetDateTime::now_utc();
-                let mapper = LocalDayMapper::System;
+                let (today_start, today_end) =
+                    crate::usage::day_axis::tokenmaxxing_today_window(status_now);
                 today_effective = usage_store
-                    .today_effective_tokens(status_now, mapper)
+                    .canonical_total_tokens_between(today_start, today_end)
                     .unwrap_or(0.0);
-                let today_start = mapper
-                    .local_day_start(mapper.local_date(status_now))
-                    .to_offset(time::UtcOffset::UTC);
                 today_sources = usage_store
-                    .token_totals_by_source_between(today_start, status_now)
+                    .canonical_total_tokens_by_source_between(today_start, today_end)
                     .unwrap_or_default();
                 if let Some(diagnostic) = result.diagnostics.first() {
                     provider_line = format!("provider: blocked ({})", diagnostic.code);
@@ -119,7 +117,7 @@ pub fn run() -> Result<()> {
         state.vitals.fed, state.vitals.happiness, state.vitals.energy
     );
     println!(
-        "effective tokens ({usage_confidence}): today {:.0} recent {:.0} lifetime {:.0}",
+        "tokens ({usage_confidence}): today {:.0} recent {:.0} lifetime {:.0}",
         display_tokens(today_effective),
         display_tokens(recent_effective),
         display_tokens(state.lifetime_effective_tokens)

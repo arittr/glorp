@@ -26,6 +26,8 @@ pub struct WatchViewModel {
     pub fed: f64,
     pub happiness: f64,
     pub energy: f64,
+    /// Transitional field name. Values are canonical Tokenmaxxing total tokens
+    /// for tokenmaxxing_total_v1 rows.
     pub today_effective_tokens: f64,
     pub recent_daily_effective_tokens: Vec<f64>,
     pub source_breakdown: Vec<SourceUsageView>,
@@ -96,6 +98,8 @@ pub struct EarnedHabitatPropView {
 pub struct SourceUsageView {
     pub name: String,
     pub display_name: String,
+    /// Transitional field name. Values are canonical Tokenmaxxing total tokens
+    /// for tokenmaxxing_total_v1 rows.
     pub effective_tokens: f64,
 }
 
@@ -111,7 +115,11 @@ pub struct SourceHealthView {
     pub name: String,
     pub display_name: String,
     pub status: SourceStatus,
+    /// Transitional field name. Values are canonical Tokenmaxxing total tokens
+    /// for tokenmaxxing_total_v1 rows.
     pub today_effective_tokens: f64,
+    /// Transitional field name. Values are canonical Tokenmaxxing total tokens
+    /// for tokenmaxxing_total_v1 rows.
     pub bucket_effective_tokens: f64,
     pub diagnostic_code: Option<String>,
     pub diagnostic_message: Option<String>,

@@ -473,3 +473,31 @@ fn tokenmaxxing_day_axis_handles_los_angeles_dst_boundaries() {
         datetime!(2026-11-02 08:00 UTC)
     );
 }
+
+#[test]
+fn watch_token_totals_use_tokenmaxxing_day_axis_and_external_source_labels() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage_store = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026-06-19 06:30 UTC); // 2026-06-18 23:30 in Los Angeles.
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "codex".into(),
+            period_start: datetime!(2026-06-18 07:00 UTC),
+            observed_at: datetime!(2026-06-18 23:30 UTC),
+            bucket_at: datetime!(2026-06-18 23:30 UTC),
+            token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+            total_tokens: 669_369_020.0,
+            effective_tokens: 12.0,
+            ..NormalizedUsageEvent::for_test_at(now, 12.0)
+        })
+        .unwrap();
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(vm.today_effective_tokens, 669_369_020.0);
+    assert!(vm
+        .source_breakdown
+        .iter()
+        .any(|source| source.name == "codex" && source.effective_tokens == 669_369_020.0));
+}

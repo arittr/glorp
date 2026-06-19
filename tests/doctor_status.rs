@@ -29,7 +29,8 @@ fn status_is_pipe_friendly_when_pet_exists() {
         .success()
         .stdout(predicate::str::contains("mochi"))
         .stdout(predicate::str::contains("stage progress:"))
-        .stdout(predicate::str::contains("effective tokens"))
+        .stdout(predicate::str::contains("tokens"))
+        .stdout(predicate::str::contains("effective tokens").not())
         .stdout(predicate::str::contains("local-log-derived"))
         .stdout(predicate::str::contains("provider health:"))
         .stdout(predicate::str::contains("billing").not());
@@ -192,8 +193,9 @@ fn status_clamps_zero_usage_display() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "effective tokens (estimated): today 0 recent 0 lifetime 0",
+            "tokens (estimated): today 0 recent 0 lifetime 0",
         ))
+        .stdout(predicate::str::contains("effective tokens").not())
         .stdout(predicate::str::contains("provider health: blocked"))
         .stdout(predicate::str::contains("-0").not());
 }
@@ -216,7 +218,8 @@ fn status_persists_real_usage_delta_into_pet_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains("provider: local-log-derived"))
-        .stdout(predicate::str::contains("effective tokens"));
+        .stdout(predicate::str::contains("tokens"))
+        .stdout(predicate::str::contains("effective tokens").not());
 
     Command::cargo_bin("glorp")
         .unwrap()
@@ -226,7 +229,8 @@ fn status_persists_real_usage_delta_into_pet_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains("provider: local-log-derived"))
-        .stdout(predicate::str::contains("effective tokens"));
+        .stdout(predicate::str::contains("tokens"))
+        .stdout(predicate::str::contains("effective tokens").not());
 
     let state: PetState =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())

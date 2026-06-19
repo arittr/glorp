@@ -141,38 +141,30 @@ pub(crate) fn build_watch_view_model_at(
         },
     );
 
-    // Canonical local-day axis: the mapper is injectable so tests and Preview
-    // Lab can pin an offset while production resolves the OS timezone.
+    // Keep local time for presentation and pet behavior; visible token totals
+    // below use the Tokenmaxxing Los Angeles accounting day.
     let local_offset = mapper.offset_at(now);
-    let today_start = mapper
-        .local_day_start(mapper.local_date(now))
-        .to_offset(time::UtcOffset::UTC);
+    let (today_start, today_end) = crate::usage::day_axis::tokenmaxxing_today_window(now);
     let last_10m_start = now - Duration::minutes(10);
     // Query bounds for today's applied identity signals are inclusive on the
     // right; nudge the end by one second to include the current instant.
     let window_end = now + Duration::seconds(1);
 
     let today_totals = usage_store
-        .token_totals_by_source_between(today_start, now)
+        .canonical_total_tokens_by_source_between(today_start, today_end)
         .unwrap_or_default();
     let last_10m_totals = usage_store
-        .token_totals_by_source_between(last_10m_start, now)
+        .canonical_total_tokens_by_source_between(last_10m_start, window_end)
         .unwrap_or_default();
     let today_total_tokens: f64 = today_totals.iter().map(|(_, v)| *v).sum();
     let last_10m_total_tokens: f64 = last_10m_totals.iter().map(|(_, v)| *v).sum();
-    let today_applied_by_source = usage_store
-        .applied_effective_tokens_by_source_between(today_start, window_end)
-        .unwrap_or_default();
-    let source_diversity = derive_source_diversity(&today_applied_by_source);
+    let source_diversity = derive_source_diversity(&today_totals);
     let rhythm = derive_work_rhythm(&usage_store, today_start, window_end);
     let today_shape = usage_store
         .applied_token_shape_between(today_start, window_end)
         .unwrap_or_default();
     let token_shape = derive_token_shape_personality(today_shape);
-    let today_applied_total: f64 = usage_store
-        .applied_effective_tokens_between(today_start, window_end)
-        .unwrap_or(0.0);
-    let relative_intensity = derive_relative_intensity(today_applied_total, state.calibration);
+    let relative_intensity = derive_relative_intensity(today_total_tokens, state.calibration);
     let recovery = derive_recovery_pattern(&usage_store, now);
     let activity_identity = ActivityIdentityProfile {
         source_diversity,
