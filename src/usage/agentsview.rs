@@ -432,24 +432,44 @@ fn safe_version_line(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    #[test]
-    fn version_probe_uses_timeout() {
-        let dir = tempfile::tempdir().unwrap();
-        let helper = dir.path().join("sleeping-version-helper");
-        let mut file = std::fs::File::create(&helper).unwrap();
-        writeln!(
-            file,
-            "#!/usr/bin/env bash\nif [[ \"$1\" == \"--version\" ]]; then sleep 2; echo 'agentsview v0.32.1'; exit 0; fi\nexit 0"
-        )
-        .unwrap();
+    fn helper_path(dir: &tempfile::TempDir, stem: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            dir.path().join(format!("{stem}.cmd"))
+        }
+        #[cfg(not(windows))]
+        {
+            dir.path().join(stem)
+        }
+    }
+
+    fn write_helper(path: &Path, unix_body: &str, windows_body: &str) {
+        let mut file = std::fs::File::create(path).unwrap();
+        if cfg!(windows) {
+            writeln!(file, "{windows_body}").unwrap();
+        } else {
+            writeln!(file, "{unix_body}").unwrap();
+        }
         drop(file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    #[test]
+    fn version_probe_uses_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = helper_path(&dir, "sleeping-version-helper");
+        write_helper(
+            &helper,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == \"--version\" ]]; then sleep 2; echo 'agentsview v0.32.1'; exit 0; fi\nexit 0",
+            "@echo off\nif \"%~1\"==\"--version\" (\n  powershell -NoProfile -Command \"Start-Sleep -Seconds 2\" >NUL\n  echo agentsview v0.32.1\n  exit /b 0\n)\nexit /b 0",
+        );
 
         let started = Instant::now();
         let version = version_with_timeout(&helper, Duration::from_millis(25));
@@ -464,19 +484,12 @@ mod tests {
     #[test]
     fn usage_timeout_returns_helper_timeout_diagnostic() {
         let dir = tempfile::tempdir().unwrap();
-        let helper = dir.path().join("sleeping-usage-helper");
-        let mut file = std::fs::File::create(&helper).unwrap();
-        writeln!(
-            file,
-            "#!/usr/bin/env bash\nif [[ \"$1\" == \"--version\" ]]; then echo 'agentsview v0.32.1'; exit 0; fi\nsleep 2\necho '{{\"daily\":[]}}'"
-        )
-        .unwrap();
-        drop(file);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let helper = helper_path(&dir, "sleeping-usage-helper");
+        write_helper(
+            &helper,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == \"--version\" ]]; then echo 'agentsview v0.32.1'; exit 0; fi\nsleep 2\necho '{{\"daily\":[]}}'",
+            "@echo off\nif \"%~1\"==\"--version\" (\n  echo agentsview v0.32.1\n  exit /b 0\n)\npowershell -NoProfile -Command \"Start-Sleep -Seconds 2\" >NUL\necho {\"daily\":[]}",
+        );
         let provider = AgentsviewCommandProvider::new(AgentsviewPaths {
             agentsview: Some(helper),
         });
