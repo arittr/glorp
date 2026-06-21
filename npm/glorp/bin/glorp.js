@@ -56,8 +56,8 @@ function resolvePackageBin(pkg, binName) {
 }
 
 function resolveCompanionApp(env) {
-  if (process.platform !== "darwin") return undefined;
   if (env.GLORP_COMPANION_APP_FOR_TEST) return env.GLORP_COMPANION_APP_FOR_TEST;
+  if (process.platform !== "darwin") return undefined;
   const pkgJson = resolvePackageJson(platformPackageName());
   if (!pkgJson) return undefined;
   const app = path.join(path.dirname(pkgJson), "app", "Glorp.app");
