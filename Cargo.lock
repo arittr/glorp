@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "glorp"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_cmd",
  "clap",
