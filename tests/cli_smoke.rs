@@ -35,10 +35,15 @@ fn help_lists_mvp_commands_and_no_manual_feed() {
 #[test]
 fn watch_accepts_hidden_dev_pet_selector() {
     let mut cmd = Command::cargo_bin("glorp").unwrap();
+    let usage = if cfg!(windows) {
+        "Usage: glorp.exe watch"
+    } else {
+        "Usage: glorp watch"
+    };
     cmd.args(["watch", "--pet", "ghost", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Usage: glorp watch"))
+        .stdout(predicate::str::contains(usage))
         .stdout(predicate::str::contains("--pet").not());
 }
 
