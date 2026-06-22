@@ -129,6 +129,7 @@ pub(super) fn tint_pet_styles_for_phase(
     s.pet_mouth = tint_style_for_phase(s.pet_mouth, phase, blend);
     s.pet_accent = tint_style_for_phase(s.pet_accent, phase, blend);
     s.pet_pattern = tint_style_for_phase(s.pet_pattern, phase, blend);
+    s.pet_particle = tint_style_for_phase(s.pet_particle, phase, blend);
     s
 }
 
@@ -199,6 +200,7 @@ pub(super) fn lift_pet_styles_for_activity(
     s.pet_mouth = activity_lift_style(s.pet_mouth, activity_level, color_capability);
     s.pet_accent = activity_lift_style(s.pet_accent, activity_level, color_capability);
     s.pet_pattern = activity_lift_style(s.pet_pattern, activity_level, color_capability);
+    s.pet_particle = activity_lift_style(s.pet_particle, activity_level, color_capability);
     s
 }
 
@@ -238,6 +240,7 @@ pub(super) fn darken_pet_styles(base: &SemanticStyles, multiplier: f32) -> Seman
     s.pet_mouth = darken_style(s.pet_mouth, multiplier);
     s.pet_accent = darken_style(s.pet_accent, multiplier);
     s.pet_pattern = darken_style(s.pet_pattern, multiplier);
+    s.pet_particle = darken_style(s.pet_particle, multiplier);
     s
 }
 
@@ -259,7 +262,7 @@ pub(super) fn brighten_pet_role(
         PaletteRoleName::Pattern => s.pet_pattern = brighten_style(s.pet_pattern, multiplier),
         PaletteRoleName::Eye => s.pet_eye = brighten_style(s.pet_eye, multiplier),
         PaletteRoleName::Mouth => s.pet_mouth = brighten_style(s.pet_mouth, multiplier),
-        PaletteRoleName::Particle => s.pet_accent = brighten_style(s.pet_accent, multiplier),
+        PaletteRoleName::Particle => s.pet_particle = brighten_style(s.pet_particle, multiplier),
     }
     s
 }
@@ -316,6 +319,7 @@ pub(super) fn seed_pet_palette(
     s.pet_mouth = with_rgb(s.pet_mouth, palette.mouth);
     s.pet_accent = with_rgb(s.pet_accent, palette.accent);
     s.pet_pattern = with_rgb(s.pet_pattern, palette.pattern);
+    s.pet_particle = with_rgb(s.pet_particle, palette.particle);
     s
 }
 
@@ -337,7 +341,7 @@ pub(super) fn palette_from_styles(styles: &SemanticStyles) -> crate::pet::palett
         mouth: rgb(styles.pet_mouth, default.mouth),
         accent: rgb(styles.pet_accent, default.accent),
         pattern: rgb(styles.pet_pattern, default.pattern),
-        particle: rgb(styles.pet_accent, default.particle),
+        particle: rgb(styles.pet_particle, default.particle),
     }
 }
 
@@ -381,5 +385,39 @@ mod tests {
         } else {
             panic!("lifted body should stay Rgb");
         }
+    }
+
+    #[test]
+    fn live_round_trip_preserves_distinct_particle_hue() {
+        use crate::pet::generation::{Species, VisibleTraits};
+        use crate::pet::palette::resolve_pet_palette;
+        let resolved = resolve_pet_palette(
+            Species::Crystal,
+            &VisibleTraits {
+                eyes: "o o".into(),
+                mouth: "w".into(),
+                pattern: "...".into(),
+                accent: "*".into(),
+                palette_index: 0,
+                morph_index: 0,
+                morph_pup_index: 0,
+                seed_hue: 0,
+                saturation_percent: 90,
+            },
+        );
+        assert_ne!(
+            resolved.particle, resolved.accent,
+            "precondition: Crystal particle must differ from accent in resolve"
+        );
+        let styles = seed_pet_palette(&semantic_styles(), &resolved);
+        let round_tripped = palette_from_styles(&styles);
+        assert_eq!(
+            round_tripped.particle, resolved.particle,
+            "live SemanticStyles round-trip must preserve the distinct particle hue"
+        );
+        assert_ne!(
+            round_tripped.particle, round_tripped.accent,
+            "live particle must not collapse to accent"
+        );
     }
 }
