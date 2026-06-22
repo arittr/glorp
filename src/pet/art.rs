@@ -843,6 +843,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stage_template_lines_delegates_to_apply_interior_texture() {
+        // stage_template_lines is the public render boundary; it must call through to
+        // apply_interior_texture. Guards against the delegation being accidentally
+        // severed (line-count alone would not catch that).
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                let base = stage_base_template(species, stage);
+                for seed in [0u64, 42, 9999, 123_456_789] {
+                    assert_eq!(
+                        stage_template_lines(species, stage, seed),
+                        apply_interior_texture(base, species, stage, seed),
+                        "{species:?} {stage:?} seed={seed}: stage_template_lines must delegate to apply_interior_texture"
+                    );
+                }
+            }
+        }
+    }
+
     // Inclusive [lo, hi] occupied-cell band per stage (the audit target for the
     // Phase 2 art). Disjoint and strictly increasing.
     const STAGE_CELL_BANDS: [(usize, usize); 7] = [
