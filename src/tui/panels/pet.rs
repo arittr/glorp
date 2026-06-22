@@ -82,9 +82,24 @@ const MOTE_GLYPHS: &[char] = &['·', '.', ','];
 /// the pet drifts across the full habitat regardless of where `vm.wander_offset_x`
 /// is set. `vm.wander_offset_x` is ignored at render time; it's only for test
 /// inspection.
+/// Top-y of the pet's 13×10 rect so the silhouette's lowest non-blank row
+/// (its "feet") lands one row above the habitat floor row, instead of being
+/// vertically centered. `art_lines` are the framed 10 rows (`vm.pet_art`);
+/// `feet_row` returns the lowest non-blank framed row. Clamps to `area.y`
+/// when the area is too short for the pet (degenerate, no panic).
+pub(crate) fn pet_feet_anchor_y(area: Rect, art_lines: &[String], pet_h: u16) -> u16 {
+    let floor_row = area.y + area.height.saturating_sub(1);
+    // Reserve one row for the floor band beneath the feet.
+    let feet_target_row = floor_row.saturating_sub(1);
+    let feet =
+        crate::pet::render::feet_row(art_lines).unwrap_or((pet_h as usize).saturating_sub(1));
+    let anchor = feet_target_row.saturating_sub(feet as u16);
+    anchor.max(area.y)
+}
+
 pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     let cx = area.x + area.width.saturating_sub(PET_W) / 2;
-    let cy = area.y + area.height.saturating_sub(PET_H) / 2;
+    let cy = pet_feet_anchor_y(area, &vm.pet_art, PET_H);
     // When `area` is smaller than the pet, the upper clamp bound would fall
     // below `area.x` / `area.y`, which makes `i32::clamp` panic. `.max(...)`
     // ensures min ≤ max so the rect collapses to `area`'s origin instead.
@@ -820,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn pet_panel_renders_pet_centered_in_tall_rect() {
+    fn pet_panel_renders_pet_grounded_in_tall_rect() {
         let vm = WatchViewModel::fixture();
         let panel = PetPanel;
         let ctx = test_context();
@@ -1695,5 +1710,70 @@ mod tests {
         };
         assert!(nr <= dr, "night should not warm/brighten red channel");
         let _ = (db, nb);
+    }
+
+    #[test]
+    fn pet_sits_in_the_lower_half_at_narrow_column_width() {
+        // 40-wide is the real pet column. In a tall area the lowest pet glyph row
+        // must be in the lower half — proof the pet is grounded, not centered.
+        let vm = vm_with_real_pet();
+        let panel = PetPanel;
+        let ctx = test_context();
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut lowest_pet_row = 0u16;
+        for y in 0..24u16 {
+            for x in 0..40u16 {
+                let sym = buf[(x, y)].symbol();
+                // pet art uses block + ascii glyphs; floor uses dot texture.
+                if matches!(sym.chars().next(), Some(c) if "▟▙█▓▒owO".contains(c)) {
+                    lowest_pet_row = lowest_pet_row.max(y);
+                }
+            }
+        }
+        assert!(
+            lowest_pet_row >= 12,
+            "grounded pet's lowest glyph should be in the lower half (row >= 12), got {lowest_pet_row}"
+        );
+    }
+
+    #[test]
+    fn pet_feet_anchor_drops_feet_one_row_above_floor() {
+        // 13×10 frame: art occupies frame rows 1..=8. A pet whose lowest non-blank
+        // art row is art-row 5 (frame row 6) should anchor so frame row 6 lands at
+        // habitat_floor_row - 1, i.e. the feet sit just above the floor band.
+        let area = Rect::new(0, 0, 13, 24);
+        // 10 lines, last non-blank art line at index 5; indices 6,7 blank; plus the
+        // two particle-gutter frame rows are NOT part of art_lines here — art_lines
+        // are the 8 art rows the renderer passes (vm.pet_art is the framed 10 rows;
+        // feet_row operates on the framed lines).
+        let art_lines: Vec<String> = vec![
+            "             ".to_string(), // 0 gutter
+            "    ▟██▙     ".to_string(), // 1
+            "   ▓██████   ".to_string(), // 2
+            "   ▒o o▒     ".to_string(), // 3
+            "   ▒ w ▒     ".to_string(), // 4
+            "   ▙▒▒▟      ".to_string(), // 5 feet (lowest non-blank)
+            "             ".to_string(), // 6
+            "             ".to_string(), // 7
+            "             ".to_string(), // 8
+            "             ".to_string(), // 9 gutter
+        ];
+        let y = pet_feet_anchor_y(area, &art_lines, PET_H);
+        // feet at framed row 5; floor row = 23; we want framed row 5 -> row 22.
+        // So pet_rect.y = 22 - 5 = 17.
+        assert_eq!(y, 17, "feet should land one row above the floor");
+    }
+
+    #[test]
+    fn pet_feet_anchor_clamps_when_area_shorter_than_pet() {
+        let area = Rect::new(0, 5, 13, 4); // shorter than PET_H=10
+        let art_lines: Vec<String> = (0..10).map(|_| "      X      ".to_string()).collect();
+        let y = pet_feet_anchor_y(area, &art_lines, PET_H);
+        assert_eq!(y, area.y, "degenerate area clamps to origin, no underflow");
     }
 }
