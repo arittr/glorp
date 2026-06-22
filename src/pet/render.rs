@@ -107,8 +107,6 @@ fn gutter_content_for(species: Species, stage: Stage) -> GutterContent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationProfile {
-    pub breath_period: u8,
-    pub breath_hold: u8,
     pub blink_average: u8,
     pub blink_jitter: u8,
 }
@@ -163,38 +161,26 @@ pub fn render_pet(
 pub fn species_animation_profile(species: Species) -> AnimationProfile {
     match species {
         Species::Fuzz => AnimationProfile {
-            breath_period: 16,
-            breath_hold: 4,
             blink_average: 32,
             blink_jitter: 12,
         },
         Species::Blob => AnimationProfile {
-            breath_period: 13,
-            breath_hold: 5,
             blink_average: 40,
             blink_jitter: 14,
         },
         Species::Ghost => AnimationProfile {
-            breath_period: 11,
-            breath_hold: 3,
             blink_average: 50,
             blink_jitter: 18,
         },
         Species::Glitch => AnimationProfile {
-            breath_period: 9,
-            breath_hold: 2,
             blink_average: 24,
             blink_jitter: 8,
         },
         Species::Crystal => AnimationProfile {
-            breath_period: 19,
-            breath_hold: 6,
             blink_average: 60,
             blink_jitter: 22,
         },
         Species::Mech => AnimationProfile {
-            breath_period: 17,
-            breath_hold: 4,
             blink_average: 22,
             blink_jitter: 6,
         },
@@ -1146,5 +1132,17 @@ mod tests {
                  a soft body must read as figure with color off"
             );
         }
+    }
+
+    #[test]
+    fn animation_profile_has_no_breath_fields() {
+        // Construction must compile with ONLY blink fields — proves the dead
+        // divergent breath table is gone and animator.rs owns breath alone.
+        let p = AnimationProfile {
+            blink_average: 30,
+            blink_jitter: 10,
+        };
+        assert_eq!(p.blink_average, 30);
+        assert_eq!(p.blink_jitter, 10);
     }
 }
