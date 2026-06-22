@@ -65,7 +65,7 @@ pub(crate) fn stage_base_template(species: Species, stage: Stage) -> &'static Te
         Species::Ghost => ghost_base(stage),
         Species::Glitch => glitch_base(stage),
         Species::Crystal => crystal_base(stage),
-        Species::Mech => legacy_base_template(species, stage),
+        Species::Mech => mech_base(stage),
     }
 }
 
@@ -152,21 +152,25 @@ fn crystal_base(stage: Stage) -> &'static Template {
     }
 }
 
-// Phase-1 stage dispatch for species whose validated silhouettes are not yet
-// wired (Blob/Ghost/Glitch/Crystal/Mech). Delegates to the per-species
-// tiny/pup/adult template pools. Task 8 removes this once all species are wired.
-fn legacy_base_template(species: Species, stage: Stage) -> &'static Template {
+// Validated Mech · Bulwark cast: box-draw chassis silhouette (┌─┐ head,
+// ┴─┴ shoulder bolts, ▟█▙ heavy armor) that grows unambiguously across
+// every stage. {eyes}/{mouth} slots wired at S2–S6 so the per-mood expression
+// vocabulary applies (Phase 3 face-coloring also relies on the slot).
+// S5/S6 faces are slotted per Spec Rendering #5 — the silhouette is
+// transcribed verbatim from the art-assets doc; only the 2 face rows per
+// stage are wired to the spec-mandated slot instead of baked glyphs.
+// Validated cell ramp [4,10,20,31,44,52,69].
+// Transcribed from
+// docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
+fn mech_base(stage: Stage) -> &'static Template {
     match stage {
-        Stage::S0 => tiny_template(species, 0),
-        Stage::S1 => tiny_template(species, 1),
-        Stage::S2 => tiny_template(species, 2),
-        Stage::S3 => &pup_templates(species)[0],
-        Stage::S4 => &adult_templates(species)[0],
-        Stage::S5 => &adult_templates(species)[1],
-        Stage::S6 => {
-            let adults = adult_templates(species);
-            &adults[adults.len() - 1]
-        }
+        Stage::S0 => &MECH_S0,
+        Stage::S1 => &MECH_S1,
+        Stage::S2 => &MECH_S2,
+        Stage::S3 => &MECH_S3,
+        Stage::S4 => &MECH_S4,
+        Stage::S5 => &MECH_S5,
+        Stage::S6 => &MECH_S6,
     }
 }
 
@@ -195,39 +199,6 @@ pub(crate) fn stage_template_lines(species: Species, stage: Stage, seed: u64) ->
 
 // Each species template is 8 lines x 11 chars.
 type Template = [&'static str; 8];
-
-fn pup_templates(species: Species) -> &'static [Template] {
-    match species {
-        Species::Fuzz => FUZZ_PUP,
-        Species::Blob => BLOB_PUP,
-        Species::Ghost => GHOST_PUP,
-        Species::Glitch => GLITCH_PUP,
-        Species::Crystal => CRYSTAL_PUP,
-        Species::Mech => MECH_PUP,
-    }
-}
-
-fn adult_templates(species: Species) -> &'static [Template] {
-    match species {
-        Species::Fuzz => FUZZ_ADULT,
-        Species::Blob => BLOB_ADULT,
-        Species::Ghost => GHOST_ADULT,
-        Species::Glitch => GLITCH_ADULT,
-        Species::Crystal => CRYSTAL_ADULT,
-        Species::Mech => MECH_ADULT,
-    }
-}
-
-fn tiny_template(species: Species, index: usize) -> &'static Template {
-    match species {
-        Species::Fuzz => &FUZZ_TINY[index],
-        Species::Blob => &BLOB_TINY[index],
-        Species::Ghost => &GHOST_TINY[index],
-        Species::Glitch => &GLITCH_TINY[index],
-        Species::Crystal => &CRYSTAL_TINY[index],
-        Species::Mech => &MECH_TINY[index],
-    }
-}
 
 // ── Fuzz ──────────────────────────────────────────────────────────
 // Hearthfloof: ear-cones + mitten-feet + heart-locket, block-mass edges (▒▓█).
@@ -303,103 +274,6 @@ const FUZZ_S6: Template = [
     " ▓██▒▒▒██▓ ",
     " ▓██▒▒▒██▓ ",
     " ▙██▒▘▝▒██▟",
-];
-
-// Chunky filled cat-creature: /\_/\ ears, two-tone ░▒ fur shading, and a tail
-// present from the pup (S3) onward. Morph 0 wears a small resting curl; morphs
-// 1-3 (S5+ via elder_morph_index) each sport a distinct, showier tail.
-const FUZZ_PUP: &[Template] = &[[
-    "           ",
-    "   /\\_/\\   ",
-    "  (\u{2591}{eyes}\u{2591})  ",
-    "   ='{mouth}'=   ",
-    " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
-    "  \\\u{2591}{accent}\u{2591}/ ~  ",
-    "    d b ~  ",
-    "           ",
-]];
-
-const FUZZ_ADULT: &[Template] = &[
-    // Morph 0 — S4 fuzz: chunky cat-body with a small resting tail curl.
-    [
-        "   /\\_/\\   ",
-        "  (\u{2591}{eyes}\u{2591})  ",
-        "   ='{mouth}'=   ",
-        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\ ",
-        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}) ",
-        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/\\ ",
-        "   d   b ) ",
-        "           ",
-    ],
-    // Morph 1 — short curved tail extending behind to the right.
-    [
-        "   /\\_/\\   ",
-        "  (\u{2591}{eyes}\u{2591})  ",
-        "   ='{mouth}'=   ",
-        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
-        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591})~",
-        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/ ~",
-        "   d   b ~ ",
-        "           ",
-    ],
-    // Morph 2 — long fluffy tail dangling down behind the body.
-    [
-        "   /\\_/\\   ",
-        "  (\u{2591}{eyes}\u{2591})  ",
-        "   ='{mouth}'=   ",
-        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
-        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}} ",
-        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/\u{2591} ",
-        "   d   b\u{2591}  ",
-        "        '  ",
-    ],
-    // Morph 3 — tail arched up high over the back, curled forward.
-    [
-        "          )",
-        "   /\\_/\\  )",
-        "  (\u{2591}{eyes}\u{2591}) )",
-        "   ='{mouth}'=  )",
-        " /\u{2591}\u{2592}{pattern}\u{2592}\u{2591}\\)",
-        " (\u{2591}\u{2592}\u{2591}{accent}\u{2591}\u{2592}\u{2591}) ",
-        "  \\\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}/  ",
-        "   d   b   ",
-    ],
-];
-
-const FUZZ_TINY: &[Template; 3] = &[
-    // S0 fluff — small chunky fluffball.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    \u{2591}\u{2591}\u{2591}    ",
-        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
-        "    ' '    ",
-    ],
-    // S1 fuzzling — small forming creature, single ear emerging.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    /\\     ",
-        "   \u{2591}\u{2592}\u{2591}\u{2592}\u{2591}   ",
-        "   (\u{2591}\u{2591}\u{2591})   ",
-        "    ' '    ",
-    ],
-    // S2 kit — small cat with face and ears.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "   /\\_/\\   ",
-        "  (\u{2591}{eyes}\u{2591})  ",
-        "   ='{mouth}'=   ",
-        "   \\\u{2591}\u{2592}\u{2591}/   ",
-        "    d b    ",
-    ],
 ];
 
 // ── Blob ──────────────────────────────────────────────────────────
@@ -480,105 +354,6 @@ const BLOB_S6: Template = [
     "(\u{25c6}\u{2593}\u{25c9}\u{25c6}\u{25c9}\u{2593}\u{25c6}\u{2592}) ",
     "\u{259d}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2598} ",
     " |\u{250a}|\u{254e}|\u{250a}|\u{254e}  ",
-];
-
-// Gooey gelatin: ( ) rounded walls (Blob owns "round"), gravity shading
-// (light \u{2591} cap -> heavy \u{2592}\u{2593} belly) with a \u{b0} specular
-// highlight, a lopsided cap, and uneven trailing drips so it reads as melting
-// rather than a tidy capsule.
-const BLOB_PUP: &[Template] = &[[
-    "           ",
-    "   .--.    ",
-    "  (\u{2591}\u{2591}\u{2591}\u{b0})   ",
-    " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
-    " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
-    " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
-    "  (\u{2592}\u{2593}{accent}\u{2593}\u{2592})  ",
-    "   \u{b0}  .    ",
-]];
-
-const BLOB_ADULT: &[Template] = &[
-    // Morph 0 — classic gooey melt: lopsided cap, \u{b0} specular, heavy belly,
-    // uneven drips.
-    [
-        "   .--.    ",
-        "  (\u{2591}\u{2591}\u{2591}\u{b0})   ",
-        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
-        " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
-        " (\u{2592}\u{2593}\u{2593}{accent}\u{2593}\u{2593}\u{2592}) ",
-        "  \\\u{2592}\u{2593}\u{2593}\u{2592}/   ",
-        "   \u{b0}. \u{b0}    ",
-    ],
-    // Morph 1 — wobble blob shedding bubbles up off the top.
-    [
-        "  \u{b0} . \u{b0}    ",
-        "  (\u{2591}\u{2591}\u{2591}\u{2591})   ",
-        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
-        " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
-        " (\u{2592}\u{2593}\u{2591}{accent}\u{2591}\u{2593}\u{2592}) ",
-        "  \\\u{2592}\u{2593}\u{2592}/    ",
-        "   \u{b0} \u{b0}     ",
-    ],
-    // Morph 2 — mega-blob: full-width body, gravity-shaded, sits low.
-    [
-        "   .---.   ",
-        "  /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\  ",
-        " /\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\\ ",
-        "(\u{2591}\u{2592}\u{2591}{eyes}\u{2591}\u{2592}\u{2591})",
-        "(\u{2591}\u{2592}\u{2591}\u{2591}{mouth}\u{2591}\u{2591}\u{2592}\u{2591})",
-        "(\u{2592}\u{2593}\u{2591}{pattern}\u{2591}\u{2593}\u{2592})",
-        "(\u{2592}\u{2593}\u{2593}\u{2591}{accent}\u{2591}\u{2593}\u{2593}\u{2592})",
-        " \\\u{2592}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2592}/ ",
-    ],
-    // Morph 3 — twin blob: main body with two co-blobs budding at the base.
-    [
-        "   .--.    ",
-        "  (\u{2591}\u{2591}\u{2591})    ",
-        " (\u{2591}\u{2591}{eyes}\u{2591}\u{2591}) ",
-        " (\u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}) ",
-        " (\u{2592}\u{2592}{pattern}\u{2592}\u{2592}) ",
-        " (\u{2592}\u{2593}\u{2591}{accent}\u{2591}\u{2593}\u{2592}) ",
-        "  \\\u{2592}\u{2593}\u{2592}/    ",
-        " (o) \u{b0} (o) ",
-    ],
-];
-
-const BLOB_TINY: &[Template; 3] = &[
-    // S0 droplet — a single drop forming, with a tiny specular glint.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "     .     ",
-        "    \u{2591}\u{2591}\u{2591}    ",
-        "    \u{b0}.\u{b0}    ",
-    ],
-    // S1 blip — small gooey droplet.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    .-.    ",
-        "   (\u{2591}\u{2591}\u{2591})   ",
-        "   (\u{2592}\u{2592}\u{2592})   ",
-        "    \u{b0} .    ",
-    ],
-    // S2 globule — small melting blob with eyes and mouth.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "   .--.    ",
-        "  (\u{2591}\u{2591}\u{2591}\u{b0})   ",
-        "  (\u{2591}{eyes}\u{2591})  ",
-        "  (\u{2592}\u{2592}{mouth}\u{2592}\u{2592})  ",
-        "   \u{b0}. .    ",
-    ],
 ];
 
 // ── Ghost ─────────────────────────────────────────────────────────
@@ -735,191 +510,6 @@ const GLITCH_S6: Template = [
     "▝▟▙▟▙▟▙▟▙▟▘",
 ];
 
-// Legacy Ghost pools (pre-validation). Retained because the legacy dispatch
-// still serves Glitch/Crystal/Mech until their tasks wire the validated cast.
-// Billowing edgeless sheet: rounded dome crown, soft two-tone \u{2592}/\u{2591}
-// body that fades at the edges (no rigid side walls), and a scalloped \_/ hem.
-// Each morph varies the crown (dome / hood / tattered / dense) and the hem
-// (bumps / wavy tail / ragged / tangled tendrils) so same-stage pets read as
-// distinct specters rather than recolored siblings.
-const GHOST_PUP: &[Template] = &[[
-    "           ",
-    "   .---.   ",
-    "  \u{2591}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2591}  ",
-    "  \u{2591}\u{2592}{eyes}\u{2592}\u{2591}  ",
-    "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
-    "  \u{2591}\u{2592}{pattern}\u{2592}\u{2591}  ",
-    " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
-    "  \\_/\\_/\\  ",
-]];
-
-const GHOST_ADULT: &[Template] = &[
-    // Morph 0 — classic ghost: dome crown, body billows wider toward the
-    // base, three rounded \_/ hem bumps.
-    [
-        "   .---.   ",
-        "  \u{2591}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2591}  ",
-        "  \u{2591}\u{2592}{eyes}\u{2592}\u{2591}  ",
-        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
-        " \u{2591}\u{2592}\u{2592}{pattern}\u{2592}\u{2592}\u{2591} ",
-        " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
-        " \u{2591}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2591} ",
-        " \\_/\\_/\\_/ ",
-    ],
-    // Morph 1 — hooded wraith: peaked crown, narrow tapering body, a single
-    // wavy tail trailing off.
-    [
-        "    .^.    ",
-        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
-        "   \u{2591}{eyes}\u{2591}   ",
-        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
-        "  \u{2591}\u{2592}{pattern}\u{2592}\u{2591}  ",
-        "  \u{2591}\u{2592}\u{2592}{accent}\u{2592}\u{2592}\u{2591}  ",
-        "   \\_/\\_   ",
-        "    ~ ~    ",
-    ],
-    // Morph 2 — tattered specter: frayed ~^~ crown, dappled body, ragged
-    // uneven hem.
-    [
-        "   ~^~^~   ",
-        "  \u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}  ",
-        "  \u{2591}\u{2592}{eyes}\u{2592}\u{2591}  ",
-        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
-        " \u{2591}\u{2592}\u{2591}{pattern}\u{2591}\u{2592}\u{2591} ",
-        " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
-        "  \u{2592}\u{2591} \u{2591} \u{2591}\u{2592}  ",
-        "  ~  ~  ~  ",
-    ],
-    // Morph 3 — dense revenant: dark \u{2593}-cored body, billowing wide, with
-    // long tangled tendrils.
-    [
-        "   .---.   ",
-        "  \u{2591}\u{2592}\u{2593}\u{2593}\u{2593}\u{2592}\u{2591}  ",
-        "  \u{2591}\u{2593}{eyes}\u{2593}\u{2591}  ",
-        "  \u{2591}\u{2592}\u{2591}{mouth}\u{2591}\u{2592}\u{2591}  ",
-        " \u{2591}\u{2592}\u{2593}{pattern}\u{2593}\u{2592}\u{2591} ",
-        " \u{2591}\u{2592}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2592}\u{2591} ",
-        "  \u{2591} \u{2592} \u{2591} \u{2592}  ",
-        "  \\ \\ / /  ",
-    ],
-];
-
-const GHOST_TINY: &[Template; 3] = &[
-    // S0 whisper — a wispy mark drifting.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    .-.    ",
-        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
-        "    ~ ~    ",
-    ],
-    // S1 wisp — small forming sheet, two-tone shimmer.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    .-.    ",
-        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
-        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
-        "   \\_/\\_   ",
-    ],
-    // S2 shade — small ghost sheet with eyes and mouth.
-    [
-        "           ",
-        "           ",
-        "    .-.    ",
-        "   \u{2591}\u{2592}\u{2592}\u{2592}\u{2591}   ",
-        "   \u{2591}{eyes}\u{2591}   ",
-        "   \u{2591}\u{2591}{mouth}\u{2591}\u{2591}   ",
-        "   \\_/\\_   ",
-        "           ",
-    ],
-];
-
-// ── Glitch ────────────────────────────────────────────────────────
-// S3 thread: a torn, misaligned frame (the broken silhouette is the point) —
-// matches the adult morphs' offset \u{258c}\u{2590} edges rather than a clean box.
-const GLITCH_PUP: &[Template] = &[[
-    "           ",
-    "   \u{2591}#_\u{2591}    ",
-    "  \u{258c}\u{2580}\u{2580} \u{2580}\u{2590}   ",
-    "  \u{258c} {eyes}\u{2590}#  ",
-    "  \u{258c} {mouth}_\u{258c}    ",
-    "  \u{258c}{pattern}\u{2590}    ",
-    "   \u{2580}\u{2584}{accent}\u{2584}\u{2580}   ",
-    "  _\u{258c}\u{2591} \u{2591}\u{2590}_  ",
-]];
-
-const GLITCH_ADULT: &[Template] = &[
-    [
-        "  \u{2591}#::_ \u{2591}  ",
-        " \u{258c}\u{2580}\u{2580}\u{2580} \u{2580}\u{2590}   ",
-        " \u{258c} {eyes} \u{2590}#  ",
-        " \u{258c}  {mouth}_ \u{258c}   ",
-        " \u{258c}{pattern} \u{2590}    ",
-        "  \u{2580}\u{2584}{accent}\u{2584}\u{258c}    ",
-        " _\u{258c}\u{2591} \u{2591}\u{2590}_   ",
-        " :_#\u{2591}#_:   ",
-    ],
-    [
-        " \u{2591}\u{2592}\u{2593}\u{2593}\u{2593}\u{2592}\u{2591}   ",
-        "\u{2590}\u{2580}\u{2580}\u{2580}\u{2588}\u{2580}\u{2580}\u{258c}   ",
-        "\u{2590}\u{2593}{eyes}\u{2593}\u{258c}    ",
-        "\u{2590}\u{2593}\u{2593}{mouth}\u{2593}\u{2593}\u{258c}    ",
-        "\u{2590}{pattern}\u{2593}\u{2593}\u{258c}    ",
-        "\u{2590}\u{2593}\u{2584}{accent}\u{2584}\u{2593}\u{258c}    ",
-        "\u{2590}_\u{258c}\u{2591}\u{2591}\u{2590}_\u{258c}   ",
-        "\u{2570}:#\u{2591}#::\u{256f}   ",
-    ],
-    [
-        "  \u{2591}\u{2593}\u{2588}\u{2593}#\u{2591}   ",
-        " \u{258c}\u{2580}\u{2580}\u{2588}\u{2588}\u{2590}_   ",
-        " \u{258c}\u{2593}{eyes}\u{2590}#   ",
-        " \u{258c}\u{2593}\u{2593}{mouth}\u{2593}\u{2590}    ",
-        " \u{258c}{pattern}\u{2593}\u{2590}    ",
-        " \u{2580}\u{2584}{accent}\u{2584}\u{2593}\u{258c}    ",
-        " _\u{2590}\u{2591}\u{2593}\u{2591}\u{258c}_   ",
-        "  :#\u{2588}#:_   ",
-    ],
-];
-
-const GLITCH_TINY: &[Template; 3] = &[
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "     \u{2593}     ",
-        "     \u{2588}     ",
-        "     \u{2591}     ",
-    ],
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    \u{2593}\u{2591}\u{2593}    ",
-        "    \u{2588}\u{2580}\u{2588}    ",
-        "    \u{2588}\u{2584}\u{2588}    ",
-        "    \u{2591} \u{2591}    ",
-    ],
-    [
-        "           ",
-        "           ",
-        "           ",
-        "   \u{2593}\u{2591}\u{2592}\u{2591}\u{2593}   ",
-        "   \u{2588}\u{2580}\u{2580}\u{2580}\u{2588}   ",
-        "   \u{2588}{eyes}\u{2588}   ",
-        "   \u{2588}\u{2584}{mouth}\u{2584}\u{2588}   ",
-        "   \u{2591}{pattern}\u{2591}   ",
-    ],
-];
-
 // ── Crystal ───────────────────────────────────────────────────────
 // Validated The Caged Lumen silhouettes S0–S6. Transcribed verbatim from
 // docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
@@ -996,191 +586,84 @@ const CRYSTAL_S6: Template = [
     "  \\▼▼▼/    ",
 ];
 
-// Legacy Crystal pools (pre-validation). Retained because legacy dispatch
-// still serves Mech until Task 8 wires the validated cast.
-// Filled/shaded crystals using block density (\u{2588} \u{2593} \u{2592} \u{2591})
-// as facet shading. Higher stages cluster a dominant crystal with satellites.
-const CRYSTAL_PUP: &[Template] = &[[
-    "           ",
-    "     /\\    ",
-    "    /\u{2588}\u{2588}\\   ",
-    "   /{eyes}\\   ",
-    " /\\ \\{mouth}/ /\\ ",
-    " \u{2593}\u{2593}\\{pattern}/\u{2593}\u{2593} ",
-    " \\/ \\{accent}/ \\/ ",
-    "    \\/     ",
-]];
-
-const CRYSTAL_ADULT: &[Template] = &[
-    // Morph 0 — single dominant gem (S4 default, S5/S6 morph 0).
-    [
-        "    /\\     ",
-        "   /\u{2593}\u{2588}\\    ",
-        "  /\u{2593}\u{2588}\u{2588}\u{2588}\\   ",
-        " /\u{2593}\u{2588}\u{2588}{eyes}\u{2588}\\ ",
-        " \\\u{2592}\u{2588}\u{2588}{mouth}\u{2588}\u{2588}\u{2588}/ ",
-        "  \\\u{2592}{pattern}\u{2588}/  ",
-        "   \\\u{2592}{accent}\u{2588}/   ",
-        "    \\/     ",
-    ],
-    // Morph 1 — dominant crystal flanked by two satellites at the base.
-    [
-        "    /\\     ",
-        "   /\u{2593}\u{2588}\\    ",
-        "  /\u{2593}\u{2588}\u{2588}\u{2588}\\   ",
-        " /\u{2593}\u{2588}\u{2588}{eyes}\u{2588}\\ ",
-        " \\\u{2592}\u{2588}\u{2588}{mouth}\u{2588}\u{2588}\u{2588}/ ",
-        "/\\\\\u{2592}{pattern}\u{2588}//\\",
-        "\u{2593}\u{2593} \\\u{2592}{accent}\u{2588}/ \u{2593}\u{2593}",
-        "\\/   \u{25bc}   \\/",
-    ],
-    // Morph 2 — tall asymmetric geode with one side shard.
-    [
-        "    /\\     ",
-        "   /\u{2588}\u{2588}\\    ",
-        "  /\u{2593}\u{2588}\u{2588}\\    ",
-        " /\u{2588}\u{2588}{eyes}\u{2588}\\/\\",
-        " \\\u{2592}\u{2588}{mouth}\u{2588}\u{2593}/ \\/",
-        "  \\\u{2592}{pattern}/   ",
-        "   \\\u{2592}{accent}/    ",
-        "    \\/     ",
-    ],
-];
-
-const CRYSTAL_TINY: &[Template; 3] = &[
-    // S0 grain — a tiny seed sparkle.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "     \u{2726}     ",
-        "    \u{25c6}\u{25c7}\u{25c6}    ",
-        "     \u{b7}     ",
-    ],
-    // S1 shard — first solid shard.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    /\\     ",
-        "   /\u{2588}\u{2588}\\    ",
-        "   \\\u{2593}\u{2592}/    ",
-        "    \\/     ",
-    ],
-    // S2 facet — eyes and mouth visible, gem proportions.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "    /\\     ",
-        "   /\u{2588}\u{2588}\\    ",
-        "  /\u{2593}{eyes}\u{2593}\\  ",
-        "  \\\u{2593}\u{2593}{mouth}\u{2593}\u{2593}/  ",
-        "   \\\u{2593}\u{2593}/    ",
-    ],
-];
-
 // ── Mech ──────────────────────────────────────────────────────────
-// Chunky industrial chassis using \u{2588}/\u{2592} for armor plating and
-// double-line \u{2550}/\u{2551} chrome. Elder morphs upgrade the chassis:
-// heavier wide frame, hovering drone, or bracketed titan plating.
-// S3 drone: an articulated chassis with bolt-shoulders (\u{2534}), a hip plate
-// (\u{252c}), and split legs (\u{2575}) — reads as a little robot, not a plain box.
-const MECH_PUP: &[Template] = &[[
+// Validated Mech · Bulwark silhouettes S0–S6. Box-draw war-frame chassis:
+// head/torso/legs bolt onto the chassis as it ages (legibility benchmark).
+// {eyes}/{mouth} slots wired at S2–S6. S5/S6 are slotted per Spec Rendering #5
+// (binding reconciliation rule): the silhouette is transcribed verbatim from the
+// art-assets doc; only the 2 face rows per stage replace baked ◉ ◉/═ glyphs
+// with the spec-mandated {eyes}/{mouth} slots so mood expressions apply.
+// Cell ramp [4,10,20,31,44,52,69], strictly increasing, every value in-band.
+// Transcribed from docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
+const MECH_S0: Template = [
     "           ",
-    "    _._    ",
-    "   \u{250c}\u{2500}\u{2500}\u{2500}\u{2510}   ",
-    "   \u{2502}{eyes}\u{2502}   ",
-    "  \u{250c}\u{2534}\u{2500}{mouth}\u{2500}\u{2534}\u{2510}  ",
-    "  \u{2502}\u{2591}{pattern}\u{2591}\u{2502}  ",
-    "  \u{2514}\u{252c}\u{2500}{accent}\u{2500}\u{252c}\u{2518}  ",
-    "   \u{2575}   \u{2575}   ",
-]];
-
-const MECH_ADULT: &[Template] = &[
-    // Morph 0 — S4 mech: humanoid build with bolt-shoulders and split feet.
-    [
-        "    /\u{b7}\\    ",
-        "   \u{250c}\u{2500}\u{2500}\u{2500}\u{2510}   ",
-        "   \u{2502}{eyes}\u{2502}   ",
-        "   \u{2502}\u{b7}{mouth}\u{b7}\u{2502}   ",
-        " \u{250c}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2510} ",
-        " \u{2502}\u{2588}\u{2591}{pattern}\u{2591}\u{2588}\u{2502} ",
-        " \u{2502}\u{2588}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2588}\u{2502} ",
-        " \u{2514}\u{2500}\u{2518}\u{203e}\u{203e}\u{203e}\u{2514}\u{2500}\u{2518} ",
-    ],
-    // Morph 1 — sentinel: crossed-mast antenna, full-width platform base.
-    [
-        "  \\\\__//   ",
-        "  \u{250c}\u{2567}\u{2550}\u{2567}\u{2550}\u{2567}\u{2510}  ",
-        "  \u{2502}\u{2593}{eyes}\u{2593}\u{2502}  ",
-        "  \u{2502}\u{2593}\u{b7}{mouth}\u{b7}\u{2593}\u{2502}  ",
-        "\u{250c}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2510}",
-        "\u{2502}\u{2591}\u{2591}\u{2591}{pattern}\u{2591}\u{2591}\u{2591}\u{2502}",
-        "\u{2502}\u{2591}\u{2591}\u{2591}\u{2591}{accent}\u{2591}\u{2591}\u{2591}\u{2591}\u{2502}",
-        "\u{2514}\u{2500}\u{2510}\u{2568}\u{2550}\u{2550}\u{2550}\u{2568}\u{250c}\u{2500}\u{2518}",
-    ],
-    // Morph 2 — drone: sensor halo, narrowed neck, hover exhaust trail.
-    [
-        " \u{b0} \\\u{b7}/ \u{b0}   ",
-        "   \u{2553}\u{2500}\u{2500}\u{2500}\u{2556}   ",
-        "   \u{2551}{eyes}\u{2551}   ",
-        "   \u{2551}\u{b7}{mouth}\u{b7}\u{2551}   ",
-        "    \u{2559}\u{2565}\u{255c}    ",
-        "  \u{2503}\u{2592}{pattern}\u{2592}\u{2503}  ",
-        "  \u{2517}\u{2501}\u{2501}{accent}\u{2501}\u{2501}\u{251b}  ",
-        "  \u{2591} \u{2591} \u{2591} \u{2591}  ",
-    ],
-    // Morph 3 — bio-mech: heavy chrome, exposed core indicators, bolted ends.
-    [
-        "   __\u{2588}__   ",
-        "   \u{250f}\u{2501}\u{2501}\u{2501}\u{2513}   ",
-        "   \u{2503}{eyes}\u{2503}   ",
-        "   \u{2503}\u{b7}{mouth}\u{b7}\u{2503}   ",
-        " \u{250f}\u{2501}\u{2567}\u{2550}\u{2550}\u{2550}\u{2567}\u{2501}\u{2513} ",
-        " \u{2503}\u{2592}\u{2591}{pattern}\u{2591}\u{2592}\u{2503} ",
-        " \u{2503}\u{2592}\u{25c9}\u{2591}{accent}\u{2591}\u{25c9}\u{2592}\u{2503} ",
-        " \u{2517}\u{2501}\u{2568}\u{2550}\u{2550}\u{2550}\u{2568}\u{2501}\u{251b} ",
-    ],
+    "           ",
+    "           ",
+    "           ",
+    "     ▄     ",
+    "    ▐◉▌    ",
+    "           ",
+    "           ",
 ];
-
-const MECH_TINY: &[Template; 3] = &[
-    // S0 chip — tiny printed-circuit chip with one indicator.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    \u{250c}\u{2500}\u{2510}    ",
-        "    \u{2502}\u{2588}\u{2502}    ",
-        "    \u{2514}\u{2500}\u{2518}    ",
-    ],
-    // S1 bolt — small mech head, blinking indicator.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "           ",
-        "    _._    ",
-        "   \u{250c}\u{2500}\u{2500}\u{2500}\u{2510}   ",
-        "   \u{2502}o o\u{2502}   ",
-        "   \u{2514}\u{2500}\u{2500}\u{2500}\u{2518}   ",
-    ],
-    // S2 rivet — small forming robot with eyes, pattern, mouth slot.
-    [
-        "           ",
-        "           ",
-        "           ",
-        "    _._    ",
-        "   \u{250c}\u{2500}\u{2500}\u{2500}\u{2510}   ",
-        "   \u{2502}{eyes}\u{2502}   ",
-        "   \u{2502}{pattern}\u{2502}   ",
-        "   \u{2514}\u{2500}{mouth}\u{2500}\u{2518}   ",
-    ],
+const MECH_S1: Template = [
+    "           ",
+    "           ",
+    "           ",
+    "    ▗▄▖    ",
+    "    ▌◉◉▐   ",
+    "    ▝▀▘    ",
+    "           ",
+    "           ",
+];
+const MECH_S2: Template = [
+    "           ",
+    "     ╷     ",
+    "    ┌───┐  ",
+    "    │{eyes}│  ",
+    "    │ {mouth} │  ",
+    "    └┬─┬┘  ",
+    "     ╨ ╨   ",
+    "           ",
+];
+const MECH_S3: Template = [
+    "    ╷ ╷    ",
+    "   ┌───┐   ",
+    "   │{eyes}│   ",
+    "   │ {mouth} │   ",
+    "   ├───┤   ",
+    "   │▒▓▒│   ",
+    "   └┬─┬┘   ",
+    "    ╨ ╨    ",
+];
+const MECH_S4: Template = [
+    "    ╷╷╷    ",
+    "   ┌───┐   ",
+    "   │{eyes}│   ",
+    "  ┌┴─{mouth}─┴┐  ",
+    "  ║▓███▓║  ",
+    "  ║▓▒▒▒▓║  ",
+    "  ╜└┬─┬┘╙  ",
+    "   ██ ██   ",
+];
+const MECH_S5: Template = [
+    "   ╲╷╷╷╱   ",
+    "   ┌───┐   ",
+    "   │{eyes}│   ",
+    "  ┌┴─{mouth}─┴┐  ",
+    " ▟█▌███▐█▙ ",
+    " ▝█▌▒◈▒▐█▘ ",
+    "  ║▌▓─▓▐║  ",
+    "  ▟█▙ ▟█▙  ",
+];
+const MECH_S6: Template = [
+    " ██┌───┐██ ",
+    " ██│{eyes}│██ ",
+    " ██│ {mouth} │██ ",
+    " ██▙▓◆▓▟██ ",
+    " █████████ ",
+    " ███▒◈▒███ ",
+    " ██▙┬─┬▟██ ",
+    " ▟███████▙ ",
 ];
 
 #[cfg(test)]
@@ -1624,6 +1107,23 @@ mod tests {
             !young.contains('\u{25c8}'),
             "Crystal S2 must not pre-show the elder ◈ facet, got:\n{young}"
         );
+    }
+
+    #[test]
+    fn mech_base_art_passes_phase1_invariants() {
+        let species = Species::Mech;
+        for stage in ALL_STAGES {
+            assert_in_stage_band(species, stage);
+        }
+        assert_s6_fills_art_rows_no_sparkle(species);
+        // Mech keeps its own chassis rows at S6 (gutter_content_for == None per the
+        // Phase-1/CONTRACT Mech-S6 decision); assert S6 fills all 8 rows itself.
+        let s6 = stage_base_template(species, Stage::S6);
+        let nonblank_rows = s6
+            .iter()
+            .filter(|line| line.chars().any(|c| !c.is_whitespace()))
+            .count();
+        assert_eq!(nonblank_rows, 8, "Mech S6 must fill all 8 art rows itself");
     }
 
     #[test]
