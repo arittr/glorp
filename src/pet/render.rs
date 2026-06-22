@@ -996,6 +996,20 @@ mod tests {
             row0.contains('\u{2726}'),
             "S6 gutter row 0 must carry the sparkle, got: {row0:?}"
         );
+        // Pin the sparkle to the specific gutter columns (2 and 6) no Crystal
+        // particle occupies at tick 0 (Crystal's row-0 particle is col 11), so
+        // this is a real emission guard: without the gutter code these cells are
+        // spaces. Col 10 is contested by Glitch and validated in the precedence
+        // test below, so it is excluded here.
+        let row0_chars: Vec<char> = row0.chars().collect();
+        assert_eq!(
+            row0_chars[2], '\u{2726}',
+            "S6 gutter sparkle must paint col 2, got: {row0:?}"
+        );
+        assert_eq!(
+            row0_chars[6], '\u{2726}',
+            "S6 gutter sparkle must paint col 6, got: {row0:?}"
+        );
         for (i, line) in rendered.lines.iter().enumerate().skip(1) {
             assert!(
                 !line.contains('\u{2726}'),
