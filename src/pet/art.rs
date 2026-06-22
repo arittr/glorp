@@ -64,7 +64,8 @@ pub(crate) fn stage_base_template(species: Species, stage: Stage) -> &'static Te
         Species::Blob => blob_base(stage),
         Species::Ghost => ghost_base(stage),
         Species::Glitch => glitch_base(stage),
-        Species::Crystal | Species::Mech => legacy_base_template(species, stage),
+        Species::Crystal => crystal_base(stage),
+        Species::Mech => legacy_base_template(species, stage),
     }
 }
 
@@ -129,6 +130,25 @@ fn glitch_base(stage: Stage) -> &'static Template {
         Stage::S4 => &GLITCH_S4,
         Stage::S5 => &GLITCH_S5,
         Stage::S6 => &GLITCH_S6,
+    }
+}
+
+// Validated The Caged Lumen cast: faceted crystal silhouette with a caged core
+// that fills with age. The lens glyph escalates ◇ (young) → ◆ (mid) → ◈
+// (elder) baked directly into the body — Crystal has no {eyes}/{mouth} slots;
+// the lens is the face. ◇◆◈ are EAW-Ambiguous and kept under the documented
+// ambiguous=narrow assumption. Validated cell ramp [4,10,20,31,39,53,73].
+// Transcribed verbatim from
+// docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
+fn crystal_base(stage: Stage) -> &'static Template {
+    match stage {
+        Stage::S0 => &CRYSTAL_S0,
+        Stage::S1 => &CRYSTAL_S1,
+        Stage::S2 => &CRYSTAL_S2,
+        Stage::S3 => &CRYSTAL_S3,
+        Stage::S4 => &CRYSTAL_S4,
+        Stage::S5 => &CRYSTAL_S5,
+        Stage::S6 => &CRYSTAL_S6,
     }
 }
 
@@ -901,6 +921,83 @@ const GLITCH_TINY: &[Template; 3] = &[
 ];
 
 // ── Crystal ───────────────────────────────────────────────────────
+// Validated The Caged Lumen silhouettes S0–S6. Transcribed verbatim from
+// docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
+// Cell ramp [4,10,20,31,39,53,73]. No {eyes}/{mouth} slots — the ◇/◆/◈ lens
+// is baked into each silhouette per the eye-fill design.
+const CRYSTAL_S0: Template = [
+    "           ",
+    "           ",
+    "           ",
+    "     /\\    ",
+    "     \\/    ",
+    "           ",
+    "           ",
+    "           ",
+];
+const CRYSTAL_S1: Template = [
+    "           ",
+    "           ",
+    "     /\\    ",
+    "    /◇\\    ",
+    "    \\▒/    ",
+    "     \\/    ",
+    "           ",
+    "           ",
+];
+const CRYSTAL_S2: Template = [
+    "           ",
+    "    /\\     ",
+    "   /◇◇\\    ",
+    "  /▒▓▒\\    ",
+    "  \\▒▒/     ",
+    "   \\▓/     ",
+    "    \\/     ",
+    "           ",
+];
+const CRYSTAL_S3: Template = [
+    "    /\\     ",
+    "   /◆◆\\    ",
+    "  /▒▓▒\\    ",
+    " /▒▓▓▒\\    ",
+    " \\▒▓▒/     ",
+    "  \\▓▓/     ",
+    "   \\▓/     ",
+    "    \\/     ",
+];
+const CRYSTAL_S4: Template = [
+    "    /\\     ",
+    "   /◆◆\\    ",
+    "  /▒◆◆▒\\   ",
+    " /▒▓▿▓▒\\   ",
+    " \\▒▓█▓▒/   ",
+    "  \\▒█▒/    ",
+    "  \\▓█▓/    ",
+    "   \\▼/     ",
+];
+const CRYSTAL_S5: Template = [
+    "  /\\/\\/\\   ",
+    " /◈▒◈▒◈\\   ",
+    "/▒▓█▓█▓▒\\  ",
+    "\\▒▓███▓▒/  ",
+    " \\▒▓█▓▒/   ",
+    " \\▒▓█▓▒/   ",
+    "  \\▓█▓/    ",
+    "   \\▼/     ",
+];
+const CRYSTAL_S6: Template = [
+    "/\\/\\/\\/\\/\\ ",
+    "▒██◈██◈██▒ ",
+    "▒█▓██▓██▓▒ ",
+    "▒█▓█▿█▓█▓▒ ",
+    "▒█▓█████▓▒ ",
+    "▒▓█▓███▓█▒ ",
+    " \\▒▓█▓█▒/  ",
+    "  \\▼▼▼/    ",
+];
+
+// Legacy Crystal pools (pre-validation). Retained because legacy dispatch
+// still serves Mech until Task 8 wires the validated cast.
 // Filled/shaded crystals using block density (\u{2588} \u{2593} \u{2592} \u{2591})
 // as facet shading. Higher stages cluster a dominant crystal with satellites.
 const CRYSTAL_PUP: &[Template] = &[[
@@ -1483,6 +1580,50 @@ mod tests {
             assert_in_stage_band(species, stage);
         }
         assert_s6_fills_art_rows_no_sparkle(species);
+    }
+
+    #[test]
+    fn crystal_base_art_passes_phase1_invariants() {
+        let species = Species::Crystal;
+        for stage in ALL_STAGES {
+            assert_in_stage_band(species, stage);
+        }
+        assert_s6_fills_art_rows_no_sparkle(species);
+        // Crystal deliberately keeps ambiguous-wide ◆◈; the lint WARNS (non-blocking)
+        // and we assert it surfaces them rather than silently dropping the signature.
+        let mut any_warning = false;
+        for stage in [Stage::S4, Stage::S5, Stage::S6] {
+            if !ambiguous_wide_width_warnings(species, stage).is_empty() {
+                any_warning = true;
+            }
+        }
+        assert!(
+            any_warning,
+            "Crystal elder stages keep the ◆/◈ signature; the ambiguous lint should warn"
+        );
+    }
+
+    #[test]
+    fn crystal_eye_fill_ages_with_stage() {
+        // The caged-core glyph fills with age: a young facet (◇) at S2, a filled
+        // diamond (◆) by S4, the multi-facet (◈) by S6. Structural, not subjective.
+        let young = stage_base_template(Species::Crystal, Stage::S2)
+            .iter()
+            .copied()
+            .collect::<String>();
+        let elder = stage_base_template(Species::Crystal, Stage::S6)
+            .iter()
+            .copied()
+            .collect::<String>();
+        assert!(
+            elder.contains('\u{25c8}') || elder.contains('\u{25c6}'),
+            "Crystal S6 must show a filled facet core (◆/◈), got:\n{elder}"
+        );
+        // young may use the hollow ◇ — assert it is NOT already the elder ◈.
+        assert!(
+            !young.contains('\u{25c8}'),
+            "Crystal S2 must not pre-show the elder ◈ facet, got:\n{young}"
+        );
     }
 
     #[test]
