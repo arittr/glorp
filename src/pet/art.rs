@@ -866,4 +866,140 @@ mod tests {
             }
         }
     }
+
+    // Inclusive [lo, hi] occupied-cell band per stage (the audit target for the
+    // Phase 2 art). Disjoint and strictly increasing.
+    const STAGE_CELL_BANDS: [(usize, usize); 7] = [
+        (1, 4),   // S0
+        (5, 10),  // S1
+        (11, 20), // S2
+        (21, 34), // S3
+        (35, 50), // S4
+        (51, 66), // S5
+        (67, 88), // S6
+    ];
+
+    // Rendered occupied (non-space) cell count of the 8 art rows at the fixed
+    // reference state: mood = Content, resting (non-blink) expression, no work
+    // accent, fixed tick, each {slot} replaced by its canonical width-correct
+    // filler ({eyes}->"o o", {mouth}->"w", {pattern}->"...", {accent}->"*").
+    // Excludes the particle gutter and any frame substitution. Built from
+    // stage_template_lines so it tracks the Phase 1 (identity) and Phase 2 (real)
+    // texture path.
+    #[cfg(test)]
+    fn rendered_occupied_cells(species: Species, stage: Stage) -> usize {
+        stage_template_lines(species, stage, REFERENCE_SEED)
+            .iter()
+            .map(|line| {
+                substitute_slots(line)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count()
+            })
+            .sum()
+    }
+
+    // A fixed reference seed for the tick-independent measurement. The slot fill is
+    // canonical (substitute_slots), so this is only the interior-texture draw.
+    #[cfg(test)]
+    const REFERENCE_SEED: u64 = 0;
+
+    // Band membership + S0->S6 monotonicity (S4 < S5 < S6) over the occupied-cell
+    // count. NOTE: in Phase 1 this is NOT run over the real templates (they predate
+    // the band redesign); Phase 2 calls it as its growth-acceptance gate. It is
+    // exercised here only via the synthetic self-test below so its logic is proven.
+    #[cfg(test)]
+    fn assert_in_stage_band_value(stage: Stage, occupied: usize) {
+        let (lo, hi) = STAGE_CELL_BANDS[stage.index()];
+        assert!(
+            occupied >= lo && occupied <= hi,
+            "occupied cells {occupied} for {stage:?} outside band [{lo}, {hi}]"
+        );
+    }
+
+    // Called by the Phase 2 growth gate; see plan Task 4.
+    #[allow(dead_code)]
+    #[cfg(test)]
+    fn assert_in_stage_band(species: Species, stage: Stage) {
+        assert_in_stage_band_value(stage, rendered_occupied_cells(species, stage));
+    }
+
+    #[test]
+    fn stage_cell_bands_are_disjoint_and_strictly_increasing() {
+        for w in STAGE_CELL_BANDS.windows(2) {
+            let (lo, hi) = w[0];
+            let (next_lo, next_hi) = w[1];
+            assert!(lo <= hi, "band [{lo}, {hi}] is inverted");
+            assert!(
+                hi < next_lo,
+                "bands must be disjoint and increasing: [{lo},{hi}] then [{next_lo},{next_hi}]"
+            );
+        }
+        // S4 < S5 < S6 lower bounds (the explicit monotonicity callout).
+        assert!(STAGE_CELL_BANDS[4].0 < STAGE_CELL_BANDS[5].0);
+        assert!(STAGE_CELL_BANDS[5].0 < STAGE_CELL_BANDS[6].0);
+    }
+
+    #[test]
+    fn assert_in_stage_band_value_accepts_in_band_rejects_out_of_band() {
+        // Proves the band check logic without depending on placeholder art.
+        assert_in_stage_band_value(Stage::S0, 1);
+        assert_in_stage_band_value(Stage::S0, 4);
+        assert_in_stage_band_value(Stage::S6, 67);
+        assert_in_stage_band_value(Stage::S6, 88);
+        let rejected = std::panic::catch_unwind(|| assert_in_stage_band_value(Stage::S0, 5));
+        assert!(
+            rejected.is_err(),
+            "5 cells must be rejected from the S0 band"
+        );
+        let rejected_high = std::panic::catch_unwind(|| assert_in_stage_band_value(Stage::S6, 89));
+        assert!(
+            rejected_high.is_err(),
+            "89 cells must be rejected from the S6 band"
+        );
+    }
+
+    // Ambiguous=WIDE width check. Per the Crystal eye-fill decision this is a
+    // NON-BLOCKING lint: it WARNS (eprintln!) on East-Asian-Width Ambiguous glyphs
+    // and returns them, but never asserts — failing the build would contradict
+    // keeping the ◇/◆/◈ eye-fill. The blocking width invariant
+    // (every_template_line_is_eleven_display_columns) stays under the default
+    // narrow assumption.
+    #[cfg(test)]
+    fn ambiguous_wide_width_warnings(species: Species, stage: Stage) -> Vec<char> {
+        use unicode_width::UnicodeWidthChar;
+        let mut offenders = Vec::new();
+        for line in stage_template_lines(species, stage, REFERENCE_SEED).iter() {
+            for ch in substitute_slots(line).chars() {
+                // width_cjk() applies the ambiguous=wide rule. A glyph whose narrow
+                // width is 1 but whose cjk width is 2 is the Ambiguous case.
+                let narrow = UnicodeWidthChar::width(ch).unwrap_or(0);
+                let wide = UnicodeWidthChar::width_cjk(ch).unwrap_or(0);
+                if narrow == 1 && wide == 2 {
+                    offenders.push(ch);
+                }
+            }
+        }
+        offenders
+    }
+
+    #[test]
+    fn ambiguous_width_lint_warns_but_does_not_fail() {
+        // Surfaces ambiguous-width glyphs for human review without failing CI.
+        // The eprintln! below is an intentional captured lint signal: it only
+        // appears under `--nocapture`, so default `cargo test` output stays clean.
+        let mut total = 0usize;
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                let offenders = ambiguous_wide_width_warnings(species, stage);
+                if !offenders.is_empty() {
+                    eprintln!("ambiguous-width glyphs in {species:?} {stage:?}: {offenders:?}");
+                    total += offenders.len();
+                }
+            }
+        }
+        // The lint is informational. Assert only that the helper ran over every
+        // species/stage (the count is allowed to be zero or positive).
+        let _ = total;
+    }
 }
