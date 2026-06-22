@@ -2,6 +2,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 const AGENTSVIEW_OK: &str = "tests/fixtures/helpers/agentsview-ok.mjs";
+const AGENTSVIEW_DATA_WITH_DIAGNOSTIC: &str =
+    "tests/fixtures/helpers/agentsview-data-with-diagnostic.mjs";
 
 #[test]
 fn help_hides_dev_preview_command() {
@@ -242,4 +244,42 @@ fn init_does_not_feed_pet_or_persist_history_as_usage_events() {
     let usage_store =
         glorp::storage::usage_store::UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     assert_eq!(usage_store.recent_event_count().unwrap(), 0);
+}
+
+// Regression test: init must advance cursors to current totals even when the
+// calibration snapshot has benign diagnostics alongside valid records.
+//
+// Before the fix: any diagnostic caused init to skip advance_cursors → cursors
+// stayed at zero. This test verifies directly that provider_cursors rows exist
+// in usage.sqlite after init completes with a diagnostic fixture.
+//
+// The bolus scenario: if cursors are NOT advanced, the next poll (e.g. watch
+// or status on a day where the diagnostic clears and cutover fires) would diff
+// the full history against zero cursors and apply it as pet food → S6.
+#[test]
+fn init_with_diagnostic_snapshot_advances_cursors_in_usage_db() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Init with a fixture that has valid data + a benign diagnostic.
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_DATA_WITH_DIAGNOSTIC)
+        .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mochi has hatched"));
+
+    // The fix: init must advance cursors even when diagnostics are present.
+    // If cursors are not advanced, the usage.sqlite will have no provider_cursors
+    // rows, and the next poll will see the full history as a bolus.
+    let usage_store =
+        glorp::storage::usage_store::UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let versions = usage_store.provider_versions().unwrap();
+    assert!(
+        !versions.is_empty(),
+        "init must advance provider cursors into usage.sqlite even when the \
+        calibration snapshot has diagnostics; found no cursor rows. \
+        Without this, the next clean poll applies full history as a bolus."
+    );
 }

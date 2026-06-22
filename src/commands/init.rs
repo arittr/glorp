@@ -35,10 +35,16 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
             AgentsviewCommandProvider::from_environment().snapshot_for_calibration(&mut usage_store)
         {
             let now = OffsetDateTime::now_utc();
+            // Advance cursors unconditionally to prevent a bolus on the next poll.
+            // Even when diagnostics are present (e.g. a malformed model breakdown
+            // alongside valid records), the cursor_updates reflect current totals
+            // and are safe to advance. Skipping this step leaves cursors at zero,
+            // so the next clean poll diffs against nothing and applies the full
+            // usage history as pet food in one shot.
+            usage_store.advance_cursors(snapshot.cursor_updates, now)?;
             if snapshot.diagnostics.is_empty() {
                 calibration = CalibrationBaseline::from_history(&snapshot.daily_usage);
                 rhythm = RhythmProfile::from_history(&snapshot.daily_usage);
-                usage_store.advance_cursors(snapshot.cursor_updates, now)?;
                 usage_store.mark_token_contract_active(
                     crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
                     now,
