@@ -1,6 +1,6 @@
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
-use crate::pet::art::template_lines;
+use crate::pet::art::stage_template_lines;
 use crate::pet::generation::{GeneratedPet, Species};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -124,16 +124,11 @@ pub fn render_pet(
     let profile = species_animation_profile(pet.species);
     let blinking = frame.hold_eyes_closed || should_blink(pet, mood, frame, profile);
     let expression = expression_for(pet, mood, blinking, frame);
-    let raw = template_lines(
-        pet.species,
-        stage,
-        pet.traits.morph_index,
-        pet.traits.morph_pup_index,
-    );
+    let raw = stage_template_lines(pet.species, stage, u64::from(pet.traits.seed_hue));
     let rendered = raw
         .iter()
         .enumerate()
-        .map(|(line_index, line)| render_template_line(line, line_index, pet, &expression))
+        .map(|(line_index, line)| render_template_line(line.as_str(), line_index, pet, &expression))
         .collect::<Vec<_>>();
     let mut lines = rendered
         .iter()

@@ -43,76 +43,58 @@ pub fn stage_label(species: Species, stage: Stage) -> &'static str {
     labels[stage.index()]
 }
 
-pub fn morph_count(species: Species, stage: Stage) -> usize {
-    match stage {
-        Stage::S0 | Stage::S1 | Stage::S2 => 1,
-        Stage::S3 => pup_templates(species).len(),
-        Stage::S4 | Stage::S5 | Stage::S6 => adult_templates(species).len(),
-    }
+/// Number of deterministic interior-texture variants a (species, stage) can
+/// render. Per-pet variety is algorithmic (interior texture), not hand-drawn
+/// silhouette pools, so this is the interior-texture-variant count (>= 1 for
+/// every stage; 1 where texture is pinned). It is NOT a silhouette-pool size.
+/// Phase 1: `apply_interior_texture` is an identity passthrough, so every
+/// (species, stage) has exactly one variant. Phase 2 raises this where texture
+/// adds variants.
+pub fn morph_count(_species: Species, _stage: Stage) -> usize {
+    1
 }
 
-pub(crate) fn template_lines(
-    species: Species,
-    stage: Stage,
-    morph_index: usize,
-    morph_pup_index: usize,
-) -> Vec<&'static str> {
+/// One hand-drawn base silhouette per (species, stage). 42 total. Phase 1 wires
+/// the existing art into this map; Phase 2 replaces the bodies with the new cast.
+/// The S4/S5/S6 picks are three distinct existing adult shapes so growth still
+/// reads as change without the retired `elder_morph_index` reshuffle.
+pub(crate) fn stage_base_template(species: Species, stage: Stage) -> &'static Template {
     match stage {
-        Stage::S0 => tiny_template(species, 0).to_vec(),
-        Stage::S1 => tiny_template(species, 1).to_vec(),
-        Stage::S2 => tiny_template(species, 2).to_vec(),
-        Stage::S3 => {
-            let templates = pup_templates(species);
-            templates[morph_pup_index % templates.len()].to_vec()
-        }
-        Stage::S4 => adult_templates(species)[0].to_vec(),
-        Stage::S5 => {
-            let templates = adult_templates(species);
-            templates[elder_morph_index(species, morph_index, templates)].to_vec()
-        }
+        Stage::S0 => tiny_template(species, 0),
+        Stage::S1 => tiny_template(species, 1),
+        Stage::S2 => tiny_template(species, 2),
+        Stage::S3 => &pup_templates(species)[0],
+        Stage::S4 => &adult_templates(species)[0],
+        Stage::S5 => &adult_templates(species)[1],
         Stage::S6 => {
-            let templates = adult_templates(species);
-            let body = templates[elder_morph_index(species, morph_index, templates)];
-            // Sage frame: top + body[1..body.len()-1] + bottom.
-            let mut framed: Vec<&'static str> = Vec::with_capacity(body.len());
-            framed.push(SAGE_TOP);
-            for line in &body[1..body.len() - 1] {
-                framed.push(line);
-            }
-            framed.push(SAGE_BOT);
-            framed
+            let adults = adult_templates(species);
+            &adults[adults.len() - 1]
         }
     }
 }
 
-// Most species visibly transform at S5+: Crystal pets cluster, Ghost pets grow
-// longer tentacles, Blob pets bubble and bud co-blobs, Fuzz pets grow a tail,
-// Glitch pets become denser packets, Mech pets upgrade chassis. Skip the
-// singleton morph 0 at elder stages so
-// every elder pet reads as the evolved form while still preserving
-// morph-driven variation across the remaining morphs.
-fn elder_morph_index(species: Species, morph_index: usize, templates: &[Template]) -> usize {
-    debug_assert!(!templates.is_empty(), "adult templates must be non-empty");
-    let len = templates.len();
-    let skip_first = matches!(
-        species,
-        Species::Crystal
-            | Species::Ghost
-            | Species::Blob
-            | Species::Fuzz
-            | Species::Glitch
-            | Species::Mech
-    ) && len > 1;
-    if skip_first {
-        1 + (morph_index % (len - 1))
-    } else {
-        morph_index % len
-    }
+/// Deterministic per-seed interior-texture variation applied on top of a base
+/// silhouette. Phase 1: identity passthrough (returns the base verbatim) — the
+/// hook exists so render.rs and the invariant tests can target the final API
+/// now; Phase 2 fills in the texture math. MUST preserve the closed outline,
+/// width-1, and the stage cell band. On S0-S2 it is constrained to
+/// constant-occupancy glyphs (band-safety).
+pub(crate) fn apply_interior_texture(
+    base: &Template,
+    _species: Species,
+    _stage: Stage,
+    _seed: u64,
+) -> [String; 8] {
+    std::array::from_fn(|i| base[i].to_string())
 }
 
-// Sage stage = adult + sparkle frame on top + bottom (per pet.jsx).
-pub(crate) const SAGE_TOP: &str = " *  .  *   ";
-pub(crate) const SAGE_BOT: &str = " \u{2726} \u{2727} \u{2726} \u{2727} \u{2726} ";
+/// Public render entry replacing `template_lines`. Returns owned Strings because
+/// interior texture is computed, not 'static. `seed` is the interior-texture
+/// draw (render.rs passes `pet.traits.seed_hue`).
+pub(crate) fn stage_template_lines(species: Species, stage: Stage, seed: u64) -> [String; 8] {
+    let base = stage_base_template(species, stage);
+    apply_interior_texture(base, species, stage, seed)
+}
 
 // Each species template is 8 lines x 11 chars.
 type Template = [&'static str; 8];
@@ -743,25 +725,17 @@ mod tests {
 
     #[test]
     fn every_template_line_is_eleven_cells_wide() {
-        // The art renderer assumes each template line is exactly 11 chars;
-        // see the `Template` type alias and `frame_with_particles` in
-        // `src/pet/render.rs`. Drift in either direction breaks alignment.
         for species in Species::all() {
             for stage in ALL_STAGES {
-                for morph_index in 0..6 {
-                    for morph_pup_index in 0..6 {
-                        let lines = template_lines(species, stage, morph_index, morph_pup_index);
-                        for (row, line) in lines.iter().enumerate() {
-                            let rendered = substitute_slots(line);
-                            let width = rendered.chars().count();
-                            assert_eq!(
-                                width, 11,
-                                "template width != 11 for species={species:?} stage={stage:?} \
-                                 morph={morph_index} pup_morph={morph_pup_index} row={row}: \
-                                 {rendered:?}"
-                            );
-                        }
-                    }
+                let lines = stage_base_template(species, stage);
+                for (row, line) in lines.iter().enumerate() {
+                    let rendered = substitute_slots(line);
+                    let width = rendered.chars().count();
+                    assert_eq!(
+                        width, 11,
+                        "template width != 11 for species={species:?} stage={stage:?} row={row}: \
+                         {rendered:?}"
+                    );
                 }
             }
         }
@@ -770,26 +744,18 @@ mod tests {
     #[test]
     fn every_template_line_is_eleven_display_columns() {
         use unicode_width::UnicodeWidthStr;
-        // Terminal columns, not code points. Policy: art uses only glyphs that
-        // are width-1 under the ambiguous=narrow assumption (unicode-width's
-        // default `width()`); this catches any always-width-2 (CJK/emoji) glyph
-        // that `.chars().count()` would miss.
+        // Terminal columns under unicode-width's default (ambiguous=narrow).
         for species in Species::all() {
             for stage in ALL_STAGES {
-                for morph_index in 0..6 {
-                    for morph_pup_index in 0..6 {
-                        let lines = template_lines(species, stage, morph_index, morph_pup_index);
-                        for (row, line) in lines.iter().enumerate() {
-                            let rendered = substitute_slots(line);
-                            let columns = UnicodeWidthStr::width(rendered.as_str());
-                            assert_eq!(
-                                columns, 11,
-                                "display width != 11 for species={species:?} stage={stage:?} \
-                                 morph={morph_index} pup_morph={morph_pup_index} row={row}: \
-                                 {rendered:?}"
-                            );
-                        }
-                    }
+                let lines = stage_base_template(species, stage);
+                for (row, line) in lines.iter().enumerate() {
+                    let rendered = substitute_slots(line);
+                    let columns = UnicodeWidthStr::width(rendered.as_str());
+                    assert_eq!(
+                        columns, 11,
+                        "display width != 11 for species={species:?} stage={stage:?} row={row}: \
+                         {rendered:?}"
+                    );
                 }
             }
         }
@@ -797,18 +763,88 @@ mod tests {
 
     #[test]
     fn every_template_is_eight_lines() {
-        // frame_with_particles overlays exactly 8 art rows (render.rs `.take(8)`);
-        // a template with a different line count would silently clip or shift.
         for species in Species::all() {
             for stage in ALL_STAGES {
-                for morph_index in 0..6 {
-                    for morph_pup_index in 0..6 {
-                        let lines = template_lines(species, stage, morph_index, morph_pup_index);
+                let lines = stage_base_template(species, stage);
+                assert_eq!(
+                    lines.len(),
+                    8,
+                    "template height != 8 for species={species:?} stage={stage:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn elder_stages_are_distinct_base_templates() {
+        // Replaces elder_morph_skips_singleton_for_carved_species / _for_glitch.
+        // The retired `elder_morph_index` ensured S5/S6 were not the S4 form; the
+        // per-stage base map encodes that directly by mapping S4/S5/S6 to three
+        // different existing shapes. Strict occupied-cell growth (S4<S5<S6) is the
+        // Phase 2 band gate, not a Phase 1 property of the placeholder art.
+        for species in Species::all() {
+            let s4 = stage_base_template(species, Stage::S4);
+            let s5 = stage_base_template(species, Stage::S5);
+            let s6 = stage_base_template(species, Stage::S6);
+            assert_ne!(
+                s4, s5,
+                "{species:?} S4 and S5 must be different base templates"
+            );
+            assert_ne!(
+                s5, s6,
+                "{species:?} S5 and S6 must be different base templates"
+            );
+            assert_ne!(
+                s4, s6,
+                "{species:?} S4 and S6 must be different base templates"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_base_template_returns_a_valid_template_for_every_species_stage() {
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                let tpl = stage_base_template(species, stage);
+                assert_eq!(tpl.len(), 8, "{species:?} {stage:?} must be 8 lines");
+                for (row, line) in tpl.iter().enumerate() {
+                    let rendered = substitute_slots(line);
+                    assert_eq!(
+                        rendered.chars().count(),
+                        11,
+                        "{species:?} {stage:?} row {row} must be 11 chars: {rendered:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn morph_count_is_at_least_one_for_every_stage() {
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                assert!(
+                    morph_count(species, stage) >= 1,
+                    "{species:?} {stage:?} must have >= 1 interior-texture variant"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn apply_interior_texture_is_identity_in_phase_one() {
+        // Phase 1 ships the texture hook as a passthrough: the rendered lines equal
+        // the base template (slots still unresolved {} markers) regardless of seed.
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                let base = stage_base_template(species, stage);
+                for seed in [0u64, 1, 7, 99, 360, u64::from(u16::MAX)] {
+                    let textured = apply_interior_texture(base, species, stage, seed);
+                    for (row, (a, b)) in base.iter().zip(textured.iter()).enumerate() {
                         assert_eq!(
-                            lines.len(),
-                            8,
-                            "template height != 8 for species={species:?} stage={stage:?} \
-                             morph={morph_index} pup_morph={morph_pup_index}"
+                            *a,
+                            b.as_str(),
+                            "{species:?} {stage:?} seed={seed} row={row} must be unchanged"
                         );
                     }
                 }
@@ -817,74 +853,17 @@ mod tests {
     }
 
     #[test]
-    fn elder_morph_skips_singleton_for_carved_species() {
-        // Pets in this set evolve a distinct elder silhouette; the singleton
-        // morph 0 is the S4 form and must never be reused at S5/S6.
-        let carved = [
-            Species::Crystal,
-            Species::Ghost,
-            Species::Blob,
-            Species::Fuzz,
-            Species::Glitch,
-            Species::Mech,
-        ];
-        for species in carved {
-            let templates = adult_templates(species);
-            assert!(
-                templates.len() > 1,
-                "{species:?} needs at least 2 adult morphs for elder skip to apply"
-            );
-            for morph_index in 0..6 {
-                let idx = elder_morph_index(species, morph_index, templates);
-                assert!(
-                    idx >= 1,
-                    "{species:?} elder_morph_index returned 0 for morph={morph_index}"
-                );
+    fn stage_template_lines_matches_base_after_slot_widths() {
+        // stage_template_lines feeds render.rs; in Phase 1 it equals the base.
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                let base = stage_base_template(species, stage);
+                let lines = stage_template_lines(species, stage, 42);
+                assert_eq!(lines.len(), 8);
+                for (a, b) in base.iter().zip(lines.iter()) {
+                    assert_eq!(*a, b.as_str());
+                }
             }
         }
-    }
-
-    #[test]
-    fn elder_morph_skips_singleton_for_glitch() {
-        let templates = adult_templates(Species::Glitch);
-        assert!(
-            templates.len() > 1,
-            "Glitch needs at least 2 adult morphs for elder skip to apply"
-        );
-        for morph_index in 0..6 {
-            let idx = elder_morph_index(Species::Glitch, morph_index, templates);
-            assert!(
-                idx >= 1,
-                "Glitch elder stage reused the weaker S4 morph for morph={morph_index}"
-            );
-        }
-    }
-
-    #[test]
-    fn glitch_daemon_silhouette_is_visibly_denser_than_glitch_form() {
-        let glitch_form = template_lines(Species::Glitch, Stage::S4, 0, 0);
-        let glitch_density = visible_cell_count(&glitch_form);
-
-        for morph_index in 0..6 {
-            let daemon = template_lines(Species::Glitch, Stage::S5, morph_index, 0);
-            let daemon_density = visible_cell_count(&daemon);
-            assert!(
-                daemon_density >= glitch_density + 6,
-                "Glitch daemon morph={morph_index} should visibly outgrow S4: \
-                 S4 density={glitch_density}, S5 density={daemon_density}"
-            );
-        }
-    }
-
-    fn visible_cell_count(lines: &[&str]) -> usize {
-        lines
-            .iter()
-            .map(|line| {
-                substitute_slots(line)
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .count()
-            })
-            .sum()
     }
 }
