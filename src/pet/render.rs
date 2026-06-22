@@ -120,6 +120,12 @@ const GLITCH_NOISE: &[char] = &[
     '\u{2592}', '\u{2591}', '\u{2593}', '\u{2580}', '\u{2584}', '\u{258c}', '\u{2590}',
 ];
 
+/// Corruption fires on a periodic gate so it reads as a calm, intentional
+/// data-glitch rather than a constant flicker.
+const CORRUPTION_GATE_TICKS: u64 = 13;
+/// Bounded footprint: at most this many cells corrupt on an active tick.
+const CORRUPTION_MAX_CELLS: usize = 3;
+
 pub fn render_pet(
     pet: &GeneratedPet,
     stage: Stage,
@@ -410,6 +416,65 @@ fn push_segment(
         role,
     });
     *cursor += width;
+}
+
+/// Deterministic, bounded set of non-blank art cells to corrupt this tick.
+/// Returns empty when the periodic gate is closed (calm). Selection walks the
+/// non-blank cells of the 8 art rows and picks up to CORRUPTION_MAX_CELLS via
+/// a tick-seeded stride, so the footprint reshuffles across base/edge/face
+/// cells over time without ever exceeding the cap.
+#[allow(dead_code)] // wired into apply_glitch_corruption in Phase 4 Task 4
+fn corruption_cells_for_tick(art_lines: &[String], tick: u64) -> Vec<(usize, usize)> {
+    if !tick.is_multiple_of(CORRUPTION_GATE_TICKS) {
+        return Vec::new();
+    }
+    // Collect every non-blank cell of the art rows.
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    for (row, line) in art_lines.iter().enumerate().take(8) {
+        for (col, ch) in line.chars().enumerate().take(ART_WIDTH) {
+            if ch != ' ' {
+                candidates.push((row, col));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let count = CORRUPTION_MAX_CELLS.min(candidates.len());
+    // Tick-seeded start + odd stride so successive active ticks land on
+    // different cells (reshuffle) while staying deterministic per tick.
+    let n = candidates.len();
+    let gate = tick / CORRUPTION_GATE_TICKS;
+    let start = (gate.wrapping_mul(7) as usize) % n;
+    let stride = ((gate.wrapping_mul(11) as usize) % n) | 1; // always odd, >=1
+    let mut out = Vec::with_capacity(count);
+    let mut idx = start;
+    for _ in 0..count {
+        out.push(candidates[idx % n]);
+        idx += stride;
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The living-face rule: corruption may briefly touch the face but NEVER the
+/// eye-center. Returns true when (row, col) is the middle cell of an Eye span
+/// on that row. For even-width eye spans, both middle cells are protected.
+#[allow(dead_code)] // wired into apply_glitch_corruption in Phase 4 Task 4
+fn is_eye_center(spans: &[StyledSegment], row: usize, col: usize) -> bool {
+    spans.iter().any(|span| {
+        if span.line != row || span.role != PaletteRoleName::Eye {
+            return false;
+        }
+        let width = span.end.saturating_sub(span.start);
+        if width == 0 {
+            return false;
+        }
+        let mid_lo = span.start + (width - 1) / 2;
+        let mid_hi = span.start + width / 2;
+        col >= mid_lo && col <= mid_hi
+    })
 }
 
 fn apply_glitch_corruption(lines: &mut [String], spans: &mut [StyledSegment], tick: u64) {
@@ -1145,5 +1210,96 @@ mod tests {
         };
         assert_eq!(p.blink_average, 30);
         assert_eq!(p.blink_jitter, 10);
+    }
+
+    #[test]
+    fn corruption_gate_is_closed_most_ticks() {
+        let lines: Vec<String> = vec!["###########".to_string(); 8];
+        let active = (0..130_u64)
+            .filter(|&t| !corruption_cells_for_tick(&lines, t).is_empty())
+            .count();
+        // Calm: corruption is the quiet exception, not the rule.
+        assert!(active > 0, "corruption must fire sometimes");
+        assert!(
+            active <= 130 / CORRUPTION_GATE_TICKS as usize + 1,
+            "corruption fired {active}/130 ticks — too noisy"
+        );
+    }
+
+    #[test]
+    fn corruption_footprint_is_bounded() {
+        let lines: Vec<String> = vec!["###########".to_string(); 8];
+        for t in 0..200_u64 {
+            let cells = corruption_cells_for_tick(&lines, t);
+            assert!(
+                cells.len() <= CORRUPTION_MAX_CELLS,
+                "tick {t} produced {} cells, over the cap",
+                cells.len()
+            );
+        }
+    }
+
+    #[test]
+    fn corruption_cells_are_deterministic() {
+        let lines: Vec<String> = vec!["#### ## ####".chars().take(11).collect(); 8];
+        let a = corruption_cells_for_tick(&lines, 26);
+        let b = corruption_cells_for_tick(&lines, 26);
+        assert_eq!(a, b, "same tick must give same cells");
+    }
+
+    #[test]
+    fn corruption_cells_skip_blank_cells_and_stay_in_bounds() {
+        // Sparse art: only a few non-space cells. Selector must never pick a
+        // space cell or an out-of-grid cell.
+        let lines: Vec<String> = vec![
+            "   ###     ".to_string(),
+            "           ".to_string(),
+            "  #     #  ".to_string(),
+            "           ".to_string(),
+            "           ".to_string(),
+            "           ".to_string(),
+            "           ".to_string(),
+            "           ".to_string(),
+        ];
+        for t in 0..300_u64 {
+            for (row, col) in corruption_cells_for_tick(&lines, t) {
+                assert!(row < lines.len(), "row {row} out of bounds at tick {t}");
+                let ch = lines[row].chars().nth(col).unwrap();
+                assert_ne!(ch, ' ', "tick {t} picked a blank cell ({row},{col})");
+            }
+        }
+    }
+
+    #[test]
+    fn corruption_cells_empty_for_all_blank_art() {
+        let lines: Vec<String> = vec!["           ".to_string(); 8];
+        for t in 0..40_u64 {
+            assert!(
+                corruption_cells_for_tick(&lines, t).is_empty(),
+                "blank art must never corrupt (tick {t})"
+            );
+        }
+    }
+
+    #[test]
+    fn is_eye_center_is_true_only_at_the_middle_of_an_eye_span() {
+        // Eye span on row 2 covering cols 3..6 ("o o"): center is col 4.
+        let spans = vec![StyledSegment {
+            line: 2,
+            start: 3,
+            end: 6,
+            role: PaletteRoleName::Eye,
+        }];
+        assert!(is_eye_center(&spans, 2, 4), "col 4 is the eye-center");
+        assert!(
+            !is_eye_center(&spans, 2, 3),
+            "col 3 is an eye edge, not center"
+        );
+        assert!(
+            !is_eye_center(&spans, 2, 5),
+            "col 5 is an eye edge, not center"
+        );
+        assert!(!is_eye_center(&spans, 1, 4), "wrong row");
+        assert!(!is_eye_center(&spans, 2, 7), "outside the span");
     }
 }
