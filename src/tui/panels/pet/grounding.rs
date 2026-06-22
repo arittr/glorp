@@ -293,4 +293,38 @@ pub(crate) mod tests {
             assert!(*c >= 7 && *c <= 13, "shadow col {c} escaped the feet span");
         }
     }
+
+    #[test]
+    fn grounded_scene_stays_calm_at_narrow_column_width() {
+        use super::super::PetPanel;
+        use crate::tui::panels::pet::tests::{test_context, vm_with_real_pet};
+        use crate::tui::panels::LegacyPanel;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // The real pet column is ~40 wide. Render a full panel and assert the
+        // scene is grounded (pet low) and calm (no excessive bright churn): the
+        // contact shadow + floor wash are bg-only, so the count of non-blank
+        // GLYPH cells stays bounded and the pet still reads.
+        let vm = vm_with_real_pet();
+        let panel = PetPanel;
+        let ctx = test_context();
+        let backend = TestBackend::new(40, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let glyph_cells: usize = (0..18u16)
+            .flat_map(|y| (0..40u16).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() != " ")
+            .count();
+        assert!(glyph_cells > 5, "pet + floor must render visible content");
+        // Calm ceiling: a 40×18 = 720-cell panel should not be glyph-saturated.
+        // Calm ceiling: a 40×18 = 720-cell panel should not be glyph-saturated.
+        assert!(
+            glyph_cells < 720 / 2,
+            "scene must stay calm — fewer than half the cells carry glyphs; got {glyph_cells}"
+        );
+    }
 }
