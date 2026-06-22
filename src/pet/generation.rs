@@ -147,7 +147,7 @@ fn visible_traits(species: Species, rng: &mut StableRng) -> VisibleTraits {
         Species::Fuzz => pick(rng, &["o o", "^ ^", "* *", "u u"]),
         Species::Blob => pick(rng, &["o o", ". .", "O O", "~ ~"]),
         Species::Ghost => pick(rng, &["o o", ". .", "* *", "v v"]),
-        Species::Glitch => pick(rng, &["0 0", "x x", "# #", "1 1"]),
+        Species::Glitch => pick(rng, &["0 0", "\u{25c9} \u{25c9}", "# #", "1 1"]),
         Species::Crystal => pick(rng, &["o o", "< >", "* *", "v v"]),
         Species::Mech => pick(rng, &["o o", "[ ]", "= =", "0 0"]),
     };
