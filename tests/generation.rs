@@ -180,19 +180,27 @@ fn tokenpet_stage_labels_match_spec() {
 }
 
 #[test]
-fn species_have_enough_seeded_morph_variety() {
+fn morph_count_is_the_interior_texture_variant_count() {
+    // New contract: per-pet variety is algorithmic (interior texture), so
+    // morph_count is the interior-texture-variant count and is >= 1 for every
+    // (species, stage). It is NOT a hand-drawn silhouette-pool size, so the old
+    // `morph_count(S3) == 1` and `morph_count(S4/S6) >= 3` assertions are gone.
+    let stages = [
+        Stage::S0,
+        Stage::S1,
+        Stage::S2,
+        Stage::S3,
+        Stage::S4,
+        Stage::S5,
+        Stage::S6,
+    ];
     for species in Species::all() {
-        // Pup (S3) has a single template per pet.jsx; adult stages have
-        // multiple morphs whose exact count comes from `pet/art.rs` templates.
-        assert_eq!(morph_count(species, Stage::S3), 1);
-        assert!(
-            morph_count(species, Stage::S4) >= 3,
-            "expected {species:?} adult templates to provide >=3 morphs"
-        );
-        assert!(
-            morph_count(species, Stage::S6) >= 3,
-            "expected {species:?} sage templates to provide >=3 morphs"
-        );
+        for stage in stages {
+            assert!(
+                morph_count(species, stage) >= 1,
+                "{species:?} {stage:?} must report >= 1 interior-texture variant"
+            );
+        }
     }
 }
 
@@ -237,4 +245,59 @@ fn species_animation_profiles_match_tokenpet_mockup() {
     assert_eq!(species_animation_profile(Species::Glitch).breath_period, 9);
     assert_eq!(species_animation_profile(Species::Crystal).blink_jitter, 22);
     assert_eq!(species_animation_profile(Species::Mech).blink_average, 22);
+}
+
+#[test]
+fn fixed_seed_set_renders_valid_non_empty_11x8_for_every_species_stage() {
+    use unicode_width::UnicodeWidthStr;
+    let stages = [
+        Stage::S0,
+        Stage::S1,
+        Stage::S2,
+        Stage::S3,
+        Stage::S4,
+        Stage::S5,
+        Stage::S6,
+    ];
+    // A fixed seed set spanning the seed_hue space that drives interior texture.
+    let seeds = [
+        "mochi-7f3a",
+        "alpha",
+        "beta",
+        "gamma",
+        "ori-shard",
+        "0x-404",
+    ];
+    for seed in seeds {
+        for species in Species::all() {
+            let pet = generate_pet(seed).with_species(species);
+            for stage in stages {
+                let rendered = render_pet(&pet, stage, Mood::Content, frame(0));
+                // The framed grid is 10 rows x 13 cols; assert it is present and
+                // rectangular, and that at least one art row is non-blank (no
+                // blank pet).
+                assert_eq!(
+                    rendered.lines.len(),
+                    10,
+                    "seed={seed} {species:?} {stage:?} must render 10 framed rows"
+                );
+                for (row, line) in rendered.lines.iter().enumerate() {
+                    assert_eq!(
+                        UnicodeWidthStr::width(line.as_str()),
+                        13,
+                        "seed={seed} {species:?} {stage:?} row {row} must be 13 cols wide: \
+                         {line:?}"
+                    );
+                }
+                let any_ink = rendered
+                    .lines
+                    .iter()
+                    .any(|line| line.chars().any(|c| c != ' '));
+                assert!(
+                    any_ink,
+                    "seed={seed} {species:?} {stage:?} rendered a blank pet"
+                );
+            }
+        }
+    }
 }

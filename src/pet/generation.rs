@@ -190,6 +190,11 @@ fn visible_traits(species: Species, rng: &mut StableRng) -> VisibleTraits {
     )
     .to_string();
     let palette_index = rng.next_usize(8);
+    // morph_index / morph_pup_index are retained-dead at the render layer: the
+    // per-stage base-template map (pet/art.rs `stage_base_template`) replaced the
+    // adult-pool / pup-pool indexing they fed. They are kept in the draw order so
+    // existing seeds keep their downstream draws (seed_hue, saturation) stable;
+    // removing them would rehue every pet beyond the accepted one-time reset.
     let morph_index = rng.next_usize(4);
     let morph_pup_index = rng.next_usize(4);
     let seed_hue = rng.next_usize(360) as u16;

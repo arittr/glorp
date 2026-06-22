@@ -205,6 +205,11 @@ fn split_rect_around(rect: Rect, hole: Rect) -> Vec<Rect> {
 /// Returns the horizontal border fill character for the outer frame, picked
 /// per stage tier. S0–S1 use a dotted line, S2–S3 the default rounded fill,
 /// S4–S5 a heavy line, S6 a sparkle. See the watch-visual-polish design.
+///
+/// The S6 sparkle here is one of two coordinated sparkle surfaces: the pet's
+/// own gutter row 0 (render.rs `gutter_content_for` == `GutterContent::Sparkle`)
+/// uses the same `✦` glyph. Keep them in sync — see
+/// `s6_outer_frame_fill_matches_the_pet_gutter_sparkle_glyph`.
 pub(crate) fn frame_fill_for_stage(stage: crate::game::evolution::Stage) -> &'static str {
     use crate::game::evolution::Stage;
     match stage {
@@ -342,6 +347,20 @@ mod frame_fill_tests {
         assert_eq!(super::frame_fill_for_stage(Stage::S4), "━");
         assert_eq!(super::frame_fill_for_stage(Stage::S5), "━");
         assert_eq!(super::frame_fill_for_stage(Stage::S6), "✦");
+    }
+
+    #[test]
+    fn s6_outer_frame_fill_matches_the_pet_gutter_sparkle_glyph() {
+        // The pet-gutter S6 sparkle (render.rs frame_with_particles) and the outer
+        // frame fill must use the same glyph so the watch frame reads as one design,
+        // not two independent sparkle treatments. Keep these in sync.
+        use crate::game::evolution::Stage;
+        const GUTTER_SPARKLE: &str = "\u{2726}";
+        assert_eq!(
+            super::frame_fill_for_stage(Stage::S6),
+            GUTTER_SPARKLE,
+            "S6 outer-frame fill must equal the pet-gutter sparkle glyph"
+        );
     }
 }
 
