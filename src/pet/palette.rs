@@ -180,9 +180,30 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
     }
 }
 
+/// WCAG relative luminance of an sRGB color (0.0 black .. 1.0 white).
+#[allow(dead_code)] // production caller (per-species eye-lightness) lands in Phase 3 Task 5
+pub(crate) fn relative_luminance(c: Rgb) -> f32 {
+    let chan = |v: u8| {
+        let s = f32::from(v) / 255.0;
+        if s <= 0.039_28 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+        let la = relative_luminance(a);
+        let lb = relative_luminance(b);
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
 
     #[test]
     fn black_and_white_are_exact() {
@@ -300,5 +321,30 @@ mod tests {
         let a = resolve_pet_palette(Species::Fuzz, &traits_with_hue(10)).body;
         let b = resolve_pet_palette(Species::Fuzz, &traits_with_hue(300)).body;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn contrast_ratio_white_on_black_is_twenty_one() {
+        let white = Rgb::new(255, 255, 255);
+        let black = Rgb::new(0, 0, 0);
+        let ratio = contrast_ratio(white, black);
+        assert!(
+            (ratio - 21.0).abs() < 0.1,
+            "white-on-black contrast should be ~21:1, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn contrast_ratio_is_symmetric_and_one_for_identical() {
+        let c = Rgb::new(0x82, 0xbc, 0x83);
+        assert!(
+            (contrast_ratio(c, c) - 1.0).abs() < 1e-4,
+            "identical colors are 1:1"
+        );
+        let d = Rgb::new(0x13, 0x11, 0x0f);
+        assert!(
+            (contrast_ratio(c, d) - contrast_ratio(d, c)).abs() < 1e-4,
+            "contrast is symmetric"
+        );
     }
 }
