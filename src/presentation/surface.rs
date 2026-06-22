@@ -140,8 +140,140 @@ pub struct ResolvedColors {
 }
 
 // ---------------------------------------------------------------------------
+// Resolver
+// ---------------------------------------------------------------------------
+
+use crate::pet::palette::{role_color, ResolvedPalette};
+use crate::presentation::color_ops;
+
+pub fn resolve_pet_colors(
+    base: &ResolvedPalette,
+    inputs: &LiveColorInputs,
+    style: &SurfaceStyle,
+) -> ResolvedColors {
+    let resolve_one = |role: PaletteRoleName| -> Rgb {
+        let mut c = role_color(role, base);
+        // 1. source-accent override (menubar): accent/particle only
+        if style.source_accent
+            && matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle)
+        {
+            if let Some(over) = inputs.source_override {
+                c = over;
+            }
+        }
+        // 2. phase tint (watch)
+        if style.phase_tint {
+            c = color_ops::tint_for_phase(c, inputs.phase, inputs.phase_blend);
+        }
+        // 3. energy/sleep droop (watch energy*perf; menubar asleep?0.7:1.0)
+        if style.energy_droop {
+            c = color_ops::darken_channel(c, inputs.droop_mult);
+        }
+        // 4. shimmer / token-pop brighten (watch): one role only
+        if style.shimmer && inputs.shimmer_role == Some(role) {
+            c = color_ops::brighten_channel(c, inputs.shimmer_mult);
+        }
+        // 5. activity lift (watch)
+        if style.activity_lift {
+            c = color_ops::activity_lift_channel(c, inputs.activity_level);
+        }
+        c
+    };
+    ResolvedColors {
+        body: resolve_one(PaletteRoleName::Body),
+        eye: resolve_one(PaletteRoleName::Eye),
+        mouth: resolve_one(PaletteRoleName::Mouth),
+        accent: resolve_one(PaletteRoleName::Accent),
+        pattern: resolve_one(PaletteRoleName::Pattern),
+        particle: resolve_one(PaletteRoleName::Particle),
+        corruption: resolve_one(PaletteRoleName::Corruption),
+        eye_emphasis: style.eye_emphasis,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+    use crate::pet::palette::{default_theme_palette, role_color, Rgb};
+    use crate::pet::render::PaletteRoleName;
+    use crate::tui::day::DayPhase;
+
+    fn neutral_inputs() -> LiveColorInputs {
+        LiveColorInputs {
+            phase: DayPhase::Day,
+            phase_blend: 0.0,
+            droop_mult: 1.0,
+            shimmer_role: None,
+            shimmer_mult: 1.0,
+            activity_level: 0.0,
+            source_override: None,
+        }
+    }
+
+    #[test]
+    fn round_style_is_pure_role_color() {
+        let p = default_theme_palette();
+        let out = resolve_pet_colors(&p, &neutral_inputs(), &ROUND_STYLE);
+        // companion does exactly role_color today
+        assert_eq!(out.body, role_color(PaletteRoleName::Body, &p));
+        assert_eq!(out.accent, role_color(PaletteRoleName::Accent, &p));
+        assert!(matches!(out.eye_emphasis, EyeEmphasis::None));
+    }
+
+    #[test]
+    fn menu_style_applies_source_override_then_sleep_dim() {
+        // MENU_STYLE: source_accent on accent/particle, droop_mult carries the sleep dim.
+        let p = default_theme_palette();
+        let mut inputs = neutral_inputs();
+        inputs.source_override = Some(Rgb::new(0xf0, 0xc4, 0x6a)); // Ensemble
+        inputs.droop_mult = 0.7; // asleep
+        let out = resolve_pet_colors(&p, &inputs, &MENU_STYLE);
+        // accent = override(0xf0,0xc4,0x6a) darkened x0.7 (truncating) = (168,137,74)
+        assert_eq!(out.accent, Rgb::new(168, 137, 74));
+        // body = base body darkened x0.7, no override
+        let body = role_color(PaletteRoleName::Body, &p);
+        assert_eq!(
+            out.body,
+            Rgb::new(
+                (body.r as f32 * 0.7) as u8,
+                (body.g as f32 * 0.7) as u8,
+                (body.b as f32 * 0.7) as u8
+            )
+        );
+    }
+
+    #[test]
+    fn watch_style_runs_phase_then_droop_then_shimmer_then_lift_in_order() {
+        let p = default_theme_palette();
+        let mut inputs = neutral_inputs();
+        inputs.phase = DayPhase::Dusk;
+        inputs.phase_blend = 1.0;
+        inputs.droop_mult = 0.8;
+        inputs.shimmer_role = Some(PaletteRoleName::Pattern);
+        inputs.shimmer_mult = 1.4;
+        inputs.activity_level = 1.0;
+        let out = resolve_pet_colors(&p, &inputs, &WATCH_STYLE);
+
+        // recompute pattern by hand in the same order
+        let mut c = role_color(PaletteRoleName::Pattern, &p);
+        c = crate::presentation::color_ops::tint_for_phase(c, DayPhase::Dusk, 1.0);
+        c = crate::presentation::color_ops::darken_channel(c, 0.8);
+        c = crate::presentation::color_ops::brighten_channel(c, 1.4); // shimmer hits Pattern
+        c = crate::presentation::color_ops::activity_lift_channel(c, 1.0);
+        assert_eq!(out.pattern, c);
+        // body gets the same chain MINUS shimmer (shimmer only hits Pattern)
+        let mut b = role_color(PaletteRoleName::Body, &p);
+        b = crate::presentation::color_ops::tint_for_phase(b, DayPhase::Dusk, 1.0);
+        b = crate::presentation::color_ops::darken_channel(b, 0.8);
+        b = crate::presentation::color_ops::activity_lift_channel(b, 1.0);
+        assert_eq!(out.body, b);
+        assert!(matches!(out.eye_emphasis, EyeEmphasis::TerminalBold));
+    }
+}
 
 #[cfg(test)]
 mod tests {
