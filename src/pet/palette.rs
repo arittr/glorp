@@ -152,12 +152,12 @@ use crate::pet::generation::{Species, VisibleTraits};
 /// Hue (OKLCH degrees) each species leans toward.
 fn species_base_hue(species: Species) -> f32 {
     match species {
-        Species::Fuzz => 70.0,     // warm amber
-        Species::Blob => 195.0,    // teal
-        Species::Ghost => 300.0,   // violet
-        Species::Glitch => 135.0,  // acid green
-        Species::Crystal => 230.0, // ice blue
-        Species::Mech => 250.0,    // steel
+        Species::Fuzz => 40.0,     // peach
+        Species::Blob => 150.0,    // mint
+        Species::Ghost => 300.0,   // lavender
+        Species::Glitch => 135.0,  // acid/phosphor
+        Species::Crystal => 230.0, // ice
+        Species::Mech => 75.0,     // amber/brass
     }
 }
 
@@ -414,6 +414,34 @@ mod tests {
                 new_chroma > old_chroma,
                 "{s:?}: raised chroma {new_chroma:.3} should exceed old pinned-0.10 chroma {old_chroma:.3}"
             );
+        }
+    }
+
+    #[test]
+    fn species_base_hues_match_identity_family() {
+        use crate::pet::generation::Species;
+        // OKLCH hue degrees (approx): peach ~40, mint ~150, lavender ~300,
+        // acid ~135, ice ~230, amber ~75. Verify the family anchor, not exact
+        // realized RGB (that depends on chroma/jitter).
+        assert!((species_base_hue(Species::Fuzz) - 40.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Blob) - 150.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Ghost) - 300.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Glitch) - 135.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Crystal) - 230.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Mech) - 75.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn all_species_bodies_are_mutually_distinct() {
+        use crate::pet::generation::Species;
+        let bodies: Vec<_> = Species::all()
+            .into_iter()
+            .map(|s| resolve_pet_palette(s, &traits_with_hue(0)).body)
+            .collect();
+        for (i, a) in bodies.iter().enumerate() {
+            for b in bodies.iter().skip(i + 1) {
+                assert_ne!(a, b, "two species bodies collided after hue retune");
+            }
         }
     }
 }
