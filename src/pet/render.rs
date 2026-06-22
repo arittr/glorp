@@ -423,7 +423,6 @@ fn push_segment(
 /// non-blank cells of the 8 art rows and picks up to CORRUPTION_MAX_CELLS via
 /// a tick-seeded stride, so the footprint reshuffles across base/edge/face
 /// cells over time without ever exceeding the cap.
-#[allow(dead_code)] // wired into apply_glitch_corruption in Phase 4 Task 4
 fn corruption_cells_for_tick(art_lines: &[String], tick: u64) -> Vec<(usize, usize)> {
     if !tick.is_multiple_of(CORRUPTION_GATE_TICKS) {
         return Vec::new();
@@ -461,7 +460,6 @@ fn corruption_cells_for_tick(art_lines: &[String], tick: u64) -> Vec<(usize, usi
 /// The living-face rule: corruption may briefly touch the face but NEVER the
 /// eye-center. Returns true when (row, col) is the middle cell of an Eye span
 /// on that row. For even-width eye spans, both middle cells are protected.
-#[allow(dead_code)] // wired into apply_glitch_corruption in Phase 4 Task 4
 fn is_eye_center(spans: &[StyledSegment], row: usize, col: usize) -> bool {
     spans.iter().any(|span| {
         if span.line != row || span.role != PaletteRoleName::Eye {
@@ -477,37 +475,76 @@ fn is_eye_center(spans: &[StyledSegment], row: usize, col: usize) -> bool {
     })
 }
 
-fn apply_glitch_corruption(lines: &mut [String], spans: &mut [StyledSegment], tick: u64) {
-    if !tick.is_multiple_of(37) {
+/// Glitch corruption: a bounded, deterministic, loud data-glitch effect.
+///
+/// On a periodic gate (calm — not every frame) it corrupts up to
+/// CORRUPTION_MAX_CELLS non-blank art cells. Each corrupted cell:
+///
+///   * swaps its glyph to a contrasting GLITCH_NOISE glyph (may be ▒▓ weight),
+///   * is re-tagged as the Corruption role by SPLITTING the underlying span,
+///     so corruption wins z-order over Eye/Mouth/Body at that cell.
+///
+/// The eye-center is never corrupted (living-face rule).
+fn apply_glitch_corruption(lines: &mut [String], spans: &mut Vec<StyledSegment>, tick: u64) {
+    let cells = corruption_cells_for_tick(lines, tick);
+    if cells.is_empty() {
         return;
     }
-    if lines.is_empty() {
-        return;
+    for (i, (row, col)) in cells.into_iter().enumerate() {
+        if is_eye_center(spans, row, col) {
+            continue; // living-face: never the eye-center
+        }
+        // Pick a noise glyph deterministically per (tick, cell index).
+        let noise =
+            GLITCH_NOISE[((tick as usize).wrapping_mul(3).wrapping_add(i)) % GLITCH_NOISE.len()];
+        replace_char_in_line(&mut lines[row], col, noise);
+        retag_cell_as_corruption(spans, row, col);
     }
-    let row = ((tick * 7) as usize) % lines.len();
-    let line = &lines[row];
-    let total_chars = line.chars().count();
-    if total_chars == 0 {
-        return;
-    }
-    let col = ((tick * 11) as usize) % total_chars;
-    let target_char = line.chars().nth(col).unwrap_or(' ');
-    if target_char == ' ' {
-        return;
-    }
-    // Skip if the cell belongs to anything other than a body span.
-    let in_body = spans.iter().any(|span| {
-        span.line == row
-            && span.role == PaletteRoleName::Body
-            && col >= span.start
-            && col < span.end
-    });
-    if !in_body {
-        return;
-    }
+}
 
-    let noise = GLITCH_NOISE[((tick * 3) as usize) % GLITCH_NOISE.len()];
-    replace_char_in_line(&mut lines[row], col, noise);
+/// Re-tag the single cell (row, col) as the Corruption role. If an existing
+/// span covers the cell, it is split around the cell so the surrounding cells
+/// keep their original role and the cell itself becomes a width-1 Corruption
+/// span. If no span covers the cell, a standalone Corruption span is added.
+fn retag_cell_as_corruption(spans: &mut Vec<StyledSegment>, row: usize, col: usize) {
+    let mut split: Vec<StyledSegment> = Vec::new();
+    let mut covered = false;
+    for span in spans.iter_mut() {
+        if span.line != row || col < span.start || col >= span.end {
+            continue;
+        }
+        covered = true;
+        let original_end = span.end;
+        let original_role = span.role;
+        // Left fragment: keep original role for [start, col).
+        // Shrink this span to the left fragment (possibly empty -> filtered later).
+        span.end = col;
+        // Right fragment: keep original role for (col, end).
+        if col + 1 < original_end {
+            split.push(StyledSegment {
+                line: row,
+                start: col + 1,
+                end: original_end,
+                role: original_role,
+            });
+        }
+        break;
+    }
+    // The corrupted cell itself.
+    split.push(StyledSegment {
+        line: row,
+        start: col,
+        end: col + 1,
+        role: PaletteRoleName::Corruption,
+    });
+    if !covered {
+        // No span covered the cell (a body-gap cell). Just add the corruption
+        // span; the consumer renders uncovered cells as body, and this span
+        // overrides that single cell.
+    }
+    // Drop any now-empty left fragments produced by the shrink.
+    spans.retain(|s| s.start < s.end);
+    spans.extend(split);
 }
 
 fn replace_char_in_line(line: &mut String, char_index: usize, replacement: char) {
@@ -1301,5 +1338,115 @@ mod tests {
         );
         assert!(!is_eye_center(&spans, 1, 4), "wrong row");
         assert!(!is_eye_center(&spans, 2, 7), "outside the span");
+    }
+
+    /// At a tick where the corruption gate is open, a Glitch pet shows at least
+    /// one Corruption-role span over a cell that was previously Eye or Mouth or
+    /// Body — proving corruption is loud (recolored) and z-wins, not a silent
+    /// in-place glyph edit.
+    #[test]
+    fn glitch_corruption_emits_corruption_role_spans_on_active_tick() {
+        let pet = generate_pet("corrupt-seed").with_species(Species::Glitch);
+        // CORRUPTION_GATE_TICKS == 13; tick 13 opens the gate.
+        let frame = AnimationFrame {
+            tick: 13,
+            ..AnimationFrame::default()
+        };
+        let rendered = render_pet(&pet, Stage::S4, Mood::Content, frame);
+        let has_corruption = rendered
+            .spans
+            .iter()
+            .any(|s| s.role == PaletteRoleName::Corruption);
+        assert!(
+            has_corruption,
+            "active corruption tick must emit Corruption-role spans"
+        );
+    }
+
+    #[test]
+    fn glitch_corruption_never_recolors_the_eye_center() {
+        let pet = generate_pet("corrupt-eye-seed").with_species(Species::Glitch);
+        // Scan many gate-open ticks; the eye-center must never become Corruption.
+        for gate in 1..400_u64 {
+            let tick = gate * CORRUPTION_GATE_TICKS;
+            let frame = AnimationFrame {
+                tick,
+                ..AnimationFrame::default()
+            };
+            // Re-derive the pre-frame spans the same way render_pet does, then
+            // run the public render and check no Corruption span lands on an
+            // eye-center cell (in the pre-frame coordinate space).
+            let rendered = render_pet(&pet, Stage::S4, Mood::Content, frame);
+            // Find the Eye spans (post-frame coords: render adds +1 to line/col).
+            let eye_spans: Vec<_> = rendered
+                .spans
+                .iter()
+                .filter(|s| s.role == PaletteRoleName::Eye)
+                .cloned()
+                .collect();
+            for c in rendered
+                .spans
+                .iter()
+                .filter(|s| s.role == PaletteRoleName::Corruption)
+            {
+                for e in &eye_spans {
+                    if c.line == e.line {
+                        let width = e.end.saturating_sub(e.start);
+                        let mid_lo = e.start + (width.saturating_sub(1)) / 2;
+                        let mid_hi = e.start + width / 2;
+                        // Corruption span is width-1; its start is the cell.
+                        let col = c.start;
+                        assert!(
+                            !(col >= mid_lo && col <= mid_hi),
+                            "tick {tick}: corruption hit the eye-center at line {} col {col}",
+                            c.line
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_glitch_species_never_corrupt() {
+        for species in [
+            Species::Fuzz,
+            Species::Blob,
+            Species::Ghost,
+            Species::Crystal,
+            Species::Mech,
+        ] {
+            let pet = generate_pet("no-corrupt").with_species(species);
+            let frame = AnimationFrame {
+                tick: 13,
+                ..AnimationFrame::default()
+            };
+            let rendered = render_pet(&pet, Stage::S4, Mood::Content, frame);
+            assert!(
+                !rendered
+                    .spans
+                    .iter()
+                    .any(|s| s.role == PaletteRoleName::Corruption),
+                "{species:?} must never corrupt"
+            );
+        }
+    }
+
+    #[test]
+    fn glitch_corruption_quiet_off_gate_tick() {
+        let pet = generate_pet("corrupt-seed").with_species(Species::Glitch);
+        // Tick 1 is not a multiple of CORRUPTION_GATE_TICKS (13): gate closed.
+        let frame = AnimationFrame {
+            tick: 1,
+            ..AnimationFrame::default()
+        };
+        let rendered = render_pet(&pet, Stage::S4, Mood::Content, frame);
+        assert!(
+            !rendered
+                .spans
+                .iter()
+                .any(|s| s.role == PaletteRoleName::Corruption),
+            "off-gate tick must stay calm (no corruption)"
+        );
     }
 }
