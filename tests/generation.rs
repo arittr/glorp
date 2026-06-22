@@ -2,7 +2,7 @@ use glorp::game::evolution::Stage;
 use glorp::game::metabolism::Mood;
 use glorp::pet::art::{morph_count, stage_label};
 use glorp::pet::generation::{generate_pet, resolve_accepted_name, Species};
-use glorp::pet::render::{palette_roles, render_pet, species_animation_profile, AnimationFrame};
+use glorp::pet::render::{render_pet, species_animation_profile, AnimationFrame};
 
 fn frame(tick: u64) -> AnimationFrame {
     AnimationFrame {
@@ -180,19 +180,25 @@ fn tokenpet_stage_labels_match_spec() {
 }
 
 #[test]
-fn species_have_enough_seeded_morph_variety() {
+fn morph_count_reports_interior_texture_variants_not_silhouette_pools() {
+    // New contract (Phase 1): morph_count is the number of deterministic
+    // interior-texture variants a (species, stage) can render — NOT a hand-drawn
+    // silhouette-pool size. It is >= 1 for every stage, and pinned to 1 on the
+    // small stages (S0..S2) where texture is constant-occupancy.
     for species in Species::all() {
-        // Pup (S3) has a single template per pet.jsx; adult stages have
-        // multiple morphs whose exact count comes from `pet/art.rs` templates.
-        assert_eq!(morph_count(species, Stage::S3), 1);
-        assert!(
-            morph_count(species, Stage::S4) >= 3,
-            "expected {species:?} adult templates to provide >=3 morphs"
-        );
-        assert!(
-            morph_count(species, Stage::S6) >= 3,
-            "expected {species:?} sage templates to provide >=3 morphs"
-        );
+        for stage in [Stage::S0, Stage::S1, Stage::S2] {
+            assert_eq!(
+                morph_count(species, stage),
+                1,
+                "{species:?} {stage:?}: small stages pin interior texture to 1 variant"
+            );
+        }
+        for stage in [Stage::S3, Stage::S4, Stage::S5, Stage::S6] {
+            assert!(
+                morph_count(species, stage) >= 1,
+                "{species:?} {stage:?}: every stage renders at least one variant"
+            );
+        }
     }
 }
 
@@ -212,29 +218,97 @@ fn adult_stages_have_distinct_silhouettes_for_representative_species() {
 }
 
 #[test]
-fn palette_roles_follow_tokenpet_hue_offsets() {
-    let mut pet = generate_pet("ori-shard");
-    pet.traits.saturation_percent = 50;
-    let roles = palette_roles(&pet);
-    assert_eq!(roles.body.lightness, 0.84);
-    assert_eq!(roles.body.base_chroma, 0.05);
-    assert_eq!(roles.eye.hue_offset_degrees, 180);
-    assert_eq!(roles.eye.lightness, 0.84);
-    assert_eq!(roles.eye.base_chroma, 0.065);
-    assert_eq!(roles.mouth.hue_offset_degrees, 30);
-    assert_eq!(roles.accent.hue_offset_degrees, 90);
-    assert_eq!(roles.pattern.hue_offset_degrees, 150);
+fn species_animation_profiles_match_tokenpet_mockup() {
+    // Breath is now owned by species_breath_rhythm_decis in animator.rs.
+    // Only blink cadence lives in AnimationProfile.
+    assert_eq!(species_animation_profile(Species::Fuzz).blink_average, 32);
+    assert_eq!(species_animation_profile(Species::Fuzz).blink_jitter, 12);
+    assert_eq!(species_animation_profile(Species::Ghost).blink_average, 50);
+    assert_eq!(species_animation_profile(Species::Crystal).blink_jitter, 22);
+    assert_eq!(species_animation_profile(Species::Mech).blink_average, 22);
 }
 
 #[test]
-fn species_animation_profiles_match_tokenpet_mockup() {
-    assert_eq!(species_animation_profile(Species::Fuzz).breath_period, 16);
-    assert_eq!(species_animation_profile(Species::Fuzz).breath_hold, 4);
-    assert_eq!(species_animation_profile(Species::Fuzz).blink_average, 32);
-    assert_eq!(species_animation_profile(Species::Fuzz).blink_jitter, 12);
-    assert_eq!(species_animation_profile(Species::Blob).breath_period, 13);
-    assert_eq!(species_animation_profile(Species::Ghost).blink_average, 50);
-    assert_eq!(species_animation_profile(Species::Glitch).breath_period, 9);
-    assert_eq!(species_animation_profile(Species::Crystal).blink_jitter, 22);
-    assert_eq!(species_animation_profile(Species::Mech).blink_average, 22);
+fn fixed_seed_set_renders_valid_non_empty_11x8_for_every_species_stage() {
+    use unicode_width::UnicodeWidthStr;
+    let stages = [
+        Stage::S0,
+        Stage::S1,
+        Stage::S2,
+        Stage::S3,
+        Stage::S4,
+        Stage::S5,
+        Stage::S6,
+    ];
+    // A fixed seed set spanning the seed_hue space that drives interior texture.
+    let seeds = [
+        "mochi-7f3a",
+        "alpha",
+        "beta",
+        "gamma",
+        "ori-shard",
+        "0x-404",
+    ];
+    for seed in seeds {
+        for species in Species::all() {
+            let pet = generate_pet(seed).with_species(species);
+            for stage in stages {
+                let rendered = render_pet(&pet, stage, Mood::Content, frame(0));
+                // The framed grid is 10 rows x 13 cols; assert it is present and
+                // rectangular, and that at least one art row is non-blank (no
+                // blank pet).
+                assert_eq!(
+                    rendered.lines.len(),
+                    10,
+                    "seed={seed} {species:?} {stage:?} must render 10 framed rows"
+                );
+                for (row, line) in rendered.lines.iter().enumerate() {
+                    assert_eq!(
+                        UnicodeWidthStr::width(line.as_str()),
+                        13,
+                        "seed={seed} {species:?} {stage:?} row {row} must be 13 cols wide: \
+                         {line:?}"
+                    );
+                }
+                let any_ink = rendered
+                    .lines
+                    .iter()
+                    .any(|line| line.chars().any(|c| c != ' '));
+                assert!(
+                    any_ink,
+                    "seed={seed} {species:?} {stage:?} rendered a blank pet"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn glitch_resting_eyes_pool_has_no_corpse_eyes() {
+    // Probe many seeds; the Glitch resting (Content) eyes must never be "x x".
+    for n in 0..500 {
+        let pet = generate_pet(&format!("glitch-pool-{n}")).with_species(Species::Glitch);
+        assert_ne!(
+            pet.traits.eyes, "x x",
+            "Glitch resting eyes must never be corpse eyes"
+        );
+    }
+}
+
+#[test]
+fn species_resting_eye_pools_are_three_columns() {
+    use unicode_width::UnicodeWidthStr;
+    // The Content (resting) eyes come from the per-seed pool, substituted into a
+    // 3-col {eyes} slot; every pool entry must be exactly 3 display columns.
+    for n in 0..500 {
+        for species in Species::all() {
+            let pet = generate_pet(&format!("eye-width-{n}")).with_species(species);
+            assert_eq!(
+                UnicodeWidthStr::width(pet.traits.eyes.as_str()),
+                3,
+                "{species:?} resting eyes {:?} must be 3 cols",
+                pet.traits.eyes
+            );
+        }
+    }
 }

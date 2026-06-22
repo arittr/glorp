@@ -88,7 +88,11 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         kind: HabitatPropKind::Accent,
         zone: HabitatPropZone::FloorLeft,
         display_priority: 10,
-        lifetime_threshold: Some(25_000.0),
+        // Front-loaded: the first pebble arrives at 10k lifetime tokens so a
+        // young pet's habitat shows honest early character. The const name
+        // keeps its 25k label for call-site stability; the value is the source
+        // of truth. Maturity gate and later thresholds are unchanged.
+        lifetime_threshold: Some(10_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0xa8, 0xa4, 0x9c), // weathered stone
     },
@@ -568,5 +572,17 @@ mod tests {
             &mut unlocked,
         );
         assert!(unlocked.iter().any(|id| id.as_str() == RETURN_SPROUT));
+    }
+
+    #[test]
+    fn pebble_unlocks_earlier_for_honest_early_character() {
+        let spec = catalog_prop_by_str(TOKEN_PEBBLE_25K).unwrap();
+        assert_eq!(
+            spec.lifetime_threshold,
+            Some(10_000.0),
+            "the first pebble front-loads early character at 10k lifetime tokens"
+        );
+        // The maturity gate (100k default baseline) is unrelated and untouched —
+        // a pet at 10k lifetime tokens is still immature and renders zero motes.
     }
 }

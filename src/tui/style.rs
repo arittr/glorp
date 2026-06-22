@@ -219,6 +219,7 @@ pub struct SemanticStyles {
     pub pet_mouth: Style,
     pub pet_accent: Style,
     pub pet_pattern: Style,
+    pub pet_particle: Style,
 }
 
 impl SemanticStyles {
@@ -268,6 +269,7 @@ pub fn semantic_styles() -> SemanticStyles {
         pet_mouth: Style::default().fg(p.dim.rgb),
         pet_accent: Style::default().fg(p.accent.rgb),
         pet_pattern: Style::default().fg(p.faint.rgb),
+        pet_particle: Style::default().fg(p.accent.rgb),
     }
 }
 

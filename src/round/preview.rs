@@ -332,4 +332,13 @@ mod tests {
             .expect("expected command cell");
         assert_eq!(command_cell.symbol, "x");
     }
+
+    #[test]
+    fn corruption_role_degrades_to_neutral_under_flat() {
+        use crate::pet::render::PaletteRoleName;
+        // Under Flat the round companion carries the pet by silhouette; the
+        // contrasting corruption color is gone, so corruption must read as a
+        // neutral cell, not be mistaken for an eye (green) or accent (yellow).
+        assert_eq!(flat_role_name(PaletteRoleName::Corruption), "white");
+    }
 }

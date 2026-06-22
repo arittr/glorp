@@ -271,7 +271,7 @@ fn dev_preview_watch_writes_expected_artifacts() {
     }
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["schema_version"], 4);
     assert_eq!(manifest["producer"], "glorp-dev-preview");
     assert!(!manifest["glorp_version"].as_str().unwrap().is_empty());
     assert!(manifest["generated_at"].as_str().unwrap().ends_with('Z'));
@@ -648,7 +648,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         .is_file());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["schema_version"], 4);
     let wide = scenario(&manifest, "watch-wide-normal");
     assert_eq!(
         wide["files"]["layout"],
@@ -1004,6 +1004,8 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-habitat-full-phase-b.txt",
         "frames/pet-species-stage.txt",
         "frames/pet-species-stage-flat.txt",
+        "frames/pet-texture-variants.txt",
+        "frames/pet-mood-set.txt",
         "frames/pet-glitch-live-states.txt",
         "frames/round-normal.txt",
         "frames/round-normal.cells.json",
@@ -1076,6 +1078,8 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-habitat-full-phase-b".to_string(),
             "pet-species-stage".to_string(),
             "pet-species-stage-flat".to_string(),
+            "pet-texture-variants".to_string(),
+            "pet-mood-set".to_string(),
             "pet-glitch-live-states".to_string(),
             "round-normal".to_string(),
             "round-active-pulse".to_string(),
@@ -1408,7 +1412,7 @@ fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
     assert!(!run.out.join("frames/watch-wide-normal.txt").exists());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["schema_version"], 4);
     assert!(
         manifest["scenarios"].as_array().unwrap().is_empty(),
         "animation-only bundles should not write static scenarios"
@@ -1582,7 +1586,7 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
     run.run_success("round");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["schema_version"], 4);
     for id in ROUND_IDS {
         assert!(
             run.out.join(format!("frames/{id}.txt")).is_file(),

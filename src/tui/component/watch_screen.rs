@@ -602,8 +602,8 @@ mod tests {
         let pet_art = layout.target(TargetPath::new("watch.pet.art")).unwrap();
         assert_eq!(pet_art.rect.width, 13);
         assert_eq!(pet_art.rect.height, 10);
-        // Art centered in 118×14 panel: cx=1+(118-13)/2=53, cy=2+(14-10)/2=4.
-        assert_eq!(pet_art.rect, Rect::new(53, 4, 13, 10));
+        // Art grounded in 118×14 panel: cx=1+(118-13)/2=53; feet anchor clamps to max_y=6.
+        assert_eq!(pet_art.rect, Rect::new(53, 6, 13, 10));
     }
 
     #[test]

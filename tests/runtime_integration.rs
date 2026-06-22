@@ -378,6 +378,62 @@ fn tokenmaxxing_cutover_missing_agentsview_does_not_activate_contract() {
         .unwrap());
 }
 
+// Regression test: cutover with a snapshot that has diagnostics must still advance cursors.
+// Before the fix, any benign diagnostic (e.g. a malformed model breakdown alongside valid
+// records) caused ensure_tokenmaxxing_contract_active to early-return without advancing
+// cursors, so the next poll saw a zero-cursor diff and applied the full usage history as a
+// bolus — rocketing the pet to S6.
+#[test]
+fn tokenmaxxing_cutover_advances_cursors_when_snapshot_has_benign_diagnostic() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 100_000.0;
+    state.xp = 0.25;
+    state.stage = Stage::S2;
+    state.vitals.fed = 44.0;
+
+    // Fixture returns valid daily records plus one malformed model breakdown that
+    // triggers a diagnostic but leaves cursor_updates/daily_usage populated.
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/helpers/agentsview-data-with-diagnostic.mjs"),
+            ),
+        },
+    );
+
+    let outcome = glorp::usage::cutover::ensure_tokenmaxxing_contract_active(
+        &mut state,
+        &mut usage_store,
+        &provider,
+        datetime!(2026 - 06 - 18 20:00 UTC),
+    )
+    .unwrap();
+
+    // Contract is NOT activated (diagnostics present), but cursors MUST be advanced.
+    assert!(!outcome.activated);
+    assert!(!usage_store
+        .is_token_contract_active(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1)
+        .unwrap());
+
+    // The critical assertion: a subsequent poll must yield ~0 new tokens because the
+    // cursors were advanced to the current totals during cutover. Without the fix,
+    // this poll would return the full historical usage as a bolus.
+    let after_cutover_poll = provider.poll(&mut usage_store).unwrap();
+    assert_eq!(
+        after_cutover_poll.total_tokens, 0.0,
+        "cursors must be advanced even when diagnostics are present; \
+        a non-zero poll means the full history would be applied as a bolus"
+    );
+
+    // Pet state must be unchanged.
+    assert_eq!(state.xp, 0.25);
+    assert_eq!(state.stage, Stage::S2);
+    assert_eq!(state.vitals.fed, 44.0);
+}
+
 fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePollResult {
     // Each call yields a distinct cursor_value so the unapplied ledger's idempotency
     // (keyed on provider_surface|cursor_key|cursor_value) treats each call as a new poll.
@@ -644,7 +700,8 @@ fn habitat_catalog_exposes_v1_prop_ids_and_kinds() {
 
     let pebble = catalog_prop(&HabitatPropId::new("token_pebble_25k")).unwrap();
     assert_eq!(pebble.kind, HabitatPropKind::Accent);
-    assert_eq!(pebble.lifetime_threshold, Some(25_000.0));
+    // Front-loaded to 10k to give young pets honest early character (was 25k).
+    assert_eq!(pebble.lifetime_threshold, Some(10_000.0));
 
     for (id, zone) in [
         ("token_moss_tuft_250k", HabitatPropZone::FloorMid),

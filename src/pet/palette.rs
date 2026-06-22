@@ -1,5 +1,6 @@
 //! Pet color resolution: OKLCH -> sRGB, and per-pet/species palettes.
 
+use crate::game::metabolism::Mood;
 use crate::pet::render::PaletteRoleName;
 
 /// Backend-neutral 8-bit color. Each surface adapts this to its own type
@@ -121,6 +122,8 @@ pub struct ResolvedPalette {
     pub mouth: Rgb,
     pub accent: Rgb,
     pub pattern: Rgb,
+    pub particle: Rgb,
+    pub corruption: Rgb,
 }
 
 pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
@@ -130,7 +133,8 @@ pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
         PaletteRoleName::Mouth => palette.mouth,
         PaletteRoleName::Accent => palette.accent,
         PaletteRoleName::Pattern => palette.pattern,
-        PaletteRoleName::Particle => palette.accent,
+        PaletteRoleName::Particle => palette.particle,
+        PaletteRoleName::Corruption => palette.corruption,
     }
 }
 
@@ -142,6 +146,8 @@ pub fn default_theme_palette() -> ResolvedPalette {
         mouth: Rgb::new(0x97, 0x91, 0x8a),
         accent: Rgb::new(0xf0, 0xa6, 0x46),
         pattern: Rgb::new(0x50, 0x4c, 0x49),
+        particle: Rgb::new(0xf0, 0xa6, 0x46),
+        corruption: Rgb::new(0x78, 0xff, 0xb4),
     }
 }
 
@@ -150,17 +156,80 @@ use crate::pet::generation::{Species, VisibleTraits};
 /// Hue (OKLCH degrees) each species leans toward.
 fn species_base_hue(species: Species) -> f32 {
     match species {
-        Species::Fuzz => 70.0,     // warm amber
-        Species::Blob => 195.0,    // teal
-        Species::Ghost => 300.0,   // violet
-        Species::Glitch => 135.0,  // acid green
-        Species::Crystal => 230.0, // ice blue
-        Species::Mech => 250.0,    // steel
+        Species::Fuzz => 40.0,     // peach
+        Species::Blob => 150.0,    // mint
+        Species::Ghost => 300.0,   // lavender
+        Species::Glitch => 135.0,  // acid/phosphor
+        Species::Crystal => 230.0, // ice
+        Species::Mech => 75.0,     // amber/brass
     }
 }
 
-/// Pinned green eye signature (same for every species).
-const EYE_HUE: f32 = 142.0;
+/// Per-species body chroma (OKLCH). Raised off the old pinned 0.10 so the
+/// species hue actually registers. Soft-bodied/pale species (Crystal ice,
+/// Ghost lavender) stay lower; saturated identities (Glitch acid, Mech amber)
+/// go higher. `oklch_to_rgb` gamut-maps any out-of-gamut request, so these are
+/// safe ceilings, not exact realized chroma.
+fn species_body_chroma(species: Species) -> f32 {
+    match species {
+        Species::Fuzz => 0.13,    // peach
+        Species::Blob => 0.14,    // mint
+        Species::Ghost => 0.12,   // lavender (pale, keep soft)
+        Species::Glitch => 0.18,  // acid/phosphor (loud)
+        Species::Crystal => 0.11, // ice (cold, pale shell)
+        Species::Mech => 0.15,    // amber/brass
+    }
+}
+
+/// Mood -> eye color (OKLCH-resolved). Green at rest, warming to gold when
+/// excited, cooling to blue when tired, desaturating toward grey when wilted.
+/// This is the eye-color half of the mood signal; the eye *glyph* is owned by
+/// `expression_for` (render.rs) and updates on the same animation tick.
+pub fn eye_color_for_mood(mood: Mood) -> Rgb {
+    // (lightness, chroma, hue) tuned so each clears the resting green floor's
+    // intent while staying calm (no neon). Wilted drops chroma to near-grey.
+    let (l, c, h) = match mood {
+        Mood::Content => (0.82, 0.19, 145.0), // resting green
+        Mood::Happy => (0.84, 0.20, 130.0),   // brighter green, a touch warm
+        Mood::Ecstatic => (0.86, 0.20, 95.0), // warm gold-green
+        Mood::Hungry => (0.80, 0.18, 70.0),   // amber-warm (seeking)
+        Mood::Sad => (0.74, 0.14, 250.0),     // cool, muted blue
+        Mood::Sleepy => (0.78, 0.15, 250.0),  // cool blue, tired
+        Mood::Wilted => (0.70, 0.03, 145.0),  // desaturated grey-green
+    };
+    oklch_to_rgb(l, c, h)
+}
+
+/// Overwrite only the eye role with the mood-driven color, for the expressive
+/// (non-Content) moods. Content keeps the per-species resting eye baked by
+/// resolve_pet_palette (resting_eye_color), which is lightness-shifted to clear
+/// the >=3:1 luminance floor against the body. Hooked at the per-tick render
+/// site (rerender_pet_for_view_model).
+pub fn apply_mood_eye_color(palette: &mut ResolvedPalette, mood: Mood) {
+    if mood != Mood::Content {
+        palette.eye = eye_color_for_mood(mood);
+    }
+}
+
+/// Per-species RESTING eye color (Mood::Content), shifted in lightness so it
+/// clears the >=3:1 luminance floor against that species' body across the full
+/// per-pet hue jitter sweep. All species bodies sit near L=0.74 OKLCH, which
+/// in WCAG relative-luminance terms requires the eye to be significantly darker
+/// (≈L 0.44–0.46) to achieve 3:1. Lightness values tuned empirically:
+///   Fuzz 0.44, Ghost 0.44, Mech 0.44 (lowest body rel-lum headroom)
+///   Crystal 0.45 (ice body is slightly lighter)
+///   Blob 0.46, Glitch 0.46 (mint/acid bodies are lightest in practice)
+fn resting_eye_color(species: Species) -> Rgb {
+    let l = match species {
+        Species::Fuzz => 0.44,
+        Species::Blob => 0.46,
+        Species::Ghost => 0.44,
+        Species::Glitch => 0.46,
+        Species::Crystal => 0.45,
+        Species::Mech => 0.44,
+    };
+    oklch_to_rgb(l, 0.19, 145.0)
+}
 
 pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> ResolvedPalette {
     let base = species_base_hue(species);
@@ -172,17 +241,42 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
     let role = |lightness: f32, chroma: f32, hue: f32| oklch_to_rgb(lightness, chroma * sat, hue);
 
     ResolvedPalette {
-        body: role(0.74, 0.10, h),
-        eye: oklch_to_rgb(0.82, 0.19, EYE_HUE),
+        body: role(0.74, species_body_chroma(species), h),
+        eye: resting_eye_color(species),
         mouth: role(0.70, 0.16, h + 35.0),
         accent: role(0.76, 0.24, h + 120.0),
         pattern: role(0.64, 0.20, h + 210.0),
+        particle: role(0.80, 0.20, h + 160.0),
+        // Corruption is species-independent acid/phosphor, fixed-hue so it
+        // always contrasts the body and reads as a deliberate data glitch,
+        // not a tint of the creature. High chroma green at high lightness.
+        corruption: oklch_to_rgb(0.85, 0.22, 145.0),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WCAG relative luminance of an sRGB color (0.0 black .. 1.0 white).
+    fn relative_luminance(c: Rgb) -> f32 {
+        let chan = |v: u8| {
+            let s = f32::from(v) / 255.0;
+            if s <= 0.039_28 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b)
+    }
+
+    fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+        let la = relative_luminance(a);
+        let lb = relative_luminance(b);
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
 
     #[test]
     fn black_and_white_are_exact() {
@@ -247,7 +341,21 @@ mod tests {
         assert_eq!(role_color(Mouth, &p), Rgb::new(0x97, 0x91, 0x8a));
         assert_eq!(role_color(Accent, &p), Rgb::new(0xf0, 0xa6, 0x46));
         assert_eq!(role_color(Pattern, &p), Rgb::new(0x50, 0x4c, 0x49));
-        assert_eq!(role_color(Particle, &p), Rgb::new(0xf0, 0xa6, 0x46));
+        // Default theme keeps particle == accent for pre-color parity, but it is
+        // now a dedicated field (role_color reads palette.particle, not accent).
+        assert_eq!(role_color(Particle, &p), p.particle);
+        assert_eq!(p.particle, Rgb::new(0xf0, 0xa6, 0x46));
+        assert_eq!(role_color(Corruption, &p), Rgb::new(0x78, 0xff, 0xb4));
+    }
+
+    #[test]
+    fn particle_is_its_own_species_hue() {
+        use crate::pet::generation::Species;
+        let p = resolve_pet_palette(Species::Crystal, &traits_with_hue(0));
+        assert_ne!(
+            p.particle, p.accent,
+            "particle should resolve to its own hue, not reuse accent"
+        );
     }
 
     fn traits_with_hue(hue: u16) -> crate::pet::generation::VisibleTraits {
@@ -273,17 +381,104 @@ mod tests {
     }
 
     #[test]
-    fn eyes_are_green_for_every_species() {
+    fn eyes_are_green_at_rest_for_every_species() {
         use crate::pet::generation::Species;
-        let green = resolve_pet_palette(Species::Fuzz, &traits_with_hue(0)).eye;
+        // At rest (the resting eye is Mood::Content's color baked into resolve),
+        // every species' eye reads green (g dominates) even if lightness differs.
         for s in Species::all() {
-            let p = resolve_pet_palette(s, &traits_with_hue(123));
-            assert_eq!(p.eye, green, "eye drifted for {s:?}");
+            let eye = resolve_pet_palette(s, &traits_with_hue(123)).eye;
+            assert!(
+                eye.g > eye.r && eye.g > eye.b,
+                "{s:?} resting eye not green: {eye:?}"
+            );
         }
+    }
+
+    #[test]
+    fn resting_eye_clears_three_to_one_contrast_against_body() {
+        use crate::pet::generation::Species;
+        // Sweep seeds so the per-seed jittered body never sneaks under the floor.
+        for s in Species::all() {
+            for hue in (0..360).step_by(30) {
+                let p = resolve_pet_palette(s, &traits_with_hue(hue));
+                let ratio = contrast_ratio(p.eye, p.body);
+                assert!(
+                    ratio >= 3.0,
+                    "{s:?} hue {hue}: resting eye/body contrast {ratio:.2} < 3.0"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eye_color_is_green_at_rest_and_shifts_with_mood() {
+        use crate::game::metabolism::Mood;
+        let rest = eye_color_for_mood(Mood::Content);
         assert!(
-            green.g > green.r && green.g > green.b,
-            "eye not green: {green:?}"
+            rest.g > rest.r && rest.g > rest.b,
+            "resting (Content) eye must read green, got {rest:?}"
         );
+        // Excited -> warm/gold (red+green high, blue low; warmer than rest).
+        let excited = eye_color_for_mood(Mood::Ecstatic);
+        assert!(
+            excited.r >= rest.r,
+            "excited eye should warm toward gold (more red than rest)"
+        );
+        // Tired -> cool blue (blue dominates).
+        let tired = eye_color_for_mood(Mood::Sleepy);
+        assert!(
+            tired.b > tired.r,
+            "tired (Sleepy) eye should read cool/blue, got {tired:?}"
+        );
+        // Wilted -> desaturated/grey (channels close together).
+        let wilted = eye_color_for_mood(Mood::Wilted);
+        let spread = wilted.r.abs_diff(wilted.g).max(wilted.g.abs_diff(wilted.b));
+        assert!(
+            spread < 24,
+            "wilted eye should desaturate toward grey, got spread {spread}"
+        );
+    }
+
+    #[test]
+    fn apply_mood_eye_color_overwrites_only_the_eye() {
+        use crate::game::metabolism::Mood;
+        use crate::pet::generation::Species;
+        let mut p = resolve_pet_palette(Species::Blob, &traits_with_hue(7));
+        let (body, mouth, accent, pattern, particle) =
+            (p.body, p.mouth, p.accent, p.pattern, p.particle);
+        apply_mood_eye_color(&mut p, Mood::Sleepy);
+        assert_eq!(p.eye, eye_color_for_mood(Mood::Sleepy));
+        assert_eq!(
+            (p.body, p.mouth, p.accent, p.pattern, p.particle),
+            (body, mouth, accent, pattern, particle),
+            "mood eye color must not touch any other role"
+        );
+    }
+
+    #[test]
+    fn live_resting_eye_keeps_the_contrast_floor_after_apply() {
+        use crate::game::metabolism::Mood;
+        use crate::pet::generation::Species;
+        // The per-tick hook (Task 6) calls apply_mood_eye_color every tick incl.
+        // Content. Content must be a no-op so the live resting eye keeps the
+        // per-species floor-clearing color (eye_color_for_mood(Content)'s blind
+        // L=0.82 green fails the floor for Blob/Fuzz/Glitch).
+        for s in Species::all() {
+            for hue in (0..360).step_by(30) {
+                let resolved = resolve_pet_palette(s, &traits_with_hue(hue));
+                let mut p = resolved;
+                apply_mood_eye_color(&mut p, Mood::Content);
+                assert_eq!(
+                    p.eye, resolved.eye,
+                    "{s:?}: Content must not change the resting eye"
+                );
+                assert!(
+                    contrast_ratio(p.eye, p.body) >= 3.0,
+                    "{s:?} hue {hue}: live resting eye/body contrast {:.2} < 3.0",
+                    contrast_ratio(p.eye, p.body)
+                );
+            }
+        }
     }
 
     #[test]
@@ -300,5 +495,118 @@ mod tests {
         let a = resolve_pet_palette(Species::Fuzz, &traits_with_hue(10)).body;
         let b = resolve_pet_palette(Species::Fuzz, &traits_with_hue(300)).body;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn contrast_ratio_white_on_black_is_twenty_one() {
+        let white = Rgb::new(255, 255, 255);
+        let black = Rgb::new(0, 0, 0);
+        let ratio = contrast_ratio(white, black);
+        assert!(
+            (ratio - 21.0).abs() < 0.1,
+            "white-on-black contrast should be ~21:1, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn contrast_ratio_is_symmetric_and_one_for_identical() {
+        let c = Rgb::new(0x82, 0xbc, 0x83);
+        assert!(
+            (contrast_ratio(c, c) - 1.0).abs() < 1e-4,
+            "identical colors are 1:1"
+        );
+        let d = Rgb::new(0x13, 0x11, 0x0f);
+        assert!(
+            (contrast_ratio(c, d) - contrast_ratio(d, c)).abs() < 1e-4,
+            "contrast is symmetric"
+        );
+    }
+
+    #[test]
+    fn bodies_are_visibly_chromatic_not_grey() {
+        use crate::pet::generation::Species;
+        for s in Species::all() {
+            let body = resolve_pet_palette(s, &traits_with_hue(0)).body;
+            let (a, b) = rgb_to_oklab_ab(body);
+            let chroma = (a * a + b * b).sqrt();
+            assert!(
+                chroma > 0.04,
+                "{s:?} body reads near-grey (oklab chroma {chroma:.3}); raise species_body_chroma"
+            );
+        }
+    }
+
+    #[test]
+    fn raised_chroma_exceeds_old_pinned_point_one_zero() {
+        use crate::pet::generation::Species;
+        // Proves the species_body_chroma raise had a visible effect: the realized
+        // oklab chroma of each body now exceeds what the old pinned 0.10 request
+        // realized at the same lightness/hue. Guards against reverting the knob.
+        // Both paths use the species base hue with no jitter so the only variable
+        // is chroma (0.10 old vs species_body_chroma(s) new).
+        for s in Species::all() {
+            let h = species_base_hue(s);
+            let new_body = oklch_to_rgb(0.74, species_body_chroma(s), h);
+            let old_body = oklch_to_rgb(0.74, 0.10, h);
+            let (na, nb) = rgb_to_oklab_ab(new_body);
+            let (oa, ob) = rgb_to_oklab_ab(old_body);
+            let new_chroma = (na * na + nb * nb).sqrt();
+            let old_chroma = (oa * oa + ob * ob).sqrt();
+            assert!(
+                new_chroma > old_chroma,
+                "{s:?}: raised chroma {new_chroma:.3} should exceed old pinned-0.10 chroma {old_chroma:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn species_base_hues_match_identity_family() {
+        use crate::pet::generation::Species;
+        // OKLCH hue degrees (approx): peach ~40, mint ~150, lavender ~300,
+        // acid ~135, ice ~230, amber ~75. Verify the family anchor, not exact
+        // realized RGB (that depends on chroma/jitter).
+        assert!((species_base_hue(Species::Fuzz) - 40.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Blob) - 150.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Ghost) - 300.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Glitch) - 135.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Crystal) - 230.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Mech) - 75.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn all_species_bodies_are_mutually_distinct() {
+        use crate::pet::generation::Species;
+        let bodies: Vec<_> = Species::all()
+            .into_iter()
+            .map(|s| resolve_pet_palette(s, &traits_with_hue(0)).body)
+            .collect();
+        for (i, a) in bodies.iter().enumerate() {
+            for b in bodies.iter().skip(i + 1) {
+                assert_ne!(a, b, "two species bodies collided after hue retune");
+            }
+        }
+    }
+
+    #[test]
+    fn corruption_role_resolves_to_a_contrasting_acid_color() {
+        use crate::pet::generation::Species;
+        use crate::pet::render::PaletteRoleName::Corruption;
+        let p = resolve_pet_palette(Species::Glitch, &traits_with_hue(50));
+        let c = role_color(Corruption, &p);
+        // Acid/phosphor: green dominant, distinct from the body so corruption
+        // never melts into its background (Appendix B failure mode #3).
+        assert!(c.g > c.r && c.g > c.b, "corruption not acid-green: {c:?}");
+        assert_ne!(c, p.body, "corruption must contrast the body");
+    }
+
+    #[test]
+    fn default_theme_has_a_corruption_color() {
+        use crate::pet::render::PaletteRoleName::Corruption;
+        let p = default_theme_palette();
+        let c = role_color(Corruption, &p);
+        assert!(
+            c.g > c.r && c.g > c.b,
+            "default corruption not acid-green: {c:?}"
+        );
     }
 }
