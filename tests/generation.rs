@@ -180,25 +180,23 @@ fn tokenpet_stage_labels_match_spec() {
 }
 
 #[test]
-fn morph_count_is_the_interior_texture_variant_count() {
-    // New contract: per-pet variety is algorithmic (interior texture), so
-    // morph_count is the interior-texture-variant count and is >= 1 for every
-    // (species, stage). It is NOT a hand-drawn silhouette-pool size, so the old
-    // `morph_count(S3) == 1` and `morph_count(S4/S6) >= 3` assertions are gone.
-    let stages = [
-        Stage::S0,
-        Stage::S1,
-        Stage::S2,
-        Stage::S3,
-        Stage::S4,
-        Stage::S5,
-        Stage::S6,
-    ];
+fn morph_count_reports_interior_texture_variants_not_silhouette_pools() {
+    // New contract (Phase 1): morph_count is the number of deterministic
+    // interior-texture variants a (species, stage) can render — NOT a hand-drawn
+    // silhouette-pool size. It is >= 1 for every stage, and pinned to 1 on the
+    // small stages (S0..S2) where texture is constant-occupancy.
     for species in Species::all() {
-        for stage in stages {
+        for stage in [Stage::S0, Stage::S1, Stage::S2] {
+            assert_eq!(
+                morph_count(species, stage),
+                1,
+                "{species:?} {stage:?}: small stages pin interior texture to 1 variant"
+            );
+        }
+        for stage in [Stage::S3, Stage::S4, Stage::S5, Stage::S6] {
             assert!(
                 morph_count(species, stage) >= 1,
-                "{species:?} {stage:?} must report >= 1 interior-texture variant"
+                "{species:?} {stage:?}: every stage renders at least one variant"
             );
         }
     }
@@ -298,6 +296,36 @@ fn fixed_seed_set_renders_valid_non_empty_11x8_for_every_species_stage() {
                     "seed={seed} {species:?} {stage:?} rendered a blank pet"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn glitch_resting_eyes_pool_has_no_corpse_eyes() {
+    // Probe many seeds; the Glitch resting (Content) eyes must never be "x x".
+    for n in 0..500 {
+        let pet = generate_pet(&format!("glitch-pool-{n}")).with_species(Species::Glitch);
+        assert_ne!(
+            pet.traits.eyes, "x x",
+            "Glitch resting eyes must never be corpse eyes"
+        );
+    }
+}
+
+#[test]
+fn species_resting_eye_pools_are_three_columns() {
+    use unicode_width::UnicodeWidthStr;
+    // The Content (resting) eyes come from the per-seed pool, substituted into a
+    // 3-col {eyes} slot; every pool entry must be exactly 3 display columns.
+    for n in 0..500 {
+        for species in Species::all() {
+            let pet = generate_pet(&format!("eye-width-{n}")).with_species(species);
+            assert_eq!(
+                UnicodeWidthStr::width(pet.traits.eyes.as_str()),
+                3,
+                "{species:?} resting eyes {:?} must be 3 cols",
+                pet.traits.eyes
+            );
         }
     }
 }

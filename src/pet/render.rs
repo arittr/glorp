@@ -274,6 +274,60 @@ struct Expression {
     mouth: String,
 }
 
+/// Per-species mood-face vocabulary for the six non-Content moods. Content reads
+/// from the per-seed `traits.eyes`/`mouth` (handled in `expression_for`). All
+/// glyphs are width-1 under ambiguous=narrow; eyes occupy exactly 3 columns,
+/// mouth exactly 1. Phase 3 measures resting-eye contrast against the Content
+/// face; this covers the expressive moods so they read per-species rather than
+/// as one shared set.
+fn mood_face(species: Species, mood: Mood) -> Expression {
+    let mk = |eyes: &str, mouth: &str| Expression {
+        eyes: eyes.to_string(),
+        mouth: mouth.to_string(),
+    };
+    match species {
+        Species::Fuzz | Species::Blob | Species::Ghost => match mood {
+            Mood::Happy => mk("^.^", "\u{03c9}"),    // ^.^ / ω
+            Mood::Ecstatic => mk("*o*", "\u{25bd}"), // *o* / ▽
+            Mood::Hungry => mk("u.u", "o"),
+            Mood::Sad => mk("T.T", "\u{2322}"), // T.T / ⌢
+            Mood::Sleepy => mk("-.-", "-"),
+            Mood::Wilted => mk(",_,", "_"),
+            Mood::Content => unreachable!("Content handled in expression_for"),
+        },
+        Species::Glitch => match mood {
+            // Daemon lens face: alive, never corpse. ◉ is EAW-Neutral (width-1).
+            Mood::Happy => mk(">\u{25c9}<", "\u{02c4}"), // >◉< / ˄
+            Mood::Ecstatic => mk("\u{25c9}o\u{25c9}", "\u{25bd}"),
+            Mood::Hungry => mk("o\u{25c9}o", "o"),
+            Mood::Sad => mk("v\u{25c9}v", "\u{2322}"), // ⌢
+            Mood::Sleepy => mk("-.-", "_"),
+            Mood::Wilted => mk("x_x", "_"), // wilted may dim the lens
+            Mood::Content => unreachable!("Content handled in expression_for"),
+        },
+        Species::Crystal => match mood {
+            // Facet eyes; ◇ is ambiguous-narrow (kept per the Crystal decision).
+            Mood::Happy => mk("\u{25c7}^\u{25c7}", "v"),
+            Mood::Ecstatic => mk("*\u{25c7}*", "\u{25bd}"),
+            Mood::Hungry => mk("\u{25c7}.\u{25c7}", "o"),
+            Mood::Sad => mk("\u{25c7}_\u{25c7}", "\u{2322}"), // ⌢
+            Mood::Sleepy => mk("-.-", "_"),
+            Mood::Wilted => mk(",_,", "_"),
+            Mood::Content => unreachable!("Content handled in expression_for"),
+        },
+        Species::Mech => match mood {
+            // Optic-sensor face: square/bracket eyes read mechanical.
+            Mood::Happy => mk("^=^", "v"),
+            Mood::Ecstatic => mk("*o*", "\u{25bd}"),
+            Mood::Hungry => mk("o=o", "o"),
+            Mood::Sad => mk("v=v", "\u{2322}"), // ⌢
+            Mood::Sleepy => mk("=.=", "_"),
+            Mood::Wilted => mk("x_x", "_"),
+            Mood::Content => unreachable!("Content handled in expression_for"),
+        },
+    }
+}
+
 fn expression_for(
     pet: &GeneratedPet,
     mood: Mood,
@@ -288,34 +342,11 @@ fn expression_for(
     }
 
     let mut expr = match mood {
-        Mood::Happy => Expression {
-            eyes: "^.^".to_string(),
-            mouth: "\u{03c9}".to_string(),
-        },
-        Mood::Ecstatic => Expression {
-            eyes: "*o*".to_string(),
-            mouth: "\u{25bd}".to_string(), // ▽
-        },
         Mood::Content => Expression {
             eyes: pet.traits.eyes.clone(),
             mouth: pet.traits.mouth.clone(),
         },
-        Mood::Hungry => Expression {
-            eyes: "u.u".to_string(),
-            mouth: "o".to_string(),
-        },
-        Mood::Sad => Expression {
-            eyes: "T.T".to_string(),
-            mouth: "\u{fe35}".to_string(),
-        },
-        Mood::Sleepy => Expression {
-            eyes: "-.-".to_string(),
-            mouth: "-".to_string(),
-        },
-        Mood::Wilted => Expression {
-            eyes: ",_,".to_string(),
-            mouth: "_".to_string(),
-        },
+        other => mood_face(pet.species, other),
     };
     if frame.soft_eyes && matches!(mood, Mood::Content | Mood::Happy) {
         expr.eyes = "\u{02d8}.\u{02d8}".to_string(); // ˘.˘ relaxed, heavy-lidded
@@ -1103,6 +1134,44 @@ mod tests {
         assert!(
             rested > halfway && halfway > exhausted,
             "cadence must slow monotonically: {rested} > {halfway} > {exhausted}"
+        );
+    }
+
+    #[test]
+    fn mood_faces_are_species_specific_and_width_correct() {
+        use crate::pet::generation::Species;
+        use unicode_width::UnicodeWidthStr;
+        let non_content = [
+            Mood::Happy,
+            Mood::Ecstatic,
+            Mood::Hungry,
+            Mood::Sad,
+            Mood::Sleepy,
+            Mood::Wilted,
+        ];
+        for species in Species::all() {
+            for mood in non_content {
+                let face = mood_face(species, mood);
+                assert_eq!(
+                    UnicodeWidthStr::width(face.eyes.as_str()),
+                    3,
+                    "{species:?} {mood:?} eyes must be 3 cols, got {:?}",
+                    face.eyes
+                );
+                assert_eq!(
+                    UnicodeWidthStr::width(face.mouth.as_str()),
+                    1,
+                    "{species:?} {mood:?} mouth must be 1 col, got {:?}",
+                    face.mouth
+                );
+            }
+        }
+        // Species differentiation: at least one species' happy eyes differs from
+        // another's (the vocabulary is not one shared set).
+        assert_ne!(
+            mood_face(Species::Glitch, Mood::Happy).eyes,
+            mood_face(Species::Fuzz, Mood::Happy).eyes,
+            "mood vocabulary must vary by species"
         );
     }
 }

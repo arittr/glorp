@@ -8,7 +8,7 @@ use crate::pet::{
     render::{render_pet, AnimationFrame, WorkAccent},
 };
 use crate::tui::panels::pet::pet_role_spans_for_line;
-use crate::tui::style::{semantic_styles, ColorCapability};
+use crate::tui::style::{semantic_styles, ColorCapability, SemanticStyles};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -33,6 +33,19 @@ const STAGES: [Stage; 7] = [
     Stage::S6,
 ];
 
+const ADULT_STAGES: [Stage; 3] = [Stage::S4, Stage::S5, Stage::S6];
+const TEXTURE_VARIANT_SEEDS: [&str; 3] = ["glorp-tex-a", "glorp-tex-b", "glorp-tex-c"];
+
+const MOOD_SET: [(Mood, &str); 7] = [
+    (Mood::Content, "content"),
+    (Mood::Happy, "happy"),
+    (Mood::Ecstatic, "ecstatic"),
+    (Mood::Hungry, "hungry"),
+    (Mood::Sad, "sad"),
+    (Mood::Sleepy, "sleepy"),
+    (Mood::Wilted, "wilted"),
+];
+
 pub fn pet_frames(ctx: &PreviewRenderContext) -> Result<Vec<PreviewFrame>> {
     Ok(vec![
         render_pet_matrix(
@@ -47,8 +60,135 @@ pub fn pet_frames(ctx: &PreviewRenderContext) -> Result<Vec<PreviewFrame>> {
             "Pet Species Stage (Flat)",
             ColorCapability::Flat,
         ),
+        render_texture_variants(ctx),
+        render_mood_set(ctx),
         render_glitch_live_states(ctx),
     ])
+}
+
+fn render_texture_variants(_ctx: &PreviewRenderContext) -> PreviewFrame {
+    let styles = semantic_styles();
+    // Layout: one row band per (species, adult stage); 3 variant columns.
+    let row_height: u16 = 11;
+    let band_count = (Species::all().len() * ADULT_STAGES.len()) as u16;
+    let height = HEADER_HEIGHT + band_count * row_height;
+    let col_width = FRAME_WIDTH / TEXTURE_VARIANT_SEEDS.len() as u16;
+    let mut buffer = Buffer::empty(Rect::new(0, 0, FRAME_WIDTH, height));
+
+    let mut band = 0u16;
+    for species in Species::all() {
+        for stage in ADULT_STAGES {
+            for (col, seed) in TEXTURE_VARIANT_SEEDS.iter().enumerate() {
+                let area = Rect::new(
+                    col as u16 * col_width,
+                    HEADER_HEIGHT + band * row_height,
+                    col_width,
+                    row_height,
+                );
+                render_seeded_pet_cell(area, &mut buffer, species, stage, seed, &styles);
+            }
+            band += 1;
+        }
+    }
+    frame_from_buffer(
+        "pet-texture-variants",
+        "Pet Interior-Texture Variants",
+        &buffer,
+    )
+}
+
+fn render_seeded_pet_cell(
+    area: Rect,
+    buffer: &mut Buffer,
+    species: Species,
+    stage: Stage,
+    seed: &str,
+    styles: &SemanticStyles,
+) {
+    let pet = generate_pet(seed).with_species(species);
+    let palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
+    let rendered = render_pet(
+        &pet,
+        stage,
+        Mood::Content,
+        AnimationFrame {
+            tick: 0,
+            blink_suppression_ticks: 0,
+            hold_eyes_closed: false,
+            blink_slowdown: 0,
+            soft_eyes: false,
+            work_accent: WorkAccent::None,
+        },
+    );
+    let mut lines = vec![Line::styled(
+        format!("{} s{} {}", species.as_str(), stage_index(stage), seed),
+        styles.label,
+    )];
+    for (line_index, art_line) in rendered.lines.iter().enumerate() {
+        let spans = pet_role_spans_for_line(
+            art_line,
+            line_index,
+            &rendered.spans,
+            styles,
+            &palette,
+            None,
+        );
+        lines.push(Line::from(spans));
+    }
+    Paragraph::new(lines).render(area, buffer);
+}
+
+fn render_mood_set(_ctx: &PreviewRenderContext) -> PreviewFrame {
+    let styles = semantic_styles();
+    let row_height: u16 = 11;
+    let col_width = FRAME_WIDTH / MOOD_SET.len() as u16;
+    let height = HEADER_HEIGHT + Species::all().len() as u16 * row_height;
+    let mut buffer = Buffer::empty(Rect::new(0, 0, FRAME_WIDTH, height));
+
+    for (mood_col, (_, label)) in MOOD_SET.iter().enumerate() {
+        let area = Rect::new(mood_col as u16 * col_width, 0, col_width, HEADER_HEIGHT);
+        Paragraph::new(Line::styled(*label, styles.section_header)).render(area, &mut buffer);
+    }
+
+    for (row, species) in Species::all().into_iter().enumerate() {
+        let pet = generate_pet(&format!("glorp-mood-{}", species.as_str())).with_species(species);
+        let palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
+        for (mood_col, (mood, _)) in MOOD_SET.iter().enumerate() {
+            let area = Rect::new(
+                mood_col as u16 * col_width,
+                HEADER_HEIGHT + row as u16 * row_height,
+                col_width,
+                row_height,
+            );
+            let rendered = render_pet(
+                &pet,
+                Stage::S4,
+                *mood,
+                AnimationFrame {
+                    tick: 1,
+                    blink_suppression_ticks: 0,
+                    hold_eyes_closed: false,
+                    blink_slowdown: 0,
+                    soft_eyes: false,
+                    work_accent: WorkAccent::None,
+                },
+            );
+            let mut lines = vec![Line::styled(species.as_str(), styles.label)];
+            for (line_index, art_line) in rendered.lines.iter().enumerate() {
+                let spans = pet_role_spans_for_line(
+                    art_line,
+                    line_index,
+                    &rendered.spans,
+                    &styles,
+                    &palette,
+                    None,
+                );
+                lines.push(Line::from(spans));
+            }
+            Paragraph::new(lines).render(area, &mut buffer);
+        }
+    }
+    frame_from_buffer("pet-mood-set", "Pet Mood Set", &buffer)
 }
 
 fn render_pet_matrix(
@@ -327,6 +467,21 @@ mod tests {
         assert!(
             ids.contains(&"pet-glitch-live-states"),
             "pets preview should include a focused Glitch live-state fixture; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn pets_preview_includes_texture_variant_and_mood_set_frames() {
+        let ctx = PreviewRenderContext::deterministic();
+        let frames = pet_frames(&ctx).unwrap();
+        let ids: Vec<&str> = frames.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            ids.contains(&"pet-texture-variants"),
+            "pets preview must show per-seed interior-texture variants; got {ids:?}"
+        );
+        assert!(
+            ids.contains(&"pet-mood-set"),
+            "pets preview must show the full mood set; got {ids:?}"
         );
     }
 
