@@ -62,9 +62,8 @@ pub(crate) fn stage_base_template(species: Species, stage: Stage) -> &'static Te
     match species {
         Species::Fuzz => fuzz_base(stage),
         Species::Blob => blob_base(stage),
-        Species::Ghost | Species::Glitch | Species::Crystal | Species::Mech => {
-            legacy_base_template(species, stage)
-        }
+        Species::Ghost => ghost_base(stage),
+        Species::Glitch | Species::Crystal | Species::Mech => legacy_base_template(species, stage),
     }
 }
 
@@ -97,6 +96,21 @@ fn blob_base(stage: Stage) -> &'static Template {
         Stage::S4 => &BLOB_S4,
         Stage::S5 => &BLOB_S5,
         Stage::S6 => &BLOB_S6,
+    }
+}
+
+// Validated The Pall cast: a dense ▒▓█ shroud with a living face at rest and
+// a sealed wavering \_/ hem; S6 fills all 8 rows. Validated by the art
+// pipeline against the Phase-1 invariants.
+fn ghost_base(stage: Stage) -> &'static Template {
+    match stage {
+        Stage::S0 => &GHOST_S0,
+        Stage::S1 => &GHOST_S1,
+        Stage::S2 => &GHOST_S2,
+        Stage::S3 => &GHOST_S3,
+        Stage::S4 => &GHOST_S4,
+        Stage::S5 => &GHOST_S5,
+        Stage::S6 => &GHOST_S6,
     }
 }
 
@@ -530,6 +544,86 @@ const BLOB_TINY: &[Template; 3] = &[
 ];
 
 // ── Ghost ─────────────────────────────────────────────────────────
+// The Pall: a dense ▒▓█ shroud with a living face at rest; sealed wavering
+// \_/ hem, S6 fills all 8 rows. Validated by the art pipeline against the
+// Phase-1 invariants. Cell ramp [3, 9, 18, 31, 44, 63, 79], strictly
+// increasing, every value in-band. Transcribed verbatim from
+// docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
+// S0/S1 are pre-face buds; S2-S6 carry {eyes}/{mouth} slots and S4-S6 carry
+// {pattern} so the mood-face vocabulary can substitute.
+const GHOST_S0: Template = [
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "    ▒▒▒    ",
+    "           ",
+];
+const GHOST_S1: Template = [
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "    ▄▄▄    ",
+    "    ▒▒▒    ",
+    "    \\_/    ",
+    "           ",
+];
+const GHOST_S2: Template = [
+    "           ",
+    "           ",
+    "    ▄▄▄    ",
+    "   ▒{eyes}▒   ",
+    "   ▒░{mouth}░▒   ",
+    "    ▒▒▒    ",
+    "    \\_/    ",
+    "           ",
+];
+const GHOST_S3: Template = [
+    "    ╭─╮    ",
+    "   ╭╯ ╰╮   ",
+    "   ▒▒▒▒▒   ",
+    "   ▒{eyes}▒   ",
+    "   ▒░{mouth}░▒   ",
+    "   ▒▒▒▒▒   ",
+    "   \\_/\\_   ",
+    "           ",
+];
+const GHOST_S4: Template = [
+    "   ╭───╮   ",
+    "  ╭╯   ╰╮  ",
+    "  ░▒▒▒▒▒░  ",
+    "  ░▒{eyes}▒░  ",
+    "  ░▒░{mouth}░▒░  ",
+    "  ░▒{pattern}▒░  ",
+    "   ▒▒▒▒▒   ",
+    "   \\_/\\_   ",
+];
+const GHOST_S5: Template = [
+    "  ╭╯───╰╮  ",
+    "  ▒▓▓▓▓▓▒  ",
+    " ░▒▓{eyes}▓▒░ ",
+    " ░▒▓░{mouth}░▓▒░ ",
+    " ░▒▓{pattern}▓▒░ ",
+    " ░▒▓▓▓▓▓▒░ ",
+    "  ▒▓▓▓▓▓▒  ",
+    " \\_/\\_/\\_/ ",
+];
+const GHOST_S6: Template = [
+    " ░▒▓▓▓▓▓▒░ ",
+    "▒▓███████▓▒",
+    "▓███{eyes}███▓",
+    "▓███░{mouth}░███▓",
+    "▒▓██{pattern}██▓▒",
+    "▒▓███████▓▒",
+    " ▓███████▓ ",
+    " ░▒▓█▓█▓▒░ ",
+];
+
+// Legacy Ghost pools (pre-validation). Retained because the legacy dispatch
+// still serves Glitch/Crystal/Mech until their tasks wire the validated cast.
 // Billowing edgeless sheet: rounded dome crown, soft two-tone \u{2592}/\u{2591}
 // body that fades at the edges (no rigid side walls), and a scalloped \_/ hem.
 // Each morph varies the crown (dome / hood / tattered / dense) and the hem
@@ -1269,6 +1363,23 @@ mod tests {
                 has_dense_core,
                 "Blob {stage:?} base must carry a ▒/▓ core for flat-color figure-ground"
             );
+        }
+    }
+
+    #[test]
+    fn ghost_base_art_passes_phase1_invariants() {
+        let species = Species::Ghost;
+        for stage in ALL_STAGES {
+            assert_in_stage_band(species, stage);
+        }
+        assert_s6_fills_art_rows_no_sparkle(species);
+        // Ghost is soft but must still read solid with color off: dense core at S2+.
+        for stage in [Stage::S2, Stage::S3, Stage::S4, Stage::S5, Stage::S6] {
+            let base = stage_base_template(species, stage);
+            let has_dense_core = base
+                .iter()
+                .any(|line| line.contains('\u{2592}') || line.contains('\u{2593}'));
+            assert!(has_dense_core, "Ghost {stage:?} base needs a ▒/▓ core");
         }
     }
 }
