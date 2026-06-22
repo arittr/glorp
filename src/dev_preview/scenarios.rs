@@ -414,6 +414,47 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Compare S4 and S6 silhouettes for visible elder progression.".to_string(),
             ],
         ),
+        "pet-texture-variants" => (
+            PreviewScenarioKind::PetMatrix,
+            "Review interior-texture variety at adult stages (S4/S5/S6) by comparing three deterministic seeds side-by-side per species.",
+            BTreeMap::from([
+                ("seeds".to_string(), json!(["glorp-tex-a", "glorp-tex-b", "glorp-tex-c"])),
+                ("stages".to_string(), json!(["s4", "s5", "s6"])),
+                (
+                    "species".to_string(),
+                    json!(Species::all()
+                        .into_iter()
+                        .map(Species::as_str)
+                        .collect::<Vec<_>>()),
+                ),
+            ]),
+            vec![
+                "Confirm texture variants differ visibly within the same species×stage band.".to_string(),
+                "Check that growth silhouette differences between S4, S5, and S6 are legible.".to_string(),
+            ],
+        ),
+        "pet-mood-set" => (
+            PreviewScenarioKind::PetMatrix,
+            "Review the full mood set (Content, Happy, Ecstatic, Hungry, Sad, Sleepy, Wilted) at S4 across all species.",
+            BTreeMap::from([
+                (
+                    "moods".to_string(),
+                    json!(["content", "happy", "ecstatic", "hungry", "sad", "sleepy", "wilted"]),
+                ),
+                ("stage".to_string(), Value::String("s4".to_string())),
+                (
+                    "species".to_string(),
+                    json!(Species::all()
+                        .into_iter()
+                        .map(Species::as_str)
+                        .collect::<Vec<_>>()),
+                ),
+            ]),
+            vec![
+                "Confirm eye expression shifts legibly across the mood spectrum per species.".to_string(),
+                "Check wilted and hungry reads as visibly distressed vs. content baseline.".to_string(),
+            ],
+        ),
         "habitat-props-catalog" => (
             PreviewScenarioKind::HabitatProps,
             "Review every habitat prop in isolated tanks across three deterministic motion phases.",
@@ -1842,6 +1883,8 @@ mod tests {
                 "watch-habitat-full-phase-b",
                 "pet-species-stage",
                 "pet-species-stage-flat",
+                "pet-texture-variants",
+                "pet-mood-set",
                 "pet-glitch-live-states",
                 "round-normal",
                 "round-active-pulse",
