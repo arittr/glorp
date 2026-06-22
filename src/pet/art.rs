@@ -1002,4 +1002,33 @@ mod tests {
         // species/stage (the count is allowed to be zero or positive).
         let _ = total;
     }
+
+    // Structural: S6 fills all 8 art rows from the creature (no sparkle row
+    // substitution). Phase 1 satisfies this because S6 now maps to a full adult
+    // template instead of the retired SAGE_TOP/SAGE_BOT framing. The "S6 fills
+    // all 8 rows" density requirement (67-88 occupied cells) is a Phase 2 band
+    // gate, NOT Phase 1 — the existing adult templates may leave a legitimately
+    // blank trailing row, which this check accepts; it rejects only sparkle-
+    // substituted rows.
+    #[cfg(test)]
+    fn assert_s6_fills_art_rows_no_sparkle(species: Species) {
+        let lines = stage_base_template(species, Stage::S6);
+        // No row is a literal sparkle frame (the old SAGE rows were sparkle-only).
+        for (row, line) in lines.iter().enumerate() {
+            let only_sparkle_and_space = line
+                .chars()
+                .all(|c| c == ' ' || matches!(c, '\u{2726}' | '\u{2727}' | '*' | '.'));
+            assert!(
+                !only_sparkle_and_space || substitute_slots(line).trim().is_empty(),
+                "{species:?} S6 row {row} looks like a sparkle frame, not creature art: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn s6_fills_art_rows_for_every_species() {
+        for species in Species::all() {
+            assert_s6_fills_art_rows_no_sparkle(species);
+        }
+    }
 }

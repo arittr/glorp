@@ -82,6 +82,29 @@ pub enum PaletteRoleName {
     Particle,
 }
 
+/// Per-species gutter identity for the 13x10 frame's gutter rows (0 and 9) and
+/// side columns. Data, not an architecture fork. Phase 1 uses it only for the
+/// S6 sparkle move; Phase 5 reads it when compositing the contact shadow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GutterContent {
+    Sparkle,
+    #[allow(dead_code)] // MachineFrame: reserved for a future Mech gutter overlay (Phase 5).
+    MachineFrame,
+    None,
+}
+
+/// S6 earns a gutter sparkle for every species except Mech, which keeps its own
+/// chassis art rows (decision: Mech-S6 gutter == None). Below S6 there is no
+/// gutter sparkle. `MachineFrame` is reserved for a future Mech gutter overlay
+/// and is unused in Phase 1.
+fn gutter_content_for(species: Species, stage: Stage) -> GutterContent {
+    match (species, stage) {
+        (Species::Mech, Stage::S6) => GutterContent::None,
+        (_, Stage::S6) => GutterContent::Sparkle,
+        _ => GutterContent::None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaletteRoles {
     pub body: PaletteRole,
@@ -145,7 +168,8 @@ pub fn render_pet(
     }
 
     // Wrap pet art in a 13x10 frame and overlay particles.
-    let (framed_lines, framed_spans) = frame_with_particles(lines, spans, pet.species, frame.tick);
+    let (framed_lines, framed_spans) =
+        frame_with_particles(lines, spans, pet.species, stage, frame.tick);
 
     RenderedPet {
         lines: framed_lines,
@@ -470,6 +494,7 @@ fn frame_with_particles(
     art_lines: Vec<String>,
     art_spans: Vec<StyledSegment>,
     species: Species,
+    stage: Stage,
     tick: u64,
 ) -> (Vec<String>, Vec<StyledSegment>) {
     // Build a 13x10 grid of chars initialized with spaces, then overlay
@@ -494,6 +519,23 @@ fn frame_with_particles(
         })
         .collect();
 
+    // S6 gutter sparkle (row 0 only) — precedence: species identity particles
+    // (painted just below) outrank it; the contact shadow (Phase 5, row 9) never
+    // collides with row 0. Same glyph as the outer-frame S6 fill so the surfaces
+    // agree.
+    if gutter_content_for(species, stage) == GutterContent::Sparkle {
+        const SPARKLE_COLS: [usize; 3] = [2, 6, 10];
+        for col in SPARKLE_COLS {
+            grid[0][col] = '\u{2726}';
+            framed_spans.push(StyledSegment {
+                line: 0,
+                start: col,
+                end: col + 1,
+                role: PaletteRoleName::Particle,
+            });
+        }
+    }
+
     // Overlay particles for this tick.
     for particle in particles_for_species(species, tick) {
         if particle.row < FRAME_HEIGHT && particle.col < FRAME_WIDTH {
@@ -512,6 +554,35 @@ fn frame_with_particles(
         .map(|row| row.into_iter().collect::<String>())
         .collect();
     (lines, framed_spans)
+}
+
+/// Lowest non-blank art row of the rendered 8 rows = the silhouette's "feet".
+/// Templates carry trailing blank rows, so this finds the true bottom of the
+/// creature. Phase 5 restricts the contact shadow to the columns beneath it.
+// Consumed by Phase 5 contact-shadow; see plan Task 5.
+#[allow(dead_code)]
+pub(crate) fn feet_row(art_lines: &[String]) -> Option<usize> {
+    art_lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| line.chars().any(|c| c != ' '))
+        .map(|(row, _)| row)
+}
+
+/// Non-space columns of the feet row (the contact-shadow footprint).
+// Consumed by Phase 5 contact-shadow; see plan Task 5.
+#[allow(dead_code)]
+pub(crate) fn feet_columns(art_lines: &[String]) -> Vec<usize> {
+    match feet_row(art_lines) {
+        None => Vec::new(),
+        Some(row) => art_lines[row]
+            .chars()
+            .enumerate()
+            .filter(|(_, c)| *c != ' ')
+            .map(|(col, _)| col)
+            .collect(),
+    }
 }
 
 struct Particle {
@@ -894,6 +965,93 @@ mod tests {
         );
         assert_eq!(blink_slowdown_for_tiredness(7.0), TIRED_BLINK_MAX_SLOWDOWN);
         assert_eq!(blink_slowdown_for_tiredness(-1.0), 0);
+    }
+
+    #[test]
+    fn species_particle_outranks_s6_sparkle_on_a_contested_cell() {
+        use crate::pet::generation::generate_pet;
+        let pet = generate_pet("contested").with_species(Species::Glitch);
+        // tick 0: tick % 17 == 0 < 2, so Glitch paints ':' at row 0 col 10, which
+        // is also a sparkle column. The species particle must win.
+        let rendered = render_pet(&pet, Stage::S6, Mood::Content, AnimationFrame::default());
+        let row0: Vec<char> = rendered.lines[0].chars().collect();
+        assert_eq!(
+            row0[10], ':',
+            "Glitch row-0 particle at col 10 must outrank the S6 sparkle, got {:?}",
+            row0[10]
+        );
+    }
+
+    #[test]
+    fn s6_sparkle_is_in_gutter_row_zero_not_art_rows() {
+        use crate::pet::generation::generate_pet;
+        // Force a Sparkle species at S6.
+        let pet = generate_pet("s6-sparkle").with_species(Species::Crystal);
+        // tick 0 keeps animation deterministic.
+        let rendered = render_pet(&pet, Stage::S6, Mood::Content, AnimationFrame::default());
+        // Framed grid is 10 rows tall; art occupies framed rows 1..=8, gutter is
+        // rows 0 and 9. The S6 sparkle ('✦') must appear only in framed row 0.
+        let row0 = &rendered.lines[0];
+        assert!(
+            row0.contains('\u{2726}'),
+            "S6 gutter row 0 must carry the sparkle, got: {row0:?}"
+        );
+        for (i, line) in rendered.lines.iter().enumerate().skip(1) {
+            assert!(
+                !line.contains('\u{2726}'),
+                "S6 sparkle must not appear in framed row {i} (art/bottom gutter): {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gutter_content_is_sparkle_at_s6_except_mech() {
+        use crate::pet::generation::Species;
+        for species in Species::all() {
+            // Below S6: no gutter sparkle.
+            assert_eq!(
+                gutter_content_for(species, Stage::S5),
+                GutterContent::None,
+                "{species:?} S5 must have no gutter sparkle"
+            );
+        }
+        // S6: sparkle for everyone except Mech (keeps its chassis art rows).
+        for species in [
+            Species::Fuzz,
+            Species::Blob,
+            Species::Ghost,
+            Species::Glitch,
+            Species::Crystal,
+        ] {
+            assert_eq!(
+                gutter_content_for(species, Stage::S6),
+                GutterContent::Sparkle
+            );
+        }
+        assert_eq!(
+            gutter_content_for(Species::Mech, Stage::S6),
+            GutterContent::None
+        );
+    }
+
+    #[test]
+    fn feet_row_is_lowest_non_blank_art_row() {
+        let art: Vec<String> = vec![
+            "    ░░░    ".to_string(), // row 0
+            "   ░▒▒▒░   ".to_string(), // row 1 (widest, but not lowest)
+            "    d b    ".to_string(), // row 2 lowest non-blank
+            "           ".to_string(), // row 3 blank
+        ];
+        assert_eq!(feet_row(&art), Some(2));
+        // Columns of the lowest non-blank row that are non-space:
+        assert_eq!(feet_columns(&art), vec![4, 6]);
+    }
+
+    #[test]
+    fn feet_row_none_for_all_blank() {
+        let art: Vec<String> = vec!["           ".to_string(); 3];
+        assert_eq!(feet_row(&art), None);
+        assert!(feet_columns(&art).is_empty());
     }
 
     #[test]
