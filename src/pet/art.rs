@@ -63,7 +63,8 @@ pub(crate) fn stage_base_template(species: Species, stage: Stage) -> &'static Te
         Species::Fuzz => fuzz_base(stage),
         Species::Blob => blob_base(stage),
         Species::Ghost => ghost_base(stage),
-        Species::Glitch | Species::Crystal | Species::Mech => legacy_base_template(species, stage),
+        Species::Glitch => glitch_base(stage),
+        Species::Crystal | Species::Mech => legacy_base_template(species, stage),
     }
 }
 
@@ -111,6 +112,23 @@ fn ghost_base(stage: Stage) -> &'static Template {
         Stage::S4 => &GHOST_S4,
         Stage::S5 => &GHOST_S5,
         Stage::S6 => &GHOST_S6,
+    }
+}
+
+// Validated Packet Daemon cast: a closed packet-frame silhouette (not open ▌▐
+// walls), living lens eyes (◉ via the {eyes} slot), torn-data base. The mouth is
+// wired to the {mouth} slot at S2-S4 (clean 1-cell mouth per spec Rendering #5);
+// S5/S6 dense elder bodies bake their mouth decoration verbatim (no clean 1-cell
+// mouth slot in the elder data-cube). Validated cell ramp [3,10,19,32,44,62,85].
+fn glitch_base(stage: Stage) -> &'static Template {
+    match stage {
+        Stage::S0 => &GLITCH_S0,
+        Stage::S1 => &GLITCH_S1,
+        Stage::S2 => &GLITCH_S2,
+        Stage::S3 => &GLITCH_S3,
+        Stage::S4 => &GLITCH_S4,
+        Stage::S5 => &GLITCH_S5,
+        Stage::S6 => &GLITCH_S6,
     }
 }
 
@@ -620,6 +638,81 @@ const GHOST_S6: Template = [
     "▒▓███████▓▒",
     " ▓███████▓ ",
     " ░▒▓█▓█▓▒░ ",
+];
+
+// ── Glitch · Packet Daemon (validated) ── S0-S6 base silhouettes. Transcribed
+// verbatim from the art-assets doc with the mouth wired to {mouth} at S2-S4
+// (per spec Rendering #5; the {eyes} slot is already in the doc). S5/S6 keep
+// their baked mouth decoration (no clean 1-cell mouth in the elder data-cube).
+const GLITCH_S0: Template = [
+    "           ",
+    "           ",
+    "           ",
+    "     ◉     ",
+    "    ▟▙     ",
+    "           ",
+    "           ",
+    "           ",
+];
+const GLITCH_S1: Template = [
+    "           ",
+    "           ",
+    "    ▛▀▜    ",
+    "    ▌◉▐    ",
+    "    ▙▄▟    ",
+    "     ▚     ",
+    "           ",
+    "           ",
+];
+const GLITCH_S2: Template = [
+    "           ",
+    "   ▛▀▀▀▜   ",
+    "   ▌{eyes}▐   ",
+    "   ▌ {mouth} ▐   ",
+    "   ▙▄▄▄▟   ",
+    "    ▚ ▞    ",
+    "           ",
+    "           ",
+];
+const GLITCH_S3: Template = [
+    "           ",
+    "  ▛▀▀▀▀▀▜  ",
+    "  ▌ {eyes} ▐  ",
+    "  ▌  {mouth}  ▐  ",
+    "  ▌ ░▄░ ▐  ",
+    "  ▙▄▄▄▄▄▟  ",
+    "   ▚▞ ▚▞   ",
+    "    ▘  ▝   ",
+];
+const GLITCH_S4: Template = [
+    " ▛▀▀▀▀▀▀▀▜ ",
+    " ▌  {eyes}  ▐ ",
+    " ▌   {mouth}   ▐ ",
+    " ▌  ▒▓▒  ▐ ",
+    " ▌  ░▒░  ▐ ",
+    " ▙▄▄▄▄▄▄▄▟ ",
+    "  ▚▞▙ ▟▚▞  ",
+    "   ▘ ▝ ▘   ",
+];
+const GLITCH_S5: Template = [
+    " ▛▀▀▀▀▀▀▀▜ ",
+    " ▌▒ {eyes} ▒▐ ",
+    " ▌░▄▄▄▄▄░▐ ",
+    " ▌▒░ █ ░▒▐ ",
+    " ▌▓░▒▒▒░▓▐ ",
+    " ▌░▒ ▒ ▒░▐ ",
+    " ▙▄▄▄▄▄▄▄▟ ",
+    "  ▝▟▙ ▟▙▘  ",
+];
+const GLITCH_S6: Template = [
+    "▛▀▀▀▀▀▀▀▀▀▜",
+    "▌▓▒ {eyes} ▒▓▐",
+    "▌▒░█▀▀▀█░▒▐",
+    "▌▓▒░▓▓▓░▒▓▐",
+    "▌█▒░▒▒▒░▒█▐",
+    "▌▓▒░▒▒▒░▒▓▐",
+    "▙▟▙▟▙▟▙▟▙▟▟",
+    "▝▟▙▟▙▟▙▟▙▟▘",
 ];
 
 // Legacy Ghost pools (pre-validation). Retained because the legacy dispatch
@@ -1381,5 +1474,41 @@ mod tests {
                 .any(|line| line.contains('\u{2592}') || line.contains('\u{2593}'));
             assert!(has_dense_core, "Ghost {stage:?} base needs a ▒/▓ core");
         }
+    }
+
+    #[test]
+    fn glitch_base_art_passes_phase1_invariants() {
+        let species = Species::Glitch;
+        for stage in ALL_STAGES {
+            assert_in_stage_band(species, stage);
+        }
+        assert_s6_fills_art_rows_no_sparkle(species);
+    }
+
+    #[test]
+    fn glitch_resting_face_is_alive() {
+        use crate::game::metabolism::Mood;
+        use crate::pet::generation::generate_pet;
+        use crate::pet::render::{render_pet, AnimationFrame};
+        let pet = generate_pet("glitch-face-seed").with_species(Species::Glitch);
+        let art = render_pet(
+            &pet,
+            Stage::S4,
+            Mood::Content,
+            AnimationFrame {
+                tick: 1,
+                ..AnimationFrame::default()
+            },
+        )
+        .lines
+        .join("\n");
+        assert!(
+            !art.contains("x x"),
+            "Glitch resting face must be alive, never corpse eyes, got:\n{art}"
+        );
+        assert!(
+            art.chars().filter(|c| !c.is_whitespace()).count() > 30,
+            "Glitch S4 must render a dense closed packet, got:\n{art}"
+        );
     }
 }
