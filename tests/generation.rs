@@ -219,13 +219,11 @@ fn adult_stages_have_distinct_silhouettes_for_representative_species() {
 
 #[test]
 fn species_animation_profiles_match_tokenpet_mockup() {
-    assert_eq!(species_animation_profile(Species::Fuzz).breath_period, 16);
-    assert_eq!(species_animation_profile(Species::Fuzz).breath_hold, 4);
+    // Breath is now owned by species_breath_rhythm_decis in animator.rs.
+    // Only blink cadence lives in AnimationProfile.
     assert_eq!(species_animation_profile(Species::Fuzz).blink_average, 32);
     assert_eq!(species_animation_profile(Species::Fuzz).blink_jitter, 12);
-    assert_eq!(species_animation_profile(Species::Blob).breath_period, 13);
     assert_eq!(species_animation_profile(Species::Ghost).blink_average, 50);
-    assert_eq!(species_animation_profile(Species::Glitch).breath_period, 9);
     assert_eq!(species_animation_profile(Species::Crystal).blink_jitter, 22);
     assert_eq!(species_animation_profile(Species::Mech).blink_average, 22);
 }

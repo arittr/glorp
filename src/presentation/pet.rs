@@ -39,5 +39,6 @@ pub fn role_name(role: PaletteRoleName) -> &'static str {
         PaletteRoleName::Accent => "accent",
         PaletteRoleName::Pattern => "pattern",
         PaletteRoleName::Particle => "particle",
+        PaletteRoleName::Corruption => "corruption",
     }
 }

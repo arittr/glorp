@@ -263,6 +263,7 @@ pub(super) fn brighten_pet_role(
         PaletteRoleName::Eye => s.pet_eye = brighten_style(s.pet_eye, multiplier),
         PaletteRoleName::Mouth => s.pet_mouth = brighten_style(s.pet_mouth, multiplier),
         PaletteRoleName::Particle => s.pet_particle = brighten_style(s.pet_particle, multiplier),
+        PaletteRoleName::Corruption => s.pet_accent = brighten_style(s.pet_accent, multiplier),
     }
     s
 }
@@ -342,6 +343,7 @@ pub(super) fn palette_from_styles(styles: &SemanticStyles) -> crate::pet::palett
         accent: rgb(styles.pet_accent, default.accent),
         pattern: rgb(styles.pet_pattern, default.pattern),
         particle: rgb(styles.pet_particle, default.particle),
+        corruption: default.corruption,
     }
 }
 
