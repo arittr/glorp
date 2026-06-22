@@ -1,7 +1,7 @@
 # Glorp Pet Scene Render Seam — Design
 
 - **Date:** 2026-06-22
-- **Status:** Direction approved by Drew (Option C, two native surfaces, companion-first). Written for review before implementation planning.
+- **Status:** Approved by Drew (Option C, companion-first). Open questions on privacy, moments, and screen-window scope resolved 2026-06-22 (see Decisions). Ready for implementation planning.
 - **Builds on / revises:**
   - `2026-06-15-glorp-presentation-architecture-design.md` — **completes** its intent. That spec designed `src/presentation/` as "a backend-neutral scene vocabulary layer" that all surfaces route through; the implementation stopped at a privacy/normalization filter. This spec realizes the original seam.
   - `2026-06-13-glorp-macos-round-companion-design.md` — **revises** it. That spec deliberately made the round companion a thin "porthole, not a shrunken watch screen." This spec upgrades it to a first-class surface that shares the full visual vocabulary, while **preserving** that spec's privacy boundary for informational content on external displays.
@@ -258,6 +258,7 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 - **Stop condition:** menubar resolves through the seam; no intended visual change.
 
 ### Track 6 — Screen-window adapter (new surface)
+- **Purpose:** the rectangular-monitor surface. Fast-follow after Track 3 proves the seam; **non-gating** (the round panels are the immediate hardware target).
 - **Scope:** full-size AppKit window, no clip, reusing the companion blitter.
 - **Stop condition:** a rectangular window renders the full scene at arbitrary size.
 
@@ -295,15 +296,18 @@ The seam is **pure and infallible**. `PetScene::build` and `render` are total fu
 6. `dev-preview` emits one unified draw-list golden format; `art.rs` invariant tests never changed.
 7. A new visual feature added to `PetScene` (e.g. a test-only `Overlay` variant) renders on all four surfaces with **no** change to any surface adapter, proven by one feature test exercising all surfaces.
 
+## Decisions (confirmed by Drew, 2026-06-22)
+
+1. **External-display privacy: redacted by default.** The round companion and screen window keep informational redaction (no source names / exact counts / project context); they carry only abstract signals (bucketed halo vitals, source diversity as color) plus the full visual vocabulary. `SurfaceStyle.privacy` makes this a per-surface knob, flippable later if a given display is personal enough. Rationale: the `PetScene` carries little sensitive content (the heavy accounting lives in watch's text panels, which these surfaces do not render), and exact accounting on an always-on ambient display fights the tamagotchi spirit.
+2. **Moments deleted, not preserved.** Both dead systems (`RoundSceneMoment`, `RoomLifeProfile.scene_moments`) are deleted in Track 7. Real moment animations, when built, use the `SceneDrawList.overlays` channel, designed with a live consumer.
+3. **Screen window is a fast-follow, not gating.** Track 6 ships *after* the companion (Track 3) proves the seam; it is the companion AppKit blitter minus the circular clip. Companion-first remains the priority because the round panels are the immediate hardware target.
+
 ## Open implementation questions
 
-These do not block the direction; flag before/within planning.
+These are implementation-detail calls, best made during planning/execution; they do not block the design.
 
-1. **Privacy revision confirmation.** Confirm the bounded reading of "share all the same stuff": full *visual* richness on external surfaces, but informational redaction (no source names / exact counts / project context) retained per 06-13/06-15. Is that the intent, or do you want external surfaces fully unredacted because the display is personal? (And if the screen window ever lives on your *internal* display, should it relax to watch-level disclosure?)
-2. **Moments deletion.** Confirm deleting both dead moment systems (`RoundSceneMoment`, `RoomLifeProfile.scene_moments`) rather than keeping them as a future hook.
-3. **Golden re-bake aggressiveness.** Track 4 may shift some watch `cells.json` RGB even when visually identical (rounding/order). Preference: one reviewed re-bake commit per surface, or hold watch byte-stable by pinning the exact legacy resolution math?
-4. **Unified artifact shape.** Keep `cells.json` as a terminal-projection alongside `*.scene-draw-list.json`, or fully replace it (larger manifest change, simpler contract)?
-5. **Screen-window scope in this pass.** Build the rectangular window adapter now (Track 6) or defer it until the companion lands and the round surface is proven?
+1. **Golden re-bake aggressiveness.** Track 4 may shift some watch `cells.json` RGB even when visually identical (rounding/order). Preference: one reviewed re-bake commit per surface, or hold watch byte-stable by pinning the exact legacy resolution math?
+2. **Unified artifact shape.** Keep `cells.json` as a terminal-projection alongside `*.scene-draw-list.json`, or fully replace it (larger manifest change, simpler contract)?
 
 ## Recommendation
 
