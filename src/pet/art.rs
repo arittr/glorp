@@ -61,7 +61,8 @@ pub fn morph_count(_species: Species, _stage: Stage) -> usize {
 pub(crate) fn stage_base_template(species: Species, stage: Stage) -> &'static Template {
     match species {
         Species::Fuzz => fuzz_base(stage),
-        Species::Blob | Species::Ghost | Species::Glitch | Species::Crystal | Species::Mech => {
+        Species::Blob => blob_base(stage),
+        Species::Ghost | Species::Glitch | Species::Crystal | Species::Mech => {
             legacy_base_template(species, stage)
         }
     }
@@ -80,6 +81,22 @@ fn fuzz_base(stage: Stage) -> &'static Template {
         Stage::S4 => &FUZZ_S4,
         Stage::S5 => &FUZZ_S5,
         Stage::S6 => &FUZZ_S6,
+    }
+}
+
+// Validated Deep-Light Medusa cast: translucent jelly bell with a glowing
+// organ-core and a tendril curtain that lengthens with age. ▒▓ gravity-shaded
+// core carries the flat-color figure-ground; ◉ lens eyes. Validated by the art
+// pipeline against the Phase-1 invariants. S6 is fully baked (primordial).
+fn blob_base(stage: Stage) -> &'static Template {
+    match stage {
+        Stage::S0 => &BLOB_S0,
+        Stage::S1 => &BLOB_S1,
+        Stage::S2 => &BLOB_S2,
+        Stage::S3 => &BLOB_S3,
+        Stage::S4 => &BLOB_S4,
+        Stage::S5 => &BLOB_S5,
+        Stage::S6 => &BLOB_S6,
     }
 }
 
@@ -334,6 +351,85 @@ const FUZZ_TINY: &[Template; 3] = &[
 ];
 
 // ── Blob ──────────────────────────────────────────────────────────
+// Deep-Light Medusa: translucent bioluminescent jelly bell housing a glowing
+// organ-core, with a tendril curtain that grows downward. ( ) rounded walls,
+// gravity-shaded ▒▓ core (figure-ground), ◉ lens eyes. Validated by the art
+// pipeline against the Phase-1 invariants. Cell ramp
+// [3, 7, 15, 33, 38, 55, 78], strictly increasing, every value in-band.
+// Transcribed from docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
+// S0/S1 are single-eye buds (no slot); S2-S5 carry {eyes}/{mouth} slots so the
+// mood-face vocabulary can substitute; S6 is fully baked (primordial form).
+const BLOB_S0: Template = [
+    "           ",
+    "           ",
+    "    \u{2584}\u{2584}     ",
+    "    \u{2592}      ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+];
+const BLOB_S1: Template = [
+    "           ",
+    "    \u{2584}\u{2584}     ",
+    "   \u{259f}\u{2592}\u{2599}     ",
+    "    \u{25c9}      ",
+    "    |      ",
+    "           ",
+    "           ",
+    "           ",
+];
+const BLOB_S2: Template = [
+    "           ",
+    "    \u{2584}\u{2584}\u{2584}    ",
+    "   \u{259f}\u{2592}\u{2592}\u{2599}    ",
+    "   {eyes}     ",
+    "   \u{2592}{mouth}\u{2592}     ",
+    "   |\u{254e}|     ",
+    "           ",
+    "           ",
+];
+const BLOB_S3: Template = [
+    "    \u{2584}\u{2584}\u{2584}    ",
+    "   \u{259f}\u{2592}\u{2592}\u{2599}    ",
+    "  (\u{2592}{eyes}\u{2592})  ",
+    "  (\u{2592}\u{2592}{mouth}\u{2592}\u{2592})  ",
+    "   \u{2592}\u{2593}\u{2592}     ",
+    "   \u{2592}\u{2593}\u{2592}     ",
+    "   |\u{254e}|\u{250a}    ",
+    "   ' ' '   ",
+];
+const BLOB_S4: Template = [
+    "    \u{2584}\u{2584}\u{2584}    ",
+    "   \u{259f}\u{2592}\u{2592}\u{2599}    ",
+    "  (\u{2592}{eyes}\u{2592})  ",
+    "  (\u{2592}\u{2592}{mouth}\u{2592}\u{2592})  ",
+    "  (\u{2591}\u{2593}\u{25c6}\u{2593}\u{2591})  ",
+    "   \u{2592}\u{2593}\u{2593}\u{2592}    ",
+    "   |\u{254e}|\u{250a}    ",
+    "   ' ' '   ",
+];
+const BLOB_S5: Template = [
+    "   \u{2584}\u{2584}\u{2584}\u{2584}    ",
+    "  \u{259f}\u{2592}\u{2592}\u{2592}\u{2592}\u{2599}   ",
+    " (\u{2592}\u{2592}{eyes}\u{2592}\u{2592}) ",
+    " (\u{2592}\u{2592}\u{2592}{mouth}\u{2592}\u{2592}\u{2592}) ",
+    " (\u{2591}\u{2593}\u{25c6}\u{25c9}\u{25c6}\u{2593}\u{2591}) ",
+    " (\u{2591}\u{2592}\u{2593}\u{2593}\u{2593}\u{2592}\u{2591}) ",
+    "  |\u{250a}|\u{254e}|\u{250a}   ",
+    "  ' ' ' '  ",
+];
+const BLOB_S6: Template = [
+    " \u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584} ",
+    "\u{259f}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}\u{2599}",
+    "\u{2590}\u{2592}\u{2593}\u{2588}\u{2588}\u{2588}\u{2593}\u{2592}\u{2592}\u{2592}\u{258c}",
+    "\u{2590}\u{2592}{eyes}\u{2592}\u{2593}\u{2592}\u{2591}\u{258c} ",
+    "(\u{2592}\u{2592}{mouth}\u{2592}\u{2592}\u{2593}\u{2592}\u{2591}) ",
+    "(\u{25c6}\u{2593}\u{25c9}\u{25c6}\u{25c9}\u{2593}\u{25c6}\u{2592}) ",
+    "\u{259d}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2592}\u{2591}\u{2598} ",
+    " |\u{250a}|\u{254e}|\u{250a}|\u{254e}  ",
+];
+
 // Gooey gelatin: ( ) rounded walls (Blob owns "round"), gravity shading
 // (light \u{2591} cap -> heavy \u{2592}\u{2593} belly) with a \u{b0} specular
 // highlight, a lopsided cap, and uneven trailing drips so it reads as melting
@@ -1151,5 +1247,28 @@ mod tests {
         // lint per the README's binding Crystal decision; the band + s6
         // structural checks above are the real transcription-error gate,
         // matching the other 5 species tests.
+    }
+
+    #[test]
+    fn blob_base_art_passes_phase1_invariants() {
+        let species = Species::Blob;
+        for stage in ALL_STAGES {
+            assert_in_stage_band(species, stage);
+        }
+        assert_s6_fills_art_rows_no_sparkle(species);
+
+        // Flat-color figure-ground: at every stage that has a body (S2+), the base
+        // must contain at least one ▒ or ▓ core cell so it reads as solid with
+        // color off — a ░-only body in a ░ dot field is the failure this guards.
+        for stage in [Stage::S2, Stage::S3, Stage::S4, Stage::S5, Stage::S6] {
+            let base = stage_base_template(species, stage);
+            let has_dense_core = base
+                .iter()
+                .any(|line| line.contains('\u{2592}') || line.contains('\u{2593}'));
+            assert!(
+                has_dense_core,
+                "Blob {stage:?} base must carry a ▒/▓ core for flat-color figure-ground"
+            );
+        }
     }
 }
