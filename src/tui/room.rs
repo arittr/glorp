@@ -5,7 +5,7 @@ use crate::game::habitat::{
     WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
-use crate::storage::state::{EarnedHabitatProp, HabitatPropId};
+use crate::storage::state::{EarnedHabitatProp, HabitatPropId, HabitatPropSource};
 use crate::tui::day::{in_morning_after_window, resonant_prop_for_day, DayContext, DayPhase};
 use crate::tui::life::WorkWeather;
 use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
@@ -20,6 +20,11 @@ use time::{Duration, OffsetDateTime};
 use crate::tui::style::ColorCapability;
 
 const BASE_EARNED_PROP_WEIGHT: f32 = 1.0;
+
+/// How recently the heavy-session planter must have been earned for the room
+/// to shimmer once in celebration. Keyed to `earned_at` so the one-shot
+/// trigger guard fires it exactly once, never on replay.
+const HEAVY_SESSION_SHIMMER_FRESH: Duration = Duration::minutes(20);
 const RECENT_EARNED_BONUS: f32 = 0.4;
 const RESONANT_BONUS: f32 = 1.2;
 const SECONDARY_THRESHOLD: f32 = 0.6;
@@ -436,6 +441,25 @@ fn scene_moments_for(
             duration_ms: 900,
             max_replay_age_ms: 3_600_000,
         });
+    }
+    if !vm.day_context.asleep {
+        if let Some(planter) = vm.habitat.earned_props.iter().find(|p| {
+            p.id.as_str() == HEAVY_SESSION_PLANTER
+                && matches!(p.source, HabitatPropSource::HeavySession)
+                && now - p.earned_at >= Duration::ZERO
+                && now - p.earned_at <= HEAVY_SESSION_SHIMMER_FRESH
+        }) {
+            moments.push(SceneMoment {
+                key: SceneMomentKey::HeavySessionShimmer,
+                trigger_id: SceneTriggerId::new(format!(
+                    "heavy:{}",
+                    planter.earned_at.unix_timestamp()
+                )),
+                target_id: "watch.room.effect",
+                duration_ms: 700,
+                max_replay_age_ms: 3_600_000,
+            });
+        }
     }
     moments
 }
@@ -1587,5 +1611,79 @@ mod tests {
         assert!(dusk_b < dawn_b, "dusk should be less blue than dawn");
         // Day is identity.
         assert_eq!(phase_warmth_tint(base, DayPhase::Day), base);
+    }
+
+    fn earned_heavy_session(earned_at: time::OffsetDateTime) -> EarnedHabitatPropView {
+        EarnedHabitatPropView {
+            id: HabitatPropId::new(HEAVY_SESSION_PLANTER),
+            earned_at,
+            kind: crate::game::habitat::catalog_prop_by_str(HEAVY_SESSION_PLANTER)
+                .unwrap()
+                .kind,
+            display_priority: 80,
+            source: HabitatPropSource::HeavySession,
+        }
+    }
+
+    #[test]
+    fn fresh_heavy_session_planter_emits_a_shimmer() {
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let mut vm = vm_with_props(vec![earned_heavy_session(now - Duration::minutes(5))]);
+        vm.day_context.asleep = false;
+        let profile = derive_room_life_profile(&vm, now);
+        assert!(
+            profile
+                .scene_moments
+                .iter()
+                .any(|m| m.key == SceneMomentKey::HeavySessionShimmer),
+            "a heavy session earned 5 minutes ago should shimmer the room"
+        );
+    }
+
+    #[test]
+    fn stale_heavy_session_planter_does_not_shimmer() {
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let vm = vm_with_props(vec![earned_heavy_session(now - Duration::hours(6))]);
+        let profile = derive_room_life_profile(&vm, now);
+        assert!(
+            !profile
+                .scene_moments
+                .iter()
+                .any(|m| m.key == SceneMomentKey::HeavySessionShimmer),
+            "a long-past heavy session must not keep shimmering"
+        );
+    }
+
+    #[test]
+    fn lifetime_planter_without_heavy_session_source_does_not_shimmer() {
+        // A planter earned via the lifetime ladder (not a heavy session) must not
+        // trigger the heavy-session shimmer — the signal is source-specific.
+        let now = datetime!(2026-06-11 10:00 UTC);
+        let mut prop = earned_heavy_session(now - Duration::minutes(2));
+        prop.source = HabitatPropSource::LifetimeTokens { threshold: 1.0 };
+        let vm = vm_with_props(vec![prop]);
+        let profile = derive_room_life_profile(&vm, now);
+        assert!(
+            !profile
+                .scene_moments
+                .iter()
+                .any(|m| m.key == SceneMomentKey::HeavySessionShimmer),
+            "only a HeavySession-sourced planter shimmers"
+        );
+    }
+
+    #[test]
+    fn sleeping_room_does_not_shimmer_a_heavy_session() {
+        let now = datetime!(2026-06-11 03:00 UTC);
+        let mut vm = vm_with_props(vec![earned_heavy_session(now - Duration::minutes(5))]);
+        vm.day_context.asleep = true;
+        let profile = derive_room_life_profile(&vm, now);
+        assert!(
+            !profile
+                .scene_moments
+                .iter()
+                .any(|m| m.key == SceneMomentKey::HeavySessionShimmer),
+            "a sleeping room stays calm — no shimmer"
+        );
     }
 }

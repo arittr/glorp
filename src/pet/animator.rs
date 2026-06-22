@@ -1533,4 +1533,21 @@ mod tests {
         animator.advance_for_test(1);
         assert!(!animator.has_active_effects());
     }
+
+    #[test]
+    fn heavy_session_shimmer_enqueues_a_room_effect() {
+        let mut animator = SceneAnimator::new();
+        let moment = crate::tui::room::SceneMoment {
+            key: crate::tui::room::SceneMomentKey::HeavySessionShimmer,
+            trigger_id: crate::tui::room::SceneTriggerId::new("heavy:123"),
+            target_id: "watch.room.effect",
+            duration_ms: 700,
+            max_replay_age_ms: 3_600_000,
+        };
+        animator.update_scene_moments(std::slice::from_ref(&moment), &dummy_targets());
+        assert!(
+            animator.has_active_effects(),
+            "shimmer must produce a live effect"
+        );
+    }
 }

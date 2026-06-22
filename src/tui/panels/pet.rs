@@ -21,13 +21,14 @@ use crate::tui::view_model::WatchViewModel;
 mod ambient;
 mod art_lines;
 mod colors;
+mod grounding;
 mod performance;
 mod props;
 
 pub(crate) use ambient::pet_silhouette_halo_rects;
 use ambient::{
-    activity_glyphs_for, ambient_glyph_is_inside_area, biome_wash_color,
-    effective_weekend_softening, mote_glyphs_for, weekend_soften_color,
+    activity_glyphs_for, ambient_glyph_is_inside_area, effective_weekend_softening,
+    mote_glyphs_for, weekend_soften_color,
 };
 pub use ambient::{ambient_glyphs_for, ambient_glyphs_for_phase};
 #[allow(unused_imports)]
@@ -53,7 +54,7 @@ use crate::tui::day::{DayPhase, Season};
 #[cfg(test)]
 use crate::tui::life::{SourceAccent, WorkWeather};
 #[cfg(test)]
-use ambient::biome_floor_palette;
+use ambient::{biome_floor_palette, biome_wash_color};
 #[cfg(test)]
 use art_lines::{build_cursor_eye_string, cursor_eye_glyph};
 #[cfg(test)]
@@ -68,23 +69,16 @@ pub struct PetPanel;
 /// The rendered pet art is 13 columns wide (11 chars + 1-cell particle border each side)
 /// and 10 rows tall (8 art rows + 1-cell particle border top/bottom).
 const PET_W: u16 = 13;
-const PET_H: u16 = 10;
+pub(super) const PET_H: u16 = 10;
 /// Day-accumulation motes may use at most this share of the ambient glyph
 /// allocation — the room never crowds the sky (spec: Day accumulation).
 const MOTE_BUDGET_SHARE: f64 = 0.5;
 /// Floor-mote glyphs: soft specks, deliberately sub-countable.
 const MOTE_GLYPHS: &[char] = &['·', '.', ','];
 
-/// Computes the 13×10 sub-rect where the pet art sits inside the panel area,
-/// accounting for vertical centering, breathing offset, and wander offset.
-///
-/// The horizontal wander position is computed directly from `area.width` so
-/// the pet drifts across the full habitat regardless of where `vm.wander_offset_x`
-/// is set. `vm.wander_offset_x` is ignored at render time; it's only for test
-/// inspection.
 pub(crate) fn pet_inner_rect_in_panel(area: Rect, vm: &WatchViewModel) -> Rect {
     let cx = area.x + area.width.saturating_sub(PET_W) / 2;
-    let cy = area.y + area.height.saturating_sub(PET_H) / 2;
+    let cy = grounding::pet_feet_anchor_y(area, &vm.pet_art, PET_H);
     // When `area` is smaller than the pet, the upper clamp bound would fall
     // below `area.x` / `area.y`, which makes `i32::clamp` panic. `.max(...)`
     // ensures min ≤ max so the rect collapses to `area`'s origin instead.
@@ -238,18 +232,9 @@ impl LegacyPanel for PetPanel {
         let presentation_room = &presentation_scene.room;
         presentation_room.debug_assert_matches_profile(&room_profile);
 
-        // Base layer: a subtle per-biome background wash over the ENTIRE habitat,
-        // including under the pet and speech bubble. Set BEFORE every glyph pass
-        // (room/ambient/pet all set fg only), so this bg stays seamless underneath
-        // — washing around the pet's exclusion rect would carve a visible hole.
-        {
-            let wash = biome_wash_color(room_profile.biome.primary);
-            for wy in scene.habitat.y..scene.habitat.y.saturating_add(scene.habitat.height) {
-                for wx in scene.habitat.x..scene.habitat.x.saturating_add(scene.habitat.width) {
-                    buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
-                }
-            }
-        }
+        // Base layer: per-biome background wash over the entire habitat (sky + deeper
+        // floor band). Set before every glyph pass so the bg stays seamless underneath.
+        grounding::paint_biome_wash(buf, scene.habitat, room_profile.biome.primary);
 
         let room_glyphs = crate::tui::room::room_glyphs_for(
             &room_profile,
@@ -356,6 +341,19 @@ impl LegacyPanel for PetPanel {
             &life_profile.prop_reactions,
             ctx.color_capability,
             &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
+        );
+
+        // Contact shadow: a calm bg deepening directly under the pet's feet so it
+        // reads as resting ON the floor. Restricted to feet columns (gutter
+        // precedence: species identity side cells are never touched). Bg-only — it
+        // never replaces a floor-texture glyph, just deepens the cell behind it.
+        grounding::paint_contact_shadow(
+            buf,
+            scene.pet_art,
+            &vm.pet_art,
+            vm.facing,
+            scene.habitat,
+            room_profile.biome.primary,
         );
 
         // Pet art with shimmer, twinkle, and token-pop overlays — paints over
@@ -480,7 +478,7 @@ fn render_pet_inside(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -519,7 +517,7 @@ mod tests {
         }
     }
 
-    fn test_context() -> RenderContext {
+    pub(crate) fn test_context() -> RenderContext {
         use crate::tui::render_context::WatchClock;
         // Fixed clock so wander position is deterministic across test runs.
         RenderContext::with_clock(
@@ -528,7 +526,7 @@ mod tests {
         )
     }
 
-    fn vm_with_real_pet() -> WatchViewModel {
+    pub(crate) fn vm_with_real_pet() -> WatchViewModel {
         use crate::game::evolution::Stage;
         use crate::game::metabolism::Mood;
         use crate::pet::generation::generate_pet;
@@ -820,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn pet_panel_renders_pet_centered_in_tall_rect() {
+    fn pet_panel_renders_pet_grounded_in_tall_rect() {
         let vm = WatchViewModel::fixture();
         let panel = PetPanel;
         let ctx = test_context();

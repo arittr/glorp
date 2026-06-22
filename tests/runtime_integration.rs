@@ -644,7 +644,8 @@ fn habitat_catalog_exposes_v1_prop_ids_and_kinds() {
 
     let pebble = catalog_prop(&HabitatPropId::new("token_pebble_25k")).unwrap();
     assert_eq!(pebble.kind, HabitatPropKind::Accent);
-    assert_eq!(pebble.lifetime_threshold, Some(25_000.0));
+    // Front-loaded to 10k to give young pets honest early character (was 25k).
+    assert_eq!(pebble.lifetime_threshold, Some(10_000.0));
 
     for (id, zone) in [
         ("token_moss_tuft_250k", HabitatPropZone::FloorMid),

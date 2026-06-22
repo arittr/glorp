@@ -83,6 +83,33 @@ pub(super) fn biome_wash_color(tag: crate::tui::room::RoomBiomeTag) -> ratatui::
     )
 }
 
+/// Ground companion to [`biome_wash_color`]: the same biome nudge, then a
+/// uniform darkening so the floor band reads as ground value, lighter sky
+/// above it. Kept subtle (a small fixed subtraction) so it deepens without
+/// turning into a hard band.
+pub(super) fn biome_floor_wash_color(tag: crate::tui::room::RoomBiomeTag) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    const FLOOR_DARKEN: i16 = 14;
+    let Color::Rgb(r, g, b) = biome_wash_color(tag) else {
+        return biome_wash_color(tag);
+    };
+    let darken = |v: u8| (v as i16 - FLOOR_DARKEN).clamp(0, 255) as u8;
+    Color::Rgb(darken(r), darken(g), darken(b))
+}
+
+/// The contact shadow under the pet's feet: the floor wash deepened a bit
+/// further so the pet reads as resting ON the ground, never a hard black
+/// blob. Calm, never high-contrast (Tamagotchi spirit).
+pub(super) fn contact_shadow_color(floor_wash: ratatui::style::Color) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    const SHADOW_DARKEN: i16 = 16;
+    let Color::Rgb(r, g, b) = floor_wash else {
+        return floor_wash;
+    };
+    let darken = |v: u8| (v as i16 - SHADOW_DARKEN).clamp(0, 255) as u8;
+    Color::Rgb(darken(r), darken(g), darken(b))
+}
+
 /// Sky-glyph count by stage tier.
 fn stage_base_count(stage: Stage) -> usize {
     match stage {
@@ -612,6 +639,48 @@ pub(super) fn ambient_glyph_is_inside_area(glyph: &AmbientGlyph, area: Rect) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floor_wash_is_darker_than_sky_wash_per_biome() {
+        use crate::tui::room::RoomBiomeTag;
+        use ratatui::style::Color;
+        for tag in [
+            RoomBiomeTag::Starter,
+            RoomBiomeTag::Botanical,
+            RoomBiomeTag::Technical,
+            RoomBiomeTag::Celestial,
+            RoomBiomeTag::Artifact,
+            RoomBiomeTag::Cozy,
+        ] {
+            let sky = biome_wash_color(tag);
+            let floor = biome_floor_wash_color(tag);
+            let (Color::Rgb(sr, sg, sb), Color::Rgb(fr, fg, fb)) = (sky, floor) else {
+                panic!("washes must be rgb");
+            };
+            let sky_lum = sr as u32 + sg as u32 + sb as u32;
+            let floor_lum = fr as u32 + fg as u32 + fb as u32;
+            assert!(
+                floor_lum < sky_lum,
+                "{tag:?}: floor wash {floor_lum} must be darker than sky wash {sky_lum}"
+            );
+            // Stay subtle: floor within 36 of sky per channel (a touch deeper, not black).
+            assert!((sr as i16 - fr as i16).abs() <= 36);
+            assert!((sg as i16 - fg as i16).abs() <= 36);
+            assert!((sb as i16 - fb as i16).abs() <= 36);
+        }
+    }
+
+    #[test]
+    fn contact_shadow_is_darker_than_its_floor_wash_and_stays_rgb() {
+        use crate::tui::room::RoomBiomeTag;
+        use ratatui::style::Color;
+        let floor = biome_floor_wash_color(RoomBiomeTag::Botanical);
+        let shadow = contact_shadow_color(floor);
+        let (Color::Rgb(fr, fg, fb), Color::Rgb(sr, sg, sb)) = (floor, shadow) else {
+            panic!("rgb");
+        };
+        assert!((sr as u32 + sg as u32 + sb as u32) < (fr as u32 + fg as u32 + fb as u32));
+    }
 
     #[test]
     fn night_sky_uses_the_night_family_and_a_smaller_budget() {

@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(scene.content, area);
         assert_eq!(scene.habitat, area);
         assert_eq!(scene.hit_area, area);
-        assert_eq!(scene.pet_art, Rect::new(23, 7, 13, 10));
+        assert_eq!(scene.pet_art, Rect::new(23, 9, 13, 10));
         assert_eq!(scene.exclusions, vec![scene.pet_art]);
         assert_eq!(
             scene.effect_targets,
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(scene.speech, Some(Rect::new(10, 5, 40, 1)));
         assert_eq!(scene.content, Rect::new(10, 6, 40, 13));
         assert_eq!(scene.hit_area, scene.content);
-        assert_eq!(scene.pet_art, Rect::new(23, 7, 13, 10));
+        assert_eq!(scene.pet_art, Rect::new(23, 9, 13, 10));
         assert_eq!(scene.exclusions, vec![scene.speech.unwrap(), scene.pet_art]);
 
         let speech = scene.target(TargetPath::new("watch.pet.speech")).unwrap();
