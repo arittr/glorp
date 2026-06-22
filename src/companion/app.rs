@@ -505,7 +505,12 @@ fn pet_role_color(
     role: PaletteRoleName,
     palette: &crate::pet::palette::ResolvedPalette,
 ) -> Option<RoundColor> {
-    let rgb = crate::pet::palette::role_color(role, palette);
+    let resolved = crate::presentation::surface::resolve_pet_colors(
+        palette,
+        &crate::presentation::surface::LiveColorInputs::passthrough(),
+        &crate::presentation::surface::ROUND_STYLE,
+    );
+    let rgb = crate::presentation::surface::role_rgb(&resolved, role);
     Some(rgb_color(rgb.r, rgb.g, rgb.b))
 }
 
@@ -634,6 +639,16 @@ mod tests {
 
         assert_eq!(grid.cells[0].role, PaletteRoleName::Eye);
         assert_eq!(grid.cells[1].role, PaletteRoleName::Body);
+    }
+
+    #[test]
+    fn companion_role_color_matches_resolver_round_style() {
+        use crate::pet::palette::{default_theme_palette, role_color};
+        use crate::pet::render::PaletteRoleName;
+        let p = default_theme_palette();
+        let got = pet_role_color(PaletteRoleName::Accent, &p).unwrap();
+        let rgb = role_color(PaletteRoleName::Accent, &p);
+        assert_eq!(got, rgb_color(rgb.r, rgb.g, rgb.b)); // unchanged from today
     }
 
     #[test]

@@ -123,6 +123,23 @@ pub struct LiveColorInputs {
     pub source_override: Option<Rgb>,
 }
 
+impl LiveColorInputs {
+    /// All-neutral inputs: Day phase, no blend, no droop, no shimmer, no
+    /// activity, no source override.  Used wherever a surface applies no
+    /// live transforms (e.g. `ROUND_STYLE`).
+    pub fn passthrough() -> Self {
+        Self {
+            phase: DayPhase::Day,
+            phase_blend: 0.0,
+            droop_mult: 1.0,
+            shimmer_role: None,
+            shimmer_mult: 1.0,
+            activity_level: 0.0,
+            source_override: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ResolvedColors — output of the resolver; one Rgb per palette role
 // ---------------------------------------------------------------------------
@@ -188,6 +205,19 @@ pub fn resolve_pet_colors(
         particle: resolve_one(PaletteRoleName::Particle),
         corruption: resolve_one(PaletteRoleName::Corruption),
         eye_emphasis: style.eye_emphasis,
+    }
+}
+
+/// Map a `PaletteRoleName` to its resolved `Rgb` field on `ResolvedColors`.
+pub fn role_rgb(c: &ResolvedColors, role: PaletteRoleName) -> Rgb {
+    match role {
+        PaletteRoleName::Body => c.body,
+        PaletteRoleName::Eye => c.eye,
+        PaletteRoleName::Mouth => c.mouth,
+        PaletteRoleName::Accent => c.accent,
+        PaletteRoleName::Pattern => c.pattern,
+        PaletteRoleName::Particle => c.particle,
+        PaletteRoleName::Corruption => c.corruption,
     }
 }
 
