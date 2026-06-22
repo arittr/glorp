@@ -508,12 +508,10 @@ fn apply_glitch_corruption(lines: &mut [String], spans: &mut Vec<StyledSegment>,
 /// span. If no span covers the cell, a standalone Corruption span is added.
 fn retag_cell_as_corruption(spans: &mut Vec<StyledSegment>, row: usize, col: usize) {
     let mut split: Vec<StyledSegment> = Vec::new();
-    let mut covered = false;
     for span in spans.iter_mut() {
         if span.line != row || col < span.start || col >= span.end {
             continue;
         }
-        covered = true;
         let original_end = span.end;
         let original_role = span.role;
         // Left fragment: keep original role for [start, col).
@@ -530,18 +528,14 @@ fn retag_cell_as_corruption(spans: &mut Vec<StyledSegment>, row: usize, col: usi
         }
         break;
     }
-    // The corrupted cell itself.
+    // The corrupted cell itself. If no span covered the cell (a body-gap cell),
+    // this standalone Corruption span overrides that single cell for the consumer.
     split.push(StyledSegment {
         line: row,
         start: col,
         end: col + 1,
         role: PaletteRoleName::Corruption,
     });
-    if !covered {
-        // No span covered the cell (a body-gap cell). Just add the corruption
-        // span; the consumer renders uncovered cells as body, and this span
-        // overrides that single cell.
-    }
     // Drop any now-empty left fragments produced by the shrink.
     spans.retain(|s| s.start < s.end);
     spans.extend(split);
@@ -1384,6 +1378,10 @@ mod tests {
                 .filter(|s| s.role == PaletteRoleName::Eye)
                 .cloned()
                 .collect();
+            assert!(
+                !eye_spans.is_empty(),
+                "tick {tick}: Glitch S4 must always render eye spans"
+            );
             for c in rendered
                 .spans
                 .iter()
