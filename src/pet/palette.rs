@@ -123,6 +123,7 @@ pub struct ResolvedPalette {
     pub accent: Rgb,
     pub pattern: Rgb,
     pub particle: Rgb,
+    pub corruption: Rgb,
 }
 
 pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
@@ -133,6 +134,7 @@ pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
         PaletteRoleName::Accent => palette.accent,
         PaletteRoleName::Pattern => palette.pattern,
         PaletteRoleName::Particle => palette.particle,
+        PaletteRoleName::Corruption => palette.corruption,
     }
 }
 
@@ -145,6 +147,7 @@ pub fn default_theme_palette() -> ResolvedPalette {
         accent: Rgb::new(0xf0, 0xa6, 0x46),
         pattern: Rgb::new(0x50, 0x4c, 0x49),
         particle: Rgb::new(0xf0, 0xa6, 0x46),
+        corruption: Rgb::new(0x78, 0xff, 0xb4),
     }
 }
 
@@ -244,6 +247,10 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
         accent: role(0.76, 0.24, h + 120.0),
         pattern: role(0.64, 0.20, h + 210.0),
         particle: role(0.80, 0.20, h + 160.0),
+        // Corruption is species-independent acid/phosphor, fixed-hue so it
+        // always contrasts the body and reads as a deliberate data glitch,
+        // not a tint of the creature. High chroma green at high lightness.
+        corruption: oklch_to_rgb(0.85, 0.22, 145.0),
     }
 }
 
@@ -338,6 +345,7 @@ mod tests {
         // now a dedicated field (role_color reads palette.particle, not accent).
         assert_eq!(role_color(Particle, &p), p.particle);
         assert_eq!(p.particle, Rgb::new(0xf0, 0xa6, 0x46));
+        assert_eq!(role_color(Corruption, &p), Rgb::new(0x78, 0xff, 0xb4));
     }
 
     #[test]
@@ -577,5 +585,28 @@ mod tests {
                 assert_ne!(a, b, "two species bodies collided after hue retune");
             }
         }
+    }
+
+    #[test]
+    fn corruption_role_resolves_to_a_contrasting_acid_color() {
+        use crate::pet::generation::Species;
+        use crate::pet::render::PaletteRoleName::Corruption;
+        let p = resolve_pet_palette(Species::Glitch, &traits_with_hue(50));
+        let c = role_color(Corruption, &p);
+        // Acid/phosphor: green dominant, distinct from the body so corruption
+        // never melts into its background (Appendix B failure mode #3).
+        assert!(c.g > c.r && c.g > c.b, "corruption not acid-green: {c:?}");
+        assert_ne!(c, p.body, "corruption must contrast the body");
+    }
+
+    #[test]
+    fn default_theme_has_a_corruption_color() {
+        use crate::pet::render::PaletteRoleName::Corruption;
+        let p = default_theme_palette();
+        let c = role_color(Corruption, &p);
+        assert!(
+            c.g > c.r && c.g > c.b,
+            "default corruption not acid-green: {c:?}"
+        );
     }
 }

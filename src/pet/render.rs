@@ -80,6 +80,7 @@ pub enum PaletteRoleName {
     Accent,
     Pattern,
     Particle,
+    Corruption,
 }
 
 /// Per-species gutter identity for the 13x10 frame's gutter rows (0 and 9) and
