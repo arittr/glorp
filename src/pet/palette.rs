@@ -393,4 +393,27 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn raised_chroma_exceeds_old_pinned_point_one_zero() {
+        use crate::pet::generation::Species;
+        // Proves the species_body_chroma raise had a visible effect: the realized
+        // oklab chroma of each body now exceeds what the old pinned 0.10 request
+        // realized at the same lightness/hue. Guards against reverting the knob.
+        // Both paths use the species base hue with no jitter so the only variable
+        // is chroma (0.10 old vs species_body_chroma(s) new).
+        for s in Species::all() {
+            let h = species_base_hue(s);
+            let new_body = oklch_to_rgb(0.74, species_body_chroma(s), h);
+            let old_body = oklch_to_rgb(0.74, 0.10, h);
+            let (na, nb) = rgb_to_oklab_ab(new_body);
+            let (oa, ob) = rgb_to_oklab_ab(old_body);
+            let new_chroma = (na * na + nb * nb).sqrt();
+            let old_chroma = (oa * oa + ob * ob).sqrt();
+            assert!(
+                new_chroma > old_chroma,
+                "{s:?}: raised chroma {new_chroma:.3} should exceed old pinned-0.10 chroma {old_chroma:.3}"
+            );
+        }
+    }
 }
