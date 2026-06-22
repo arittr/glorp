@@ -59,6 +59,34 @@ pub fn morph_count(_species: Species, _stage: Stage) -> usize {
 /// The S4/S5/S6 picks are three distinct existing adult shapes so growth still
 /// reads as change without the retired `elder_morph_index` reshuffle.
 pub(crate) fn stage_base_template(species: Species, stage: Stage) -> &'static Template {
+    match species {
+        Species::Fuzz => fuzz_base(stage),
+        Species::Blob | Species::Ghost | Species::Glitch | Species::Crystal | Species::Mech => {
+            legacy_base_template(species, stage)
+        }
+    }
+}
+
+// Validated Hearthfloof cast: ear-cones + mitten-feet + heart-locket, block-mass
+// edges (▒▓█). Validated by the art pipeline against the Phase-1 invariants. The
+// locket fills with age (◌ → ◆ → ◈◈◈); the ◆/◈ glyphs are EAW-Ambiguous and rely
+// on the documented ambiguous=narrow rendering assumption (same as Crystal).
+fn fuzz_base(stage: Stage) -> &'static Template {
+    match stage {
+        Stage::S0 => &FUZZ_S0,
+        Stage::S1 => &FUZZ_S1,
+        Stage::S2 => &FUZZ_S2,
+        Stage::S3 => &FUZZ_S3,
+        Stage::S4 => &FUZZ_S4,
+        Stage::S5 => &FUZZ_S5,
+        Stage::S6 => &FUZZ_S6,
+    }
+}
+
+// Phase-1 stage dispatch for species whose validated silhouettes are not yet
+// wired (Blob/Ghost/Glitch/Crystal/Mech). Delegates to the per-species
+// tiny/pup/adult template pools. Task 8 removes this once all species are wired.
+fn legacy_base_template(species: Species, stage: Stage) -> &'static Template {
     match stage {
         Stage::S0 => tiny_template(species, 0),
         Stage::S1 => tiny_template(species, 1),
@@ -133,6 +161,81 @@ fn tiny_template(species: Species, index: usize) -> &'static Template {
 }
 
 // ── Fuzz ──────────────────────────────────────────────────────────
+// Hearthfloof: ear-cones + mitten-feet + heart-locket, block-mass edges (▒▓█).
+// Validated by the art pipeline against the Phase-1 invariants. Cell ramp
+// [4, 10, 19, 33, 50, 59, 69], strictly increasing, every value in-band.
+// Transcribed verbatim from docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
+const FUZZ_S0: Template = [
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "    ▒▒     ",
+    "    ▟▙     ",
+    "           ",
+];
+const FUZZ_S1: Template = [
+    "           ",
+    "           ",
+    "    ▟▙     ",
+    "    ▒▒     ",
+    "    ▓▓     ",
+    "    ▒▒     ",
+    "    ▘▝     ",
+    "           ",
+];
+const FUZZ_S2: Template = [
+    "           ",
+    "           ",
+    "    ▟▙     ",
+    "   ▓▒▒▓    ",
+    "  ▒{eyes}▒    ",
+    "   ▒{mouth}▒     ",
+    "   ▓▒▒▓    ",
+    "    ▘▝     ",
+];
+const FUZZ_S3: Template = [
+    "           ",
+    "   ▟▙▟▙    ",
+    "  ▓▒▒▒▒▓   ",
+    "  ▓▒{eyes}▒▓  ",
+    "  ▓▒ {mouth} ▒▓  ",
+    "  ▓▒◌▒▒▓   ",
+    "   ▙▒▒▟    ",
+    "   ▘  ▝    ",
+];
+const FUZZ_S4: Template = [
+    "   ▟▙ ▟▙   ",
+    "  ▓▒▒▒▒▒▓  ",
+    "  ▓▒{eyes}▒▒▓ ",
+    "  ▓▒ {mouth} ▒▒▓ ",
+    "  ▓▒▒◆▒▒▒▓ ",
+    "  ▓▒▒▒▒▒▒▓ ",
+    "  ▙▒▒▒▒▒▒▟ ",
+    "   ▘    ▝  ",
+];
+const FUZZ_S5: Template = [
+    "  ▟█▙ ▟█▙  ",
+    "  ▓▓▒▒▒▒▓▓ ",
+    "  ▓▒{eyes}▒▒▓ ",
+    "  ▓▒ {mouth} ▒▒▓ ",
+    "  ▓▒▒◆◆▒▒▓ ",
+    "  ▓█▒▒▒▒█▓ ",
+    "  ▓█▒▒▒▒█▓ ",
+    "  ▙█▒▘▝▒█▟ ",
+];
+const FUZZ_S6: Template = [
+    " ▟██▙▟██▙  ",
+    " ▓██▒▒▒██▓ ",
+    " ▓█▒{eyes}▒█▓ ",
+    " ▓█▒ {mouth} ▒█▓ ",
+    " ▓█▒◈◈◈▒█▓ ",
+    " ▓██▒▒▒██▓ ",
+    " ▓██▒▒▒██▓ ",
+    " ▙██▒▘▝▒██▟",
+];
+
 // Chunky filled cat-creature: /\_/\ ears, two-tone ░▒ fur shading, and a tail
 // present from the pup (S3) onward. Morph 0 wears a small resting curl; morphs
 // 1-3 (S5+ via elder_morph_index) each sport a distinct, showier tail.
@@ -1030,5 +1133,23 @@ mod tests {
         for species in Species::all() {
             assert_s6_fills_art_rows_no_sparkle(species);
         }
+    }
+
+    #[test]
+    fn fuzz_base_art_passes_phase1_invariants() {
+        let species = Species::Fuzz;
+        for stage in ALL_STAGES {
+            // width-1 / 11-col on the rendered base (canonical fillers).
+            // Reuses the Phase-1 helper that renders with mood=Content, resting eyes.
+            assert_in_stage_band(species, stage); // band membership + monotonicity
+        }
+        assert_s6_fills_art_rows_no_sparkle(species);
+        // Fuzz does NOT assert `ambiguous_wide_width_warnings(Fuzz,_).is_empty()`:
+        // the ▒▓█▟▙▘▝ body vocabulary (and the S4-S6 ◆/◈ locket) are
+        // EAW-Ambiguous by design, relied on under the documented
+        // ambiguous=narrow assumption. The wide-mode check is a non-blocking
+        // lint per the README's binding Crystal decision; the band + s6
+        // structural checks above are the real transcription-error gate,
+        // matching the other 5 species tests.
     }
 }
