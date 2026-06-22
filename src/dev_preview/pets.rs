@@ -106,7 +106,8 @@ fn render_seeded_pet_cell(
     styles: &SemanticStyles,
 ) {
     let pet = generate_pet(seed).with_species(species);
-    let palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
+    let mut palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
+    crate::pet::palette::apply_mood_eye_color(&mut palette, Mood::Content);
     let rendered = render_pet(
         &pet,
         stage,
@@ -152,7 +153,7 @@ fn render_mood_set(_ctx: &PreviewRenderContext) -> PreviewFrame {
 
     for (row, species) in Species::all().into_iter().enumerate() {
         let pet = generate_pet(&format!("glorp-mood-{}", species.as_str())).with_species(species);
-        let palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
+        let base_palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
         for (mood_col, (mood, _)) in MOOD_SET.iter().enumerate() {
             let area = Rect::new(
                 mood_col as u16 * col_width,
@@ -160,6 +161,8 @@ fn render_mood_set(_ctx: &PreviewRenderContext) -> PreviewFrame {
                 col_width,
                 row_height,
             );
+            let mut palette = base_palette;
+            crate::pet::palette::apply_mood_eye_color(&mut palette, *mood);
             let rendered = render_pet(
                 &pet,
                 Stage::S4,
@@ -230,7 +233,8 @@ fn render_pet_cell(
 ) {
     let styles = semantic_styles();
     let pet = generate_pet(&format!("glorp-preview-{}", species.as_str())).with_species(species);
-    let palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
+    let mut palette = crate::pet::palette::resolve_pet_palette(species, &pet.traits);
+    crate::pet::palette::apply_mood_eye_color(&mut palette, Mood::Content);
     let rendered = render_pet(
         &pet,
         stage,
@@ -322,7 +326,8 @@ fn render_glitch_live_states(_ctx: &PreviewRenderContext) -> PreviewFrame {
 fn render_glitch_state_cell(area: Rect, buffer: &mut Buffer, fixture: GlitchStateFixture) {
     let styles = semantic_styles();
     let pet = generate_pet("glorp-preview-glitch-live").with_species(Species::Glitch);
-    let palette = crate::pet::palette::resolve_pet_palette(Species::Glitch, &pet.traits);
+    let mut palette = crate::pet::palette::resolve_pet_palette(Species::Glitch, &pet.traits);
+    crate::pet::palette::apply_mood_eye_color(&mut palette, fixture.mood);
     let rendered = render_pet(
         &pet,
         fixture.stage,
@@ -483,6 +488,28 @@ mod tests {
             ids.contains(&"pet-mood-set"),
             "pets preview must show the full mood set; got {ids:?}"
         );
+    }
+
+    #[test]
+    fn preview_mood_fixtures_differentiate_eye_color() {
+        use crate::game::metabolism::Mood;
+        use crate::pet::generation::{generate_pet, Species};
+        use crate::pet::palette::{apply_mood_eye_color, eye_color_for_mood, resolve_pet_palette};
+        let pet = generate_pet("glorp-preview-glitch-live").with_species(Species::Glitch);
+        let resolved = resolve_pet_palette(Species::Glitch, &pet.traits);
+        let mut content = resolved;
+        let mut ecstatic = resolved;
+        apply_mood_eye_color(&mut content, Mood::Content); // no-op (skip-Content)
+        apply_mood_eye_color(&mut ecstatic, Mood::Ecstatic); // recolors eye
+        assert_eq!(
+            content.eye, resolved.eye,
+            "Content keeps the floor-clearing resting eye"
+        );
+        assert_ne!(
+            content.eye, ecstatic.eye,
+            "preview mood fixtures must show distinct eye colors"
+        );
+        assert_eq!(ecstatic.eye, eye_color_for_mood(Mood::Ecstatic));
     }
 
     fn frame_text(frame: &PreviewFrame) -> String {
