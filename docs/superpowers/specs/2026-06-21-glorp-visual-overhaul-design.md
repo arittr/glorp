@@ -84,6 +84,9 @@ below. Bands are disjoint and strictly increasing:
 | occupied cells | 1–4 | 5–10 | 11–20 | 21–34 | 35–50 | 51–66 | 67–88 |
 
 S6 must fill all 8 art rows (the sparkle no longer steals rows — see Rendering #2).
+The upper bands (S5–S6) are reached as **dense, filled masses**, not hollow outlines —
+grammar rule #1's "flood-fill in one pass" describes the closed boundary, not a hollow
+interior.
 
 ## The cast
 
@@ -140,7 +143,10 @@ Verified against source; re-check at implementation time.
    `elder_morph_index` (`art.rs`). Redefine `morph_count` semantics (it has **zero
    production callers** — only tests): per-pet variety is now algorithmic, so
    `morph_count` either goes away or returns the interior-texture-variant count; the
-   tests that assert `morph_count >= 3` are rewritten (see Testing).
+   tests that assert `morph_count >= 3` are rewritten (see Testing). When S3 collapses
+   to a single base template, resolve the `morph_pup_index` / `next_usize(4)` pup draw
+   (`generation.rs`) — remove it or mark it retained-dead — and update the
+   `visible_traits` draw-order note above; harmless under the accepted reset.
 
 2. **Move the S6 sparkle into the particle gutter, with an explicit per-species
    gutter-precedence rule.** Today the renderer overwrites authored art rows 0 and 7
@@ -157,11 +163,14 @@ Verified against source; re-check at implementation time.
 
    Required: define a **per-species gutter content model** (sparkle / machine-frame /
    none) so the Mech-S6 choice is data, not an architecture fork; define
-   **last-write precedence** when an S6 sparkle, a species particle, and a contact
-   shadow target the same cell (proposal: contact shadow > species particle >
-   S6 sparkle, and the S6 sparkle uses **row 0 only** to avoid the row-9 shadow);
-   reconcile with `frame_fill_for_stage` so there are not three uncoordinated sparkle
-   treatments. `frame_with_particles` is last-write-wins today; precedence must be
+   **precedence** when an S6 sparkle, a species particle, and a contact
+   shadow target the same cell. **Species identity particles outrank the contact
+   shadow** (grammar rule #5 — the signature must survive every size): the contact
+   shadow is restricted to the columns **directly beneath the silhouette's feet** (the
+   lowest non-blank art row), leaving side-column gutter identity cells (e.g. Crystal's
+   facets, Mech's LED) untouched; the S6 sparkle uses **row 0 only** to avoid the
+   row-9 shadow. Reconcile with `frame_fill_for_stage` so there are not three
+   uncoordinated sparkle treatments. `frame_with_particles` is last-write-wins today; precedence must be
    explicit.
 
 3. **New invariant: rendered-size monotonicity (precise, tick-independent).**
@@ -172,9 +181,13 @@ Verified against source; re-check at implementation time.
    templates land in their stage cell band and are strictly increasing S0→S6
    (S4 < S5 < S6). The "sparkle no longer steals art rows" is asserted **separately**
    as a structural check, not folded into the size count. (Per-pet interior texture
-   never changes the occupied-cell count enough to leave the band — the texture
-   varies glyph identity, not occupancy of structural cells; the invariant runs on
-   the canonical base.)
+   varies glyph *identity* within structural cells, not occupancy, so it does not
+   move a template across a band. The variable-occupancy `{pattern}` slot is the
+   exception — its per-seed pool can swing 0–3 cells, enough to cross the narrow
+   small-stage bands — so on **S0–S2** the `{pattern}`/interior-texture pool is
+   constrained to constant-occupancy glyphs, and the band check is additionally run
+   across the real per-seed slot values for those stages, not only the canonical
+   base.)
 
 4. **Ambiguous-width glyph invariant.** Eye/accent glyphs must be East-Asian-Width
    **Neutral or Narrow**, not Ambiguous. `◉` (U+25C9) is Neutral (safe); `◇◆◈●○` are
@@ -227,10 +240,12 @@ missing. Changes:
   is currently mood-blind and the palette is rebuilt only on the ~10s worker poll
   (`commands/watch.rs`), so eye *color* cannot ride mood there without lagging the
   eye *glyph* (which updates on the animation tick via `expression_for`). Required:
-  a `mood → eye hue/lightness` mapping applied **at animation-tick cadence**
-  (either thread `Mood` into eye-color resolution, enumerating the call sites that
-  must pass it — watch, view_model, menubar, round companion, dev_preview — or apply
-  a post-step in `tui/panels/pet/colors.rs`). Mapping: **green at rest → warm/gold
+  a `mood → eye hue/lightness` mapping applied **at animation-tick cadence**. The
+  watch surface already has live mood at its per-tick render site
+  (`rerender_pet_for_view_model`, `vm.pet_render.mood` in scope), so the step is added
+  there — no new threading; the menubar / round companion / dev_preview surfaces are
+  confirmed per-surface during Phase 3 (some may lack live mood), applying the step or
+  a post-step in `tui/panels/pet/colors.rs`. Mapping: **green at rest → warm/gold
   excited → cool blue tired → desaturated wilted.** Resolve the dead `palette_roles`
   path (`render.rs`, zero callers) — adopt it as the mechanism or delete it. Eye hue
   is pinned in **two** places (`palette.rs` `EYE_HUE`; `render.rs` `palette_roles`);
@@ -360,7 +375,7 @@ set. This increments the manifest schema (currently v3).
 - **Tests to rewrite (never silently delete):** `species_have_enough_seeded_morph_variety`
   (`generation.rs`), `elder_morph_skips_singleton_for_carved_species` and `_for_glitch`
   (`art.rs`), `glitch_daemon_silhouette_is_visibly_denser_than_glitch_form` (`art.rs`),
-  `morph_count >= 3` assertions (`tests/generation.rs`), `eyes_are_green_for_every_species`
+  `morph_count >= 3` assertions plus the `morph_count(species, S3) == 1` assertion (`tests/generation.rs`), `eyes_are_green_for_every_species`
   → "green at rest" (`palette.rs`). State the new `morph_count` contract.
 - **Continuity:** a fixed seed set renders a valid non-empty 11×8 for every
   species × stage after the map rework (no crash / no blank pet).
@@ -397,7 +412,7 @@ set. This increments the manifest schema (currently v3).
 - `src/tui/layout.rs` — `frame_fill_for_stage` (the third S6 sparkle surface)
 - `src/tui/style.rs` — `ColorCapability` (Truecolor/Flat), degrade
 - `src/commands/watch.rs`, `src/tui/view_model.rs` — palette build, mood threading
-- `src/cli/dev_preview/pets.rs` — preview-lab pets scenario (extend for variants)
+- `src/dev_preview/pets.rs` — preview-lab pets scenario (extend for variants)
 
 ---
 
@@ -405,8 +420,13 @@ set. This increments the manifest schema (currently v3).
 
 **Candidate**, not validated-as-templates: drawn 7-stages side-by-side for review.
 Before authoring, each is re-extracted into a single-column 11×8 grid and run through
-`every_template_line_is_eleven_display_columns` / `_is_eight_lines` and the
-`ambiguous=wide` width check. Known redraws: Glitch S5/S6 (pull S5 inset so S6 owns
+`every_template_line_is_eleven_display_columns` / `_is_eight_lines`, the
+`ambiguous=wide` width check, **and the rendered-size cell-band / monotonicity
+invariant** (Rendering #3). **Candidate cell counts here are illustrative, not
+normative**: on redraw each base template must be re-measured to land in its stage
+band (e.g. S5 51–66, S6 67–88) with S4<S5<S6 — in particular the Glitch S5 redraw must
+drop into the **S5** band (not the S6 band), and Crystal S5 must clear the 51 floor.
+Known redraws: Glitch S5/S6 (pull S5 inset so S6 owns
 edge-to-edge); any S6 reserving a `(sparkle → gutter)` row must instead fill all 8
 rows; Blob/Mech/Crystal eyes must fit the 3-cell `{eyes}` slot; the Blob body needs a
 `▒▓` core for flat-color figure-ground.
