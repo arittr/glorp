@@ -2,7 +2,7 @@ use glorp::game::evolution::Stage;
 use glorp::game::metabolism::Mood;
 use glorp::pet::art::{morph_count, stage_label};
 use glorp::pet::generation::{generate_pet, resolve_accepted_name, Species};
-use glorp::pet::render::{palette_roles, render_pet, species_animation_profile, AnimationFrame};
+use glorp::pet::render::{render_pet, species_animation_profile, AnimationFrame};
 
 fn frame(tick: u64) -> AnimationFrame {
     AnimationFrame {
@@ -215,21 +215,6 @@ fn adult_stages_have_distinct_silhouettes_for_representative_species() {
         assert_ne!(s0.lines, s1.lines, "seed {seed}: S0 vs S1 should differ");
         assert_ne!(s1.lines, s2.lines, "seed {seed}: S1 vs S2 should differ");
     }
-}
-
-#[test]
-fn palette_roles_follow_tokenpet_hue_offsets() {
-    let mut pet = generate_pet("ori-shard");
-    pet.traits.saturation_percent = 50;
-    let roles = palette_roles(&pet);
-    assert_eq!(roles.body.lightness, 0.84);
-    assert_eq!(roles.body.base_chroma, 0.05);
-    assert_eq!(roles.eye.hue_offset_degrees, 180);
-    assert_eq!(roles.eye.lightness, 0.84);
-    assert_eq!(roles.eye.base_chroma, 0.065);
-    assert_eq!(roles.mouth.hue_offset_degrees, 30);
-    assert_eq!(roles.accent.hue_offset_degrees, 90);
-    assert_eq!(roles.pattern.hue_offset_degrees, 150);
 }
 
 #[test]

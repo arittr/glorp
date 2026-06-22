@@ -105,23 +105,6 @@ fn gutter_content_for(species: Species, stage: Stage) -> GutterContent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct PaletteRoles {
-    pub body: PaletteRole,
-    pub eye: PaletteRole,
-    pub mouth: PaletteRole,
-    pub accent: PaletteRole,
-    pub pattern: PaletteRole,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PaletteRole {
-    pub lightness: f32,
-    pub base_chroma: f32,
-    pub hue_degrees: u16,
-    pub hue_offset_degrees: i16,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationProfile {
     pub breath_period: u8,
@@ -174,18 +157,6 @@ pub fn render_pet(
     RenderedPet {
         lines: framed_lines,
         spans: framed_spans,
-    }
-}
-
-pub fn palette_roles(pet: &GeneratedPet) -> PaletteRoles {
-    let saturation = f32::from(pet.traits.saturation_percent) / 100.0;
-    let hue = pet.traits.seed_hue;
-    PaletteRoles {
-        body: role(0.84, 0.10, hue, 0, saturation),
-        eye: role(0.84, 0.13, hue, 180, saturation),
-        mouth: role(0.84, 0.10, hue, 30, saturation),
-        accent: role(0.82, 0.11, hue, 90, saturation),
-        pattern: role(0.76, 0.06, hue, 150, saturation),
     }
 }
 
@@ -243,29 +214,6 @@ pub fn closed_blink_eyes(species: Species) -> &'static str {
         Species::Glitch => "\u{2592}\u{2592}\u{2592}",
         Species::Crystal => "\u{25c7} \u{25c7}",
         Species::Mech => "= =",
-    }
-}
-
-fn role(
-    lightness: f32,
-    base_chroma: f32,
-    hue: u16,
-    hue_offset_degrees: i16,
-    saturation: f32,
-) -> PaletteRole {
-    PaletteRole {
-        lightness,
-        base_chroma,
-        hue_degrees: ((i32::from(hue) + i32::from(hue_offset_degrees)).rem_euclid(360)) as u16,
-        hue_offset_degrees,
-    }
-    .with_saturation(saturation)
-}
-
-impl PaletteRole {
-    fn with_saturation(mut self, saturation: f32) -> Self {
-        self.base_chroma *= saturation;
-        self
     }
 }
 
