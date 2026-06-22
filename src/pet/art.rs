@@ -397,8 +397,10 @@ const BLOB_S6: Template = [
 // Phase-1 invariants. Cell ramp [3, 9, 18, 31, 44, 63, 79], strictly
 // increasing, every value in-band. Transcribed verbatim from
 // docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
-// S0/S1 are pre-face buds; S2-S6 carry {eyes}/{mouth} slots and S4-S6 carry
-// {pattern} so the mood-face vocabulary can substitute.
+// S0/S1 are pre-face buds; S2-S6 carry {eyes}/{mouth} slots so mood-face can
+// substitute. The body interior is baked solid — per-seed variation is
+// interior-texture (apply_interior_texture), not a {pattern} slot, so the
+// dense shroud always reads as a closed silhouette with no holes.
 const GHOST_S0: Template = [
     "           ",
     "           ",
@@ -445,7 +447,7 @@ const GHOST_S4: Template = [
     "  ░▒▒▒▒▒░  ",
     "  ░▒{eyes}▒░  ",
     "  ░▒░{mouth}░▒░  ",
-    "  ░▒{pattern}▒░  ",
+    "  ░▒ ▒ ▒░  ",
     "   ▒▒▒▒▒   ",
     "   \\_/\\_   ",
 ];
@@ -454,7 +456,7 @@ const GHOST_S5: Template = [
     "  ▒▓▓▓▓▓▒  ",
     " ░▒▓{eyes}▓▒░ ",
     " ░▒▓░{mouth}░▓▒░ ",
-    " ░▒▓{pattern}▓▒░ ",
+    " ░▒▓ ▒ ▓▒░ ",
     " ░▒▓▓▓▓▓▒░ ",
     "  ▒▓▓▓▓▓▒  ",
     " \\_/\\_/\\_/ ",
@@ -464,7 +466,7 @@ const GHOST_S6: Template = [
     "▒▓███████▓▒",
     "▓███{eyes}███▓",
     "▓███░{mouth}░███▓",
-    "▒▓██{pattern}██▓▒",
+    "▒▓██ ▒ ██▓▒",
     "▒▓███████▓▒",
     " ▓███████▓ ",
     " ░▒▓█▓█▓▒░ ",
@@ -1232,6 +1234,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn no_base_template_uses_the_blankable_pattern_slot() {
+        // {pattern}'s seed pool includes "   " (fully blank); using it in a body row
+        // would render a hole and break the closed-silhouette / reads-solid grammar.
+        // Per-seed body variation is interior-texture (apply_interior_texture), not a
+        // {pattern} slot. Guards against reintroducing a blankable body slot.
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                for (row, line) in stage_base_template(species, stage).iter().enumerate() {
+                    assert!(
+                        !line.contains("{pattern}"),
+                        "{species:?} {stage:?} row {row} uses the blankable {{pattern}} slot: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ghost_elder_cell_counts_after_solid_body_fix() {
+        // Confirm the baked ` ▒ ` interior gives the expected occupied-cell counts.
+        let s4 = rendered_occupied_cells(Species::Ghost, Stage::S4);
+        let s5 = rendered_occupied_cells(Species::Ghost, Stage::S5);
+        let s6 = rendered_occupied_cells(Species::Ghost, Stage::S6);
+        // All three must be in-band (asserted via assert_in_stage_band already); also
+        // assert the exact counts so a future template edit is caught immediately.
+        assert_eq!(s4, 44, "Ghost S4 occupied cells");
+        assert_eq!(s5, 63, "Ghost S5 occupied cells");
+        assert_eq!(s6, 79, "Ghost S6 occupied cells");
     }
 
     #[test]
