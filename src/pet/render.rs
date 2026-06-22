@@ -621,8 +621,6 @@ fn frame_with_particles(
 /// Lowest non-blank art row of the rendered 8 rows = the silhouette's "feet".
 /// Templates carry trailing blank rows, so this finds the true bottom of the
 /// creature. Phase 5 restricts the contact shadow to the columns beneath it.
-// Consumed by Phase 5 contact-shadow; see plan Task 5.
-#[allow(dead_code)]
 pub(crate) fn feet_row(art_lines: &[String]) -> Option<usize> {
     art_lines
         .iter()
@@ -633,8 +631,6 @@ pub(crate) fn feet_row(art_lines: &[String]) -> Option<usize> {
 }
 
 /// Non-space columns of the feet row (the contact-shadow footprint).
-// Consumed by Phase 5 contact-shadow; see plan Task 5.
-#[allow(dead_code)]
 pub(crate) fn feet_columns(art_lines: &[String]) -> Vec<usize> {
     match feet_row(art_lines) {
         None => Vec::new(),
