@@ -1,3 +1,4 @@
+pub mod color_ops;
 pub mod pet;
 pub mod privacy;
 pub mod props;

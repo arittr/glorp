@@ -47,13 +47,12 @@ fn blend_colors(primary: Color, secondary: Color, primary_weight: f32) -> Color 
     let (Color::Rgb(pr, pg, pb), Color::Rgb(sr, sg, sb)) = (primary, secondary) else {
         return primary;
     };
-    let weight = primary_weight.clamp(0.0, 1.0);
-    let inv = 1.0 - weight;
-    Color::Rgb(
-        ((pr as f32 * weight) + (sr as f32 * inv)).round() as u8,
-        ((pg as f32 * weight) + (sg as f32 * inv)).round() as u8,
-        ((pb as f32 * weight) + (sb as f32 * inv)).round() as u8,
-    )
+    let out = crate::presentation::color_ops::blend(
+        crate::pet::palette::Rgb::new(pr, pg, pb),
+        crate::pet::palette::Rgb::new(sr, sg, sb),
+        primary_weight,
+    );
+    Color::Rgb(out.r, out.g, out.b)
 }
 
 pub(super) fn lerp_color(a: Color, b: Color, t: f32) -> Color {
@@ -72,23 +71,18 @@ pub(super) fn warm_shift(base: Color, amount: f32) -> Color {
     let Color::Rgb(r, g, b) = base else {
         return base;
     };
-    let t = amount.clamp(0.0, 1.0);
-    let add = (t * 40.0).round() as u8;
-    let sub = (t * 30.0).round() as u8;
-    Color::Rgb(r.saturating_add(add), g, b.saturating_sub(sub))
+    let out =
+        crate::presentation::color_ops::warm_shift(crate::pet::palette::Rgb::new(r, g, b), amount);
+    Color::Rgb(out.r, out.g, out.b)
 }
 
 pub(super) fn dim_shift(base: Color, amount: f32) -> Color {
     let Color::Rgb(r, g, b) = base else {
         return base;
     };
-    let t = amount.clamp(0.0, 1.0);
-    let m = 1.0 - t * 0.5;
-    Color::Rgb(
-        (r as f32 * m).round() as u8,
-        (g as f32 * m).round() as u8,
-        (b as f32 * m).round() as u8,
-    )
+    let out =
+        crate::presentation::color_ops::dim_shift(crate::pet::palette::Rgb::new(r, g, b), amount);
+    Color::Rgb(out.r, out.g, out.b)
 }
 
 /// Apply the day-phase "ambient light" to one style's fg: warmer at dusk,
@@ -96,25 +90,15 @@ pub(super) fn dim_shift(base: Color, amount: f32) -> Color {
 /// (warm_shift/dim_shift) so pet and room share one light.
 pub(super) fn tint_style_for_phase(style: Style, phase: DayPhase, blend: f32) -> Style {
     let Some(fg) = style.fg else { return style };
-    let Color::Rgb(..) = fg else { return style };
-    let tinted = match phase {
-        DayPhase::Day => fg,
-        DayPhase::Dawn => warm_shift(fg, 0.10 * blend),
-        DayPhase::Dusk => warm_shift(fg, 0.18 * blend),
-        DayPhase::Night => dim_shift(cool_shift(fg, 0.18 * blend), 0.28 * blend),
+    let Color::Rgb(r, g, b) = fg else {
+        return style;
     };
-    style.fg(tinted)
-}
-
-/// Nudge a color toward cool (more blue, less red) for night ambience.
-fn cool_shift(color: Color, amount: f32) -> Color {
-    let Color::Rgb(r, g, b) = color else {
-        return color;
-    };
-    let amt = amount.clamp(0.0, 1.0);
-    let r2 = (f32::from(r) * (1.0 - 0.5 * amt)).round() as u8;
-    let b2 = (f32::from(b) + (255.0 - f32::from(b)) * 0.25 * amt).round() as u8;
-    Color::Rgb(r2, g, b2)
+    let out = crate::presentation::color_ops::tint_for_phase(
+        crate::pet::palette::Rgb::new(r, g, b),
+        phase,
+        blend,
+    );
+    style.fg(Color::Rgb(out.r, out.g, out.b))
 }
 
 /// Apply the phase tint to all five pet roles of a SemanticStyles.
@@ -156,13 +140,14 @@ pub(super) fn activity_lift_style(
     if matches!(color_capability, ColorCapability::Flat) {
         return style;
     }
-    let lift = (activity_level.clamp(0.0, 2.0) * 22.0) as u8;
     match style.fg {
-        Some(Color::Rgb(r, g, b)) => style.fg(Color::Rgb(
-            r.saturating_add(lift),
-            g.saturating_add(lift),
-            b.saturating_add(lift),
-        )),
+        Some(Color::Rgb(r, g, b)) => {
+            let out = crate::presentation::color_ops::activity_lift_channel(
+                crate::pet::palette::Rgb::new(r, g, b),
+                activity_level,
+            );
+            style.fg(Color::Rgb(out.r, out.g, out.b))
+        }
         _ => style,
     }
 }
@@ -269,27 +254,25 @@ pub(super) fn brighten_pet_role(
 }
 
 fn brighten_style(style: Style, multiplier: f32) -> Style {
-    if let Some(Color::Rgb(r, g, b)) = style.fg {
-        let m = multiplier.max(0.0);
-        let r = (r as f32 * m).min(255.0) as u8;
-        let g = (g as f32 * m).min(255.0) as u8;
-        let b = (b as f32 * m).min(255.0) as u8;
-        style.fg(Color::Rgb(r, g, b))
-    } else {
-        style
-    }
+    let Some(Color::Rgb(r, g, b)) = style.fg else {
+        return style;
+    };
+    let out = crate::presentation::color_ops::brighten_channel(
+        crate::pet::palette::Rgb::new(r, g, b),
+        multiplier,
+    );
+    style.fg(Color::Rgb(out.r, out.g, out.b))
 }
 
 fn darken_style(style: Style, multiplier: f32) -> Style {
-    if let Some(Color::Rgb(r, g, b)) = style.fg {
-        let m = multiplier.clamp(0.0, 1.0);
-        let r = (r as f32 * m) as u8;
-        let g = (g as f32 * m) as u8;
-        let b = (b as f32 * m) as u8;
-        style.fg(Color::Rgb(r, g, b))
-    } else {
-        style
-    }
+    let Some(Color::Rgb(r, g, b)) = style.fg else {
+        return style;
+    };
+    let out = crate::presentation::color_ops::darken_channel(
+        crate::pet::palette::Rgb::new(r, g, b),
+        multiplier,
+    );
+    style.fg(Color::Rgb(out.r, out.g, out.b))
 }
 
 pub(crate) fn pet_role_style(
