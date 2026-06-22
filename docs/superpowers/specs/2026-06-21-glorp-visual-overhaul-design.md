@@ -1,264 +1,415 @@
 # Glorp Visual Overhaul — Design
 
-Status: approved for planning · Date: 2026-06-21
+Status: approved for planning (post staff-review revision) · Date: 2026-06-21
+
+> Revised after a three-reviewer staff-SWE adversarial pass. Code claims in this
+> revision are verified against source; file:line references are current as of
+> 2026-06-21 and must still be re-checked at implementation time.
 
 ## Goal
 
 Make glorp's pet, evolution arc, and habitat feel alive and characterful. Two
-concrete complaints drive this work:
+concrete complaints drive this:
 
 1. **The glitch pet reads as a broken render**, not an intentional creature.
-2. **The whole thing feels boring** — flat color, a static "tank" that is a void
-   of confetti, and evolution stages that barely differ.
+2. **The whole thing feels boring** — flat-looking color, a static "tank," and
+   evolution stages that barely differ (S4/S5/S6 look the same).
 
-This is a single cohesive overhaul of the pet art, the growth/evolution arc, the
-color system, the liveliness, and the habitat — not a series of isolated tweaks.
+This is one design, delivered in **five sequenced, independently-shippable phases**
+(see "Delivery phases"). It is not a single monolithic change.
 
 ## Non-goals / scope guardrails
 
 - **Evolution ceremony stays modest.** Polish the existing overlay (art + timing);
-  do not build a new full-screen cinematic beat.
-- **Color is truecolor-first.** Best-effort 256/16, basic `NO_COLOR`. Legibility
-  must survive monochrome (carried by silhouette + glyph, never color alone), but
-  we do not invest in full cross-depth parity.
-- **Tamagotchi spirit is preserved.** Calm over flashy; night calmer than day;
-  nurturing companion, not an optimizer; no ETAs/countdowns/min-max framing. There
-  is no death — the floor state is `wilted` (drooped, desaturated).
+  no new full-screen cinematic beat.
+- **Color is truecolor-first, two tiers only.** `ColorCapability` has exactly
+  `Truecolor` and `Flat` (`src/tui/style.rs`). Colored pets render in truecolor and
+  fall back to monochrome-by-silhouette under `Flat`/`NO_COLOR`. Sub-truecolor
+  (256/16) is delegated to ratatui's automatic downgrade and **not engineered
+  here.** Legibility must survive monochrome (carried by silhouette + glyph).
+- **Tamagotchi spirit.** Calm over flashy; night calmer than day; nurturing
+  companion, not an optimizer. No death — the floor state is `wilted`.
 - **Only real signals drive content.** Growth, mood, biome, props, and scene
-  moments all trace to real observed token usage and the clock. Flavor is allowed
-  only when a real signal selects which flavor shows.
+  moments all trace to real observed token usage and the clock. No fabricated
+  richness (the immature-pet "zero-feast" invariant is preserved — see Habitat).
 - **The renderer stays content-agnostic.** Species/stage character lives in the
   templates (`art.rs`) and the palette, not in renderer special-casing.
 
+## Migration / continuity
+
+Pet appearance is a pure function of `(seed, species)`, recomputed every render
+(`commands/watch.rs` `generate_pet(&state.pet.seed).with_species(species)`); the
+derived `morph_index` / `palette_index` / `seed_hue` are **not persisted**
+(`storage/state.rs` `PetIdentity` holds only `seed`, `generated_species`,
+`accepted_name`). They are drawn in a fixed RNG order in `visible_traits`
+(`generation.rs`): `palette_index` → `morph_index` → `morph_pup_index` → `seed_hue`.
+
+**Decision (Drew): a one-time visual reset is accepted.** We are an early project
+with few live pets, so we do **not** invest in append-only draw-order discipline to
+keep existing pets pixel-identical. On upgrade a pet may change body texture/hue and
+(post stage→template rework) its silhouette, once.
+
+Hard constraints that still hold:
+
+- **Identity data is never touched.** `seed`, `accepted_name`, `xp`, vitals, stage,
+  calibration baseline, and seen transitions are untouched. This is a rendering
+  change, not a state migration. No `state.json` schema change.
+- **No crash / no blank pet.** Every persisted `(seed, species, stage)` must resolve
+  to a valid template after the template-map rework. A test renders a fixed seed set
+  across all species × stages and asserts a non-empty 11×8 result.
+
 ## The shared art grammar
 
-Every species obeys one structural grammar, which is what makes six bespoke
-concepts read as a single designed cast:
+Every species obeys one structural grammar — what makes six bespoke concepts read
+as a single designed cast:
 
-1. **Closed silhouette** — the body is a sealed shape you could flood-fill in one
-   pass. No accidental half-open walls (the original glitch's core defect).
-2. **Figure-ground** — the body is visibly denser (`░▒▓█` fill) than the sparse
-   dotty habitat, so it reads as a solid creature with color off.
-3. **Growth reads as bigger** — across S0→S6 the creature visibly grows within the
-   fixed 11×8 canvas: a tiny hatchling in negative space → an edge-to-edge,
-   densest elder. See "Growth system".
-4. **Living face** — the resting expression is alive (never `x x` corpse eyes). A
-   3-cell eye region (`{eyes}` slot) + 1-cell mouth (`{mouth}` slot) stays
-   expressive at rest.
-5. **Recognizable species** — one memorable signature survives at every size
-   (ears+locket, tendril-curtain, crown+hem, torn packet, prism apex, head/torso/
-   legs).
+1. **Closed silhouette** — a sealed shape you could flood-fill in one pass.
+2. **Figure-ground** — the body is visibly denser (`▒▓█`) than the sparse dotty
+   habitat, so it reads as a solid creature **with color off.** This applies to
+   every species **including Blob** (see Blob note); a `░`-only body in a `░` dot
+   field is the failure this rule exists to kill.
+3. **Growth reads as bigger** — across S0→S6 the creature grows within the fixed
+   11×8 canvas per the concrete cell bands below.
+4. **Living face** — the resting expression is alive (never `x x` corpse eyes): a
+   3-cell `{eyes}` region + 1-cell `{mouth}` region, expressive at rest.
+5. **Recognizable species** — one signature survives at every size.
+
+### Growth cell bands (concrete, the audit target)
+
+Occupied-cell count of the **8 art rows** per stage, measured per the invariant
+below. Bands are disjoint and strictly increasing:
+
+| Stage | S0 | S1 | S2 | S3 | S4 | S5 | S6 |
+|---|---|---|---|---|---|---|---|
+| occupied cells | 1–4 | 5–10 | 11–20 | 21–34 | 35–50 | 51–66 | 67–88 |
+
+S6 must fill all 8 art rows (the sparkle no longer steals rows — see Rendering #2).
 
 ## The cast
 
-Six species, each pushed to a bold bespoke concept. Names below are working
-codenames for the concepts; the in-game per-stage stage labels (`SPECIES_ARCS` in
-`docs/tokenpet/project/pet.jsx`: fluff/fuzzling/kit/…) are unchanged.
+Working codenames for the concepts; the in-game per-stage labels (`SPECIES_ARCS` in
+`docs/tokenpet/project/pet.jsx`) are unchanged.
 
 | Species | Concept | Signature | Notes |
 |---|---|---|---|
-| Fuzz | **Hearthfloof** — dense plush loaf-cat | ear-cones + mitten-feet + chest heart-locket | edges are block-mass (`▓▒█`), not thin line-art; hatchling has eyes |
-| Blob | **Deep-Light Medusa** — translucent bioluminescent jelly | trailing tendril curtain + glowing organ-core | the only soft/see-through silhouette; grows downward via tendrils |
-| Ghost | **The Pall** — billowing shroud | box-curl crown + scalloped shedding `\_/` hem | growth via density (`░▒`→`█`) + width, not just footprint |
-| Glitch | **Packet Daemon** — self-assembling data process | closed packet-frame + lens eyes + torn data-bleeding base | the locked hero; idle animation = face + base reshuffle |
-| Crystal | **The Caged Lumen** — dark prism caging a core | prism apex + facet tiers; **eyes fill `◇`→`◆`→`◈` with age** | growth-in-the-face, the standout idea of the set |
-| Mech | **Bulwark** — box-draw war-frame | unmistakable head/torso/legs that bolt on chassis | the legibility benchmark; clearest per-stage upgrade story |
+| Fuzz | **Hearthfloof** — dense plush loaf-cat | ear-cones + mitten-feet + heart-locket | block-mass edges (`▒▓█`), not line-art; hatchling has eyes |
+| Blob | **Deep-Light Medusa** — bioluminescent jelly | trailing tendril curtain + glowing core | soft concept, but must still pass flat-color figure-ground (closed `( )` outline + a `▒▓` core, not a `░`-only body) |
+| Ghost | **The Pall** — billowing shroud | box-curl crown + scalloped `\_/` hem | growth via density + width |
+| Glitch | **Packet Daemon** — self-assembling data process | closed packet-frame + lens eyes + torn data base | the hero; idle = face/base reshuffle |
+| Crystal | **The Caged Lumen** — prism caging a core | apex + facet tiers; **eyes fill `◇`→`◆`→`◈` with age** | see the ambiguous-width constraint on `◆/◈` |
+| Mech | **Bulwark** — box-draw war-frame | head/torso/legs that bolt on chassis | the legibility benchmark |
 
-Reference silhouettes (validated 11×8, width-1) are in Appendix A. They are the
-base morph (morph 0) per stage and the concrete target for the build; additional
-morphs are drawn during implementation.
+## Growth & per-pet variety (algorithmic)
 
-## Growth system
-
-The root cause of "S4 and S6 look the same" is the current stage→template map:
-S0/S1/S2 → `tiny[0/1/2]`, S3 → `pup[…]`, **S4/S5/S6 → the same `adult[elder_morph_index]`
-pool**. S4/S5/S6 are morph variants of one body, not escalating sizes.
+The root cause of "S4/S5/S6 look the same" is the current stage→template map:
+S0/S1/S2 → `tiny[0/1/2]`, S3 → `pup[…]`, **S4 → `adult[0]` (ignores morph_index),
+S5/S6 → `adult[elder_morph_index]`** — so S4/S5/S6 are variants of one adult pool.
 
 The fix:
 
-- **Each stage gets its own dedicated template(s).** Seven distinct, escalating
-  forms per species. Each stage adds a size beat **and** a new structural feature
-  over the previous one.
-- **Retire `elder_morph_index`.** It exists only to fake an evolved S5/S6 out of the
-  shared adult pool; with per-stage art it becomes dead code to delete.
-- **Morphs are kept** (per-pet silhouette variety across seeds). Each stage holds a
-  small morph pool: **1–2 morphs at the tiny early stages (S0–S2), 2–3 at the adult
-  stages (S4–S6)** where the pet spends most of its life.
-- **Size banding keeps growth monotonic regardless of rolled morph.** Each stage
-  has a target occupied-cell band; every morph of that stage lands in its band; the
-  bands strictly increase across stages. So any pet visibly grows no matter which
-  morphs it draws.
+- **One hand-drawn base silhouette per species per stage.** 42 base templates
+  (6 × 7), each a distinct escalating form landing in its stage's cell band. Each
+  stage adds a size beat **and** a structural feature over the previous.
+- **Retire `elder_morph_index`** and the shared-adult-pool indexing.
+- **Per-pet individuality is algorithmic, not hand-drawn morph pools.** (This
+  supersedes the earlier "hand-draw several morph shapes per stage" decision.)
+  Variety comes from:
+  - **Color** — per-species body hue (retuned, chroma raised) + per-seed hue jitter
+    (the existing ±18° in `resolve_pet_palette`).
+  - **Slots** — `{eyes}`/`{mouth}` (mood) and `{pattern}`/`{accent}` (per-seed from
+    species pools), the existing substitution path.
+  - **Interior texture (new)** — a deterministic per-seed variation of the body's
+    **non-structural interior cells** (which interior cells render `▒` vs `▓`, accent
+    placement), constrained to preserve the closed outline, width-1, and the stage's
+    cell band. This is the "more algorithmic, less hand-drawing" direction.
+  - **Outline shape is shared** per species/stage. Algorithmic *silhouette* variety
+    is **out of scope** — it cannot preserve the closed-silhouette/width/band
+    invariants reliably. If wanted later, it is a separate research spike.
 
 ### Acceptance bar for growth
 
-A stranger shown a species' S0→S6 must be able to sort them by age on sight, and
-**S4 / S5 / S6 must be unmistakably different rendered sizes.** This is enforced by
-a new invariant test (see "Rendering architecture").
+A reviewer can sort a species' S0→S6 base templates by age on sight, and S4 < S5 <
+S6 in occupied cells. Enforced by the monotonicity invariant (Rendering #3).
 
 ## Rendering architecture changes
 
-These are the structural changes (discussed and approved per the architecture-
-decision norm). File references are current as of this design; verify against the
-code at implementation time.
+Verified against source; re-check at implementation time.
 
 1. **Per-stage template constants + new stage→template map** (`src/pet/art.rs`).
-   Replace the tiny/pup/adult-pool indexing with a per-stage pool. Delete
-   `elder_morph_index`.
+   Replace tiny/pup/adult-pool indexing with one base template per stage. Delete
+   `elder_morph_index` (`art.rs`). Redefine `morph_count` semantics (it has **zero
+   production callers** — only tests): per-pet variety is now algorithmic, so
+   `morph_count` either goes away or returns the interior-texture-variant count; the
+   tests that assert `morph_count >= 3` are rewritten (see Testing).
 
-2. **Move the S6 sparkle frame into the particle gutter** (`src/pet/art.rs` S6
-   substitution + `src/pet/render.rs` particle frame). Today the renderer overwrites
-   authored rows 0 and 7 at S6 with `SAGE_TOP`/`SAGE_BOT`, discarding whatever the
-   artist drew there — which silently shrinks several S6 forms below their S5. After
-   the change, all 8 art rows belong to the creature, and the sparkle lives in the
-   13×10 frame's gutter. Result: every species' signature row survives at its
-   pinnacle, and S6 can own the full canvas.
+2. **Move the S6 sparkle into the particle gutter, with an explicit per-species
+   gutter-precedence rule.** Today the renderer overwrites authored art rows 0 and 7
+   at S6 with `SAGE_TOP`/`SAGE_BOT` (`art.rs`), shrinking several S6 forms below
+   their S5. After the change all 8 art rows belong to the creature. **But the 13×10
+   frame's gutter rows (0 and 9) are already contended** and there is a *third*
+   sparkle surface the original spec missed:
+   - species particles already paint gutter rows (`render.rs` `particles_for_species`
+     — e.g. Crystal's whole identity is gutter cells; Mech's LED; Ghost/Blob/Fuzz
+     motes),
+   - `frame_fill_for_stage` renders an outer-frame `✦` at S6 (`tui/layout.rs`),
+   - the new contact shadow wants the bottom row (Habitat), and `PET_H` is a fixed 10
+     (`pet.rs`).
 
-3. **New invariant test: rendered-size monotonicity.** Alongside the existing 11×8 /
-   width-1 / 8-line invariants in `art.rs`, add a test that the **rendered** occupied
-   size is non-decreasing across S0→S6 for every species and every morph, and that
-   S4 < S5 < S6 strictly. "Rendered" accounts for any gutter/frame substitution.
+   Required: define a **per-species gutter content model** (sparkle / machine-frame /
+   none) so the Mech-S6 choice is data, not an architecture fork; define
+   **last-write precedence** when an S6 sparkle, a species particle, and a contact
+   shadow target the same cell (proposal: contact shadow > species particle >
+   S6 sparkle, and the S6 sparkle uses **row 0 only** to avoid the row-9 shadow);
+   reconcile with `frame_fill_for_stage` so there are not three uncoordinated sparkle
+   treatments. `frame_with_particles` is last-write-wins today; precedence must be
+   explicit.
 
-4. **Mood-glyph vocabulary is standardized.** Each species gets a small mood-eye set
-   (resting / happy / tired / wilted) as width-1 glyphs, wired through the existing
-   `{eyes}`/`{mouth}` slot + role-span path. Resting eyes may be species-specific
-   geometric glyphs (e.g. `◉` daemon, `◆` prism) — this is a deliberate expansion of
-   the eye trait vocab in `src/pet/generation.rs`, not free; all glyphs are width-1.
+3. **New invariant: rendered-size monotonicity (precise, tick-independent).**
+   Count **non-space cells in the 8 art rows only** (exclude the particle gutter and
+   any frame substitution), with each `{slot}` replaced by a fixed canonical
+   width-correct filler, at a **fixed reference state: mood = Content, resting
+   (non-blink) expression, no work accent, fixed tick.** Assert each species' base
+   templates land in their stage cell band and are strictly increasing S0→S6
+   (S4 < S5 < S6). The "sparkle no longer steals art rows" is asserted **separately**
+   as a structural check, not folded into the size count. (Per-pet interior texture
+   never changes the occupied-cell count enough to leave the band — the texture
+   varies glyph identity, not occupancy of structural cells; the invariant runs on
+   the canonical base.)
+
+4. **Ambiguous-width glyph invariant.** Eye/accent glyphs must be East-Asian-Width
+   **Neutral or Narrow**, not Ambiguous. `◉` (U+25C9) is Neutral (safe); `◇◆◈●○` are
+   Ambiguous and render width-2 on `ambiguous=wide` terminals, shattering the grid.
+   Either the existing 11×8 width test is **also run under `ambiguous=wide`**
+   (rejecting Ambiguous glyphs), or Ambiguous glyphs are banned from templates. The
+   Crystal eye-fill `◇`→`◆`→`◈` must comply: if kept, the project's
+   `ambiguous=narrow` assumption is documented and the wide-mode test is added; else
+   the eye-fill uses Neutral/Narrow glyphs.
+
+5. **Mood-glyph vocabulary is standardized** across species (resting / happy / tired
+   / wilted) as width-1 glyphs in the existing `{eyes}`(3) / `{mouth}`(1) slots, wired
+   through `expression_for` (`render.rs`). Resting eyes may be species-specific (e.g.
+   `◉` daemon) within the 3-cell slot. **The 3-cell `{eyes}` slot is kept**; any
+   reference art with wider/split eyes (Blob/Mech/Crystal in Appendix A) is redrawn
+   to fit the slot rather than widening it.
 
 ## Color & palette system
 
-Today every species is near-grey (body chroma ~0.10) with eyes hard-pinned green
-(`EYE_HUE`), so the roster looks samey and mood carries no steady color. Changes in
-`src/pet/palette.rs` (+ `colors.rs`, `animator.rs`):
+Corrected diagnosis: species **already have per-species base hues** —
+`species_base_hue` (`palette.rs`: Fuzz 70 / Blob 195 / Ghost 300 / Glitch 135 /
+Crystal 230 / Mech 250), applied live via `resolve_pet_palette`. They read near-grey
+**because body chroma is pinned low (~0.10, `palette.rs`)**, not because hue is
+missing. Changes:
 
-- **Per-species identity palette.** Give each species a permanent body/accent/
-  particle hue. Spend the vivid `species_feed` palette (peach / mint / lavender /
-  acid / ice / amber) — which today only flashes for ~400ms during feeding — as the
-  steady body-hue spine.
+- **Raise body chroma** off ~0.10 so the species hue registers; **retune the base
+  hues** toward the identity palette below. Keep OKLCH `resolve_pet_palette` and the
+  per-seed hue jitter. Re-validate `seed_pet_palette` / `palette_from_styles`
+  (`tui/panels/pet/colors.rs`, per-channel `saturating_add`) at higher chroma so a
+  high channel doesn't blow out.
 
   | Species | Body | Accent | Particle | Signature move |
   |---|---|---|---|---|
   | Fuzz · Hearthfloof | peach | rose-amber | warm dust | heart-locket pulses |
-  | Blob · Medusa | mint | ice-cyan | cyan motes | organ-core glows brighter with age |
+  | Blob · Medusa | mint | ice-cyan | cyan motes | core glows brighter with age |
   | Ghost · Pall | lavender | ice | pale wisps | cool pallor; lantern eyes |
-  | Glitch · Packet Daemon | acid/phosphor | cyan | acid static | terminal-green static; lens scanline |
-  | Crystal · Caged Lumen | ice | violet | white sparkle | cold shell, warming violet core |
-  | Mech · Bulwark | amber/brass | red reactor | ember flecks | reactor-core glow at the chest |
+  | Glitch · Packet Daemon | acid/phosphor | cyan | acid static | green static; lens scanline |
+  | Crystal · Caged Lumen | ice | violet | white sparkle | cold shell, warming core |
+  | Mech · Bulwark | amber/brass | red reactor | ember flecks | reactor-core glow |
+
+  These are the `species_feed` hue family (`animator.rs`). Decision: **re-point
+  `species_base_hue` to these hues** (keep OKLCH resolution + seed jitter); do **not**
+  adopt the flat `species_feed_color` RGBs directly (they have no jitter and would
+  kill `per_pet_variety_within_species`).
 
 - **Particles get their own species hue** (today `Particle => palette.accent`,
-  undifferentiated). The halo/sparkle/mist differentiates species at a glance.
-- **Raise body chroma** off near-grey so the species hue actually registers.
-- **Eyes encode mood, not species.** Un-pin `EYE_HUE`. Eye color shifts with the
-  pet's feeling: **green at rest (brand anchor) → warm/gold excited → cool blue
-  tired → desaturated wilted.** Species identity rides on silhouette + body color;
-  mood rides on the eyes (color) plus the mood-glyph (shape).
-- **Truecolor-first degrade** (`src/tui/style.rs`): honor `NO_COLOR`; degrade
-  truecolor → 256 → 16 best-effort; never let information depend on a color tier
-  (the silhouette carries it).
+  undifferentiated).
+
+- **Eyes encode mood, not species — with a real data path.** `resolve_pet_palette`
+  is currently mood-blind and the palette is rebuilt only on the ~10s worker poll
+  (`commands/watch.rs`), so eye *color* cannot ride mood there without lagging the
+  eye *glyph* (which updates on the animation tick via `expression_for`). Required:
+  a `mood → eye hue/lightness` mapping applied **at animation-tick cadence**
+  (either thread `Mood` into eye-color resolution, enumerating the call sites that
+  must pass it — watch, view_model, menubar, round companion, dev_preview — or apply
+  a post-step in `tui/panels/pet/colors.rs`). Mapping: **green at rest → warm/gold
+  excited → cool blue tired → desaturated wilted.** Resolve the dead `palette_roles`
+  path (`render.rs`, zero callers) — adopt it as the mechanism or delete it. Eye hue
+  is pinned in **two** places (`palette.rs` `EYE_HUE`; `render.rs` `palette_roles`);
+  both change. `eyes_are_green_for_every_species` becomes "green **at rest**."
+
+- **Resting-eye contrast floor.** The resting eye must hold **≥3:1 luminance contrast
+  against the species body color.** The brand green (`good`, `style.rs`) measured
+  against the new bodies is ~1.4–1.8:1 (effectively invisible) on Blob/Fuzz/Glitch.
+  Species whose body collides with the green anchor get a per-species resting-eye
+  lightness shift or a dark eye outline. Specify the mechanism before Phase 3.
+
+- **Wilting is glyph + desaturation only.** The `wilted` floor state is expressed by
+  eye/mouth glyph + a desaturated palette — **not** a new per-stage droop silhouette
+  (no per-stage × wilted art explosion). Wilting never reduces a pet's rendered
+  occupied size below its stage band, so it never reads as de-evolution.
+
+- **Flat / NO_COLOR.** Honor `NO_COLOR`. Under `Flat`, pets render monochrome and
+  legibility is carried by silhouette; pass RGB to ratatui's downgrade otherwise. Add
+  a **flat-color figure-ground acceptance check** for the soft-bodied species
+  (Blob/Ghost) whose interiors are sparse.
 
 ## Liveliness / animation
 
-The pet interior is essentially static today; the only motion is a blink and a
-once-per-37-ticks glitch swap. Changes in `src/pet/render.rs` / `animator.rs`:
+Corrected: breath **is already per-species** via `compute_breath_offset_with_rhythm`
+→ `species_breath_rhythm_decis` (`animator.rs`; test `breath_periods_match_pet_jsx_ordering`).
+The `AnimationProfile.breath_period`/`breath_hold` fields (`render.rs`) are dead **and
+divergent** (a second table that disagrees with the live rhythm). Changes:
 
-- **Wire up per-species breathing.** `species_animation_profile` already authors
-  `breath_period`/`breath_hold` per species but they are read nowhere — breath is a
-  single identical whole-pet bob. Drive the bob's amplitude/period from the profile
-  so Crystal's slow held breath differs from the Packet Daemon's fast shallow one.
-- **Make glitch corruption the loudest effect, not the quietest.** Today it fires
-  one Body-only cell every 37 ticks from the same glyph family the body is built
-  from, and is forbidden from touching the face. Give it a contrasting role-color,
-  let it touch the face (the reshuffling expression is the signature idle), and
-  raise its rate/footprint so it reads as intentional corruption.
-- Keep it calm: animation is texture and gentle motion, never flashing; night is
-  calmer than day.
+- **Delete the dead `AnimationProfile.breath_period`/`breath_hold` fields** so there
+  is one breath source of truth (`animator.rs`).
+- **Breath amplitude is the real gap.** The bob is a binary 0/1 row offset — there is
+  no amplitude knob without a structural change. **Decide in Phase 4** whether a
+  multi-row per-species amplitude is worth that change; do not wire the dead fields.
+- **Make glitch corruption a loud, intentional effect.** Today `apply_glitch_corruption`
+  (`render.rs`) is body-only (`in_body` guard), pre-framing, from the body's own glyph
+  alphabet, one cell / 37 ticks. Required: a new `PaletteRoleName::Corruption` variant
+  threaded through `role_color` / the palette / `style.rs` degrade, with **z-order
+  winning over the underlying Eye/Mouth span** at a corrupted cell. Bounds: bounded
+  rate/footprint; reshuffles base/edge cells and **only briefly** touches the face,
+  **never the eye-center** (the living-face rule holds); respects "calm, never
+  flashing"; respects `glitch_particles_stay_punctuation_sized` (`render.rs`) — heavier
+  glyphs must not trip that assertion (rewrite it deliberately if the new corruption
+  needs `▒▓`-weight glyphs).
 
 ## The tank / habitat
 
-Today the habitat is a uniform confetti of dots over a void — same color sky and
-ground, no floor, no horizon, no depth; the pet floats lost in it.
+Corrected starting state: the habitat is **not** an empty void. Code already has a
+patchy floor row (`ambient.rs`, test `ambient_glyphs_present_with_floor_row`),
+per-biome floor palettes (`biome_floor_palette`), a per-biome background wash
+(`biome_wash_color`), and night-sparser dimming. The genuinely-missing,
+highest-payoff piece: **the pet is vertically centered, not grounded** —
+`pet.rs` `let cy = area.y + area.height.saturating_sub(PET_H) / 2;`.
 
-**Direction: grounded habitat (phased).** In `src/tui/panels/pet/ambient.rs`,
-`src/tui/room.rs`, `src/tui/day.rs`, `src/tui/panels/pet.rs`:
+Direction (Phase 5):
 
-- **A real ground line the pet stands on** — anchor the pet's feet to the ground
-  instead of centering it in negative space. This single change kills the "floating
-  in a void" read and is the highest-payoff, lowest-risk move.
-- **A contact shadow under the pet** (borrowed from the diorama exploration).
-- **A two-tone sky/ground value wash** so air and ground are visually separated.
-- **Hold** the full terrarium glass frame + multi-row perspective floor until
-  validated at real terminal width — at narrow widths the side rails crowd the
-  ~13-wide pet and read busy, the opposite of the calm we want.
+- **Anchor the pet to the floor.** Change the `pet.rs` anchor from centered to
+  floor-relative. Define "feet" as the **lowest non-blank art row** of the template
+  (templates carry trailing blank rows). This single change kills the "floating in a
+  void" read.
+- **Contact shadow under the pet**, composited against the existing floor row and the
+  silhouette halo (`pet_silhouette_halo_rects`); resolve row-9 contention per the
+  gutter-precedence rule (Rendering #2).
+- **Sky/ground value separation** — extend the existing `biome_wash_color` for a
+  clearer two-tone, rather than introducing a parallel system.
+- **Hold** the full terrarium glass frame + perspective floor until validated at the
+  real (narrow) pet-column width.
 
-Stays calm: static structure, not motion-spam; night strictly sparser than day;
-props/biome/weather continue to come from real signals.
+Honest-signal habitat improvements (Phase 5, constrained):
 
-Secondary habitat improvements to fold in where cheap (from the diagnosis):
-front-load some room character earlier (today the interesting biome/props are gated
-behind 750k–25M lifetime tokens, so a typical pet sits in a grey Starter dot-field),
-and activate the two scene effects (`HeavySessionShimmer`, `DreamGlimmer`) that
-exist in the enum + preview but are never emitted in the watch.
+- **Front-load some early character without fabricating a feast.** `mote_glyphs_for`
+  returns empty for immature pets (`ambient.rs`, test
+  `flat_and_immature_pets_render_zero_motes`) and props gate on real
+  `lifetime_effective_tokens` (`habitat.rs`). Permitted: lower a *specific* early prop
+  threshold (e.g. the 25k pebble) or add honest Starter-biome **texture variety**. Not
+  permitted: lowering the maturity gate or pre-granting props. The immature-pet
+  zero-feast invariant is preserved.
+- **Activate `HeavySessionShimmer`** on a named real trigger — the heavy-session
+  unlock (`recent_effective_tokens >= threshold`, `habitat.rs`), emitted from
+  `scene_moments_for` (`room.rs`). **Drop `DreamGlimmer`** from scope — it has no real
+  signal, and inventing one violates the only-real-signals rule.
+
+## Delivery phases
+
+Each phase is independently shippable, reviewable, and committable, with the existing
+roster still rendering between phases.
+
+1. **Foundation** — per-stage template map + invariants (rendered-size monotonicity,
+   ambiguous-width), delete `elder_morph_index`, redefine `morph_count`, the
+   gutter-precedence model + S6-sparkle-to-gutter. Existing art is rewired into the
+   new map so the roster still renders. *Acceptance:* all invariants pass; no
+   unintended visual regression.
+2. **Per-species base art** — the 42 S0→S6 base silhouettes + standardized mood faces
+   + the algorithmic interior-texture variation. *Acceptance:* growth monotonicity,
+   figure-ground (incl. flat-color), glitch reads as intentional, preview-lab review.
+3. **Color & eyes-mood** — raise chroma, retune hues, particle hues, the
+   mood→eye-color data path, the contrast floor. *Acceptance:* per-species identity
+   legible, mood reads in the eye, contrast ≥3:1, flat-color figure-ground holds.
+4. **Liveliness** — delete dead breath fields; decide/implement breath amplitude; the
+   loud glitch corruption (new role + z-order). *Acceptance:* calm/no-flash;
+   corruption reads intentional; living-face preserved.
+5. **Habitat grounding** — floor anchor, contact shadow, biome wash extension, honest
+   early front-loading, `HeavySessionShimmer`. *Acceptance:* pet grounded; calm;
+   real-signals + zero-feast preserved.
 
 ## Art production approach
 
-The bold per-species + per-stage + morph-pool art is a large but bounded surface
-(~6 species × 7 stages × 1–3 morphs, plus mood faces). Produce it with the same
-draw-and-validate pipeline used during this design: parallel subagents draw
-candidate grids under the grammar + invariants, an audit pass machine-validates
-every grid (11×8, width-1, escalation band, rendered-size monotonicity), and the
-results are reviewed in the preview lab.
+Real surface: **42 base templates** + standardized mood faces (`expression_for`
+covers 7 moods + blink + soft-eyes + 3 work-accents — currently shared hardcoded
+glyphs; standardizing per-species is the larger sub-task) + the algorithmic
+interior-texture variation. This is materially smaller than hand-drawn morph pools.
 
-**Every change is reviewable in the preview lab.** `glorp dev-preview --scenario all
---out target/glorp-preview` produces deterministic, seeded frames that never touch
-real pet state. The acceptance bar from the existing alive-room spec applies: a
-reviewer can identify biome, weather, emitter, and pet performance from the cropped
-room alone, in flat color.
+Produce art with the draw-and-validate pipeline used during design: parallel
+subagents draw candidates under the grammar + cell bands + invariants; an audit pass
+machine-validates every grid (11×8, width-1 incl. `ambiguous=wide`, cell band,
+rendered-size monotonicity); results reviewed in the preview lab.
+
+**Preview-lab requirement:** the pets scenario currently renders only one fixed seed
+per species (`dev_preview/pets.rs`), so it cannot backstop per-pet variety. Extend it
+to render representative interior-texture variants per adult stage and the full mood
+set. This increments the manifest schema (currently v3).
 
 ## Testing & acceptance
 
-- **Invariants (`art.rs` tests):** every template 11 display-columns × 8 lines,
-  width-1 glyphs only; plus the new rendered-size monotonicity test (S0≤…≤S6,
-  S4<S5<S6) across every species and morph.
-- **Growth acceptance:** S4/S5/S6 are unmistakably different rendered sizes for every
-  species.
-- **Glitch acceptance:** resting face is alive (no `x x`); the body is a closed
-  silhouette; corruption reads as intentional (contrasting color, touches the face);
-  the creature does not melt into the ambient field (figure-ground holds with color
-  off).
-- **Preview-lab review:** the full `--scenario all` bundle is the visual regression
-  surface; species/stage matrices, the glitch live-states, and the grounded rooms
-  are the key frames.
+- **Invariants (`art.rs`):** 11×8 / width-1 (incl. a run under `ambiguous=wide`),
+  8-line; rendered-size monotonicity per the precise definition (Rendering #3);
+  "S6 fills all 8 rows / sparkle not in art" structural check.
+- **Tests to rewrite (never silently delete):** `species_have_enough_seeded_morph_variety`
+  (`generation.rs`), `elder_morph_skips_singleton_for_carved_species` and `_for_glitch`
+  (`art.rs`), `glitch_daemon_silhouette_is_visibly_denser_than_glitch_form` (`art.rs`),
+  `morph_count >= 3` assertions (`tests/generation.rs`), `eyes_are_green_for_every_species`
+  → "green at rest" (`palette.rs`). State the new `morph_count` contract.
+- **Continuity:** a fixed seed set renders a valid non-empty 11×8 for every
+  species × stage after the map rework (no crash / no blank pet).
+- **Color:** resting-eye ≥3:1 contrast vs body per species; flat-color figure-ground
+  check for Blob/Ghost.
+- **Glitch:** resting face alive (no `x x`); closed silhouette; corruption reads
+  intentional (contrasting role, z-over Eye/Mouth) and never blanks the eye-center.
+- **Preview-lab** is the visual regression surface (extended per above).
 - **Pristine test output** and a clean `cargo clippy --all-targets --all-features -D
-  warnings` gate, per project convention (test-only helpers stay `#[cfg(test)]`).
+  warnings` gate; test-only helpers stay `#[cfg(test)]`.
 
-## Open items to confirm during planning
+## Open items (decide during planning)
 
-- **Exact morph counts per stage** (proposal: 1–2 early / 2–3 adult).
-- **Whether the Mech S6 keeps the sparkle** at all, or a machine-appropriate frame
-  (it reads more "machine" than "sage").
-- **Phasing/sequencing** of the build (grammar + invariants → per-species arcs →
-  palette → liveliness → tank) is decided in the implementation plan.
+- **Breath amplitude** (Phase 4): multi-row per-species amplitude (structural change)
+  vs leave the 0/1 bob and rely on per-species *period* only.
+- **Mech S6 gutter content**: sparkle vs machine-frame vs none — now per-species data,
+  decided at art time.
+- **Crystal eye-fill glyphs**: keep `◇◆◈` (document `ambiguous=narrow` + add the
+  wide-mode test) vs swap to Neutral/Narrow glyphs.
 
 ## File map (verify at implementation time)
 
-- `src/pet/art.rs` — templates, per-stage map, S6 frame, invariants
-- `src/pet/render.rs` — particle frame, role spans, glitch corruption, breathing
-- `src/pet/palette.rs` — per-species palette, eye-hue/mood, body chroma
-- `src/pet/generation.rs` — eye/mouth trait vocab, mood-glyph sets
-- `src/pet/animator.rs` — per-species breath profile wiring
-- `src/pet/colors.rs` — live mutation chain
-- `src/tui/panels/pet.rs`, `src/tui/panels/pet/{ambient,colors,art_lines}.rs` — pet + habitat passes
-- `src/tui/room.rs`, `src/tui/day.rs` — room / time-of-day
-- `src/game/habitat.rs`, `src/tui/component/habitat_props.rs` — props
-- `src/tui/style.rs` — color capability / degrade
-- `src/tui/component/watch_screen.rs` — watch layout
+- `src/pet/art.rs` — templates, per-stage map, S6 frame, invariants; delete `elder_morph_index`
+- `src/pet/render.rs` — particle frame, role spans, `expression_for`, glitch corruption; delete dead `AnimationProfile` breath fields + dead `palette_roles` (or adopt)
+- `src/pet/palette.rs` — `species_base_hue` retune, body chroma, `EYE_HUE` un-pin, mood→eye color
+- `src/pet/generation.rs` — eye/mouth trait vocab, mood-glyph sets, `visible_traits` draw order
+- `src/pet/animator.rs` — `species_breath_rhythm_decis` (breath site), `species_feed_color` hues
+- `src/tui/panels/pet/colors.rs` — live mutation chain (NOTE: this is the real path; there is **no** `src/pet/colors.rs`)
+- `src/tui/panels/pet.rs` — pet anchor (`cy`), contact shadow, `PET_H`
+- `src/tui/panels/pet/ambient.rs` — floor row, motes, biome floor palettes
+- `src/tui/room.rs` — `scene_moments_for`, biome wash
+- `src/tui/day.rs` — time-of-day
+- `src/game/habitat.rs` — prop thresholds, heavy-session unlock
+- `src/tui/layout.rs` — `frame_fill_for_stage` (the third S6 sparkle surface)
+- `src/tui/style.rs` — `ColorCapability` (Truecolor/Flat), degrade
+- `src/commands/watch.rs`, `src/tui/view_model.rs` — palette build, mood threading
+- `src/cli/dev_preview/pets.rs` — preview-lab pets scenario (extend for variants)
 
 ---
 
-## Appendix A — validated reference silhouettes
+## Appendix A — candidate reference silhouettes
 
-Base morph per stage, validated 11×8 / width-1. The starting target for the build;
-refine in the preview lab. (Glitch S5/S6 to be redrawn so S6 owns the full canvas —
-see note.)
+**Candidate**, not validated-as-templates: drawn 7-stages side-by-side for review.
+Before authoring, each is re-extracted into a single-column 11×8 grid and run through
+`every_template_line_is_eleven_display_columns` / `_is_eight_lines` and the
+`ambiguous=wide` width check. Known redraws: Glitch S5/S6 (pull S5 inset so S6 owns
+edge-to-edge); any S6 reserving a `(sparkle → gutter)` row must instead fill all 8
+rows; Blob/Mech/Crystal eyes must fit the 3-cell `{eyes}` slot; the Blob body needs a
+`▒▓` core for flat-color figure-ground.
 
 ### Fuzz — Hearthfloof
 ```
@@ -282,11 +433,11 @@ S0       S1        S2         S3            S4          S5          S6
  ▗▄▖   ░▒▒▒░       ░o o░        ░▒o o▒░       ░▒o o▒░    ░▒▓ o ▓▒░   ▓███ o ███▓
  ◦ ◦   ░o o░       ░ o ░        ░▒ o ▒░       ░▒ o ▒░    ░▒▓▓▓▓▓▒░   ▒▓███████▓▒
         \_/        ░▒▒▒░        ░▒▒▒▒▒░       ░▒▒▒▒▒░     ░▒▓▓▓▒░    ░▒▓█▓█▓█▓▒░
-                   \_/\_        \_/\_/\      ░▒▒▒▒▒▒▒░    ░▒▒▒▒▒░    (sparkle → gutter)
+                   \_/\_        \_/\_/\      ░▒▒▒▒▒▒▒░    ░▒▒▒▒▒░    (fill row 8)
                                              \_/\_/\_/   \_/\_/\_/\
 ```
 
-### Glitch — Packet Daemon  (S5/S6 to be redrawn: pull S5 inset so S6 owns edge-to-edge)
+### Glitch — Packet Daemon  (S5/S6 to be redrawn so S6 owns edge-to-edge)
 ```
 S0       S1        S2         S3            S4          S5          S6
                               ▄▄▄▄▄▄▄        ▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▛▀▀▀▀▀▀▀▀▀▜
@@ -295,11 +446,11 @@ S0       S1        S2         S3            S4          S5          S6
  ◉▌     ▌◉▐        ▌ ▀ ▐      ▌░▄▄▄░▐        ▌ ░▓▓▓░ ▐  ▌▒░ █▀█ ░▒▐  ▌▓▒░▓▓▓░▒▓▐
  ▀      ▙▄▟        ▌▄▄▄▐      ▙▄▄▄▄▄▟        ▌  ░▒░  ▐  ▌▓░ ▓▓▓ ░▓▐  ▙▟▙▟▙▟▙▟▙▟▟
                   ▙▟▙▟▟        ▝▟▙ ▟▙▘       ▙▄▄▄▄▄▄▄▟  ▌░▒ ▒▒▒ ▒░▐  ▝▟▙▟▙▟▙▟▙▟▘
-                   ▘ ▖ ▝                    ▝▟▙▟ ▟▙▟▘  ▙▄▄▄▄▄▄▄▄▄▟  (sparkle → gutter)
+                   ▘ ▖ ▝                    ▝▟▙▟ ▟▙▟▘  ▙▄▄▄▄▄▄▄▄▄▟  (fill row 8)
                                              ▘ ▝ ▘ ▝   ▝▟▙▟▙ ▙▟▙▟▘
 ```
 
-### Crystal — The Caged Lumen
+### Crystal — The Caged Lumen  (eye-fill glyphs subject to ambiguous-width check)
 ```
 S0       S1        S2         S3            S4          S5          S6
                                  /\            /\          /\       /\ /\ /\ /\
@@ -308,43 +459,43 @@ S0       S1        S2         S3            S4          S5          S6
  ·     /◇◇\       /▒▓▓▒\       \▒▿▓▒/       /▒▓██▓▒\    /▒▓██▓▒\    \▒███▾███▒/
  ◇◇    \▒▒/       \▒▿▓▒/       /▓██▓\       \▒▓▾█▓▒/    \▒▓▾█▓▒/    \▓███████▓/
   ▿     \/         \▓▓/        \▓▓▓/         \▒▓▓▒/    /\ \▓█▓/ /\  \▒▓█▓█▓█▓▒/
-                   \/           \▼/           \▓▓/     ▓▓ \▓▓/  ▓▓  (sparkle → gutter)
+                   \/           \▼/           \▓▓/     ▓▓ \▓▓/  ▓▓  (fill row 8)
                                                \/      \/   ▼   \/
 ```
 
-### Mech — Bulwark
+### Mech — Bulwark  (S4/S6 eyes redraw to 3-cell {eyes} slot)
 ```
 S0       S1        S2         S3            S4          S5          S6
                                 ╷ ╷            ╷╷╷       ╲╷╷╷╱     █▌┌─────┐▐█
-                   ╷           ┌───┐          ┌───┐      ┌─────┐   █▌│·◉ ◉·│▐█
-        ┌───┐     ┌───┐        │◉ ◉│         │◉ ◉│      │·◉ ◉·│    █▌│ ╴═╶ │▐█
+                   ╷           ┌───┐          ┌───┐      ┌─────┐   █▌│ ◉ ◉ │▐█
+        ┌───┐     ┌───┐        │◉ ◉│         │◉ ◉│      │ ◉ ◉ │    █▌│ ╴═╶ │▐█
         │◉ ◉│     │◉ ◉│        │ ═ │        ┌┴─═─┴┐     │ ╴═╶ │    ██▙▓◆◈◆▓▟██
  ▄      │ ═ │     │ ═ │       ┌┴───┴┐       ║▌▓███▓▐║   ▟█▌▓███▓▐█▙  ██▌▒███▒▐██
 ▐◉▌     └┬─┬┘     └┬─┬┘       │▒▓▓▓▒│       ║▌▓▒▒▒▓▐║   ▝█▌▓▒◈▒▓▐█▘  ██▙└┬─┬┘▟██
- ▀       ╨ ╨       ╨ ╨        │▒▒▒▒▒│       ╜└┬───┬┘╙    ║▌└┬─┬┘▐║   (sparkle → gutter)
+ ▀       ╨ ╨       ╨ ╨        │▒▒▒▒▒│       ╜└┬───┬┘╙    ║▌└┬─┬┘▐║   (fill row 8)
                               ╜   ╙          ██  ██       ▟█▙ ▟█▙
 ```
 
-### Blob — Deep-Light Medusa  (chosen)
+### Blob — Deep-Light Medusa  (needs a ▒▓ core for flat-color figure-ground; eyes to 3-cell slot)
 ```
 S4            S5            S6
    .---.        ·˚ ✦ ˚·      ✦ ˚ · ˚ ✦
-  /░░░░░\       /░░░░░\     .░▒▓███▓▒░.
- (░░░░░░░)     (░░░░░░░)    (▓░◉▒ ▒◉░▓)
- (░◉░ ░◉░)    (░░◉░ ░◉░░)   (▓▒░░~░░▒▓)
- (░░░~░░░)    (░░░░~░░░░)   (◆●◆◉◆◉◆●◆)
- (░░●◆●░░)    (░░●◆◉◆●░░)   \░▒░▒░▒░▒░/
-  \░░░░░/      \░▒░▒░▒/     |┊|╎|┊|╎|┊|
-   ╎|┊|╎        |┊|╎|┊|      '╵'╵'╵'╵'
+  /▒▒▒▒▒\       /▒▒▒▒▒\     .▒▓███▓▒.
+ (▒▒◉ ◉▒▒)     (▒▒◉ ◉▒▒)    (▓▒◉ ◉▒▓)
+ (▒▒▒~▒▒▒)    (▒▒▒▒~▒▒▒▒)   (▓▒▒~▒▒▓)
+ (░▒▓◆▓▒░)    (░▒▓◆◉◆▓▒░)   (◆▓◉◆◉▓◆)
+  \░▒░▒░/      \░▒░▒░/      \▒░▒░▒░/
+   ╎|┊|╎        |┊|╎|┊|     |┊|╎|┊|╎
+   '╵'╵'        '╵'╵'╵'      '╵'╵'╵
 ```
 
 ## Appendix B — the glitch fix, stated plainly
 
-The original glitch failed because: (1) its resting face used `x x` corpse eyes;
-(2) its half-block `▌▐` walls never closed into a silhouette; (3) its corruption
-used the same glyph alphabet as the ambient field, so it melted into its own
-background; and (4) the actual corruption animation was the quietest effect in the
-file and forbidden from touching the face. The Packet Daemon concept fixes all
-four: a closed packet-frame (silhouette), living lens eyes (`◉`), a contrasting-
-colored corruption that touches the face (intentional, loud), and a signature torn-
-data base that is unique to the creature (figure-ground).
+The original glitch failed because: (1) resting face used `x x` corpse eyes; (2) the
+half-block `▌▐` walls never closed into a silhouette; (3) corruption used the same
+glyph alphabet as the ambient field, so it melted into its background; and (4) the
+corruption animation was the quietest effect in the file and forbidden from touching
+the face. The Packet Daemon concept fixes all four: a closed packet-frame
+(silhouette), living lens eyes (`◉`), a contrasting-colored corruption that briefly
+touches the face but never the eye-center (intentional + loud + living-face-safe), and
+a signature torn-data base unique to the creature (figure-ground).
