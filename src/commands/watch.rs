@@ -516,6 +516,10 @@ pub fn rerender_pet_for_view_model(
     tick: u64,
     hold_eyes_closed: bool,
 ) -> Result<()> {
+    // Eye color rides mood at the same cadence as the eye glyph (expression_for),
+    // overwriting only the eye role. The ~10s worker palette rebuild stays
+    // mood-blind; this per-tick site owns mood -> eye color.
+    crate::pet::palette::apply_mood_eye_color(&mut vm.pet_palette, vm.pet_render.mood);
     let species = vm.pet_render.generated_species;
     let generated = generate_pet(&vm.pet_render.seed).with_species(species);
     let pet_performance = crate::tui::room::pet_performance_from_day_context(&vm.day_context);
@@ -960,9 +964,18 @@ mod tests {
         assert_eq!(vm.species, Species::Ghost.as_str());
         assert_eq!(vm.stage, stage_label(Species::Ghost, Stage::S4));
         let ghost_pet = generate_pet(&state.pet.seed).with_species(Species::Ghost);
+        let raw_palette =
+            crate::pet::palette::resolve_pet_palette(Species::Ghost, &ghost_pet.traits);
+        // Non-eye roles come from the species palette; eye is mood-colored by the
+        // per-tick hook in rerender_pet_for_view_model.
+        assert_eq!(vm.pet_palette.body, raw_palette.body);
+        assert_eq!(vm.pet_palette.mouth, raw_palette.mouth);
+        assert_eq!(vm.pet_palette.accent, raw_palette.accent);
+        assert_eq!(vm.pet_palette.pattern, raw_palette.pattern);
+        assert_eq!(vm.pet_palette.particle, raw_palette.particle);
         assert_eq!(
-            vm.pet_palette,
-            crate::pet::palette::resolve_pet_palette(Species::Ghost, &ghost_pet.traits)
+            vm.pet_palette.eye,
+            crate::pet::palette::eye_color_for_mood(vm.pet_render.mood)
         );
         assert_eq!(vm.today_effective_tokens, 4_200.0);
         assert_eq!(vm.source_breakdown.len(), 1);
@@ -1688,6 +1701,30 @@ mod tests {
         assert_eq!(
             vm.activity_identity.relative_intensity,
             crate::tui::identity::RelativeIntensity::Normal
+        );
+    }
+
+    #[test]
+    fn rerender_applies_mood_eye_color() {
+        use crate::game::metabolism::Mood;
+        use crate::pet::palette::eye_color_for_mood;
+
+        let mut vm = WatchViewModel::fixture();
+
+        vm.pet_render.mood = Mood::Sleepy;
+        rerender_pet_for_view_model(&mut vm, 1, false).unwrap();
+        assert_eq!(
+            vm.pet_palette.eye,
+            eye_color_for_mood(Mood::Sleepy),
+            "sleepy mood should cool the eye color"
+        );
+
+        vm.pet_render.mood = Mood::Ecstatic;
+        rerender_pet_for_view_model(&mut vm, 2, false).unwrap();
+        assert_eq!(
+            vm.pet_palette.eye,
+            eye_color_for_mood(Mood::Ecstatic),
+            "ecstatic mood should warm the eye color"
         );
     }
 }
