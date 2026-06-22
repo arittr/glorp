@@ -231,7 +231,7 @@ pub(crate) mod tests {
         assert!(deepened > 0, "shadow cells must carry a deepened bg tint");
     }
 
-    pub(crate) fn f_area() -> Rect {
+    fn f_area() -> Rect {
         Rect::new(0, 0, 40, 24)
     }
 
@@ -320,7 +320,6 @@ pub(crate) mod tests {
             .filter(|&(x, y)| buf[(x, y)].symbol() != " ")
             .count();
         assert!(glyph_cells > 5, "pet + floor must render visible content");
-        // Calm ceiling: a 40×18 = 720-cell panel should not be glyph-saturated.
         // Calm ceiling: a 40×18 = 720-cell panel should not be glyph-saturated.
         assert!(
             glyph_cells < 720 / 2,
