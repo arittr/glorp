@@ -337,5 +337,6 @@ pub(super) fn palette_from_styles(styles: &SemanticStyles) -> crate::pet::palett
         mouth: rgb(styles.pet_mouth, default.mouth),
         accent: rgb(styles.pet_accent, default.accent),
         pattern: rgb(styles.pet_pattern, default.pattern),
+        particle: rgb(styles.pet_accent, default.particle),
     }
 }

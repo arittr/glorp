@@ -121,6 +121,7 @@ pub struct ResolvedPalette {
     pub mouth: Rgb,
     pub accent: Rgb,
     pub pattern: Rgb,
+    pub particle: Rgb,
 }
 
 pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
@@ -130,7 +131,7 @@ pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
         PaletteRoleName::Mouth => palette.mouth,
         PaletteRoleName::Accent => palette.accent,
         PaletteRoleName::Pattern => palette.pattern,
-        PaletteRoleName::Particle => palette.accent,
+        PaletteRoleName::Particle => palette.particle,
     }
 }
 
@@ -142,6 +143,7 @@ pub fn default_theme_palette() -> ResolvedPalette {
         mouth: Rgb::new(0x97, 0x91, 0x8a),
         accent: Rgb::new(0xf0, 0xa6, 0x46),
         pattern: Rgb::new(0x50, 0x4c, 0x49),
+        particle: Rgb::new(0xf0, 0xa6, 0x46),
     }
 }
 
@@ -177,6 +179,7 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
         mouth: role(0.70, 0.16, h + 35.0),
         accent: role(0.76, 0.24, h + 120.0),
         pattern: role(0.64, 0.20, h + 210.0),
+        particle: role(0.80, 0.20, h + 160.0),
     }
 }
 
@@ -268,7 +271,20 @@ mod tests {
         assert_eq!(role_color(Mouth, &p), Rgb::new(0x97, 0x91, 0x8a));
         assert_eq!(role_color(Accent, &p), Rgb::new(0xf0, 0xa6, 0x46));
         assert_eq!(role_color(Pattern, &p), Rgb::new(0x50, 0x4c, 0x49));
-        assert_eq!(role_color(Particle, &p), Rgb::new(0xf0, 0xa6, 0x46));
+        // Default theme keeps particle == accent for pre-color parity, but it is
+        // now a dedicated field (role_color reads palette.particle, not accent).
+        assert_eq!(role_color(Particle, &p), p.particle);
+        assert_eq!(p.particle, Rgb::new(0xf0, 0xa6, 0x46));
+    }
+
+    #[test]
+    fn particle_is_its_own_species_hue() {
+        use crate::pet::generation::Species;
+        let p = resolve_pet_palette(Species::Crystal, &traits_with_hue(0));
+        assert_ne!(
+            p.particle, p.accent,
+            "particle should resolve to its own hue, not reuse accent"
+        );
     }
 
     fn traits_with_hue(hue: u16) -> crate::pet::generation::VisibleTraits {
