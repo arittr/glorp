@@ -100,7 +100,6 @@ pub(super) fn biome_floor_wash_color(tag: crate::tui::room::RoomBiomeTag) -> rat
 /// The contact shadow under the pet's feet: the floor wash deepened a bit
 /// further so the pet reads as resting ON the ground, never a hard black
 /// blob. Calm, never high-contrast (Tamagotchi spirit).
-#[allow(dead_code)] // used by Task 3 (contact shadow pass)
 pub(super) fn contact_shadow_color(floor_wash: ratatui::style::Color) -> ratatui::style::Color {
     use ratatui::style::Color;
     const SHADOW_DARKEN: i16 = 16;
