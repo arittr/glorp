@@ -1122,4 +1122,29 @@ mod tests {
             "mood vocabulary must vary by species"
         );
     }
+
+    #[test]
+    fn soft_bodies_read_as_figure_with_color_off() {
+        use crate::pet::generation::generate_pet;
+        // Flat color strips hue; legibility must come from dense glyphs. The
+        // body of a soft species must contain enough medium/dark shade cells
+        // (▒▓█) to read as a solid creature, not a sparse dot cloud.
+        let dense: &[char] = &['\u{2592}', '\u{2593}', '\u{2588}']; // ▒ ▓ █
+        for species in [Species::Blob, Species::Ghost] {
+            let pet = generate_pet("figure-ground-seed").with_species(species);
+            // S4 is the first mass stage; soft bodies must already read solid.
+            let rendered = render_pet(&pet, Stage::S4, Mood::Content, AnimationFrame::default());
+            let dense_cells = rendered
+                .lines
+                .iter()
+                .flat_map(|l| l.chars())
+                .filter(|c| dense.contains(c))
+                .count();
+            assert!(
+                dense_cells >= 6,
+                "{species:?} S4 body has only {dense_cells} dense (▒▓█) cells; \
+                 a soft body must read as figure with color off"
+            );
+        }
+    }
 }
