@@ -174,19 +174,54 @@ fn mech_base(stage: Stage) -> &'static Template {
     }
 }
 
-/// Deterministic per-seed interior-texture variation applied on top of a base
-/// silhouette. Phase 1: identity passthrough (returns the base verbatim) — the
-/// hook exists so render.rs and the invariant tests can target the final API
-/// now; Phase 2 fills in the texture math. MUST preserve the closed outline,
-/// width-1, and the stage cell band. On S0-S2 it is constrained to
-/// constant-occupancy glyphs (band-safety).
+/// Deterministic interior-texture variation. Swaps interior fill cells between
+/// ▒ and ▓ per `seed`, preserving the closed outline, width-1, and occupancy
+/// (so the stage cell band is never crossed). Pinned (no-op) on S0..S2.
 pub(crate) fn apply_interior_texture(
     base: &Template,
     _species: Species,
-    _stage: Stage,
-    _seed: u64,
+    stage: Stage,
+    seed: u64,
 ) -> [String; 8] {
-    std::array::from_fn(|i| base[i].to_string())
+    let pinned = matches!(stage, Stage::S0 | Stage::S1 | Stage::S2);
+    let mut out: [String; 8] = Default::default();
+    for (row, line) in base.iter().enumerate() {
+        if pinned {
+            out[row] = (*line).to_string();
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        // Find the outline bounds (first/last non-space cell) to protect them.
+        let first = chars.iter().position(|c| !c.is_whitespace());
+        let last = chars.iter().rposition(|c| !c.is_whitespace());
+        let mut rebuilt = String::with_capacity(line.len());
+        for (col, &ch) in chars.iter().enumerate() {
+            let is_edge = Some(col) == first || Some(col) == last;
+            let is_interior_fill = !is_edge && matches!(ch, '\u{2592}' | '\u{2593}'); // ▒ or ▓
+            if is_interior_fill {
+                // Hash (seed, row, col) -> pick ▒ or ▓. Never ░, never space.
+                let h = mix_seed(seed, row as u64, col as u64);
+                rebuilt.push(if h & 1 == 0 { '\u{2592}' } else { '\u{2593}' });
+            } else {
+                rebuilt.push(ch);
+            }
+        }
+        out[row] = rebuilt;
+    }
+    out
+}
+
+/// Small deterministic mixer for interior-texture draws. Not crypto; just a
+/// stable per-(seed,row,col) bit source independent of std hashing iteration.
+fn mix_seed(seed: u64, row: u64, col: u64) -> u64 {
+    let mut x = seed
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(row.wrapping_mul(0x0000_0100_0000_01b3))
+        .wrapping_add(col.wrapping_mul(0xff51_afd7_ed55_8ccd));
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 29;
+    x
 }
 
 /// Public render entry replacing `template_lines`. Returns owned Strings because
@@ -798,37 +833,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_interior_texture_is_identity_in_phase_one() {
-        // Phase 1 ships the texture hook as a passthrough: the rendered lines equal
-        // the base template (slots still unresolved {} markers) regardless of seed.
+    fn stage_template_lines_has_eight_lines_for_every_species_stage() {
+        // stage_template_lines feeds render.rs; it must always return 8 lines.
         for species in Species::all() {
             for stage in ALL_STAGES {
-                let base = stage_base_template(species, stage);
-                for seed in [0u64, 1, 7, 99, 360, u64::from(u16::MAX)] {
-                    let textured = apply_interior_texture(base, species, stage, seed);
-                    for (row, (a, b)) in base.iter().zip(textured.iter()).enumerate() {
-                        assert_eq!(
-                            *a,
-                            b.as_str(),
-                            "{species:?} {stage:?} seed={seed} row={row} must be unchanged"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn stage_template_lines_matches_base_after_slot_widths() {
-        // stage_template_lines feeds render.rs; in Phase 1 it equals the base.
-        for species in Species::all() {
-            for stage in ALL_STAGES {
-                let base = stage_base_template(species, stage);
                 let lines = stage_template_lines(species, stage, 42);
-                assert_eq!(lines.len(), 8);
-                for (a, b) in base.iter().zip(lines.iter()) {
-                    assert_eq!(*a, b.as_str());
-                }
+                assert_eq!(lines.len(), 8, "{species:?} {stage:?} must be 8 lines");
             }
         }
     }
@@ -1124,6 +1134,85 @@ mod tests {
             .filter(|line| line.chars().any(|c| !c.is_whitespace()))
             .count();
         assert_eq!(nonblank_rows, 8, "Mech S6 must fill all 8 art rows itself");
+    }
+
+    #[test]
+    fn interior_texture_varies_per_seed() {
+        // On adult stages, two different seeds produce different interior texture.
+        for species in Species::all() {
+            let base = stage_base_template(species, Stage::S5);
+            let a = apply_interior_texture(base, species, Stage::S5, 11);
+            let b = apply_interior_texture(base, species, Stage::S5, 91037);
+            // Some species/stage may have too few interior fill cells to vary; require
+            // that at least one species varies (the mechanism works), and that no call
+            // panics. Stronger per-species variation is exercised in the preview lab.
+            if a != b {
+                return;
+            }
+        }
+        panic!("interior texture did not vary for any species at S5");
+    }
+
+    #[test]
+    fn interior_texture_preserves_band_and_width() {
+        use unicode_width::UnicodeWidthStr;
+        for species in Species::all() {
+            for stage in ALL_STAGES {
+                let base = stage_base_template(species, stage);
+                let base_occupied: usize = base
+                    .iter()
+                    .map(|l| {
+                        substitute_slots(l)
+                            .chars()
+                            .filter(|c| !c.is_whitespace())
+                            .count()
+                    })
+                    .sum();
+                for seed in [0u64, 7, 42, 9999, 123_456_789] {
+                    let textured = apply_interior_texture(base, species, stage, seed);
+                    assert_eq!(
+                        textured.len(),
+                        8,
+                        "{species:?} {stage:?}: must stay 8 lines"
+                    );
+                    let mut occupied = 0;
+                    for (row, line) in textured.iter().enumerate() {
+                        let rendered = substitute_slots(line);
+                        assert_eq!(
+                            UnicodeWidthStr::width(rendered.as_str()),
+                            11,
+                            "{species:?} {stage:?} seed={seed} row={row}: rendered width must stay 11, got {:?}",
+                            rendered
+                        );
+                        occupied += rendered.chars().filter(|c| !c.is_whitespace()).count();
+                    }
+                    assert_eq!(
+                        occupied, base_occupied,
+                        "{species:?} {stage:?} seed={seed}: rendered occupancy must not change (band-safe)"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interior_texture_is_pinned_on_small_stages() {
+        // S0..S2 must be byte-identical to the base across seeds (constant-occupancy,
+        // the narrow bands cannot tolerate any swing).
+        for species in Species::all() {
+            for stage in [Stage::S0, Stage::S1, Stage::S2] {
+                let base = stage_base_template(species, stage);
+                let base_lines: Vec<String> = base.iter().map(|l| l.to_string()).collect();
+                for seed in [0u64, 5, 500, 5_000_000] {
+                    let textured = apply_interior_texture(base, species, stage, seed);
+                    assert_eq!(
+                        textured.to_vec(),
+                        base_lines,
+                        "{species:?} {stage:?} seed={seed}: small stages must be pinned"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
