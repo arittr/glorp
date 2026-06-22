@@ -26,7 +26,7 @@ mod props;
 
 pub(crate) use ambient::pet_silhouette_halo_rects;
 use ambient::{
-    activity_glyphs_for, ambient_glyph_is_inside_area, biome_wash_color,
+    activity_glyphs_for, ambient_glyph_is_inside_area, biome_floor_wash_color, biome_wash_color,
     effective_weekend_softening, mote_glyphs_for, weekend_soften_color,
 };
 pub use ambient::{ambient_glyphs_for, ambient_glyphs_for_phase};
@@ -74,6 +74,9 @@ const PET_H: u16 = 10;
 const MOTE_BUDGET_SHARE: f64 = 0.5;
 /// Floor-mote glyphs: soft specks, deliberately sub-countable.
 const MOTE_GLYPHS: &[char] = &['·', '.', ','];
+/// The lower N habitat rows painted with the deeper floor wash so the ground
+/// reads as a value distinct from the lighter sky above it.
+const FLOOR_BAND_ROWS: u16 = 3;
 
 /// Computes the 13×10 sub-rect where the pet art sits inside the panel area,
 /// accounting for vertical centering, breathing offset, and wander offset.
@@ -257,9 +260,21 @@ impl LegacyPanel for PetPanel {
         // including under the pet and speech bubble. Set BEFORE every glyph pass
         // (room/ambient/pet all set fg only), so this bg stays seamless underneath
         // — washing around the pet's exclusion rect would carve a visible hole.
+        // The lower FLOOR_BAND_ROWS rows use the darker floor wash so the ground
+        // reads as a distinct value from the lighter sky above it.
         {
-            let wash = biome_wash_color(room_profile.biome.primary);
+            let sky_wash = biome_wash_color(room_profile.biome.primary);
+            let floor_wash = biome_floor_wash_color(room_profile.biome.primary);
+            let floor_band_top = scene
+                .habitat
+                .y
+                .saturating_add(scene.habitat.height.saturating_sub(FLOOR_BAND_ROWS));
             for wy in scene.habitat.y..scene.habitat.y.saturating_add(scene.habitat.height) {
+                let wash = if wy >= floor_band_top {
+                    floor_wash
+                } else {
+                    sky_wash
+                };
                 for wx in scene.habitat.x..scene.habitat.x.saturating_add(scene.habitat.width) {
                     buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
                 }
