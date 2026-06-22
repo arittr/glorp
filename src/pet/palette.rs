@@ -161,6 +161,22 @@ fn species_base_hue(species: Species) -> f32 {
     }
 }
 
+/// Per-species body chroma (OKLCH). Raised off the old pinned 0.10 so the
+/// species hue actually registers. Soft-bodied/pale species (Crystal ice,
+/// Ghost lavender) stay lower; saturated identities (Glitch acid, Mech amber)
+/// go higher. `oklch_to_rgb` gamut-maps any out-of-gamut request, so these are
+/// safe ceilings, not exact realized chroma.
+fn species_body_chroma(species: Species) -> f32 {
+    match species {
+        Species::Fuzz => 0.13,    // peach
+        Species::Blob => 0.14,    // mint
+        Species::Ghost => 0.12,   // lavender (pale, keep soft)
+        Species::Glitch => 0.18,  // acid/phosphor (loud)
+        Species::Crystal => 0.11, // ice (cold, pale shell)
+        Species::Mech => 0.15,    // amber/brass
+    }
+}
+
 /// Pinned green eye signature (same for every species).
 const EYE_HUE: f32 = 142.0;
 
@@ -174,7 +190,7 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
     let role = |lightness: f32, chroma: f32, hue: f32| oklch_to_rgb(lightness, chroma * sat, hue);
 
     ResolvedPalette {
-        body: role(0.74, 0.10, h),
+        body: role(0.74, species_body_chroma(species), h),
         eye: oklch_to_rgb(0.82, 0.19, EYE_HUE),
         mouth: role(0.70, 0.16, h + 35.0),
         accent: role(0.76, 0.24, h + 120.0),
@@ -362,5 +378,19 @@ mod tests {
             (contrast_ratio(c, d) - contrast_ratio(d, c)).abs() < 1e-4,
             "contrast is symmetric"
         );
+    }
+
+    #[test]
+    fn bodies_are_visibly_chromatic_not_grey() {
+        use crate::pet::generation::Species;
+        for s in Species::all() {
+            let body = resolve_pet_palette(s, &traits_with_hue(0)).body;
+            let (a, b) = rgb_to_oklab_ab(body);
+            let chroma = (a * a + b * b).sqrt();
+            assert!(
+                chroma > 0.04,
+                "{s:?} body reads near-grey (oklab chroma {chroma:.3}); raise species_body_chroma"
+            );
+        }
     }
 }
