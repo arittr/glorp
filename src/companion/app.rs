@@ -573,6 +573,84 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
     }
 }
 
+/// Metrics needed to map a character-cell grid onto the round AppKit view.
+///
+/// `font_size` is the chosen monospace font size in points.  `cell_w`/`cell_h`
+/// are the measured dimensions of one `"M"` glyph at that size.  `grid_cols`
+/// and `grid_rows` are the number of cells that fit inside `view_w`/`view_h`.
+/// `origin_x`/`origin_y` are the AppKit pixel coordinates of the top-left
+/// corner of the grid (centred in the view), where `origin_y` is the
+/// **top** of row-0 in AppKit's Y-up coordinate system.
+///
+/// **Tunable aesthetic default**: `font_size` starts at 8.5 pt, which gives
+/// roughly 44 columns × 18 rows inside a 360-pt window — wide enough that the
+/// 13-col pet is ~30 % of the width.  Drew can adjust this to taste; bumping
+/// the font makes the pet larger, shrinking it fits more habitat texture.
+// Wired in Plan 06 Task 3 — unused until `draw_scene` is updated.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct CompanionGridMetrics {
+    pub font_size: f64,
+    pub cell_w: f64,
+    pub cell_h: f64,
+    pub grid_cols: u16,
+    pub grid_rows: u16,
+    pub origin_x: f64,
+    pub origin_y: f64,
+}
+
+/// Default font size for the round companion grid.
+///
+/// **TUNABLE AESTHETIC DEFAULT** — this is Drew's call to adjust.
+/// At 8.5 pt monospaced on a 360-pt window the grid is roughly 44 cols × 18
+/// rows, which places the 13-wide pet at ~30 % of the viewport width.
+/// Increase to make the pet larger; decrease to add more habitat texture.
+// Wired in Plan 06 Task 3 — unused until `companion_grid_metrics` is called.
+#[allow(dead_code)]
+const COMPANION_FONT_SIZE: f64 = 8.5;
+
+/// Measure the cell grid for the given view dimensions and compute the centred
+/// `origin_x`/`origin_y` offset so the grid is positioned in the middle of the
+/// AppKit view.
+///
+/// Only compiled on macOS; not golden-tested (AppKit font measurement is
+/// machine-dependent and not deterministic on non-macOS hosts).
+// Wired in Plan 06 Task 3 — unused until `draw_scene` is updated.
+#[allow(dead_code)]
+pub(super) fn companion_grid_metrics(view_w: f64, view_h: f64) -> Option<CompanionGridMetrics> {
+    unsafe {
+        let font_size = COMPANION_FONT_SIZE;
+        let cell_size =
+            attributed_pet_glyph("M", font_size, &RoundColor(1.0, 1.0, 1.0, 1.0)).size();
+        let cell_w = cell_size.width;
+        let cell_h = cell_size.height;
+        if cell_w <= 0.0 || cell_h <= 0.0 {
+            return None;
+        }
+        let grid_cols = (view_w / cell_w).floor() as u16;
+        let grid_rows = (view_h / cell_h).floor() as u16;
+        if grid_cols == 0 || grid_rows == 0 {
+            return None;
+        }
+        let total_grid_w = grid_cols as f64 * cell_w;
+        let total_grid_h = grid_rows as f64 * cell_h;
+        // origin_x: left edge of the grid (AppKit X-right).
+        let origin_x = (view_w - total_grid_w) / 2.0;
+        // origin_y: top of row-0 in AppKit Y-up coordinates (AppKit bottom is y=0,
+        // top is y=view_h, so the top of the grid is view_h - top_margin).
+        let origin_y = (view_h + total_grid_h) / 2.0;
+        Some(CompanionGridMetrics {
+            font_size,
+            cell_w,
+            cell_h,
+            grid_cols,
+            grid_rows,
+            origin_x,
+            origin_y,
+        })
+    }
+}
+
 /// Convert a (col, row) cell coordinate to AppKit pixel coordinates.
 ///
 /// AppKit Y is up: row 0 top-left maps to `origin_y - cell_h` (the top of
