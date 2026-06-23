@@ -2,7 +2,7 @@ use crate::error::{GlorpError, Result};
 use crate::storage::usage_store::{
     ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
 };
-use crate::usage::ccusage::{run_command_with_timeout, HELPER_SUBPROCESS_TIMEOUT};
+use crate::usage::ccusage::{run_command_with_timeout, HelperCommand, HELPER_SUBPROCESS_TIMEOUT};
 use crate::usage::day_axis::{parse_agentsview_period_date, TOKENMAXXING_TIMEZONE};
 use crate::usage::normalize::{normalize_agentsview_json, RawTokenTotals};
 use crate::usage::provider::{
@@ -10,6 +10,7 @@ use crate::usage::provider::{
     UsageSnapshot,
 };
 use crate::usage::token_contract::TOKENMAXXING_TOTAL_V1;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -233,7 +234,11 @@ impl AgentsviewCommandProvider {
         no_sync: bool,
         timeout: Duration,
     ) -> Result<std::process::Output> {
-        let mut command = Command::new(helper);
+        let hcmd = agentsview_helper_command(agent, helper, None).map_err(|d| {
+            GlorpError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, d.message))
+        })?;
+        let mut command = Command::new(&hcmd.program);
+        command.args(&hcmd.args_prefix);
         command.args([
             "usage",
             "daily",
@@ -387,8 +392,53 @@ fn write_cursor(
     )
 }
 
+fn is_node_helper(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("js") | Some("mjs")
+    )
+}
+
+fn agentsview_helper_command(
+    provider_surface: &str,
+    helper: &Path,
+    explicit_node: Option<&Path>,
+) -> std::result::Result<HelperCommand, ProviderDiagnostic> {
+    if is_node_helper(helper) {
+        let node = explicit_node
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("GLORP_NODE_BIN").map(PathBuf::from))
+            .or_else(|| which::which("node").ok())
+            .ok_or_else(|| {
+                diagnostic(
+                    provider_surface,
+                    "missing_helper",
+                    "agentsview helper requires node, but node was not found",
+                )
+            })?;
+        if !node.exists() {
+            return Err(diagnostic(
+                provider_surface,
+                "missing_helper",
+                "agentsview helper requires node, but node was not found",
+            ));
+        }
+        return Ok(HelperCommand {
+            program: node,
+            args_prefix: vec![helper.display().to_string()],
+        });
+    }
+
+    Ok(HelperCommand {
+        program: helper.to_path_buf(),
+        args_prefix: Vec::new(),
+    })
+}
+
 fn version_with_timeout(helper: &Path, timeout: Duration) -> Option<String> {
-    let mut command = Command::new(helper);
+    let hcmd = agentsview_helper_command("agentsview", helper, None).ok()?;
+    let mut command = Command::new(&hcmd.program);
+    command.args(&hcmd.args_prefix);
     command.arg("--version");
     let output = run_command_with_timeout(&mut command, timeout).ok()?;
     if !output.status.success() {
@@ -459,6 +509,49 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    #[test]
+    fn helper_command_node_helper_uses_node_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mjs_helper = dir.path().join("agentsview.mjs");
+        std::fs::write(&mjs_helper, "#!/usr/bin/env node\nconsole.log('{}');\n").unwrap();
+
+        // Provide an explicit node binary so the test doesn't depend on PATH.
+        let node_path = which::which("node").expect("node must be on PATH for this test to run");
+
+        let cmd = agentsview_helper_command("claude", &mjs_helper, Some(&node_path))
+            .expect("should build a valid HelperCommand");
+
+        assert_eq!(cmd.program, node_path, "program should be the node binary");
+        assert_eq!(
+            cmd.args_prefix,
+            vec![mjs_helper.display().to_string()],
+            "args_prefix should contain the .mjs helper path"
+        );
+    }
+
+    #[test]
+    fn helper_command_native_helper_no_node_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let native_helper = helper_path(&dir, "agentsview-native");
+        write_helper(
+            &native_helper,
+            "#!/usr/bin/env bash\nexit 0",
+            "@echo off\nexit /b 0",
+        );
+
+        let cmd = agentsview_helper_command("claude", &native_helper, None)
+            .expect("should build a valid HelperCommand");
+
+        assert_eq!(
+            cmd.program, native_helper,
+            "program should be the helper itself"
+        );
+        assert!(
+            cmd.args_prefix.is_empty(),
+            "args_prefix should be empty for a native helper"
+        );
     }
 
     #[test]
