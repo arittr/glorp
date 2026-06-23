@@ -20,15 +20,23 @@ fn round_preview_renders_pet_cells_via_seam() {
         52,
         RoundRenderCapabilities::preview_truecolor(),
     );
+    // Count fg-colored non-blank cells inside the aperture. Room glyphs alone
+    // could satisfy a low bar (≥5), so we mirror the ≥10 threshold from
+    // `build_round_scene_draw_list_includes_pet_body_cells` in scene.rs — that
+    // test verified ≥10 non-blank pet-glyph cells in the draw list. Requiring ≥10
+    // fg-colored cells in the rendered frame proves pet rendering is present, not
+    // just room glyphs (which may have no fg color in truecolor mode).
     let non_blank: usize = frame
         .cells
         .iter()
-        .filter(|cell| !cell.outside_aperture && !cell.symbol.trim().is_empty())
+        .filter(|cell| {
+            !cell.outside_aperture && !cell.symbol.trim().is_empty() && cell.fg.is_some()
+        })
         .count();
 
     assert!(
-        non_blank >= 5,
-        "expected ≥5 non-blank cells from seam render, got {non_blank}"
+        non_blank >= 10,
+        "expected ≥10 fg-colored non-blank cells from seam render (proves pet is rendered), got {non_blank}"
     );
 }
 
@@ -87,27 +95,37 @@ fn round_preview_paints_halo_command_glyphs() {
     );
 
     // Only Halo is still overlay-painted from commands; room/prop/pet come from the seam.
+    // The fixture must produce a Halo command — if it doesn't, the draw-command path is broken.
     let halo_command = commands
         .iter()
         .find(|command| command.kind == RoundDrawKind::Halo);
 
-    if let Some(command) = halo_command {
-        if let Some(label) = command.label {
-            let cell = frame
-                .cells
-                .iter()
-                .find(|cell| {
-                    cell.x == command.x.round() as u16 && cell.y == command.y.round() as u16
-                })
-                .unwrap_or_else(|| panic!("expected cell for Halo command"));
+    assert!(
+        halo_command.is_some(),
+        "fixture must produce a Halo command; got commands: {commands:?}"
+    );
+    let command = halo_command.unwrap();
 
-            assert_eq!(
-                cell.symbol,
-                label.to_string(),
-                "preview should paint Halo command glyph at ({}, {})",
-                command.x,
-                command.y
-            );
-        }
-    }
+    let label = command
+        .label
+        .expect("Halo command must carry a label glyph for overlay painting");
+
+    let cell = frame
+        .cells
+        .iter()
+        .find(|cell| cell.x == command.x.round() as u16 && cell.y == command.y.round() as u16)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected cell for Halo command at ({}, {})",
+                command.x, command.y
+            )
+        });
+
+    assert_eq!(
+        cell.symbol,
+        label.to_string(),
+        "preview should paint Halo command glyph at ({}, {})",
+        command.x,
+        command.y
+    );
 }

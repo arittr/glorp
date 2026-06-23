@@ -204,9 +204,35 @@ mod tests {
         // The seam-rendered frame must produce more than one distinct fg color,
         // proving that role-based coloring (eye, body, accent, biome wash) is
         // applied — not a flat single-color fill.
+        //
+        // Stronger role-color check: inject a known eye span into the pet art so
+        // the Eye role is exercised by the seam render. The fixture uses
+        // default_theme_palette() (body=#efebe4, eye=#82bc83). Both fg hex values
+        // must appear in the frame, and they must be distinct.
+        use crate::pet::palette::default_theme_palette;
+        use crate::pet::render::{PaletteRoleName, StyledSegment};
         use crate::tui::view_model::WatchViewModel;
         use time::macros::datetime;
-        let vm = WatchViewModel::fixture_with_habitat_props();
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        // Give the pet a one-line art with two eye-role cells (cols 0, 2) and one
+        // body-role cell (col 1 is a space — skipped; add 'X' as body).
+        // Layout: "o o" with Eye spans at 0..1 and 2..3; col 1 (' ') is skipped.
+        // We add a second line "XX" (body) so the body color also appears in fgs.
+        vm.pet_art = vec!["o o".to_string(), "XX".to_string()];
+        vm.pet_spans = vec![
+            StyledSegment {
+                line: 0,
+                start: 0,
+                end: 1,
+                role: PaletteRoleName::Eye,
+            },
+            StyledSegment {
+                line: 0,
+                start: 2,
+                end: 3,
+                role: PaletteRoleName::Eye,
+            },
+        ];
         let frame = render_round_preview_frame_from_vm(
             "round-color",
             "Round Color",
@@ -225,6 +251,35 @@ mod tests {
         assert!(
             fgs.len() > 1,
             "expected multiple fg colors from seam render, got {fgs:?}"
+        );
+
+        // Resolve eye and body colors exactly as the seam does for this fixture.
+        // fixture_with_habitat_props() → fixture() → pet_palette = default_theme_palette().
+        // All live transforms (phase-tint, droop, activity lift) are identity for
+        // this fixture (Day phase, energy=0.81, activity_level=0.0, no shimmer),
+        // so the resolved fg hex equals the raw palette color.
+        let palette = default_theme_palette();
+        let body = palette.body;
+        let eye = palette.eye;
+        let body_hex = format!("#{:02x}{:02x}{:02x}", body.r, body.g, body.b);
+        let eye_hex = format!("#{:02x}{:02x}{:02x}", eye.r, eye.g, eye.b);
+
+        // (a) Eye role resolves to a distinct color from Body role.
+        assert_ne!(
+            eye_hex, body_hex,
+            "eye and body must resolve to distinct colors in the fixture palette"
+        );
+
+        // (b) The eye color appears in the rendered fg set — Eye-role cells are present.
+        assert!(
+            fgs.contains(&eye_hex),
+            "eye color {eye_hex} must appear in rendered fg set; got {fgs:?}"
+        );
+
+        // (c) The body color appears in the rendered fg set — Body-role cells are present.
+        assert!(
+            fgs.contains(&body_hex),
+            "body color {body_hex} must appear in rendered fg set; got {fgs:?}"
         );
     }
 
