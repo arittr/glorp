@@ -313,20 +313,34 @@ fn advance_companion_animation(
 
 fn draw_scene(bounds: NSRect) {
     let _mtm = MainThreadMarker::new().expect("companion draw_scene on non-main thread");
-    let scene = APP_STATE.with(|cell| cell.borrow().as_ref().map(|s| s.scene.clone()));
-    let Some(scene) = scene else {
+    let state_snapshot = APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|s| (s.scene.clone(), s.vm.clone()))
+    });
+    let Some((scene, vm)) = state_snapshot else {
         return;
     };
 
+    let now = time::OffsetDateTime::now_utc();
     let width = bounds.size.width as f32;
     let height = bounds.size.height as f32;
     let aperture = RoundAperture::new(width as u16, height as u16);
+
+    // Build the halo/trouble commands from the round scene model (kept on top).
     let layout = layout_round_scene(
         &scene,
         aperture,
         RoundRenderCapabilities::preview_truecolor(),
     );
     let commands = build_draw_commands(&scene, &layout);
+
+    // Compute background color from the first Background command.
+    let bg_color = commands
+        .iter()
+        .find(|c| c.kind == RoundDrawKind::Background)
+        .map(|c| c.color)
+        .unwrap_or(RoundColor(0.05, 0.06, 0.10, 1.0));
 
     let dim_overlay = scene.lifecycle.asleep || scene.lifecycle.calm;
     unsafe {
@@ -343,7 +357,43 @@ fn draw_scene(bounds: NSRect) {
         ));
         clip.addClip();
 
-        for command in &commands {
+        // Background base fill — drawn first, under everything.
+        let bg_path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(
+                (aperture.center_x - aperture.radius) as f64,
+                (aperture.center_y - aperture.radius) as f64,
+            ),
+            NSSize::new(
+                (aperture.radius * 2.0) as f64,
+                (aperture.radius * 2.0) as f64,
+            ),
+        ));
+        ns_color(&bg_color).setFill();
+        bg_path.fill();
+
+        // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
+        if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
+            let list = crate::round::scene::build_round_scene_draw_list(
+                &vm,
+                now,
+                m.grid_cols,
+                m.grid_rows,
+            );
+            appkit_blit_draw_list(
+                &list,
+                m.font_size,
+                m.cell_w,
+                m.cell_h,
+                m.origin_x,
+                m.origin_y,
+            );
+        }
+
+        // Halo and trouble indicators drawn on top of the scene blit.
+        for command in commands
+            .iter()
+            .filter(|c| matches!(c.kind, RoundDrawKind::Halo | RoundDrawKind::Trouble))
+        {
             draw_command(command, &scene.pet.palette);
         }
 
@@ -586,8 +636,6 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
 /// roughly 44 columns × 18 rows inside a 360-pt window — wide enough that the
 /// 13-col pet is ~30 % of the width.  Drew can adjust this to taste; bumping
 /// the font makes the pet larger, shrinking it fits more habitat texture.
-// Wired in Plan 06 Task 3 — unused until `draw_scene` is updated.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CompanionGridMetrics {
     pub font_size: f64,
@@ -605,8 +653,6 @@ pub(super) struct CompanionGridMetrics {
 /// At 8.5 pt monospaced on a 360-pt window the grid is roughly 44 cols × 18
 /// rows, which places the 13-wide pet at ~30 % of the viewport width.
 /// Increase to make the pet larger; decrease to add more habitat texture.
-// Wired in Plan 06 Task 3 — unused until `companion_grid_metrics` is called.
-#[allow(dead_code)]
 const COMPANION_FONT_SIZE: f64 = 8.5;
 
 /// Measure the cell grid for the given view dimensions and compute the centred
@@ -615,8 +661,6 @@ const COMPANION_FONT_SIZE: f64 = 8.5;
 ///
 /// Only compiled on macOS; not golden-tested (AppKit font measurement is
 /// machine-dependent and not deterministic on non-macOS hosts).
-// Wired in Plan 06 Task 3 — unused until `draw_scene` is updated.
-#[allow(dead_code)]
 pub(super) fn companion_grid_metrics(view_w: f64, view_h: f64) -> Option<CompanionGridMetrics> {
     unsafe {
         let font_size = COMPANION_FONT_SIZE;
@@ -680,8 +724,6 @@ fn cell_to_point(
 ///
 /// AppKit rendering is exercised only at runtime; the pixel-math helper
 /// `cell_to_point` is separately unit-tested.
-// Wired in Plan 06 Task 3 — unused until `draw_scene` is updated.
-#[allow(dead_code)]
 fn appkit_blit_draw_list(
     list: &crate::presentation::SceneDrawList,
     font_size: f64,
