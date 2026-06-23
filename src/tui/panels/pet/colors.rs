@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::pet::animator::{compute_token_pop, low_energy_lightness_multiplier, TokenPop};
+use crate::pet::animator::low_energy_lightness_multiplier;
 use crate::pet::render::PaletteRoleName;
 #[cfg(test)]
 use crate::tui::day::DayPhase;
@@ -105,21 +105,6 @@ pub(super) fn tint_style_for_phase(style: Style, phase: DayPhase, blend: f32) ->
         blend,
     );
     style.fg(Color::Rgb(out.r, out.g, out.b))
-}
-
-pub(super) fn profile_token_pop(
-    last_feed_pulse_at: Option<time::OffsetDateTime>,
-    profile: &PetLifeProfile,
-    color_capability: ColorCapability,
-    now: time::OffsetDateTime,
-) -> Option<TokenPop> {
-    if profile.calm_mode
-        || profile.burst_level <= 0.0
-        || matches!(color_capability, ColorCapability::Flat)
-    {
-        return None;
-    }
-    compute_token_pop(last_feed_pulse_at, now)
 }
 
 /// Activity-lift one style's fg. The live watch path runs this through

@@ -101,4 +101,18 @@ mod tests {
             "burst_level <= 0 must suppress token-pop"
         );
     }
+
+    #[test]
+    fn token_pop_fires_when_burst_is_nonzero_and_pulse_is_recent() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let mut vm = WatchViewModel::fixture();
+        vm.life_profile.calm_mode = false;
+        vm.life_profile.burst_level = 0.6;
+        vm.last_feed_pulse_at = Some(now - time::Duration::seconds(1));
+        let fx = EffectState::from_vm(&vm, now, ColorCapability::Truecolor);
+        assert!(
+            fx.token_pop.is_some(),
+            "non-zero burst + recent pulse + Truecolor must produce token-pop"
+        );
+    }
 }
