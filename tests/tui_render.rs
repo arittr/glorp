@@ -1268,21 +1268,21 @@ fn pet_panel_renders_habitat_props_behind_pet_art() {
 
 #[test]
 fn pet_panel_draw_order_keeps_pet_above_habitat_props() {
-    let source = std::fs::read_to_string("src/tui/panels/pet.rs").unwrap();
-    let render_body = source
-        .split("fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext)")
+    // Since Task 6, the z-order lives in draw.rs (render_pet_to_draw_list).
+    // Verify the pass ordering there: ambient → props(bg/behind) → pet-body → props(fg).
+    let source = std::fs::read_to_string("src/tui/panels/pet/draw.rs").unwrap();
+    let fn_body = source
+        .split("pub(crate) fn render_pet_to_draw_list(")
         .nth(1)
-        .expect("PetPanel render body");
-    let ambient = render_body
+        .expect("render_pet_to_draw_list body");
+    let ambient = fn_body
         .find("ambient_glyphs_for_phase(")
-        .or_else(|| render_body.find("ambient_glyphs_for("))
+        .or_else(|| fn_body.find("ambient_glyphs_for("))
         .expect("ambient render pass");
-    let props = render_body
-        .find("habitat_props_for(")
+    let props = fn_body
+        .find("HabitatPetLayer::Background")
         .expect("prop render pass");
-    let pet = render_body
-        .find("render_pet_inside(")
-        .expect("pet render pass");
+    let pet = fn_body.find("pet_body_cells(").expect("pet render pass");
 
     assert!(ambient < props, "ambient must render before props");
     assert!(props < pet, "props must render before pet art");
