@@ -2,4 +2,4 @@
 source: tests/round_draw_list.rs
 expression: cell_count
 ---
-845
+667

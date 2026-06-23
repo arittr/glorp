@@ -8,6 +8,24 @@ use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
+// ── Companion tuning constants ────────────────────────────────────────────────
+// Adjust these to change the round companion's feel without touching any
+// shared watch code.
+
+/// Pet art width (must match `PET_W` in `src/tui/panels/pet.rs`).
+const PET_W: u16 = 13;
+/// Pet art height (must match `PET_H` in `src/tui/panels/pet.rs`).
+const PET_H: u16 = 10;
+
+/// Half-width of the pet's wander range in the companion, in cells.
+/// The pet wanders ±this many cells around center. Increase for more motion,
+/// decrease to keep the pet near the circle's widest band.
+/// At a typical 44-col companion grid this is ~18 % of the available
+/// horizontal room, which keeps the pet well inside the circle's chords.
+const COMPANION_WANDER_HALF: u16 = 8;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Build a [`SceneDrawList`] for the round companion viewport.
 ///
 /// This function is **pure** — it has no side effects, no AppKit calls, and no
@@ -23,20 +41,39 @@ use crate::tui::view_model::WatchViewModel;
 ///
 /// # Layout contract
 ///
-/// `area = Rect::new(0, 0, grid_cols, grid_rows)` — the full grid is the
-/// scene's habitat. Wander and facing are resolved from the fixture clock so
-/// the pet moves naturally inside the round window.
+/// `area` is cropped to the upper half of the grid so the pet's body center
+/// lands on the circle's vertical equator — the widest visible band. Specifically:
+/// `area_height = (grid_rows / 2 + PET_H / 2).min(grid_rows)`, which places the
+/// pet's feet near `grid_rows / 2` and the body spanning upward. The lower half
+/// of the circle shows the background base color (accepted v1 trade-off; tune
+/// `area_height` to extend the habitat downward if desired).
+///
+/// Wander is narrowed to `PET_W + 2 * COMPANION_WANDER_HALF` so the pet stays
+/// near center instead of drifting to the square window's edges (which fall
+/// outside the circle's narrow chords).
 pub fn build_round_scene_draw_list(
     vm: &WatchViewModel,
     now: time::OffsetDateTime,
     grid_cols: u16,
     grid_rows: u16,
 ) -> SceneDrawList {
-    let area = Rect::new(0, 0, grid_cols, grid_rows);
+    // Crop to the upper circle: pet body centers on the equator; the lower half
+    // shows the background. Tune `COMPANION_WANDER_HALF` and `area_height` to
+    // adjust the look.
+    let area_height = (grid_rows / 2 + PET_H / 2).min(grid_rows);
+    let area = Rect::new(0, 0, grid_cols, area_height);
 
-    // Resolve wander offset + facing from the live clock and grid width,
-    // mirroring exactly what `PetPanel::render` does (src/tui/panels/pet.rs:141-158).
-    let (wx, fc) = crate::tui::wander::resolve_wander_offset(vm, now, grid_cols);
+    // Narrow the wander range so the pet drifts gently around center rather
+    // than roaming the full square width (which puts it outside the circle's
+    // chords). The effective habitat_width fed to `resolve_wander_offset` is
+    // PET_W + 2 * COMPANION_WANDER_HALF; `area.width` is still the full
+    // grid_cols so horizontal centering is true-center.
+    let wander_width = PET_W + 2 * COMPANION_WANDER_HALF;
+
+    // Resolve wander offset + facing from the live clock and narrowed width,
+    // mirroring what `PetPanel::render` does (src/tui/panels/pet.rs:141-158)
+    // but with a companion-specific wander range.
+    let (wx, fc) = crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
     let vm: Cow<WatchViewModel> = if wx != vm.wander_offset_x || fc != vm.facing {
         Cow::Owned({
             let mut v = vm.clone();
