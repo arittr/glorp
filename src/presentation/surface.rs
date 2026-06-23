@@ -276,6 +276,31 @@ mod resolver_tests {
         );
     }
 
+    /// Anti-drift parity guard: with neutral (passthrough) inputs every knob is a
+    /// no-op, so ALL surfaces MUST collapse to the shared base `role_color`.
+    /// This test fails loudly if a future edit makes any surface diverge at its
+    /// base resolution (i.e. without live inputs engaged).
+    #[test]
+    fn surfaces_share_one_base_resolution_with_neutral_inputs() {
+        let p = default_theme_palette();
+        let neutral = LiveColorInputs::passthrough();
+        for style in [WATCH_STYLE, ROUND_STYLE, SCREEN_STYLE, MENU_STYLE] {
+            let out = resolve_pet_colors(&p, &neutral, &style);
+            for role in [
+                PaletteRoleName::Body,
+                PaletteRoleName::Mouth,
+                PaletteRoleName::Pattern,
+                PaletteRoleName::Accent,
+            ] {
+                assert_eq!(
+                    role_rgb(&out, role),
+                    role_color(role, &p),
+                    "neutral inputs must collapse every surface to the shared base for {role:?} (style={style:?})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn watch_style_runs_phase_then_droop_then_shimmer_then_lift_in_order() {
         let p = default_theme_palette();
