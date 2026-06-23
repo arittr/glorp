@@ -221,6 +221,18 @@ After unification both surfaces produce a `SceneDrawList`, so the two formats **
 
 Strangler-fig, companion-first. Each track is independently shippable; behavior-preserving except where a golden re-bake is explicitly reviewed. `render_pet` and `art.rs` are **forbidden changes** in every track.
 
+**Delivery status (track → plan ledger).** Tracks map to incremental plans under `docs/superpowers/plans/render-seam-NN-*.md`. A track may split across plans to keep each increment small and byte-stable. Update this table on each plan's merge so deferred work is never lost.
+
+| Plan | Track(s) | Status |
+|---|---|---|
+| 01 — color resolution unification | 0, 1 | **DONE** (merged `d15ea78`) |
+| 02 — `EffectState` (viewport-agnostic per-frame effects) | 2a | **in progress** |
+| 03 — wander/facing semantic split + grounding/ambient/props placement extraction | 2b | planned |
+| 04 — `SceneDrawList` + companion migration | 3 | planned |
+| 05 — migrate watch adapter | 4 | planned |
+| 06 — menubar reroute + screen-window adapter | 5, 6 | planned |
+| 07 — dev-preview unification + dead-scaffolding cleanup | 7 | planned |
+
 ### Track 0 — Safety net
 - **Purpose:** make the rest safe.
 - **Scope:** pin current `cells.json` + `round-commands.json` as the regression baseline. Add a cross-surface **characterization test** capturing today's role→RGB for each surface × mood × role.
@@ -236,17 +248,27 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 
 ### Track 2 — Lift effects to data
 - **Purpose:** make per-frame effects readable by any surface; keep `render_pet` content-agnostic.
-- **Scope:** move inline `compute_*` (wander/facing/twinkle/shimmer/token_pop) and grounding/ambient/props/performance placement out of `PetPanel::render` into `PetScene::build`; wander resolved against viewport in a `render` step. Watch reads from the scene.
+- **Delivery:** split across two plans (2a then 2b) so each increment stays small and byte-stable. Grounding for the split: of the inline effects, `shimmer_role`/`twinkle`/`token_pop` depend only on species + `now` (fully viewport/cursor-agnostic, computed-and-lost today); `wander`/`facing` need `area.width`; cursor-eyes need cursor + hit_area.
+
+#### Track 2a — Viewport-agnostic effects → `EffectState` (Plan 02)
+- **Scope:** extract `shimmer_role`, `twinkle`, `token_pop` out of inline computation in `render_pet_inside` into a per-frame `EffectState` (`src/presentation/effect.rs`, `EffectState::from_vm(vm, now, color_capability)`). Watch reads them from the struct. Per-frame build (not a vm field) — `now` drives the animation; companion will build the identical `EffectState` per its own frame in Plan 04.
 - **Forbidden:** behavior change.
-- **Verification:** watch goldens stable; visual diff via Preview Lab unchanged.
-- **Stop condition:** `PetPanel::render` no longer computes effects inline.
+- **Verification:** watch goldens byte-stable; `EffectState::from_vm` reproduces the animator computations exactly.
+- **Stop condition:** `render_pet_inside` no longer computes shimmer/twinkle/token_pop inline; they live on `EffectState`.
+
+#### Track 2b — Wander/facing semantic split + placement extraction (Plan 03)
+- **Scope:** (1) refactor `src/pet/animator.rs` so `wander`/`facing` separate the viewport-agnostic SEMANTIC intent (target column, drift direction) from the pixel resolution against `area.width`; store the semantic intent on `EffectState`, resolve pixels at render time. (2) Move grounding/ambient/props/performance PLACEMENT out of `PetPanel::render` into the semantic `PetScene::build`. Cursor-tracked eyes stay render-time (need cursor + hit_area).
+- **Forbidden:** behavior change.
+- **Verification:** watch goldens byte-stable; visual diff via Preview Lab unchanged.
+- **Stop condition:** `PetPanel::render` no longer computes effect/placement logic inline; the semantic scene is a built data structure.
 
 ### Track 3 — `SceneDrawList` + migrate companion ← **the visible win**
 - **Purpose:** companion becomes first-class.
 - **Scope:** introduce `SceneDrawList` and `render(style, viewport)`; point the companion AppKit blitter at `scene.render(ROUND_STYLE, viewport)`, retiring `derive_round_scene_model` → `build_draw_commands`. Companion inherits grounding/ambient/props/speech/effects/halo + mood color, under a round `SurfaceStyle` (Compact detail, Circle clip, external-display privacy).
 - **Expected change:** companion gets richer (intended). `round-commands.json` → unified artifact, re-baked and reviewed.
+- **Debt to retire (from Plan 02):** `EffectState::from_vm` currently takes `ColorCapability` purely to gate `token_pop` off on `Flat` — a *terminal* capability leaking into the surface-agnostic builder (an AppKit companion has no meaningful `Flat`). When `render(style, viewport)` lands, move the `Flat`/`calm`/`burst` suppression OUT of `from_vm` into the `SurfaceStyle` resolution step (alongside `eye_emphasis`'s capability-awareness); `EffectState` then holds the raw `compute_token_pop(...)` result and each surface decides whether to paint it.
 - **Verification:** `dev-preview` round previews reviewed; companion runs on a 480×480 viewport.
-- **Stop condition:** companion renders the full scene; old round draw path deleted.
+- **Stop condition:** companion renders the full scene; old round draw path deleted; `EffectState::from_vm` no longer takes `ColorCapability`.
 
 ### Track 4 — Migrate watch
 - **Scope:** gut `PetPanel::render` into a `SceneDrawList` → `Buffer` blitter.

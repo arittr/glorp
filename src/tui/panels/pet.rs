@@ -4,8 +4,8 @@ use ratatui::style::{Color, Style};
 
 use crate::game::habitat::{catalog_prop, HabitatPetLayer, HabitatPropId, HabitatPropZone};
 use crate::pet::animator::{
-    compute_facing, compute_shimmer_role, compute_sleep_wander_x, compute_twinkle,
-    compute_wake_wander_x, compute_wander_position_x, lazy_wander_instant,
+    compute_facing, compute_sleep_wander_x, compute_wake_wander_x, compute_wander_position_x,
+    lazy_wander_instant,
 };
 use crate::presentation::{privacy::PresentationSurface, scene::PresentationScene};
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
@@ -37,7 +37,7 @@ use art_lines::{
 };
 pub(crate) use colors::pet_role_style;
 use colors::{
-    activity_glyph_budget, performance_posture_offset, profile_token_pop, resolve_watch_pet_styles,
+    activity_glyph_budget, performance_posture_offset, resolve_watch_pet_styles,
     watch_live_color_inputs,
 };
 use performance::apply_pet_performance_cues;
@@ -401,15 +401,10 @@ fn render_pet_inside(
     color_capability: ColorCapability,
     pet_performance: crate::tui::room::PetPerformance,
 ) {
-    let species = vm.pet_render.generated_species;
-    let shimmer_role = compute_shimmer_role(species, now);
-    let twinkle = compute_twinkle(species, now, vm.life_profile.idle.idle_minutes);
-    let token_pop = profile_token_pop(
-        vm.last_feed_pulse_at,
-        &vm.life_profile,
-        color_capability,
-        now,
-    );
+    let effects = crate::presentation::EffectState::from_vm(vm, now, color_capability);
+    let shimmer_role = effects.shimmer_role;
+    let twinkle = effects.twinkle;
+    let token_pop = effects.token_pop;
 
     // The shared resolver runs the live color pipeline: `live_styles` carries
     // the full WATCH chain (phase tint + droop + shimmer + activity lift),
@@ -909,43 +904,6 @@ pub(crate) mod tests {
         });
 
         assert_ne!(cache_claude, output_claude);
-    }
-
-    #[test]
-    fn token_pop_requires_current_profile_burst() {
-        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
-        let pulse = now - time::Duration::seconds(1);
-
-        assert!(profile_token_pop(
-            Some(pulse),
-            &PetLifeProfile {
-                burst_level: 0.6,
-                ..Default::default()
-            },
-            ColorCapability::Truecolor,
-            now,
-        )
-        .is_some());
-        assert!(profile_token_pop(
-            Some(pulse),
-            &PetLifeProfile {
-                burst_level: 0.0,
-                ..Default::default()
-            },
-            ColorCapability::Truecolor,
-            now,
-        )
-        .is_none());
-        assert!(profile_token_pop(
-            Some(pulse),
-            &PetLifeProfile {
-                burst_level: 0.6,
-                ..Default::default()
-            },
-            ColorCapability::Flat,
-            now,
-        )
-        .is_none());
     }
 
     #[test]
