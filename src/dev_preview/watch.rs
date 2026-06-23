@@ -92,6 +92,8 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
         seed_usage_store_unknown_source,
     )?);
 
+    frames.push(render_habitat_props_orbit_watch_frame(ctx, scratch_dir)?);
+
     Ok(frames)
 }
 
@@ -1805,6 +1807,74 @@ fn seed_usage_store_unknown_source(path: &Path, now: OffsetDateTime) -> Result<(
     Ok(())
 }
 
+/// Renders a watch frame with earned props + an explicit Orbit-class prop
+/// reaction. This frame exists to provide golden coverage of prop-cell and
+/// reaction rendering — the plan-04 regression showed this was previously
+/// untested in the dev-preview suite. The Orbit reaction also exercises the
+/// compact-mode downgrade path (compact → Glow).
+fn render_habitat_props_orbit_watch_frame(
+    ctx: &PreviewRenderContext,
+    scratch_dir: &Path,
+) -> Result<PreviewFrame> {
+    const ID: &str = "watch-habitat-props-orbit";
+    const TITLE: &str = "Watch Habitat Props Orbit Reaction";
+    const WIDTH: u16 = 120;
+    const HEIGHT: u16 = 32;
+
+    let state = orbit_prop_pet_state(ctx);
+    let usage_path = scratch_dir.join(format!("{ID}.sqlite"));
+    seed_usage_store(&usage_path, ctx.fixed_now)?;
+    let render =
+        RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(ctx.fixed_now));
+    let mut vm = build_watch_view_model_at(
+        &state,
+        &usage_path,
+        ctx.fixed_now,
+        crate::storage::day_axis::LocalDayMapper::Fixed(UtcOffset::UTC),
+    )?;
+    // Inject an explicit Orbit reaction for the token_orbit_5m prop so the
+    // Orbit rendering path is covered by the golden. Non-compact width so the
+    // Orbit kind is preserved (compact would degrade it to Glow).
+    vm.life_profile.activity_level = 1.2;
+    vm.life_profile.prop_reactions = vec![PropReaction {
+        prop_id: crate::storage::state::HabitatPropId::new(crate::game::habitat::TOKEN_ORBIT_5M),
+        intensity: 0.8,
+        kind: PropReactionKind::Orbit,
+    }];
+
+    let layout = layout_watch_with_context(Rect::new(0, 0, WIDTH, HEIGHT), &vm, &render);
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT))?;
+    terminal.draw(|frame| {
+        render_watch_frame_with_layout(frame, &vm, &render, &layout);
+    })?;
+
+    let mut frame = frame_from_buffer(ID, TITLE, terminal.backend().buffer());
+    frame.layout = Some(preview_layout(ID, &layout));
+    frame.contract.scene = Some(
+        crate::dev_preview::contract::PreviewSceneArtifact::from_watch_view_model(
+            ID,
+            &vm,
+            ctx.fixed_now,
+            frame.layout.as_ref(),
+        ),
+    );
+    Ok(frame)
+}
+
+fn orbit_prop_pet_state(ctx: &PreviewRenderContext) -> PetState {
+    let mut state = seeded_pet_state(ctx);
+    // Add token_orbit_5m so the prop renders and gets the Orbit reaction
+    // applied. The orbit prop is a Trophy class with display_priority 50.
+    state.habitat.earned_props.push(EarnedHabitatProp {
+        id: HabitatPropId::new("token_orbit_5m"),
+        earned_at: ctx.fixed_now - Duration::days(3),
+        source: HabitatPropSource::LifetimeTokens {
+            threshold: 5_000_000.0,
+        },
+    });
+    state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1816,7 +1886,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 47);
+        assert_eq!(frames.len(), 48);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -1895,6 +1965,8 @@ mod tests {
         assert_eq!((frames[45].width, frames[45].height), (120, 32));
         assert_eq!(frames[46].id, "watch-activity-identity-unknown");
         assert_eq!((frames[46].width, frames[46].height), (120, 32));
+        assert_eq!(frames[47].id, "watch-habitat-props-orbit");
+        assert_eq!((frames[47].width, frames[47].height), (120, 32));
     }
 
     #[test]

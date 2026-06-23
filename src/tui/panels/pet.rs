@@ -36,7 +36,7 @@ use colors::{
     activity_glyph_budget, performance_posture_offset, resolve_watch_pet_styles,
     watch_live_color_inputs,
 };
-use performance::apply_pet_performance_cues;
+use performance::performance_cue_cells;
 
 #[cfg(test)]
 use crate::game::evolution::Stage;
@@ -348,13 +348,17 @@ impl LegacyPanel for PetPanel {
             &vm.pet_render.seed,
             ctx,
         );
-        props::render_prop_layers(
+        blit_draw_list(
             buf,
-            &prop_cells,
-            &scene,
-            &life_profile.prop_reactions,
-            ctx.color_capability,
-            &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
+            &crate::presentation::SceneDrawList {
+                cells: props::prop_layer_cells(
+                    &prop_cells,
+                    &scene,
+                    &life_profile.prop_reactions,
+                    ctx.color_capability,
+                    &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
+                ),
+            },
         );
 
         // Contact shadow: a calm bg deepening directly under the pet's feet so it
@@ -387,23 +391,31 @@ impl LegacyPanel for PetPanel {
         );
 
         // Tiny performance cue near the pet: one cell, never a template rewrite.
-        apply_pet_performance_cues(
+        blit_draw_list(
             buf,
-            &scene,
-            room_profile.pet_performance,
-            ctx.color_capability,
+            &crate::presentation::SceneDrawList {
+                cells: performance_cue_cells(
+                    &scene,
+                    room_profile.pet_performance,
+                    ctx.color_capability,
+                ),
+            },
         );
 
         // Foreground props paint on top of the pet, for whenever depth in
         // front of the pet is wanted (no foreground props in the catalog
         // today; the pass exists so adding one only requires a catalog flip).
-        props::render_prop_layer(
+        blit_draw_list(
             buf,
-            &prop_cells,
-            &scene,
-            &life_profile.prop_reactions,
-            ctx.color_capability,
-            HabitatPetLayer::Foreground,
+            &crate::presentation::SceneDrawList {
+                cells: props::prop_layer_cells(
+                    &prop_cells,
+                    &scene,
+                    &life_profile.prop_reactions,
+                    ctx.color_capability,
+                    &[HabitatPetLayer::Foreground],
+                ),
+            },
         );
     }
 }
@@ -1502,13 +1514,27 @@ pub(crate) mod tests {
         }
     }
 
+    fn blit_performance_cue(
+        buf: &mut Buffer,
+        scene: &PetSceneLayout,
+        performance: crate::tui::room::PetPerformance,
+        color_capability: ColorCapability,
+    ) {
+        blit_draw_list(
+            buf,
+            &crate::presentation::SceneDrawList {
+                cells: performance_cue_cells(scene, performance, color_capability),
+            },
+        );
+    }
+
     #[test]
     fn performance_cue_places_floor_symbol_below_pet() {
         let pet_art = Rect::new(30, 3, 13, 10);
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::TiredAwake,
@@ -1526,7 +1552,7 @@ pub(crate) mod tests {
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::AsleepDreaming,
@@ -1544,7 +1570,7 @@ pub(crate) mod tests {
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::HeavyDayCozy,
@@ -1563,7 +1589,7 @@ pub(crate) mod tests {
         let mut buf = Buffer::empty(scene.habitat);
 
         // Should not panic on underflow and must not overwrite pet art.
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::CatchUpWake,
@@ -1585,7 +1611,7 @@ pub(crate) mod tests {
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::SourceBurstPerk,
