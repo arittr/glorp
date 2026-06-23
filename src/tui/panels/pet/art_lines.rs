@@ -1,18 +1,23 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::pet::render::{PaletteRoleName, StyledSegment};
+use crate::presentation::DrawCell;
 use crate::tui::style::SemanticStyles;
 use crate::tui::view_model::WatchViewModel;
 
 use super::colors::palette_from_styles;
 use super::pet_role_style;
 
-/// Draws `lines` into `area`, writing only non-space glyphs. Whitespace cells
-/// pass through, leaving whatever the habitat / props passes wrote underneath
-/// visible — so the pet's bounding rectangle no longer occludes the backdrop.
+/// Reference sparse writer kept as the byte-stability oracle for
+/// [`pet_body_cells`]: it draws `lines` into `area`, writing only non-space
+/// glyphs. Production renders through `pet_body_cells` + `blit_draw_list`
+/// instead; this is retained solely so the equivalence test can prove the cell
+/// list reproduces the legacy buffer byte-for-byte.
+#[cfg(test)]
 pub(super) fn render_pet_lines_sparse(buf: &mut Buffer, area: Rect, lines: &[Line<'_>]) {
     let right = area.x.saturating_add(area.width);
     let bottom = area.y.saturating_add(area.height);
@@ -39,6 +44,53 @@ pub(super) fn render_pet_lines_sparse(buf: &mut Buffer, area: Rect, lines: &[Lin
             }
         }
     }
+}
+
+/// Cell-producing sibling of the legacy sparse writer. Walks `lines`
+/// identically — skipping space glyphs, advancing one column per char, same
+/// bounds guards — but pushes a [`DrawCell`] per non-space glyph instead of
+/// writing to a [`Buffer`]. The fg is read from each span's style (always
+/// `Color::Rgb` for pet spans; any other variant falls back to `None`), and
+/// `bold` carries the eye's `Modifier::BOLD`. `bg` is left `None` so the
+/// sparse-pet contract holds: whatever the habitat wrote underneath survives.
+pub(super) fn pet_body_cells(area: Rect, lines: &[Line<'_>]) -> Vec<DrawCell> {
+    let right = area.x.saturating_add(area.width);
+    let bottom = area.y.saturating_add(area.height);
+    let mut cells = Vec::new();
+    for (row_idx, line) in lines.iter().enumerate() {
+        let y = area.y.saturating_add(row_idx as u16);
+        if y >= bottom {
+            break;
+        }
+        let mut x = area.x;
+        for span in &line.spans {
+            if x >= right {
+                break;
+            }
+            let fg = match span.style.fg {
+                Some(Color::Rgb(r, g, b)) => Some(crate::pet::palette::Rgb::new(r, g, b)),
+                _ => None,
+            };
+            let bold = span.style.add_modifier.contains(Modifier::BOLD);
+            for ch in span.content.chars() {
+                if x >= right {
+                    break;
+                }
+                if ch != ' ' {
+                    cells.push(DrawCell {
+                        row: y,
+                        col: x,
+                        glyph: Some(ch.to_string()),
+                        fg,
+                        bg: None,
+                        bold,
+                    });
+                }
+                x = x.saturating_add(1);
+            }
+        }
+    }
+    cells
 }
 
 /// Render a small speech bubble: "« text »" centered above the pet, styled
@@ -395,4 +447,118 @@ fn char_slice<'a>(line: &'a str, indices: &[usize], start_char: usize, end_char:
     let start = indices[start_char];
     let end = indices[end_char];
     &line[start..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::blit::blit_draw_list;
+    use super::*;
+    use crate::presentation::SceneDrawList;
+    use ratatui::style::Style;
+
+    fn styled_lines() -> Vec<Line<'static>> {
+        // A BOLD green "eye" span and a non-bold cream "body" span containing a
+        // space (skipped). Mirrors how real pet spans look: fg always Rgb, bg
+        // unset, BOLD only on the eye. Two rows exercise the row advance.
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    "o",
+                    Style::default()
+                        .fg(Color::Rgb(0x82, 0xbc, 0x83))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("a b", Style::default().fg(Color::Rgb(0xef, 0xeb, 0xe4))),
+            ]),
+            Line::from(vec![Span::styled(
+                "X",
+                Style::default().fg(Color::Rgb(0x10, 0x20, 0x30)),
+            )]),
+        ]
+    }
+
+    #[test]
+    fn pet_body_cells_skips_spaces_and_maps_style() {
+        let area = Rect::new(3, 7, 13, 10);
+        let cells = pet_body_cells(area, &styled_lines());
+
+        // Row 0: "o" at col 3 (BOLD eye, green), "a" at col 4, space skipped,
+        // "b" at col 6. Row 1: "X" at col 3.
+        assert_eq!(
+            cells,
+            vec![
+                DrawCell {
+                    row: 7,
+                    col: 3,
+                    glyph: Some("o".to_string()),
+                    fg: Some(crate::pet::palette::Rgb::new(0x82, 0xbc, 0x83)),
+                    bg: None,
+                    bold: true,
+                },
+                DrawCell {
+                    row: 7,
+                    col: 4,
+                    glyph: Some("a".to_string()),
+                    fg: Some(crate::pet::palette::Rgb::new(0xef, 0xeb, 0xe4)),
+                    bg: None,
+                    bold: false,
+                },
+                DrawCell {
+                    row: 7,
+                    col: 6,
+                    glyph: Some("b".to_string()),
+                    fg: Some(crate::pet::palette::Rgb::new(0xef, 0xeb, 0xe4)),
+                    bg: None,
+                    bold: false,
+                },
+                DrawCell {
+                    row: 8,
+                    col: 3,
+                    glyph: Some("X".to_string()),
+                    fg: Some(crate::pet::palette::Rgb::new(0x10, 0x20, 0x30)),
+                    bg: None,
+                    bold: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pet_body_cells_falls_back_to_no_fg_for_non_rgb_span() {
+        // Pet spans are always Rgb in practice; if a non-Rgb fg ever appears,
+        // the documented fallback is fg: None (leave existing fg intact).
+        let area = Rect::new(0, 0, 5, 1);
+        let lines = vec![Line::from(vec![Span::styled(
+            "z",
+            Style::default().fg(Color::Indexed(5)),
+        )])];
+        let cells = pet_body_cells(area, &lines);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].fg, None);
+    }
+
+    #[test]
+    fn pet_body_cells_blit_matches_sparse_writer_byte_for_byte() {
+        // The cell list, once blitted, must produce a buffer byte-identical to
+        // the legacy sparse writer — same symbols, same fg, same BOLD eye, same
+        // untouched-space cells. This is the local byte-stability guard.
+        let area = Rect::new(2, 1, 13, 10);
+        let lines = styled_lines();
+
+        let mut sparse_buf = Buffer::empty(Rect::new(0, 0, 20, 14));
+        render_pet_lines_sparse(&mut sparse_buf, area, &lines);
+
+        let mut blit_buf = Buffer::empty(Rect::new(0, 0, 20, 14));
+        blit_draw_list(
+            &mut blit_buf,
+            &SceneDrawList {
+                cells: pet_body_cells(area, &lines),
+            },
+        );
+
+        assert_eq!(
+            sparse_buf, blit_buf,
+            "pet_body_cells + blit must equal the legacy sparse writer"
+        );
+    }
 }

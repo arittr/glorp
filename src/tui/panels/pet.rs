@@ -29,7 +29,7 @@ pub(crate) use ambient::{effective_weekend_softening, pet_silhouette_halo_rects}
 pub(crate) use art_lines::mirror_line;
 pub(crate) use art_lines::pet_role_spans_for_line;
 use art_lines::{
-    build_pet_lines, cursor_normalized_x_within, render_pet_lines_sparse, render_speech_bubble,
+    build_pet_lines, cursor_normalized_x_within, pet_body_cells, render_speech_bubble,
 };
 use blit::blit_draw_list;
 pub(crate) use colors::pet_role_style;
@@ -412,7 +412,12 @@ fn render_pet_inside(
         cursor_norm_x,
         effective_twinkle,
     );
-    render_pet_lines_sparse(buf, pet_rect, &lines);
+    blit_draw_list(
+        buf,
+        &crate::presentation::SceneDrawList {
+            cells: pet_body_cells(pet_rect, &lines),
+        },
+    );
 }
 
 #[cfg(test)]
