@@ -20,12 +20,12 @@ fn round_preview_renders_pet_cells_via_seam() {
         52,
         RoundRenderCapabilities::preview_truecolor(),
     );
-    // Count fg-colored non-blank cells inside the aperture. Room glyphs alone
-    // could satisfy a low bar (≥5), so we mirror the ≥10 threshold from
-    // `build_round_scene_draw_list_includes_pet_body_cells` in scene.rs — that
-    // test verified ≥10 non-blank pet-glyph cells in the draw list. Requiring ≥10
-    // fg-colored cells in the rendered frame proves pet rendering is present, not
-    // just room glyphs (which may have no fg color in truecolor mode).
+    // Count fg-colored non-blank cells inside the aperture. The ≥10 threshold
+    // mirrors `build_round_scene_draw_list_includes_pet_body_cells` in scene.rs
+    // (which verifies ≥10 non-blank pet-glyph cells in the draw list). All seam
+    // glyphs carry fg in truecolor (pet + room alike), so this is a lower bound on
+    // substantial seam content rendering — a broken pet seam would fall below ≥10
+    // even with room glyphs present.
     let non_blank: usize = frame
         .cells
         .iter()
