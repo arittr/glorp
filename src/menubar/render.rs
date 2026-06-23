@@ -1,62 +1,84 @@
 //! Build an `NSAttributedString` from a `WatchViewModel`. Two regions:
-//! the 10-row pet frame (uses `StyledSegment.role` to color each cell) and
-//! a stats block beneath it (dim labels, accent values).
+//! the shared habitat scene (rendered via `build_round_scene_draw_list` +
+//! `scene_draw_list_to_attributed`) and a stats block beneath it (dim labels,
+//! accent values).
 //!
-//! All char/UTF-16 arithmetic assumes BMP-only content. The pet templates and
-//! particle glyphs are all in the BMP; if a future template introduces a
-//! non-BMP codepoint, the span offsets will need a UTF-16 conversion pass.
+//! All char/UTF-16 arithmetic assumes BMP-only content. The scene glyphs are
+//! all in the BMP; if a future template introduces a non-BMP codepoint, the
+//! span offsets will need a UTF-16 conversion pass.
 
 #![cfg(target_os = "macos")]
 
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSTextAlignment,
+    NSBackgroundColorAttributeName, NSColor, NSFont, NSFontAttributeName, NSFontWeightBold,
+    NSForegroundColorAttributeName,
 };
 use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 
 use crate::format::format_tokens;
-use crate::pet::render::PaletteRoleName;
 use crate::presentation::privacy::PresentationSurface;
 use crate::presentation::scene::{PresentationHelperHealth, PresentationScene};
-use crate::tui::identity::SourceDiversity;
-use crate::tui::life::SourceAccent;
 use crate::tui::view_model::WatchViewModel;
 
 /// Approximate width in columns of the wider stats lines; used to size the
-/// popover. The pet frame is 13 columns wide; stats lines are short labels +
-/// short values, comfortably under 36 columns.
+/// popover. Stats lines are short labels + short values, comfortably under 36
+/// columns.
 pub const POPOVER_COLUMNS: usize = 36;
 pub const POPOVER_ROWS: usize = 22;
 pub const FONT_POINT_SIZE: f64 = 13.0;
+
+/// Height of the habitat scene region in the popover, in rows.
+///
+/// TUNABLE — aesthetic default (Drew's call). The stats block emits ≈ 11 rows;
+/// scene + stats must fit `POPOVER_ROWS = 22`. At `MENU_SCENE_ROWS = 11` the
+/// layout is scene(11) + stats(11) = 22 — exact fit, no clipping. To give the
+/// habitat more vertical room, raise both `MENU_SCENE_ROWS` and `POPOVER_ROWS`
+/// together.
+const MENU_SCENE_ROWS: usize = 11;
 
 pub struct RenderedBlock {
     pub attr: Retained<NSMutableAttributedString>,
     pub char_len: usize,
 }
 
-/// Render the pet region (framed art + trailing newline). Returned `char_len`
-/// is the count of `char` codepoints in the attributed string; callers use it
-/// as the upper bound of the `NSRange` to replace when animating just the pet.
+/// Render the habitat scene region as an `NSMutableAttributedString`.
 ///
-/// The pet block is center-aligned via a paragraph-style attribute so the
-/// 13-char art rows sit centered in the wider popover instead of pinned to
-/// the left text-container inset.
+/// Builds the full shared habitat scene via `build_round_scene_draw_list` and
+/// rasterizes it with `scene_draw_list_to_attributed`. The scene is
+/// `POPOVER_COLUMNS × MENU_SCENE_ROWS` — at 36×11 `compact=true` is active
+/// (same parameterization as the round companion). Returned `char_len` is the
+/// count of `char` codepoints; callers use it as the upper bound of the
+/// `NSRange` to replace when animating just the pet region.
+///
+/// Pet colors come from `render_pet_to_draw_list`/`PetSceneModel` rather than
+/// the old `MENU_STYLE` source-accent path — the color change is intentional
+/// and flagged for Drew's visual review.
 pub fn render_pet_block(vm: &WatchViewModel) -> RenderedBlock {
-    let scene = PresentationScene::from_watch_view_model(
+    let now = time::OffsetDateTime::now_utc();
+    let list = crate::round::scene::build_round_scene_draw_list(
         vm,
-        time::OffsetDateTime::now_utc(),
-        PresentationSurface::MenubarPopover,
+        now,
+        POPOVER_COLUMNS as u16,
+        MENU_SCENE_ROWS as u16,
     );
-    debug_assert!(scene.privacy.source_names_visible);
-    debug_assert!(scene.privacy.exact_counts_visible);
-
-    let mut runs: Vec<StyledRun> = Vec::new();
-    append_pet(&mut runs, vm);
-    runs.push(StyledRun::plain("\n"));
-    let mut block = materialize(runs);
-    apply_paragraph_alignment(&mut block, NSTextAlignment::Center);
-    block
+    let mut attr =
+        scene_draw_list_to_attributed(&list, POPOVER_COLUMNS as u16, MENU_SCENE_ROWS as u16);
+    // Count chars so the caller can form a tight NSRange over just this region.
+    // The scene text is BMP-only so char count == UTF-16 unit count.
+    //
+    // Append a trailing "\n" separator so the stats block (appended by the
+    // caller) starts on a new visual line rather than overprinting the last
+    // scene row. Include it in char_len so NSRange arithmetic in app.rs
+    // stays accurate.
+    let scene_chars = attr.string().to_string().chars().count();
+    let separator = NSString::from_str("\n");
+    let sep_attr = NSMutableAttributedString::from_nsstring(&separator);
+    unsafe {
+        attr.appendAttributedString(&sep_attr);
+    }
+    let char_len = scene_chars + 1;
+    RenderedBlock { attr, char_len }
 }
 
 pub fn render_stats_block(vm: &WatchViewModel) -> RenderedBlock {
@@ -65,75 +87,156 @@ pub fn render_stats_block(vm: &WatchViewModel) -> RenderedBlock {
     materialize(runs)
 }
 
+/// Convert a [`crate::presentation::SceneDrawList`] to an `NSMutableAttributedString`
+/// suitable for display in the menubar popover's `NSTextView`.
+///
+/// Calls the pure [`crate::presentation::rasterize`] to build a dense grid, then
+/// coalesces consecutive cells with identical `(fg, bg, bold)` into single runs and
+/// appends each run with the appropriate `NSAttributedString` attributes:
+/// - `NSForegroundColorAttributeName` — `fg` mapped to `NSColor`; if `None`, uses
+///   `COLOR_FG` (the popover's default text color, matching `render_pet_block`).
+/// - `NSBackgroundColorAttributeName` — `bg` mapped to `NSColor`; attribute is
+///   **omitted** when `bg` is `None` (transparent background inherits the text view's
+///   surface color).
+/// - `NSFontAttributeName` — `bold_font` when `bold`, else `font`.
+///
+/// Rows are joined with `"\n"`.
+///
+/// # Note
+/// AppKit attributed-string rendering is unverified in automated tests — the pure
+/// rasterize step is covered by unit tests in `src/presentation/rasterize.rs`.
+pub fn scene_draw_list_to_attributed(
+    list: &crate::presentation::SceneDrawList,
+    cols: u16,
+    rows: u16,
+) -> Retained<NSMutableAttributedString> {
+    let grid = crate::presentation::rasterize(list, cols, rows);
+
+    let bold_font = monospace_bold_font();
+    let regular_font = monospace_font();
+
+    // Build the full string and collect run intervals in one pass.
+    struct Run {
+        start: usize,
+        end: usize,
+        fg: Option<Rgb>,
+        bg: Option<Rgb>,
+        bold: bool,
+    }
+
+    let mut full_text = String::new();
+    let mut runs: Vec<Run> = Vec::new();
+
+    for (row_idx, row) in grid.iter().enumerate() {
+        if row_idx > 0 {
+            full_text.push('\n');
+        }
+
+        // Coalesce consecutive cells with the same (fg, bg, bold) into one run.
+        let mut run_start = full_text.chars().count();
+        let mut run_fg: Option<crate::pet::palette::Rgb> = None;
+        let mut run_bg: Option<crate::pet::palette::Rgb> = None;
+        let mut run_bold = false;
+        let mut first = true;
+
+        for cell in row.iter() {
+            let cell_fg = cell.fg;
+            let cell_bg = cell.bg;
+            let cell_bold = cell.bold;
+
+            if first {
+                run_fg = cell_fg;
+                run_bg = cell_bg;
+                run_bold = cell_bold;
+                first = false;
+            } else if cell_fg != run_fg || cell_bg != run_bg || cell_bold != run_bold {
+                // Flush the current run.
+                let run_end = full_text.chars().count();
+                if run_end > run_start {
+                    runs.push(Run {
+                        start: run_start,
+                        end: run_end,
+                        fg: run_fg.map(|c| Rgb(c.r, c.g, c.b)),
+                        bg: run_bg.map(|c| Rgb(c.r, c.g, c.b)),
+                        bold: run_bold,
+                    });
+                }
+                run_start = run_end;
+                run_fg = cell_fg;
+                run_bg = cell_bg;
+                run_bold = cell_bold;
+            }
+            full_text.push(cell.glyph);
+        }
+        // Flush final run of the row.
+        let run_end = full_text.chars().count();
+        if !first && run_end > run_start {
+            runs.push(Run {
+                start: run_start,
+                end: run_end,
+                fg: run_fg.map(|c| Rgb(c.r, c.g, c.b)),
+                bg: run_bg.map(|c| Rgb(c.r, c.g, c.b)),
+                bold: run_bold,
+            });
+        }
+    }
+
+    let ns_text = NSString::from_str(&full_text);
+    let mut attr_str = NSMutableAttributedString::from_nsstring(&ns_text);
+    let total_chars = full_text.chars().count();
+    let full_range = NSRange::from(0..total_chars);
+
+    unsafe {
+        // Apply defaults across the whole string first.
+        attr_str.addAttribute_value_range(NSFontAttributeName, &regular_font, full_range);
+        attr_str.addAttribute_value_range(
+            NSForegroundColorAttributeName,
+            &color_for(COLOR_FG),
+            full_range,
+        );
+
+        // Apply per-run attributes.
+        for run in &runs {
+            if run.end <= run.start {
+                continue;
+            }
+            let range = NSRange::from(run.start..run.end);
+
+            // Foreground color
+            let fg_color = run.fg.map(color_for).unwrap_or_else(|| color_for(COLOR_FG));
+            attr_str.addAttribute_value_range(NSForegroundColorAttributeName, &fg_color, range);
+
+            // Background color — omit attribute if None (transparent)
+            if let Some(bg) = run.bg {
+                attr_str.addAttribute_value_range(
+                    NSBackgroundColorAttributeName,
+                    &color_for(bg),
+                    range,
+                );
+            }
+
+            // Font
+            let font: &NSFont = if run.bold { &bold_font } else { &regular_font };
+            attr_str.addAttribute_value_range(NSFontAttributeName, font, range);
+        }
+    }
+
+    attr_str
+}
+
+/// Bold monospace font at the same point size as [`monospace_font`].
+fn monospace_bold_font() -> Retained<NSFont> {
+    // `monospacedSystemFontOfSize:weight:` requires macOS 10.15+.
+    // NSFontWeightBold is the standard bold weight constant.
+    unsafe { NSFont::monospacedSystemFontOfSize_weight(FONT_POINT_SIZE, NSFontWeightBold) }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Rgb(u8, u8, u8);
 
 const COLOR_FG: Rgb = Rgb(0xef, 0xeb, 0xe4);
 const COLOR_DIM: Rgb = Rgb(0x97, 0x91, 0x8a);
 const COLOR_ACCENT: Rgb = Rgb(0xf0, 0xa6, 0x46);
-
-#[cfg(test)]
-fn role_color_base(role: PaletteRoleName, palette: &crate::pet::palette::ResolvedPalette) -> Rgb {
-    let rgb = crate::pet::palette::role_color(role, palette);
-    Rgb(rgb.r, rgb.g, rgb.b)
-}
-
-/// Sleep dim factor for the popover pet (the menubar's only palette channel).
-const SLEEP_DIM: f32 = 0.7;
-
-/// Extract the source-accent color override for Accent/Particle roles, or `None`
-/// for all other roles and for the no-override (base) case.
-fn menubar_source_override(
-    role: PaletteRoleName,
-    vm: &WatchViewModel,
-) -> Option<crate::pet::palette::Rgb> {
-    if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
-        return None;
-    }
-    // Activity identity wins over life-profile accent for accent/particle glyphs.
-    match vm.activity_identity.source_diversity {
-        SourceDiversity::Ensemble => Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
-        _ => match vm.life_profile.source_accent {
-            Some(SourceAccent::Codex) => Some(crate::pet::palette::Rgb::new(0x86, 0xd9, 0xef)),
-            Some(SourceAccent::Claude) => Some(crate::pet::palette::Rgb::new(0xb3, 0x9d, 0xff)),
-            Some(SourceAccent::Balanced) => Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
-            Some(SourceAccent::Ensemble) => Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
-            None => None,
-        },
-    }
-}
-
-/// Pure resolver shim: applies the shared color pipeline with MENU_STYLE
-/// (source_accent + energy_droop only) and converts back to the menubar Rgb.
-fn menubar_resolve(
-    role: PaletteRoleName,
-    palette: &crate::pet::palette::ResolvedPalette,
-    source_override: Option<crate::pet::palette::Rgb>,
-    asleep: bool,
-) -> Rgb {
-    let inputs = crate::presentation::surface::LiveColorInputs {
-        source_override,
-        droop_mult: if asleep { SLEEP_DIM } else { 1.0 },
-        ..crate::presentation::surface::LiveColorInputs::passthrough()
-    };
-    let resolved = crate::presentation::surface::resolve_pet_colors(
-        palette,
-        &inputs,
-        &crate::presentation::surface::MENU_STYLE,
-    );
-    let rgb = crate::presentation::surface::role_rgb(&resolved, role);
-    Rgb(rgb.r, rgb.g, rgb.b)
-}
-
-fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
-    let source_override = menubar_source_override(role, vm);
-    menubar_resolve(
-        role,
-        &vm.pet_palette,
-        source_override,
-        vm.day_context.asleep,
-    )
-}
 
 struct StyledRun {
     text: String,
@@ -155,46 +258,6 @@ impl StyledRun {
     }
     fn accent(text: impl Into<String>) -> Self {
         Self::new(text, COLOR_ACCENT)
-    }
-}
-
-fn append_pet(runs: &mut Vec<StyledRun>, vm: &WatchViewModel) {
-    // Convert the line/start/end spans to flat run order. For each line we
-    // walk the spans that cover it (in start order), filling unstyled gaps
-    // with body color.
-    let mut spans_by_line: Vec<Vec<&crate::pet::render::StyledSegment>> =
-        vec![Vec::new(); vm.pet_art.len()];
-    for span in &vm.pet_spans {
-        if span.line < spans_by_line.len() {
-            spans_by_line[span.line].push(span);
-        }
-    }
-    for spans in &mut spans_by_line {
-        spans.sort_by_key(|s| s.start);
-    }
-
-    for (line_index, line) in vm.pet_art.iter().enumerate() {
-        let chars: Vec<char> = line.chars().collect();
-        let mut cursor = 0usize;
-        let line_len = chars.len();
-        for span in &spans_by_line[line_index] {
-            let span_start = span.start.min(line_len);
-            let span_end = span.end.min(line_len);
-            if span_start > cursor {
-                let gap: String = chars[cursor..span_start].iter().collect();
-                runs.push(StyledRun::new(gap, COLOR_FG));
-            }
-            if span_end > span_start {
-                let body: String = chars[span_start..span_end].iter().collect();
-                runs.push(StyledRun::new(body, role_color_for_profile(span.role, vm)));
-                cursor = span_end;
-            }
-        }
-        if cursor < line_len {
-            let tail: String = chars[cursor..line_len].iter().collect();
-            runs.push(StyledRun::new(tail, COLOR_FG));
-        }
-        runs.push(StyledRun::plain("\n"));
     }
 }
 
@@ -330,21 +393,6 @@ fn monospace_font() -> Retained<NSFont> {
     unsafe { NSFont::monospacedSystemFontOfSize_weight(FONT_POINT_SIZE, 0.0) }
 }
 
-fn apply_paragraph_alignment(block: &mut RenderedBlock, alignment: NSTextAlignment) {
-    if block.char_len == 0 {
-        return;
-    }
-    unsafe {
-        let style: Retained<NSMutableParagraphStyle> = NSMutableParagraphStyle::new();
-        style.setAlignment(alignment);
-        block.attr.addAttribute_value_range(
-            NSParagraphStyleAttributeName,
-            &style,
-            NSRange::from(0..block.char_len),
-        );
-    }
-}
-
 fn color_for(rgb: Rgb) -> Retained<NSColor> {
     let Rgb(r, g, b) = rgb;
     unsafe {
@@ -360,191 +408,7 @@ fn color_for(rgb: Rgb) -> Retained<NSColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pet::render::StyledSegment;
-    use crate::tui::life::{PetLifeProfile, SourceAccent};
     use crate::tui::view_model::{SourceStatus, WatchViewModel};
-
-    #[test]
-    fn menubar_role_base_matches_resolved_palette() {
-        use crate::pet::palette::{default_theme_palette, role_color};
-        use crate::pet::render::PaletteRoleName::*;
-        let p = default_theme_palette();
-        for role in [Body, Eye, Mouth, Pattern] {
-            let rgb = role_color(role, &p);
-            assert_eq!(role_color_base(role, &p), Rgb(rgb.r, rgb.g, rgb.b));
-        }
-    }
-
-    /// The animation tick uses `pet_block.char_len` as the upper bound of the
-    /// `NSRange` it replaces in the text storage. If that count ever drifts
-    /// from the actual UTF-16 length of the materialized attributed string,
-    /// the popover will slice the stats block on every frame. This test pins
-    /// the invariant for the standard 13×10 framed pet (10 framed rows + a
-    /// trailing blank line).
-    #[test]
-    fn pet_block_char_len_matches_attributed_string_length() {
-        let mut vm = WatchViewModel::fixture();
-        vm.pet_art = (0..10).map(|_| "             ".to_string()).collect(); // 13 spaces
-        vm.pet_spans = Vec::new();
-
-        let block = render_pet_block(&vm);
-
-        let expected = 13 * 10 + 10 + 1; // 10 rows of 13 chars + 10 row newlines + 1 trailing newline
-        assert_eq!(block.char_len, expected);
-        let ns_len = block.attr.length();
-        assert_eq!(
-            ns_len, block.char_len,
-            "BMP-only content should keep NSString UTF-16 length in sync with char count"
-        );
-    }
-
-    #[test]
-    fn menubar_profile_accent_is_poll_bound_and_bmp_safe() {
-        let mut vm = WatchViewModel::fixture();
-        vm.pet_art = vec!["EAPB".to_string()];
-        vm.pet_spans = vec![
-            StyledSegment {
-                line: 0,
-                start: 0,
-                end: 1,
-                role: PaletteRoleName::Eye,
-            },
-            StyledSegment {
-                line: 0,
-                start: 1,
-                end: 2,
-                role: PaletteRoleName::Accent,
-            },
-            StyledSegment {
-                line: 0,
-                start: 2,
-                end: 3,
-                role: PaletteRoleName::Particle,
-            },
-            StyledSegment {
-                line: 0,
-                start: 3,
-                end: 4,
-                role: PaletteRoleName::Body,
-            },
-        ];
-        vm.life_profile = PetLifeProfile {
-            activity_level: 1.5,
-            source_accent: Some(SourceAccent::Codex),
-            ..Default::default()
-        };
-
-        let block = render_pet_block(&vm);
-
-        assert_eq!(
-            block.char_len,
-            block.attr.length(),
-            "profile accents must not disturb the menubar BMP length invariant"
-        );
-
-        let runs = pet_runs_for_test(&vm);
-        assert_eq!(runs[0].text, "E");
-        assert_eq!(
-            rgb_tuple(runs[0].color),
-            rgb_tuple(role_color_base(PaletteRoleName::Eye, &vm.pet_palette))
-        );
-        assert_eq!(runs[1].text, "A");
-        assert_eq!(rgb_tuple(runs[1].color), (0x86, 0xd9, 0xef));
-        assert_eq!(runs[2].text, "P");
-        assert_eq!(rgb_tuple(runs[2].color), (0x86, 0xd9, 0xef));
-        assert_eq!(runs[3].text, "B");
-        assert_eq!(
-            rgb_tuple(runs[3].color),
-            rgb_tuple(role_color_base(PaletteRoleName::Body, &vm.pet_palette))
-        );
-
-        let base_accent = rgb_tuple(role_color_base(PaletteRoleName::Accent, &vm.pet_palette));
-        let profile_accent = rgb_tuple(role_color_for_profile(PaletteRoleName::Accent, &vm));
-        assert_ne!(
-            profile_accent, base_accent,
-            "Codex profile should recolor the accent role"
-        );
-        assert_eq!(profile_accent, (0x86, 0xd9, 0xef));
-    }
-
-    #[test]
-    fn sleeping_pet_dims_the_menubar_palette_and_keeps_the_bmp_invariant() {
-        let mut vm = WatchViewModel::fixture();
-        vm.pet_art = vec!["EAPB".to_string()];
-        vm.pet_spans = vec![
-            StyledSegment {
-                line: 0,
-                start: 0,
-                end: 1,
-                role: PaletteRoleName::Eye,
-            },
-            StyledSegment {
-                line: 0,
-                start: 1,
-                end: 2,
-                role: PaletteRoleName::Accent,
-            },
-            StyledSegment {
-                line: 0,
-                start: 2,
-                end: 3,
-                role: PaletteRoleName::Particle,
-            },
-            StyledSegment {
-                line: 0,
-                start: 3,
-                end: 4,
-                role: PaletteRoleName::Body,
-            },
-        ];
-        vm.day_context.asleep = true;
-
-        let block = render_pet_block(&vm);
-        assert_eq!(
-            block.char_len,
-            block.attr.length(),
-            "sleep dimming must not disturb the menubar BMP length invariant"
-        );
-
-        let dimmed = rgb_tuple(role_color_for_profile(PaletteRoleName::Body, &vm));
-        let base = rgb_tuple(role_color_base(PaletteRoleName::Body, &vm.pet_palette));
-        assert!(
-            dimmed.0 < base.0 && dimmed.1 < base.1 && dimmed.2 < base.2,
-            "asleep must dim every role: {dimmed:?} vs {base:?}"
-        );
-    }
-
-    fn pet_runs_for_test(vm: &WatchViewModel) -> Vec<StyledRun> {
-        let mut runs = Vec::new();
-        append_pet(&mut runs, vm);
-        runs.push(StyledRun::plain("\n"));
-        runs
-    }
-
-    #[test]
-    fn menubar_uses_ensemble_diversity_accent() {
-        let mut vm = WatchViewModel::fixture();
-        vm.activity_identity.source_diversity = SourceDiversity::Ensemble;
-        vm.pet_art = vec!["EAPB".to_string()];
-        vm.pet_spans = vec![
-            StyledSegment {
-                line: 0,
-                start: 1,
-                end: 2,
-                role: PaletteRoleName::Accent,
-            },
-            StyledSegment {
-                line: 0,
-                start: 2,
-                end: 3,
-                role: PaletteRoleName::Particle,
-            },
-        ];
-
-        let runs = pet_runs_for_test(&vm);
-        assert_eq!(rgb_tuple(runs[1].color), (0xf0, 0xc4, 0x6a));
-        assert_eq!(rgb_tuple(runs[2].color), (0xf0, 0xc4, 0x6a));
-    }
 
     #[test]
     fn stats_block_omits_raw_helper_diagnostics_for_menubar_privacy() {
@@ -579,29 +443,5 @@ mod tests {
         let mut runs = Vec::new();
         append_stats(&mut runs, vm);
         runs.into_iter().map(|run| run.text).collect()
-    }
-
-    fn rgb_tuple(rgb: Rgb) -> (u8, u8, u8) {
-        let Rgb(r, g, b) = rgb;
-        (r, g, b)
-    }
-
-    #[test]
-    fn menubar_accent_uses_source_override_and_sleep_dim() {
-        // Ensemble + asleep: accent override (0xf0,0xc4,0x6a) x0.7 truncating = (168,137,74)
-        use crate::pet::palette::default_theme_palette;
-        use crate::pet::render::PaletteRoleName;
-        let palette = default_theme_palette();
-        let out = menubar_resolve(
-            PaletteRoleName::Accent,
-            &palette,
-            Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
-            true,
-        );
-        assert_eq!(out, Rgb(168, 137, 74));
-        // Body, awake: base body unchanged
-        let body = crate::pet::palette::role_color(PaletteRoleName::Body, &palette);
-        let out_body = menubar_resolve(PaletteRoleName::Body, &palette, None, false);
-        assert_eq!(out_body, Rgb(body.r, body.g, body.b));
     }
 }

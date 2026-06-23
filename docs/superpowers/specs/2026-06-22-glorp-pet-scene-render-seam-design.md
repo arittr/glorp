@@ -232,7 +232,7 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 | 05 — `SceneDrawList` + `render(viewport)`; watch becomes a blitter | 3, 4 | **DONE** (merged `c78c0fd`) |
 | 06 — companion blits the shared `SceneDrawList` (round viewport + clip; keep halo; old round path kept) — *the visible win* | 3 | **DONE** (merged `1c5219d`; Drew visually approved) |
 | 07 — retire dead companion round-rendering path (`draw_command`/`draw_pet_art_block`/`pet_art_grid`/`draw_label` + helpers, unreachable after 06) | 3 | **DONE** (merged `16a1663`, −255 LOC) |
-| 08 — menubar adapter | 5 | planned |
+| 08 — menubar popover renders the shared habitat scene (full-habitat per Drew; `SceneDrawList`→`NSAttributedString`) | 5 | **DONE on branch `rearch/08-menubar` (`44f691a`), HELD for Drew's visual review (not merged)** |
 | 09 — screen-window adapter | 6 | planned |
 | 10 — dev-preview unification + dead-scaffolding cleanup: migrate dev-preview round preview to `render_pet_to_draw_list`, THEN retire `build_draw_commands`' pet/room/prop emission + `derive_round_scene_model`'s pet/room/prop derivation (the dev-preview-coupled half of the old round path; only `Background`/`Halo`/`Trouble` stay live) | 7 | planned |
 
