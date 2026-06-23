@@ -227,8 +227,8 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 |---|---|---|
 | 01 — color resolution unification | 0, 1 | **DONE** (merged `d15ea78`) |
 | 02 — `EffectState` (viewport-agnostic per-frame effects) | 2a | **DONE** (merged `ea21084`) |
-| 03 — wander/facing shared resolver (`resolve_wander_offset`) | 2b-i | **in progress** |
-| 04 — `PetScene` container + grounding/ambient/props/performance placement | 2b-ii | planned |
+| 03 — wander/facing shared resolver (`resolve_wander_offset`) | 2b-i | **DONE** (merged `168e4c4`) |
+| 04 — `PetScene` container + placement extraction (+ harden flaky `tui_render` clock tests) | 2b-ii | **in progress** |
 | 05 — `SceneDrawList` + `PetScene::render`; watch becomes a blitter | 3, 4 | planned |
 | 06 — companion adapter (round style, clip, halo, privacy) — *the visible win* | 3 | planned |
 | 07 — menubar adapter | 5 | planned |
