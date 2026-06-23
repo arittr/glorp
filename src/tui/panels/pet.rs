@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Color;
 
 use crate::game::habitat::{HabitatPetLayer, HabitatPropId};
 use crate::presentation::{privacy::PresentationSurface, scene::PresentationScene};
@@ -8,7 +8,6 @@ use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::room::rects_contain;
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
@@ -104,6 +103,17 @@ pub struct AmbientGlyph {
 }
 
 const RESONANCE_REACTION_INTENSITY: f32 = 0.25;
+
+/// Map a ratatui `Color::Rgb` to the backend-agnostic `Rgb` used by `DrawCell`.
+/// Non-Rgb variants (named colors, Reset, etc.) yield `None` so the blitter
+/// leaves the existing fg intact — these never appear in practice on the tokenpet
+/// palette, but the fallback keeps the contract explicit.
+fn color_to_rgb(color: Color) -> Option<crate::pet::palette::Rgb> {
+    match color {
+        Color::Rgb(r, g, b) => Some(crate::pet::palette::Rgb::new(r, g, b)),
+        _ => None,
+    }
+}
 
 fn apply_resonance_reaction(
     mut profile: PetLifeProfile,
@@ -210,13 +220,23 @@ impl LegacyPanel for PetPanel {
             ctx.color_capability,
             vm.day_context.day_phase,
         );
-        for g in room_glyphs {
-            if !rects_contain(&ambient_exclusions, g.col, g.row) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(g.style);
-            }
-        }
+        // room_glyphs_for already filters exclusions; blit every returned glyph.
+        blit_draw_list(
+            buf,
+            &crate::presentation::SceneDrawList {
+                cells: room_glyphs
+                    .into_iter()
+                    .map(|g| crate::presentation::DrawCell {
+                        row: g.row,
+                        col: g.col,
+                        glyph: Some(g.glyph.to_string()),
+                        fg: color_to_rgb(g.style.fg.unwrap_or(Color::Reset)),
+                        bg: None,
+                        bold: false,
+                    })
+                    .collect(),
+            },
+        );
 
         let phase_blend = {
             let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
@@ -236,15 +256,23 @@ impl LegacyPanel for PetPanel {
             vm.day_context.season,
             vm.day_context.climate,
         );
-        for g in glyphs {
-            if ambient_glyph_is_inside_area(&g, scene.habitat) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(
-                    ratatui::style::Style::default().fg(weekend_soften_color(g.color, softening)),
-                );
-            }
-        }
+        blit_draw_list(
+            buf,
+            &crate::presentation::SceneDrawList {
+                cells: glyphs
+                    .into_iter()
+                    .filter(|g| ambient_glyph_is_inside_area(g, scene.habitat))
+                    .map(|g| crate::presentation::DrawCell {
+                        row: g.row,
+                        col: g.col,
+                        glyph: Some(g.glyph.to_string()),
+                        fg: color_to_rgb(weekend_soften_color(g.color, softening)),
+                        bg: None,
+                        bold: false,
+                    })
+                    .collect(),
+            },
+        );
         // Mote pass: after ambient, before activity glyphs, same exclusions
         // (silhouette halo + speech) — spec: Day accumulation.
         let motes = mote_glyphs_for(
@@ -254,13 +282,23 @@ impl LegacyPanel for PetPanel {
             now,
             ctx.color_capability,
         );
-        for g in motes {
-            if ambient_glyph_is_inside_area(&g, scene.habitat) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(Style::default().fg(weekend_soften_color(g.color, softening)));
-            }
-        }
+        blit_draw_list(
+            buf,
+            &crate::presentation::SceneDrawList {
+                cells: motes
+                    .into_iter()
+                    .filter(|g| ambient_glyph_is_inside_area(g, scene.habitat))
+                    .map(|g| crate::presentation::DrawCell {
+                        row: g.row,
+                        col: g.col,
+                        glyph: Some(g.glyph.to_string()),
+                        fg: color_to_rgb(weekend_soften_color(g.color, softening)),
+                        bg: None,
+                        bold: false,
+                    })
+                    .collect(),
+            },
+        );
         let compact = area.width <= 72 || area.height <= 24;
         let earned_prop_ids = vm
             .habitat
@@ -280,13 +318,23 @@ impl LegacyPanel for PetPanel {
             ctx.color_capability,
             extra_count,
         );
-        for g in activity_glyphs {
-            if ambient_glyph_is_inside_area(&g, scene.habitat) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(Style::default().fg(g.color));
-            }
-        }
+        blit_draw_list(
+            buf,
+            &crate::presentation::SceneDrawList {
+                cells: activity_glyphs
+                    .into_iter()
+                    .filter(|g| ambient_glyph_is_inside_area(g, scene.habitat))
+                    .map(|g| crate::presentation::DrawCell {
+                        row: g.row,
+                        col: g.col,
+                        glyph: Some(g.glyph.to_string()),
+                        fg: color_to_rgb(g.color),
+                        bg: None,
+                        bold: false,
+                    })
+                    .collect(),
+            },
+        );
 
         // Trophies + accents, classified by their pet-layer from the catalog.
         // Background avoids the silhouette halo; Behind ignores it (renders
@@ -428,6 +476,7 @@ fn render_pet_inside(
 pub(crate) mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Style;
     use ratatui::Terminal;
     use time::macros::datetime;
     use ColorCapability;
