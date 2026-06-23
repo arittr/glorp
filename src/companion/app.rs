@@ -17,7 +17,8 @@ use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
     NSBackingStoreType, NSBezierPath, NSColor, NSCommandKeyMask, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
+    NSFontWeightBold, NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -312,20 +313,34 @@ fn advance_companion_animation(
 
 fn draw_scene(bounds: NSRect) {
     let _mtm = MainThreadMarker::new().expect("companion draw_scene on non-main thread");
-    let scene = APP_STATE.with(|cell| cell.borrow().as_ref().map(|s| s.scene.clone()));
-    let Some(scene) = scene else {
+    let state_snapshot = APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|s| (s.scene.clone(), s.vm.clone()))
+    });
+    let Some((scene, vm)) = state_snapshot else {
         return;
     };
 
+    let now = time::OffsetDateTime::now_utc();
     let width = bounds.size.width as f32;
     let height = bounds.size.height as f32;
     let aperture = RoundAperture::new(width as u16, height as u16);
+
+    // Build the halo/trouble commands from the round scene model (kept on top).
     let layout = layout_round_scene(
         &scene,
         aperture,
         RoundRenderCapabilities::preview_truecolor(),
     );
     let commands = build_draw_commands(&scene, &layout);
+
+    // Compute background color from the first Background command.
+    let bg_color = commands
+        .iter()
+        .find(|c| c.kind == RoundDrawKind::Background)
+        .map(|c| c.color)
+        .unwrap_or(RoundColor(0.05, 0.06, 0.10, 1.0));
 
     let dim_overlay = scene.lifecycle.asleep || scene.lifecycle.calm;
     unsafe {
@@ -342,7 +357,43 @@ fn draw_scene(bounds: NSRect) {
         ));
         clip.addClip();
 
-        for command in &commands {
+        // Background base fill — drawn first, under everything.
+        let bg_path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(
+                (aperture.center_x - aperture.radius) as f64,
+                (aperture.center_y - aperture.radius) as f64,
+            ),
+            NSSize::new(
+                (aperture.radius * 2.0) as f64,
+                (aperture.radius * 2.0) as f64,
+            ),
+        ));
+        ns_color(&bg_color).setFill();
+        bg_path.fill();
+
+        // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
+        if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
+            let list = crate::round::scene::build_round_scene_draw_list(
+                &vm,
+                now,
+                m.grid_cols,
+                m.grid_rows,
+            );
+            appkit_blit_draw_list(
+                &list,
+                m.font_size,
+                m.cell_w,
+                m.cell_h,
+                m.origin_x,
+                m.origin_y,
+            );
+        }
+
+        // Halo and trouble indicators drawn on top of the scene blit.
+        for command in commands
+            .iter()
+            .filter(|c| matches!(c.kind, RoundDrawKind::Halo | RoundDrawKind::Trouble))
+        {
             draw_command(command, &scene.pet.palette);
         }
 
@@ -572,9 +623,182 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
     }
 }
 
+/// Metrics needed to map a character-cell grid onto the round AppKit view.
+///
+/// `font_size` is the chosen monospace font size in points.  `cell_w`/`cell_h`
+/// are the measured dimensions of one `"M"` glyph at that size.  `grid_cols`
+/// and `grid_rows` are the number of cells that fit inside `view_w`/`view_h`.
+/// `origin_x`/`origin_y` are the AppKit pixel coordinates of the top-left
+/// corner of the grid (centred in the view), where `origin_y` is the
+/// **top** of row-0 in AppKit's Y-up coordinate system.
+///
+/// **Tunable aesthetic default**: `font_size` starts at 8.5 pt, which gives
+/// roughly 44 columns × 18 rows inside a 360-pt window — wide enough that the
+/// 13-col pet is ~30 % of the width.  Drew can adjust this to taste; bumping
+/// the font makes the pet larger, shrinking it fits more habitat texture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct CompanionGridMetrics {
+    pub font_size: f64,
+    pub cell_w: f64,
+    pub cell_h: f64,
+    pub grid_cols: u16,
+    pub grid_rows: u16,
+    pub origin_x: f64,
+    pub origin_y: f64,
+}
+
+/// Default font size for the round companion grid.
+///
+/// **TUNABLE AESTHETIC DEFAULT** — this is Drew's call to adjust.
+/// At 8.5 pt monospaced on a 360-pt window the grid is roughly 44 cols × 18
+/// rows, which places the 13-wide pet at ~30 % of the viewport width.
+/// Increase to make the pet larger; decrease to add more habitat texture.
+const COMPANION_FONT_SIZE: f64 = 8.5;
+
+/// Measure the cell grid for the given view dimensions and compute the centred
+/// `origin_x`/`origin_y` offset so the grid is positioned in the middle of the
+/// AppKit view.
+///
+/// Only compiled on macOS; not golden-tested (AppKit font measurement is
+/// machine-dependent and not deterministic on non-macOS hosts).
+pub(super) fn companion_grid_metrics(view_w: f64, view_h: f64) -> Option<CompanionGridMetrics> {
+    unsafe {
+        let font_size = COMPANION_FONT_SIZE;
+        let cell_size =
+            attributed_pet_glyph("M", font_size, &RoundColor(1.0, 1.0, 1.0, 1.0)).size();
+        let cell_w = cell_size.width;
+        let cell_h = cell_size.height;
+        if cell_w <= 0.0 || cell_h <= 0.0 {
+            return None;
+        }
+        let grid_cols = (view_w / cell_w).floor() as u16;
+        let grid_rows = (view_h / cell_h).floor() as u16;
+        if grid_cols == 0 || grid_rows == 0 {
+            return None;
+        }
+        let total_grid_w = grid_cols as f64 * cell_w;
+        let total_grid_h = grid_rows as f64 * cell_h;
+        // origin_x: left edge of the grid (AppKit X-right).
+        let origin_x = (view_w - total_grid_w) / 2.0;
+        // origin_y: top of row-0 in AppKit Y-up coordinates (AppKit bottom is y=0,
+        // top is y=view_h, so the top of the grid is view_h - top_margin).
+        let origin_y = (view_h + total_grid_h) / 2.0;
+        Some(CompanionGridMetrics {
+            font_size,
+            cell_w,
+            cell_h,
+            grid_cols,
+            grid_rows,
+            origin_x,
+            origin_y,
+        })
+    }
+}
+
+/// Convert a (col, row) cell coordinate to AppKit pixel coordinates.
+///
+/// AppKit Y is up: row 0 top-left maps to `origin_y - cell_h` (the top of
+/// row 0 is `origin_y`; the bottom is `origin_y - cell_h`). This mirrors the
+/// math in `draw_pet_art_block` exactly.
+fn cell_to_point(
+    col: u16,
+    row: u16,
+    cell_w: f64,
+    cell_h: f64,
+    origin_x: f64,
+    origin_y: f64,
+) -> (f64, f64) {
+    let px = origin_x + col as f64 * cell_w;
+    let py = origin_y - (row + 1) as f64 * cell_h;
+    (px, py)
+}
+
+/// Blit a [`crate::presentation::SceneDrawList`] to the current AppKit
+/// graphics context. The caller is responsible for installing the aperture
+/// clip before calling (as `draw_scene` already does).
+///
+/// Cells are drawn in list order (z-order: later entries paint over earlier
+/// ones). For each cell:
+/// - If `cell.bg` is set, fill the cell rectangle with the background color.
+/// - If `cell.glyph` is set, draw the glyph string at the cell origin.
+///
+/// AppKit rendering is exercised only at runtime; the pixel-math helper
+/// `cell_to_point` is separately unit-tested.
+fn appkit_blit_draw_list(
+    list: &crate::presentation::SceneDrawList,
+    font_size: f64,
+    cell_w: f64,
+    cell_h: f64,
+    origin_x: f64,
+    origin_y: f64,
+) {
+    unsafe {
+        for cell in &list.cells {
+            if cell.bg.is_none() && cell.glyph.is_none() {
+                continue;
+            }
+
+            let (px, py) = cell_to_point(cell.col, cell.row, cell_w, cell_h, origin_x, origin_y);
+
+            if let Some(bg) = &cell.bg {
+                let bg_color = rgb_color(bg.r, bg.g, bg.b);
+                let path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(px, py),
+                    NSSize::new(cell_w, cell_h),
+                ));
+                ns_color(&bg_color).setFill();
+                path.fill();
+            }
+
+            if let Some(glyph) = &cell.glyph {
+                let fg = cell
+                    .fg
+                    .as_ref()
+                    .map(|c| rgb_color(c.r, c.g, c.b))
+                    .unwrap_or(RoundColor(1.0, 1.0, 1.0, 1.0));
+                let attr = if cell.bold {
+                    // `attributed_pet_glyph` uses weight 0.0 (NSFontWeightRegular).
+                    // For bold cells we build the attributed string with NSFontWeightBold.
+                    let text = NSString::from_str(glyph);
+                    let font =
+                        NSFont::monospacedSystemFontOfSize_weight(font_size, NSFontWeightBold);
+                    let mut a = NSMutableAttributedString::from_nsstring(&text);
+                    let range = objc2_foundation::NSRange::from(0..text.length());
+                    a.addAttribute_value_range(NSFontAttributeName, &font, range);
+                    a.addAttribute_value_range(
+                        NSForegroundColorAttributeName,
+                        &ns_color(&fg),
+                        range,
+                    );
+                    a
+                } else {
+                    attributed_pet_glyph(glyph, font_size, &fg)
+                };
+                attr.drawAtPoint(NSPoint::new(px, py));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_to_point_row_zero_sits_at_top_of_origin() {
+        // Row 0, col 0: px = origin_x, py = origin_y - cell_h (AppKit Y-up).
+        let (px, py) = cell_to_point(0, 0, 10.0, 14.0, 5.0, 100.0);
+        assert_eq!(px, 5.0);
+        assert_eq!(py, 86.0); // 100.0 - (0 + 1) * 14.0
+    }
+
+    #[test]
+    fn cell_to_point_advances_right_and_down() {
+        // Col 3, row 2: px = 5 + 3*10 = 35; py = 100 - (2+1)*14 = 58.
+        let (px, py) = cell_to_point(3, 2, 10.0, 14.0, 5.0, 100.0);
+        assert_eq!(px, 35.0);
+        assert_eq!(py, 58.0);
+    }
 
     #[test]
     fn companion_menu_spec_wires_standard_quit_shortcut() {

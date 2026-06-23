@@ -1,0 +1,49 @@
+---
+source: tests/round_draw_list.rs
+expression: tail
+---
+- row: 9
+  col: 37
+  glyph: o
+  fg:
+    - 239
+    - 235
+    - 228
+  bg: ~
+  bold: false
+- row: 9
+  col: 39
+  glyph: )
+  fg:
+    - 239
+    - 235
+    - 228
+  bg: ~
+  bold: false
+- row: 10
+  col: 34
+  glyph: ">"
+  fg:
+    - 239
+    - 235
+    - 228
+  bg: ~
+  bold: false
+- row: 10
+  col: 36
+  glyph: ^
+  fg:
+    - 239
+    - 235
+    - 228
+  bg: ~
+  bold: false
+- row: 10
+  col: 38
+  glyph: "<"
+  fg:
+    - 239
+    - 235
+    - 228
+  bg: ~
+  bold: false
