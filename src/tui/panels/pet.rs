@@ -6,16 +6,14 @@ use crate::game::habitat::{catalog_prop, HabitatPetLayer, HabitatPropId, Habitat
 use crate::pet::animator::{
     compute_facing, compute_shimmer_role, compute_sleep_wander_x, compute_twinkle,
     compute_wake_wander_x, compute_wander_position_x, lazy_wander_instant,
-    low_energy_lightness_multiplier,
 };
-use crate::pet::render::PaletteRoleName;
 use crate::presentation::{privacy::PresentationSurface, scene::PresentationScene};
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::room::rects_contain;
-use crate::tui::style::{semantic_styles, ColorCapability};
+use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
 mod ambient;
@@ -39,9 +37,8 @@ use art_lines::{
 };
 pub(crate) use colors::pet_role_style;
 use colors::{
-    activity_glyph_budget, brighten_pet_role, darken_pet_styles, lift_pet_styles_for_activity,
-    performance_lightness_multiplier, performance_posture_offset, profile_token_pop,
-    seed_pet_palette, tint_pet_styles_for_phase,
+    activity_glyph_budget, performance_posture_offset, profile_token_pop, resolve_watch_pet_styles,
+    watch_live_color_inputs,
 };
 use performance::apply_pet_performance_cues;
 
@@ -50,16 +47,21 @@ use crate::game::evolution::Stage;
 #[cfg(test)]
 use crate::pet::generation::Species;
 #[cfg(test)]
+use crate::pet::render::PaletteRoleName;
+#[cfg(test)]
 use crate::tui::day::{DayPhase, Season};
 #[cfg(test)]
 use crate::tui::life::{SourceAccent, WorkWeather};
+#[cfg(test)]
+use crate::tui::style::semantic_styles;
 #[cfg(test)]
 use ambient::{biome_floor_palette, biome_wash_color};
 #[cfg(test)]
 use art_lines::{build_cursor_eye_string, cursor_eye_glyph};
 #[cfg(test)]
 use colors::{
-    activity_glyph_color, activity_lift_style, apply_prop_reaction_style, tint_style_for_phase,
+    activity_glyph_color, activity_lift_style, apply_prop_reaction_style, darken_pet_styles,
+    performance_lightness_multiplier, tint_style_for_phase,
 };
 #[cfg(test)]
 use ratatui::text::Line;
@@ -399,20 +401,6 @@ fn render_pet_inside(
     color_capability: ColorCapability,
     pet_performance: crate::tui::room::PetPerformance,
 ) {
-    let base = seed_pet_palette(&semantic_styles(), &vm.pet_palette);
-    let phase_blend = {
-        let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
-        (since / (crate::tui::day::PHASE_BLEND_MINUTES as f32 * 60.0)).clamp(0.0, 1.0)
-    };
-    let base = tint_pet_styles_for_phase(&base, vm.day_context.day_phase, phase_blend);
-    let energy_m = low_energy_lightness_multiplier(vm.energy);
-    let perf_m = performance_lightness_multiplier(pet_performance);
-    let droop = darken_pet_styles(&base, energy_m * perf_m);
-
-    if let (Some(speech_area), Some(speech)) = (scene.speech, vm.current_speech.as_deref()) {
-        render_speech_bubble(speech_area, buf, speech, &droop);
-    }
-
     let species = vm.pet_render.generated_species;
     let shimmer_role = compute_shimmer_role(species, now);
     let twinkle = compute_twinkle(species, now, vm.life_profile.idle.idle_minutes);
@@ -423,28 +411,18 @@ fn render_pet_inside(
         now,
     );
 
-    // When the token-pop is active, override shimmer to Pattern for extra flash.
-    let effective_shimmer_role = if token_pop.is_some() {
-        Some(PaletteRoleName::Pattern)
-    } else {
-        shimmer_role
-    };
+    // The shared resolver runs the live color pipeline: `live_styles` carries
+    // the full WATCH chain (phase tint + droop + shimmer + activity lift),
+    // while `droop_styles` is the dimmed-but-not-shimmered variant the speech
+    // bubble draws from.
+    let inputs =
+        watch_live_color_inputs(vm, now, pet_performance, shimmer_role, token_pop.is_some());
+    let (live_styles, droop_styles) =
+        resolve_watch_pet_styles(&vm.pet_palette, &inputs, color_capability);
 
-    // Brighten multiplier: shimmer/pop boost lightness ~1.4×, clamped to 1.0
-    // on the u8 channel (we apply it in brighten_style).
-    let shimmer_m = if effective_shimmer_role.is_some() {
-        1.4f32
-    } else {
-        1.0
-    };
-    let shimmer_styles = brighten_pet_role(&droop, effective_shimmer_role, shimmer_m);
-    let activity_level = if vm.life_profile.calm_mode {
-        0.0
-    } else {
-        vm.life_profile.activity_level
-    };
-    let live_styles =
-        lift_pet_styles_for_activity(&shimmer_styles, activity_level, color_capability);
+    if let (Some(speech_area), Some(speech)) = (scene.speech, vm.current_speech.as_deref()) {
+        render_speech_bubble(speech_area, buf, speech, &droop_styles);
+    }
 
     // Twinkle: also place a sparkle at the token-pop center when pop is active.
     let effective_twinkle = if token_pop.is_some() {
@@ -565,7 +543,6 @@ pub(crate) mod tests {
     #[test]
     fn pet_role_style_uses_resolved_palette_with_bold_eye() {
         use crate::pet::palette::{default_theme_palette, Rgb};
-        use crate::pet::render::PaletteRoleName;
         let p = default_theme_palette();
         let eye = pet_role_style(PaletteRoleName::Eye, &p);
         assert_eq!(eye.fg, Some(ratatui::style::Color::Rgb(0x82, 0xbc, 0x83)));

@@ -1,10 +1,12 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::pet::animator::{compute_token_pop, TokenPop};
+use crate::pet::animator::{compute_token_pop, low_energy_lightness_multiplier, TokenPop};
 use crate::pet::render::PaletteRoleName;
+#[cfg(test)]
 use crate::tui::day::DayPhase;
 use crate::tui::life::{PetLifeProfile, PropReaction, SourceAccent, WorkWeather};
-use crate::tui::style::{ColorCapability, SemanticStyles};
+use crate::tui::style::{semantic_styles, ColorCapability, SemanticStyles};
+use crate::tui::view_model::WatchViewModel;
 
 /// Capped count of extra activity glyphs for the current life profile.
 pub(super) fn activity_glyph_budget(profile: &PetLifeProfile, compact: bool) -> usize {
@@ -88,6 +90,10 @@ pub(super) fn dim_shift(base: Color, amount: f32) -> Color {
 /// Apply the day-phase "ambient light" to one style's fg: warmer at dusk,
 /// cooler and dimmer at night, neutral by day. Mirrors the sky's phase curve
 /// (warm_shift/dim_shift) so pet and room share one light.
+///
+/// The live watch path runs phase tint through `resolve_pet_colors`; this
+/// per-style form survives only as a `color_ops` parity check.
+#[cfg(test)]
 pub(super) fn tint_style_for_phase(style: Style, phase: DayPhase, blend: f32) -> Style {
     let Some(fg) = style.fg else { return style };
     let Color::Rgb(r, g, b) = fg else {
@@ -99,22 +105,6 @@ pub(super) fn tint_style_for_phase(style: Style, phase: DayPhase, blend: f32) ->
         blend,
     );
     style.fg(Color::Rgb(out.r, out.g, out.b))
-}
-
-/// Apply the phase tint to all five pet roles of a SemanticStyles.
-pub(super) fn tint_pet_styles_for_phase(
-    styles: &SemanticStyles,
-    phase: DayPhase,
-    blend: f32,
-) -> SemanticStyles {
-    let mut s = styles.clone();
-    s.pet_body = tint_style_for_phase(s.pet_body, phase, blend);
-    s.pet_eye = tint_style_for_phase(s.pet_eye, phase, blend);
-    s.pet_mouth = tint_style_for_phase(s.pet_mouth, phase, blend);
-    s.pet_accent = tint_style_for_phase(s.pet_accent, phase, blend);
-    s.pet_pattern = tint_style_for_phase(s.pet_pattern, phase, blend);
-    s.pet_particle = tint_style_for_phase(s.pet_particle, phase, blend);
-    s
 }
 
 pub(super) fn profile_token_pop(
@@ -132,6 +122,10 @@ pub(super) fn profile_token_pop(
     compute_token_pop(last_feed_pulse_at, now)
 }
 
+/// Activity-lift one style's fg. The live watch path runs this through
+/// `resolve_pet_colors`; this per-style form survives only as a `color_ops`
+/// parity check (Flat early-return + hue stability).
+#[cfg(test)]
 pub(super) fn activity_lift_style(
     style: Style,
     activity_level: f32,
@@ -174,21 +168,6 @@ pub(super) fn apply_prop_reaction_style(
     }
 }
 
-pub(super) fn lift_pet_styles_for_activity(
-    styles: &SemanticStyles,
-    activity_level: f32,
-    color_capability: ColorCapability,
-) -> SemanticStyles {
-    let mut s = styles.clone();
-    s.pet_body = activity_lift_style(s.pet_body, activity_level, color_capability);
-    s.pet_eye = activity_lift_style(s.pet_eye, activity_level, color_capability);
-    s.pet_mouth = activity_lift_style(s.pet_mouth, activity_level, color_capability);
-    s.pet_accent = activity_lift_style(s.pet_accent, activity_level, color_capability);
-    s.pet_pattern = activity_lift_style(s.pet_pattern, activity_level, color_capability);
-    s.pet_particle = activity_lift_style(s.pet_particle, activity_level, color_capability);
-    s
-}
-
 /// Resting brightness baseline by performance state, composed UNDER the
 /// activity lift (a tired pet still visibly brightens when work arrives, it
 /// just settles back lower). 1.0 = neutral. Bounded so the pet is never dark.
@@ -218,6 +197,10 @@ pub(super) fn performance_posture_offset(performance: crate::tui::room::PetPerfo
 /// Returns a copy of `base` with all pet-role foreground colors scaled by
 /// `multiplier` (1.0 = unchanged, 0.55 = ~half lightness). Non-RGB colors
 /// pass through unchanged.
+///
+/// The live watch path runs droop through `resolve_pet_colors`; this
+/// `SemanticStyles` form survives only as a dim-parity check.
+#[cfg(test)]
 pub(super) fn darken_pet_styles(base: &SemanticStyles, multiplier: f32) -> SemanticStyles {
     let mut s = base.clone();
     s.pet_body = darken_style(s.pet_body, multiplier);
@@ -229,41 +212,7 @@ pub(super) fn darken_pet_styles(base: &SemanticStyles, multiplier: f32) -> Seman
     s
 }
 
-/// Returns a copy of `base` where the style for `role` has its foreground
-/// brightened by `multiplier`. Other roles are returned unchanged.
-/// A multiplier > 1.0 brightens; use this for shimmer/token-pop effects.
-pub(super) fn brighten_pet_role(
-    base: &SemanticStyles,
-    role: Option<PaletteRoleName>,
-    multiplier: f32,
-) -> SemanticStyles {
-    let Some(role) = role else {
-        return base.clone();
-    };
-    let mut s = base.clone();
-    match role {
-        PaletteRoleName::Body => s.pet_body = brighten_style(s.pet_body, multiplier),
-        PaletteRoleName::Accent => s.pet_accent = brighten_style(s.pet_accent, multiplier),
-        PaletteRoleName::Pattern => s.pet_pattern = brighten_style(s.pet_pattern, multiplier),
-        PaletteRoleName::Eye => s.pet_eye = brighten_style(s.pet_eye, multiplier),
-        PaletteRoleName::Mouth => s.pet_mouth = brighten_style(s.pet_mouth, multiplier),
-        PaletteRoleName::Particle => s.pet_particle = brighten_style(s.pet_particle, multiplier),
-        PaletteRoleName::Corruption => s.pet_accent = brighten_style(s.pet_accent, multiplier),
-    }
-    s
-}
-
-fn brighten_style(style: Style, multiplier: f32) -> Style {
-    let Some(Color::Rgb(r, g, b)) = style.fg else {
-        return style;
-    };
-    let out = crate::presentation::color_ops::brighten_channel(
-        crate::pet::palette::Rgb::new(r, g, b),
-        multiplier,
-    );
-    style.fg(Color::Rgb(out.r, out.g, out.b))
-}
-
+#[cfg(test)]
 fn darken_style(style: Style, multiplier: f32) -> Style {
     let Some(Color::Rgb(r, g, b)) = style.fg else {
         return style;
@@ -288,9 +237,10 @@ pub(crate) fn pet_role_style(
 }
 
 /// Overlays a per-pet `ResolvedPalette` onto the pet roles of `base`, keeping
-/// every role's modifiers (e.g. the bold eye). The live dim/lift/shimmer chain
-/// then mutates these seeded colors, so role-tagged glyphs and body-gap fills
-/// both track per-pet color and brightness coherently.
+/// every role's modifiers (e.g. the bold eye). Superseded on the live watch
+/// path by `semantic_styles_from_resolved`; survives only to seed styles for
+/// the `color_ops` round-trip parity tests.
+#[cfg(test)]
 pub(super) fn seed_pet_palette(
     base: &SemanticStyles,
     palette: &crate::pet::palette::ResolvedPalette,
@@ -305,6 +255,112 @@ pub(super) fn seed_pet_palette(
     s.pet_pattern = with_rgb(s.pet_pattern, palette.pattern);
     s.pet_particle = with_rgb(s.pet_particle, palette.particle);
     s
+}
+
+/// Seed a `SemanticStyles` from resolver output, replacing each pet-role
+/// foreground with the resolved color and re-applying the bold eye when the
+/// surface uses `EyeEmphasis::TerminalBold`. This is the resolver-era successor
+/// to the `seed_pet_palette` → tint → darken → brighten → lift chain: the
+/// resolver already ran the live transforms, so this only carries colors and
+/// the eye modifier across into the styles the watch renderer consumes.
+pub(super) fn semantic_styles_from_resolved(
+    base: &SemanticStyles,
+    c: &crate::presentation::surface::ResolvedColors,
+) -> SemanticStyles {
+    use crate::presentation::surface::EyeEmphasis;
+    let with =
+        |style: Style, rgb: crate::pet::palette::Rgb| style.fg(Color::Rgb(rgb.r, rgb.g, rgb.b));
+    let mut s = base.clone();
+    s.pet_body = with(s.pet_body, c.body);
+    s.pet_eye = with(s.pet_eye, c.eye);
+    if matches!(c.eye_emphasis, EyeEmphasis::TerminalBold) {
+        s.pet_eye = s.pet_eye.add_modifier(Modifier::BOLD);
+    }
+    s.pet_mouth = with(s.pet_mouth, c.mouth);
+    s.pet_accent = with(s.pet_accent, c.accent);
+    s.pet_pattern = with(s.pet_pattern, c.pattern);
+    s.pet_particle = with(s.pet_particle, c.particle);
+    s
+}
+
+/// Assemble the watch's live color inputs from the view model: the day-phase
+/// blend, the combined energy/performance droop, the effective shimmer role
+/// (token-pop overrides shimmer to Pattern) and its brighten multiplier, and
+/// the calm-gated activity level. These are exactly the legacy inline chain's
+/// scalars, now in resolver vocabulary.
+pub(super) fn watch_live_color_inputs(
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+    pet_performance: crate::tui::room::PetPerformance,
+    shimmer_role: Option<PaletteRoleName>,
+    token_pop_active: bool,
+) -> crate::presentation::surface::LiveColorInputs {
+    let phase_blend = {
+        let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
+        (since / (crate::tui::day::PHASE_BLEND_MINUTES as f32 * 60.0)).clamp(0.0, 1.0)
+    };
+    let droop_mult = low_energy_lightness_multiplier(vm.energy)
+        * performance_lightness_multiplier(pet_performance);
+    // Token-pop overrides shimmer to Pattern for extra flash; shimmer/pop boost
+    // lightness ~1.4× (clamped on the u8 channel by the resolver).
+    let effective_shimmer_role = if token_pop_active {
+        Some(PaletteRoleName::Pattern)
+    } else {
+        shimmer_role
+    };
+    let shimmer_mult = if effective_shimmer_role.is_some() {
+        1.4
+    } else {
+        1.0
+    };
+    let activity_level = if vm.life_profile.calm_mode {
+        0.0
+    } else {
+        vm.life_profile.activity_level
+    };
+    crate::presentation::surface::LiveColorInputs {
+        phase: vm.day_context.day_phase,
+        phase_blend,
+        droop_mult,
+        shimmer_role: effective_shimmer_role,
+        shimmer_mult,
+        activity_level,
+        source_override: None,
+    }
+}
+
+/// Resolve the watch's live pet styles and the speech-bubble droop styles in a
+/// single shared pass. Both flow through `resolve_pet_colors`: `live_styles`
+/// uses the full `WATCH_STYLE` (phase tint + droop + shimmer + activity lift),
+/// while the bubble uses a droop-only variant (phase tint + droop, no shimmer,
+/// no activity lift) so the bubble reads dimmed but never shimmered. Activity
+/// lift is a no-op on `Flat` terminals (the legacy lift early-returned there),
+/// so the knob is gated off to match exactly.
+pub(super) fn resolve_watch_pet_styles(
+    palette: &crate::pet::palette::ResolvedPalette,
+    inputs: &crate::presentation::surface::LiveColorInputs,
+    color_capability: ColorCapability,
+) -> (SemanticStyles, SemanticStyles) {
+    use crate::presentation::surface::{resolve_pet_colors, SurfaceStyle, WATCH_STYLE};
+    let live_style = if matches!(color_capability, ColorCapability::Flat) {
+        SurfaceStyle {
+            activity_lift: false,
+            ..WATCH_STYLE
+        }
+    } else {
+        WATCH_STYLE
+    };
+    let droop_style = SurfaceStyle {
+        shimmer: false,
+        activity_lift: false,
+        ..WATCH_STYLE
+    };
+    let base = semantic_styles();
+    let live =
+        semantic_styles_from_resolved(&base, &resolve_pet_colors(palette, inputs, &live_style));
+    let droop =
+        semantic_styles_from_resolved(&base, &resolve_pet_colors(palette, inputs, &droop_style));
+    (live, droop)
 }
 
 /// Snapshot the per-role foreground colors of the live `SemanticStyles` into a
@@ -333,7 +389,6 @@ pub(super) fn palette_from_styles(styles: &SemanticStyles) -> crate::pet::palett
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::style::semantic_styles;
 
     #[test]
     fn activity_lift_does_not_invert_body_hue_at_high_chroma() {
@@ -403,6 +458,57 @@ mod tests {
         assert_ne!(
             round_tripped.particle, round_tripped.accent,
             "live particle must not collapse to accent"
+        );
+    }
+
+    #[test]
+    fn semantic_styles_from_resolved_seeds_colors_and_bolds_eye() {
+        use crate::pet::palette::Rgb;
+        use crate::presentation::surface::{EyeEmphasis, ResolvedColors};
+        let resolved = ResolvedColors {
+            body: Rgb::new(1, 2, 3),
+            eye: Rgb::new(10, 20, 30),
+            mouth: Rgb::new(40, 50, 60),
+            accent: Rgb::new(70, 80, 90),
+            pattern: Rgb::new(100, 110, 120),
+            particle: Rgb::new(130, 140, 150),
+            corruption: Rgb::new(160, 170, 180),
+            eye_emphasis: EyeEmphasis::TerminalBold,
+        };
+        let out = semantic_styles_from_resolved(&semantic_styles(), &resolved);
+        assert_eq!(out.pet_body.fg, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(out.pet_eye.fg, Some(Color::Rgb(10, 20, 30)));
+        assert_eq!(out.pet_mouth.fg, Some(Color::Rgb(40, 50, 60)));
+        assert_eq!(out.pet_accent.fg, Some(Color::Rgb(70, 80, 90)));
+        assert_eq!(out.pet_pattern.fg, Some(Color::Rgb(100, 110, 120)));
+        assert_eq!(out.pet_particle.fg, Some(Color::Rgb(130, 140, 150)));
+        assert!(
+            out.pet_eye.add_modifier.contains(Modifier::BOLD),
+            "TerminalBold emphasis must bold the eye"
+        );
+    }
+
+    #[test]
+    fn semantic_styles_from_resolved_skips_eye_bold_when_emphasis_off() {
+        use crate::pet::palette::Rgb;
+        use crate::presentation::surface::{EyeEmphasis, ResolvedColors};
+        let resolved = ResolvedColors {
+            body: Rgb::new(1, 2, 3),
+            eye: Rgb::new(10, 20, 30),
+            mouth: Rgb::new(40, 50, 60),
+            accent: Rgb::new(70, 80, 90),
+            pattern: Rgb::new(100, 110, 120),
+            particle: Rgb::new(130, 140, 150),
+            corruption: Rgb::new(160, 170, 180),
+            eye_emphasis: EyeEmphasis::None,
+        };
+        // Seed from a base whose eye carries no bold, to isolate the helper's add.
+        let mut base = semantic_styles();
+        base.pet_eye = Style::default().fg(Color::Rgb(0, 0, 0));
+        let out = semantic_styles_from_resolved(&base, &resolved);
+        assert!(
+            !out.pet_eye.add_modifier.contains(Modifier::BOLD),
+            "non-bold emphasis must not add BOLD"
         );
     }
 }
