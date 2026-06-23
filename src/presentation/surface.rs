@@ -1,8 +1,8 @@
-//! Surface rendering policy types.
+//! Per-surface color policy and the unified resolver.
 //!
-//! Defines per-surface style policy (`SurfaceStyle`) and the color pipeline
-//! input/output types (`LiveColorInputs`, `ResolvedColors`). The actual
-//! resolver logic lives in Task 3 (`color_resolver.rs`).
+//! Defines `SurfaceStyle` (the only place surfaces differ), the resolver
+//! input/output types (`LiveColorInputs`, `ResolvedColors`), and
+//! `resolve_pet_colors`, which maps a pet's role colors for a given surface.
 
 use crate::pet::palette::Rgb;
 use crate::pet::render::PaletteRoleName;
@@ -51,6 +51,8 @@ pub struct SurfaceStyle {
     /// Apply activity-lift brightness when the pet is active.
     pub activity_lift: bool,
     /// Apply prop-reaction color shift when props are nearby.
+    /// Consumed by `apply_prop_reaction_style` on the prop-glyph render path;
+    /// not yet read by `resolve_pet_colors`.
     pub prop_reaction: bool,
     /// How to visually emphasize eye segments.
     pub eye_emphasis: EyeEmphasis,
@@ -291,6 +293,9 @@ mod resolver_tests {
                 PaletteRoleName::Mouth,
                 PaletteRoleName::Pattern,
                 PaletteRoleName::Accent,
+                PaletteRoleName::Eye,
+                PaletteRoleName::Particle,
+                PaletteRoleName::Corruption,
             ] {
                 assert_eq!(
                     role_rgb(&out, role),
@@ -342,6 +347,7 @@ mod tests {
                     && WATCH_STYLE.energy_droop
                     && WATCH_STYLE.shimmer
                     && WATCH_STYLE.activity_lift
+                    && WATCH_STYLE.prop_reaction
             );
             assert!(!WATCH_STYLE.source_accent);
         }
