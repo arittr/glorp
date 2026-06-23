@@ -87,8 +87,8 @@ pub fn render_round_preview_frame_from_vm(
 }
 
 /// Paint only `Halo` and `Trouble` commands into the cell grid.
-/// All other draw kinds (`Background`, `PetGlyph`, `RoomGlyph`, `PropGlyph`)
-/// are now supplied by the rasterized seam scene and are intentionally skipped.
+/// `Background` has no label and is skipped by `paint_labeled_command`.
+/// Pet, room, and prop rendering are supplied by the rasterized seam scene.
 fn paint_halo_trouble(
     cells: &mut [PreviewCell],
     width: u16,
@@ -135,10 +135,9 @@ fn command_color(command: &RoundDrawCommand, truecolor: bool) -> String {
     }
 
     match command.kind {
-        RoundDrawKind::RoomGlyph => "gray",
-        RoundDrawKind::PropGlyph | RoundDrawKind::Halo => "yellow",
+        RoundDrawKind::Halo => "yellow",
         RoundDrawKind::Trouble => "red",
-        RoundDrawKind::Background | RoundDrawKind::PetGlyph => "white",
+        RoundDrawKind::Background => "white",
     }
     .to_string()
 }

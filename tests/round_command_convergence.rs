@@ -41,7 +41,7 @@ fn round_preview_renders_pet_cells_via_seam() {
 }
 
 #[test]
-fn round_preview_exposes_command_backed_room_and_halo_glyphs() {
+fn round_preview_exposes_command_backed_trouble_glyph() {
     let mut vm = WatchViewModel::fixture_with_habitat_props();
     vm.source_health[0].status = glorp::tui::view_model::SourceStatus::Diagnostic;
     let now = datetime!(2026-06-15 12:00 UTC);
@@ -53,9 +53,6 @@ fn round_preview_exposes_command_backed_room_and_halo_glyphs() {
     );
     let commands = build_draw_commands(&scene, &layout);
 
-    assert!(commands
-        .iter()
-        .any(|command| command.kind == RoundDrawKind::RoomGlyph));
     assert!(commands
         .iter()
         .any(|command| command.kind == RoundDrawKind::Trouble));
