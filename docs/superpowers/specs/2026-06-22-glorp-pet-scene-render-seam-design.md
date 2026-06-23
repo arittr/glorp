@@ -229,8 +229,8 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 | 02 — `EffectState` (viewport-agnostic per-frame effects) | 2a | **DONE** (merged `ea21084`) |
 | 03 — wander/facing shared resolver (`resolve_wander_offset`) | 2b-i | **DONE** (merged `168e4c4`) |
 | 04 — semantic scene container (`PetSceneModel` = effects + room) + harden flaky `tui_render` clock tests | 2b-ii | **DONE** (merged `4c9b268`) |
-| 05 — `SceneDrawList` + `render(viewport)`; watch becomes a blitter (6 byte-stable tasks) | 3, 4 | **in progress** |
-| 06 — companion adapter (round style, clip, halo, privacy) — *the visible win* | 3 | planned |
+| 05 — `SceneDrawList` + `render(viewport)`; watch becomes a blitter | 3, 4 | **DONE** (merged `c78c0fd`) |
+| 06 — companion blits the shared `SceneDrawList` (round viewport + clip; keep halo; old round path kept) — *the visible win* | 3 | **in progress** |
 | 07 — menubar adapter | 5 | planned |
 | 08 — screen-window adapter | 6 | planned |
 | 09 — dev-preview unification + dead-scaffolding cleanup | 7 | planned |
