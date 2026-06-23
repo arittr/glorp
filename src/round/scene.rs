@@ -24,6 +24,12 @@ const PET_H: u16 = 10;
 /// horizontal room, which keeps the pet well inside the circle's chords.
 const COMPANION_WANDER_HALF: u16 = 8;
 
+/// How many rows to drop the floor below the circle's equator, in cells.
+/// The pet grounds on the floor, so a larger value lowers both the floor line
+/// and the pet, leaving more sky above and shrinking the dark band at the
+/// bottom of the circle. 0 puts the floor at the equator.
+const COMPANION_FLOOR_DROP: u16 = 4;
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build a [`SceneDrawList`] for the round companion viewport.
@@ -43,10 +49,10 @@ const COMPANION_WANDER_HALF: u16 = 8;
 ///
 /// `area` is cropped to the upper half of the grid so the pet's body center
 /// lands on the circle's vertical equator — the widest visible band. Specifically:
-/// `area_height = (grid_rows / 2 + PET_H / 2).min(grid_rows)`, which places the
-/// pet's feet near `grid_rows / 2` and the body spanning upward. The lower half
-/// of the circle shows the background base color (accepted v1 trade-off; tune
-/// `area_height` to extend the habitat downward if desired).
+/// `area_height = (grid_rows / 2 + PET_H / 2 + COMPANION_FLOOR_DROP).min(grid_rows)`,
+/// which places the pet's feet a little below `grid_rows / 2` and the body
+/// spanning upward. The band below the floor shows the background base color
+/// (tune `COMPANION_FLOOR_DROP` to lower the floor / extend the habitat down).
 ///
 /// Wander is narrowed to `PET_W + 2 * COMPANION_WANDER_HALF` so the pet stays
 /// near center instead of drifting to the square window's edges (which fall
@@ -60,7 +66,7 @@ pub fn build_round_scene_draw_list(
     // Crop to the upper circle: pet body centers on the equator; the lower half
     // shows the background. Tune `COMPANION_WANDER_HALF` and `area_height` to
     // adjust the look.
-    let area_height = (grid_rows / 2 + PET_H / 2).min(grid_rows);
+    let area_height = (grid_rows / 2 + PET_H / 2 + COMPANION_FLOOR_DROP).min(grid_rows);
     let area = Rect::new(0, 0, grid_cols, area_height);
 
     // Narrow the wander range so the pet drifts gently around center rather

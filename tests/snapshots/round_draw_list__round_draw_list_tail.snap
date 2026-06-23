@@ -2,7 +2,7 @@
 source: tests/round_draw_list.rs
 expression: tail
 ---
-- row: 5
+- row: 9
   col: 21
   glyph: o
   fg:
@@ -11,7 +11,7 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 5
+- row: 9
   col: 23
   glyph: )
   fg:
@@ -20,7 +20,7 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 6
+- row: 10
   col: 18
   glyph: ">"
   fg:
@@ -29,7 +29,7 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 6
+- row: 10
   col: 20
   glyph: ^
   fg:
@@ -38,7 +38,7 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 6
+- row: 10
   col: 22
   glyph: "<"
   fg:
