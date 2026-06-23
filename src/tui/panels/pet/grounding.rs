@@ -63,8 +63,7 @@ pub(super) fn contact_shadow_cells(
 
 /// Returns one bg-only [`DrawCell`] per habitat cell: sky rows use
 /// [`biome_wash_color`] and the bottom [`FLOOR_BAND_ROWS`] rows use
-/// [`biome_floor_wash_color`]. Same color math and row split as
-/// [`paint_biome_wash`] — this is its `SceneDrawList` counterpart.
+/// [`biome_floor_wash_color`].
 pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCell> {
     let sky_wash = biome_wash_color(biome);
     let floor_wash = biome_floor_wash_color(biome);
@@ -80,7 +79,7 @@ pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCe
         };
         let bg = match wash {
             Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
-            _ => continue, // non-RGB color cap: skip (same as paint_biome_wash)
+            _ => continue, // non-RGB color cap: skip
         };
         for wx in habitat.x..habitat.x.saturating_add(habitat.width) {
             cells.push(DrawCell {
@@ -97,9 +96,8 @@ pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCe
 }
 
 /// Returns one bg-only [`DrawCell`] per shadow position: the columns directly
-/// under the pet's feet on the floor row, clipped to `habitat`. Same color math
-/// and position logic as the former `paint_contact_shadow` — this is the
-/// `SceneDrawList` counterpart that replaced it.
+/// under the pet's feet on the floor row, clipped to `habitat`. Color is
+/// derived from [`contact_shadow_color`] applied to the biome floor wash.
 pub(super) fn contact_shadow_draw_cells(
     scene_pet_art: Rect,
     pet_art_lines: &[String],
@@ -112,7 +110,7 @@ pub(super) fn contact_shadow_draw_cells(
     let shadow = contact_shadow_color(floor_wash);
     let bg = match shadow {
         ratatui::style::Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
-        _ => return Vec::new(), // non-RGB color cap: skip (same as paint_contact_shadow)
+        _ => return Vec::new(), // non-RGB color cap: skip
     };
     contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat)
         .into_iter()

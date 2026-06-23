@@ -28,8 +28,9 @@ use super::{apply_resonance_reaction, color_to_rgb, pet_silhouette_halo_rects};
 /// props(Background, Behind) → contact-shadow → pet-body →
 /// performance-cue → props(Foreground).
 ///
-/// Speech bubble is NOT included: it renders to `scene.speech`, a disjoint
-/// region above the habitat, and is painted separately after the single blit.
+/// Speech is NOT in the draw list: it occupies the top rows of the habitat
+/// (an entry in `ambient_exclusions`) and is painted separately AFTER the
+/// single blit, so it always renders on top.
 pub(crate) fn render_pet_to_draw_list(
     scene_model: &PetSceneModel,
     vm: &WatchViewModel,
