@@ -2,11 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Style};
 
-use crate::game::habitat::{catalog_prop, HabitatPetLayer, HabitatPropId, HabitatPropZone};
-use crate::pet::animator::{
-    compute_facing, compute_sleep_wander_x, compute_wake_wander_x, compute_wander_position_x,
-    lazy_wander_instant,
-};
+use crate::game::habitat::{HabitatPetLayer, HabitatPropId};
 use crate::presentation::{privacy::PresentationSurface, scene::PresentationScene};
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
 use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind};
@@ -23,12 +19,11 @@ mod grounding;
 mod performance;
 mod props;
 
-pub(crate) use ambient::pet_silhouette_halo_rects;
 use ambient::{
-    activity_glyphs_for, ambient_glyph_is_inside_area, effective_weekend_softening,
-    mote_glyphs_for, weekend_soften_color,
+    activity_glyphs_for, ambient_glyph_is_inside_area, mote_glyphs_for, weekend_soften_color,
 };
 pub use ambient::{ambient_glyphs_for, ambient_glyphs_for_phase};
+pub(crate) use ambient::{effective_weekend_softening, pet_silhouette_halo_rects};
 #[allow(unused_imports)]
 pub(crate) use art_lines::mirror_line;
 pub(crate) use art_lines::pet_role_spans_for_line;
@@ -107,7 +102,6 @@ pub struct AmbientGlyph {
 }
 
 const RESONANCE_REACTION_INTENSITY: f32 = 0.25;
-const RESONANCE_WANDER_BIAS_CELLS: i16 = 3;
 
 fn apply_resonance_reaction(
     mut profile: PetLifeProfile,
@@ -127,18 +121,6 @@ fn apply_resonance_reaction(
     profile
 }
 
-fn resonance_wander_bias(resonant: Option<&HabitatPropId>) -> i16 {
-    let Some(spec) = resonant.and_then(catalog_prop) else {
-        return 0;
-    };
-    let side: i16 = match spec.zone {
-        HabitatPropZone::FloorLeft | HabitatPropZone::WallLeft | HabitatPropZone::AirLeft => -1,
-        HabitatPropZone::FloorRight | HabitatPropZone::WallRight | HabitatPropZone::AirRight => 1,
-        HabitatPropZone::FloorMid | HabitatPropZone::AirMid | HabitatPropZone::Ceiling => 0,
-    };
-    side * RESONANCE_WANDER_BIAS_CELLS
-}
-
 impl LegacyPanel for PetPanel {
     fn preferred_constraint(&self, _vm: &WatchViewModel) -> Constraint {
         Constraint::Fill(1)
@@ -149,7 +131,6 @@ impl LegacyPanel for PetPanel {
         // wall clock so both stay consistent with each other regardless of what
         // vm.wander_offset_x or vm.facing carry.
         let now = ctx.clock.now_utc();
-        let species = vm.pet_render.generated_species;
         let day = &vm.day_context;
         let resonant_prop = {
             let earned: Vec<crate::storage::state::EarnedHabitatProp> = vm
@@ -165,32 +146,7 @@ impl LegacyPanel for PetPanel {
             crate::tui::day::resonant_prop_for_day(day, &earned)
         };
         let softening = effective_weekend_softening(day, &vm.life_profile);
-        let idle_minutes = vm.life_profile.idle.idle_minutes;
-        let (wander_x, facing) = match (day.asleep, day.sleep_onset_utc, day.wake_resume) {
-            (true, Some(onset), _) => (
-                compute_sleep_wander_x(area.width, species, now, onset, idle_minutes),
-                compute_facing(area.width, species, onset, idle_minutes), // held facing: no mirror flips with shut eyes
-            ),
-            (false, _, Some(resume)) => (
-                compute_wake_wander_x(
-                    area.width,
-                    species,
-                    now,
-                    resume.from_eval_utc,
-                    resume.woke_at_utc,
-                    idle_minutes,
-                ),
-                compute_facing(area.width, species, now, idle_minutes),
-            ),
-            _ => {
-                let wander_now = lazy_wander_instant(now, day.local_day_started_utc, softening);
-                (
-                    compute_wander_position_x(area.width, species, wander_now, idle_minutes)
-                        + resonance_wander_bias(resonant_prop.as_ref()),
-                    compute_facing(area.width, species, wander_now, idle_minutes),
-                )
-            }
-        };
+        let (wander_x, facing) = crate::tui::wander::resolve_wander_offset(vm, now, area.width);
         let vm = if wander_x != vm.wander_offset_x || facing != vm.facing {
             // Build a local copy with the computed values rather than mutating.
             std::borrow::Cow::Owned({
@@ -1461,23 +1417,6 @@ pub(crate) mod tests {
         assert_eq!(styled.prop_reactions.len(), 1);
         assert_eq!(styled.prop_reactions[0].intensity, 0.72);
         assert_eq!(styled.prop_reactions[0].kind, PropReactionKind::Bloom);
-    }
-
-    #[test]
-    fn resonance_wander_bias_points_toward_the_prop_zone() {
-        let planter =
-            crate::storage::state::HabitatPropId::new(crate::game::habitat::HEAVY_SESSION_PLANTER);
-        let sprout =
-            crate::storage::state::HabitatPropId::new(crate::game::habitat::WILT_RECOVERY_SPROUT);
-        assert!(
-            resonance_wander_bias(Some(&planter)) > 0,
-            "right-zone prop pulls right"
-        );
-        assert!(
-            resonance_wander_bias(Some(&sprout)) < 0,
-            "left-zone prop pulls left"
-        );
-        assert_eq!(resonance_wander_bias(None), 0, "no companion, no bias");
     }
 
     fn test_scene_with_pet_art(pet_art: Rect) -> PetSceneLayout {

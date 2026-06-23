@@ -9,3 +9,4 @@ pub mod render_context;
 pub mod room;
 pub mod style;
 pub mod view_model;
+pub(crate) mod wander;
