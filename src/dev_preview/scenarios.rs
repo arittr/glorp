@@ -481,6 +481,32 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                     .to_string(),
             ],
         ),
+        "watch-habitat-props-orbit" => (
+            PreviewScenarioKind::Watch,
+            "Review prop-cell rendering with an earned Orbit-class prop and explicit Orbit reaction at non-compact width (prop golden coverage).",
+            BTreeMap::from([
+                (
+                    "fixed_now".to_string(),
+                    Value::String(format_rfc3339_lossy(ctx.fixed_now)),
+                ),
+                (
+                    "color_capability".to_string(),
+                    Value::String(color_capability_name(ctx.render.color_capability).to_string()),
+                ),
+                ("fixture".to_string(), Value::String("seeded-pet-state-with-orbit-prop".to_string())),
+                ("species".to_string(), Value::String("fuzz".to_string())),
+                ("stage".to_string(), Value::String("s4".to_string())),
+                ("terminal_width".to_string(), json!(frame.width)),
+                ("terminal_height".to_string(), json!(frame.height)),
+                ("habitat_props".to_string(), preview_habitat_props_with_orbit()),
+                ("orbit_reaction_kind".to_string(), Value::String("Orbit".to_string())),
+            ]),
+            vec![
+                "Confirm token_orbit_5m prop renders in the habitat (Background layer).".to_string(),
+                "Check the Orbit reaction glow applies to the orbit prop fg color.".to_string(),
+                "Verify existing non-orbit props (pebble, shell, lamp) still render correctly.".to_string(),
+            ],
+        ),
         id if id.starts_with("watch-habitat-") => (
             PreviewScenarioKind::HabitatProps,
             "Review habitat props inside realistic watch frames at different earned-state densities.",
@@ -759,6 +785,16 @@ fn preview_habitat_props() -> Value {
         "heavy_session_planter",
         "token_pebble_25k",
         "token_shell_100k"
+    ])
+}
+
+fn preview_habitat_props_with_orbit() -> Value {
+    json!([
+        "codex_signal_lamp",
+        "heavy_session_planter",
+        "token_pebble_25k",
+        "token_shell_100k",
+        "token_orbit_5m"
     ])
 }
 
@@ -1876,6 +1912,7 @@ mod tests {
                 "watch-species-dialect-crystal-flat",
                 "watch-activity-identity-ensemble",
                 "watch-activity-identity-unknown",
+                "watch-habitat-props-orbit",
                 "habitat-props-catalog",
                 "watch-habitat-early",
                 "watch-habitat-lived-in",

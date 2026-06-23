@@ -1,41 +1,33 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Color;
 
-use crate::game::habitat::{HabitatPetLayer, HabitatPropId};
+use crate::game::habitat::HabitatPropId;
 use crate::presentation::{privacy::PresentationSurface, scene::PresentationScene};
-use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
-use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind};
+use crate::tui::component::PetScene;
+use crate::tui::life::{PetLifeProfile, PropReaction, PropReactionKind};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
-use crate::tui::room::rects_contain;
-use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
 mod ambient;
 mod art_lines;
+mod blit;
 mod colors;
+mod draw;
 mod grounding;
 mod performance;
 mod props;
 
-use ambient::{
-    activity_glyphs_for, ambient_glyph_is_inside_area, mote_glyphs_for, weekend_soften_color,
-};
 pub use ambient::{ambient_glyphs_for, ambient_glyphs_for_phase};
 pub(crate) use ambient::{effective_weekend_softening, pet_silhouette_halo_rects};
 #[allow(unused_imports)]
 pub(crate) use art_lines::mirror_line;
 pub(crate) use art_lines::pet_role_spans_for_line;
-use art_lines::{
-    build_pet_lines, cursor_normalized_x_within, render_pet_lines_sparse, render_speech_bubble,
-};
+use art_lines::render_speech_bubble;
+use blit::blit_draw_list;
 pub(crate) use colors::pet_role_style;
-use colors::{
-    activity_glyph_budget, performance_posture_offset, resolve_watch_pet_styles,
-    watch_live_color_inputs,
-};
-use performance::apply_pet_performance_cues;
+pub(crate) use draw::render_pet_to_draw_list;
 
 #[cfg(test)]
 use crate::game::evolution::Stage;
@@ -44,20 +36,29 @@ use crate::pet::generation::Species;
 #[cfg(test)]
 use crate::pet::render::PaletteRoleName;
 #[cfg(test)]
+use crate::tui::component::PetSceneLayout;
+#[cfg(test)]
 use crate::tui::day::{DayPhase, Season};
 #[cfg(test)]
 use crate::tui::life::{SourceAccent, WorkWeather};
 #[cfg(test)]
-use crate::tui::style::semantic_styles;
+use crate::tui::style::{semantic_styles, ColorCapability};
 #[cfg(test)]
-use ambient::{biome_floor_palette, biome_wash_color};
+use ambient::{
+    activity_glyphs_for, ambient_glyph_is_inside_area, biome_floor_palette, biome_wash_color,
+};
 #[cfg(test)]
-use art_lines::{build_cursor_eye_string, cursor_eye_glyph};
+use art_lines::{
+    build_cursor_eye_string, build_pet_lines, cursor_eye_glyph, cursor_normalized_x_within,
+};
 #[cfg(test)]
 use colors::{
-    activity_glyph_color, activity_lift_style, apply_prop_reaction_style, darken_pet_styles,
-    performance_lightness_multiplier, tint_style_for_phase,
+    activity_glyph_budget, activity_glyph_color, activity_lift_style, apply_prop_reaction_style,
+    darken_pet_styles, performance_lightness_multiplier, performance_posture_offset,
+    tint_style_for_phase,
 };
+#[cfg(test)]
+use performance::performance_cue_cells;
 #[cfg(test)]
 use ratatui::text::Line;
 
@@ -103,6 +104,17 @@ pub struct AmbientGlyph {
 
 const RESONANCE_REACTION_INTENSITY: f32 = 0.25;
 
+/// Map a ratatui `Color::Rgb` to the backend-agnostic `Rgb` used by `DrawCell`.
+/// Non-Rgb variants (named colors, Reset, etc.) yield `None` so the blitter
+/// leaves the existing fg intact — these never appear in practice on the tokenpet
+/// palette, but the fallback keeps the contract explicit.
+fn color_to_rgb(color: Color) -> Option<crate::pet::palette::Rgb> {
+    match color {
+        Color::Rgb(r, g, b) => Some(crate::pet::palette::Rgb::new(r, g, b)),
+        _ => None,
+    }
+}
+
 fn apply_resonance_reaction(
     mut profile: PetLifeProfile,
     resonant: Option<&HabitatPropId>,
@@ -127,28 +139,9 @@ impl LegacyPanel for PetPanel {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
-        // Compute the wander position and facing from the live area width and
-        // wall clock so both stay consistent with each other regardless of what
-        // vm.wander_offset_x or vm.facing carry.
         let now = ctx.clock.now_utc();
-        let day = &vm.day_context;
-        let resonant_prop = {
-            let earned: Vec<crate::storage::state::EarnedHabitatProp> = vm
-                .habitat
-                .earned_props
-                .iter()
-                .map(|prop| crate::storage::state::EarnedHabitatProp {
-                    id: prop.id.clone(),
-                    earned_at: prop.earned_at,
-                    source: prop.source.clone(),
-                })
-                .collect();
-            crate::tui::day::resonant_prop_for_day(day, &earned)
-        };
-        let softening = effective_weekend_softening(day, &vm.life_profile);
         let (wander_x, facing) = crate::tui::wander::resolve_wander_offset(vm, now, area.width);
         let vm = if wander_x != vm.wander_offset_x || facing != vm.facing {
-            // Build a local copy with the computed values rather than mutating.
             std::borrow::Cow::Owned({
                 let mut v = vm.clone();
                 v.wander_offset_x = wander_x;
@@ -159,259 +152,38 @@ impl LegacyPanel for PetPanel {
             std::borrow::Cow::Borrowed(vm)
         };
         let vm = vm.as_ref();
+
         let presentation_scene =
             PresentationScene::from_watch_view_model(vm, now, PresentationSurface::WatchTui);
         let scene = PetScene::compute_layout(area, vm, ctx);
         let scene_model = crate::presentation::PetSceneModel::build(vm, now, ctx.color_capability);
+        presentation_scene
+            .room
+            .debug_assert_matches_profile(&scene_model.room);
 
-        // Per-cell pet silhouette + 1-cell halo, shared by every pass that
-        // wants pet avoidance. Replaces the inflated bounding rect so habitat
-        // content can fill the diamond's negative space while keeping a
-        // breathing margin around the actual pet outline.
-        let species = vm.pet_render.generated_species;
-        let _presentation_species = presentation_scene.pet.species.as_str();
-        let stage = vm.pet_render.stage;
-        let mirror = vm.facing == -1;
-        let silhouette_halo = pet_silhouette_halo_rects(&vm.pet_art, scene.pet_art, mirror);
+        let list = render_pet_to_draw_list(&scene_model, vm, &scene, now, ctx);
+        blit_draw_list(buf, &list);
 
-        // Pass 1: ambient backdrop — uses the silhouette halo as a per-cell
-        // exclusion so dots/sparkles flow through the rect's negative space.
-        let mut ambient_exclusions: Vec<Rect> = scene
-            .exclusions
-            .iter()
-            .copied()
-            .filter(|r| *r != scene.pet_art)
-            .collect();
-        ambient_exclusions.extend_from_slice(&silhouette_halo);
-
-        // Alive room base: persistent biome, weather, and prop emitter glyphs
-        // drawn before the existing ambient/mote/activity passes so they set
-        // the room's silhouette without replacing pet or speech cells.
-        let room_profile = scene_model.room;
-        let presentation_room = &presentation_scene.room;
-        presentation_room.debug_assert_matches_profile(&room_profile);
-
-        // Base layer: per-biome background wash over the entire habitat (sky + deeper
-        // floor band). Set before every glyph pass so the bg stays seamless underneath.
-        grounding::paint_biome_wash(buf, scene.habitat, room_profile.biome.primary);
-
-        let room_glyphs = crate::tui::room::room_glyphs_for(
-            &room_profile,
-            scene.habitat,
-            &ambient_exclusions,
-            now,
-            ctx.color_capability,
-            vm.day_context.day_phase,
-        );
-        for g in room_glyphs {
-            if !rects_contain(&ambient_exclusions, g.col, g.row) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(g.style);
-            }
+        if let (Some(speech_area), Some(speech)) = (scene.speech, vm.current_speech.as_deref()) {
+            let inputs = colors::watch_live_color_inputs(
+                vm,
+                now,
+                scene_model.room.pet_performance,
+                scene_model.effects.shimmer_role,
+                scene_model.effects.token_pop.is_some(),
+            );
+            let (_live_styles, droop_styles) =
+                colors::resolve_watch_pet_styles(&vm.pet_palette, &inputs, ctx.color_capability);
+            render_speech_bubble(speech_area, buf, speech, &droop_styles);
         }
-
-        let phase_blend = {
-            let since = (now - vm.day_context.phase_started_at_utc).whole_seconds() as f32;
-            (since / (crate::tui::day::PHASE_BLEND_MINUTES as f32 * 60.0)).clamp(0.0, 1.0)
-        };
-        let glyphs = ambient_glyphs_for_phase(
-            species,
-            stage,
-            room_profile.biome.primary,
-            scene.habitat,
-            &ambient_exclusions,
-            now,
-            ctx.color_capability,
-            vm.day_context.day_phase,
-            phase_blend,
-            vm.day_context.date_seed,
-            vm.day_context.season,
-            vm.day_context.climate,
-        );
-        for g in glyphs {
-            if ambient_glyph_is_inside_area(&g, scene.habitat) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(
-                    ratatui::style::Style::default().fg(weekend_soften_color(g.color, softening)),
-                );
-            }
-        }
-        // Mote pass: after ambient, before activity glyphs, same exclusions
-        // (silhouette halo + speech) — spec: Day accumulation.
-        let motes = mote_glyphs_for(
-            &vm.day_context,
-            scene.habitat,
-            &ambient_exclusions,
-            now,
-            ctx.color_capability,
-        );
-        for g in motes {
-            if ambient_glyph_is_inside_area(&g, scene.habitat) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(Style::default().fg(weekend_soften_color(g.color, softening)));
-            }
-        }
-        let compact = area.width <= 72 || area.height <= 24;
-        let earned_prop_ids = vm
-            .habitat
-            .earned_props
-            .iter()
-            .map(|prop| prop.id.clone())
-            .collect::<Vec<_>>();
-        let life_profile = build_prop_reactions(vm.life_profile.clone(), &earned_prop_ids, compact);
-        let life_profile = apply_resonance_reaction(life_profile, resonant_prop.as_ref());
-        let extra_count = activity_glyph_budget(&life_profile, compact);
-        let activity_glyphs = activity_glyphs_for(
-            &life_profile,
-            species,
-            scene.habitat,
-            &ambient_exclusions,
-            now,
-            ctx.color_capability,
-            extra_count,
-        );
-        for g in activity_glyphs {
-            if ambient_glyph_is_inside_area(&g, scene.habitat) {
-                let cell = &mut buf[(g.col, g.row)];
-                cell.set_char(g.glyph);
-                cell.set_style(Style::default().fg(g.color));
-            }
-        }
-
-        // Trophies + accents, classified by their pet-layer from the catalog.
-        // Background avoids the silhouette halo; Behind ignores it (renders
-        // pre-pet to sit visually behind); Foreground ignores it and renders
-        // post-pet to sit visually in front.
-        let prop_cells = habitat_props_for(
-            &vm.habitat,
-            &scene,
-            &silhouette_halo,
-            species,
-            &vm.pet_render.seed,
-            ctx,
-        );
-        props::render_prop_layers(
-            buf,
-            &prop_cells,
-            &scene,
-            &life_profile.prop_reactions,
-            ctx.color_capability,
-            &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
-        );
-
-        // Contact shadow: a calm bg deepening directly under the pet's feet so it
-        // reads as resting ON the floor. Restricted to feet columns (gutter
-        // precedence: species identity side cells are never touched). Bg-only — it
-        // never replaces a floor-texture glyph, just deepens the cell behind it.
-        grounding::paint_contact_shadow(
-            buf,
-            scene.pet_art,
-            &vm.pet_art,
-            vm.facing,
-            scene.habitat,
-            room_profile.biome.primary,
-        );
-
-        // Pet art with shimmer, twinkle, and token-pop overlays — paints over
-        // any Background / Behind cells it touches via the silhouette.
-        render_pet_inside(
-            buf,
-            vm,
-            &scene,
-            now,
-            ctx.color_capability,
-            room_profile.pet_performance,
-            scene_model.effects,
-        );
-
-        // Tiny performance cue near the pet: one cell, never a template rewrite.
-        apply_pet_performance_cues(
-            buf,
-            &scene,
-            room_profile.pet_performance,
-            ctx.color_capability,
-        );
-
-        // Foreground props paint on top of the pet, for whenever depth in
-        // front of the pet is wanted (no foreground props in the catalog
-        // today; the pass exists so adding one only requires a catalog flip).
-        props::render_prop_layer(
-            buf,
-            &prop_cells,
-            &scene,
-            &life_profile.prop_reactions,
-            ctx.color_capability,
-            HabitatPetLayer::Foreground,
-        );
     }
-}
-
-/// Renders the speech bubble and pet art into `area`, centered vertically.
-/// This is the pre-existing render logic extracted from the old `render` body.
-fn render_pet_inside(
-    buf: &mut Buffer,
-    vm: &WatchViewModel,
-    scene: &PetSceneLayout,
-    now: time::OffsetDateTime,
-    color_capability: ColorCapability,
-    pet_performance: crate::tui::room::PetPerformance,
-    effects: crate::presentation::EffectState,
-) {
-    let shimmer_role = effects.shimmer_role;
-    let twinkle = effects.twinkle;
-    let token_pop = effects.token_pop;
-
-    // The shared resolver runs the live color pipeline: `live_styles` carries
-    // the full WATCH chain (phase tint + droop + shimmer + activity lift),
-    // while `droop_styles` is the dimmed-but-not-shimmered variant the speech
-    // bubble draws from.
-    let inputs =
-        watch_live_color_inputs(vm, now, pet_performance, shimmer_role, token_pop.is_some());
-    let (live_styles, droop_styles) =
-        resolve_watch_pet_styles(&vm.pet_palette, &inputs, color_capability);
-
-    if let (Some(speech_area), Some(speech)) = (scene.speech, vm.current_speech.as_deref()) {
-        render_speech_bubble(speech_area, buf, speech, &droop_styles);
-    }
-
-    // Twinkle: also place a sparkle at the token-pop center when pop is active.
-    let effective_twinkle = if token_pop.is_some() {
-        Some(crate::pet::animator::TwinkleSpec {
-            row: 4,
-            col: 5,
-            glyph: '\u{2726}',
-        })
-    } else {
-        twinkle
-    };
-
-    // Hit-test against the full column width so the cursor anywhere in the
-    // panel triggers eye tracking, matching the pre-Fill behavior.
-    let cursor_norm_x = cursor_normalized_x_within(vm, scene.hit_area);
-    let posture = performance_posture_offset(pet_performance);
-    let pet_rect = {
-        let mut r = scene.pet_art;
-        let max_y = scene.habitat.y + scene.habitat.height.saturating_sub(r.height);
-        r.y = (r.y + posture).min(max_y);
-        r
-    };
-    let lines = build_pet_lines(
-        vm,
-        pet_rect.width as usize,
-        &live_styles,
-        cursor_norm_x,
-        effective_twinkle,
-    );
-    render_pet_lines_sparse(buf, pet_rect, &lines);
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Style;
     use ratatui::Terminal;
     use time::macros::datetime;
     use ColorCapability;
@@ -1437,13 +1209,27 @@ pub(crate) mod tests {
         }
     }
 
+    fn blit_performance_cue(
+        buf: &mut Buffer,
+        scene: &PetSceneLayout,
+        performance: crate::tui::room::PetPerformance,
+        color_capability: ColorCapability,
+    ) {
+        blit_draw_list(
+            buf,
+            &crate::presentation::SceneDrawList {
+                cells: performance_cue_cells(scene, performance, color_capability),
+            },
+        );
+    }
+
     #[test]
     fn performance_cue_places_floor_symbol_below_pet() {
         let pet_art = Rect::new(30, 3, 13, 10);
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::TiredAwake,
@@ -1461,7 +1247,7 @@ pub(crate) mod tests {
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::AsleepDreaming,
@@ -1479,7 +1265,7 @@ pub(crate) mod tests {
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::HeavyDayCozy,
@@ -1498,7 +1284,7 @@ pub(crate) mod tests {
         let mut buf = Buffer::empty(scene.habitat);
 
         // Should not panic on underflow and must not overwrite pet art.
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::CatchUpWake,
@@ -1520,7 +1306,7 @@ pub(crate) mod tests {
         let scene = test_scene_with_pet_art(pet_art);
         let mut buf = Buffer::empty(scene.habitat);
 
-        apply_pet_performance_cues(
+        blit_performance_cue(
             &mut buf,
             &scene,
             crate::tui::room::PetPerformance::SourceBurstPerk,

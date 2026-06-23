@@ -1,4 +1,5 @@
 pub mod color_ops;
+pub mod draw_list;
 pub mod effect;
 pub mod pet;
 pub mod pet_scene;
@@ -9,6 +10,7 @@ pub mod scene;
 pub mod surface;
 pub mod target;
 
+pub use draw_list::{DrawCell, SceneDrawList};
 pub use effect::EffectState;
 pub use pet_scene::PetSceneModel;
 pub use surface::{

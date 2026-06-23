@@ -1,7 +1,8 @@
-use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 use super::ambient::{biome_floor_wash_color, biome_wash_color, contact_shadow_color};
+use crate::presentation::DrawCell;
 use crate::tui::room::RoomBiomeTag;
 
 /// The lower N habitat rows painted with the deeper floor wash so the ground
@@ -60,49 +61,68 @@ pub(super) fn contact_shadow_cells(
         .collect()
 }
 
-/// Paints the per-biome background wash over the entire habitat area. The lower
-/// `FLOOR_BAND_ROWS` rows use the darker floor wash so the ground reads as a
-/// distinct value from the lighter sky above it. This pass sets `bg` only, so
-/// every glyph pass (room/ambient/pet) that sets `fg` stays seamless on top.
-pub(super) fn paint_biome_wash(buf: &mut Buffer, habitat: Rect, biome: RoomBiomeTag) {
+/// Returns one bg-only [`DrawCell`] per habitat cell: sky rows use
+/// [`biome_wash_color`] and the bottom [`FLOOR_BAND_ROWS`] rows use
+/// [`biome_floor_wash_color`].
+pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCell> {
     let sky_wash = biome_wash_color(biome);
     let floor_wash = biome_floor_wash_color(biome);
     let floor_band_top = habitat
         .y
         .saturating_add(habitat.height.saturating_sub(FLOOR_BAND_ROWS));
+    let mut cells = Vec::with_capacity((habitat.width as usize) * (habitat.height as usize));
     for wy in habitat.y..habitat.y.saturating_add(habitat.height) {
         let wash = if wy >= floor_band_top {
             floor_wash
         } else {
             sky_wash
         };
+        let bg = match wash {
+            Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
+            _ => continue, // non-RGB color cap: skip
+        };
         for wx in habitat.x..habitat.x.saturating_add(habitat.width) {
-            buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
+            cells.push(DrawCell {
+                row: wy,
+                col: wx,
+                glyph: None,
+                fg: None,
+                bg: Some(bg),
+                bold: false,
+            });
         }
     }
+    cells
 }
 
-/// Paints the contact shadow: a calm bg deepening directly under the pet's feet
-/// so it reads as resting ON the floor. Restricted to feet columns (gutter
-/// precedence: species identity side cells are never touched). Bg-only — it
-/// never replaces a floor-texture glyph, just deepens the cell behind it.
-pub(super) fn paint_contact_shadow(
-    buf: &mut Buffer,
+/// Returns one bg-only [`DrawCell`] per shadow position: the columns directly
+/// under the pet's feet on the floor row, clipped to `habitat`. Color is
+/// derived from [`contact_shadow_color`] applied to the biome floor wash.
+pub(super) fn contact_shadow_draw_cells(
     scene_pet_art: Rect,
     pet_art_lines: &[String],
     facing: i8,
     habitat: Rect,
     biome: RoomBiomeTag,
-) {
+) -> Vec<DrawCell> {
     let mirror = facing == -1;
     let floor_wash = biome_floor_wash_color(biome);
     let shadow = contact_shadow_color(floor_wash);
-    for (sx, sy) in contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat) {
-        let cell = &mut buf[(sx, sy)];
-        let mut style = cell.style();
-        style.bg = Some(shadow);
-        cell.set_style(style);
-    }
+    let bg = match shadow {
+        ratatui::style::Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
+        _ => return Vec::new(), // non-RGB color cap: skip
+    };
+    contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat)
+        .into_iter()
+        .map(|(col, row)| DrawCell {
+            row,
+            col,
+            glyph: None,
+            fg: None,
+            bg: Some(bg),
+            bold: false,
+        })
+        .collect()
 }
 
 #[cfg(test)]

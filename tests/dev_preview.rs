@@ -54,6 +54,8 @@ const ACTIVITY_IDENTITY_WATCH_IDS: [&str; 2] = [
     "watch-activity-identity-unknown",
 ];
 
+const HABITAT_PROPS_ORBIT_ID: &str = "watch-habitat-props-orbit";
+
 const SPECIES_DIALECT_WATCH_IDS: [&str; 8] = [
     "watch-species-dialect-fuzz",
     "watch-species-dialect-blob",
@@ -269,6 +271,24 @@ fn dev_preview_watch_writes_expected_artifacts() {
             "missing {id} layout artifact"
         );
     }
+    assert!(
+        run.out
+            .join(format!("frames/{HABITAT_PROPS_ORBIT_ID}.txt"))
+            .is_file(),
+        "missing {HABITAT_PROPS_ORBIT_ID} text artifact"
+    );
+    assert!(
+        run.out
+            .join(format!("frames/{HABITAT_PROPS_ORBIT_ID}.cells.json"))
+            .is_file(),
+        "missing {HABITAT_PROPS_ORBIT_ID} cells artifact"
+    );
+    assert!(
+        run.out
+            .join(format!("frames/{HABITAT_PROPS_ORBIT_ID}.layout.json"))
+            .is_file(),
+        "missing {HABITAT_PROPS_ORBIT_ID} layout artifact"
+    );
 
     let manifest = run.manifest();
     assert_eq!(manifest["schema_version"], 4);
@@ -486,6 +506,38 @@ fn dev_preview_watch_manifest_records_activity_identity_intent() {
             "{id} must not include raw payloads"
         );
     }
+}
+
+#[test]
+fn dev_preview_watch_includes_habitat_props_orbit_frame() {
+    let run = PreviewRun::new();
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    // Frame must exist with correct dimensions
+    assert_scenario(
+        &manifest,
+        HABITAT_PROPS_ORBIT_ID,
+        "watch",
+        (120, 32),
+        (
+            &format!("frames/{HABITAT_PROPS_ORBIT_ID}.txt"),
+            &format!("frames/{HABITAT_PROPS_ORBIT_ID}.cells.json"),
+            Some(&format!("frames/{HABITAT_PROPS_ORBIT_ID}.layout.json")),
+        ),
+    );
+    // The frame must record habitat_props inputs (including the orbit prop)
+    let s = scenario(&manifest, HABITAT_PROPS_ORBIT_ID);
+    let prop_ids = s["inputs"]["habitat_props"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{HABITAT_PROPS_ORBIT_ID} should have habitat_props input"))
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        prop_ids.contains(&"token_orbit_5m"),
+        "{HABITAT_PROPS_ORBIT_ID} habitat_props must include token_orbit_5m (orbit-class prop for golden coverage)"
+    );
 }
 
 #[test]
@@ -997,6 +1049,9 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-activity-identity-unknown.txt",
         "frames/watch-activity-identity-unknown.cells.json",
         "frames/watch-activity-identity-unknown.layout.json",
+        "frames/watch-habitat-props-orbit.txt",
+        "frames/watch-habitat-props-orbit.cells.json",
+        "frames/watch-habitat-props-orbit.layout.json",
         "frames/habitat-props-catalog.txt",
         "frames/watch-habitat-early.txt",
         "frames/watch-habitat-lived-in.txt",
@@ -1071,6 +1126,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-species-dialect-crystal-flat".to_string(),
             "watch-activity-identity-ensemble".to_string(),
             "watch-activity-identity-unknown".to_string(),
+            "watch-habitat-props-orbit".to_string(),
             "habitat-props-catalog".to_string(),
             "watch-habitat-early".to_string(),
             "watch-habitat-lived-in".to_string(),

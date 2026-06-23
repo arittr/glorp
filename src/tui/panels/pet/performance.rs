@@ -1,27 +1,31 @@
-use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Style};
 
+use crate::pet::palette::Rgb;
+use crate::presentation::DrawCell;
 use crate::tui::component::PetSceneLayout;
 use crate::tui::room::PetPerformance;
 use crate::tui::style::ColorCapability;
 
-/// Overwrites one or two cells near the pet with a tiny performance cue glyph.
-/// Keeps the rest of the pet template untouched — this is punctuation, not a
-/// rewrite.
-pub(super) fn apply_pet_performance_cues(
-    buf: &mut Buffer,
+/// Returns a list of up to one [`DrawCell`] for the performance cue near the
+/// pet. The cue is punctuation only — it never rewrites pet art.
+///
+/// Returns an empty list for [`PetPerformance::RestedAwake`] (no cue needed).
+/// The caller blits the result via
+/// [`crate::tui::panels::pet::blit::blit_draw_list`].
+pub(super) fn performance_cue_cells(
     scene: &PetSceneLayout,
     performance: PetPerformance,
     color_capability: ColorCapability,
-) {
+) -> Vec<DrawCell> {
     let style = performance_cue_style(color_capability);
+    let fg = style_fg_to_rgb(style.fg);
     match performance {
-        PetPerformance::TiredAwake => mark_pet_floor(buf, scene, '˙', style),
-        PetPerformance::HeavyDayCozy => mark_pet_floor(buf, scene, '~', style),
-        PetPerformance::AsleepDreaming => mark_pet_air(buf, scene, 'z', style),
-        PetPerformance::CatchUpWake => mark_pet_air(buf, scene, '^', style),
-        PetPerformance::SourceBurstPerk => mark_pet_air(buf, scene, '!', style),
-        PetPerformance::RestedAwake => {}
+        PetPerformance::TiredAwake => floor_draw_cell(scene, '˙', fg),
+        PetPerformance::HeavyDayCozy => floor_draw_cell(scene, '~', fg),
+        PetPerformance::AsleepDreaming => air_draw_cell(scene, 'z', fg),
+        PetPerformance::CatchUpWake => air_draw_cell(scene, '^', fg),
+        PetPerformance::SourceBurstPerk => air_draw_cell(scene, '!', fg),
+        PetPerformance::RestedAwake => vec![],
     }
 }
 
@@ -34,9 +38,17 @@ fn performance_cue_style(color_capability: ColorCapability) -> Style {
     Style::default().fg(color)
 }
 
-/// Places `symbol` on the floor cell just below the pet's bounding rect,
-/// clipped to the habitat area.
-fn mark_pet_floor(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: Style) {
+fn style_fg_to_rgb(color: Option<Color>) -> Option<Rgb> {
+    match color {
+        Some(Color::Rgb(r, g, b)) => Some(Rgb::new(r, g, b)),
+        _ => None,
+    }
+}
+
+/// Returns a [`DrawCell`] for the floor position (one row below the pet's
+/// bounding rect), clipped to the habitat area.  Returns an empty `Vec` if the
+/// position is outside the habitat.
+fn floor_draw_cell(scene: &PetSceneLayout, symbol: char, fg: Option<Rgb>) -> Vec<DrawCell> {
     let x = scene.pet_art.x + scene.pet_art.width / 2;
     let y = scene.pet_art.y.saturating_add(scene.pet_art.height);
     let within_habitat = x >= scene.habitat.x
@@ -44,16 +56,24 @@ fn mark_pet_floor(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style:
         && x < scene.habitat.x.saturating_add(scene.habitat.width)
         && y < scene.habitat.y.saturating_add(scene.habitat.height);
     if within_habitat {
-        let cell = &mut buf[(x, y)];
-        cell.set_char(symbol);
-        cell.set_style(style);
+        vec![DrawCell {
+            row: y,
+            col: x,
+            glyph: Some(symbol.to_string()),
+            fg,
+            bg: None,
+            bold: false,
+        }]
+    } else {
+        vec![]
     }
 }
 
-/// Places `symbol` on the air cell just above the pet's bounding rect,
-/// clipped to the habitat area. Skips the write when there is no row above
-/// the pet, so the cue never overwrites pet art.
-fn mark_pet_air(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: Style) {
+/// Returns a [`DrawCell`] for the air position (one row above the pet's
+/// bounding rect), clipped to the habitat area. Returns an empty `Vec` if
+/// there is no row above the pet (prevents overwriting pet art) or the
+/// position is outside the habitat.
+fn air_draw_cell(scene: &PetSceneLayout, symbol: char, fg: Option<Rgb>) -> Vec<DrawCell> {
     let x = scene.pet_art.x + scene.pet_art.width / 2;
     let y = scene.pet_art.y.saturating_sub(1);
     let above_pet = y < scene.pet_art.y;
@@ -62,8 +82,15 @@ fn mark_pet_air(buf: &mut Buffer, scene: &PetSceneLayout, symbol: char, style: S
         && x < scene.habitat.x.saturating_add(scene.habitat.width)
         && y < scene.habitat.y.saturating_add(scene.habitat.height);
     if above_pet && within_habitat {
-        let cell = &mut buf[(x, y)];
-        cell.set_char(symbol);
-        cell.set_style(style);
+        vec![DrawCell {
+            row: y,
+            col: x,
+            glyph: Some(symbol.to_string()),
+            fg,
+            bg: None,
+            bold: false,
+        }]
+    } else {
+        vec![]
     }
 }
