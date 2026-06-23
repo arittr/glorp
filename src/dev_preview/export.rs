@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const PRODUCER: &str = "glorp-dev-preview";
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -89,10 +89,6 @@ pub struct PreviewScenarioFiles {
     pub room_masked_text: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scene: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub round_layout: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub round_commands: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,8 +149,6 @@ pub enum ArtifactType {
     Cells,
     Layout,
     Scene,
-    RoundLayout,
-    RoundCommands,
     Html,
     Review,
     Asset,
@@ -307,15 +301,6 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             if let Some(scene) = &scenario.files.scene {
                 markdown.push_str(&format!("- Scene: `{}`\n", scene.display()));
             }
-            if let Some(round_layout) = &scenario.files.round_layout {
-                markdown.push_str(&format!("- Round layout: `{}`\n", round_layout.display()));
-            }
-            if let Some(round_commands) = &scenario.files.round_commands {
-                markdown.push_str(&format!(
-                    "- Round commands: `{}`\n",
-                    round_commands.display()
-                ));
-            }
             markdown.push('\n');
             markdown.push_str("Review prompts:\n");
             for prompt in &scenario.review_prompts {
@@ -455,18 +440,6 @@ fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
         links.push(format!(
             r#"<a href="{}">scene</a>"#,
             escape_html(&format!("frames/{}.scene.json", frame.id))
-        ));
-    }
-    if frame.contract.round_layout.is_some() {
-        links.push(format!(
-            r#"<a href="{}">round layout</a>"#,
-            escape_html(&format!("frames/{}.round-layout.json", frame.id))
-        ));
-    }
-    if frame.contract.round_commands.is_some() {
-        links.push(format!(
-            r#"<a href="{}">round commands</a>"#,
-            escape_html(&format!("frames/{}.round-commands.json", frame.id))
         ));
     }
 
@@ -722,8 +695,6 @@ mod tests {
                     room_text: None,
                     room_masked_text: None,
                     scene: None,
-                    round_layout: None,
-                    round_commands: None,
                 },
                 inputs: BTreeMap::from([(
                     "fixed_now".to_string(),
@@ -939,7 +910,7 @@ mod tests {
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 4);
+        assert_eq!(json["schema_version"], 5);
         assert_eq!(json["producer"], "glorp-dev-preview");
         assert_eq!(json["scenarios"][0]["kind"], "watch");
         assert_eq!(json["scenarios"][0]["dimensions"]["width"], 2);

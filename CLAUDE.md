@@ -101,7 +101,7 @@ The preview bundle contains:
 - `review.md` — manifest-driven checklist with scenario prompts.
 - `manifest.json` — review contract with scenario ids, kinds, intents,
   dimensions, files, inputs, round metadata, and artifact inventory. Current
-  manifest schema version is 3.
+  manifest schema version is 5.
 - `frames/*.txt` — plain visible terminal cells.
 - `frames/*.cells.json` — per-cell geometry/style data.
 - `frames/*.layout.json` — optional component layout target captures.

@@ -1,11 +1,8 @@
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
-use crate::pet::render::PaletteRoleName;
-use crate::presentation::pet::{role_for_cell, PetTextBlock};
 use crate::round::draw::{RoundDrawCommand, RoundDrawKind};
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
-use crate::round::model::{derive_round_scene_model, RoundSceneModel};
+use crate::round::model::derive_round_scene_model;
 use crate::tui::view_model::WatchViewModel;
-use ratatui::text::Line;
 
 pub fn render_round_preview_frame_from_vm(
     id: impl Into<String>,
@@ -19,9 +16,57 @@ pub fn render_round_preview_frame_from_vm(
     let scene = derive_round_scene_model(vm, now);
     let aperture = RoundAperture::new(width, height);
     let layout = layout_round_scene(&scene, aperture, capabilities);
-    let mut cells = blank_cells(width, height, aperture);
+
+    // Render pet+habitat via the shared scene seam.
+    let list = crate::round::scene::build_round_scene_draw_list(vm, now, width, height);
+    let grid = crate::presentation::rasterize(&list, width, height);
+
+    // Build PreviewCell grid from rasterized output, applying the aperture mask.
+    let mut cells: Vec<PreviewCell> = Vec::with_capacity(width as usize * height as usize);
+    for row in 0..height {
+        for col in 0..width {
+            let outside_aperture = !aperture.contains(col as f32, row as f32);
+            if outside_aperture {
+                cells.push(PreviewCell {
+                    x: col,
+                    y: row,
+                    symbol: " ".to_string(),
+                    display_width: 1,
+                    continuation: false,
+                    fg: None,
+                    bg: None,
+                    modifiers: Vec::new(),
+                    outside_aperture: true,
+                });
+            } else {
+                let raster = &grid[row as usize][col as usize];
+                let symbol = raster.glyph.to_string();
+                let display_width = ratatui::text::Line::from(symbol.clone()).width();
+                let fg = raster
+                    .fg
+                    .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b));
+                let bg = raster
+                    .bg
+                    .map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b));
+                cells.push(PreviewCell {
+                    x: col,
+                    y: row,
+                    symbol,
+                    display_width,
+                    continuation: false,
+                    fg,
+                    bg,
+                    modifiers: Vec::new(),
+                    outside_aperture: false,
+                });
+            }
+        }
+    }
+
+    // Overlay halo/trouble beads from the draw-command path.
     let commands = crate::round::draw::build_draw_commands(&scene, &layout);
-    paint_commands(&mut cells, width, &scene, &commands, capabilities.truecolor);
+    paint_halo_trouble(&mut cells, width, &commands, capabilities.truecolor);
+
     mark_continuations(&mut cells, width);
     let mut frame = PreviewFrame {
         id: id.into(),
@@ -38,55 +83,24 @@ pub fn render_round_preview_frame_from_vm(
             &frame.id, &scene, now,
         ),
     );
-    frame.contract.round_layout = Some(
-        crate::dev_preview::contract::PreviewRoundLayoutArtifact::from_layout(&frame.id, &layout),
-    );
-    frame.contract.round_commands = Some(
-        crate::dev_preview::contract::PreviewRoundCommandsArtifact::from_commands(
-            &frame.id, &scene, &commands,
-        ),
-    );
     frame
 }
 
-fn blank_cells(width: u16, height: u16, aperture: RoundAperture) -> Vec<PreviewCell> {
-    let mut cells = Vec::with_capacity(width as usize * height as usize);
-    for y in 0..height {
-        for x in 0..width {
-            let outside = !aperture.contains(x as f32, y as f32);
-            cells.push(PreviewCell {
-                x,
-                y,
-                symbol: " ".to_string(),
-                display_width: 1,
-                continuation: false,
-                fg: None,
-                bg: None,
-                modifiers: Vec::new(),
-                outside_aperture: outside,
-            });
-        }
-    }
-    cells
-}
-
-fn paint_commands(
+/// Paint only `Halo` and `Trouble` commands into the cell grid.
+/// `Background` has no label and is skipped by `paint_labeled_command`.
+/// Pet, room, and prop rendering are supplied by the rasterized seam scene.
+fn paint_halo_trouble(
     cells: &mut [PreviewCell],
     width: u16,
-    scene: &RoundSceneModel,
     commands: &[RoundDrawCommand],
     truecolor: bool,
 ) {
     for command in commands {
         match command.kind {
-            RoundDrawKind::Background => {}
-            RoundDrawKind::RoomGlyph
-            | RoundDrawKind::PropGlyph
-            | RoundDrawKind::Halo
-            | RoundDrawKind::Trouble => paint_labeled_command(cells, width, command, truecolor),
-            RoundDrawKind::PetGlyph => {
-                paint_pet_art_command(cells, width, scene, command, truecolor);
+            RoundDrawKind::Halo | RoundDrawKind::Trouble => {
+                paint_labeled_command(cells, width, command, truecolor)
             }
+            _ => {}
         }
     }
 }
@@ -109,67 +123,6 @@ fn paint_labeled_command(
     }
 }
 
-fn paint_pet_art_command(
-    cells: &mut [PreviewCell],
-    width: u16,
-    scene: &RoundSceneModel,
-    command: &RoundDrawCommand,
-    truecolor: bool,
-) {
-    let art_lines = command
-        .text
-        .as_deref()
-        .unwrap_or_default()
-        .split('\n')
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let block = PetTextBlock::new(art_lines.clone(), command.spans.clone());
-    let art_width = art_lines
-        .iter()
-        .map(|line| {
-            line.chars()
-                .map(|ch| Line::from(ch.to_string()).width())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0) as i32;
-    let art_height = art_lines.len() as i32;
-    let start_x = command.x.round() as i32 - art_width / 2;
-    let start_y = command.y.round() as i32 - art_height / 2;
-    for (row, line) in art_lines.iter().enumerate() {
-        let mut col = 0i32;
-        for (char_index, ch) in line.chars().enumerate() {
-            let display_width = Line::from(ch.to_string()).width() as i32;
-            if ch != ' ' {
-                let role = role_for_cell(&block, row, char_index);
-                let rgb = crate::pet::palette::role_color(role, &scene.pet.palette);
-                let fg = if truecolor {
-                    format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)
-                } else {
-                    flat_role_name(role).to_string()
-                };
-                set_cell(
-                    cells,
-                    width,
-                    start_x + col,
-                    start_y + row as i32,
-                    ch.to_string(),
-                    Some(fg),
-                );
-            }
-            col += display_width;
-        }
-    }
-}
-
-fn flat_role_name(role: PaletteRoleName) -> &'static str {
-    match role {
-        PaletteRoleName::Eye => "green",
-        PaletteRoleName::Accent | PaletteRoleName::Particle => "yellow",
-        _ => "white",
-    }
-}
-
 fn command_color(command: &RoundDrawCommand, truecolor: bool) -> String {
     if truecolor {
         let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -182,10 +135,9 @@ fn command_color(command: &RoundDrawCommand, truecolor: bool) -> String {
     }
 
     match command.kind {
-        RoundDrawKind::RoomGlyph => "gray",
-        RoundDrawKind::PropGlyph | RoundDrawKind::Halo => "yellow",
+        RoundDrawKind::Halo => "yellow",
         RoundDrawKind::Trouble => "red",
-        RoundDrawKind::Background | RoundDrawKind::PetGlyph => "white",
+        RoundDrawKind::Background => "white",
     }
     .to_string()
 }
@@ -207,7 +159,7 @@ fn set_cell(
     if idx >= cells.len() || cells[idx].outside_aperture || cells[idx].continuation {
         return;
     }
-    cells[idx].display_width = Line::from(symbol.clone()).width();
+    cells[idx].display_width = ratatui::text::Line::from(symbol.clone()).width();
     cells[idx].symbol = symbol;
     cells[idx].fg = fg;
 }
@@ -215,17 +167,49 @@ fn set_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pet::render::StyledSegment;
+    use crate::round::layout::RoundRenderCapabilities;
+
+    fn blank_cells(width: u16, height: u16, aperture: RoundAperture) -> Vec<PreviewCell> {
+        let mut cells = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let outside = !aperture.contains(x as f32, y as f32);
+                cells.push(PreviewCell {
+                    x,
+                    y,
+                    symbol: " ".to_string(),
+                    display_width: 1,
+                    continuation: false,
+                    fg: None,
+                    bg: None,
+                    modifiers: Vec::new(),
+                    outside_aperture: outside,
+                });
+            }
+        }
+        cells
+    }
 
     #[test]
-    fn preview_pet_colors_eye_and_body_differently() {
-        use crate::pet::render::PaletteRoleName;
+    fn preview_renders_multiple_fg_colors_via_seam() {
+        // The seam-rendered frame must produce more than one distinct fg color,
+        // proving that role-based coloring (eye, body, accent, biome wash) is
+        // applied — not a flat single-color fill.
+        //
+        // Stronger role-color check: inject a known eye span into the pet art so
+        // the Eye role is exercised by the seam render. The fixture uses
+        // default_theme_palette() (body=#efebe4, eye=#82bc83). Both fg hex values
+        // must appear in the frame, and they must be distinct.
+        use crate::pet::palette::default_theme_palette;
+        use crate::pet::render::{PaletteRoleName, StyledSegment};
         use crate::tui::view_model::WatchViewModel;
         use time::macros::datetime;
         let mut vm = WatchViewModel::fixture_with_habitat_props();
-        // Give the pet a known eye span so the assertion exercises span-aware
-        // coloring rather than the room's ambient texture color.
-        vm.pet_art = vec!["o o".to_string()];
+        // Give the pet a one-line art with two eye-role cells (cols 0, 2) and one
+        // body-role cell (col 1 is a space — skipped; add 'X' as body).
+        // Layout: "o o" with Eye spans at 0..1 and 2..3; col 1 (' ') is skipped.
+        // We add a second line "XX" (body) so the body color also appears in fgs.
+        vm.pet_art = vec!["o o".to_string(), "XX".to_string()];
         vm.pet_spans = vec![
             StyledSegment {
                 line: 0,
@@ -255,17 +239,38 @@ mod tests {
             .filter(|c| !c.symbol.trim().is_empty())
             .filter_map(|c| c.fg.clone())
             .collect();
-        // More than one distinct pet/room fg means spans are honored (not flat cream).
-        assert!(fgs.len() > 1, "expected multiple fg colors, got {fgs:?}");
-        // The eye role resolves to green; a flat-cream pet would never produce it.
-        let eye = crate::pet::palette::role_color(
-            PaletteRoleName::Eye,
-            &crate::pet::palette::default_theme_palette(),
-        );
-        let eye_fg = format!("#{:02x}{:02x}{:02x}", eye.r, eye.g, eye.b);
         assert!(
-            fgs.contains(&eye_fg),
-            "expected an eye-colored pet cell ({eye_fg}), got {fgs:?}"
+            fgs.len() > 1,
+            "expected multiple fg colors from seam render, got {fgs:?}"
+        );
+
+        // Resolve eye and body colors exactly as the seam does for this fixture.
+        // fixture_with_habitat_props() → fixture() → pet_palette = default_theme_palette().
+        // All live transforms (phase-tint, droop, activity lift) are identity for
+        // this fixture (Day phase, energy=0.81, activity_level=0.0, no shimmer),
+        // so the resolved fg hex equals the raw palette color.
+        let palette = default_theme_palette();
+        let body = palette.body;
+        let eye = palette.eye;
+        let body_hex = format!("#{:02x}{:02x}{:02x}", body.r, body.g, body.b);
+        let eye_hex = format!("#{:02x}{:02x}{:02x}", eye.r, eye.g, eye.b);
+
+        // (a) Eye role resolves to a distinct color from Body role.
+        assert_ne!(
+            eye_hex, body_hex,
+            "eye and body must resolve to distinct colors in the fixture palette"
+        );
+
+        // (b) The eye color appears in the rendered fg set — Eye-role cells are present.
+        assert!(
+            fgs.contains(&eye_hex),
+            "eye color {eye_hex} must appear in rendered fg set; got {fgs:?}"
+        );
+
+        // (c) The body color appears in the rendered fg set — Body-role cells are present.
+        assert!(
+            fgs.contains(&body_hex),
+            "body color {body_hex} must appear in rendered fg set; got {fgs:?}"
         );
     }
 
@@ -295,50 +300,40 @@ mod tests {
     }
 
     #[test]
-    fn preview_pet_text_is_positioned_from_command_anchor() {
-        use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
-        use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
-        use crate::round::model::derive_round_scene_model;
+    fn aperture_masking_blanks_corners_and_fills_center() {
         use crate::tui::view_model::WatchViewModel;
         use time::macros::datetime;
 
-        let mut vm = WatchViewModel::fixture_with_habitat_props();
-        vm.pet_art = vec!["x".to_string()];
-        vm.pet_spans = Vec::new();
-        let now = datetime!(2026-06-15 12:00 UTC);
-        let scene = derive_round_scene_model(&vm, now);
-        let layout = layout_round_scene(
-            &scene,
-            RoundAperture::new(52, 52),
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let frame = render_round_preview_frame_from_vm(
+            "round-aperture",
+            "Round Aperture",
+            &vm,
+            datetime!(2026-06-15 12:00 UTC),
+            52,
+            52,
             RoundRenderCapabilities::preview_truecolor(),
         );
-        let command = RoundDrawCommand {
-            kind: RoundDrawKind::PetGlyph,
-            x: 8.0,
-            y: 9.0,
-            radius: 1.0,
-            label: None,
-            text: Some("x".into()),
-            spans: Vec::new(),
-            color: RoundColor(1.0, 1.0, 1.0, 1.0),
-        };
-        let mut cells = blank_cells(52, 52, layout.aperture);
 
-        paint_commands(&mut cells, 52, &scene, &[command], true);
+        // Top-left corner must be masked (outside circle).
+        let top_left = frame.cells.iter().find(|c| c.x == 0 && c.y == 0).unwrap();
+        assert!(top_left.outside_aperture, "top-left corner must be masked");
+        assert_eq!(top_left.symbol, " ");
 
-        let command_cell = cells
-            .iter()
-            .find(|cell| cell.x == 8 && cell.y == 9)
-            .expect("expected command cell");
-        assert_eq!(command_cell.symbol, "x");
+        // Center cell must be inside aperture.
+        let center = frame.cells.iter().find(|c| c.x == 26 && c.y == 26).unwrap();
+        assert!(
+            !center.outside_aperture,
+            "center cell must be inside aperture"
+        );
     }
 
     #[test]
-    fn corruption_role_degrades_to_neutral_under_flat() {
-        use crate::pet::render::PaletteRoleName;
-        // Under Flat the round companion carries the pet by silhouette; the
-        // contrasting corruption color is gone, so corruption must read as a
-        // neutral cell, not be mistaken for an eye (green) or accent (yellow).
-        assert_eq!(flat_role_name(PaletteRoleName::Corruption), "white");
+    fn blank_cells_outside_aperture_are_flagged() {
+        let aperture = RoundAperture::new(10, 10);
+        let cells = blank_cells(10, 10, aperture);
+        let corner = cells.iter().find(|c| c.x == 0 && c.y == 0).unwrap();
+        assert!(corner.outside_aperture);
+        assert_eq!(corner.symbol, " ");
     }
 }
