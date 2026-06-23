@@ -8,6 +8,15 @@ use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model};
+use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
+use crate::error::{GlorpError, Result};
+use crate::paths::AppPaths;
+use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
+use crate::round::model::{derive_round_scene_model, RoundSceneModel};
+use crate::storage::state::StateStore;
+use crate::tui::view_model::WatchViewModel;
+use crate::watch_live::{LiveWatchUpdate, WatchPresentationState};
 use objc2::declare_class;
 use objc2::msg_send_id;
 use objc2::mutability;
@@ -23,18 +32,6 @@ use objc2_app_kit::{
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
-use ratatui::text::Line as RatatuiLine;
-
-use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model};
-use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawCommand, RoundDrawKind};
-use crate::error::{GlorpError, Result};
-use crate::paths::AppPaths;
-use crate::pet::render::{PaletteRoleName, StyledSegment};
-use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
-use crate::round::model::{derive_round_scene_model, RoundSceneModel};
-use crate::storage::state::StateStore;
-use crate::tui::view_model::WatchViewModel;
-use crate::watch_live::{LiveWatchUpdate, WatchPresentationState};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const UI_TICK_INTERVAL_SECS: f64 = 0.25;
@@ -48,21 +45,6 @@ struct CompanionMenuSpec {
     app_title: &'static str,
     quit_title: &'static str,
     quit_key: &'static str,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PetArtGrid {
-    width: usize,
-    height: usize,
-    cells: Vec<PetArtCell>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PetArtCell {
-    row: usize,
-    col: usize,
-    ch: char,
-    role: PaletteRoleName,
 }
 
 struct AppState {
@@ -394,7 +376,15 @@ fn draw_scene(bounds: NSRect) {
             .iter()
             .filter(|c| matches!(c.kind, RoundDrawKind::Halo | RoundDrawKind::Trouble))
         {
-            draw_command(command, &scene.pet.palette);
+            let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                NSPoint::new(
+                    (command.x - command.radius) as f64,
+                    (command.y - command.radius) as f64,
+                ),
+                NSSize::new((command.radius * 2.0) as f64, (command.radius * 2.0) as f64),
+            ));
+            ns_color(&command.color).setFill();
+            path.fill();
         }
 
         if dim_overlay {
@@ -405,166 +395,6 @@ fn draw_scene(bounds: NSRect) {
     }
 }
 
-fn draw_command(command: &RoundDrawCommand, palette: &crate::pet::palette::ResolvedPalette) {
-    match command.kind {
-        RoundDrawKind::Background => unsafe {
-            let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(
-                    (command.x - command.radius) as f64,
-                    (command.y - command.radius) as f64,
-                ),
-                NSSize::new((command.radius * 2.0) as f64, (command.radius * 2.0) as f64),
-            ));
-            ns_color(&command.color).setFill();
-            path.fill();
-        },
-        RoundDrawKind::PetGlyph => {
-            if let Some(text) = command.text.as_deref() {
-                draw_pet_art_block(
-                    text,
-                    &command.spans,
-                    palette,
-                    command.x,
-                    command.y,
-                    command.radius,
-                    &command.color,
-                );
-            }
-        }
-        RoundDrawKind::PropGlyph => {
-            if let Some(label) = command.label {
-                draw_label(label, command.x, command.y, command.radius, &command.color);
-            }
-        }
-        RoundDrawKind::Halo => unsafe {
-            let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(
-                    (command.x - command.radius) as f64,
-                    (command.y - command.radius) as f64,
-                ),
-                NSSize::new((command.radius * 2.0) as f64, (command.radius * 2.0) as f64),
-            ));
-            ns_color(&command.color).setFill();
-            path.fill();
-        },
-        RoundDrawKind::Trouble => unsafe {
-            let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(
-                    (command.x - command.radius) as f64,
-                    (command.y - command.radius) as f64,
-                ),
-                NSSize::new((command.radius * 2.0) as f64, (command.radius * 2.0) as f64),
-            ));
-            ns_color(&command.color).setFill();
-            path.fill();
-        },
-        RoundDrawKind::RoomGlyph => {
-            if let Some(label) = command.label {
-                draw_label(label, command.x, command.y, command.radius, &command.color);
-            }
-        }
-    }
-}
-
-fn draw_pet_art_block(
-    text: &str,
-    spans: &[StyledSegment],
-    palette: &crate::pet::palette::ResolvedPalette,
-    x: f32,
-    y: f32,
-    radius: f32,
-    color: &RoundColor,
-) {
-    let Some(grid) = pet_art_grid(text, spans) else {
-        return;
-    };
-    unsafe {
-        let base = attributed_pet_glyph("M", 1.0, color);
-        let base_size = base.size();
-        if base_size.width <= 0.0 || base_size.height <= 0.0 {
-            return;
-        }
-        let target = f64::from(radius * 2.0) * 0.92;
-        let font_size = (target / (base_size.width * grid.width as f64))
-            .min(target / (base_size.height * grid.height as f64))
-            .clamp(6.0, 28.0);
-        let cell_size = attributed_pet_glyph("M", font_size, color).size();
-        let cell_width = cell_size.width;
-        let cell_height = cell_size.height;
-        if cell_width <= 0.0 || cell_height <= 0.0 {
-            return;
-        }
-        let total_width = cell_width * grid.width as f64;
-        let total_height = cell_height * grid.height as f64;
-        let left = x as f64 - total_width / 2.0;
-        let top = y as f64 + total_height / 2.0;
-        for cell in grid.cells {
-            let cell_color = pet_role_color(cell.role, palette).unwrap_or(*color);
-            let attr = attributed_pet_glyph(&cell.ch.to_string(), font_size, &cell_color);
-            let point = NSPoint::new(
-                left + cell.col as f64 * cell_width,
-                top - (cell.row + 1) as f64 * cell_height,
-            );
-            attr.drawAtPoint(point);
-        }
-    }
-}
-
-fn pet_art_grid(text: &str, spans: &[StyledSegment]) -> Option<PetArtGrid> {
-    let lines = text.lines().collect::<Vec<_>>();
-    let height = lines.len();
-    let width = lines
-        .iter()
-        .map(|line| line_display_width(line))
-        .max()
-        .unwrap_or(0);
-    let mut cells = Vec::new();
-    for (row, line) in lines.iter().enumerate() {
-        let mut col = 0usize;
-        for (char_index, ch) in line.chars().enumerate() {
-            let width = char_display_width(ch);
-            if ch != ' ' {
-                cells.push(PetArtCell {
-                    row,
-                    col,
-                    ch,
-                    role: role_for_pet_cell(spans, row, char_index),
-                });
-            }
-            col = col.saturating_add(width);
-        }
-    }
-    if width == 0 || height == 0 || cells.is_empty() {
-        return None;
-    }
-    Some(PetArtGrid {
-        width,
-        height,
-        cells,
-    })
-}
-
-fn role_for_pet_cell(spans: &[StyledSegment], row: usize, char_index: usize) -> PaletteRoleName {
-    spans
-        .iter()
-        .find(|span| span.line == row && char_index >= span.start && char_index < span.end)
-        .map(|span| span.role)
-        .unwrap_or(PaletteRoleName::Body)
-}
-
-fn pet_role_color(
-    role: PaletteRoleName,
-    palette: &crate::pet::palette::ResolvedPalette,
-) -> Option<RoundColor> {
-    let resolved = crate::presentation::surface::resolve_pet_colors(
-        palette,
-        &crate::presentation::surface::LiveColorInputs::passthrough(),
-        &crate::presentation::surface::ROUND_STYLE,
-    );
-    let rgb = crate::presentation::surface::role_rgb(&resolved, role);
-    Some(rgb_color(rgb.r, rgb.g, rgb.b))
-}
-
 fn rgb_color(r: u8, g: u8, b: u8) -> RoundColor {
     RoundColor(
         f32::from(r) / 255.0,
@@ -572,14 +402,6 @@ fn rgb_color(r: u8, g: u8, b: u8) -> RoundColor {
         f32::from(b) / 255.0,
         1.0,
     )
-}
-
-fn line_display_width(line: &str) -> usize {
-    RatatuiLine::from(line).width()
-}
-
-fn char_display_width(ch: char) -> usize {
-    RatatuiLine::from(ch.to_string()).width().max(1)
 }
 
 fn attributed_pet_glyph(
@@ -595,20 +417,6 @@ fn attributed_pet_glyph(
         attr.addAttribute_value_range(NSFontAttributeName, &font, range);
         attr.addAttribute_value_range(NSForegroundColorAttributeName, &ns_color(color), range);
         attr
-    }
-}
-
-fn draw_label(label: char, x: f32, y: f32, radius: f32, color: &RoundColor) {
-    unsafe {
-        let text = NSString::from_str(&label.to_string());
-        let font = NSFont::monospacedSystemFontOfSize_weight((radius * 1.5) as f64, 0.0);
-        let mut attr = NSMutableAttributedString::from_nsstring(&text);
-        let range = objc2_foundation::NSRange::from(0..text.length());
-        attr.addAttribute_value_range(NSFontAttributeName, &font, range);
-        attr.addAttribute_value_range(NSForegroundColorAttributeName, &ns_color(color), range);
-        let size = attr.size();
-        let point = NSPoint::new(x as f64 - size.width / 2.0, y as f64 - size.height / 2.0);
-        attr.drawAtPoint(point);
     }
 }
 
@@ -824,68 +632,5 @@ mod tests {
 
         assert!(changed);
         assert_ne!(vm.pet_art, before);
-    }
-
-    #[test]
-    fn pet_art_grid_preserves_terminal_columns() {
-        let grid = pet_art_grid(" A\nB ", &[]).unwrap();
-
-        assert_eq!(grid.width, 2);
-        assert_eq!(grid.height, 2);
-        assert_eq!(
-            grid.cells,
-            vec![
-                PetArtCell {
-                    row: 0,
-                    col: 1,
-                    ch: 'A',
-                    role: PaletteRoleName::Body,
-                },
-                PetArtCell {
-                    row: 1,
-                    col: 0,
-                    ch: 'B',
-                    role: PaletteRoleName::Body,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn pet_art_grid_maps_terminal_span_roles_to_cells() {
-        let spans = vec![StyledSegment {
-            line: 0,
-            start: 1,
-            end: 2,
-            role: PaletteRoleName::Eye,
-        }];
-        let grid = pet_art_grid(" A\nB ", &spans).unwrap();
-
-        assert_eq!(grid.cells[0].role, PaletteRoleName::Eye);
-        assert_eq!(grid.cells[1].role, PaletteRoleName::Body);
-    }
-
-    #[test]
-    fn companion_role_color_matches_resolver_round_style() {
-        use crate::pet::palette::{default_theme_palette, role_color};
-        use crate::pet::render::PaletteRoleName;
-        let p = default_theme_palette();
-        let got = pet_role_color(PaletteRoleName::Accent, &p).unwrap();
-        let rgb = role_color(PaletteRoleName::Accent, &p);
-        assert_eq!(got, rgb_color(rgb.r, rgb.g, rgb.b)); // unchanged from today
-    }
-
-    #[test]
-    fn companion_pet_role_color_matches_resolved_palette() {
-        use crate::pet::palette::{default_theme_palette, role_color};
-        use crate::pet::render::PaletteRoleName::*;
-        let p = default_theme_palette();
-        for role in [Body, Eye, Mouth, Accent, Pattern, Particle] {
-            let rgb = role_color(role, &p);
-            assert_eq!(
-                pet_role_color(role, &p),
-                Some(rgb_color(rgb.r, rgb.g, rgb.b))
-            );
-        }
     }
 }
