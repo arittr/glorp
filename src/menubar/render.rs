@@ -30,12 +30,12 @@ pub const FONT_POINT_SIZE: f64 = 13.0;
 
 /// Height of the habitat scene region in the popover, in rows.
 ///
-/// TUNABLE — aesthetic default (Drew's call). At 36×14 the scene trips
-/// `compact=true` (trims activity budget + Orbit→Glow), the same
-/// parameterization as the round companion. The remaining 8 rows are given to
-/// the stats block (plus spacing). Raise `POPOVER_ROWS` or lower
-/// `MENU_SCENE_ROWS` if the scene + stats block overflows the popover height.
-const MENU_SCENE_ROWS: usize = 14;
+/// TUNABLE — aesthetic default (Drew's call). The stats block emits ≈ 11 rows;
+/// scene + stats must fit `POPOVER_ROWS = 22`. At `MENU_SCENE_ROWS = 11` the
+/// layout is scene(11) + stats(11) = 22 — exact fit, no clipping. To give the
+/// habitat more vertical room, raise both `MENU_SCENE_ROWS` and `POPOVER_ROWS`
+/// together.
+const MENU_SCENE_ROWS: usize = 11;
 
 pub struct RenderedBlock {
     pub attr: Retained<NSMutableAttributedString>,
@@ -62,10 +62,22 @@ pub fn render_pet_block(vm: &WatchViewModel) -> RenderedBlock {
         POPOVER_COLUMNS as u16,
         MENU_SCENE_ROWS as u16,
     );
-    let attr = scene_draw_list_to_attributed(&list, POPOVER_COLUMNS as u16, MENU_SCENE_ROWS as u16);
+    let mut attr =
+        scene_draw_list_to_attributed(&list, POPOVER_COLUMNS as u16, MENU_SCENE_ROWS as u16);
     // Count chars so the caller can form a tight NSRange over just this region.
     // The scene text is BMP-only so char count == UTF-16 unit count.
-    let char_len = attr.string().to_string().chars().count();
+    //
+    // Append a trailing "\n" separator so the stats block (appended by the
+    // caller) starts on a new visual line rather than overprinting the last
+    // scene row. Include it in char_len so NSRange arithmetic in app.rs
+    // stays accurate.
+    let scene_chars = attr.string().to_string().chars().count();
+    let separator = NSString::from_str("\n");
+    let sep_attr = NSMutableAttributedString::from_nsstring(&separator);
+    unsafe {
+        attr.appendAttributedString(&sep_attr);
+    }
+    let char_len = scene_chars + 1;
     RenderedBlock { attr, char_len }
 }
 
@@ -93,8 +105,6 @@ pub fn render_stats_block(vm: &WatchViewModel) -> RenderedBlock {
 /// # Note
 /// AppKit attributed-string rendering is unverified in automated tests — the pure
 /// rasterize step is covered by unit tests in `src/presentation/rasterize.rs`.
-///
-/// wired in Plan 08 Task 2
 pub fn scene_draw_list_to_attributed(
     list: &crate::presentation::SceneDrawList,
     cols: u16,
