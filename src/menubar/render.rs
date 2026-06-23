@@ -46,7 +46,7 @@ pub struct RenderedBlock {
 ///
 /// Builds the full shared habitat scene via `build_round_scene_draw_list` and
 /// rasterizes it with `scene_draw_list_to_attributed`. The scene is
-/// `POPOVER_COLUMNS × MENU_SCENE_ROWS` — at 36×14 `compact=true` is active
+/// `POPOVER_COLUMNS × MENU_SCENE_ROWS` — at 36×11 `compact=true` is active
 /// (same parameterization as the round companion). Returned `char_len` is the
 /// count of `char` codepoints; callers use it as the upper bound of the
 /// `NSRange` to replace when animating just the pet region.
