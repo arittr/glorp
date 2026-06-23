@@ -10,8 +10,9 @@
 
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSTextAlignment,
+    NSBackgroundColorAttributeName, NSColor, NSFont, NSFontAttributeName, NSFontWeightBold,
+    NSForegroundColorAttributeName, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
+    NSTextAlignment,
 };
 use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
 
@@ -63,6 +64,153 @@ pub fn render_stats_block(vm: &WatchViewModel) -> RenderedBlock {
     let mut runs: Vec<StyledRun> = Vec::new();
     append_stats(&mut runs, vm);
     materialize(runs)
+}
+
+/// Convert a [`crate::presentation::SceneDrawList`] to an `NSMutableAttributedString`
+/// suitable for display in the menubar popover's `NSTextView`.
+///
+/// Calls the pure [`crate::presentation::rasterize`] to build a dense grid, then
+/// coalesces consecutive cells with identical `(fg, bg, bold)` into single runs and
+/// appends each run with the appropriate `NSAttributedString` attributes:
+/// - `NSForegroundColorAttributeName` — `fg` mapped to `NSColor`; if `None`, uses
+///   `COLOR_FG` (the popover's default text color, matching `render_pet_block`).
+/// - `NSBackgroundColorAttributeName` — `bg` mapped to `NSColor`; attribute is
+///   **omitted** when `bg` is `None` (transparent background inherits the text view's
+///   surface color).
+/// - `NSFontAttributeName` — `bold_font` when `bold`, else `font`.
+///
+/// Rows are joined with `"\n"`.
+///
+/// # Note
+/// AppKit attributed-string rendering is unverified in automated tests — the pure
+/// rasterize step is covered by unit tests in `src/presentation/rasterize.rs`.
+///
+/// wired in Plan 08 Task 2
+#[allow(dead_code)]
+pub fn scene_draw_list_to_attributed(
+    list: &crate::presentation::SceneDrawList,
+    cols: u16,
+    rows: u16,
+) -> Retained<NSMutableAttributedString> {
+    let grid = crate::presentation::rasterize(list, cols, rows);
+
+    let bold_font = monospace_bold_font();
+    let regular_font = monospace_font();
+
+    // Build the full string and collect run intervals in one pass.
+    struct Run {
+        start: usize,
+        end: usize,
+        fg: Option<Rgb>,
+        bg: Option<Rgb>,
+        bold: bool,
+    }
+
+    let mut full_text = String::new();
+    let mut runs: Vec<Run> = Vec::new();
+
+    for (row_idx, row) in grid.iter().enumerate() {
+        if row_idx > 0 {
+            full_text.push('\n');
+        }
+
+        // Coalesce consecutive cells with the same (fg, bg, bold) into one run.
+        let mut run_start = full_text.chars().count();
+        let mut run_fg: Option<crate::pet::palette::Rgb> = None;
+        let mut run_bg: Option<crate::pet::palette::Rgb> = None;
+        let mut run_bold = false;
+        let mut first = true;
+
+        for cell in row.iter() {
+            let cell_fg = cell.fg;
+            let cell_bg = cell.bg;
+            let cell_bold = cell.bold;
+
+            if first {
+                run_fg = cell_fg;
+                run_bg = cell_bg;
+                run_bold = cell_bold;
+                first = false;
+            } else if cell_fg != run_fg || cell_bg != run_bg || cell_bold != run_bold {
+                // Flush the current run.
+                let run_end = full_text.chars().count();
+                if run_end > run_start {
+                    runs.push(Run {
+                        start: run_start,
+                        end: run_end,
+                        fg: run_fg.map(|c| Rgb(c.r, c.g, c.b)),
+                        bg: run_bg.map(|c| Rgb(c.r, c.g, c.b)),
+                        bold: run_bold,
+                    });
+                }
+                run_start = run_end;
+                run_fg = cell_fg;
+                run_bg = cell_bg;
+                run_bold = cell_bold;
+            }
+            full_text.push(cell.glyph);
+        }
+        // Flush final run of the row.
+        let run_end = full_text.chars().count();
+        if !first && run_end > run_start {
+            runs.push(Run {
+                start: run_start,
+                end: run_end,
+                fg: run_fg.map(|c| Rgb(c.r, c.g, c.b)),
+                bg: run_bg.map(|c| Rgb(c.r, c.g, c.b)),
+                bold: run_bold,
+            });
+        }
+    }
+
+    let ns_text = NSString::from_str(&full_text);
+    let mut attr_str = NSMutableAttributedString::from_nsstring(&ns_text);
+    let total_chars = full_text.chars().count();
+    let full_range = NSRange::from(0..total_chars);
+
+    unsafe {
+        // Apply defaults across the whole string first.
+        attr_str.addAttribute_value_range(NSFontAttributeName, &regular_font, full_range);
+        attr_str.addAttribute_value_range(
+            NSForegroundColorAttributeName,
+            &color_for(COLOR_FG),
+            full_range,
+        );
+
+        // Apply per-run attributes.
+        for run in &runs {
+            if run.end <= run.start {
+                continue;
+            }
+            let range = NSRange::from(run.start..run.end);
+
+            // Foreground color
+            let fg_color = run.fg.map(color_for).unwrap_or_else(|| color_for(COLOR_FG));
+            attr_str.addAttribute_value_range(NSForegroundColorAttributeName, &fg_color, range);
+
+            // Background color — omit attribute if None (transparent)
+            if let Some(bg) = run.bg {
+                attr_str.addAttribute_value_range(
+                    NSBackgroundColorAttributeName,
+                    &color_for(bg),
+                    range,
+                );
+            }
+
+            // Font
+            let font: &NSFont = if run.bold { &bold_font } else { &regular_font };
+            attr_str.addAttribute_value_range(NSFontAttributeName, font, range);
+        }
+    }
+
+    attr_str
+}
+
+/// Bold monospace font at the same point size as [`monospace_font`].
+fn monospace_bold_font() -> Retained<NSFont> {
+    // `monospacedSystemFontOfSize:weight:` requires macOS 10.15+.
+    // NSFontWeightBold is the standard bold weight constant.
+    unsafe { NSFont::monospacedSystemFontOfSize_weight(FONT_POINT_SIZE, NSFontWeightBold) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
