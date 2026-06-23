@@ -501,7 +501,7 @@ pub(super) fn mote_glyphs_for(
 
 /// Live-activity channels always win over weekend softening: any live
 /// signal suppresses it entirely (spec: Weekend texture).
-pub(super) fn effective_weekend_softening(day: &DayContext, profile: &PetLifeProfile) -> f32 {
+pub(crate) fn effective_weekend_softening(day: &DayContext, profile: &PetLifeProfile) -> f32 {
     if profile.burst_level > 0.0 || profile.activity_level > 0.0 {
         return 0.0;
     }

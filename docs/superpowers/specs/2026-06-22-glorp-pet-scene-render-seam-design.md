@@ -226,12 +226,16 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 | Plan | Track(s) | Status |
 |---|---|---|
 | 01 — color resolution unification | 0, 1 | **DONE** (merged `d15ea78`) |
-| 02 — `EffectState` (viewport-agnostic per-frame effects) | 2a | **in progress** |
-| 03 — wander/facing semantic split + grounding/ambient/props placement extraction | 2b | planned |
-| 04 — `SceneDrawList` + companion migration | 3 | planned |
-| 05 — migrate watch adapter | 4 | planned |
-| 06 — menubar reroute + screen-window adapter | 5, 6 | planned |
-| 07 — dev-preview unification + dead-scaffolding cleanup | 7 | planned |
+| 02 — `EffectState` (viewport-agnostic per-frame effects) | 2a | **DONE** (merged `ea21084`) |
+| 03 — wander/facing shared resolver (`resolve_wander_offset`) | 2b-i | **in progress** |
+| 04 — `PetScene` container + grounding/ambient/props/performance placement | 2b-ii | planned |
+| 05 — `SceneDrawList` + `PetScene::render`; watch becomes a blitter | 3, 4 | planned |
+| 06 — companion adapter (round style, clip, halo, privacy) — *the visible win* | 3 | planned |
+| 07 — menubar adapter | 5 | planned |
+| 08 — screen-window adapter | 6 | planned |
+| 09 — dev-preview unification + dead-scaffolding cleanup | 7 | planned |
+
+**Sequencing note:** the plan order does the cheap byte-stable extractions first (03 resolver, 04 placements) so the adapter plans stay thin, and it **resequences Tracks 3-4** — `SceneDrawList` is proven byte-stable on **watch** (Plan 05, goldens are the oracle) *before* companion consumes it (Plan 06), since companion is an intended visual change and can't self-verify. Plan 05 is the one inherently-large plan; split it further if it exceeds a reviewable size.
 
 ### Track 0 — Safety net
 - **Purpose:** make the rest safe.
@@ -251,16 +255,23 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 - **Delivery:** split across two plans (2a then 2b) so each increment stays small and byte-stable. Grounding for the split: of the inline effects, `shimmer_role`/`twinkle`/`token_pop` depend only on species + `now` (fully viewport/cursor-agnostic, computed-and-lost today); `wander`/`facing` need `area.width`; cursor-eyes need cursor + hit_area.
 
 #### Track 2a — Viewport-agnostic effects → `EffectState` (Plan 02)
-- **Scope:** extract `shimmer_role`, `twinkle`, `token_pop` out of inline computation in `render_pet_inside` into a per-frame `EffectState` (`src/presentation/effect.rs`, `EffectState::from_vm(vm, now, color_capability)`). Watch reads them from the struct. Per-frame build (not a vm field) — `now` drives the animation; companion will build the identical `EffectState` per its own frame in Plan 04.
+- **Scope:** extract `shimmer_role`, `twinkle`, `token_pop` out of inline computation in `render_pet_inside` into a per-frame `EffectState` (`src/presentation/effect.rs`, `EffectState::from_vm(vm, now, color_capability)`). Watch reads them from the struct. Per-frame build (not a vm field) — `now` drives the animation; companion will build the identical `EffectState` per its own frame in the SceneDrawList/companion-migration plan.
 - **Forbidden:** behavior change.
 - **Verification:** watch goldens byte-stable; `EffectState::from_vm` reproduces the animator computations exactly.
 - **Stop condition:** `render_pet_inside` no longer computes shimmer/twinkle/token_pop inline; they live on `EffectState`.
 
-#### Track 2b — Wander/facing semantic split + placement extraction (Plan 03)
-- **Scope:** (1) refactor `src/pet/animator.rs` so `wander`/`facing` separate the viewport-agnostic SEMANTIC intent (target column, drift direction) from the pixel resolution against `area.width`; store the semantic intent on `EffectState`, resolve pixels at render time. (2) Move grounding/ambient/props/performance PLACEMENT out of `PetPanel::render` into the semantic `PetScene::build`. Cursor-tracked eyes stay render-time (need cursor + hit_area).
+#### Track 2b-i — Wander/facing shared resolver (Plan 03)
+- **Premise correction:** the original "viewport-agnostic semantic split" framing was DROPPED. Grounding showed the wander target is seeded by `half_range = (width−13)/2` itself — `splitmix64(period ^ species) % (2·half_range+1) − half_range` — so *where* the pet drifts is irreducibly width-dependent; there is no width-independent intent to lift onto `EffectState`. And it isn't needed: wander/facing are already pure functions of `(width, species, now, idle)`, so any surface gets them by calling the function with its own width. The goal is **reuse + decoupling `PetPanel`**, not data-lifting.
+- **Scope:** extract the 3-arm (sleep/wake/normal) wander+facing selection, `resonance_wander_bias`, and the `Cow`-vm write out of `PetPanel::render` into one shared `resolve_wander_offset(…, habitat_width) -> (wander_x: i16, facing: i8)`. Watch calls it; companion calls the same function with its round width in Plan 06, inheriting wander with zero new logic. Done now (cheap) so it isn't weight on the companion plan.
+- **Forbidden:** behavior change.
+- **Verification:** watch goldens byte-stable; `resolve_wander_offset` reproduces the current inline `(wander_x, facing)` exactly.
+- **Stop condition:** `PetPanel::render` no longer inlines the wander/facing selection; it calls the shared resolver.
+
+#### Track 2b-ii — Placement extraction → `PetScene` (Plan 04)
+- **Scope:** move grounding/ambient/props/performance PLACEMENT out of `PetPanel::render` into a semantic `PetScene::build` (the first real `PetScene` container). Behavior-preserving.
 - **Forbidden:** behavior change.
 - **Verification:** watch goldens byte-stable; visual diff via Preview Lab unchanged.
-- **Stop condition:** `PetPanel::render` no longer computes effect/placement logic inline; the semantic scene is a built data structure.
+- **Stop condition:** `PetPanel::render` no longer computes placement logic inline; the semantic scene is a built data structure.
 
 ### Track 3 — `SceneDrawList` + migrate companion ← **the visible win**
 - **Purpose:** companion becomes first-class.
