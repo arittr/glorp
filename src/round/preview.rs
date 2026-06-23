@@ -83,14 +83,6 @@ pub fn render_round_preview_frame_from_vm(
             &frame.id, &scene, now,
         ),
     );
-    frame.contract.round_layout = Some(
-        crate::dev_preview::contract::PreviewRoundLayoutArtifact::from_layout(&frame.id, &layout),
-    );
-    frame.contract.round_commands = Some(
-        crate::dev_preview::contract::PreviewRoundCommandsArtifact::from_commands(
-            &frame.id, &scene, &commands,
-        ),
-    );
     frame
 }
 

@@ -165,15 +165,6 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         if let Some(scene) = &frame.contract.scene {
             write_json_artifact(&staging_dir.join(scene_path(frame)), scene)?;
         }
-        if let Some(round_layout) = &frame.contract.round_layout {
-            write_json_artifact(&staging_dir.join(round_layout_path(frame)), round_layout)?;
-        }
-        if let Some(round_commands) = &frame.contract.round_commands {
-            write_json_artifact(
-                &staging_dir.join(round_commands_path(frame)),
-                round_commands,
-            )?;
-        }
     }
 
     for strip in &strips {
@@ -609,16 +600,6 @@ fn scenario_from_parts(
                 }
             }),
             scene: frame.contract.scene.as_ref().map(|_| scene_path(frame)),
-            round_layout: frame
-                .contract
-                .round_layout
-                .as_ref()
-                .map(|_| round_layout_path(frame)),
-            round_commands: frame
-                .contract
-                .round_commands
-                .as_ref()
-                .map(|_| round_commands_path(frame)),
         },
         inputs,
         round,
@@ -690,26 +671,6 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 title: format!("{} Scene", frame.title),
                 artifact_type: ArtifactType::Scene,
                 path: scene_path(frame),
-                width: None,
-                height: None,
-            });
-        }
-        if frame.contract.round_layout.is_some() {
-            artifacts.push(PreviewArtifact {
-                id: format!("{}-round-layout", frame.id),
-                title: format!("{} Round Layout", frame.title),
-                artifact_type: ArtifactType::RoundLayout,
-                path: round_layout_path(frame),
-                width: None,
-                height: None,
-            });
-        }
-        if frame.contract.round_commands.is_some() {
-            artifacts.push(PreviewArtifact {
-                id: format!("{}-round-commands", frame.id),
-                title: format!("{} Round Commands", frame.title),
-                artifact_type: ArtifactType::RoundCommands,
-                path: round_commands_path(frame),
                 width: None,
                 height: None,
             });
@@ -1700,14 +1661,6 @@ fn layout_path(frame: &PreviewFrame) -> PathBuf {
 
 fn scene_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.scene.json", frame.id))
-}
-
-fn round_layout_path(frame: &PreviewFrame) -> PathBuf {
-    PathBuf::from(format!("frames/{}.round-layout.json", frame.id))
-}
-
-fn round_commands_path(frame: &PreviewFrame) -> PathBuf {
-    PathBuf::from(format!("frames/{}.round-commands.json", frame.id))
 }
 
 fn room_text_path(frame: &PreviewFrame) -> PathBuf {

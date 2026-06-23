@@ -291,7 +291,7 @@ fn dev_preview_watch_writes_expected_artifacts() {
     );
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 4);
+    assert_eq!(manifest["schema_version"], 5);
     assert_eq!(manifest["producer"], "glorp-dev-preview");
     assert!(!manifest["glorp_version"].as_str().unwrap().is_empty());
     assert!(manifest["generated_at"].as_str().unwrap().ends_with('Z'));
@@ -700,7 +700,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         .is_file());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 4);
+    assert_eq!(manifest["schema_version"], 5);
     let wide = scenario(&manifest, "watch-wide-normal");
     assert_eq!(
         wide["files"]["layout"],
@@ -1468,7 +1468,7 @@ fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
     assert!(!run.out.join("frames/watch-wide-normal.txt").exists());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 4);
+    assert_eq!(manifest["schema_version"], 5);
     assert!(
         manifest["scenarios"].as_array().unwrap().is_empty(),
         "animation-only bundles should not write static scenarios"
@@ -1642,7 +1642,7 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
     run.run_success("round");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 4);
+    assert_eq!(manifest["schema_version"], 5);
     for id in ROUND_IDS {
         assert!(
             run.out.join(format!("frames/{id}.txt")).is_file(),
@@ -1672,106 +1672,6 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
 }
 
 #[test]
-fn dev_preview_round_writes_layout_and_command_artifacts() {
-    let run = PreviewRun::new();
-
-    run.run_success("round");
-
-    let manifest = run.manifest();
-    for id in ROUND_IDS {
-        assert!(
-            run.out
-                .join(format!("frames/{id}.round-layout.json"))
-                .is_file(),
-            "missing {id}.round-layout.json"
-        );
-        assert!(
-            run.out
-                .join(format!("frames/{id}.round-commands.json"))
-                .is_file(),
-            "missing {id}.round-commands.json"
-        );
-        let scenario = scenario(&manifest, id);
-        assert_eq!(
-            scenario["files"]["round_layout"],
-            format!("frames/{id}.round-layout.json")
-        );
-        assert_eq!(
-            scenario["files"]["round_commands"],
-            format!("frames/{id}.round-commands.json")
-        );
-        assert_artifact_type(&manifest, &format!("{id}-round-layout"), "round-layout");
-        assert_artifact_type(&manifest, &format!("{id}-round-commands"), "round-commands");
-
-        let layout = read_round_layout_artifact(&run, id);
-        assert_eq!(layout["schema_version"], 1);
-        assert_eq!(layout["frame_id"], id);
-        assert_eq!(layout["aperture"]["width"], 52);
-        assert_eq!(layout["aperture"]["height"], 52);
-        assert!(layout["safe_inner_radius"].as_f64().unwrap() > 0.0);
-        assert_eq!(layout["pet_anchor"]["kind"], "pet");
-        assert!(layout["prop_anchors"].as_array().unwrap().len() <= 2);
-        assert!(layout["motion_budget"]["pet_breath"].is_boolean());
-
-        let commands = read_round_commands_artifact(&run, id);
-        assert_eq!(commands["schema_version"], 1);
-        assert_eq!(commands["frame_id"], id);
-        assert!(commands["command_counts"]["background"].as_u64().unwrap() >= 1);
-        assert!(commands["command_counts"]["pet-glyph"].as_u64().unwrap() >= 1);
-        assert!(
-            commands["command_counts"]["room-glyph"].as_u64().unwrap() >= 1,
-            "{id} should expose room glyph commands"
-        );
-        assert_eq!(
-            commands["privacy_projection"]["source_names_visible"], false,
-            "{id} command artifact should be glanceable-safe"
-        );
-    }
-}
-
-#[test]
-fn dev_preview_round_artifacts_match_scene_semantics() {
-    let run = PreviewRun::new();
-
-    run.run_success("round");
-
-    for id in ROUND_IDS {
-        let scene = read_scene(&run, id);
-        let layout = read_round_layout_artifact(&run, id);
-        let commands = read_round_commands_artifact(&run, id);
-
-        assert_eq!(
-            layout["fixture_id"], scene["fixture"]["id"],
-            "{id} fixture id"
-        );
-        assert_eq!(
-            commands["fixture_id"], scene["fixture"]["id"],
-            "{id} command fixture id"
-        );
-        assert_eq!(
-            layout["pet_anchor"]["kind"], "pet",
-            "{id} pet anchor should be semantic"
-        );
-        assert_eq!(
-            commands["pet"]["text"], scene["pet"]["art_text"],
-            "{id} pet glyph command should use scene pet text"
-        );
-        assert_eq!(
-            commands["pet"]["span_count"], scene["pet"]["span_count"],
-            "{id} pet span count"
-        );
-        assert_eq!(
-            commands["room"]["glyph_vocabulary"], scene["room"]["glyph_vocabulary"],
-            "{id} room glyph vocabulary"
-        );
-        assert_eq!(
-            commands["privacy_projection"], scene["privacy_projection"],
-            "{id} privacy projection"
-        );
-    }
-}
-
-#[test]
 fn dev_preview_review_surfaces_link_typed_artifacts() {
     let run = PreviewRun::new();
 
@@ -1779,14 +1679,9 @@ fn dev_preview_review_surfaces_link_typed_artifacts() {
 
     let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
     let review = std::fs::read_to_string(run.out.join("review.md")).unwrap();
-    for needle in [
-        "frames/round-normal.scene.json",
-        "frames/round-normal.round-layout.json",
-        "frames/round-normal.round-commands.json",
-    ] {
-        assert!(html.contains(needle), "index.html missing {needle}");
-        assert!(review.contains(needle), "review.md missing {needle}");
-    }
+    let needle = "frames/round-normal.scene.json";
+    assert!(html.contains(needle), "index.html missing {needle}");
+    assert!(review.contains(needle), "review.md missing {needle}");
 }
 
 #[test]
@@ -1935,14 +1830,6 @@ fn read_layout(run: &PreviewRun, id: &str) -> Value {
 
 fn read_scene(run: &PreviewRun, id: &str) -> Value {
     read_json(run.out.join(format!("frames/{id}.scene.json")))
-}
-
-fn read_round_layout_artifact(run: &PreviewRun, id: &str) -> Value {
-    read_json(run.out.join(format!("frames/{id}.round-layout.json")))
-}
-
-fn read_round_commands_artifact(run: &PreviewRun, id: &str) -> Value {
-    read_json(run.out.join(format!("frames/{id}.round-commands.json")))
 }
 
 fn preview_scenarios_with_contract_scene(manifest: &Value) -> Vec<String> {
