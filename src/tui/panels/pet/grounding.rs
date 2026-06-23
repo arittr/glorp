@@ -1,7 +1,9 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 use super::ambient::{biome_floor_wash_color, biome_wash_color, contact_shadow_color};
+use crate::presentation::DrawCell;
 use crate::tui::room::RoomBiomeTag;
 
 /// The lower N habitat rows painted with the deeper floor wash so the ground
@@ -60,26 +62,39 @@ pub(super) fn contact_shadow_cells(
         .collect()
 }
 
-/// Paints the per-biome background wash over the entire habitat area. The lower
-/// `FLOOR_BAND_ROWS` rows use the darker floor wash so the ground reads as a
-/// distinct value from the lighter sky above it. This pass sets `bg` only, so
-/// every glyph pass (room/ambient/pet) that sets `fg` stays seamless on top.
-pub(super) fn paint_biome_wash(buf: &mut Buffer, habitat: Rect, biome: RoomBiomeTag) {
+/// Returns one bg-only [`DrawCell`] per habitat cell: sky rows use
+/// [`biome_wash_color`] and the bottom [`FLOOR_BAND_ROWS`] rows use
+/// [`biome_floor_wash_color`]. Same color math and row split as
+/// [`paint_biome_wash`] — this is its `SceneDrawList` counterpart.
+pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCell> {
     let sky_wash = biome_wash_color(biome);
     let floor_wash = biome_floor_wash_color(biome);
     let floor_band_top = habitat
         .y
         .saturating_add(habitat.height.saturating_sub(FLOOR_BAND_ROWS));
+    let mut cells = Vec::with_capacity((habitat.width as usize) * (habitat.height as usize));
     for wy in habitat.y..habitat.y.saturating_add(habitat.height) {
         let wash = if wy >= floor_band_top {
             floor_wash
         } else {
             sky_wash
         };
+        let bg = match wash {
+            Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
+            _ => continue, // non-RGB color cap: skip (same as paint_biome_wash)
+        };
         for wx in habitat.x..habitat.x.saturating_add(habitat.width) {
-            buf[(wx, wy)].set_style(ratatui::style::Style::default().bg(wash));
+            cells.push(DrawCell {
+                row: wy,
+                col: wx,
+                glyph: None,
+                fg: None,
+                bg: Some(bg),
+                bold: false,
+            });
         }
     }
+    cells
 }
 
 /// Paints the contact shadow: a calm bg deepening directly under the pet's feet

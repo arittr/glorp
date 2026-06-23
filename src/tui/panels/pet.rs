@@ -14,6 +14,7 @@ use crate::tui::view_model::WatchViewModel;
 
 mod ambient;
 mod art_lines;
+mod blit;
 mod colors;
 mod grounding;
 mod performance;
@@ -30,6 +31,7 @@ pub(crate) use art_lines::pet_role_spans_for_line;
 use art_lines::{
     build_pet_lines, cursor_normalized_x_within, render_pet_lines_sparse, render_speech_bubble,
 };
+use blit::blit_draw_list;
 pub(crate) use colors::pet_role_style;
 use colors::{
     activity_glyph_budget, performance_posture_offset, resolve_watch_pet_styles,
@@ -193,7 +195,12 @@ impl LegacyPanel for PetPanel {
 
         // Base layer: per-biome background wash over the entire habitat (sky + deeper
         // floor band). Set before every glyph pass so the bg stays seamless underneath.
-        grounding::paint_biome_wash(buf, scene.habitat, room_profile.biome.primary);
+        blit_draw_list(
+            buf,
+            &crate::presentation::SceneDrawList {
+                cells: grounding::biome_wash_cells(scene.habitat, room_profile.biome.primary),
+            },
+        );
 
         let room_glyphs = crate::tui::room::room_glyphs_for(
             &room_profile,
