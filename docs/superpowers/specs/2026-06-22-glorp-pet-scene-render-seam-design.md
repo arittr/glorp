@@ -230,10 +230,11 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 | 03 — wander/facing shared resolver (`resolve_wander_offset`) | 2b-i | **DONE** (merged `168e4c4`) |
 | 04 — semantic scene container (`PetSceneModel` = effects + room) + harden flaky `tui_render` clock tests | 2b-ii | **DONE** (merged `4c9b268`) |
 | 05 — `SceneDrawList` + `render(viewport)`; watch becomes a blitter | 3, 4 | **DONE** (merged `c78c0fd`) |
-| 06 — companion blits the shared `SceneDrawList` (round viewport + clip; keep halo; old round path kept) — *the visible win* | 3 | **DONE on branch `rearch/06-companion` (`90f7b82`), HELD for Drew's visual review (not merged)** |
-| 07 — menubar adapter | 5 | planned |
-| 08 — screen-window adapter | 6 | planned |
-| 09 — dev-preview unification + dead-scaffolding cleanup (incl. retiring the now-dead-on-arrival old round pet/room/prop path: `PetGlyph`/`RoomGlyph`/`PropGlyph` in `build_draw_commands`, `draw_pet_art_block`, round pet/room/prop derivation; only `Background`/`Halo`/`Trouble` stay live) | 7 | planned (after 06 merges) |
+| 06 — companion blits the shared `SceneDrawList` (round viewport + clip; keep halo; old round path kept) — *the visible win* | 3 | **DONE** (merged `1c5219d`; Drew visually approved) |
+| 07 — retire dead companion round-rendering path (`draw_command`/`draw_pet_art_block`/`pet_art_grid`/`draw_label` + helpers, unreachable after 06) | 3 | **DONE** (merged `16a1663`, −255 LOC) |
+| 08 — menubar adapter | 5 | planned |
+| 09 — screen-window adapter | 6 | planned |
+| 10 — dev-preview unification + dead-scaffolding cleanup: migrate dev-preview round preview to `render_pet_to_draw_list`, THEN retire `build_draw_commands`' pet/room/prop emission + `derive_round_scene_model`'s pet/room/prop derivation (the dev-preview-coupled half of the old round path; only `Background`/`Halo`/`Trouble` stay live) | 7 | planned |
 
 **Sequencing note:** the plan order does the cheap byte-stable extractions first (03 resolver, 04 placements) so the adapter plans stay thin, and it **resequences Tracks 3-4** — `SceneDrawList` is proven byte-stable on **watch** (Plan 05, goldens are the oracle) *before* companion consumes it (Plan 06), since companion is an intended visual change and can't self-verify. Plan 05 is the one inherently-large plan; split it further if it exceeds a reviewable size.
 
