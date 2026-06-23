@@ -72,6 +72,7 @@ const COLOR_FG: Rgb = Rgb(0xef, 0xeb, 0xe4);
 const COLOR_DIM: Rgb = Rgb(0x97, 0x91, 0x8a);
 const COLOR_ACCENT: Rgb = Rgb(0xf0, 0xa6, 0x46);
 
+#[cfg(test)]
 fn role_color_base(role: PaletteRoleName, palette: &crate::pet::palette::ResolvedPalette) -> Rgb {
     let rgb = crate::pet::palette::role_color(role, palette);
     Rgb(rgb.r, rgb.g, rgb.b)
@@ -80,32 +81,58 @@ fn role_color_base(role: PaletteRoleName, palette: &crate::pet::palette::Resolve
 /// Sleep dim factor for the popover pet (the menubar's only palette channel).
 const SLEEP_DIM: f32 = 0.7;
 
-fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
-    let base = role_color_base(role, &vm.pet_palette);
-    let colored = if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
-        base
-    } else {
-        // Activity identity wins over life-profile accent for accent/particle glyphs.
-        match vm.activity_identity.source_diversity {
-            SourceDiversity::Ensemble => Rgb(0xf0, 0xc4, 0x6a),
-            _ => match vm.life_profile.source_accent {
-                Some(SourceAccent::Codex) => Rgb(0x86, 0xd9, 0xef),
-                Some(SourceAccent::Claude) => Rgb(0xb3, 0x9d, 0xff),
-                Some(SourceAccent::Balanced) => Rgb(0xf0, 0xc4, 0x6a),
-                Some(SourceAccent::Ensemble) => Rgb(0xf0, 0xc4, 0x6a),
-                None => base,
-            },
-        }
-    };
-    if vm.day_context.asleep {
-        Rgb(
-            (f32::from(colored.0) * SLEEP_DIM).round() as u8,
-            (f32::from(colored.1) * SLEEP_DIM).round() as u8,
-            (f32::from(colored.2) * SLEEP_DIM).round() as u8,
-        )
-    } else {
-        colored
+/// Extract the source-accent color override for Accent/Particle roles, or `None`
+/// for all other roles and for the no-override (base) case.
+fn menubar_source_override(
+    role: PaletteRoleName,
+    vm: &WatchViewModel,
+) -> Option<crate::pet::palette::Rgb> {
+    if !matches!(role, PaletteRoleName::Accent | PaletteRoleName::Particle) {
+        return None;
     }
+    // Activity identity wins over life-profile accent for accent/particle glyphs.
+    match vm.activity_identity.source_diversity {
+        SourceDiversity::Ensemble => Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
+        _ => match vm.life_profile.source_accent {
+            Some(SourceAccent::Codex) => Some(crate::pet::palette::Rgb::new(0x86, 0xd9, 0xef)),
+            Some(SourceAccent::Claude) => Some(crate::pet::palette::Rgb::new(0xb3, 0x9d, 0xff)),
+            Some(SourceAccent::Balanced) => Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
+            Some(SourceAccent::Ensemble) => Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
+            None => None,
+        },
+    }
+}
+
+/// Pure resolver shim: applies the shared color pipeline with MENU_STYLE
+/// (source_accent + energy_droop only) and converts back to the menubar Rgb.
+fn menubar_resolve(
+    role: PaletteRoleName,
+    palette: &crate::pet::palette::ResolvedPalette,
+    source_override: Option<crate::pet::palette::Rgb>,
+    asleep: bool,
+) -> Rgb {
+    let inputs = crate::presentation::surface::LiveColorInputs {
+        source_override,
+        droop_mult: if asleep { SLEEP_DIM } else { 1.0 },
+        ..crate::presentation::surface::LiveColorInputs::passthrough()
+    };
+    let resolved = crate::presentation::surface::resolve_pet_colors(
+        palette,
+        &inputs,
+        &crate::presentation::surface::MENU_STYLE,
+    );
+    let rgb = crate::presentation::surface::role_rgb(&resolved, role);
+    Rgb(rgb.r, rgb.g, rgb.b)
+}
+
+fn role_color_for_profile(role: PaletteRoleName, vm: &WatchViewModel) -> Rgb {
+    let source_override = menubar_source_override(role, vm);
+    menubar_resolve(
+        role,
+        &vm.pet_palette,
+        source_override,
+        vm.day_context.asleep,
+    )
 }
 
 struct StyledRun {
@@ -557,5 +584,24 @@ mod tests {
     fn rgb_tuple(rgb: Rgb) -> (u8, u8, u8) {
         let Rgb(r, g, b) = rgb;
         (r, g, b)
+    }
+
+    #[test]
+    fn menubar_accent_uses_source_override_and_sleep_dim() {
+        // Ensemble + asleep: accent override (0xf0,0xc4,0x6a) x0.7 truncating = (168,137,74)
+        use crate::pet::palette::default_theme_palette;
+        use crate::pet::render::PaletteRoleName;
+        let palette = default_theme_palette();
+        let out = menubar_resolve(
+            PaletteRoleName::Accent,
+            &palette,
+            Some(crate::pet::palette::Rgb::new(0xf0, 0xc4, 0x6a)),
+            true,
+        );
+        assert_eq!(out, Rgb(168, 137, 74));
+        // Body, awake: base body unchanged
+        let body = crate::pet::palette::role_color(PaletteRoleName::Body, &palette);
+        let out_body = menubar_resolve(PaletteRoleName::Body, &palette, None, false);
+        assert_eq!(out_body, Rgb(body.r, body.g, body.b));
     }
 }
