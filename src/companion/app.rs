@@ -17,7 +17,8 @@ use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
     NSBackingStoreType, NSBezierPath, NSColor, NSCommandKeyMask, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
+    NSFontWeightBold, NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -572,9 +573,112 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
     }
 }
 
+/// Convert a (col, row) cell coordinate to AppKit pixel coordinates.
+///
+/// AppKit Y is up: row 0 top-left maps to `origin_y - cell_h` (the top of
+/// row 0 is `origin_y`; the bottom is `origin_y - cell_h`). This mirrors the
+/// math in `draw_pet_art_block` exactly.
+fn cell_to_point(
+    col: u16,
+    row: u16,
+    cell_w: f64,
+    cell_h: f64,
+    origin_x: f64,
+    origin_y: f64,
+) -> (f64, f64) {
+    let px = origin_x + col as f64 * cell_w;
+    let py = origin_y - (row + 1) as f64 * cell_h;
+    (px, py)
+}
+
+/// Blit a [`crate::presentation::SceneDrawList`] to the current AppKit
+/// graphics context. The caller is responsible for installing the aperture
+/// clip before calling (as `draw_scene` already does).
+///
+/// Cells are drawn in list order (z-order: later entries paint over earlier
+/// ones). For each cell:
+/// - If `cell.bg` is set, fill the cell rectangle with the background color.
+/// - If `cell.glyph` is set, draw the glyph string at the cell origin.
+///
+/// AppKit rendering is exercised only at runtime; the pixel-math helper
+/// `cell_to_point` is separately unit-tested.
+// Wired in Plan 06 Task 3 — unused until `draw_scene` is updated.
+#[allow(dead_code)]
+fn appkit_blit_draw_list(
+    list: &crate::presentation::SceneDrawList,
+    font_size: f64,
+    cell_w: f64,
+    cell_h: f64,
+    origin_x: f64,
+    origin_y: f64,
+) {
+    unsafe {
+        for cell in &list.cells {
+            if cell.bg.is_none() && cell.glyph.is_none() {
+                continue;
+            }
+
+            let (px, py) = cell_to_point(cell.col, cell.row, cell_w, cell_h, origin_x, origin_y);
+
+            if let Some(bg) = &cell.bg {
+                let bg_color = rgb_color(bg.r, bg.g, bg.b);
+                let path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(px, py),
+                    NSSize::new(cell_w, cell_h),
+                ));
+                ns_color(&bg_color).setFill();
+                path.fill();
+            }
+
+            if let Some(glyph) = &cell.glyph {
+                let fg = cell
+                    .fg
+                    .as_ref()
+                    .map(|c| rgb_color(c.r, c.g, c.b))
+                    .unwrap_or(RoundColor(1.0, 1.0, 1.0, 1.0));
+                let attr = if cell.bold {
+                    // `attributed_pet_glyph` uses weight 0.0 (NSFontWeightRegular).
+                    // For bold cells we build the attributed string with NSFontWeightBold.
+                    let text = NSString::from_str(glyph);
+                    let font =
+                        NSFont::monospacedSystemFontOfSize_weight(font_size, NSFontWeightBold);
+                    let mut a = NSMutableAttributedString::from_nsstring(&text);
+                    let range = objc2_foundation::NSRange::from(0..text.length());
+                    a.addAttribute_value_range(NSFontAttributeName, &font, range);
+                    a.addAttribute_value_range(
+                        NSForegroundColorAttributeName,
+                        &ns_color(&fg),
+                        range,
+                    );
+                    a
+                } else {
+                    attributed_pet_glyph(glyph, font_size, &fg)
+                };
+                attr.drawAtPoint(NSPoint::new(px, py));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_to_point_row_zero_sits_at_top_of_origin() {
+        // Row 0, col 0: px = origin_x, py = origin_y - cell_h (AppKit Y-up).
+        let (px, py) = cell_to_point(0, 0, 10.0, 14.0, 5.0, 100.0);
+        assert_eq!(px, 5.0);
+        assert_eq!(py, 86.0); // 100.0 - (0 + 1) * 14.0
+    }
+
+    #[test]
+    fn cell_to_point_advances_right_and_down() {
+        // Col 3, row 2: px = 5 + 3*10 = 35; py = 100 - (2+1)*14 = 58.
+        let (px, py) = cell_to_point(3, 2, 10.0, 14.0, 5.0, 100.0);
+        assert_eq!(px, 35.0);
+        assert_eq!(py, 58.0);
+    }
 
     #[test]
     fn companion_menu_spec_wires_standard_quit_shortcut() {
