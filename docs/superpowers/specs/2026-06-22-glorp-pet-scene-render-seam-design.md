@@ -227,8 +227,8 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 |---|---|---|
 | 01 — color resolution unification | 0, 1 | **DONE** (merged `d15ea78`) |
 | 02 — `EffectState` (viewport-agnostic per-frame effects) | 2a | **DONE** (merged `ea21084`) |
-| 03 — wander/facing shared resolver (`resolve_wander_offset`) | 2b-i | **in progress** |
-| 04 — `PetScene` container + grounding/ambient/props/performance placement | 2b-ii | planned |
+| 03 — wander/facing shared resolver (`resolve_wander_offset`) | 2b-i | **DONE** (merged `168e4c4`) |
+| 04 — semantic scene container (`PetSceneModel` = effects + room) + harden flaky `tui_render` clock tests | 2b-ii | **DONE** |
 | 05 — `SceneDrawList` + `PetScene::render`; watch becomes a blitter | 3, 4 | planned |
 | 06 — companion adapter (round style, clip, halo, privacy) — *the visible win* | 3 | planned |
 | 07 — menubar adapter | 5 | planned |
@@ -278,6 +278,7 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 - **Scope:** introduce `SceneDrawList` and `render(style, viewport)`; point the companion AppKit blitter at `scene.render(ROUND_STYLE, viewport)`, retiring `derive_round_scene_model` → `build_draw_commands`. Companion inherits grounding/ambient/props/speech/effects/halo + mood color, under a round `SurfaceStyle` (Compact detail, Circle clip, external-display privacy).
 - **Expected change:** companion gets richer (intended). `round-commands.json` → unified artifact, re-baked and reviewed.
 - **Debt to retire (from Plan 02):** `EffectState::from_vm` currently takes `ColorCapability` purely to gate `token_pop` off on `Flat` — a *terminal* capability leaking into the surface-agnostic builder (an AppKit companion has no meaningful `Flat`). When `render(style, viewport)` lands, move the `Flat`/`calm`/`burst` suppression OUT of `from_vm` into the `SurfaceStyle` resolution step (alongside `eye_emphasis`'s capability-awareness); `EffectState` then holds the raw `compute_token_pop(...)` result and each surface decides whether to paint it.
+- **Debt to retire (from Plan 04):** the reacted-`life` pipeline (`build_prop_reactions(..., compact)` + `apply_resonance_reaction`) stays inline in `PetPanel::render` because it depends on `compact` (a viewport value: `area.width <= 72 || area.height <= 24`). When `render(style, viewport)` threads it, derive `compact` from the **real per-surface viewport** (round companion ~480×480, screen window, etc.) — never hardcoded. **Add a prop-bearing fixture** (an `Orbit`-class earned prop) so per-surface `compact` resolution is golden-covered: `WatchViewModel::fixture()` has no earned props, which masked an `Orbit→Glow` regression in Plan 04's first cut.
 - **Verification:** `dev-preview` round previews reviewed; companion runs on a 480×480 viewport.
 - **Stop condition:** companion renders the full scene; old round draw path deleted; `EffectState::from_vm` no longer takes `ColorCapability`.
 

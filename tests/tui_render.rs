@@ -317,7 +317,17 @@ fn wide_layout_centers_full_pet_stage_with_dashed_divider() {
 
     let backend = TestBackend::new(120, 32);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render_frame_for_test(f, &vm)).unwrap();
+    // Pin the clock so facing is deterministic (+1 at width=118 pet area).
+    // facing == -1 would mirror "/" to "\" and break the art-content assertions below.
+    let ctx = glorp::tui::render_context::RenderContext::with_clock(
+        ColorCapability::Truecolor,
+        glorp::tui::render_context::WatchClock::fixed(
+            time::OffsetDateTime::from_unix_timestamp(1_760_000_120).unwrap(),
+        ),
+    );
+    terminal
+        .draw(|f| glorp::tui::layout::render_watch_frame_with_context(f, &vm, &ctx))
+        .unwrap();
 
     let lines = buffer_lines(terminal.backend().buffer());
     let stage_y = lines
@@ -1034,15 +1044,15 @@ fn drop_does_not_block_on_in_flight_poll() {
     // `WatchApp` is not `Send` (SceneAnimator holds tachyonfx state that isn't
     // thread-safe), so we can't run `drop` on a side thread and wait via
     // recv_timeout. Instead, take a wall-clock measurement around `drop(app)`
-    // on this thread. This catches a regression back to the original
+    // on this thread. The budget (30s) is large enough to be immune to load
+    // jitter while still unambiguously catching a regression to the original
     // blocking-join behaviour, which would take a full hour (the poller's
-    // sleep) to return — the assertion budget is tight enough to fail fast
-    // if Drop ever waits on the worker.
+    // sleep) to return.
     let started_drop = std::time::Instant::now();
     drop(app);
     let elapsed = started_drop.elapsed();
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < Duration::from_secs(30),
         "WatchApp::drop must not block on an in-flight poll (took {elapsed:?})"
     );
 }
