@@ -5,7 +5,7 @@ use ratatui::style::{Color, Style};
 use crate::game::habitat::{HabitatPetLayer, HabitatPropId};
 use crate::presentation::{privacy::PresentationSurface, scene::PresentationScene};
 use crate::tui::component::{habitat_props_for, PetScene, PetSceneLayout};
-use crate::tui::life::{build_prop_reactions, PetLifeProfile, PropReaction, PropReactionKind};
+use crate::tui::life::{PetLifeProfile, PropReaction, PropReactionKind};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::room::rects_contain;
@@ -103,7 +103,7 @@ pub struct AmbientGlyph {
 
 const RESONANCE_REACTION_INTENSITY: f32 = 0.25;
 
-fn apply_resonance_reaction(
+pub(crate) fn apply_resonance_reaction(
     mut profile: PetLifeProfile,
     resonant: Option<&HabitatPropId>,
 ) -> PetLifeProfile {
@@ -132,19 +132,6 @@ impl LegacyPanel for PetPanel {
         // vm.wander_offset_x or vm.facing carry.
         let now = ctx.clock.now_utc();
         let day = &vm.day_context;
-        let resonant_prop = {
-            let earned: Vec<crate::storage::state::EarnedHabitatProp> = vm
-                .habitat
-                .earned_props
-                .iter()
-                .map(|prop| crate::storage::state::EarnedHabitatProp {
-                    id: prop.id.clone(),
-                    earned_at: prop.earned_at,
-                    source: prop.source.clone(),
-                })
-                .collect();
-            crate::tui::day::resonant_prop_for_day(day, &earned)
-        };
         let softening = effective_weekend_softening(day, &vm.life_profile);
         let (wander_x, facing) = crate::tui::wander::resolve_wander_offset(vm, now, area.width);
         let vm = if wander_x != vm.wander_offset_x || facing != vm.facing {
@@ -162,6 +149,7 @@ impl LegacyPanel for PetPanel {
         let presentation_scene =
             PresentationScene::from_watch_view_model(vm, now, PresentationSurface::WatchTui);
         let scene = PetScene::compute_layout(area, vm, ctx);
+        let scene_model = crate::presentation::PetSceneModel::build(vm, now, ctx.color_capability);
 
         // Per-cell pet silhouette + 1-cell halo, shared by every pass that
         // wants pet avoidance. Replaces the inflated bounding rect so habitat
@@ -186,7 +174,7 @@ impl LegacyPanel for PetPanel {
         // Alive room base: persistent biome, weather, and prop emitter glyphs
         // drawn before the existing ambient/mote/activity passes so they set
         // the room's silhouette without replacing pet or speech cells.
-        let room_profile = crate::tui::room::derive_room_life_profile(vm, now);
+        let room_profile = scene_model.room;
         let presentation_room = &presentation_scene.room;
         presentation_room.debug_assert_matches_profile(&room_profile);
 
@@ -253,18 +241,11 @@ impl LegacyPanel for PetPanel {
                 cell.set_style(Style::default().fg(weekend_soften_color(g.color, softening)));
             }
         }
+        let life_profile = &scene_model.life;
         let compact = area.width <= 72 || area.height <= 24;
-        let earned_prop_ids = vm
-            .habitat
-            .earned_props
-            .iter()
-            .map(|prop| prop.id.clone())
-            .collect::<Vec<_>>();
-        let life_profile = build_prop_reactions(vm.life_profile.clone(), &earned_prop_ids, compact);
-        let life_profile = apply_resonance_reaction(life_profile, resonant_prop.as_ref());
-        let extra_count = activity_glyph_budget(&life_profile, compact);
+        let extra_count = activity_glyph_budget(life_profile, compact);
         let activity_glyphs = activity_glyphs_for(
-            &life_profile,
+            life_profile,
             species,
             scene.habitat,
             &ambient_exclusions,
@@ -323,6 +304,7 @@ impl LegacyPanel for PetPanel {
             now,
             ctx.color_capability,
             room_profile.pet_performance,
+            scene_model.effects,
         );
 
         // Tiny performance cue near the pet: one cell, never a template rewrite.
@@ -356,8 +338,8 @@ fn render_pet_inside(
     now: time::OffsetDateTime,
     color_capability: ColorCapability,
     pet_performance: crate::tui::room::PetPerformance,
+    effects: crate::presentation::EffectState,
 ) {
-    let effects = crate::presentation::EffectState::from_vm(vm, now, color_capability);
     let shimmer_role = effects.shimmer_role;
     let twinkle = effects.twinkle;
     let token_pop = effects.token_pop;
