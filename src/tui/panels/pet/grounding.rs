@@ -1,4 +1,3 @@
-use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
@@ -97,27 +96,35 @@ pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCe
     cells
 }
 
-/// Paints the contact shadow: a calm bg deepening directly under the pet's feet
-/// so it reads as resting ON the floor. Restricted to feet columns (gutter
-/// precedence: species identity side cells are never touched). Bg-only — it
-/// never replaces a floor-texture glyph, just deepens the cell behind it.
-pub(super) fn paint_contact_shadow(
-    buf: &mut Buffer,
+/// Returns one bg-only [`DrawCell`] per shadow position: the columns directly
+/// under the pet's feet on the floor row, clipped to `habitat`. Same color math
+/// and position logic as the former `paint_contact_shadow` — this is the
+/// `SceneDrawList` counterpart that replaced it.
+pub(super) fn contact_shadow_draw_cells(
     scene_pet_art: Rect,
     pet_art_lines: &[String],
     facing: i8,
     habitat: Rect,
     biome: RoomBiomeTag,
-) {
+) -> Vec<DrawCell> {
     let mirror = facing == -1;
     let floor_wash = biome_floor_wash_color(biome);
     let shadow = contact_shadow_color(floor_wash);
-    for (sx, sy) in contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat) {
-        let cell = &mut buf[(sx, sy)];
-        let mut style = cell.style();
-        style.bg = Some(shadow);
-        cell.set_style(style);
-    }
+    let bg = match shadow {
+        ratatui::style::Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
+        _ => return Vec::new(), // non-RGB color cap: skip (same as paint_contact_shadow)
+    };
+    contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat)
+        .into_iter()
+        .map(|(col, row)| DrawCell {
+            row,
+            col,
+            glyph: None,
+            fg: None,
+            bg: Some(bg),
+            bold: false,
+        })
+        .collect()
 }
 
 #[cfg(test)]

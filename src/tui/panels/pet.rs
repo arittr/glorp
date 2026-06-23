@@ -313,13 +313,17 @@ impl LegacyPanel for PetPanel {
         // reads as resting ON the floor. Restricted to feet columns (gutter
         // precedence: species identity side cells are never touched). Bg-only — it
         // never replaces a floor-texture glyph, just deepens the cell behind it.
-        grounding::paint_contact_shadow(
+        blit_draw_list(
             buf,
-            scene.pet_art,
-            &vm.pet_art,
-            vm.facing,
-            scene.habitat,
-            room_profile.biome.primary,
+            &crate::presentation::SceneDrawList {
+                cells: grounding::contact_shadow_draw_cells(
+                    scene.pet_art,
+                    &vm.pet_art,
+                    vm.facing,
+                    scene.habitat,
+                    room_profile.biome.primary,
+                ),
+            },
         );
 
         // Pet art with shimmer, twinkle, and token-pop overlays — paints over
