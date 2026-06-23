@@ -40,6 +40,75 @@ const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
 const MIN_WINDOW_SIZE: f64 = 260.0;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Ambient HUD — tunable layout constants
+// Adjust these to move/resize the overlay elements without touching draw logic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Top-rim gauge row: fraction of view height DOWN from the top where the
+/// gauge bar centerline sits.  0.20 = 20 % down (roughly 72 pt on a 360 pt
+/// window). The row stays wide because the circle is still ~80 % of its
+/// maximum chord here.
+const HUD_GAUGE_ROW_Y_FRAC: f64 = 0.20;
+
+/// Combined width of all three gauge bars as a fraction of the circle chord
+/// at the gauge row. 0.70 = 70 % of the available chord width.
+const HUD_GAUGE_TOTAL_WIDTH_FRAC: f64 = 0.70;
+
+/// Height of each gauge bar in points.
+const HUD_GAUGE_BAR_H: f64 = 4.0;
+
+/// Gap between adjacent gauge bars in points.
+const HUD_GAUGE_BAR_GAP: f64 = 6.0;
+
+/// Height of the dim track drawn behind each gauge bar in points.
+const HUD_GAUGE_TRACK_H: f64 = 4.0;
+
+/// Font size (pt) for the tiny label drawn above each gauge bar ("fed" etc.).
+const HUD_GAUGE_LABEL_SIZE: f64 = 7.5;
+
+/// Vertical offset from the bar's bottom edge to the label baseline (pt).
+const HUD_GAUGE_LABEL_OFFSET_Y: f64 = 5.5;
+
+/// Fraction of view height DOWN from the top for the first stat line
+/// ("{today} today · {rate}/hr").  0.75 = 75 % down.
+const HUD_STAT_LINE1_Y_FRAC: f64 = 0.75;
+
+/// Fraction of view height DOWN from the top for the second stat line
+/// ("{stage} {xpbar_text} · {age}").  0.83 = 83 % down.
+const HUD_STAT_LINE2_Y_FRAC: f64 = 0.83;
+
+/// Font size (pt) for the two lower stat lines.
+const HUD_STAT_FONT_SIZE: f64 = 8.5;
+
+/// Width of the inline XP progress bar in the second stat line (points).
+const HUD_XP_BAR_W: f64 = 28.0;
+
+/// Height of the inline XP progress bar in the second stat line (points).
+const HUD_XP_BAR_H: f64 = 4.0;
+
+/// Horizontal gap between the stage label text and the XP bar (points).
+const HUD_XP_BAR_LEFT_GAP: f64 = 4.0;
+
+/// Horizontal gap between the XP bar and the age label text (points).
+const HUD_XP_BAR_RIGHT_GAP: f64 = 4.0;
+
+// HUD gauge colors (RGB 0–255).
+/// "fed" gauge fill — warm amber/tan.
+const HUD_COLOR_FED: (u8, u8, u8) = (210, 160, 80);
+/// "happy" gauge fill — soft pink.
+const HUD_COLOR_HAPPY: (u8, u8, u8) = (210, 100, 140);
+/// "energy" gauge fill — cyan/teal.
+const HUD_COLOR_ENERGY: (u8, u8, u8) = (80, 200, 200);
+/// Dim track background for all gauges.
+const HUD_COLOR_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.18);
+/// Text color for gauge labels and stat lines.
+const HUD_COLOR_TEXT: (u8, u8, u8, f64) = (220, 220, 240, 0.75);
+/// XP bar fill color — soft violet.
+const HUD_COLOR_XP_FILL: (u8, u8, u8) = (160, 130, 220);
+/// XP bar track color.
+const HUD_COLOR_XP_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.18);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CompanionMenuSpec {
     app_title: &'static str,
@@ -387,6 +456,10 @@ fn draw_scene(bounds: NSRect) {
             path.fill();
         }
 
+        // Ambient HUD — drawn after halo beads and before the sleep/calm dim,
+        // so the dim overlay softens the HUD when the pet is resting.
+        draw_hud(bounds, &aperture, &vm);
+
         if dim_overlay {
             let dim = NSBezierPath::bezierPathWithRect(bounds);
             NSColor::colorWithSRGBRed_green_blue_alpha(0.05, 0.06, 0.10, 0.35).setFill();
@@ -588,6 +661,230 @@ fn appkit_blit_draw_list(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Ambient HUD — pure layout helper (no AppKit; unit-testable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One gauge's layout rectangle (x, y, w, h) in AppKit view coordinates.
+///
+/// `x`/`y` is the bottom-left of the track.
+/// `fill_w` is the filled-bar width = `w * fraction.clamp(0,1)`.
+/// `label_x`/`label_y` are where the label text anchor should be drawn
+/// (bottom-left of the label, above the track).
+#[derive(Debug, Clone, PartialEq)]
+struct GaugeLayout {
+    track_x: f64,
+    track_y: f64,
+    track_w: f64,
+    fill_w: f64,
+    label_x: f64,
+    label_y: f64,
+}
+
+/// Layout all three vital gauges (fed / happy / energy) given the aperture and
+/// view dimensions.
+///
+/// Returns `None` if the aperture is too small to meaningfully render.
+///
+/// `fractions` must have exactly 3 elements: [fed, happy, energy], each
+/// clamped internally to 0.0–1.0.
+fn hud_gauge_layouts(
+    view_h: f64,
+    aperture_cx: f64,
+    aperture_r: f64,
+    fractions: [f64; 3],
+) -> Option<[GaugeLayout; 3]> {
+    if aperture_r < 20.0 {
+        return None;
+    }
+
+    // Y position of gauge row centerline in AppKit coords (y=0 at bottom).
+    // HUD_GAUGE_ROW_Y_FRAC is fraction DOWN from top → distance from bottom.
+    let row_center_y = view_h * (1.0 - HUD_GAUGE_ROW_Y_FRAC);
+
+    // Chord half-width at this Y position inside the circle.
+    // Aperture center_y is in AppKit (y-up) coords already.
+    let dy = row_center_y - (view_h / 2.0); // offset from circle center
+    let chord_sq = aperture_r * aperture_r - dy * dy;
+    if chord_sq <= 0.0 {
+        return None;
+    }
+    let chord_half = chord_sq.sqrt();
+    let chord = 2.0 * chord_half;
+
+    // Total bar width = fraction of chord at this row.
+    let total_bar_w = chord * HUD_GAUGE_TOTAL_WIDTH_FRAC;
+    // Each individual gauge bar width (3 bars + 2 gaps).
+    let bar_w = ((total_bar_w - HUD_GAUGE_BAR_GAP * 2.0) / 3.0).max(4.0);
+    let total_used_w = bar_w * 3.0 + HUD_GAUGE_BAR_GAP * 2.0;
+
+    let track_y = row_center_y - HUD_GAUGE_TRACK_H / 2.0;
+    let start_x = aperture_cx - total_used_w / 2.0;
+
+    let mut result: [GaugeLayout; 3] = core::array::from_fn(|_| GaugeLayout {
+        track_x: 0.0,
+        track_y: 0.0,
+        track_w: 0.0,
+        fill_w: 0.0,
+        label_x: 0.0,
+        label_y: 0.0,
+    });
+
+    for (i, &frac) in fractions.iter().enumerate() {
+        let frac = frac.clamp(0.0, 1.0);
+        let bar_left = start_x + i as f64 * (bar_w + HUD_GAUGE_BAR_GAP);
+        result[i] = GaugeLayout {
+            track_x: bar_left,
+            track_y,
+            track_w: bar_w,
+            fill_w: bar_w * frac,
+            label_x: bar_left,
+            label_y: track_y + HUD_GAUGE_LABEL_OFFSET_Y,
+        };
+    }
+    Some(result)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ambient HUD — AppKit draw call (macOS only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Draw the ambient HUD overlay. Must be called inside an active AppKit
+/// drawing context with the circular aperture clip already installed.
+///
+/// Draws:
+/// 1. Top-rim vital gauges (fed / happy / energy) at `HUD_GAUGE_ROW_Y_FRAC`.
+/// 2. Two stat lines in the lower band (today tokens + rate; stage + xp bar + age).
+#[cfg(target_os = "macos")]
+fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_model::WatchViewModel) {
+    let view_h = bounds.size.height;
+    let cx = aperture.center_x as f64;
+    let r = aperture.radius as f64;
+
+    let text_color = RoundColor(
+        HUD_COLOR_TEXT.0 as f32 / 255.0,
+        HUD_COLOR_TEXT.1 as f32 / 255.0,
+        HUD_COLOR_TEXT.2 as f32 / 255.0,
+        HUD_COLOR_TEXT.3 as f32,
+    );
+    let track_color = RoundColor(
+        HUD_COLOR_TRACK.0 as f32 / 255.0,
+        HUD_COLOR_TRACK.1 as f32 / 255.0,
+        HUD_COLOR_TRACK.2 as f32 / 255.0,
+        HUD_COLOR_TRACK.3 as f32,
+    );
+
+    // ── 1. Top-rim vital gauges ───────────────────────────────────────────────
+    let gauge_colors: [RoundColor; 3] = [
+        rgb_color(HUD_COLOR_FED.0, HUD_COLOR_FED.1, HUD_COLOR_FED.2),
+        rgb_color(HUD_COLOR_HAPPY.0, HUD_COLOR_HAPPY.1, HUD_COLOR_HAPPY.2),
+        rgb_color(HUD_COLOR_ENERGY.0, HUD_COLOR_ENERGY.1, HUD_COLOR_ENERGY.2),
+    ];
+    let gauge_labels: [&str; 3] = ["fed", "happy", "energy"];
+    let fracs = [vm.fed, vm.happiness, vm.energy];
+
+    if let Some(layouts) = hud_gauge_layouts(view_h, cx, r, fracs) {
+        unsafe {
+            for (i, layout) in layouts.iter().enumerate() {
+                // Track (dim background).
+                let track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(layout.track_x, layout.track_y),
+                    NSSize::new(layout.track_w, HUD_GAUGE_TRACK_H),
+                ));
+                ns_color(&track_color).setFill();
+                track_path.fill();
+
+                // Colored fill bar.
+                if layout.fill_w > 0.0 {
+                    let fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                        NSPoint::new(layout.track_x, layout.track_y),
+                        NSSize::new(layout.fill_w, HUD_GAUGE_BAR_H),
+                    ));
+                    ns_color(&gauge_colors[i]).setFill();
+                    fill_path.fill();
+                }
+
+                // Label above the bar.
+                let label =
+                    attributed_pet_glyph(gauge_labels[i], HUD_GAUGE_LABEL_SIZE, &text_color);
+                label.drawAtPoint(NSPoint::new(layout.label_x, layout.label_y));
+            }
+        }
+    }
+
+    // ── 2. Lower-band stat lines ──────────────────────────────────────────────
+    // Line 1: "{today} today · {rate}/hr"
+    let today_str = crate::format::format_tokens(vm.today_effective_tokens);
+    let rate_str = crate::format::format_tokens(vm.progress.rate_per_hour);
+    let line1 = format!("{today_str} today · {rate_str}/hr");
+
+    // Line 2 is composed of three parts: stage label | xp bar | age label.
+    // We draw the text in two halves and the bar between them.
+    let stage_str = format!("{} ", vm.progress.stage_label);
+    let age_str = format!(" · {}", vm.bio.age_label);
+
+    unsafe {
+        // Measure helpers: compute text widths so we can center the composite line.
+        let line1_attr = attributed_pet_glyph(&line1, HUD_STAT_FONT_SIZE, &text_color);
+        let line1_w = line1_attr.size().width;
+        let line1_y = view_h * (1.0 - HUD_STAT_LINE1_Y_FRAC);
+        let line1_x = cx - line1_w / 2.0;
+        line1_attr.drawAtPoint(NSPoint::new(line1_x, line1_y));
+
+        // Line 2: measure parts to place bar between them.
+        let stage_attr = attributed_pet_glyph(&stage_str, HUD_STAT_FONT_SIZE, &text_color);
+        let stage_w = stage_attr.size().width;
+        let age_attr = attributed_pet_glyph(&age_str, HUD_STAT_FONT_SIZE, &text_color);
+        let age_w = age_attr.size().width;
+
+        let line2_total_w =
+            stage_w + HUD_XP_BAR_LEFT_GAP + HUD_XP_BAR_W + HUD_XP_BAR_RIGHT_GAP + age_w;
+        let line2_y = view_h * (1.0 - HUD_STAT_LINE2_Y_FRAC);
+        let line2_start_x = cx - line2_total_w / 2.0;
+
+        // Draw stage label.
+        stage_attr.drawAtPoint(NSPoint::new(line2_start_x, line2_y));
+
+        // Draw XP bar (track + fill).
+        let xp_bar_x = line2_start_x + stage_w + HUD_XP_BAR_LEFT_GAP;
+        // Center the bar vertically on the text baseline midpoint.
+        let xp_bar_y = line2_y + HUD_STAT_FONT_SIZE * 0.2;
+
+        let xp_track_color = RoundColor(
+            HUD_COLOR_XP_TRACK.0 as f32 / 255.0,
+            HUD_COLOR_XP_TRACK.1 as f32 / 255.0,
+            HUD_COLOR_XP_TRACK.2 as f32 / 255.0,
+            HUD_COLOR_XP_TRACK.3 as f32,
+        );
+        let xp_fill_color = rgb_color(
+            HUD_COLOR_XP_FILL.0,
+            HUD_COLOR_XP_FILL.1,
+            HUD_COLOR_XP_FILL.2,
+        );
+
+        let xp_track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+            NSPoint::new(xp_bar_x, xp_bar_y),
+            NSSize::new(HUD_XP_BAR_W, HUD_XP_BAR_H),
+        ));
+        ns_color(&xp_track_color).setFill();
+        xp_track_path.fill();
+
+        let fill_frac = (vm.progress.fraction as f64).clamp(0.0, 1.0);
+        if fill_frac > 0.0 {
+            let xp_fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                NSPoint::new(xp_bar_x, xp_bar_y),
+                NSSize::new(HUD_XP_BAR_W * fill_frac, HUD_XP_BAR_H),
+            ));
+            ns_color(&xp_fill_color).setFill();
+            xp_fill_path.fill();
+        }
+
+        // Draw age label.
+        let age_x = xp_bar_x + HUD_XP_BAR_W + HUD_XP_BAR_RIGHT_GAP;
+        age_attr.drawAtPoint(NSPoint::new(age_x, line2_y));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +929,56 @@ mod tests {
 
         assert!(changed);
         assert_ne!(vm.pet_art, before);
+    }
+
+    // ── Ambient HUD layout helper tests ──────────────────────────────────────
+
+    #[test]
+    fn hud_gauge_layouts_returns_none_for_tiny_aperture() {
+        // radius < 20 → no layout.
+        assert!(hud_gauge_layouts(40.0, 20.0, 10.0, [1.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn hud_gauge_layouts_returns_three_rects_for_normal_aperture() {
+        // 360×360 window, aperture centered, radius 179.
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 0.5, 0.0]);
+        let layouts = layouts.expect("should produce layouts for a 360pt window");
+        assert_eq!(layouts.len(), 3);
+    }
+
+    #[test]
+    fn hud_gauge_layouts_clamps_fractions() {
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.5, -0.2, 0.5]).unwrap();
+        // Gauge 0 fraction clamped to 1.0 → fill_w == track_w.
+        assert!((layouts[0].fill_w - layouts[0].track_w).abs() < 1e-9);
+        // Gauge 1 fraction clamped to 0.0 → fill_w == 0.
+        assert!((layouts[1].fill_w).abs() < 1e-9);
+        // Gauge 2 fraction 0.5 → fill_w == track_w * 0.5.
+        let expected = layouts[2].track_w * 0.5;
+        assert!((layouts[2].fill_w - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_gauge_layouts_bars_are_evenly_spaced() {
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 1.0, 1.0]).unwrap();
+        // Each bar has the same track_w.
+        assert!((layouts[0].track_w - layouts[1].track_w).abs() < 1e-9);
+        assert!((layouts[1].track_w - layouts[2].track_w).abs() < 1e-9);
+        // Gaps between consecutive bars equal HUD_GAUGE_BAR_GAP.
+        let gap_0_1 = layouts[1].track_x - (layouts[0].track_x + layouts[0].track_w);
+        let gap_1_2 = layouts[2].track_x - (layouts[1].track_x + layouts[1].track_w);
+        assert!((gap_0_1 - HUD_GAUGE_BAR_GAP).abs() < 1e-9);
+        assert!((gap_1_2 - HUD_GAUGE_BAR_GAP).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_gauge_layouts_is_horizontally_centered() {
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [0.5, 0.5, 0.5]).unwrap();
+        // Total span from left of first bar to right of last bar.
+        let left = layouts[0].track_x;
+        let right = layouts[2].track_x + layouts[2].track_w;
+        let mid = (left + right) / 2.0;
+        assert!((mid - 180.0).abs() < 1e-6);
     }
 }
