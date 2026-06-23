@@ -1,3 +1,5 @@
+#![cfg(feature = "dev-preview")]
+
 use glorp::round::draw::{build_draw_commands, RoundDrawKind};
 use glorp::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use glorp::round::model::derive_round_scene_model;
