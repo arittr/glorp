@@ -266,8 +266,9 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 - **Purpose:** companion becomes first-class.
 - **Scope:** introduce `SceneDrawList` and `render(style, viewport)`; point the companion AppKit blitter at `scene.render(ROUND_STYLE, viewport)`, retiring `derive_round_scene_model` → `build_draw_commands`. Companion inherits grounding/ambient/props/speech/effects/halo + mood color, under a round `SurfaceStyle` (Compact detail, Circle clip, external-display privacy).
 - **Expected change:** companion gets richer (intended). `round-commands.json` → unified artifact, re-baked and reviewed.
+- **Debt to retire (from Plan 02):** `EffectState::from_vm` currently takes `ColorCapability` purely to gate `token_pop` off on `Flat` — a *terminal* capability leaking into the surface-agnostic builder (an AppKit companion has no meaningful `Flat`). When `render(style, viewport)` lands, move the `Flat`/`calm`/`burst` suppression OUT of `from_vm` into the `SurfaceStyle` resolution step (alongside `eye_emphasis`'s capability-awareness); `EffectState` then holds the raw `compute_token_pop(...)` result and each surface decides whether to paint it.
 - **Verification:** `dev-preview` round previews reviewed; companion runs on a 480×480 viewport.
-- **Stop condition:** companion renders the full scene; old round draw path deleted.
+- **Stop condition:** companion renders the full scene; old round draw path deleted; `EffectState::from_vm` no longer takes `ColorCapability`.
 
 ### Track 4 — Migrate watch
 - **Scope:** gut `PetPanel::render` into a `SceneDrawList` → `Buffer` blitter.
