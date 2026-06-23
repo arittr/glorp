@@ -232,9 +232,11 @@ Strangler-fig, companion-first. Each track is independently shippable; behavior-
 | 05 — `SceneDrawList` + `render(viewport)`; watch becomes a blitter | 3, 4 | **DONE** (merged `c78c0fd`) |
 | 06 — companion blits the shared `SceneDrawList` (round viewport + clip; keep halo; old round path kept) — *the visible win* | 3 | **DONE** (merged `1c5219d`; Drew visually approved) |
 | 07 — retire dead companion round-rendering path (`draw_command`/`draw_pet_art_block`/`pet_art_grid`/`draw_label` + helpers, unreachable after 06) | 3 | **DONE** (merged `16a1663`, −255 LOC) |
-| 08 — menubar popover renders the shared habitat scene (full-habitat per Drew; `SceneDrawList`→`NSAttributedString`) | 5 | **DONE on branch `rearch/08-menubar` (`44f691a`), HELD for Drew's visual review (not merged)** |
-| 09 — screen-window adapter | 6 | planned |
-| 10 — dev-preview unification + dead-scaffolding cleanup: migrate dev-preview round preview to `render_pet_to_draw_list`, THEN retire `build_draw_commands`' pet/room/prop emission + `derive_round_scene_model`'s pet/room/prop derivation (the dev-preview-coupled half of the old round path; only `Background`/`Halo`/`Trouble` stay live) | 7 | planned |
+| 08 — menubar popover renders the shared habitat scene (full-habitat per Drew; `SceneDrawList`→`NSAttributedString`) | 5 | **DONE** (merged `dc51d40`; Drew approved; source-accent tint dropped) |
+| 09 — screen-window adapter (rectangular surface) | 6 | **DEFERRED** (YAGNI — Drew's external displays are round, covered by the companion; trivially addable later = "companion blitter minus the clip"; `SCREEN_STYLE` knobs need correcting first) |
+| 10 — dev-preview unification + retire the dead round path (`build_draw_commands` pet/room/prop + `RoundDrawKind::{PetGlyph,RoomGlyph,PropGlyph}`; round-commands/round-layout artifacts; schema 4→5) | 7 | **DONE** (merged `8fb5347`, −669 LOC) |
+
+**Re-arch COMPLETE (2026-06-23):** one `render_pet_to_draw_list` → `SceneDrawList` producer feeds all four surfaces — watch (ratatui `blit_draw_list`), companion round window (AppKit `appkit_blit_draw_list`), menubar popover (`NSAttributedString` via `rasterize`), dev-preview round (`rasterize` → `PreviewCell`). No parallel pet/room/prop render paths remain (opus whole-branch review certified). Plan 09 deferred. Optional follow-ups: `SurfaceStyle`-into-seam (only if the menubar should regain source-accent tint); prune the now-dead `RoundPetModel.palette` field.
 
 **Sequencing note:** the plan order does the cheap byte-stable extractions first (03 resolver, 04 placements) so the adapter plans stay thin, and it **resequences Tracks 3-4** — `SceneDrawList` is proven byte-stable on **watch** (Plan 05, goldens are the oracle) *before* companion consumes it (Plan 06), since companion is an intended visual change and can't self-verify. Plan 05 is the one inherently-large plan; split it further if it exceeds a reviewable size.
 
