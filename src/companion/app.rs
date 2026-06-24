@@ -46,46 +46,44 @@ const MIN_WINDOW_SIZE: f64 = 260.0;
 //
 // Visual hierarchy (top → bottom):
 //   [AMBIENT]  Tiny vital ticks at top rim — fed/happy/energy, dimmed
-//   [HERO]     Large token count + secondary rate line in lower band
-//   [HERO]     Wide evolve bar below tokens — stage progress toward next form
+//   [READOUT]  Quiet token + rate line in lower band — legible, not dominating
+//   [FEATURE]  Evolve bar — the one promoted element; clean, tasteful, calm
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── Hero: Token count ────────────────────────────────────────────────────────
+// ── Readout: Token + rate combined line ──────────────────────────────────────
 
-/// Token count font = derived grid font_size × this multiplier.
-/// 2.2 makes the number the visually dominant element in the HUD.
-const HUD_TOKEN_FONT_FRAC: f64 = 2.2;
+/// Combined token+rate line font = derived grid font_size × this multiplier.
+/// 1.3 = clear and legible, but recedes behind the evolve bar — not a billboard.
+/// Tune up toward 1.6 if the physical display needs a larger readout.
+const HUD_TOKEN_FONT_FRAC: f64 = 1.3;
 
-/// Secondary line (rate + "today") font = grid font_size × this multiplier.
-/// 0.85 keeps it clearly subordinate to the hero token number.
-const HUD_RATE_FONT_FRAC: f64 = 0.85;
+/// Fraction of view height DOWN from top for the token+rate line baseline.
+/// 0.67 = in the lower-middle of the circle, gives room for the evolve bar below.
+const HUD_TOKEN_Y_FRAC: f64 = 0.67;
 
-/// Fraction of view height DOWN from top for the hero token count baseline.
-/// 0.64 = 64 % — sits in the lower-middle of the circle where it's wide.
-const HUD_TOKEN_Y_FRAC: f64 = 0.64;
+/// Subdued color alpha for the token+rate readout — it's informational, not the star.
+/// Tune down toward 0.55 for even more recession; up toward 0.85 for more presence.
+const HUD_TOKEN_ALPHA: f64 = 0.72;
 
-/// Fraction of view height DOWN from top for the secondary rate line.
-/// 0.71 = just below the token number.
-const HUD_RATE_Y_FRAC: f64 = 0.71;
-
-// ── Hero: Evolve bar ─────────────────────────────────────────────────────────
+// ── Feature: Evolve bar ───────────────────────────────────────────────────────
 
 /// Evolve bar total width as a fraction of the circle chord at the bar row.
-/// 0.72 = spans 72 % of the available width — wide and prominent.
+/// 0.72 = spans 72 % of the available width — wide and tasteful.
 const HUD_EVOLVE_BAR_WIDTH_FRAC: f64 = 0.72;
 
 /// Evolve bar height as a fraction of the derived grid font size.
-/// 0.55 = a chunky, clearly visible bar (taller than the old inline XP bar).
-const HUD_EVOLVE_BAR_H_FRAC: f64 = 0.55;
+/// 0.70 = a clean, confident bar — slightly taller than before for polish.
+const HUD_EVOLVE_BAR_H_FRAC: f64 = 0.70;
 
 /// Fraction of view height DOWN from top for the evolve bar centerline.
-/// 0.79 = below the rate line, still inside the wide band of the circle.
-const HUD_EVOLVE_BAR_Y_FRAC: f64 = 0.79;
+/// 0.80 = below the token readout, near the bottom of the wide circle band.
+const HUD_EVOLVE_BAR_Y_FRAC: f64 = 0.80;
 
-/// Gap in points between the evolve bar and its stage labels.
-const HUD_EVOLVE_LABEL_GAP: f64 = 3.5;
+/// Gap in points between the evolve bar and its stage labels (placed above).
+const HUD_EVOLVE_LABEL_GAP: f64 = 4.0;
 
 /// Evolve bar stage-label font = grid font_size × this multiplier.
+/// 0.78 = legible labels flanking the bar without competing with it.
 const HUD_EVOLVE_LABEL_FONT_FRAC: f64 = 0.78;
 
 // ── Ambient vitals — dimmed top-rim ticks ────────────────────────────────────
@@ -127,12 +125,15 @@ const HUD_COLOR_ENERGY: (u8, u8, u8) = (80, 200, 200);
 const HUD_COLOR_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.12);
 /// Alpha multiplier applied to vital fill colors (dims them to ambient level).
 const HUD_VITAL_FILL_ALPHA: f32 = 0.30;
-/// Hero token count color — bright neutral white, high contrast.
-const HUD_COLOR_TOKEN: (u8, u8, u8, f64) = (240, 240, 255, 0.92);
-/// Secondary text color (rate line, evolve labels) — slightly dimmer.
-const HUD_COLOR_TEXT: (u8, u8, u8, f64) = (200, 200, 225, 0.65);
-/// Evolve bar fill color — violet (matches existing XP bar feel).
-const HUD_COLOR_EVOLVE_FILL: (u8, u8, u8) = (160, 130, 220);
+/// Token+rate readout color (RGB) — quiet neutral white. Alpha is HUD_TOKEN_ALPHA.
+const HUD_COLOR_TOKEN: (u8, u8, u8) = (220, 220, 240);
+/// Secondary text color (evolve labels) — slightly dimmer still.
+const HUD_COLOR_TEXT: (u8, u8, u8, f64) = (200, 200, 225, 0.60);
+/// Evolve bar fill color — calm violet; promoted element but not garish.
+const HUD_COLOR_EVOLVE_FILL: (u8, u8, u8) = (150, 120, 210);
+/// Evolve bar fill alpha — slightly transparent so the fill reads as calm, not loud.
+/// Tune toward 1.0 for a bolder bar, down toward 0.6 for more subtlety.
+const HUD_EVOLVE_FILL_ALPHA: f64 = 0.80;
 /// Evolve bar track color — dim background.
 const HUD_COLOR_EVOLVE_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.18);
 
@@ -873,8 +874,8 @@ fn hud_evolve_bar_layout(
 ///
 /// Visual hierarchy (top → bottom):
 /// 1. Tiny ambient vital ticks (fed/happy/energy) at the top rim — dim, no labels.
-/// 2. HERO token count (large) + secondary rate line just below it.
-/// 3. HERO evolve bar (wide, chunky) — stage progress toward next form.
+/// 2. Quiet token+rate readout (one line: "27.7M today · 17.0M/hr") — legible, subdued.
+/// 3. Evolve bar (the one promoted element) — progress toward next stage, with flanking labels.
 #[cfg(target_os = "macos")]
 fn draw_hud(
     bounds: NSRect,
@@ -890,7 +891,6 @@ fn draw_hud(
     let gauge_track_h = font_size * HUD_GAUGE_TRACK_H_FRAC;
     let gauge_bar_h = font_size * HUD_GAUGE_BAR_H_FRAC;
     let token_font_size = font_size * HUD_TOKEN_FONT_FRAC;
-    let rate_font_size = font_size * HUD_RATE_FONT_FRAC;
     let evolve_bar_h = font_size * HUD_EVOLVE_BAR_H_FRAC;
     let evolve_label_size = font_size * HUD_EVOLVE_LABEL_FONT_FRAC;
 
@@ -898,7 +898,7 @@ fn draw_hud(
         HUD_COLOR_TOKEN.0 as f32 / 255.0,
         HUD_COLOR_TOKEN.1 as f32 / 255.0,
         HUD_COLOR_TOKEN.2 as f32 / 255.0,
-        HUD_COLOR_TOKEN.3 as f32,
+        HUD_TOKEN_ALPHA as f32,
     );
     let text_color = RoundColor(
         HUD_COLOR_TEXT.0 as f32 / 255.0,
@@ -951,28 +951,22 @@ fn draw_hud(
         }
     }
 
-    // ── 2. Hero token count + secondary rate line ─────────────────────────────
+    // ── 2. Quiet token+rate readout (one line) ────────────────────────────────
+    // Combined as a single tidy line: "27.7M today · 17.0M/hr"
+    // Subdued size and alpha so it reads as a clean readout, not a billboard.
     let today_str = crate::format::format_tokens(vm.today_effective_tokens);
     let rate_str = crate::format::format_tokens(vm.progress.rate_per_hour);
+    let combined_line = format!("{today_str} today · {rate_str}/hr");
 
     unsafe {
-        // Large token count — the hero number.
-        let token_attr = attributed_pet_glyph(&today_str, token_font_size, &token_color);
-        let token_w = token_attr.size().width;
-        let token_y = view_h * (1.0 - HUD_TOKEN_Y_FRAC);
-        let token_x = cx - token_w / 2.0;
-        token_attr.drawAtPoint(NSPoint::new(token_x, token_y));
-
-        // Smaller secondary line: "today  ·  {rate}/hr"
-        let rate_line = format!("today  ·  {rate_str}/hr");
-        let rate_attr = attributed_pet_glyph(&rate_line, rate_font_size, &text_color);
-        let rate_w = rate_attr.size().width;
-        let rate_y = view_h * (1.0 - HUD_RATE_Y_FRAC);
-        let rate_x = cx - rate_w / 2.0;
-        rate_attr.drawAtPoint(NSPoint::new(rate_x, rate_y));
+        let combined_attr = attributed_pet_glyph(&combined_line, token_font_size, &token_color);
+        let combined_w = combined_attr.size().width;
+        let combined_y = view_h * (1.0 - HUD_TOKEN_Y_FRAC);
+        let combined_x = cx - combined_w / 2.0;
+        combined_attr.drawAtPoint(NSPoint::new(combined_x, combined_y));
     }
 
-    // ── 3. Hero evolve bar (stage progress) ───────────────────────────────────
+    // ── 3. Evolve bar — the one promoted element (stage progress) ────────────
     let evolve_frac = vm.progress.fraction as f64;
     if let Some(eb) = hud_evolve_bar_layout(view_h, cx, r, evolve_frac, evolve_bar_h) {
         let evolve_track_color = RoundColor(
@@ -981,10 +975,11 @@ fn draw_hud(
             HUD_COLOR_EVOLVE_TRACK.2 as f32 / 255.0,
             HUD_COLOR_EVOLVE_TRACK.3 as f32,
         );
-        let evolve_fill_color = rgb_color(
-            HUD_COLOR_EVOLVE_FILL.0,
-            HUD_COLOR_EVOLVE_FILL.1,
-            HUD_COLOR_EVOLVE_FILL.2,
+        let evolve_fill_color = RoundColor(
+            HUD_COLOR_EVOLVE_FILL.0 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_FILL.1 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_FILL.2 as f32 / 255.0,
+            HUD_EVOLVE_FILL_ALPHA as f32,
         );
 
         unsafe {
