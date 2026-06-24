@@ -2,8 +2,8 @@
 source: tests/round_draw_list.rs
 expression: tail
 ---
-- row: 9
-  col: 21
+- row: 5
+  col: 25
   glyph: o
   fg:
     - 239
@@ -11,8 +11,8 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 9
-  col: 23
+- row: 5
+  col: 27
   glyph: )
   fg:
     - 239
@@ -20,8 +20,8 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 10
-  col: 18
+- row: 6
+  col: 22
   glyph: ">"
   fg:
     - 239
@@ -29,8 +29,8 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 10
-  col: 20
+- row: 6
+  col: 24
   glyph: ^
   fg:
     - 239
@@ -38,8 +38,8 @@ expression: tail
     - 228
   bg: ~
   bold: false
-- row: 10
-  col: 22
+- row: 6
+  col: 26
   glyph: "<"
   fg:
     - 239
