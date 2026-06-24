@@ -55,17 +55,19 @@ const HUD_GAUGE_ROW_Y_FRAC: f64 = 0.20;
 /// at the gauge row. 0.70 = 70 % of the available chord width.
 const HUD_GAUGE_TOTAL_WIDTH_FRAC: f64 = 0.70;
 
-/// Height of each gauge bar in points.
-const HUD_GAUGE_BAR_H: f64 = 4.0;
+/// Height of each gauge bar as a fraction of the derived grid font size.
+/// bar_h = HUD_GAUGE_BAR_H_FRAC * font_size.
+const HUD_GAUGE_BAR_H_FRAC: f64 = 0.47;
 
 /// Gap between adjacent gauge bars in points.
 const HUD_GAUGE_BAR_GAP: f64 = 6.0;
 
-/// Height of the dim track drawn behind each gauge bar in points.
-const HUD_GAUGE_TRACK_H: f64 = 4.0;
+/// Height of the dim track behind each gauge bar as a fraction of font size.
+const HUD_GAUGE_TRACK_H_FRAC: f64 = 0.47;
 
-/// Font size (pt) for the tiny label drawn above each gauge bar ("fed" etc.).
-const HUD_GAUGE_LABEL_SIZE: f64 = 7.5;
+/// HUD gauge label font = font_size × this multiplier.
+/// 0.85 keeps labels visually subordinate to the stat lines.
+const HUD_GAUGE_LABEL_FONT_FRAC: f64 = 0.85;
 
 /// Vertical offset from the bar's bottom edge to the label baseline (pt).
 const HUD_GAUGE_LABEL_OFFSET_Y: f64 = 5.5;
@@ -78,14 +80,15 @@ const HUD_STAT_LINE1_Y_FRAC: f64 = 0.75;
 /// ("{stage} {xpbar_text} · {age}").  0.83 = 83 % down.
 const HUD_STAT_LINE2_Y_FRAC: f64 = 0.83;
 
-/// Font size (pt) for the two lower stat lines.
-const HUD_STAT_FONT_SIZE: f64 = 8.5;
+/// HUD stat-line font = derived grid font_size × 1.0 (stat lines at full grid font).
+const HUD_STAT_FONT_FRAC: f64 = 1.0;
 
-/// Width of the inline XP progress bar in the second stat line (points).
-const HUD_XP_BAR_W: f64 = 28.0;
+/// Width of the inline XP progress bar as a fraction of font size.
+/// xp_bar_w = HUD_XP_BAR_W_FRAC * font_size.
+const HUD_XP_BAR_W_FRAC: f64 = 3.3;
 
-/// Height of the inline XP progress bar in the second stat line (points).
-const HUD_XP_BAR_H: f64 = 4.0;
+/// Height of the inline XP progress bar as a fraction of font size.
+const HUD_XP_BAR_H_FRAC: f64 = 0.47;
 
 /// Horizontal gap between the stage label text and the XP bar (points).
 const HUD_XP_BAR_LEFT_GAP: f64 = 4.0;
@@ -458,7 +461,11 @@ fn draw_scene(bounds: NSRect) {
 
         // Ambient HUD — drawn after halo beads and before the sleep/calm dim,
         // so the dim overlay softens the HUD when the pet is resting.
-        draw_hud(bounds, &aperture, &vm);
+        // Pass the derived font size so HUD elements scale with the display.
+        let hud_font_size = companion_grid_metrics(bounds.size.width, bounds.size.height)
+            .map(|m| m.font_size)
+            .unwrap_or(8.5);
+        draw_hud(bounds, &aperture, &vm, hud_font_size);
 
         if dim_overlay {
             let dim = NSBezierPath::bezierPathWithRect(bounds);
@@ -506,17 +513,13 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
 
 /// Metrics needed to map a character-cell grid onto the round AppKit view.
 ///
-/// `font_size` is the chosen monospace font size in points.  `cell_w`/`cell_h`
-/// are the measured dimensions of one `"M"` glyph at that size.  `grid_cols`
-/// and `grid_rows` are the number of cells that fit inside `view_w`/`view_h`.
+/// `font_size` is the derived monospace font size in points (derived from
+/// `view_w` and `COMPANION_TARGET_COLS`).  `cell_w`/`cell_h` are the measured
+/// dimensions of one `"M"` glyph at that size.  `grid_cols` and `grid_rows`
+/// are the number of cells that fit inside `view_w`/`view_h`.
 /// `origin_x`/`origin_y` are the AppKit pixel coordinates of the top-left
 /// corner of the grid (centred in the view), where `origin_y` is the
 /// **top** of row-0 in AppKit's Y-up coordinate system.
-///
-/// **Tunable aesthetic default**: `font_size` starts at 8.5 pt, which gives
-/// roughly 44 columns × 18 rows inside a 360-pt window — wide enough that the
-/// 13-col pet is ~30 % of the width.  Drew can adjust this to taste; bumping
-/// the font makes the pet larger, shrinking it fits more habitat texture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CompanionGridMetrics {
     pub font_size: f64,
@@ -528,31 +531,64 @@ pub(super) struct CompanionGridMetrics {
     pub origin_y: f64,
 }
 
-/// Default font size for the round companion grid.
+/// Target number of columns across the full view width.
 ///
-/// **TUNABLE AESTHETIC DEFAULT** — this is Drew's call to adjust.
-/// At 8.5 pt monospaced on a 360-pt window the grid is roughly 44 cols × 18
-/// rows, which places the 13-wide pet at ~30 % of the viewport width.
-/// Increase to make the pet larger; decrease to add more habitat texture.
-const COMPANION_FONT_SIZE: f64 = 8.5;
+/// **TUNABLE** — the pet is PET_W=13 of these columns; FEWER cols = bigger
+/// pet/glyphs.  Lower this for tiny displays (e.g. a 480px 2.1″ round screen);
+/// raise it for large desktop windows.  The font size is *derived* from this
+/// value and the actual view width, so the pet stays a consistent fraction of
+/// the display regardless of window size.
+const COMPANION_TARGET_COLS: u16 = 30;
+
+/// Probe font size used to measure "M" advance ratio.
+///
+/// The ratio (advance/size) is stable over a wide range; we probe at this size
+/// then scale the result to the target cell width.
+const COMPANION_PROBE_FONT_SIZE: f64 = 16.0;
 
 /// Measure the cell grid for the given view dimensions and compute the centred
 /// `origin_x`/`origin_y` offset so the grid is positioned in the middle of the
 /// AppKit view.
 ///
+/// Font size is derived from `view_w` and `COMPANION_TARGET_COLS` so the pet
+/// is always a consistent fraction of the display.  Increasing
+/// `COMPANION_TARGET_COLS` → more, smaller columns; decreasing it → fewer,
+/// larger columns (bigger pet).
+///
 /// Only compiled on macOS; not golden-tested (AppKit font measurement is
 /// machine-dependent and not deterministic on non-macOS hosts).
 pub(super) fn companion_grid_metrics(view_w: f64, view_h: f64) -> Option<CompanionGridMetrics> {
     unsafe {
-        let font_size = COMPANION_FONT_SIZE;
-        let cell_size =
-            attributed_pet_glyph("M", font_size, &RoundColor(1.0, 1.0, 1.0, 1.0)).size();
-        let cell_w = cell_size.width;
-        let cell_h = cell_size.height;
-        if cell_w <= 0.0 || cell_h <= 0.0 {
+        // 1. Measure "M" advance at the probe size to get the advance/size ratio.
+        let probe_size = attributed_pet_glyph(
+            "M",
+            COMPANION_PROBE_FONT_SIZE,
+            &RoundColor(1.0, 1.0, 1.0, 1.0),
+        )
+        .size();
+        let probe_advance = probe_size.width;
+        if probe_advance <= 0.0 {
             return None;
         }
-        let grid_cols = (view_w / cell_w).floor() as u16;
+
+        // 2. Desired cell width from the target column count.
+        let cell_w = view_w / COMPANION_TARGET_COLS as f64;
+
+        // 3. Derive font size so "M" advance ≈ cell_w (measured ratio, no hardcoding).
+        let font_size = COMPANION_PROBE_FONT_SIZE * cell_w / probe_advance;
+        if font_size <= 0.0 {
+            return None;
+        }
+
+        // 4. Measure actual cell height at the derived font size.
+        let cell_size =
+            attributed_pet_glyph("M", font_size, &RoundColor(1.0, 1.0, 1.0, 1.0)).size();
+        let cell_h = cell_size.height;
+        if cell_h <= 0.0 {
+            return None;
+        }
+
+        let grid_cols = COMPANION_TARGET_COLS;
         let grid_rows = (view_h / cell_h).floor() as u16;
         if grid_cols == 0 || grid_rows == 0 {
             return None;
@@ -688,11 +724,16 @@ struct GaugeLayout {
 ///
 /// `fractions` must have exactly 3 elements: [fed, happy, energy], each
 /// clamped internally to 0.0–1.0.
+///
+/// `track_h` is the pixel height of the track bar; used only to vertically
+/// centre the bar on the row centerline.  Callers derive it from the scaled
+/// font size via `HUD_GAUGE_TRACK_H_FRAC`.
 fn hud_gauge_layouts(
     view_h: f64,
     aperture_cx: f64,
     aperture_r: f64,
     fractions: [f64; 3],
+    track_h: f64,
 ) -> Option<[GaugeLayout; 3]> {
     if aperture_r < 20.0 {
         return None;
@@ -718,7 +759,7 @@ fn hud_gauge_layouts(
     let bar_w = ((total_bar_w - HUD_GAUGE_BAR_GAP * 2.0) / 3.0).max(4.0);
     let total_used_w = bar_w * 3.0 + HUD_GAUGE_BAR_GAP * 2.0;
 
-    let track_y = row_center_y - HUD_GAUGE_TRACK_H / 2.0;
+    let track_y = row_center_y - track_h / 2.0;
     let start_x = aperture_cx - total_used_w / 2.0;
 
     let mut result: [GaugeLayout; 3] = core::array::from_fn(|_| GaugeLayout {
@@ -752,14 +793,30 @@ fn hud_gauge_layouts(
 /// Draw the ambient HUD overlay. Must be called inside an active AppKit
 /// drawing context with the circular aperture clip already installed.
 ///
+/// `font_size` is the derived grid font size; all HUD text and bar thicknesses
+/// scale proportionally via the `HUD_*_FRAC` constants.
+///
 /// Draws:
 /// 1. Top-rim vital gauges (fed / happy / energy) at `HUD_GAUGE_ROW_Y_FRAC`.
 /// 2. Two stat lines in the lower band (today tokens + rate; stage + xp bar + age).
 #[cfg(target_os = "macos")]
-fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_model::WatchViewModel) {
+fn draw_hud(
+    bounds: NSRect,
+    aperture: &RoundAperture,
+    vm: &crate::tui::view_model::WatchViewModel,
+    font_size: f64,
+) {
     let view_h = bounds.size.height;
     let cx = aperture.center_x as f64;
     let r = aperture.radius as f64;
+
+    // Derive scaled sizes from the grid font_size.
+    let stat_font_size = font_size * HUD_STAT_FONT_FRAC;
+    let gauge_label_size = font_size * HUD_GAUGE_LABEL_FONT_FRAC;
+    let gauge_bar_h = font_size * HUD_GAUGE_BAR_H_FRAC;
+    let gauge_track_h = font_size * HUD_GAUGE_TRACK_H_FRAC;
+    let xp_bar_w = font_size * HUD_XP_BAR_W_FRAC;
+    let xp_bar_h = font_size * HUD_XP_BAR_H_FRAC;
 
     let text_color = RoundColor(
         HUD_COLOR_TEXT.0 as f32 / 255.0,
@@ -783,13 +840,13 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_mode
     let gauge_labels: [&str; 3] = ["fed", "happy", "energy"];
     let fracs = [vm.fed, vm.happiness, vm.energy];
 
-    if let Some(layouts) = hud_gauge_layouts(view_h, cx, r, fracs) {
+    if let Some(layouts) = hud_gauge_layouts(view_h, cx, r, fracs, gauge_track_h) {
         unsafe {
             for (i, layout) in layouts.iter().enumerate() {
                 // Track (dim background).
                 let track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
                     NSPoint::new(layout.track_x, layout.track_y),
-                    NSSize::new(layout.track_w, HUD_GAUGE_TRACK_H),
+                    NSSize::new(layout.track_w, gauge_track_h),
                 ));
                 ns_color(&track_color).setFill();
                 track_path.fill();
@@ -798,15 +855,14 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_mode
                 if layout.fill_w > 0.0 {
                     let fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
                         NSPoint::new(layout.track_x, layout.track_y),
-                        NSSize::new(layout.fill_w, HUD_GAUGE_BAR_H),
+                        NSSize::new(layout.fill_w, gauge_bar_h),
                     ));
                     ns_color(&gauge_colors[i]).setFill();
                     fill_path.fill();
                 }
 
                 // Label above the bar.
-                let label =
-                    attributed_pet_glyph(gauge_labels[i], HUD_GAUGE_LABEL_SIZE, &text_color);
+                let label = attributed_pet_glyph(gauge_labels[i], gauge_label_size, &text_color);
                 label.drawAtPoint(NSPoint::new(layout.label_x, layout.label_y));
             }
         }
@@ -825,20 +881,19 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_mode
 
     unsafe {
         // Measure helpers: compute text widths so we can center the composite line.
-        let line1_attr = attributed_pet_glyph(&line1, HUD_STAT_FONT_SIZE, &text_color);
+        let line1_attr = attributed_pet_glyph(&line1, stat_font_size, &text_color);
         let line1_w = line1_attr.size().width;
         let line1_y = view_h * (1.0 - HUD_STAT_LINE1_Y_FRAC);
         let line1_x = cx - line1_w / 2.0;
         line1_attr.drawAtPoint(NSPoint::new(line1_x, line1_y));
 
         // Line 2: measure parts to place bar between them.
-        let stage_attr = attributed_pet_glyph(&stage_str, HUD_STAT_FONT_SIZE, &text_color);
+        let stage_attr = attributed_pet_glyph(&stage_str, stat_font_size, &text_color);
         let stage_w = stage_attr.size().width;
-        let age_attr = attributed_pet_glyph(&age_str, HUD_STAT_FONT_SIZE, &text_color);
+        let age_attr = attributed_pet_glyph(&age_str, stat_font_size, &text_color);
         let age_w = age_attr.size().width;
 
-        let line2_total_w =
-            stage_w + HUD_XP_BAR_LEFT_GAP + HUD_XP_BAR_W + HUD_XP_BAR_RIGHT_GAP + age_w;
+        let line2_total_w = stage_w + HUD_XP_BAR_LEFT_GAP + xp_bar_w + HUD_XP_BAR_RIGHT_GAP + age_w;
         let line2_y = view_h * (1.0 - HUD_STAT_LINE2_Y_FRAC);
         let line2_start_x = cx - line2_total_w / 2.0;
 
@@ -848,7 +903,7 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_mode
         // Draw XP bar (track + fill).
         let xp_bar_x = line2_start_x + stage_w + HUD_XP_BAR_LEFT_GAP;
         // Center the bar vertically on the text baseline midpoint.
-        let xp_bar_y = line2_y + HUD_STAT_FONT_SIZE * 0.2;
+        let xp_bar_y = line2_y + stat_font_size * 0.2;
 
         let xp_track_color = RoundColor(
             HUD_COLOR_XP_TRACK.0 as f32 / 255.0,
@@ -864,7 +919,7 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_mode
 
         let xp_track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
             NSPoint::new(xp_bar_x, xp_bar_y),
-            NSSize::new(HUD_XP_BAR_W, HUD_XP_BAR_H),
+            NSSize::new(xp_bar_w, xp_bar_h),
         ));
         ns_color(&xp_track_color).setFill();
         xp_track_path.fill();
@@ -873,14 +928,14 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, vm: &crate::tui::view_mode
         if fill_frac > 0.0 {
             let xp_fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
                 NSPoint::new(xp_bar_x, xp_bar_y),
-                NSSize::new(HUD_XP_BAR_W * fill_frac, HUD_XP_BAR_H),
+                NSSize::new(xp_bar_w * fill_frac, xp_bar_h),
             ));
             ns_color(&xp_fill_color).setFill();
             xp_fill_path.fill();
         }
 
         // Draw age label.
-        let age_x = xp_bar_x + HUD_XP_BAR_W + HUD_XP_BAR_RIGHT_GAP;
+        let age_x = xp_bar_x + xp_bar_w + HUD_XP_BAR_RIGHT_GAP;
         age_attr.drawAtPoint(NSPoint::new(age_x, line2_y));
     }
 }
@@ -936,20 +991,20 @@ mod tests {
     #[test]
     fn hud_gauge_layouts_returns_none_for_tiny_aperture() {
         // radius < 20 → no layout.
-        assert!(hud_gauge_layouts(40.0, 20.0, 10.0, [1.0, 1.0, 1.0]).is_none());
+        assert!(hud_gauge_layouts(40.0, 20.0, 10.0, [1.0, 1.0, 1.0], 4.0).is_none());
     }
 
     #[test]
     fn hud_gauge_layouts_returns_three_rects_for_normal_aperture() {
         // 360×360 window, aperture centered, radius 179.
-        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 0.5, 0.0]);
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 0.5, 0.0], 4.0);
         let layouts = layouts.expect("should produce layouts for a 360pt window");
         assert_eq!(layouts.len(), 3);
     }
 
     #[test]
     fn hud_gauge_layouts_clamps_fractions() {
-        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.5, -0.2, 0.5]).unwrap();
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.5, -0.2, 0.5], 4.0).unwrap();
         // Gauge 0 fraction clamped to 1.0 → fill_w == track_w.
         assert!((layouts[0].fill_w - layouts[0].track_w).abs() < 1e-9);
         // Gauge 1 fraction clamped to 0.0 → fill_w == 0.
@@ -961,7 +1016,7 @@ mod tests {
 
     #[test]
     fn hud_gauge_layouts_bars_are_evenly_spaced() {
-        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 1.0, 1.0]).unwrap();
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 1.0, 1.0], 4.0).unwrap();
         // Each bar has the same track_w.
         assert!((layouts[0].track_w - layouts[1].track_w).abs() < 1e-9);
         assert!((layouts[1].track_w - layouts[2].track_w).abs() < 1e-9);
@@ -974,7 +1029,7 @@ mod tests {
 
     #[test]
     fn hud_gauge_layouts_is_horizontally_centered() {
-        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [0.5, 0.5, 0.5]).unwrap();
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [0.5, 0.5, 0.5], 4.0).unwrap();
         // Total span from left of first bar to right of last bar.
         let left = layouts[0].track_x;
         let right = layouts[2].track_x + layouts[2].track_w;
