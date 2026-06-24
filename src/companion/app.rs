@@ -43,74 +43,98 @@ const MIN_WINDOW_SIZE: f64 = 260.0;
 // ─────────────────────────────────────────────────────────────────────────────
 // Ambient HUD — tunable layout constants
 // Adjust these to move/resize the overlay elements without touching draw logic.
+//
+// Visual hierarchy (top → bottom):
+//   [AMBIENT]  Tiny vital ticks at top rim — fed/happy/energy, dimmed
+//   [HERO]     Large token count + secondary rate line in lower band
+//   [HERO]     Wide evolve bar below tokens — stage progress toward next form
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Top-rim gauge row: fraction of view height DOWN from the top where the
-/// gauge bar centerline sits.  0.20 = 20 % down (roughly 72 pt on a 360 pt
-/// window). The row stays wide because the circle is still ~80 % of its
-/// maximum chord here.
-const HUD_GAUGE_ROW_Y_FRAC: f64 = 0.20;
+// ── Hero: Token count ────────────────────────────────────────────────────────
 
-/// Combined width of all three gauge bars as a fraction of the circle chord
-/// at the gauge row. 0.70 = 70 % of the available chord width.
-const HUD_GAUGE_TOTAL_WIDTH_FRAC: f64 = 0.70;
+/// Token count font = derived grid font_size × this multiplier.
+/// 2.2 makes the number the visually dominant element in the HUD.
+const HUD_TOKEN_FONT_FRAC: f64 = 2.2;
 
-/// Height of each gauge bar as a fraction of the derived grid font size.
-/// bar_h = HUD_GAUGE_BAR_H_FRAC * font_size.
-const HUD_GAUGE_BAR_H_FRAC: f64 = 0.47;
+/// Secondary line (rate + "today") font = grid font_size × this multiplier.
+/// 0.85 keeps it clearly subordinate to the hero token number.
+const HUD_RATE_FONT_FRAC: f64 = 0.85;
 
-/// Gap between adjacent gauge bars in points.
-const HUD_GAUGE_BAR_GAP: f64 = 6.0;
+/// Fraction of view height DOWN from top for the hero token count baseline.
+/// 0.64 = 64 % — sits in the lower-middle of the circle where it's wide.
+const HUD_TOKEN_Y_FRAC: f64 = 0.64;
 
-/// Height of the dim track behind each gauge bar as a fraction of font size.
-const HUD_GAUGE_TRACK_H_FRAC: f64 = 0.47;
+/// Fraction of view height DOWN from top for the secondary rate line.
+/// 0.71 = just below the token number.
+const HUD_RATE_Y_FRAC: f64 = 0.71;
 
-/// HUD gauge label font = font_size × this multiplier.
-/// 0.85 keeps labels visually subordinate to the stat lines.
-const HUD_GAUGE_LABEL_FONT_FRAC: f64 = 0.85;
+// ── Hero: Evolve bar ─────────────────────────────────────────────────────────
 
-/// Vertical offset from the bar's bottom edge to the label baseline (pt).
-const HUD_GAUGE_LABEL_OFFSET_Y: f64 = 5.5;
+/// Evolve bar total width as a fraction of the circle chord at the bar row.
+/// 0.72 = spans 72 % of the available width — wide and prominent.
+const HUD_EVOLVE_BAR_WIDTH_FRAC: f64 = 0.72;
 
-/// Fraction of view height DOWN from the top for the first stat line
-/// ("{today} today · {rate}/hr").  0.75 = 75 % down.
-const HUD_STAT_LINE1_Y_FRAC: f64 = 0.75;
+/// Evolve bar height as a fraction of the derived grid font size.
+/// 0.55 = a chunky, clearly visible bar (taller than the old inline XP bar).
+const HUD_EVOLVE_BAR_H_FRAC: f64 = 0.55;
 
-/// Fraction of view height DOWN from the top for the second stat line
-/// ("{stage} {xpbar_text} · {age}").  0.83 = 83 % down.
-const HUD_STAT_LINE2_Y_FRAC: f64 = 0.83;
+/// Fraction of view height DOWN from top for the evolve bar centerline.
+/// 0.79 = below the rate line, still inside the wide band of the circle.
+const HUD_EVOLVE_BAR_Y_FRAC: f64 = 0.79;
 
-/// HUD stat-line font = derived grid font_size × 1.0 (stat lines at full grid font).
-const HUD_STAT_FONT_FRAC: f64 = 1.0;
+/// Gap in points between the evolve bar and its stage labels.
+const HUD_EVOLVE_LABEL_GAP: f64 = 3.5;
 
-/// Width of the inline XP progress bar as a fraction of font size.
-/// xp_bar_w = HUD_XP_BAR_W_FRAC * font_size.
-const HUD_XP_BAR_W_FRAC: f64 = 3.3;
+/// Evolve bar stage-label font = grid font_size × this multiplier.
+const HUD_EVOLVE_LABEL_FONT_FRAC: f64 = 0.78;
 
-/// Height of the inline XP progress bar as a fraction of font size.
-const HUD_XP_BAR_H_FRAC: f64 = 0.47;
+// ── Ambient vitals — dimmed top-rim ticks ────────────────────────────────────
 
-/// Horizontal gap between the stage label text and the XP bar (points).
-const HUD_XP_BAR_LEFT_GAP: f64 = 4.0;
+/// Vital tick row: fraction of view height DOWN from top for the tick centerline.
+/// 0.13 = near the very top rim — unobtrusive background status.
+const HUD_GAUGE_ROW_Y_FRAC: f64 = 0.13;
 
-/// Horizontal gap between the XP bar and the age label text (points).
-const HUD_XP_BAR_RIGHT_GAP: f64 = 4.0;
+/// Combined width of all three vital tick bars as a fraction of chord.
+/// 0.50 = narrower than before; these are ambient, not prominent.
+const HUD_GAUGE_TOTAL_WIDTH_FRAC: f64 = 0.50;
 
-// HUD gauge colors (RGB 0–255).
-/// "fed" gauge fill — warm amber/tan.
+/// Height of each vital fill bar as a fraction of grid font size.
+/// 0.25 = thin ticks, clearly subordinate to the evolve bar.
+const HUD_GAUGE_BAR_H_FRAC: f64 = 0.25;
+
+/// Gap between adjacent vital tick bars in points.
+const HUD_GAUGE_BAR_GAP: f64 = 5.0;
+
+/// Height of the dim track behind each vital tick as a fraction of font size.
+const HUD_GAUGE_TRACK_H_FRAC: f64 = 0.25;
+
+/// Vital tick labels are hidden — set > 0.0 to restore label text above the ticks.
+#[allow(dead_code)]
+const HUD_GAUGE_LABEL_FONT_FRAC: f64 = 0.0;
+
+/// Vertical offset from bar bottom to label baseline. Unused while labels are hidden.
+const HUD_GAUGE_LABEL_OFFSET_Y: f64 = 3.0;
+
+// ── Colors ───────────────────────────────────────────────────────────────────
+
+/// "fed" vital tick fill — warm amber/tan, at reduced alpha (ambient).
 const HUD_COLOR_FED: (u8, u8, u8) = (210, 160, 80);
-/// "happy" gauge fill — soft pink.
+/// "happy" vital tick fill — soft pink, at reduced alpha (ambient).
 const HUD_COLOR_HAPPY: (u8, u8, u8) = (210, 100, 140);
-/// "energy" gauge fill — cyan/teal.
+/// "energy" vital tick fill — cyan/teal, at reduced alpha (ambient).
 const HUD_COLOR_ENERGY: (u8, u8, u8) = (80, 200, 200);
-/// Dim track background for all gauges.
-const HUD_COLOR_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.18);
-/// Text color for gauge labels and stat lines.
-const HUD_COLOR_TEXT: (u8, u8, u8, f64) = (220, 220, 240, 0.75);
-/// XP bar fill color — soft violet.
-const HUD_COLOR_XP_FILL: (u8, u8, u8) = (160, 130, 220);
-/// XP bar track color.
-const HUD_COLOR_XP_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.18);
+/// Dim track background for vitals (very low alpha — barely visible).
+const HUD_COLOR_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.12);
+/// Alpha multiplier applied to vital fill colors (dims them to ambient level).
+const HUD_VITAL_FILL_ALPHA: f32 = 0.30;
+/// Hero token count color — bright neutral white, high contrast.
+const HUD_COLOR_TOKEN: (u8, u8, u8, f64) = (240, 240, 255, 0.92);
+/// Secondary text color (rate line, evolve labels) — slightly dimmer.
+const HUD_COLOR_TEXT: (u8, u8, u8, f64) = (200, 200, 225, 0.65);
+/// Evolve bar fill color — violet (matches existing XP bar feel).
+const HUD_COLOR_EVOLVE_FILL: (u8, u8, u8) = (160, 130, 220);
+/// Evolve bar track color — dim background.
+const HUD_COLOR_EVOLVE_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.18);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CompanionMenuSpec {
@@ -698,15 +722,15 @@ fn appkit_blit_draw_list(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ambient HUD — pure layout helper (no AppKit; unit-testable)
+// Ambient HUD — pure layout helpers (no AppKit; unit-testable)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// One gauge's layout rectangle (x, y, w, h) in AppKit view coordinates.
+/// One gauge's layout rectangle in AppKit view coordinates.
 ///
-/// `x`/`y` is the bottom-left of the track.
-/// `fill_w` is the filled-bar width = `w * fraction.clamp(0,1)`.
-/// `label_x`/`label_y` are where the label text anchor should be drawn
-/// (bottom-left of the label, above the track).
+/// `track_x`/`track_y` is the bottom-left of the track.
+/// `fill_w` is the filled-bar width = `track_w * fraction.clamp(0,1)`.
+/// `label_x`/`label_y` are text anchor (bottom-left), relevant only when
+/// labels are enabled (`HUD_GAUGE_LABEL_FONT_FRAC > 0`).
 #[derive(Debug, Clone, PartialEq)]
 struct GaugeLayout {
     track_x: f64,
@@ -722,12 +746,9 @@ struct GaugeLayout {
 ///
 /// Returns `None` if the aperture is too small to meaningfully render.
 ///
-/// `fractions` must have exactly 3 elements: [fed, happy, energy], each
-/// clamped internally to 0.0–1.0.
-///
-/// `track_h` is the pixel height of the track bar; used only to vertically
-/// centre the bar on the row centerline.  Callers derive it from the scaled
-/// font size via `HUD_GAUGE_TRACK_H_FRAC`.
+/// `fractions` — [fed, happy, energy], each clamped internally to 0.0–1.0.
+/// `track_h` — pixel height of the track bar; callers derive it from the
+/// scaled font size via `HUD_GAUGE_TRACK_H_FRAC`.
 fn hud_gauge_layouts(
     view_h: f64,
     aperture_cx: f64,
@@ -744,7 +765,6 @@ fn hud_gauge_layouts(
     let row_center_y = view_h * (1.0 - HUD_GAUGE_ROW_Y_FRAC);
 
     // Chord half-width at this Y position inside the circle.
-    // Aperture center_y is in AppKit (y-up) coords already.
     let dy = row_center_y - (view_h / 2.0); // offset from circle center
     let chord_sq = aperture_r * aperture_r - dy * dy;
     if chord_sq <= 0.0 {
@@ -786,6 +806,61 @@ fn hud_gauge_layouts(
     Some(result)
 }
 
+/// Layout for the hero evolve (XP progress) bar.
+///
+/// The bar spans `HUD_EVOLVE_BAR_WIDTH_FRAC` of the circle chord at
+/// `HUD_EVOLVE_BAR_Y_FRAC`, centered horizontally on `aperture_cx`.
+///
+/// Returns `None` if the aperture is too small or the bar row falls outside
+/// the circle.
+///
+/// `fraction` — progress toward next stage, 0.0–1.0 (clamped internally).
+/// `bar_h` — pixel height of the bar; derive from `font_size * HUD_EVOLVE_BAR_H_FRAC`.
+#[derive(Debug, Clone, PartialEq)]
+struct EvolveBarLayout {
+    track_x: f64,
+    track_y: f64,
+    track_w: f64,
+    bar_h: f64,
+    fill_w: f64,
+}
+
+fn hud_evolve_bar_layout(
+    view_h: f64,
+    aperture_cx: f64,
+    aperture_r: f64,
+    fraction: f64,
+    bar_h: f64,
+) -> Option<EvolveBarLayout> {
+    if aperture_r < 20.0 {
+        return None;
+    }
+
+    // Y centerline of the evolve bar in AppKit coords (y=0 at bottom).
+    let row_center_y = view_h * (1.0 - HUD_EVOLVE_BAR_Y_FRAC);
+
+    // Chord half-width at this row.
+    let dy = row_center_y - (view_h / 2.0);
+    let chord_sq = aperture_r * aperture_r - dy * dy;
+    if chord_sq <= 0.0 {
+        return None;
+    }
+    let chord = 2.0 * chord_sq.sqrt();
+
+    let track_w = (chord * HUD_EVOLVE_BAR_WIDTH_FRAC).max(8.0);
+    let track_x = aperture_cx - track_w / 2.0;
+    let track_y = row_center_y - bar_h / 2.0;
+    let fill_frac = fraction.clamp(0.0, 1.0);
+
+    Some(EvolveBarLayout {
+        track_x,
+        track_y,
+        track_w,
+        bar_h,
+        fill_w: track_w * fill_frac,
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Ambient HUD — AppKit draw call (macOS only)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -796,9 +871,10 @@ fn hud_gauge_layouts(
 /// `font_size` is the derived grid font size; all HUD text and bar thicknesses
 /// scale proportionally via the `HUD_*_FRAC` constants.
 ///
-/// Draws:
-/// 1. Top-rim vital gauges (fed / happy / energy) at `HUD_GAUGE_ROW_Y_FRAC`.
-/// 2. Two stat lines in the lower band (today tokens + rate; stage + xp bar + age).
+/// Visual hierarchy (top → bottom):
+/// 1. Tiny ambient vital ticks (fed/happy/energy) at the top rim — dim, no labels.
+/// 2. HERO token count (large) + secondary rate line just below it.
+/// 3. HERO evolve bar (wide, chunky) — stage progress toward next form.
 #[cfg(target_os = "macos")]
 fn draw_hud(
     bounds: NSRect,
@@ -810,14 +886,20 @@ fn draw_hud(
     let cx = aperture.center_x as f64;
     let r = aperture.radius as f64;
 
-    // Derive scaled sizes from the grid font_size.
-    let stat_font_size = font_size * HUD_STAT_FONT_FRAC;
-    let gauge_label_size = font_size * HUD_GAUGE_LABEL_FONT_FRAC;
-    let gauge_bar_h = font_size * HUD_GAUGE_BAR_H_FRAC;
+    // Derived sizes.
     let gauge_track_h = font_size * HUD_GAUGE_TRACK_H_FRAC;
-    let xp_bar_w = font_size * HUD_XP_BAR_W_FRAC;
-    let xp_bar_h = font_size * HUD_XP_BAR_H_FRAC;
+    let gauge_bar_h = font_size * HUD_GAUGE_BAR_H_FRAC;
+    let token_font_size = font_size * HUD_TOKEN_FONT_FRAC;
+    let rate_font_size = font_size * HUD_RATE_FONT_FRAC;
+    let evolve_bar_h = font_size * HUD_EVOLVE_BAR_H_FRAC;
+    let evolve_label_size = font_size * HUD_EVOLVE_LABEL_FONT_FRAC;
 
+    let token_color = RoundColor(
+        HUD_COLOR_TOKEN.0 as f32 / 255.0,
+        HUD_COLOR_TOKEN.1 as f32 / 255.0,
+        HUD_COLOR_TOKEN.2 as f32 / 255.0,
+        HUD_COLOR_TOKEN.3 as f32,
+    );
     let text_color = RoundColor(
         HUD_COLOR_TEXT.0 as f32 / 255.0,
         HUD_COLOR_TEXT.1 as f32 / 255.0,
@@ -831,19 +913,15 @@ fn draw_hud(
         HUD_COLOR_TRACK.3 as f32,
     );
 
-    // ── 1. Top-rim vital gauges ───────────────────────────────────────────────
-    let gauge_colors: [RoundColor; 3] = [
-        rgb_color(HUD_COLOR_FED.0, HUD_COLOR_FED.1, HUD_COLOR_FED.2),
-        rgb_color(HUD_COLOR_HAPPY.0, HUD_COLOR_HAPPY.1, HUD_COLOR_HAPPY.2),
-        rgb_color(HUD_COLOR_ENERGY.0, HUD_COLOR_ENERGY.1, HUD_COLOR_ENERGY.2),
-    ];
-    let gauge_labels: [&str; 3] = ["fed", "happy", "energy"];
+    // ── 1. Ambient vital ticks (top rim — dim, no labels) ────────────────────
     let fracs = [vm.fed, vm.happiness, vm.energy];
+    // Vital fills use their hue at a low alpha so they read as ambient status.
+    let vital_fills: [(u8, u8, u8); 3] = [HUD_COLOR_FED, HUD_COLOR_HAPPY, HUD_COLOR_ENERGY];
 
     if let Some(layouts) = hud_gauge_layouts(view_h, cx, r, fracs, gauge_track_h) {
         unsafe {
             for (i, layout) in layouts.iter().enumerate() {
-                // Track (dim background).
+                // Dim track.
                 let track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
                     NSPoint::new(layout.track_x, layout.track_y),
                     NSSize::new(layout.track_w, gauge_track_h),
@@ -851,92 +929,103 @@ fn draw_hud(
                 ns_color(&track_color).setFill();
                 track_path.fill();
 
-                // Colored fill bar.
+                // Dimmed fill tick.
                 if layout.fill_w > 0.0 {
+                    let (fr, fg, fb) = vital_fills[i];
+                    let fill_color = RoundColor(
+                        fr as f32 / 255.0,
+                        fg as f32 / 255.0,
+                        fb as f32 / 255.0,
+                        HUD_VITAL_FILL_ALPHA,
+                    );
                     let fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
                         NSPoint::new(layout.track_x, layout.track_y),
                         NSSize::new(layout.fill_w, gauge_bar_h),
                     ));
-                    ns_color(&gauge_colors[i]).setFill();
+                    ns_color(&fill_color).setFill();
                     fill_path.fill();
                 }
-
-                // Label above the bar.
-                let label = attributed_pet_glyph(gauge_labels[i], gauge_label_size, &text_color);
-                label.drawAtPoint(NSPoint::new(layout.label_x, layout.label_y));
+                // No labels — vitals are ambient only.
+                let _ = gauge_bar_h; // suppress unused-variable lint
             }
         }
     }
 
-    // ── 2. Lower-band stat lines ──────────────────────────────────────────────
-    // Line 1: "{today} today · {rate}/hr"
+    // ── 2. Hero token count + secondary rate line ─────────────────────────────
     let today_str = crate::format::format_tokens(vm.today_effective_tokens);
     let rate_str = crate::format::format_tokens(vm.progress.rate_per_hour);
-    let line1 = format!("{today_str} today · {rate_str}/hr");
-
-    // Line 2 is composed of three parts: stage label | xp bar | age label.
-    // We draw the text in two halves and the bar between them.
-    let stage_str = format!("{} ", vm.progress.stage_label);
-    let age_str = format!(" · {}", vm.bio.age_label);
 
     unsafe {
-        // Measure helpers: compute text widths so we can center the composite line.
-        let line1_attr = attributed_pet_glyph(&line1, stat_font_size, &text_color);
-        let line1_w = line1_attr.size().width;
-        let line1_y = view_h * (1.0 - HUD_STAT_LINE1_Y_FRAC);
-        let line1_x = cx - line1_w / 2.0;
-        line1_attr.drawAtPoint(NSPoint::new(line1_x, line1_y));
+        // Large token count — the hero number.
+        let token_attr = attributed_pet_glyph(&today_str, token_font_size, &token_color);
+        let token_w = token_attr.size().width;
+        let token_y = view_h * (1.0 - HUD_TOKEN_Y_FRAC);
+        let token_x = cx - token_w / 2.0;
+        token_attr.drawAtPoint(NSPoint::new(token_x, token_y));
 
-        // Line 2: measure parts to place bar between them.
-        let stage_attr = attributed_pet_glyph(&stage_str, stat_font_size, &text_color);
-        let stage_w = stage_attr.size().width;
-        let age_attr = attributed_pet_glyph(&age_str, stat_font_size, &text_color);
-        let age_w = age_attr.size().width;
+        // Smaller secondary line: "today  ·  {rate}/hr"
+        let rate_line = format!("today  ·  {rate_str}/hr");
+        let rate_attr = attributed_pet_glyph(&rate_line, rate_font_size, &text_color);
+        let rate_w = rate_attr.size().width;
+        let rate_y = view_h * (1.0 - HUD_RATE_Y_FRAC);
+        let rate_x = cx - rate_w / 2.0;
+        rate_attr.drawAtPoint(NSPoint::new(rate_x, rate_y));
+    }
 
-        let line2_total_w = stage_w + HUD_XP_BAR_LEFT_GAP + xp_bar_w + HUD_XP_BAR_RIGHT_GAP + age_w;
-        let line2_y = view_h * (1.0 - HUD_STAT_LINE2_Y_FRAC);
-        let line2_start_x = cx - line2_total_w / 2.0;
-
-        // Draw stage label.
-        stage_attr.drawAtPoint(NSPoint::new(line2_start_x, line2_y));
-
-        // Draw XP bar (track + fill).
-        let xp_bar_x = line2_start_x + stage_w + HUD_XP_BAR_LEFT_GAP;
-        // Center the bar vertically on the text baseline midpoint.
-        let xp_bar_y = line2_y + stat_font_size * 0.2;
-
-        let xp_track_color = RoundColor(
-            HUD_COLOR_XP_TRACK.0 as f32 / 255.0,
-            HUD_COLOR_XP_TRACK.1 as f32 / 255.0,
-            HUD_COLOR_XP_TRACK.2 as f32 / 255.0,
-            HUD_COLOR_XP_TRACK.3 as f32,
+    // ── 3. Hero evolve bar (stage progress) ───────────────────────────────────
+    let evolve_frac = vm.progress.fraction as f64;
+    if let Some(eb) = hud_evolve_bar_layout(view_h, cx, r, evolve_frac, evolve_bar_h) {
+        let evolve_track_color = RoundColor(
+            HUD_COLOR_EVOLVE_TRACK.0 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_TRACK.1 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_TRACK.2 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_TRACK.3 as f32,
         );
-        let xp_fill_color = rgb_color(
-            HUD_COLOR_XP_FILL.0,
-            HUD_COLOR_XP_FILL.1,
-            HUD_COLOR_XP_FILL.2,
+        let evolve_fill_color = rgb_color(
+            HUD_COLOR_EVOLVE_FILL.0,
+            HUD_COLOR_EVOLVE_FILL.1,
+            HUD_COLOR_EVOLVE_FILL.2,
         );
 
-        let xp_track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
-            NSPoint::new(xp_bar_x, xp_bar_y),
-            NSSize::new(xp_bar_w, xp_bar_h),
-        ));
-        ns_color(&xp_track_color).setFill();
-        xp_track_path.fill();
-
-        let fill_frac = (vm.progress.fraction as f64).clamp(0.0, 1.0);
-        if fill_frac > 0.0 {
-            let xp_fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
-                NSPoint::new(xp_bar_x, xp_bar_y),
-                NSSize::new(xp_bar_w * fill_frac, xp_bar_h),
+        unsafe {
+            // Track.
+            let track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                NSPoint::new(eb.track_x, eb.track_y),
+                NSSize::new(eb.track_w, eb.bar_h),
             ));
-            ns_color(&xp_fill_color).setFill();
-            xp_fill_path.fill();
-        }
+            ns_color(&evolve_track_color).setFill();
+            track_path.fill();
 
-        // Draw age label.
-        let age_x = xp_bar_x + xp_bar_w + HUD_XP_BAR_RIGHT_GAP;
-        age_attr.drawAtPoint(NSPoint::new(age_x, line2_y));
+            // Fill (or full bar when is_max_stage).
+            let fill_w = if vm.progress.is_max_stage {
+                eb.track_w
+            } else {
+                eb.fill_w
+            };
+            if fill_w > 0.0 {
+                let fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(eb.track_x, eb.track_y),
+                    NSSize::new(fill_w, eb.bar_h),
+                ));
+                ns_color(&evolve_fill_color).setFill();
+                fill_path.fill();
+            }
+
+            // Stage label left of bar, next-stage label right of bar.
+            let label_y = eb.track_y + eb.bar_h + HUD_EVOLVE_LABEL_GAP;
+            let stage_attr =
+                attributed_pet_glyph(&vm.progress.stage_label, evolve_label_size, &text_color);
+            stage_attr.drawAtPoint(NSPoint::new(eb.track_x, label_y));
+
+            let next_label = if vm.progress.is_max_stage {
+                "max".to_string()
+            } else {
+                vm.progress.next_stage_label.clone()
+            };
+            let next_attr = attributed_pet_glyph(&next_label, evolve_label_size, &text_color);
+            let next_w = next_attr.size().width;
+            next_attr.drawAtPoint(NSPoint::new(eb.track_x + eb.track_w - next_w, label_y));
+        }
     }
 }
 
@@ -986,7 +1075,7 @@ mod tests {
         assert_ne!(vm.pet_art, before);
     }
 
-    // ── Ambient HUD layout helper tests ──────────────────────────────────────
+    // ── Ambient HUD vital gauge layout tests ─────────────────────────────────
 
     #[test]
     fn hud_gauge_layouts_returns_none_for_tiny_aperture() {
@@ -1035,5 +1124,57 @@ mod tests {
         let right = layouts[2].track_x + layouts[2].track_w;
         let mid = (left + right) / 2.0;
         assert!((mid - 180.0).abs() < 1e-6);
+    }
+
+    // ── Hero evolve bar layout tests ──────────────────────────────────────────
+
+    #[test]
+    fn hud_evolve_bar_layout_returns_none_for_tiny_aperture() {
+        assert!(hud_evolve_bar_layout(40.0, 20.0, 10.0, 0.5, 4.0).is_none());
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_is_horizontally_centered() {
+        // 360×360 window, aperture centered at 180, radius 179.
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 0.5, 6.0)
+            .expect("should produce layout for 360pt window");
+        let mid = eb.track_x + eb.track_w / 2.0;
+        assert!((mid - 180.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_clamps_fraction() {
+        // fraction > 1.0 → fill_w == track_w
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 1.5, 6.0).unwrap();
+        assert!((eb.fill_w - eb.track_w).abs() < 1e-9);
+
+        // fraction < 0.0 → fill_w == 0
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, -0.3, 6.0).unwrap();
+        assert!((eb.fill_w).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_fill_proportional_to_fraction() {
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 0.75, 6.0).unwrap();
+        let expected = eb.track_w * 0.75;
+        assert!((eb.fill_w - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_wider_than_vital_ticks() {
+        // The evolve bar should be wider than the combined vital tick span —
+        // it's the hero element.
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 0.5, 6.0).unwrap();
+        let gauge_track_h = 4.0;
+        let gauge_layouts =
+            hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 1.0, 1.0], gauge_track_h).unwrap();
+        let vital_span =
+            gauge_layouts[2].track_x + gauge_layouts[2].track_w - gauge_layouts[0].track_x;
+        assert!(
+            eb.track_w > vital_span,
+            "evolve bar ({:.1}) should be wider than vital ticks ({:.1})",
+            eb.track_w,
+            vital_span
+        );
     }
 }
