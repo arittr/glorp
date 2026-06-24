@@ -38,7 +38,7 @@ const DRIFT_Y_FRAC: f32 = 0.30;
 
 /// Drift cadence: target changes every this many seconds.  The pet eases
 /// smoothly between targets, so shorter means livelier; longer means calmer.
-const DRIFT_PERIOD_SECS: u64 = 30;
+const DRIFT_PERIOD_SECS: u64 = 20;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -91,8 +91,10 @@ fn companion_drift(now: time::OffsetDateTime, grid_cols: u16, grid_rows: u16) ->
     let (px, py) = target_for_epoch(epoch.saturating_sub(1));
     let (nx, ny) = target_for_epoch(epoch);
 
-    // Linear ease between previous and next target.
-    let t = phase;
+    // Ease-in-out (smoothstep) between targets — mirrors the watch's wander
+    // curve so the pet accelerates off a spot and decelerates into the next,
+    // reading as deliberate rather than a constant linear crawl.
+    let t = phase * phase * (3.0 - 2.0 * phase);
     let fx = px + (nx - px) * t;
     let fy = py + (ny - py) * t;
 
