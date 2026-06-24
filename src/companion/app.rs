@@ -40,6 +40,103 @@ const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
 const MIN_WINDOW_SIZE: f64 = 260.0;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Ambient HUD — tunable layout constants
+// Adjust these to move/resize the overlay elements without touching draw logic.
+//
+// Visual hierarchy (top → bottom):
+//   [AMBIENT]  Tiny vital ticks at top rim — fed/happy/energy, dimmed
+//   [READOUT]  Quiet token + rate line in lower band — legible, not dominating
+//   [FEATURE]  Evolve bar — the one promoted element; clean, tasteful, calm
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Readout: Token + rate combined line ──────────────────────────────────────
+
+/// Combined token+rate line font = derived grid font_size × this multiplier.
+/// 1.3 = clear and legible, but recedes behind the evolve bar — not a billboard.
+/// Tune up toward 1.6 if the physical display needs a larger readout.
+const HUD_TOKEN_FONT_FRAC: f64 = 1.3;
+
+/// Fraction of view height DOWN from top for the token+rate line baseline.
+/// 0.67 = in the lower-middle of the circle, gives room for the evolve bar below.
+const HUD_TOKEN_Y_FRAC: f64 = 0.67;
+
+/// Subdued color alpha for the token+rate readout — it's informational, not the star.
+/// Tune down toward 0.55 for even more recession; up toward 0.85 for more presence.
+const HUD_TOKEN_ALPHA: f64 = 0.72;
+
+// ── Feature: Evolve bar ───────────────────────────────────────────────────────
+
+/// Evolve bar total width as a fraction of the circle chord at the bar row.
+/// 0.72 = spans 72 % of the available width — wide and tasteful.
+const HUD_EVOLVE_BAR_WIDTH_FRAC: f64 = 0.72;
+
+/// Evolve bar height as a fraction of the derived grid font size.
+/// 0.70 = a clean, confident bar — slightly taller than before for polish.
+const HUD_EVOLVE_BAR_H_FRAC: f64 = 0.70;
+
+/// Fraction of view height DOWN from top for the evolve bar centerline.
+/// 0.80 = below the token readout, near the bottom of the wide circle band.
+const HUD_EVOLVE_BAR_Y_FRAC: f64 = 0.80;
+
+/// Gap in points between the evolve bar and its stage labels (placed above).
+const HUD_EVOLVE_LABEL_GAP: f64 = 4.0;
+
+/// Evolve bar stage-label font = grid font_size × this multiplier.
+/// 0.78 = legible labels flanking the bar without competing with it.
+const HUD_EVOLVE_LABEL_FONT_FRAC: f64 = 0.78;
+
+// ── Ambient vitals — dimmed top-rim ticks ────────────────────────────────────
+
+/// Vital tick row: fraction of view height DOWN from top for the tick centerline.
+/// 0.13 = near the very top rim — unobtrusive background status.
+const HUD_GAUGE_ROW_Y_FRAC: f64 = 0.13;
+
+/// Combined width of all three vital tick bars as a fraction of chord.
+/// 0.50 = narrower than before; these are ambient, not prominent.
+const HUD_GAUGE_TOTAL_WIDTH_FRAC: f64 = 0.50;
+
+/// Height of each vital fill bar as a fraction of grid font size.
+/// 0.25 = thin ticks, clearly subordinate to the evolve bar.
+const HUD_GAUGE_BAR_H_FRAC: f64 = 0.25;
+
+/// Gap between adjacent vital tick bars in points.
+const HUD_GAUGE_BAR_GAP: f64 = 5.0;
+
+/// Height of the dim track behind each vital tick as a fraction of font size.
+const HUD_GAUGE_TRACK_H_FRAC: f64 = 0.25;
+
+/// Vital tick labels are hidden — set > 0.0 to restore label text above the ticks.
+#[allow(dead_code)]
+const HUD_GAUGE_LABEL_FONT_FRAC: f64 = 0.0;
+
+/// Vertical offset from bar bottom to label baseline. Unused while labels are hidden.
+const HUD_GAUGE_LABEL_OFFSET_Y: f64 = 3.0;
+
+// ── Colors ───────────────────────────────────────────────────────────────────
+
+/// "fed" vital tick fill — warm amber/tan, at reduced alpha (ambient).
+const HUD_COLOR_FED: (u8, u8, u8) = (210, 160, 80);
+/// "happy" vital tick fill — soft pink, at reduced alpha (ambient).
+const HUD_COLOR_HAPPY: (u8, u8, u8) = (210, 100, 140);
+/// "energy" vital tick fill — cyan/teal, at reduced alpha (ambient).
+const HUD_COLOR_ENERGY: (u8, u8, u8) = (80, 200, 200);
+/// Dim track background for vitals (very low alpha — barely visible).
+const HUD_COLOR_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.12);
+/// Alpha multiplier applied to vital fill colors (dims them to ambient level).
+const HUD_VITAL_FILL_ALPHA: f32 = 0.30;
+/// Token+rate readout color (RGB) — quiet neutral white. Alpha is HUD_TOKEN_ALPHA.
+const HUD_COLOR_TOKEN: (u8, u8, u8) = (220, 220, 240);
+/// Secondary text color (evolve labels) — slightly dimmer still.
+const HUD_COLOR_TEXT: (u8, u8, u8, f64) = (200, 200, 225, 0.60);
+/// Evolve bar fill color — calm violet; promoted element but not garish.
+const HUD_COLOR_EVOLVE_FILL: (u8, u8, u8) = (150, 120, 210);
+/// Evolve bar fill alpha — slightly transparent so the fill reads as calm, not loud.
+/// Tune toward 1.0 for a bolder bar, down toward 0.6 for more subtlety.
+const HUD_EVOLVE_FILL_ALPHA: f64 = 0.80;
+/// Evolve bar track color — dim background.
+const HUD_COLOR_EVOLVE_TRACK: (u8, u8, u8, f64) = (180, 180, 200, 0.18);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CompanionMenuSpec {
     app_title: &'static str,
@@ -387,6 +484,14 @@ fn draw_scene(bounds: NSRect) {
             path.fill();
         }
 
+        // Ambient HUD — drawn after halo beads and before the sleep/calm dim,
+        // so the dim overlay softens the HUD when the pet is resting.
+        // Pass the derived font size so HUD elements scale with the display.
+        let hud_font_size = companion_grid_metrics(bounds.size.width, bounds.size.height)
+            .map(|m| m.font_size)
+            .unwrap_or(8.5);
+        draw_hud(bounds, &aperture, &vm, hud_font_size);
+
         if dim_overlay {
             let dim = NSBezierPath::bezierPathWithRect(bounds);
             NSColor::colorWithSRGBRed_green_blue_alpha(0.05, 0.06, 0.10, 0.35).setFill();
@@ -433,17 +538,13 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
 
 /// Metrics needed to map a character-cell grid onto the round AppKit view.
 ///
-/// `font_size` is the chosen monospace font size in points.  `cell_w`/`cell_h`
-/// are the measured dimensions of one `"M"` glyph at that size.  `grid_cols`
-/// and `grid_rows` are the number of cells that fit inside `view_w`/`view_h`.
+/// `font_size` is the derived monospace font size in points (derived from
+/// `view_w` and `COMPANION_TARGET_COLS`).  `cell_w`/`cell_h` are the measured
+/// dimensions of one `"M"` glyph at that size.  `grid_cols` and `grid_rows`
+/// are the number of cells that fit inside `view_w`/`view_h`.
 /// `origin_x`/`origin_y` are the AppKit pixel coordinates of the top-left
 /// corner of the grid (centred in the view), where `origin_y` is the
 /// **top** of row-0 in AppKit's Y-up coordinate system.
-///
-/// **Tunable aesthetic default**: `font_size` starts at 8.5 pt, which gives
-/// roughly 44 columns × 18 rows inside a 360-pt window — wide enough that the
-/// 13-col pet is ~30 % of the width.  Drew can adjust this to taste; bumping
-/// the font makes the pet larger, shrinking it fits more habitat texture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CompanionGridMetrics {
     pub font_size: f64,
@@ -455,31 +556,64 @@ pub(super) struct CompanionGridMetrics {
     pub origin_y: f64,
 }
 
-/// Default font size for the round companion grid.
+/// Target number of columns across the full view width.
 ///
-/// **TUNABLE AESTHETIC DEFAULT** — this is Drew's call to adjust.
-/// At 8.5 pt monospaced on a 360-pt window the grid is roughly 44 cols × 18
-/// rows, which places the 13-wide pet at ~30 % of the viewport width.
-/// Increase to make the pet larger; decrease to add more habitat texture.
-const COMPANION_FONT_SIZE: f64 = 8.5;
+/// **TUNABLE** — the pet is PET_W=13 of these columns; FEWER cols = bigger
+/// pet/glyphs.  Lower this for tiny displays (e.g. a 480px 2.1″ round screen);
+/// raise it for large desktop windows.  The font size is *derived* from this
+/// value and the actual view width, so the pet stays a consistent fraction of
+/// the display regardless of window size.
+const COMPANION_TARGET_COLS: u16 = 36;
+
+/// Probe font size used to measure "M" advance ratio.
+///
+/// The ratio (advance/size) is stable over a wide range; we probe at this size
+/// then scale the result to the target cell width.
+const COMPANION_PROBE_FONT_SIZE: f64 = 16.0;
 
 /// Measure the cell grid for the given view dimensions and compute the centred
 /// `origin_x`/`origin_y` offset so the grid is positioned in the middle of the
 /// AppKit view.
 ///
+/// Font size is derived from `view_w` and `COMPANION_TARGET_COLS` so the pet
+/// is always a consistent fraction of the display.  Increasing
+/// `COMPANION_TARGET_COLS` → more, smaller columns; decreasing it → fewer,
+/// larger columns (bigger pet).
+///
 /// Only compiled on macOS; not golden-tested (AppKit font measurement is
 /// machine-dependent and not deterministic on non-macOS hosts).
 pub(super) fn companion_grid_metrics(view_w: f64, view_h: f64) -> Option<CompanionGridMetrics> {
     unsafe {
-        let font_size = COMPANION_FONT_SIZE;
-        let cell_size =
-            attributed_pet_glyph("M", font_size, &RoundColor(1.0, 1.0, 1.0, 1.0)).size();
-        let cell_w = cell_size.width;
-        let cell_h = cell_size.height;
-        if cell_w <= 0.0 || cell_h <= 0.0 {
+        // 1. Measure "M" advance at the probe size to get the advance/size ratio.
+        let probe_size = attributed_pet_glyph(
+            "M",
+            COMPANION_PROBE_FONT_SIZE,
+            &RoundColor(1.0, 1.0, 1.0, 1.0),
+        )
+        .size();
+        let probe_advance = probe_size.width;
+        if probe_advance <= 0.0 {
             return None;
         }
-        let grid_cols = (view_w / cell_w).floor() as u16;
+
+        // 2. Desired cell width from the target column count.
+        let cell_w = view_w / COMPANION_TARGET_COLS as f64;
+
+        // 3. Derive font size so "M" advance ≈ cell_w (measured ratio, no hardcoding).
+        let font_size = COMPANION_PROBE_FONT_SIZE * cell_w / probe_advance;
+        if font_size <= 0.0 {
+            return None;
+        }
+
+        // 4. Measure actual cell height at the derived font size.
+        let cell_size =
+            attributed_pet_glyph("M", font_size, &RoundColor(1.0, 1.0, 1.0, 1.0)).size();
+        let cell_h = cell_size.height;
+        if cell_h <= 0.0 {
+            return None;
+        }
+
+        let grid_cols = COMPANION_TARGET_COLS;
         let grid_rows = (view_h / cell_h).floor() as u16;
         if grid_cols == 0 || grid_rows == 0 {
             return None;
@@ -588,6 +722,308 @@ fn appkit_blit_draw_list(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Ambient HUD — pure layout helpers (no AppKit; unit-testable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One gauge's layout rectangle in AppKit view coordinates.
+///
+/// `track_x`/`track_y` is the bottom-left of the track.
+/// `fill_w` is the filled-bar width = `track_w * fraction.clamp(0,1)`.
+/// `label_x`/`label_y` are text anchor (bottom-left), relevant only when
+/// labels are enabled (`HUD_GAUGE_LABEL_FONT_FRAC > 0`).
+#[derive(Debug, Clone, PartialEq)]
+struct GaugeLayout {
+    track_x: f64,
+    track_y: f64,
+    track_w: f64,
+    fill_w: f64,
+    label_x: f64,
+    label_y: f64,
+}
+
+/// Layout all three vital gauges (fed / happy / energy) given the aperture and
+/// view dimensions.
+///
+/// Returns `None` if the aperture is too small to meaningfully render.
+///
+/// `fractions` — [fed, happy, energy], each clamped internally to 0.0–1.0.
+/// `track_h` — pixel height of the track bar; callers derive it from the
+/// scaled font size via `HUD_GAUGE_TRACK_H_FRAC`.
+fn hud_gauge_layouts(
+    view_h: f64,
+    aperture_cx: f64,
+    aperture_r: f64,
+    fractions: [f64; 3],
+    track_h: f64,
+) -> Option<[GaugeLayout; 3]> {
+    if aperture_r < 20.0 {
+        return None;
+    }
+
+    // Y position of gauge row centerline in AppKit coords (y=0 at bottom).
+    // HUD_GAUGE_ROW_Y_FRAC is fraction DOWN from top → distance from bottom.
+    let row_center_y = view_h * (1.0 - HUD_GAUGE_ROW_Y_FRAC);
+
+    // Chord half-width at this Y position inside the circle.
+    let dy = row_center_y - (view_h / 2.0); // offset from circle center
+    let chord_sq = aperture_r * aperture_r - dy * dy;
+    if chord_sq <= 0.0 {
+        return None;
+    }
+    let chord_half = chord_sq.sqrt();
+    let chord = 2.0 * chord_half;
+
+    // Total bar width = fraction of chord at this row.
+    let total_bar_w = chord * HUD_GAUGE_TOTAL_WIDTH_FRAC;
+    // Each individual gauge bar width (3 bars + 2 gaps).
+    let bar_w = ((total_bar_w - HUD_GAUGE_BAR_GAP * 2.0) / 3.0).max(4.0);
+    let total_used_w = bar_w * 3.0 + HUD_GAUGE_BAR_GAP * 2.0;
+
+    let track_y = row_center_y - track_h / 2.0;
+    let start_x = aperture_cx - total_used_w / 2.0;
+
+    let mut result: [GaugeLayout; 3] = core::array::from_fn(|_| GaugeLayout {
+        track_x: 0.0,
+        track_y: 0.0,
+        track_w: 0.0,
+        fill_w: 0.0,
+        label_x: 0.0,
+        label_y: 0.0,
+    });
+
+    for (i, &frac) in fractions.iter().enumerate() {
+        let frac = frac.clamp(0.0, 1.0);
+        let bar_left = start_x + i as f64 * (bar_w + HUD_GAUGE_BAR_GAP);
+        result[i] = GaugeLayout {
+            track_x: bar_left,
+            track_y,
+            track_w: bar_w,
+            fill_w: bar_w * frac,
+            label_x: bar_left,
+            label_y: track_y + HUD_GAUGE_LABEL_OFFSET_Y,
+        };
+    }
+    Some(result)
+}
+
+/// Layout for the hero evolve (XP progress) bar.
+///
+/// The bar spans `HUD_EVOLVE_BAR_WIDTH_FRAC` of the circle chord at
+/// `HUD_EVOLVE_BAR_Y_FRAC`, centered horizontally on `aperture_cx`.
+///
+/// Returns `None` if the aperture is too small or the bar row falls outside
+/// the circle.
+///
+/// `fraction` — progress toward next stage, 0.0–1.0 (clamped internally).
+/// `bar_h` — pixel height of the bar; derive from `font_size * HUD_EVOLVE_BAR_H_FRAC`.
+#[derive(Debug, Clone, PartialEq)]
+struct EvolveBarLayout {
+    track_x: f64,
+    track_y: f64,
+    track_w: f64,
+    bar_h: f64,
+    fill_w: f64,
+}
+
+fn hud_evolve_bar_layout(
+    view_h: f64,
+    aperture_cx: f64,
+    aperture_r: f64,
+    fraction: f64,
+    bar_h: f64,
+) -> Option<EvolveBarLayout> {
+    if aperture_r < 20.0 {
+        return None;
+    }
+
+    // Y centerline of the evolve bar in AppKit coords (y=0 at bottom).
+    let row_center_y = view_h * (1.0 - HUD_EVOLVE_BAR_Y_FRAC);
+
+    // Chord half-width at this row.
+    let dy = row_center_y - (view_h / 2.0);
+    let chord_sq = aperture_r * aperture_r - dy * dy;
+    if chord_sq <= 0.0 {
+        return None;
+    }
+    let chord = 2.0 * chord_sq.sqrt();
+
+    let track_w = (chord * HUD_EVOLVE_BAR_WIDTH_FRAC).max(8.0);
+    let track_x = aperture_cx - track_w / 2.0;
+    let track_y = row_center_y - bar_h / 2.0;
+    let fill_frac = fraction.clamp(0.0, 1.0);
+
+    Some(EvolveBarLayout {
+        track_x,
+        track_y,
+        track_w,
+        bar_h,
+        fill_w: track_w * fill_frac,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ambient HUD — AppKit draw call (macOS only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Draw the ambient HUD overlay. Must be called inside an active AppKit
+/// drawing context with the circular aperture clip already installed.
+///
+/// `font_size` is the derived grid font size; all HUD text and bar thicknesses
+/// scale proportionally via the `HUD_*_FRAC` constants.
+///
+/// Visual hierarchy (top → bottom):
+/// 1. Tiny ambient vital ticks (fed/happy/energy) at the top rim — dim, no labels.
+/// 2. Quiet token+rate readout (one line: "27.7M today · 17.0M/hr") — legible, subdued.
+/// 3. Evolve bar (the one promoted element) — progress toward next stage, with flanking labels.
+#[cfg(target_os = "macos")]
+fn draw_hud(
+    bounds: NSRect,
+    aperture: &RoundAperture,
+    vm: &crate::tui::view_model::WatchViewModel,
+    font_size: f64,
+) {
+    let view_h = bounds.size.height;
+    let cx = aperture.center_x as f64;
+    let r = aperture.radius as f64;
+
+    // Derived sizes.
+    let gauge_track_h = font_size * HUD_GAUGE_TRACK_H_FRAC;
+    let gauge_bar_h = font_size * HUD_GAUGE_BAR_H_FRAC;
+    let token_font_size = font_size * HUD_TOKEN_FONT_FRAC;
+    let evolve_bar_h = font_size * HUD_EVOLVE_BAR_H_FRAC;
+    let evolve_label_size = font_size * HUD_EVOLVE_LABEL_FONT_FRAC;
+
+    let token_color = RoundColor(
+        HUD_COLOR_TOKEN.0 as f32 / 255.0,
+        HUD_COLOR_TOKEN.1 as f32 / 255.0,
+        HUD_COLOR_TOKEN.2 as f32 / 255.0,
+        HUD_TOKEN_ALPHA as f32,
+    );
+    let text_color = RoundColor(
+        HUD_COLOR_TEXT.0 as f32 / 255.0,
+        HUD_COLOR_TEXT.1 as f32 / 255.0,
+        HUD_COLOR_TEXT.2 as f32 / 255.0,
+        HUD_COLOR_TEXT.3 as f32,
+    );
+    let track_color = RoundColor(
+        HUD_COLOR_TRACK.0 as f32 / 255.0,
+        HUD_COLOR_TRACK.1 as f32 / 255.0,
+        HUD_COLOR_TRACK.2 as f32 / 255.0,
+        HUD_COLOR_TRACK.3 as f32,
+    );
+
+    // ── 1. Ambient vital ticks (top rim — dim, no labels) ────────────────────
+    let fracs = [vm.fed, vm.happiness, vm.energy];
+    // Vital fills use their hue at a low alpha so they read as ambient status.
+    let vital_fills: [(u8, u8, u8); 3] = [HUD_COLOR_FED, HUD_COLOR_HAPPY, HUD_COLOR_ENERGY];
+
+    if let Some(layouts) = hud_gauge_layouts(view_h, cx, r, fracs, gauge_track_h) {
+        unsafe {
+            for (i, layout) in layouts.iter().enumerate() {
+                // Dim track.
+                let track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(layout.track_x, layout.track_y),
+                    NSSize::new(layout.track_w, gauge_track_h),
+                ));
+                ns_color(&track_color).setFill();
+                track_path.fill();
+
+                // Dimmed fill tick.
+                if layout.fill_w > 0.0 {
+                    let (fr, fg, fb) = vital_fills[i];
+                    let fill_color = RoundColor(
+                        fr as f32 / 255.0,
+                        fg as f32 / 255.0,
+                        fb as f32 / 255.0,
+                        HUD_VITAL_FILL_ALPHA,
+                    );
+                    let fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                        NSPoint::new(layout.track_x, layout.track_y),
+                        NSSize::new(layout.fill_w, gauge_bar_h),
+                    ));
+                    ns_color(&fill_color).setFill();
+                    fill_path.fill();
+                }
+                // No labels — vitals are ambient only.
+                let _ = gauge_bar_h; // suppress unused-variable lint
+            }
+        }
+    }
+
+    // ── 2. Quiet token+rate readout (one line) ────────────────────────────────
+    // Combined as a single tidy line: "27.7M today · 17.0M/hr"
+    // Subdued size and alpha so it reads as a clean readout, not a billboard.
+    let today_str = crate::format::format_tokens(vm.today_effective_tokens);
+    let rate_str = crate::format::format_tokens(vm.progress.rate_per_hour);
+    let combined_line = format!("{today_str} today · {rate_str}/hr");
+
+    unsafe {
+        let combined_attr = attributed_pet_glyph(&combined_line, token_font_size, &token_color);
+        let combined_w = combined_attr.size().width;
+        let combined_y = view_h * (1.0 - HUD_TOKEN_Y_FRAC);
+        let combined_x = cx - combined_w / 2.0;
+        combined_attr.drawAtPoint(NSPoint::new(combined_x, combined_y));
+    }
+
+    // ── 3. Evolve bar — the one promoted element (stage progress) ────────────
+    let evolve_frac = vm.progress.fraction as f64;
+    if let Some(eb) = hud_evolve_bar_layout(view_h, cx, r, evolve_frac, evolve_bar_h) {
+        let evolve_track_color = RoundColor(
+            HUD_COLOR_EVOLVE_TRACK.0 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_TRACK.1 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_TRACK.2 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_TRACK.3 as f32,
+        );
+        let evolve_fill_color = RoundColor(
+            HUD_COLOR_EVOLVE_FILL.0 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_FILL.1 as f32 / 255.0,
+            HUD_COLOR_EVOLVE_FILL.2 as f32 / 255.0,
+            HUD_EVOLVE_FILL_ALPHA as f32,
+        );
+
+        unsafe {
+            // Track.
+            let track_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                NSPoint::new(eb.track_x, eb.track_y),
+                NSSize::new(eb.track_w, eb.bar_h),
+            ));
+            ns_color(&evolve_track_color).setFill();
+            track_path.fill();
+
+            // Fill (or full bar when is_max_stage).
+            let fill_w = if vm.progress.is_max_stage {
+                eb.track_w
+            } else {
+                eb.fill_w
+            };
+            if fill_w > 0.0 {
+                let fill_path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(eb.track_x, eb.track_y),
+                    NSSize::new(fill_w, eb.bar_h),
+                ));
+                ns_color(&evolve_fill_color).setFill();
+                fill_path.fill();
+            }
+
+            // Stage label left of bar, next-stage label right of bar.
+            let label_y = eb.track_y + eb.bar_h + HUD_EVOLVE_LABEL_GAP;
+            let stage_attr =
+                attributed_pet_glyph(&vm.progress.stage_label, evolve_label_size, &text_color);
+            stage_attr.drawAtPoint(NSPoint::new(eb.track_x, label_y));
+
+            let next_label = if vm.progress.is_max_stage {
+                "max".to_string()
+            } else {
+                vm.progress.next_stage_label.clone()
+            };
+            let next_attr = attributed_pet_glyph(&next_label, evolve_label_size, &text_color);
+            let next_w = next_attr.size().width;
+            next_attr.drawAtPoint(NSPoint::new(eb.track_x + eb.track_w - next_w, label_y));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +1068,108 @@ mod tests {
 
         assert!(changed);
         assert_ne!(vm.pet_art, before);
+    }
+
+    // ── Ambient HUD vital gauge layout tests ─────────────────────────────────
+
+    #[test]
+    fn hud_gauge_layouts_returns_none_for_tiny_aperture() {
+        // radius < 20 → no layout.
+        assert!(hud_gauge_layouts(40.0, 20.0, 10.0, [1.0, 1.0, 1.0], 4.0).is_none());
+    }
+
+    #[test]
+    fn hud_gauge_layouts_returns_three_rects_for_normal_aperture() {
+        // 360×360 window, aperture centered, radius 179.
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 0.5, 0.0], 4.0);
+        let layouts = layouts.expect("should produce layouts for a 360pt window");
+        assert_eq!(layouts.len(), 3);
+    }
+
+    #[test]
+    fn hud_gauge_layouts_clamps_fractions() {
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.5, -0.2, 0.5], 4.0).unwrap();
+        // Gauge 0 fraction clamped to 1.0 → fill_w == track_w.
+        assert!((layouts[0].fill_w - layouts[0].track_w).abs() < 1e-9);
+        // Gauge 1 fraction clamped to 0.0 → fill_w == 0.
+        assert!((layouts[1].fill_w).abs() < 1e-9);
+        // Gauge 2 fraction 0.5 → fill_w == track_w * 0.5.
+        let expected = layouts[2].track_w * 0.5;
+        assert!((layouts[2].fill_w - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_gauge_layouts_bars_are_evenly_spaced() {
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 1.0, 1.0], 4.0).unwrap();
+        // Each bar has the same track_w.
+        assert!((layouts[0].track_w - layouts[1].track_w).abs() < 1e-9);
+        assert!((layouts[1].track_w - layouts[2].track_w).abs() < 1e-9);
+        // Gaps between consecutive bars equal HUD_GAUGE_BAR_GAP.
+        let gap_0_1 = layouts[1].track_x - (layouts[0].track_x + layouts[0].track_w);
+        let gap_1_2 = layouts[2].track_x - (layouts[1].track_x + layouts[1].track_w);
+        assert!((gap_0_1 - HUD_GAUGE_BAR_GAP).abs() < 1e-9);
+        assert!((gap_1_2 - HUD_GAUGE_BAR_GAP).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_gauge_layouts_is_horizontally_centered() {
+        let layouts = hud_gauge_layouts(360.0, 180.0, 179.0, [0.5, 0.5, 0.5], 4.0).unwrap();
+        // Total span from left of first bar to right of last bar.
+        let left = layouts[0].track_x;
+        let right = layouts[2].track_x + layouts[2].track_w;
+        let mid = (left + right) / 2.0;
+        assert!((mid - 180.0).abs() < 1e-6);
+    }
+
+    // ── Hero evolve bar layout tests ──────────────────────────────────────────
+
+    #[test]
+    fn hud_evolve_bar_layout_returns_none_for_tiny_aperture() {
+        assert!(hud_evolve_bar_layout(40.0, 20.0, 10.0, 0.5, 4.0).is_none());
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_is_horizontally_centered() {
+        // 360×360 window, aperture centered at 180, radius 179.
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 0.5, 6.0)
+            .expect("should produce layout for 360pt window");
+        let mid = eb.track_x + eb.track_w / 2.0;
+        assert!((mid - 180.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_clamps_fraction() {
+        // fraction > 1.0 → fill_w == track_w
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 1.5, 6.0).unwrap();
+        assert!((eb.fill_w - eb.track_w).abs() < 1e-9);
+
+        // fraction < 0.0 → fill_w == 0
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, -0.3, 6.0).unwrap();
+        assert!((eb.fill_w).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_fill_proportional_to_fraction() {
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 0.75, 6.0).unwrap();
+        let expected = eb.track_w * 0.75;
+        assert!((eb.fill_w - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hud_evolve_bar_layout_wider_than_vital_ticks() {
+        // The evolve bar should be wider than the combined vital tick span —
+        // it's the hero element.
+        let eb = hud_evolve_bar_layout(360.0, 180.0, 179.0, 0.5, 6.0).unwrap();
+        let gauge_track_h = 4.0;
+        let gauge_layouts =
+            hud_gauge_layouts(360.0, 180.0, 179.0, [1.0, 1.0, 1.0], gauge_track_h).unwrap();
+        let vital_span =
+            gauge_layouts[2].track_x + gauge_layouts[2].track_w - gauge_layouts[0].track_x;
+        assert!(
+            eb.track_w > vital_span,
+            "evolve bar ({:.1}) should be wider than vital ticks ({:.1})",
+            eb.track_w,
+            vital_span
+        );
     }
 }
