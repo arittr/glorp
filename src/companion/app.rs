@@ -538,7 +538,7 @@ pub(super) struct CompanionGridMetrics {
 /// raise it for large desktop windows.  The font size is *derived* from this
 /// value and the actual view width, so the pet stays a consistent fraction of
 /// the display regardless of window size.
-const COMPANION_TARGET_COLS: u16 = 30;
+const COMPANION_TARGET_COLS: u16 = 36;
 
 /// Probe font size used to measure "M" advance ratio.
 ///
