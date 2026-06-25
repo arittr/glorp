@@ -12,6 +12,9 @@ use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model
 use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
+use crate::round::hud::{
+    comet_phase, comet_position, growth_ring_fill_end_deg, growth_ring_layout,
+};
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::storage::state::StateStore;
@@ -397,23 +400,17 @@ fn drain_poll_results() {
 }
 
 fn animate_pet() {
-    let redraw = APP_STATE.with(|cell| {
+    let view = APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
         let next_frame = state.animation_frame.wrapping_add(1);
         let now = time::OffsetDateTime::now_utc();
-        let changed = advance_companion_animation(&mut state.vm, next_frame, now).ok()?;
+        let _ = advance_companion_animation(&mut state.vm, next_frame, now);
         state.animation_frame = next_frame;
-        let next_scene = derive_round_scene_model(&state.vm, now);
-        let scene_changed = next_scene != state.scene;
-        if changed || scene_changed {
-            state.scene = next_scene;
-            Some(state.view.clone())
-        } else {
-            None
-        }
+        state.scene = derive_round_scene_model(&state.vm, now);
+        Some(state.view.clone())
     });
-    if let Some(view) = redraw {
+    if let Some(view) = view {
         unsafe { view.setNeedsDisplay(true) };
     }
 }
@@ -443,9 +440,7 @@ fn draw_scene(bounds: NSRect) {
             .as_ref()
             .map(|s| (s.scene.clone(), s.vm.clone(), s.animation_frame))
     });
-    // `animation_frame` is captured now so the snapshot shape is final; the rate
-    // comet consumes it in a later step.
-    let Some((scene, vm, _animation_frame)) = state_snapshot else {
+    let Some((scene, vm, animation_frame)) = state_snapshot else {
         return;
     };
 
@@ -555,6 +550,61 @@ fn draw_scene(bounds: NSRect) {
                 m.origin_x,
                 m.origin_y,
             );
+        }
+
+        // Growth ring (open-bottom arc) + orbiting rate comet.
+        {
+            const RING_GAP_DEG: f64 = 70.0;
+            let cx = aperture.center_x as f64;
+            let cy = aperture.center_y as f64;
+            let r = aperture.radius as f64 - 3.0; // inside the rim
+            let ring = growth_ring_layout(cx, cy, r, RING_GAP_DEG);
+            let frac = if vm.progress.is_max_stage {
+                1.0
+            } else {
+                vm.progress.fraction as f64
+            };
+            let fill_end = growth_ring_fill_end_deg(&ring, frac);
+            let line_w = (aperture.radius as f64 * 0.012).max(2.0);
+
+            // Track (dim) — full open arc.
+            let track = NSBezierPath::new();
+            track.setLineWidth(line_w);
+            track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+                NSPoint::new(cx, cy),
+                r,
+                ring.track_start_deg,
+                ring.track_start_deg + ring.track_sweep_deg,
+            );
+            ns_color(&RoundColor(0.71, 0.71, 0.78, 0.16)).setStroke();
+            track.stroke();
+
+            // Fill (violet) — start → fraction.
+            if fill_end > ring.track_start_deg {
+                let fill = NSBezierPath::new();
+                fill.setLineWidth(line_w);
+                fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+                    NSPoint::new(cx, cy),
+                    r,
+                    ring.track_start_deg,
+                    fill_end,
+                );
+                ns_color(&RoundColor(0.61, 0.48, 0.88, 0.85)).setStroke();
+                fill.stroke();
+            }
+
+            // Rate comet — a small bright dot riding the track.
+            let (gx, gy) = comet_position(
+                &ring,
+                comet_phase(animation_frame, vm.progress.rate_per_hour),
+            );
+            let cr = line_w * 1.6;
+            let dot = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                NSPoint::new(gx - cr, gy - cr),
+                NSSize::new(cr * 2.0, cr * 2.0),
+            ));
+            ns_color(&RoundColor(0.88, 0.82, 1.0, 0.95)).setFill();
+            dot.fill();
         }
 
         // Halo and trouble indicators drawn on top of the scene blit.
