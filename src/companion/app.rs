@@ -441,9 +441,11 @@ fn draw_scene(bounds: NSRect) {
     let state_snapshot = APP_STATE.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|s| (s.scene.clone(), s.vm.clone()))
+            .map(|s| (s.scene.clone(), s.vm.clone(), s.animation_frame))
     });
-    let Some((scene, vm)) = state_snapshot else {
+    // `animation_frame` is captured now so the snapshot shape is final; the rate
+    // comet consumes it in a later step.
+    let Some((scene, vm, _animation_frame)) = state_snapshot else {
         return;
     };
 
@@ -520,6 +522,31 @@ fn draw_scene(bounds: NSRect) {
                 m.grid_rows,
                 &companion_motion(),
             );
+            // Mood aura — soft radial glow (concentric translucent circles) centered
+            // on the pet, color by mood. Drawn under the pet so the body sits on top.
+            let pr = companion_scene.pet_rect;
+            let (cxp, cyp) = cell_to_point(
+                pr.x + pr.width / 2,
+                pr.y + pr.height / 2,
+                m.cell_w,
+                m.cell_h,
+                m.origin_x,
+                m.origin_y,
+            );
+            let base = crate::round::hud::mood_aura_color(scene.pet.mood);
+            let max_r = pr.width as f64 * m.cell_w * 0.95;
+            const AURA_RINGS: usize = 8;
+            for i in 0..AURA_RINGS {
+                let t = i as f64 / AURA_RINGS as f64; // 0 = outer, 1 = inner
+                let rr = max_r * (1.0 - t);
+                let glow = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                    NSPoint::new(cxp - rr, cyp - rr),
+                    NSSize::new(rr * 2.0, rr * 2.0),
+                ));
+                ns_color(&RoundColor(base.0, base.1, base.2, 0.05)).setFill();
+                glow.fill();
+            }
+
             appkit_blit_draw_list(
                 &companion_scene.draw_list,
                 m.font_size,
@@ -528,7 +555,6 @@ fn draw_scene(bounds: NSRect) {
                 m.origin_x,
                 m.origin_y,
             );
-            // companion_scene.pet_rect is consumed by the aura in Task 9.
         }
 
         // Halo and trouble indicators drawn on top of the scene blit.
