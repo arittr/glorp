@@ -52,6 +52,27 @@ pub fn comet_position(ring: &GrowthRing, phase: f64) -> (f64, f64) {
     )
 }
 
+/// The region (in pixels) the token stat must fit inside: centered in the ring's
+/// bottom gap, below center, clamped to the gap chord so it never clips the ring.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatGap {
+    pub center_x: f64,
+    pub baseline_y: f64,
+    pub max_width: f64,
+}
+
+pub fn stat_gap_box(cx: f64, cy: f64, radius: f64, gap_deg: f64) -> StatGap {
+    let gap = gap_deg.clamp(0.0, 180.0);
+    let half_chord = radius * (gap / 2.0).to_radians().sin();
+    StatGap {
+        center_x: cx,
+        // Place the readout in the lower band, a bit above the gap mouth.
+        baseline_y: cy + radius * 0.55,
+        // A small inset keeps the text off the ring stroke.
+        max_width: (2.0 * half_chord * 0.92).max(0.0),
+    }
+}
+
 /// Soft-glow aura hue for the pet's mood. Opaque (alpha 1.0); the renderer
 /// applies its own translucency. Sad and Sleepy are deliberately distinct hues
 /// (different needs: happiness<35 vs energy<20). Starting palette — tuned on device.
@@ -157,6 +178,23 @@ mod tests {
             busy > idle,
             "higher token rate should advance the comet further by the same frame"
         );
+    }
+
+    #[test]
+    fn stat_gap_box_sits_below_center_and_within_the_chord() {
+        let gap = stat_gap_box(100.0, 100.0, 90.0, 70.0);
+        assert!((gap.center_x - 100.0).abs() < 1e-6, "centered horizontally");
+        assert!(
+            gap.baseline_y > 100.0,
+            "stat sits below the vertical center (lower half)"
+        );
+        // The gap chord half-width at the ring edges is radius * sin(gap/2).
+        let expected_half = 90.0 * (35.0_f64.to_radians()).sin();
+        assert!(
+            gap.max_width <= 2.0 * expected_half + 1e-6,
+            "stat must fit within the gap chord"
+        );
+        assert!(gap.max_width > 0.0);
     }
 
     #[test]
