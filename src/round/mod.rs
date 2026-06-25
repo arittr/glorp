@@ -1,4 +1,5 @@
 pub mod draw;
+pub mod hud;
 pub mod layout;
 pub mod model;
 #[cfg(feature = "dev-preview")]
