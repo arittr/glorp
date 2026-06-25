@@ -111,6 +111,43 @@ fn companion_drift(
     companion_drift_position(motion, grid_cols, grid_rows, fx, fy)
 }
 
+/// Conservative bounded-drift check. Samples the drift at every box corner
+/// (`fx, fy ∈ {-1, 0, 1}`), maps each of the pet rect's four corners from cell
+/// space to pixels (using the real, non-square `cell_w`/`cell_h`), and verifies
+/// they all sit inside the pixel aperture circle. The grid is centered in the
+/// view, so a corner's pixel distance from the aperture center is
+/// `sqrt((cell_w·(col − cols/2))² + (cell_h·(row − rows/2))²)`.
+pub fn drift_keeps_pet_in_aperture(
+    motion: &CompanionMotion,
+    grid_cols: u16,
+    grid_rows: u16,
+    cell_w: f64,
+    cell_h: f64,
+    aperture_radius_px: f64,
+) -> bool {
+    let cxg = grid_cols as f64 / 2.0;
+    let cyg = grid_rows as f64 / 2.0;
+    for &fx in &[-1.0f32, 0.0, 1.0] {
+        for &fy in &[-1.0f32, 0.0, 1.0] {
+            let (ax, ay) = companion_drift_position(motion, grid_cols, grid_rows, fx, fy);
+            let corners = [
+                (ax, ay),
+                (ax + PET_W, ay),
+                (ax, ay + PET_H),
+                (ax + PET_W, ay + PET_H),
+            ];
+            for (col, row) in corners {
+                let dx = cell_w * (col as f64 - cxg);
+                let dy = cell_h * (row as f64 - cyg);
+                if (dx * dx + dy * dy).sqrt() > aperture_radius_px {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build a [`SceneDrawList`] for the round companion viewport.
@@ -299,6 +336,30 @@ mod tests {
         assert!(
             y1 <= y0,
             "upward bias should not move the pet down (y1={y1}, y0={y0})"
+        );
+    }
+
+    #[test]
+    fn default_motion_keeps_pet_inside_a_960_aperture() {
+        // Representative production metrics: 960px square face, 32 cols → cell_w=30,
+        // cells ~2:1 → cell_h=60, rows=16, aperture radius = 960/2 - 1 = 479.
+        let m = CompanionMotion::default();
+        assert!(
+            drift_keeps_pet_in_aperture(&m, 32, 16, 30.0, 60.0, 479.0),
+            "default drift must keep the whole pet inside the aperture circle"
+        );
+    }
+
+    #[test]
+    fn over_wide_x_fraction_clips_the_rim() {
+        // The spec's rejected 0.70 must be caught by the guard (corner reaches ~516 > 479).
+        let m = CompanionMotion {
+            drift_x_frac: 0.70,
+            ..CompanionMotion::default()
+        };
+        assert!(
+            !drift_keeps_pet_in_aperture(&m, 32, 16, 30.0, 60.0, 479.0),
+            "0.70 X fraction should be rejected — the pet corner clips the rim"
         );
     }
 }
