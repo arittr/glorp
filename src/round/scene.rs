@@ -133,8 +133,8 @@ pub fn drift_keeps_pet_in_aperture(
     cell_h: f64,
     aperture_radius_px: f64,
 ) -> bool {
-    let cxg = grid_cols as f64 / 2.0;
-    let cyg = grid_rows as f64 / 2.0;
+    let cxg = (grid_cols / 2) as f64;
+    let cyg = (grid_rows / 2) as f64;
     for &fx in &[-1.0f32, 0.0, 1.0] {
         for &fy in &[-1.0f32, 0.0, 1.0] {
             let (ax, ay) = companion_drift_position(motion, grid_cols, grid_rows, fx, fy);
@@ -158,7 +158,7 @@ pub fn drift_keeps_pet_in_aperture(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Build a [`SceneDrawList`] for the round companion viewport.
+/// Build a [`CompanionScene`] for the round companion viewport.
 ///
 /// This function is **pure** — it has no side effects, no AppKit calls, and no
 /// platform-specific imports. The result is fully deterministic for a fixed
@@ -176,10 +176,11 @@ pub fn drift_keeps_pet_in_aperture(
 /// The pet drifts freely in 2D within the porthole (aquarium feel — no floor or
 /// ground line). `area` fills the entire grid so the background wash covers the
 /// whole circle. The pet position is driven by `companion_drift`, which eases
-/// between deterministic 2D targets every `DRIFT_PERIOD_SECS` seconds, keeping
-/// the pet body within the safe central ellipse at all times.
+/// between deterministic 2D targets every `motion.drift_period_secs` seconds,
+/// keeping the pet body within the safe central ellipse at all times.
 ///
-/// Tune `DRIFT_X_FRAC`, `DRIFT_Y_FRAC`, and `DRIFT_PERIOD_SECS` for feel.
+/// Tune via the caller's `CompanionMotion` fields (`drift_x_frac`,
+/// `drift_y_frac`, `drift_period_secs`).
 pub fn build_round_scene_draw_list(
     vm: &WatchViewModel,
     now: time::OffsetDateTime,
