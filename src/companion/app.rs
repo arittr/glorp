@@ -496,6 +496,21 @@ fn draw_scene(bounds: NSRect) {
         ns_color(&bg_color).setFill();
         bg_path.fill();
 
+        // Tank depth: concentric translucent rings, darker toward the rim, so the
+        // porthole reads as depth rather than a flat void. (NSGradient isn't bound.)
+        const DEPTH_RINGS: usize = 7;
+        for i in 0..DEPTH_RINGS {
+            let t = i as f64 / DEPTH_RINGS as f64; // 0 center → ~1 rim
+            let rr = aperture.radius as f64 * (1.0 - t);
+            let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                NSPoint::new(aperture.center_x as f64 - rr, aperture.center_y as f64 - rr),
+                NSSize::new(rr * 2.0, rr * 2.0),
+            ));
+            // Brighter core (additive translucency builds toward center).
+            ns_color(&RoundColor(0.10, 0.11, 0.20, 0.05)).setFill();
+            ring.fill();
+        }
+
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
         if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
@@ -611,7 +626,8 @@ pub(super) struct CompanionGridMetrics {
 /// raise it for large desktop windows.  The font size is *derived* from this
 /// value and the actual view width, so the pet stays a consistent fraction of
 /// the display regardless of window size.
-const COMPANION_TARGET_COLS: u16 = 36;
+// Pet scale lever: fewer cols → larger cells → bigger pet AND props. Tuned on device.
+const COMPANION_TARGET_COLS: u16 = 32;
 
 /// Probe font size used to measure "M" advance ratio.
 ///
