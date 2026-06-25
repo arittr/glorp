@@ -44,6 +44,11 @@ const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
 const MIN_WINDOW_SIZE: f64 = 260.0;
 
+/// Open-bottom gap of the growth ring, in degrees. The HUD `stat_gap_box`
+/// geometry is coupled to this angle — a single source keeps the stat seated
+/// inside the ring's gap.
+const COMPANION_RING_GAP_DEG: f64 = 70.0;
+
 /// The companion's drift config (tuned on device). Starts at the legacy default;
 /// diverge here WITHOUT touching the shared menubar popover.
 fn companion_motion() -> crate::round::scene::CompanionMotion {
@@ -457,11 +462,10 @@ fn draw_scene(bounds: NSRect) {
 
         // Growth ring (open-bottom arc) + orbiting rate comet.
         {
-            const RING_GAP_DEG: f64 = 70.0;
             let cx = aperture.center_x as f64;
             let cy = aperture.center_y as f64;
             let r = aperture.radius as f64 - 3.0; // inside the rim
-            let ring = growth_ring_layout(cx, cy, r, RING_GAP_DEG);
+            let ring = growth_ring_layout(cx, cy, r, COMPANION_RING_GAP_DEG);
             let frac = if vm.progress.is_max_stage {
                 1.0
             } else {
@@ -777,12 +781,11 @@ fn draw_hud(
     font_size: f64,
 ) {
     let _ = bounds;
-    const RING_GAP_DEG: f64 = 70.0;
     let gap = crate::round::hud::stat_gap_box(
         aperture.center_x as f64,
         aperture.center_y as f64,
         aperture.radius as f64 - 3.0,
-        RING_GAP_DEG,
+        COMPANION_RING_GAP_DEG,
     );
 
     let today = crate::format::format_tokens(vm.today_effective_tokens);
