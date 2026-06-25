@@ -58,10 +58,15 @@ mod tests {
         assert!((ring.track_sweep_deg - 290.0).abs() < 1e-6);
         // Track starts at the right edge of the bottom gap: 270 + 35 = 305 deg.
         assert!((ring.track_start_deg - 305.0).abs() < 1e-6);
-        // Bottom (270°) is inside the gap, i.e. NOT covered by [start, start+sweep] mod 360.
-        let _end = ring.track_start_deg + ring.track_sweep_deg; // 595
-                                                                // 270 (== 630 mod 360) is not in [305, 595]; 630 would be, 270 is below start.
-        assert!(!(305.0..=595.0).contains(&630.0) || !(305.0..=595.0).contains(&270.0));
+        // Bottom (270°) is inside the gap, i.e. NOT covered by [start, start+sweep].
+        // 270° < track_start (305°) so it lies before the track begins; 630° (≡ 270° + 360°)
+        // must also be absent from [start, end] to confirm the gap is not wrapped-over.
+        let end = ring.track_start_deg + ring.track_sweep_deg; // 595
+        assert!(
+            !(ring.track_start_deg..=end).contains(&270.0_f64)
+                && !(ring.track_start_deg..=end).contains(&630.0_f64),
+            "270° must lie in the gap, not on the track"
+        );
     }
 
     #[test]
