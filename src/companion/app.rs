@@ -41,6 +41,12 @@ const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
 const MIN_WINDOW_SIZE: f64 = 260.0;
 
+/// The companion's drift config (tuned on device). Starts at the legacy default;
+/// diverge here WITHOUT touching the shared menubar popover.
+fn companion_motion() -> crate::round::scene::CompanionMotion {
+    crate::round::scene::CompanionMotion::default()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Ambient HUD — tunable layout constants
 // Adjust these to move/resize the overlay elements without touching draw logic.
@@ -492,20 +498,22 @@ fn draw_scene(bounds: NSRect) {
 
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
         if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
-            let list = crate::round::scene::build_round_scene_draw_list(
+            let companion_scene = crate::round::scene::build_round_scene_draw_list(
                 &vm,
                 now,
                 m.grid_cols,
                 m.grid_rows,
+                &companion_motion(),
             );
             appkit_blit_draw_list(
-                &list,
+                &companion_scene.draw_list,
                 m.font_size,
                 m.cell_w,
                 m.cell_h,
                 m.origin_x,
                 m.origin_y,
             );
+            // companion_scene.pet_rect is consumed by the aura in Task 9.
         }
 
         // Halo and trouble indicators drawn on top of the scene blit.

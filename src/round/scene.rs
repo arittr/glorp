@@ -8,6 +8,14 @@ use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
+/// The companion's rendered scene: the draw list plus the pet's drift rect (in
+/// grid cells), which the AppKit layer turns into a pixel center for the aura.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompanionScene {
+    pub draw_list: SceneDrawList,
+    pub pet_rect: Rect,
+}
+
 /// Pet art width (must match `PET_W` in `src/tui/panels/pet.rs`).
 const PET_W: u16 = 13;
 /// Pet art height (must match `PET_H` in `src/tui/panels/pet.rs`).
@@ -177,10 +185,8 @@ pub fn build_round_scene_draw_list(
     now: time::OffsetDateTime,
     grid_cols: u16,
     grid_rows: u16,
-) -> SceneDrawList {
-    // Temporary local until Task 4 threads motion through as a parameter.
-    let motion = CompanionMotion::default();
-
+    motion: &CompanionMotion,
+) -> CompanionScene {
     // Full-grid area: the bg wash + ambient cover the whole porthole.
     let area = Rect::new(0, 0, grid_cols, grid_rows);
 
@@ -206,7 +212,7 @@ pub fn build_round_scene_draw_list(
     // Compute layout, then override pet_art with the drift position.
     let mut layout = PetScene::compute_layout(area, vm, &ctx);
     let old_pet_art = layout.pet_art;
-    let (drift_x, drift_y) = companion_drift(now, &motion, grid_cols, grid_rows);
+    let (drift_x, drift_y) = companion_drift(now, motion, grid_cols, grid_rows);
     let new_pet_art = Rect::new(drift_x, drift_y, PET_W, PET_H);
     layout.pet_art = new_pet_art;
     // Update exclusions: replace the old pet_art entry with the drifted one so
@@ -239,7 +245,10 @@ pub fn build_round_scene_draw_list(
         }
     }
 
-    scene_list
+    CompanionScene {
+        draw_list: scene_list,
+        pet_rect: new_pet_art,
+    }
 }
 
 #[cfg(test)]
@@ -257,10 +266,13 @@ mod tests {
     #[test]
     fn build_round_scene_draw_list_is_deterministic() {
         let vm = WatchViewModel::fixture_with_habitat_props();
-        let a = build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS);
-        let b = build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS);
+        let m = CompanionMotion::default();
+        let a =
+            build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &m);
+        let b =
+            build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &m);
         assert_eq!(
-            a.cells, b.cells,
+            a.draw_list.cells, b.draw_list.cells,
             "build_round_scene_draw_list must be deterministic for fixed (vm, now, grid)"
         );
     }
@@ -268,9 +280,11 @@ mod tests {
     #[test]
     fn build_round_scene_draw_list_produces_nonempty_cells() {
         let vm = WatchViewModel::fixture_with_habitat_props();
-        let list = build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS);
+        let m = CompanionMotion::default();
+        let list =
+            build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &m);
         assert!(
-            !list.cells.is_empty(),
+            !list.draw_list.cells.is_empty(),
             "expected non-empty draw list for a standard fixture at 44×18"
         );
     }
@@ -278,8 +292,10 @@ mod tests {
     #[test]
     fn build_round_scene_draw_list_cells_within_grid_bounds() {
         let vm = WatchViewModel::fixture_with_habitat_props();
-        let list = build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS);
-        for cell in &list.cells {
+        let m = CompanionMotion::default();
+        let list =
+            build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &m);
+        for cell in &list.draw_list.cells {
             assert!(
                 cell.col < GOLDEN_GRID_COLS,
                 "cell col {} out of bounds (grid_cols={})",
@@ -300,8 +316,11 @@ mod tests {
         // Pet body cells are glyph-only (no bg, bold flag from eye role). Verify
         // that at least some non-blank glyphs are present — proves the pet renders.
         let vm = WatchViewModel::fixture_with_habitat_props();
-        let list = build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS);
+        let m = CompanionMotion::default();
+        let list =
+            build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &m);
         let pet_cells = list
+            .draw_list
             .cells
             .iter()
             .filter(|c| c.glyph.as_deref().map(|g| g != " ").unwrap_or(false))

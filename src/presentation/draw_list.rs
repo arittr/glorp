@@ -21,7 +21,7 @@ pub struct DrawCell {
 
 /// An ordered list of resolved draw cells for one scene pass. The blitter
 /// writes them in order, so later entries in the list win over earlier ones.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SceneDrawList {
     pub cells: Vec<DrawCell>,
 }
