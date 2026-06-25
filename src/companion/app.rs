@@ -50,7 +50,7 @@ const COMPANION_RING_GAP_DEG: f64 = 70.0;
 /// The companion's drift config (tuned on device). Starts at the legacy default;
 /// diverge here WITHOUT touching the shared menubar popover.
 fn companion_motion() -> crate::round::scene::CompanionMotion {
-    crate::round::scene::CompanionMotion::default()
+    crate::round::scene::companion_roam_motion()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -597,8 +597,9 @@ pub(super) struct CompanionGridMetrics {
 /// raise it for large desktop windows.  The font size is *derived* from this
 /// value and the actual view width, so the pet stays a consistent fraction of
 /// the display regardless of window size.
-// Pet scale lever: fewer cols → larger cells → bigger pet AND props. Tuned on device.
-const COMPANION_TARGET_COLS: u16 = 32;
+// Pet scale lever: fewer cols → larger cells → bigger pet/props, but less room for
+// the pet to roam on a round screen (its corners reach the rim). Tuned on device.
+const COMPANION_TARGET_COLS: u16 = 40;
 
 /// Probe font size used to measure "M" advance ratio.
 ///
@@ -795,8 +796,8 @@ fn draw_hud(
         let top = bounds.size.height - gap.baseline_y;
         big.drawAtPoint(NSPoint::new(gap.center_x - big_w / 2.0, top));
 
-        // Small "today · {rate}/hr" sub-line just below.
-        let sub_text = format!("today · {rate}/hr");
+        // Small rate sub-line just below the big today number.
+        let sub_text = format!("{rate}/hr");
         let sub_size = font_size * 0.9;
         let sub = attributed_pet_glyph(&sub_text, sub_size, &sub_color);
         let sub_w = sub.size().width;

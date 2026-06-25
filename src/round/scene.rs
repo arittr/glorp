@@ -53,6 +53,20 @@ impl Default for CompanionMotion {
     }
 }
 
+/// The companion surface's drift — livelier than the menubar default, paired with
+/// a smaller pet (more grid columns) so there is real room to roam without the
+/// pet's corners clipping the round rim. Defined here (cfg-free) so the
+/// bounded-invariant test can verify it.
+pub fn companion_roam_motion() -> CompanionMotion {
+    CompanionMotion {
+        wander_half: 8,
+        drift_x_frac: 0.55,
+        drift_y_frac: 0.5,
+        drift_period_secs: 13,
+        upward_bias: 0.0,
+    }
+}
+
 /// Deterministic normalized drift offsets in [-1, 1] per axis for `now`, eased
 /// (smoothstep) between per-epoch targets.
 fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
@@ -367,6 +381,16 @@ mod tests {
         assert!(
             drift_keeps_pet_in_aperture(&m, 32, 16, 30.0, 60.0, 479.0),
             "default drift must keep the whole pet inside the aperture circle"
+        );
+    }
+
+    #[test]
+    fn companion_roam_stays_bounded() {
+        // Representative production metrics at COMPANION_TARGET_COLS=40 on a 960²
+        // face with SF Mono's ~2:1 cells: cell_w=24, cell_h=48, rows=20, r=479.
+        assert!(
+            drift_keeps_pet_in_aperture(&companion_roam_motion(), 40, 20, 24.0, 48.0, 479.0),
+            "the companion's livelier roam must still keep the whole pet inside the rim"
         );
     }
 
