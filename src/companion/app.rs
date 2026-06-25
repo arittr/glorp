@@ -25,9 +25,10 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
-    NSBackingStoreType, NSBezierPath, NSColor, NSCommandKeyMask, NSFont, NSFontAttributeName,
-    NSFontWeightBold, NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSBackingStoreType, NSBezierPath, NSColor, NSCommandKeyMask, NSControlKeyMask,
+    NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightBold,
+    NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -142,6 +143,8 @@ struct CompanionMenuSpec {
     app_title: &'static str,
     quit_title: &'static str,
     quit_key: &'static str,
+    fullscreen_title: &'static str,
+    fullscreen_key: &'static str,
 }
 
 struct AppState {
@@ -252,6 +255,8 @@ fn companion_menu_spec() -> CompanionMenuSpec {
         app_title: "Glorp",
         quit_title: "Quit Glorp",
         quit_key: "q",
+        fullscreen_title: "Enter Full Screen",
+        fullscreen_key: "f",
     }
 }
 
@@ -259,6 +264,8 @@ fn install_app_menu(app: &NSApplication, mtm: MainThreadMarker) {
     let spec = companion_menu_spec();
     unsafe {
         let main_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(""));
+
+        // ── App menu (Glorp → Quit) ──────────────────────────────────────────
         let app_item = NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc(),
             &NSString::from_str(spec.app_title),
@@ -277,6 +284,31 @@ fn install_app_menu(app: &NSApplication, mtm: MainThreadMarker) {
         quit_item.setKeyEquivalentModifierMask(NSCommandKeyMask);
         app_menu.addItem(&quit_item);
         main_menu.setSubmenu_forItem(Some(&app_menu), &app_item);
+
+        // ── View menu (View → Enter Full Screen ⌃⌘F) ────────────────────────
+        let view_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str("View"),
+            None,
+            &NSString::from_str(""),
+        );
+        main_menu.addItem(&view_item);
+
+        let view_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("View"));
+        let fs_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str(spec.fullscreen_title),
+            Some(sel!(toggleFullScreen:)),
+            &NSString::from_str(spec.fullscreen_key),
+        );
+        // ⌃⌘F — standard macOS Enter Full Screen shortcut.
+        // target is nil so the action routes to the key window.
+        fs_item.setKeyEquivalentModifierMask(NSEventModifierFlags(
+            NSControlKeyMask.0 | NSCommandKeyMask.0,
+        ));
+        view_menu.addItem(&fs_item);
+        main_menu.setSubmenu_forItem(Some(&view_menu), &view_item);
+
         app.setMainMenu(Some(&main_menu));
     }
 }
@@ -304,6 +336,14 @@ fn build_window(mtm: MainThreadMarker) -> (Retained<NSWindow>, Retained<RoundVie
     unsafe {
         window.setContentMinSize(NSSize::new(MIN_WINDOW_SIZE, MIN_WINDOW_SIZE));
         window.setReleasedWhenClosed(false);
+        // Make the window fullscreen-capable (green zoom button → fullscreen toggle).
+        window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
+        // Transparent titlebar + hidden title so the round window looks clean in
+        // windowed mode (traffic-light buttons remain functional).
+        window.setTitlebarAppearsTransparent(true);
+        window.setTitleVisibility(NSWindowTitleVisibility::NSWindowTitleHidden);
+        // Allow dragging the window by its body since the title bar is invisible.
+        window.setMovableByWindowBackground(true);
     }
 
     let content_frame = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
@@ -1052,6 +1092,8 @@ mod tests {
                 app_title: "Glorp",
                 quit_title: "Quit Glorp",
                 quit_key: "q",
+                fullscreen_title: "Enter Full Screen",
+                fullscreen_key: "f",
             }
         );
     }
