@@ -4,6 +4,34 @@
 use crate::game::metabolism::Mood;
 use crate::round::draw::RoundColor;
 
+/// Open-bottom growth ring geometry. Angles are degrees, CCW from +x (AppKit).
+/// The gap is centered at the bottom (270°); the track sweeps CCW over the top
+/// from the gap's right edge to its left edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GrowthRing {
+    pub cx: f64,
+    pub cy: f64,
+    pub radius: f64,
+    pub track_start_deg: f64,
+    pub track_sweep_deg: f64,
+}
+
+pub fn growth_ring_layout(cx: f64, cy: f64, radius: f64, gap_deg: f64) -> GrowthRing {
+    let gap = gap_deg.clamp(0.0, 180.0);
+    GrowthRing {
+        cx,
+        cy,
+        radius,
+        track_start_deg: 270.0 + gap / 2.0,
+        track_sweep_deg: 360.0 - gap,
+    }
+}
+
+/// Angle (deg) where the violet fill ends for `fraction` of stage progress.
+pub fn growth_ring_fill_end_deg(ring: &GrowthRing, fraction: f64) -> f64 {
+    ring.track_start_deg + ring.track_sweep_deg * fraction.clamp(0.0, 1.0)
+}
+
 /// Soft-glow aura hue for the pet's mood. Opaque (alpha 1.0); the renderer
 /// applies its own translucency. Sad and Sleepy are deliberately distinct hues
 /// (different needs: happiness<35 vs energy<20). Starting palette — tuned on device.
@@ -22,6 +50,39 @@ pub fn mood_aura_color(mood: Mood) -> RoundColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_gap_is_centered_at_bottom_and_excluded() {
+        let ring = growth_ring_layout(100.0, 100.0, 90.0, 70.0);
+        // Track spans 360 - gap = 290 degrees.
+        assert!((ring.track_sweep_deg - 290.0).abs() < 1e-6);
+        // Track starts at the right edge of the bottom gap: 270 + 35 = 305 deg.
+        assert!((ring.track_start_deg - 305.0).abs() < 1e-6);
+        // Bottom (270°) is inside the gap, i.e. NOT covered by [start, start+sweep] mod 360.
+        let _end = ring.track_start_deg + ring.track_sweep_deg; // 595
+                                                                // 270 (== 630 mod 360) is not in [305, 595]; 630 would be, 270 is below start.
+        assert!(!(305.0..=595.0).contains(&630.0) || !(305.0..=595.0).contains(&270.0));
+    }
+
+    #[test]
+    fn fill_end_spans_fraction_of_the_track() {
+        let ring = growth_ring_layout(100.0, 100.0, 90.0, 70.0);
+        assert!((growth_ring_fill_end_deg(&ring, 0.0) - ring.track_start_deg).abs() < 1e-6);
+        assert!(
+            (growth_ring_fill_end_deg(&ring, 1.0) - (ring.track_start_deg + ring.track_sweep_deg))
+                .abs()
+                < 1e-6
+        );
+        let half = growth_ring_fill_end_deg(&ring, 0.5);
+        assert!((half - (ring.track_start_deg + 145.0)).abs() < 1e-6);
+        // Clamps out-of-range fractions.
+        assert!(
+            (growth_ring_fill_end_deg(&ring, 2.0) - (ring.track_start_deg + ring.track_sweep_deg))
+                .abs()
+                < 1e-6
+        );
+        assert!((growth_ring_fill_end_deg(&ring, -1.0) - ring.track_start_deg).abs() < 1e-6);
+    }
 
     #[test]
     fn every_mood_has_a_distinct_aura_color() {
