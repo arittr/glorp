@@ -147,8 +147,12 @@ mod tests {
 
     #[test]
     fn comet_is_faster_when_busy() {
-        let idle = comet_phase(20, 0.0);
-        let busy = comet_phase(20, 50_000_000.0);
+        // frame=1 is wrap-safe: idle_phase = 1/40 = 0.025, busy_phase = 1/40 * 1.5 = 0.0375.
+        // Both are well below 1.0 for any realistic RATE_NORM > 0, so rem_euclid never
+        // reorders them. Using frame=20 (the previous value) would wrap at frame=27 and
+        // silently invalidate the assertion if RATE_NORM or the test rate ever shifts.
+        let idle = comet_phase(1, 0.0);
+        let busy = comet_phase(1, 50_000_000.0);
         assert!(
             busy > idle,
             "higher token rate should advance the comet further by the same frame"
