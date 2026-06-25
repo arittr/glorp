@@ -12,9 +12,7 @@ use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model
 use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
-use crate::round::hud::{
-    comet_phase, comet_position, growth_ring_fill_end_deg, growth_ring_layout,
-};
+use crate::round::hud::{growth_ring_fill_end_deg, growth_ring_layout};
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::storage::state::StateStore;
@@ -316,6 +314,9 @@ fn animate_pet() {
         let _ = advance_companion_animation(&mut state.vm, next_frame, now);
         state.animation_frame = next_frame;
         state.scene = derive_round_scene_model(&state.vm, now);
+        // Repaint every tick: the pet's drift position is time-based
+        // (companion_drift reads `now`), so the scene must redraw to animate the
+        // free-float roam even when vitals are unchanged.
         Some(state.view.clone())
     });
     if let Some(view) = view {
@@ -346,9 +347,9 @@ fn draw_scene(bounds: NSRect) {
     let state_snapshot = APP_STATE.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|s| (s.scene.clone(), s.vm.clone(), s.animation_frame))
+            .map(|s| (s.scene.clone(), s.vm.clone()))
     });
-    let Some((scene, vm, animation_frame)) = state_snapshot else {
+    let Some((scene, vm)) = state_snapshot else {
         return;
     };
 
@@ -460,7 +461,7 @@ fn draw_scene(bounds: NSRect) {
             );
         }
 
-        // Growth ring (open-bottom arc) + orbiting rate comet.
+        // Growth ring (open-bottom arc).
         {
             let cx = aperture.center_x as f64;
             let cy = aperture.center_y as f64;
@@ -499,19 +500,6 @@ fn draw_scene(bounds: NSRect) {
                 ns_color(&RoundColor(0.61, 0.48, 0.88, 0.85)).setStroke();
                 fill.stroke();
             }
-
-            // Rate comet — a small bright dot riding the track.
-            let (gx, gy) = comet_position(
-                &ring,
-                comet_phase(animation_frame, vm.progress.rate_per_hour),
-            );
-            let cr = line_w * 1.6;
-            let dot = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(gx - cr, gy - cr),
-                NSSize::new(cr * 2.0, cr * 2.0),
-            ));
-            ns_color(&RoundColor(0.88, 0.82, 1.0, 0.95)).setFill();
-            dot.fill();
         }
 
         // Halo and trouble indicators drawn on top of the scene blit.

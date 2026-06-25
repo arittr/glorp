@@ -1,5 +1,5 @@
 //! Pure, cross-platform geometry and color helpers for the round companion HUD
-//! (growth ring, rate comet, stat gap, mood aura color). No AppKit; golden-testable.
+//! (growth ring, stat gap, mood aura color). No AppKit; golden-testable.
 
 use crate::game::metabolism::Mood;
 use crate::round::draw::RoundColor;
@@ -30,26 +30,6 @@ pub fn growth_ring_layout(cx: f64, cy: f64, radius: f64, gap_deg: f64) -> Growth
 /// Angle (deg) where the violet fill ends for `fraction` of stage progress.
 pub fn growth_ring_fill_end_deg(ring: &GrowthRing, fraction: f64) -> f64 {
     ring.track_start_deg + ring.track_sweep_deg * fraction.clamp(0.0, 1.0)
-}
-
-/// Comet orbit phase in [0, 1). A nonzero baseline keeps it alive at idle; the
-/// token rate adds speed on top. Pure function of the animation frame so it
-/// animates every UI tick. Starting constants — tuned on device.
-pub fn comet_phase(frame: u64, rate_per_hour: f64) -> f64 {
-    const BASELINE_PER_FRAME: f64 = 1.0 / 40.0; // ~one lap / 10s at 4 fps
-    const RATE_NORM: f64 = 100_000_000.0; // tokens/hr that doubles the orbit speed
-    let speed = BASELINE_PER_FRAME * (1.0 + (rate_per_hour.max(0.0) / RATE_NORM));
-    (frame as f64 * speed).rem_euclid(1.0)
-}
-
-/// Point on the visible track for `phase` (0 = track start, 1 = track end).
-pub fn comet_position(ring: &GrowthRing, phase: f64) -> (f64, f64) {
-    let ang_deg = ring.track_start_deg + ring.track_sweep_deg * phase.rem_euclid(1.0);
-    let ang = ang_deg.to_radians();
-    (
-        ring.cx + ring.radius * ang.cos(),
-        ring.cy + ring.radius * ang.sin(),
-    )
 }
 
 /// The region (in pixels) the token stat must fit inside: centered in the ring's
@@ -159,28 +139,6 @@ mod tests {
     }
 
     #[test]
-    fn comet_advances_even_when_idle() {
-        // Nonzero baseline orbit: phase must change frame-to-frame at rate 0.
-        let a = comet_phase(0, 0.0);
-        let b = comet_phase(10, 0.0);
-        assert_ne!(a, b, "comet must keep orbiting at zero rate (idle floor)");
-    }
-
-    #[test]
-    fn comet_is_faster_when_busy() {
-        // frame=1 is wrap-safe: idle_phase = 1/40 = 0.025, busy_phase = 1/40 * 1.5 = 0.0375.
-        // Both are well below 1.0 for any realistic RATE_NORM > 0, so rem_euclid never
-        // reorders them. Using frame=20 (the previous value) would wrap at frame=27 and
-        // silently invalidate the assertion if RATE_NORM or the test rate ever shifts.
-        let idle = comet_phase(1, 0.0);
-        let busy = comet_phase(1, 50_000_000.0);
-        assert!(
-            busy > idle,
-            "higher token rate should advance the comet further by the same frame"
-        );
-    }
-
-    #[test]
     fn stat_gap_box_sits_below_center_and_within_the_chord() {
         let gap = stat_gap_box(100.0, 100.0, 90.0, 70.0);
         assert!((gap.center_x - 100.0).abs() < 1e-6, "centered horizontally");
@@ -195,31 +153,5 @@ mod tests {
             "stat must fit within the gap chord"
         );
         assert!(gap.max_width > 0.0);
-    }
-
-    #[test]
-    fn comet_stays_on_the_visible_track() {
-        let ring = growth_ring_layout(100.0, 100.0, 90.0, 70.0);
-        for i in 0..100 {
-            let phase = i as f64 / 100.0;
-            let (x, y) = comet_position(&ring, phase);
-            // On the circle of the given radius.
-            let d = ((x - ring.cx).powi(2) + (y - ring.cy).powi(2)).sqrt();
-            assert!(
-                (d - ring.radius).abs() < 1e-6,
-                "comet must ride the ring radius"
-            );
-            // Never in the bottom gap: its angle is within the track sweep.
-            let ang = (y - ring.cy)
-                .atan2(x - ring.cx)
-                .to_degrees()
-                .rem_euclid(360.0);
-            let start = ring.track_start_deg.rem_euclid(360.0);
-            let rel = (ang - start).rem_euclid(360.0);
-            assert!(
-                rel <= ring.track_sweep_deg + 1e-6,
-                "comet angle must lie on the track"
-            );
-        }
     }
 }
