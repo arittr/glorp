@@ -8,75 +8,52 @@ use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
-// ── Companion tuning constants ────────────────────────────────────────────────
-// Adjust these to change the round companion's feel without touching any
-// shared watch code.
-
 /// Pet art width (must match `PET_W` in `src/tui/panels/pet.rs`).
 const PET_W: u16 = 13;
 /// Pet art height (must match `PET_H` in `src/tui/panels/pet.rs`).
 const PET_H: u16 = 10;
 
-/// Half-width of the pet's wander range in the companion, in cells.
-/// The pet wanders ±this many cells around center. Increase for more motion,
-/// decrease to keep the pet near the circle's widest band.
-/// At a typical 44-col companion grid this is ~18 % of the available
-/// horizontal room, which keeps the pet well inside the circle's chords.
-const COMPANION_WANDER_HALF: u16 = 8;
+/// Companion motion config. Defaults reproduce the historical drift exactly, so
+/// the shared menubar / preview / goldens are byte-identical; only the companion
+/// call site passes tuned values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompanionMotion {
+    /// Half-width of the pet's wander range, in cells (`PET_W + 2*wander_half`).
+    pub wander_half: u16,
+    /// Fraction of the safe horizontal radius used for drift. Keep modest
+    /// (~0.45); higher values clip the pixel rim on a smaller grid.
+    pub drift_x_frac: f32,
+    /// Fraction of the safe vertical radius used for drift. Cells are ~2:1, so
+    /// vertical headroom is tiny — keep gentle.
+    pub drift_y_frac: f32,
+    /// Drift cadence: the target changes every this many seconds.
+    pub drift_period_secs: u64,
+    /// Fraction of the safe vertical radius to shift the roam center UP, reserving
+    /// the bottom band for the stat. 0.0 = centered.
+    pub upward_bias: f32,
+}
 
-/// Fraction of the safe drift radius to use in X.  The safe radius is
-/// `(grid_cols / 2).saturating_sub(PET_W)` cells from center, so
-/// `DRIFT_X_FRAC = 0.45` keeps the pet well clear of the circle edge.
-/// Increase toward 1.0 for wider motion; decrease for a calmer look.
-const DRIFT_X_FRAC: f32 = 0.45;
+impl Default for CompanionMotion {
+    fn default() -> Self {
+        Self {
+            wander_half: 8,
+            drift_x_frac: 0.45,
+            drift_y_frac: 0.30,
+            drift_period_secs: 20,
+            upward_bias: 0.0,
+        }
+    }
+}
 
-/// Fraction of the safe drift radius to use in Y. The safe radius is
-/// `(grid_rows / 2).saturating_sub(PET_H)` cells from center. Cells are
-/// taller than wide (~2:1), so a smaller Y fraction keeps the pet in
-/// the widest circular band.  0.30 keeps it within the widest third.
-const DRIFT_Y_FRAC: f32 = 0.30;
-
-/// Drift cadence: target changes every this many seconds.  The pet eases
-/// smoothly between targets, so shorter means livelier; longer means calmer.
-const DRIFT_PERIOD_SECS: u64 = 20;
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Compute a gentle, deterministic 2D drift position for the pet.
-///
-/// Returns `(x, y)` — the top-left of the `PET_W × PET_H` pet art rect in
-/// grid coordinates — so the whole pet body stays inside the inscribed circle.
-///
-/// The approach:
-/// - Time is divided into `DRIFT_PERIOD_SECS`-second epochs.
-/// - Each epoch has a deterministic target (derived from the epoch index).
-/// - The previous epoch also has a deterministic target.
-/// - Position is the linear interpolation (ease) between them based on
-///   progress through the current epoch — giving smooth, predictable motion.
-/// - Bounding: the pet CENTER is constrained to an ellipse with semi-axes
-///   `x_radius = safe_x * DRIFT_X_FRAC` and `y_radius = safe_y * DRIFT_Y_FRAC`
-///   around the grid center, where `safe_x = grid_cols/2 - PET_W/2` and
-///   `safe_y = grid_rows/2 - PET_H/2`.  Tune `DRIFT_X_FRAC`/`DRIFT_Y_FRAC`
-///   to adjust range.
-fn companion_drift(now: time::OffsetDateTime, grid_cols: u16, grid_rows: u16) -> (u16, u16) {
+/// Deterministic normalized drift offsets in [-1, 1] per axis for `now`, eased
+/// (smoothstep) between per-epoch targets.
+fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
     let unix = now.unix_timestamp() as u64;
-    let epoch = unix / DRIFT_PERIOD_SECS;
-    let phase = (unix % DRIFT_PERIOD_SECS) as f32 / DRIFT_PERIOD_SECS as f32;
+    let period = period_secs.max(1);
+    let epoch = unix / period;
+    let phase = (unix % period) as f32 / period as f32;
 
-    // Grid center and safe radii (integer).
-    let cx = grid_cols / 2;
-    let cy = grid_rows / 2;
-    // Half the pet size to keep art fully inside the porthole.
-    let half_w = PET_W / 2;
-    let half_h = PET_H / 2;
-    let safe_x = cx.saturating_sub(half_w) as f32;
-    let safe_y = cy.saturating_sub(half_h) as f32;
-    let x_radius = safe_x * DRIFT_X_FRAC;
-    let y_radius = safe_y * DRIFT_Y_FRAC;
-
-    // Deterministic target for a given epoch, in the range [-1.0, 1.0] per axis.
     let target_for_epoch = |e: u64| -> (f32, f32) {
-        // Use a simple hash of the epoch to get pseudo-random unit offsets.
         let h1 = e
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(0x6c62_272e_07bb_0142);
@@ -90,23 +67,48 @@ fn companion_drift(now: time::OffsetDateTime, grid_cols: u16, grid_rows: u16) ->
 
     let (px, py) = target_for_epoch(epoch.saturating_sub(1));
     let (nx, ny) = target_for_epoch(epoch);
-
-    // Ease-in-out (smoothstep) between targets — mirrors the watch's wander
-    // curve so the pet accelerates off a spot and decelerates into the next,
-    // reading as deliberate rather than a constant linear crawl.
     let t = phase * phase * (3.0 - 2.0 * phase);
-    let fx = px + (nx - px) * t;
-    let fy = py + (ny - py) * t;
+    (px + (nx - px) * t, py + (ny - py) * t)
+}
 
-    // Convert normalized [-1,1] to grid-space, centered at (cx, cy).
-    // pet_art top-left = center - half_pet_size + offset
+/// Map normalized offsets `(fx, fy)` to the pet art's top-left grid cell, applying
+/// the motion config's radii, upward bias, and the rectangular grid clamp.
+fn companion_drift_position(
+    motion: &CompanionMotion,
+    grid_cols: u16,
+    grid_rows: u16,
+    fx: f32,
+    fy: f32,
+) -> (u16, u16) {
+    let cx = grid_cols / 2;
+    let cy = grid_rows / 2;
+    let half_w = PET_W / 2;
+    let half_h = PET_H / 2;
+    let safe_x = cx.saturating_sub(half_w) as f32;
+    let safe_y = cy.saturating_sub(half_h) as f32;
+    let x_radius = safe_x * motion.drift_x_frac;
+    let y_radius = safe_y * motion.drift_y_frac;
+    let bias = motion.upward_bias * safe_y;
+
     let art_x = cx as i32 - half_w as i32 + (fx * x_radius) as i32;
-    let art_y = cy as i32 - half_h as i32 + (fy * y_radius) as i32;
+    let art_y = cy as i32 - half_h as i32 - bias as i32 + (fy * y_radius) as i32;
 
     let art_x = art_x.clamp(0, (grid_cols.saturating_sub(PET_W)) as i32) as u16;
     let art_y = art_y.clamp(0, (grid_rows.saturating_sub(PET_H)) as i32) as u16;
-
     (art_x, art_y)
+}
+
+/// Gentle, deterministic 2D drift for the pet — top-left of the `PET_W × PET_H`
+/// art rect in grid coords. The reachable set is a BOX (independent X/Y hashes),
+/// not an ellipse: callers needing a bound must sample box corners.
+fn companion_drift(
+    now: time::OffsetDateTime,
+    motion: &CompanionMotion,
+    grid_cols: u16,
+    grid_rows: u16,
+) -> (u16, u16) {
+    let (fx, fy) = companion_drift_offsets(now, motion.drift_period_secs);
+    companion_drift_position(motion, grid_cols, grid_rows, fx, fy)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,12 +141,15 @@ pub fn build_round_scene_draw_list(
     grid_cols: u16,
     grid_rows: u16,
 ) -> SceneDrawList {
+    // Temporary local until Task 4 threads motion through as a parameter.
+    let motion = CompanionMotion::default();
+
     // Full-grid area: the bg wash + ambient cover the whole porthole.
     let area = Rect::new(0, 0, grid_cols, grid_rows);
 
     // Resolve horizontal facing from the live clock and narrowed wander width,
     // mirroring what PetPanel::render does but with companion-specific range.
-    let wander_width = PET_W + 2 * COMPANION_WANDER_HALF;
+    let wander_width = PET_W + 2 * motion.wander_half;
     let (wx, fc) = crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
     let vm: Cow<WatchViewModel> = if wx != vm.wander_offset_x || fc != vm.facing {
         Cow::Owned({
@@ -164,7 +169,7 @@ pub fn build_round_scene_draw_list(
     // Compute layout, then override pet_art with the drift position.
     let mut layout = PetScene::compute_layout(area, vm, &ctx);
     let old_pet_art = layout.pet_art;
-    let (drift_x, drift_y) = companion_drift(now, grid_cols, grid_rows);
+    let (drift_x, drift_y) = companion_drift(now, &motion, grid_cols, grid_rows);
     let new_pet_art = Rect::new(drift_x, drift_y, PET_W, PET_H);
     layout.pet_art = new_pet_art;
     // Update exclusions: replace the old pet_art entry with the drifted one so
@@ -267,6 +272,33 @@ mod tests {
         assert!(
             pet_cells >= 10,
             "expected at least 10 non-blank pet glyph cells, got {pet_cells}"
+        );
+    }
+
+    #[test]
+    fn companion_motion_default_matches_legacy_drift_values() {
+        let m = CompanionMotion::default();
+        assert_eq!(m.wander_half, 8);
+        assert_eq!(m.drift_x_frac, 0.45);
+        assert_eq!(m.drift_y_frac, 0.30);
+        assert_eq!(m.drift_period_secs, 20);
+        assert_eq!(m.upward_bias, 0.0);
+    }
+
+    #[test]
+    fn upward_bias_lifts_the_pet() {
+        // With a positive upward bias the pet's top-left row is <= the unbiased row
+        // for the same normalized offset (smaller row = higher on screen).
+        let base = CompanionMotion::default();
+        let biased = CompanionMotion {
+            upward_bias: 0.5,
+            ..CompanionMotion::default()
+        };
+        let (_, y0) = companion_drift_position(&base, 32, 16, 0.0, 0.0);
+        let (_, y1) = companion_drift_position(&biased, 32, 16, 0.0, 0.0);
+        assert!(
+            y1 <= y0,
+            "upward bias should not move the pet down (y1={y1}, y0={y0})"
         );
     }
 }
