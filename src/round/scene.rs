@@ -67,7 +67,7 @@ pub fn companion_roam_motion() -> CompanionMotion {
         wander_half: 8,
         drift_x_frac: 0.92,
         drift_y_frac: 0.6,
-        drift_period_secs: 16,
+        drift_period_secs: 26,
         upward_bias: 0.5,
         wander: true,
     }
