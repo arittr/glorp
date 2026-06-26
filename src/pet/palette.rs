@@ -211,26 +211,6 @@ pub fn apply_mood_eye_color(palette: &mut ResolvedPalette, mood: Mood) {
     }
 }
 
-/// Per-species RESTING eye color (Mood::Content), shifted in lightness so it
-/// clears the >=3:1 luminance floor against that species' body across the full
-/// per-pet hue jitter sweep. All species bodies sit near L=0.74 OKLCH, which
-/// in WCAG relative-luminance terms requires the eye to be significantly darker
-/// (≈L 0.44–0.46) to achieve 3:1. Lightness values tuned empirically:
-///   Fuzz 0.44, Ghost 0.44, Mech 0.44 (lowest body rel-lum headroom)
-///   Crystal 0.45 (ice body is slightly lighter)
-///   Blob 0.46, Glitch 0.46 (mint/acid bodies are lightest in practice)
-fn resting_eye_color(species: Species) -> Rgb {
-    let l = match species {
-        Species::Fuzz => 0.44,
-        Species::Blob => 0.46,
-        Species::Ghost => 0.44,
-        Species::Glitch => 0.46,
-        Species::Crystal => 0.45,
-        Species::Mech => 0.44,
-    };
-    oklch_to_rgb(l, 0.19, 145.0)
-}
-
 pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> ResolvedPalette {
     let base = species_base_hue(species);
     // Per-pet hue jitter: map seed_hue (0..360) to +-18 degrees off the family.
@@ -242,7 +222,10 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
 
     ResolvedPalette {
         body: role(0.74, species_body_chroma(species), h),
-        eye: resting_eye_color(species),
+        // Bright resting eye at the complementary hue to the body, so it reads as a
+        // distinct, vivid eye (via hue, not a dark luminance shift) and gives each
+        // species its own resting eye color.
+        eye: role(0.80, 0.20, (h + 180.0).rem_euclid(360.0)),
         mouth: role(0.70, 0.16, h + 35.0),
         accent: role(0.76, 0.24, h + 120.0),
         pattern: role(0.64, 0.20, h + 210.0),
@@ -381,30 +364,41 @@ mod tests {
     }
 
     #[test]
-    fn eyes_are_green_at_rest_for_every_species() {
+    fn resting_eye_is_bright_and_complementary_per_species() {
         use crate::pet::generation::Species;
-        // At rest (the resting eye is Mood::Content's color baked into resolve),
-        // every species' eye reads green (g dominates) even if lightness differs.
+        // The resting eye is bright (not the old dark forest-green) and sits at a
+        // complementary hue to the body, giving each species its own eye color.
         for s in Species::all() {
-            let eye = resolve_pet_palette(s, &traits_with_hue(123)).eye;
+            let p = resolve_pet_palette(s, &traits_with_hue(123));
+            let maxc = p.eye.r.max(p.eye.g).max(p.eye.b);
             assert!(
-                eye.g > eye.r && eye.g > eye.b,
-                "{s:?} resting eye not green: {eye:?}"
+                maxc > 150,
+                "{s:?} resting eye too dark (max channel {maxc}): {:?}",
+                p.eye
+            );
+            let mut dh = (rgb_hue(p.eye) - rgb_hue(p.body)).abs();
+            dh = dh.min(360.0 - dh);
+            assert!(
+                dh > 90.0,
+                "{s:?} resting eye hue not distinct from body (dh={dh:.0})"
             );
         }
     }
 
     #[test]
-    fn resting_eye_clears_three_to_one_contrast_against_body() {
+    fn resting_eye_stays_hue_distinct_from_body_across_seeds() {
         use crate::pet::generation::Species;
-        // Sweep seeds so the per-seed jittered body never sneaks under the floor.
+        // The resting eye reads via its complementary HUE, not a strict luminance
+        // floor (the expressive mood eyes never cleared 3:1 and read fine). Sweep
+        // seeds so the jittered body never collapses the hue gap.
         for s in Species::all() {
             for hue in (0..360).step_by(30) {
                 let p = resolve_pet_palette(s, &traits_with_hue(hue));
-                let ratio = contrast_ratio(p.eye, p.body);
+                let mut dh = (rgb_hue(p.eye) - rgb_hue(p.body)).abs();
+                dh = dh.min(360.0 - dh);
                 assert!(
-                    ratio >= 3.0,
-                    "{s:?} hue {hue}: resting eye/body contrast {ratio:.2} < 3.0"
+                    dh > 90.0,
+                    "{s:?} hue {hue}: eye/body hue gap {dh:.0} too small"
                 );
             }
         }
@@ -456,13 +450,12 @@ mod tests {
     }
 
     #[test]
-    fn live_resting_eye_keeps_the_contrast_floor_after_apply() {
+    fn live_resting_eye_is_a_noop_and_stays_distinct() {
         use crate::game::metabolism::Mood;
         use crate::pet::generation::Species;
-        // The per-tick hook (Task 6) calls apply_mood_eye_color every tick incl.
-        // Content. Content must be a no-op so the live resting eye keeps the
-        // per-species floor-clearing color (eye_color_for_mood(Content)'s blind
-        // L=0.82 green fails the floor for Blob/Fuzz/Glitch).
+        // The per-tick hook calls apply_mood_eye_color every tick incl. Content.
+        // Content must be a no-op so the live resting eye keeps its per-species
+        // complementary color, which stays hue-distinct from the body.
         for s in Species::all() {
             for hue in (0..360).step_by(30) {
                 let resolved = resolve_pet_palette(s, &traits_with_hue(hue));
@@ -472,10 +465,11 @@ mod tests {
                     p.eye, resolved.eye,
                     "{s:?}: Content must not change the resting eye"
                 );
+                let mut dh = (rgb_hue(p.eye) - rgb_hue(p.body)).abs();
+                dh = dh.min(360.0 - dh);
                 assert!(
-                    contrast_ratio(p.eye, p.body) >= 3.0,
-                    "{s:?} hue {hue}: live resting eye/body contrast {:.2} < 3.0",
-                    contrast_ratio(p.eye, p.body)
+                    dh > 90.0,
+                    "{s:?} hue {hue}: live eye/body hue gap {dh:.0} too small"
                 );
             }
         }
