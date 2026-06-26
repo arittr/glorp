@@ -142,20 +142,39 @@ fn companion_drift_position(
 }
 
 /// Gentle, deterministic 2D drift for the pet — top-left of the `PET_W × PET_H`
-/// art rect in grid coords. The reachable set is a BOX (independent X/Y hashes),
-/// not an ellipse: callers needing a bound must sample box corners.
+/// art rect in grid coords. `energy` (0..1, from live activity) scales the wander
+/// amplitude, so the pet's on-screen speed reflects real usage. The reachable set
+/// per axis is ~[-1, 1]; callers needing a circular bound must sample box corners.
 fn companion_drift(
     now: time::OffsetDateTime,
     motion: &CompanionMotion,
+    energy: f32,
     grid_cols: u16,
     grid_rows: u16,
 ) -> (u16, u16) {
     let (fx, fy) = if motion.wander {
-        companion_wander_offsets(now, motion.drift_period_secs)
+        // Scale the wander by live activity: amplitude — and so the pet's on-screen
+        // speed — shrinks toward center when idle/asleep and expands when busy.
+        let (wx, wy) = companion_wander_offsets(now, motion.drift_period_secs);
+        (wx * energy, wy * energy)
     } else {
         companion_drift_offsets(now, motion.drift_period_secs)
     };
     companion_drift_position(motion, grid_cols, grid_rows, fx, fy)
+}
+
+/// Movement energy in [0, 1] from real activity: a sleeping or faint (calm) pet
+/// barely drifts; an idle-awake pet keeps a gentle wobble; a busy pet roams the
+/// whole tank. Tied to the live burn rate so liveliness reflects real usage.
+fn companion_motion_energy(vm: &WatchViewModel) -> f32 {
+    const IDLE_FLOOR: f32 = 0.25;
+    const RESTING_ENERGY: f32 = 0.12;
+    const RATE_FULL: f64 = 50_000_000.0; // tokens/hr at which the pet roams full-tilt
+    if vm.day_context.asleep || vm.life_profile.calm_mode {
+        return RESTING_ENERGY;
+    }
+    let rate = vm.progress.rate_per_hour.max(0.0);
+    (IDLE_FLOOR + (rate / RATE_FULL) as f32).clamp(IDLE_FLOOR, 1.0)
 }
 
 /// Conservative bounded-drift check. Samples the drift at every box corner
@@ -252,7 +271,8 @@ pub fn build_round_scene_draw_list(
     // Compute layout, then override pet_art with the drift position.
     let mut layout = PetScene::compute_layout(area, vm, &ctx);
     let old_pet_art = layout.pet_art;
-    let (drift_x, drift_y) = companion_drift(now, motion, grid_cols, grid_rows);
+    let energy = companion_motion_energy(vm);
+    let (drift_x, drift_y) = companion_drift(now, motion, energy, grid_cols, grid_rows);
     let new_pet_art = Rect::new(drift_x, drift_y, PET_W, PET_H);
     layout.pet_art = new_pet_art;
     // Update exclusions: replace the old pet_art entry with the drifted one so
@@ -425,6 +445,31 @@ mod tests {
         assert!(
             companion_roam_motion().wander,
             "companion roam uses wander mode"
+        );
+    }
+
+    #[test]
+    fn motion_energy_tracks_activity() {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.day_context.asleep = false;
+        vm.life_profile.calm_mode = false;
+        vm.progress.rate_per_hour = 0.0;
+        let idle = companion_motion_energy(&vm);
+        vm.progress.rate_per_hour = 80_000_000.0;
+        let busy = companion_motion_energy(&vm);
+        assert!(
+            busy > idle,
+            "busy pet moves more than idle (idle={idle}, busy={busy})"
+        );
+        assert!(
+            (0.99..=1.0).contains(&busy),
+            "high burn saturates near full, got {busy}"
+        );
+        vm.day_context.asleep = true;
+        let asleep = companion_motion_energy(&vm);
+        assert!(
+            asleep < idle,
+            "a sleeping pet barely drifts (asleep={asleep}, idle={idle})"
         );
     }
 
