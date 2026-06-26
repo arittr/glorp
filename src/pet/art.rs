@@ -552,50 +552,55 @@ const GLITCH_S6: Template = [
 // docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
 // Cell ramp [4,10,20,31,39,53,73]. No {eyes}/{mouth} slots — the ◇/◆/◈ lens
 // is baked into each silhouette per the eye-fill design.
+// Crystal grows by CHANGING SHAPE, not just scaling: seed-sparkle (S0) → solid
+// shard (S1) → faceted gem with a face (S2) → a 3-crystal CLUSTER (S3) → a single
+// dominant MONOLITH (S4) → a footed COLONY (S5) → an asymmetric GEODE with a side
+// shard (S6). Forms adapted from the pre-overhaul crystal cast, rebuilt in the
+// filled-block (▒▓█) style and the current growth-size bands.
 const CRYSTAL_S0: Template = [
     "           ",
     "           ",
     "           ",
-    "     /\\    ",
-    "     \\/    ",
     "           ",
     "           ",
+    "     ✦     ",
+    "    ◆◇◆    ",
     "           ",
 ];
 const CRYSTAL_S1: Template = [
     "           ",
     "           ",
+    "           ",
     "     /\\    ",
-    "    /◇\\    ",
+    "    /█\\    ",
     "    \\▒/    ",
     "     \\/    ",
     "           ",
-    "           ",
 ];
 const CRYSTAL_S2: Template = [
+    "           ",
     "           ",
     "    /\\     ",
     "   /{eyes}\\   ",
     "  /▒{mouth}▒\\    ",
     "  \\▒▒/     ",
-    "   \\▓/     ",
     "    \\/     ",
     "           ",
 ];
 const CRYSTAL_S3: Template = [
+    "           ",
     "    /\\     ",
     "   /{eyes}\\   ",
-    "  /▒{mouth}▒\\    ",
-    " /▒▓▓▒\\    ",
-    " \\▒▓▒/     ",
-    "  \\▓▓/     ",
-    "   \\▓/     ",
-    "    \\/     ",
+    " /\\ \\{mouth}/ /\\ ",
+    " ▓▓ \\▒/ ▓▓ ",
+    " \\/ \\▼/ \\/ ",
+    "           ",
+    "           ",
 ];
 const CRYSTAL_S4: Template = [
     "    /\\     ",
     "   /{eyes}\\   ",
-    "  /▒◆◆▒\\   ",
+    "  /▒◆▒\\    ",
     " /▒▓{mouth}▓▒\\   ",
     " \\▒▓█▓▒/   ",
     "  \\▒█▒/    ",
@@ -605,21 +610,21 @@ const CRYSTAL_S4: Template = [
 const CRYSTAL_S5: Template = [
     "  /\\/\\/\\   ",
     " /◈{eyes}◈\\   ",
-    "/▒▓█▓█▓▒\\  ",
-    "\\▒▓█{mouth}█▓▒/  ",
-    " \\▒▓█▓▒/   ",
-    " \\▒▓█▓▒/   ",
-    "  \\▓█▓/    ",
-    "   \\▼/     ",
+    " /▒█▓█▒\\   ",
+    " \\▒█{mouth}█▒/   ",
+    " \\▒█▒/     ",
+    "/\\ ▒█▒ /\\  ",
+    "▓▓\\▒▼▒/▓▓  ",
+    "\\/  ▼  \\/  ",
 ];
 const CRYSTAL_S6: Template = [
     "/\\/\\/\\/\\/\\ ",
     "▒██{eyes}███▒ ",
-    "▒█▓◈█◈▓█▓▒ ",
-    "▒█▓█{mouth}█▓█▓▒ ",
-    "▒█▓█████▓▒ ",
-    "▒▓█▓███▓█▒ ",
-    " \\▒▓█▓█▒/  ",
+    "▒█▓◈█◈▓█▒/\\",
+    "▒█▓█{mouth}█▓█▒\\/",
+    "▒█▓████▓▒  ",
+    "▒▓█▓██▓█▒  ",
+    " \\▒▓█▓▒/   ",
     "  \\▼▼▼/    ",
 ];
 
