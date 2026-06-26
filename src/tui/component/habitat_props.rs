@@ -797,26 +797,29 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
                 glyph: '╲',
             },
         ],
+        // Amethyst geode: a 3×3 facet cluster in a rock cradle that SHIMMERS —
+        // every facet swaps bright◆/dim◇ between phases and the core pulses to a
+        // sparkle, so it reads as light catching the crystals (not a static pile).
         TOKEN_GEODE_50M if phase < 4 => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '◇',
+                glyph: '◆',
             },
             SpriteCell {
                 dx: 1,
                 dy: 0,
-                glyph: '◆',
+                glyph: '◇',
             },
             SpriteCell {
                 dx: 2,
                 dy: 0,
-                glyph: '◇',
+                glyph: '◆',
             },
             SpriteCell {
                 dx: 0,
                 dy: 1,
-                glyph: '◣',
+                glyph: '◇',
             },
             SpriteCell {
                 dx: 1,
@@ -826,6 +829,21 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
             SpriteCell {
                 dx: 2,
                 dy: 1,
+                glyph: '◇',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '◣',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▼',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
                 glyph: '◢',
             },
         ],
@@ -833,31 +851,46 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '◆',
+                glyph: '◇',
             },
             SpriteCell {
                 dx: 1,
                 dy: 0,
-                glyph: '✦',
+                glyph: '◆',
             },
             SpriteCell {
                 dx: 2,
                 dy: 0,
-                glyph: '◆',
+                glyph: '◇',
             },
             SpriteCell {
                 dx: 0,
                 dy: 1,
-                glyph: '◣',
+                glyph: '◆',
             },
             SpriteCell {
                 dx: 1,
                 dy: 1,
-                glyph: '◆',
+                glyph: '✦',
             },
             SpriteCell {
                 dx: 2,
                 dy: 1,
+                glyph: '◆',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '◣',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▼',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
                 glyph: '◢',
             },
         ],
