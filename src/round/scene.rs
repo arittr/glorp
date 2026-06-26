@@ -114,20 +114,32 @@ fn companion_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32
     (fx as f32, fy as f32)
 }
 
-/// Which way the wandering pet faces: the sign of its dominant horizontal velocity
-/// (the `0.72*cos` base term — the small wobble is ignored so facing flips cleanly
-/// at the turnarounds, never flickering). Right-moving → `1`, left-moving → `-1`,
-/// matching `compute_facing`'s convention. So the pet turns to face where it swims
-/// instead of gliding sideways.
-fn companion_wander_facing(now: time::OffsetDateTime, period_secs: u64) -> i8 {
-    use std::f64::consts::TAU;
-    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
-        / period_secs.max(1) as f64;
-    // d/dt of 0.72*cos(TAU*t) ∝ -sin(TAU*t); the pet moves right when that is > 0.
-    if -(TAU * t).sin() >= 0.0 {
+/// Which way the wandering pet faces: the sign of its NET horizontal travel over a
+/// short window, so facing always agrees with the movement actually on screen —
+/// it samples the SAME wander offset that drives the position (full base + wobble),
+/// scaled by `energy`. A deadzone holds `current` when the pet is barely moving
+/// (idle/asleep, or pausing at a turnaround), so facing never flips without a
+/// matching change of direction. Right-moving → `1`, left → `-1` (compute_facing's
+/// convention).
+fn companion_wander_facing(
+    now: time::OffsetDateTime,
+    period_secs: u64,
+    energy: f32,
+    current: i8,
+) -> i8 {
+    const WINDOW_SECS: i64 = 1;
+    const DEADZONE: f32 = 0.04;
+    let (fx_now, _) = companion_wander_offsets(now, period_secs);
+    let (fx_prev, _) =
+        companion_wander_offsets(now - time::Duration::seconds(WINDOW_SECS), period_secs);
+    // Proportional to the on-screen horizontal distance moved over the window.
+    let visible_dx = (fx_now - fx_prev) * energy;
+    if visible_dx > DEADZONE {
         1
-    } else {
+    } else if visible_dx < -DEADZONE {
         -1
+    } else {
+        current
     }
 }
 
@@ -266,15 +278,19 @@ pub fn build_round_scene_draw_list(
     // Full-grid area: the bg wash + ambient cover the whole porthole.
     let area = Rect::new(0, 0, grid_cols, grid_rows);
 
+    // Movement energy from live activity (drives both the wander amplitude and the
+    // facing deadzone). Read from vitals that the Cow rebind below does not touch.
+    let energy = companion_motion_energy(vm);
+
     // Resolve horizontal facing from the live clock and narrowed wander width,
     // mirroring what PetPanel::render does but with companion-specific range.
     let wander_width = PET_W + 2 * motion.wander_half;
     let (wx, fc) = crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
-    // In wander mode the pet faces its actual horizontal travel direction, so it
-    // turns to face where it's swimming instead of gliding sideways like a bouncing
-    // logo. Otherwise use the shared resolved facing.
+    // In wander mode the pet faces its ACTUAL net horizontal travel, so it turns to
+    // face where it's swimming instead of gliding sideways. Otherwise use the shared
+    // resolved facing.
     let facing = if motion.wander {
-        companion_wander_facing(now, motion.drift_period_secs)
+        companion_wander_facing(now, motion.drift_period_secs, energy, vm.facing)
     } else {
         fc
     };
@@ -296,7 +312,6 @@ pub fn build_round_scene_draw_list(
     // Compute layout, then override pet_art with the drift position.
     let mut layout = PetScene::compute_layout(area, vm, &ctx);
     let old_pet_art = layout.pet_art;
-    let energy = companion_motion_energy(vm);
     let (drift_x, drift_y) = companion_drift(now, motion, energy, grid_cols, grid_rows);
     let new_pet_art = Rect::new(drift_x, drift_y, PET_W, PET_H);
     layout.pet_art = new_pet_art;
@@ -499,22 +514,39 @@ mod tests {
     }
 
     #[test]
-    fn wander_facing_flips_across_a_cycle() {
-        // The pet turns around as it wanders, so facing must take both values over a
-        // full cycle and always be ±1 — never stuck (the bouncing-logo bug).
+    fn wander_facing_follows_travel_and_holds_when_still() {
+        // At full energy the pet faces both ways across a cycle, matching the sign of
+        // its actual windowed travel — and never returns a non-±1 value.
         let (mut saw_left, mut saw_right) = (false, false);
         for s in 0..30i64 {
             let now = datetime!(2026-06-13 18:00:00 UTC) + time::Duration::seconds(s);
-            match companion_wander_facing(now, 22) {
+            let (fx_now, _) = companion_wander_offsets(now, 22);
+            let (fx_prev, _) = companion_wander_offsets(now - time::Duration::seconds(1), 22);
+            let dx = fx_now - fx_prev;
+            let f = companion_wander_facing(now, 22, 1.0, 1);
+            match f {
                 1 => saw_right = true,
                 -1 => saw_left = true,
                 other => panic!("facing must be ±1, got {other}"),
+            }
+            // Facing agrees with the actual travel direction (outside the deadzone).
+            if dx > 0.06 {
+                assert_eq!(f, 1, "moving right ⇒ faces right at s={s}");
+            }
+            if dx < -0.06 {
+                assert_eq!(f, -1, "moving left ⇒ faces left at s={s}");
             }
         }
         assert!(
             saw_left && saw_right,
             "pet must face both directions across a wander cycle"
         );
+        // A (near-)still pet — energy 0, so visible movement is below the deadzone —
+        // HOLDS its current facing instead of flipping. This is the bug we fixed:
+        // facing must never flip without matching movement.
+        let still = datetime!(2026-06-13 18:00:30 UTC);
+        assert_eq!(companion_wander_facing(still, 22, 0.0, -1), -1);
+        assert_eq!(companion_wander_facing(still, 22, 0.0, 1), 1);
     }
 
     #[test]
