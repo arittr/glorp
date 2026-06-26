@@ -39,6 +39,10 @@ pub struct CompanionMotion {
     /// Fraction of the safe vertical radius to shift the roam center UP, reserving
     /// the bottom band for the stat. 0.0 = centered.
     pub upward_bias: f32,
+    /// When true, use a smooth sinusoidal wander (organic, non-repeating, reaching
+    /// the grid edges so the pet swims partly in/out of the round porthole) instead
+    /// of the eased waypoint drift. The menubar/goldens keep `false` (waypoint).
+    pub wander: bool,
 }
 
 impl Default for CompanionMotion {
@@ -49,21 +53,23 @@ impl Default for CompanionMotion {
             drift_y_frac: 0.30,
             drift_period_secs: 20,
             upward_bias: 0.0,
+            wander: false,
         }
     }
 }
 
-/// The companion surface's drift — livelier than the menubar default, paired with
-/// a smaller pet (more grid columns) so there is real room to roam without the
-/// pet's corners clipping the round rim. Defined here (cfg-free) so the
-/// bounded-invariant test can verify it.
+/// The companion surface's motion — an organic sinusoidal wander that reaches the
+/// grid edges, so the pet swims around the tank and partly in/out of the round
+/// porthole (the aperture clip crops it at the rim). Horizontal-dominant; a gentle
+/// upward bias keeps it mostly clear of the bottom stat. Companion-only.
 pub fn companion_roam_motion() -> CompanionMotion {
     CompanionMotion {
         wander_half: 8,
-        drift_x_frac: 0.55,
-        drift_y_frac: 0.5,
-        drift_period_secs: 13,
-        upward_bias: 0.0,
+        drift_x_frac: 0.92,
+        drift_y_frac: 0.6,
+        drift_period_secs: 16,
+        upward_bias: 0.5,
+        wander: true,
     }
 }
 
@@ -91,6 +97,19 @@ fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32,
     let (nx, ny) = target_for_epoch(epoch);
     let t = phase * phase * (3.0 - 2.0 * phase);
     (px + (nx - px) * t, py + (ny - py) * t)
+}
+
+/// Smooth, deterministic, non-repeating organic wander in ~[-1, 1] per axis.
+/// Two incommensurate sinusoids per axis (no waypoint snapping) read as a pet
+/// drifting with intent rather than lerping between targets. Uses sub-second
+/// time so it stays smooth at the companion's redraw cadence.
+fn companion_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
+    use std::f64::consts::TAU;
+    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
+        / period_secs.max(1) as f64;
+    let fx = 0.62 * (TAU * t * 1.00).sin() + 0.38 * (TAU * t * 2.30 + 1.3).sin();
+    let fy = 0.60 * (TAU * t * 0.78 + 0.7).sin() + 0.40 * (TAU * t * 1.90 + 2.1).sin();
+    (fx as f32, fy as f32)
 }
 
 /// Map normalized offsets `(fx, fy)` to the pet art's top-left grid cell, applying
@@ -129,7 +148,11 @@ fn companion_drift(
     grid_cols: u16,
     grid_rows: u16,
 ) -> (u16, u16) {
-    let (fx, fy) = companion_drift_offsets(now, motion.drift_period_secs);
+    let (fx, fy) = if motion.wander {
+        companion_wander_offsets(now, motion.drift_period_secs)
+    } else {
+        companion_drift_offsets(now, motion.drift_period_secs)
+    };
     companion_drift_position(motion, grid_cols, grid_rows, fx, fy)
 }
 
@@ -385,12 +408,21 @@ mod tests {
     }
 
     #[test]
-    fn companion_roam_stays_bounded() {
-        // Representative production metrics at COMPANION_TARGET_COLS=40 on a 960²
-        // face with SF Mono's ~2:1 cells: cell_w=24, cell_h=48, rows=20, r=479.
+    fn companion_wander_is_deterministic_and_bounded() {
+        // Companion roam now uses an organic sinusoidal wander that intentionally
+        // reaches the grid edges (the pet swims partly in/out of the porthole), so it
+        // is NOT circle-bounded. Verify it is deterministic and stays within ~[-1, 1].
+        let now = datetime!(2026-06-13 18:00:00.5 UTC);
+        let a = companion_wander_offsets(now, 16);
+        let b = companion_wander_offsets(now, 16);
+        assert_eq!(a, b, "wander must be deterministic for a fixed instant");
         assert!(
-            drift_keeps_pet_in_aperture(&companion_roam_motion(), 40, 20, 24.0, 48.0, 479.0),
-            "the companion's livelier roam must still keep the whole pet inside the rim"
+            a.0.abs() <= 1.01 && a.1.abs() <= 1.01,
+            "two unit sinusoids per axis stay within ~[-1, 1], got {a:?}"
+        );
+        assert!(
+            companion_roam_motion().wander,
+            "companion roam uses wander mode"
         );
     }
 

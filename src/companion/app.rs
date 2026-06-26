@@ -597,9 +597,10 @@ pub(super) struct CompanionGridMetrics {
 /// raise it for large desktop windows.  The font size is *derived* from this
 /// value and the actual view width, so the pet stays a consistent fraction of
 /// the display regardless of window size.
-// Pet scale lever: fewer cols → larger cells → bigger pet/props, but less room for
-// the pet to roam on a round screen (its corners reach the rim). Tuned on device.
-const COMPANION_TARGET_COLS: u16 = 40;
+// Pet scale lever: fewer cols → larger cells → bigger pet/props. With the organic
+// wander the pet is allowed to swim partly past the round rim, so a bigger pet no
+// longer fights its movement. Tuned on device.
+const COMPANION_TARGET_COLS: u16 = 36;
 
 /// Probe font size used to measure "M" advance ratio.
 ///
