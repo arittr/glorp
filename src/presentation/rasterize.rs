@@ -175,8 +175,9 @@ mod tests {
         const NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
 
         let vm = WatchViewModel::fixture();
-        let list = build_round_scene_draw_list(&vm, NOW, COLS, ROWS);
-        let grid = rasterize(&list, COLS, ROWS);
+        let m = crate::round::scene::CompanionMotion::default();
+        let scene = build_round_scene_draw_list(&vm, NOW, COLS, ROWS, &m);
+        let grid = rasterize(&scene.draw_list, COLS, ROWS);
 
         // Basic structural guarantees
         assert_eq!(grid.len(), ROWS as usize, "grid must have ROWS rows");

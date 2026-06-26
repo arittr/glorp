@@ -18,8 +18,14 @@ pub fn render_round_preview_frame_from_vm(
     let layout = layout_round_scene(&scene, aperture, capabilities);
 
     // Render pet+habitat via the shared scene seam.
-    let list = crate::round::scene::build_round_scene_draw_list(vm, now, width, height);
-    let grid = crate::presentation::rasterize(&list, width, height);
+    let companion_scene = crate::round::scene::build_round_scene_draw_list(
+        vm,
+        now,
+        width,
+        height,
+        &crate::round::scene::CompanionMotion::default(),
+    );
+    let grid = crate::presentation::rasterize(&companion_scene.draw_list, width, height);
 
     // Build PreviewCell grid from rasterized output, applying the aperture mask.
     let mut cells: Vec<PreviewCell> = Vec::with_capacity(width as usize * height as usize);

@@ -43,12 +43,18 @@ const GOLDEN_NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
 #[test]
 fn round_scene_draw_list_content_lock() {
     let vm = WatchViewModel::fixture_with_habitat_props();
-    let list = build_round_scene_draw_list(&vm, GOLDEN_NOW, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS);
+    let scene = build_round_scene_draw_list(
+        &vm,
+        GOLDEN_NOW,
+        GOLDEN_GRID_COLS,
+        GOLDEN_GRID_ROWS,
+        &glorp::round::scene::CompanionMotion::default(),
+    );
 
     // Summarise the draw list to a stable, human-readable form.
     // We snapshot total cell count + a few structural properties so the golden
     // is readable in review.md without requiring serde on every internal type.
-    let records: Vec<CellRecord> = list.cells.iter().map(CellRecord::from).collect();
+    let records: Vec<CellRecord> = scene.draw_list.cells.iter().map(CellRecord::from).collect();
 
     // Cell count is part of the golden — any net addition or removal of draw
     // cells will cause this snapshot to diverge and require a conscious review.

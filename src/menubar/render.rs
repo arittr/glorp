@@ -56,14 +56,18 @@ pub struct RenderedBlock {
 /// and flagged for Drew's visual review.
 pub fn render_pet_block(vm: &WatchViewModel) -> RenderedBlock {
     let now = time::OffsetDateTime::now_utc();
-    let list = crate::round::scene::build_round_scene_draw_list(
+    let scene = crate::round::scene::build_round_scene_draw_list(
         vm,
         now,
         POPOVER_COLUMNS as u16,
         MENU_SCENE_ROWS as u16,
+        &crate::round::scene::CompanionMotion::default(),
     );
-    let mut attr =
-        scene_draw_list_to_attributed(&list, POPOVER_COLUMNS as u16, MENU_SCENE_ROWS as u16);
+    let mut attr = scene_draw_list_to_attributed(
+        &scene.draw_list,
+        POPOVER_COLUMNS as u16,
+        MENU_SCENE_ROWS as u16,
+    );
     // Count chars so the caller can form a tight NSRange over just this region.
     // The scene text is BMP-only so char count == UTF-16 unit count.
     //
