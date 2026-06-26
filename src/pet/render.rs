@@ -278,7 +278,7 @@ fn mood_face(species: Species, mood: Mood) -> Expression {
     match species {
         Species::Fuzz | Species::Blob | Species::Ghost => match mood {
             Mood::Happy => mk("^.^", "\u{03c9}"),    // ^.^ / ω
-            Mood::Ecstatic => mk("*o*", "\u{25bd}"), // *o* / ▽
+            Mood::Ecstatic => mk("*.*", "\u{25bd}"), // *o* / ▽
             Mood::Hungry => mk("u.u", "o"),
             Mood::Sad => mk("T.T", "\u{2322}"), // T.T / ⌢
             Mood::Sleepy => mk("-.-", "-"),
@@ -288,7 +288,7 @@ fn mood_face(species: Species, mood: Mood) -> Expression {
         Species::Glitch => match mood {
             // Daemon lens face: alive, never corpse. ◉ is EAW-Neutral (width-1).
             Mood::Happy => mk(">\u{25c9}<", "\u{02c4}"), // >◉< / ˄
-            Mood::Ecstatic => mk("\u{25c9}o\u{25c9}", "\u{25bd}"),
+            Mood::Ecstatic => mk("\u{25c9}.\u{25c9}", "\u{25bd}"),
             Mood::Hungry => mk("o\u{25c9}o", "o"),
             Mood::Sad => mk("v\u{25c9}v", "\u{2322}"), // ⌢
             Mood::Sleepy => mk("-.-", "_"),
@@ -300,7 +300,7 @@ fn mood_face(species: Species, mood: Mood) -> Expression {
             // amber eye color, not abstract facet glyphs. Star eyes when excited
             // read as a gem sparkle.
             Mood::Happy => mk("^.^", "w"),
-            Mood::Ecstatic => mk("*o*", "\u{25bd}"),
+            Mood::Ecstatic => mk("*.*", "\u{25bd}"),
             Mood::Hungry => mk("o.o", "o"),
             Mood::Sad => mk("T.T", "\u{2322}"), // ⌢
             Mood::Sleepy => mk("-.-", "_"),
@@ -310,7 +310,7 @@ fn mood_face(species: Species, mood: Mood) -> Expression {
         Species::Mech => match mood {
             // Optic-sensor face: square/bracket eyes read mechanical.
             Mood::Happy => mk("^=^", "v"),
-            Mood::Ecstatic => mk("*o*", "\u{25bd}"),
+            Mood::Ecstatic => mk("*.*", "\u{25bd}"),
             Mood::Hungry => mk("o=o", "o"),
             Mood::Sad => mk("v=v", "\u{2322}"), // ⌢
             Mood::Sleepy => mk("=.=", "_"),
@@ -1047,7 +1047,7 @@ mod tests {
         let art = render_pet(&pet, Stage::S4, Mood::Ecstatic, open)
             .lines
             .join("\n");
-        assert!(art.contains("*o*"), "ecstatic uses star eyes, got:\n{art}");
+        assert!(art.contains("*.*"), "ecstatic uses star eyes, got:\n{art}");
         // An excited pet still blinks (ecstatic is no longer a blink-blocked mood).
         let profile = species_animation_profile(pet.species);
         let blinks = (0..200).any(|t| {
@@ -1078,7 +1078,7 @@ mod tests {
             .join("\n");
 
         assert!(
-            art.contains("*o*"),
+            art.contains("*.*"),
             "ecstatic must stay visibly ecstatic, got:\n{art}"
         );
         assert!(
