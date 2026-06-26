@@ -167,29 +167,32 @@ pub fn render_pet(
 
 pub fn species_animation_profile(species: Species) -> AnimationProfile {
     match species {
+        // Blink cadence in ticks (~250ms each). Lowered from the raw tokenpet mockup
+        // numbers (which assumed a faster ~214ms tick) so a glance actually catches a
+        // blink: nominal Fuzz ~4s, Crystal ~7.5s, jittered around that.
         Species::Fuzz => AnimationProfile {
-            blink_average: 32,
-            blink_jitter: 12,
+            blink_average: 16,
+            blink_jitter: 6,
         },
         Species::Blob => AnimationProfile {
-            blink_average: 40,
-            blink_jitter: 14,
+            blink_average: 20,
+            blink_jitter: 7,
         },
         Species::Ghost => AnimationProfile {
-            blink_average: 50,
-            blink_jitter: 18,
+            blink_average: 26,
+            blink_jitter: 9,
         },
         Species::Glitch => AnimationProfile {
-            blink_average: 24,
-            blink_jitter: 8,
+            blink_average: 12,
+            blink_jitter: 4,
         },
         Species::Crystal => AnimationProfile {
-            blink_average: 60,
-            blink_jitter: 22,
+            blink_average: 30,
+            blink_jitter: 11,
         },
         Species::Mech => AnimationProfile {
-            blink_average: 22,
-            blink_jitter: 6,
+            blink_average: 12,
+            blink_jitter: 4,
         },
     }
 }
@@ -309,10 +312,9 @@ fn should_blink(
     frame: AnimationFrame,
     profile: AnimationProfile,
 ) -> bool {
-    if matches!(
-        mood,
-        Mood::Sad | Mood::Sleepy | Mood::Wilted | Mood::Ecstatic
-    ) {
+    // Sleepy/sad/wilted hold their droopy eyes; every other awake mood — including
+    // the common, sticky ecstatic — still blinks so the pet never freezes wide-eyed.
+    if matches!(mood, Mood::Sad | Mood::Sleepy | Mood::Wilted) {
         return false;
     }
     if frame.blink_suppression_ticks > 0 {
@@ -969,21 +971,33 @@ mod tests {
     }
 
     #[test]
-    fn ecstatic_renders_the_star_eyes_and_blocks_blink() {
+    fn ecstatic_renders_star_eyes_and_still_blinks() {
         let pet = generate_pet("ecstatic-seed");
-        let frame = AnimationFrame {
+        // Suppress blink so the open-eyed star face is observable regardless of where
+        // a blink lands at this tick.
+        let open = AnimationFrame {
             tick: 1,
+            blink_suppression_ticks: 1,
             ..AnimationFrame::default()
         };
-        let art = render_pet(&pet, Stage::S4, Mood::Ecstatic, frame)
+        let art = render_pet(&pet, Stage::S4, Mood::Ecstatic, open)
             .lines
             .join("\n");
         assert!(art.contains("*o*"), "ecstatic uses star eyes, got:\n{art}");
+        // An excited pet still blinks (ecstatic is no longer a blink-blocked mood).
         let profile = species_animation_profile(pet.species);
-        assert!(
-            !should_blink(&pet, Mood::Ecstatic, frame, profile),
-            "ecstatic mood should block blinking"
-        );
+        let blinks = (0..200).any(|t| {
+            should_blink(
+                &pet,
+                Mood::Ecstatic,
+                AnimationFrame {
+                    tick: t,
+                    ..AnimationFrame::default()
+                },
+                profile,
+            )
+        });
+        assert!(blinks, "ecstatic mood should blink within a cycle");
     }
 
     #[test]
