@@ -213,6 +213,52 @@ pub fn closed_blink_eyes(species: Species) -> &'static str {
     }
 }
 
+/// Per-species glyph an open eye collapses to when it shuts.
+fn closed_eye_char(species: Species) -> char {
+    match species {
+        Species::Fuzz | Species::Blob | Species::Crystal => '-',
+        Species::Ghost => '\u{2014}',  // —
+        Species::Glitch => '\u{2592}', // ▒
+        Species::Mech => '=',
+    }
+}
+
+/// Close the eyes for a blink while keeping the middle bridge glyph, so only the
+/// eyes shut instead of the whole face morphing (e.g. `*o*` → `-o-`, `o o` → `- -`).
+/// Glitch corrupts its whole eye band, so it keeps the solid `▒▒▒`.
+fn close_eyes(eyes: &str, species: Species) -> String {
+    if matches!(species, Species::Glitch) {
+        return closed_blink_eyes(species).to_string();
+    }
+    let chars: Vec<char> = eyes.chars().collect();
+    if chars.len() != 3 {
+        return closed_blink_eyes(species).to_string();
+    }
+    let c = closed_eye_char(species);
+    format!("{c}{}{c}", chars[1])
+}
+
+/// Idle "look around": a calm pet occasionally drifts its gaze left or right for a
+/// beat, then back — extra life beyond the blink. Deterministic per pet + tick so
+/// renders stay reproducible. Returns `None` outside a glance window.
+fn idle_glance_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'static str> {
+    const GLANCE_PERIOD: u64 = 32; // ~8s between glances at 250ms/tick
+    const GLANCE_HOLD: u64 = 4; // ~1s holding the glance
+    let seed = u64::from(pet.animation_phase.blink)
+        .wrapping_mul(31)
+        .wrapping_add(17);
+    let t = frame.tick.wrapping_add(seed);
+    // The glance sits in the middle of its window, clear of the blink (window start).
+    let pos = t % GLANCE_PERIOD;
+    let start = GLANCE_PERIOD / 2;
+    if pos < start || pos >= start + GLANCE_HOLD {
+        return None;
+    }
+    let window = t / GLANCE_PERIOD;
+    let h = (window ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
+    Some(if h & 1 == 0 { "> >" } else { "< <" })
+}
+
 struct Expression {
     eyes: String,
     mouth: String,
@@ -280,13 +326,6 @@ fn expression_for(
     blinking: bool,
     frame: AnimationFrame,
 ) -> Expression {
-    if blinking {
-        return Expression {
-            eyes: closed_blink_eyes(pet.species).to_string(),
-            mouth: pet.traits.mouth.clone(),
-        };
-    }
-
     let mut expr = match mood {
         Mood::Content => Expression {
             eyes: pet.traits.eyes.clone(),
@@ -294,15 +333,38 @@ fn expression_for(
         },
         other => mood_face(pet.species, other),
     };
+    if blinking {
+        // Only the eyes shut — keep the bridge and the mood mouth.
+        expr.eyes = close_eyes(&expr.eyes, pet.species);
+        return expr;
+    }
+    let mut overridden = false;
     if frame.soft_eyes && matches!(mood, Mood::Content | Mood::Happy) {
         expr.eyes = "\u{02d8}.\u{02d8}".to_string(); // ˘.˘ relaxed, heavy-lidded
+        overridden = true;
     }
     if matches!(mood, Mood::Happy | Mood::Content) {
         match frame.work_accent {
             WorkAccent::None => {}
-            WorkAccent::Alert => expr.eyes = "^o^".to_string(),
-            WorkAccent::Focused => expr.eyes = ">.<".to_string(),
-            WorkAccent::Dreamy => expr.eyes = "u.u".to_string(),
+            WorkAccent::Alert => {
+                expr.eyes = "^o^".to_string();
+                overridden = true;
+            }
+            WorkAccent::Focused => {
+                expr.eyes = ">.<".to_string();
+                overridden = true;
+            }
+            WorkAccent::Dreamy => {
+                expr.eyes = "u.u".to_string();
+                overridden = true;
+            }
+        }
+    }
+    // Idle glance: a calm, non-droopy pet occasionally looks around (no real work
+    // or sleepy signal is overriding the eyes).
+    if !overridden && !matches!(mood, Mood::Sad | Mood::Sleepy | Mood::Wilted) {
+        if let Some(glance) = idle_glance_eyes(pet, frame) {
+            expr.eyes = glance.to_string();
         }
     }
     expr
