@@ -179,11 +179,15 @@ fn mech_base(stage: Stage) -> &'static Template {
 /// (so the stage cell band is never crossed). Pinned (no-op) on S0..S2.
 pub(crate) fn apply_interior_texture(
     base: &Template,
-    _species: Species,
+    species: Species,
     stage: Stage,
     seed: u64,
 ) -> [String; 8] {
-    let pinned = matches!(stage, Stage::S0 | Stage::S1 | Stage::S2);
+    // Crystal is hand-shaded for a faceted, dimensional look (intentional light/dark
+    // facets); the per-seed ▒/▓ swap would scramble that into checkerboard noise, so
+    // crystal renders its template verbatim.
+    let pinned =
+        matches!(stage, Stage::S0 | Stage::S1 | Stage::S2) || matches!(species, Species::Crystal);
     let mut out: [String; 8] = Default::default();
     for (row, line) in base.iter().enumerate() {
         if pinned {
@@ -600,10 +604,10 @@ const CRYSTAL_S3: Template = [
 const CRYSTAL_S4: Template = [
     "    /\\     ",
     "   /{eyes}\\   ",
-    "  /▒{mouth}▒\\/\\  ",
-    " ◇\\▒██▒/██ ",
-    "  \\▒██▒/█▓ ",
-    "   \\▓█▓/▓  ",
+    "  /█{mouth}▓\\/\\  ",
+    " ◇\\██▓▒/▓░ ",
+    "  \\█▓▒░/░  ",
+    "   \\▓▒░/   ",
     "    \\▼/    ",
     "           ",
 ];
