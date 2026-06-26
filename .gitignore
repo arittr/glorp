@@ -12,3 +12,4 @@
 .claude/worktrees/
 .worktrees/
 .opencode
+*.rlib
