@@ -133,12 +133,12 @@ fn glitch_base(stage: Stage) -> &'static Template {
     }
 }
 
-// Validated The Caged Lumen cast: faceted crystal silhouette with a caged core
-// that fills with age. The lens glyph escalates ◇ (young) → ◆ (mid) → ◈
-// (elder) baked directly into the body — Crystal has no {eyes}/{mouth} slots;
-// the lens is the face. ◇◆◈ are EAW-Ambiguous and kept under the documented
-// ambiguous=narrow assumption. Validated cell ramp [4,10,20,31,39,53,73].
-// Transcribed verbatim from
+// Validated The Caged Lumen cast: faceted crystal silhouette with facet glyphs
+// that fill with age (◇ young → ◆ mid → ◈ elder facets in the body). From S2 up
+// the lens position carries {eyes}/{mouth} slots so the per-mood face renders
+// into the crystal (facet-flavored mood eyes from mood_face). ◇◆◈ are
+// EAW-Ambiguous and kept under the documented ambiguous=narrow assumption.
+// Cell ramp [4,10,20,31,39,53,73]. Based on
 // docs/superpowers/plans/2026-06-21-glorp-overhaul-phase2-art-assets.md.
 fn crystal_base(stage: Stage) -> &'static Template {
     match stage {
@@ -575,8 +575,8 @@ const CRYSTAL_S1: Template = [
 const CRYSTAL_S2: Template = [
     "           ",
     "    /\\     ",
-    "   /◇◇\\    ",
-    "  /▒▓▒\\    ",
+    "   /{eyes}\\   ",
+    "  /▒{mouth}▒\\    ",
     "  \\▒▒/     ",
     "   \\▓/     ",
     "    \\/     ",
@@ -584,8 +584,8 @@ const CRYSTAL_S2: Template = [
 ];
 const CRYSTAL_S3: Template = [
     "    /\\     ",
-    "   /◆◆\\    ",
-    "  /▒▓▒\\    ",
+    "   /{eyes}\\   ",
+    "  /▒{mouth}▒\\    ",
     " /▒▓▓▒\\    ",
     " \\▒▓▒/     ",
     "  \\▓▓/     ",
@@ -594,9 +594,9 @@ const CRYSTAL_S3: Template = [
 ];
 const CRYSTAL_S4: Template = [
     "    /\\     ",
-    "   /◆◆\\    ",
+    "   /{eyes}\\   ",
     "  /▒◆◆▒\\   ",
-    " /▒▓▿▓▒\\   ",
+    " /▒▓{mouth}▓▒\\   ",
     " \\▒▓█▓▒/   ",
     "  \\▒█▒/    ",
     "  \\▓█▓/    ",
@@ -604,9 +604,9 @@ const CRYSTAL_S4: Template = [
 ];
 const CRYSTAL_S5: Template = [
     "  /\\/\\/\\   ",
-    " /◈▒◈▒◈\\   ",
+    " /◈{eyes}◈\\   ",
     "/▒▓█▓█▓▒\\  ",
-    "\\▒▓███▓▒/  ",
+    "\\▒▓█{mouth}█▓▒/  ",
     " \\▒▓█▓▒/   ",
     " \\▒▓█▓▒/   ",
     "  \\▓█▓/    ",
@@ -614,9 +614,9 @@ const CRYSTAL_S5: Template = [
 ];
 const CRYSTAL_S6: Template = [
     "/\\/\\/\\/\\/\\ ",
-    "▒██◈██◈██▒ ",
-    "▒█▓██▓██▓▒ ",
-    "▒█▓█▿█▓█▓▒ ",
+    "▒██{eyes}███▒ ",
+    "▒█▓◈█◈▓█▓▒ ",
+    "▒█▓█{mouth}█▓█▓▒ ",
     "▒█▓█████▓▒ ",
     "▒▓█▓███▓█▒ ",
     " \\▒▓█▓█▒/  ",
@@ -1118,9 +1118,10 @@ mod tests {
     }
 
     #[test]
-    fn crystal_eye_fill_ages_with_stage() {
-        // The caged-core glyph fills with age: a young facet (◇) at S2, a filled
-        // diamond (◆) by S4, the multi-facet (◈) by S6. Structural, not subjective.
+    fn crystal_keeps_aging_facets_and_has_mood_face_slots() {
+        // Crystal's crystalline identity keeps facet glyphs that fill with age (a
+        // multi-facet ◈/◆ by the elder stages), and from S2 up it carries {eyes}
+        // and {mouth} slots so the per-mood face renders into the crystal.
         let young = stage_base_template(Species::Crystal, Stage::S2)
             .iter()
             .copied()
@@ -1131,13 +1132,27 @@ mod tests {
             .collect::<String>();
         assert!(
             elder.contains('\u{25c8}') || elder.contains('\u{25c6}'),
-            "Crystal S6 must show a filled facet core (◆/◈), got:\n{elder}"
+            "Crystal S6 must keep a filled facet (◆/◈), got:\n{elder}"
         );
-        // young may use the hollow ◇ — assert it is NOT already the elder ◈.
         assert!(
             !young.contains('\u{25c8}'),
             "Crystal S2 must not pre-show the elder ◈ facet, got:\n{young}"
         );
+        // Mood face slots wired from S2 up — Crystal expresses mood like the others.
+        for stage in [Stage::S2, Stage::S3, Stage::S4, Stage::S5, Stage::S6] {
+            let t = stage_base_template(Species::Crystal, stage)
+                .iter()
+                .copied()
+                .collect::<String>();
+            assert!(
+                t.contains("{eyes}"),
+                "Crystal {stage:?} must have an {{eyes}} slot"
+            );
+            assert!(
+                t.contains("{mouth}"),
+                "Crystal {stage:?} must have a {{mouth}} slot"
+            );
+        }
     }
 
     #[test]

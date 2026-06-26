@@ -114,7 +114,8 @@ fn rgb_to_oklab_ab(c: Rgb) -> (f32, f32) {
     (a, b)
 }
 
-/// Resolved per-role colors for one pet. `eye` is always the green signature.
+/// Resolved per-role colors for one pet. `eye` is the per-species resting color
+/// (complementary to the body); expressive moods overwrite it via mood eye color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedPalette {
     pub body: Rgb,
@@ -201,10 +202,9 @@ pub fn eye_color_for_mood(mood: Mood) -> Rgb {
 }
 
 /// Overwrite only the eye role with the mood-driven color, for the expressive
-/// (non-Content) moods. Content keeps the per-species resting eye baked by
-/// resolve_pet_palette (resting_eye_color), which is lightness-shifted to clear
-/// the >=3:1 luminance floor against the body. Hooked at the per-tick render
-/// site (rerender_pet_for_view_model).
+/// (non-Content) moods. Content keeps the per-species resting eye that
+/// resolve_pet_palette assigns (bright, complementary to the body hue). Hooked at
+/// the per-tick render site (rerender_pet_for_view_model).
 pub fn apply_mood_eye_color(palette: &mut ResolvedPalette, mood: Mood) {
     if mood != Mood::Content {
         palette.eye = eye_color_for_mood(mood);
