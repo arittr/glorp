@@ -146,13 +146,14 @@ pub(super) fn cursor_eye_glyph(norm_x: f32) -> char {
 }
 
 /// Build a replacement eye string that matches the original eye span's width.
-/// For span widths >= 3 ("o o" / "^ ^" style) we render `glyph` at both ends
-/// with a single space in between — both eyes track together. For shorter
-/// spans we render just the glyph. For longer spans we pad with spaces.
+/// Both eyes track together (`glyph` at both ends). At the standard 3-wide eye
+/// slot we keep a small `.` bridge (`<.<`) so the nose doesn't vanish while the
+/// pet looks around; shorter spans render just the glyph, longer spans pad.
 pub(super) fn build_cursor_eye_string(glyph: char, span_width: usize) -> String {
     match span_width {
         0 => String::new(),
         1 | 2 => glyph.to_string(),
+        3 => format!("{glyph}.{glyph}"),
         n => {
             let mut s = String::with_capacity(n);
             s.push(glyph);

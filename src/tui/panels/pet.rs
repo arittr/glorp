@@ -466,9 +466,9 @@ pub(crate) mod tests {
 
     #[test]
     fn build_cursor_eye_string_preserves_span_width() {
-        // Width 3 ("o o" style): glyph at both ends, space in between.
-        assert_eq!(build_cursor_eye_string('<', 3), "< <");
-        assert_eq!(build_cursor_eye_string('>', 3), "> >");
+        // Width 3 (the eye slot): glyph at both ends, a small `.` bridge between.
+        assert_eq!(build_cursor_eye_string('<', 3), "<.<");
+        assert_eq!(build_cursor_eye_string('>', 3), ">.>");
         // Width 5 (wider templates): glyph at both ends, more space.
         assert_eq!(build_cursor_eye_string('o', 5), "o   o");
         // Width 1 or 2 (rare): just the glyph.

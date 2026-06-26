@@ -256,7 +256,7 @@ fn idle_glance_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'stati
     }
     let window = t / GLANCE_PERIOD;
     let h = (window ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
-    Some(if h & 1 == 0 { "> >" } else { "< <" })
+    Some(if h & 1 == 0 { ">.>" } else { "<.<" })
 }
 
 struct Expression {
