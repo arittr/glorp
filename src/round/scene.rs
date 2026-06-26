@@ -313,7 +313,10 @@ pub fn build_round_scene_draw_list(
     let mut layout = PetScene::compute_layout(area, vm, &ctx);
     let old_pet_art = layout.pet_art;
     let (drift_x, drift_y) = companion_drift(now, motion, energy, grid_cols, grid_rows);
-    let new_pet_art = Rect::new(drift_x, drift_y, PET_W, PET_H);
+    // Add the breath bob on top of the wander so the pet visibly breathes —
+    // otherwise breath_offset_y is computed every tick and silently discarded.
+    let breathed_y = (drift_y + u16::from(vm.breath_offset_y)).min(grid_rows.saturating_sub(PET_H));
+    let new_pet_art = Rect::new(drift_x, breathed_y, PET_W, PET_H);
     layout.pet_art = new_pet_art;
     // Update exclusions: replace the old pet_art entry with the drifted one so
     // ambient glyphs avoid the pet's actual rendered position.

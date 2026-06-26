@@ -318,11 +318,20 @@ fn should_blink(
     if frame.blink_suppression_ticks > 0 {
         return false;
     }
+    // Hold the blink for a few ticks (a single 250ms frame is easy to miss), and
+    // jitter the moment WITHIN each window so blinks land irregularly instead of on
+    // a metronome — deterministic (per-window hash) so tests stay stable.
+    const BLINK_HOLD_TICKS: u64 = 3;
     let jitter = u64::from(profile.blink_jitter.max(1));
-    let cadence = u64::from(profile.blink_average)
-        + (u64::from(pet.animation_phase.blink) % jitter)
-        + u64::from(frame.blink_slowdown);
-    (frame.tick + u64::from(pet.animation_phase.blink)).is_multiple_of(cadence)
+    let window_len = (u64::from(profile.blink_average) + u64::from(frame.blink_slowdown))
+        .max(BLINK_HOLD_TICKS + 2);
+    let seed = u64::from(pet.animation_phase.blink);
+    let t = frame.tick + seed;
+    let window = t / window_len;
+    let h = (window ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
+    let start = (window_len / 5 + h % (jitter + 1)).min(window_len - BLINK_HOLD_TICKS);
+    let pos = t % window_len;
+    pos >= start && pos < start + BLINK_HOLD_TICKS
 }
 
 struct RenderedTemplateLine {
@@ -881,8 +890,11 @@ mod tests {
     #[test]
     fn work_accent_sharpens_positive_moods_and_ignored_for_negative() {
         let pet = generate_pet("accent-seed");
+        // Suppress blink so the open-eyed work-accent change is observable (otherwise
+        // a blink frame closes the eyes in both renders and masks the accent).
         let base = AnimationFrame {
             tick: 2,
+            blink_suppression_ticks: 1,
             ..AnimationFrame::default()
         };
         for accent in [WorkAccent::Alert, WorkAccent::Focused, WorkAccent::Dreamy] {
