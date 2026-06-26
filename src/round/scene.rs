@@ -67,7 +67,7 @@ pub fn companion_roam_motion() -> CompanionMotion {
         wander_half: 8,
         drift_x_frac: 0.92,
         drift_y_frac: 0.6,
-        drift_period_secs: 26,
+        drift_period_secs: 22,
         upward_bias: 0.5,
         wander: true,
     }
@@ -100,15 +100,17 @@ fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32,
 }
 
 /// Smooth, deterministic, non-repeating organic wander in ~[-1, 1] per axis.
-/// Two incommensurate sinusoids per axis (no waypoint snapping) read as a pet
-/// drifting with intent rather than lerping between targets. Uses sub-second
-/// time so it stays smooth at the companion's redraw cadence.
+/// A slowly-precessing elliptical base (cos on X, sin on Y at a slightly different
+/// rate) keeps the velocity vector always rotating, so the path can never flatten
+/// into a strict horizontal/vertical line — it always wobbles. A smaller
+/// incommensurate term per axis breaks the clean-orbit feel. Sub-second time keeps
+/// it smooth at the companion's redraw cadence.
 fn companion_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
     use std::f64::consts::TAU;
     let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
         / period_secs.max(1) as f64;
-    let fx = 0.62 * (TAU * t * 1.00).sin() + 0.38 * (TAU * t * 2.30 + 1.3).sin();
-    let fy = 0.60 * (TAU * t * 0.78 + 0.7).sin() + 0.40 * (TAU * t * 1.90 + 2.1).sin();
+    let fx = 0.72 * (TAU * t).cos() + 0.28 * (TAU * t * 1.93 + 0.6).sin();
+    let fy = 0.72 * (TAU * t * 1.21 + 0.3).sin() + 0.28 * (TAU * t * 2.41 + 1.5).cos();
     (fx as f32, fy as f32)
 }
 
