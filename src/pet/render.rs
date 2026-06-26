@@ -208,7 +208,7 @@ pub fn closed_blink_eyes(species: Species) -> &'static str {
         Species::Fuzz | Species::Blob => "- -",
         Species::Ghost => "\u{2014} \u{2014}",
         Species::Glitch => "\u{2592}\u{2592}\u{2592}",
-        Species::Crystal => "\u{25c7} \u{25c7}",
+        Species::Crystal => "- -",
         Species::Mech => "= =",
     }
 }
@@ -250,11 +250,13 @@ fn mood_face(species: Species, mood: Mood) -> Expression {
             Mood::Content => unreachable!("Content handled in expression_for"),
         },
         Species::Crystal => match mood {
-            // Facet eyes; ◇ is ambiguous-narrow (kept per the Crystal decision).
-            Mood::Happy => mk("\u{25c7}^\u{25c7}", "v"),
-            Mood::Ecstatic => mk("*\u{25c7}*", "\u{25bd}"),
-            Mood::Hungry => mk("\u{25c7}.\u{25c7}", "o"),
-            Mood::Sad => mk("\u{25c7}_\u{25c7}", "\u{2322}"), // ⌢
+            // Round, cute eyes — crystal identity comes from the diamond body and
+            // amber eye color, not abstract facet glyphs. Star eyes when excited
+            // read as a gem sparkle.
+            Mood::Happy => mk("^.^", "w"),
+            Mood::Ecstatic => mk("*o*", "\u{25bd}"),
+            Mood::Hungry => mk("o.o", "o"),
+            Mood::Sad => mk("T.T", "\u{2322}"), // ⌢
             Mood::Sleepy => mk("-.-", "_"),
             Mood::Wilted => mk(",_,", "_"),
             Mood::Content => unreachable!("Content handled in expression_for"),
