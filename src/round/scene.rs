@@ -114,6 +114,23 @@ fn companion_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32
     (fx as f32, fy as f32)
 }
 
+/// Which way the wandering pet faces: the sign of its dominant horizontal velocity
+/// (the `0.72*cos` base term — the small wobble is ignored so facing flips cleanly
+/// at the turnarounds, never flickering). Right-moving → `1`, left-moving → `-1`,
+/// matching `compute_facing`'s convention. So the pet turns to face where it swims
+/// instead of gliding sideways.
+fn companion_wander_facing(now: time::OffsetDateTime, period_secs: u64) -> i8 {
+    use std::f64::consts::TAU;
+    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
+        / period_secs.max(1) as f64;
+    // d/dt of 0.72*cos(TAU*t) ∝ -sin(TAU*t); the pet moves right when that is > 0.
+    if -(TAU * t).sin() >= 0.0 {
+        1
+    } else {
+        -1
+    }
+}
+
 /// Map normalized offsets `(fx, fy)` to the pet art's top-left grid cell, applying
 /// the motion config's radii, upward bias, and the rectangular grid clamp.
 fn companion_drift_position(
@@ -253,11 +270,19 @@ pub fn build_round_scene_draw_list(
     // mirroring what PetPanel::render does but with companion-specific range.
     let wander_width = PET_W + 2 * motion.wander_half;
     let (wx, fc) = crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
-    let vm: Cow<WatchViewModel> = if wx != vm.wander_offset_x || fc != vm.facing {
+    // In wander mode the pet faces its actual horizontal travel direction, so it
+    // turns to face where it's swimming instead of gliding sideways like a bouncing
+    // logo. Otherwise use the shared resolved facing.
+    let facing = if motion.wander {
+        companion_wander_facing(now, motion.drift_period_secs)
+    } else {
+        fc
+    };
+    let vm: Cow<WatchViewModel> = if wx != vm.wander_offset_x || facing != vm.facing {
         Cow::Owned({
             let mut v = vm.clone();
             v.wander_offset_x = wx;
-            v.facing = fc;
+            v.facing = facing;
             v
         })
     } else {
@@ -470,6 +495,25 @@ mod tests {
         assert!(
             asleep < idle,
             "a sleeping pet barely drifts (asleep={asleep}, idle={idle})"
+        );
+    }
+
+    #[test]
+    fn wander_facing_flips_across_a_cycle() {
+        // The pet turns around as it wanders, so facing must take both values over a
+        // full cycle and always be ±1 — never stuck (the bouncing-logo bug).
+        let (mut saw_left, mut saw_right) = (false, false);
+        for s in 0..30i64 {
+            let now = datetime!(2026-06-13 18:00:00 UTC) + time::Duration::seconds(s);
+            match companion_wander_facing(now, 22) {
+                1 => saw_right = true,
+                -1 => saw_left = true,
+                other => panic!("facing must be ±1, got {other}"),
+            }
+        }
+        assert!(
+            saw_left && saw_right,
+            "pet must face both directions across a wander cycle"
         );
     }
 
