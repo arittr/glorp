@@ -1,8 +1,8 @@
 use crate::game::habitat::{
     catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone, CODEX_SIGNAL_LAMP,
-    HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M,
-    TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M, TOKEN_SHELL_100K,
-    TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
+    HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_GEODE_50M, TOKEN_HANGING_VINE_25M,
+    TOKEN_LANTERN_10M, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M,
+    TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
 use crate::storage::state::HabitatPropId;
@@ -161,6 +161,7 @@ pub fn prop_effect_target_path(id: &str) -> Option<TargetPath> {
         TOKEN_ORBIT_5M => Some(TargetPath::new("watch.prop.token_orbit_5m.effect")),
         TOKEN_LANTERN_10M => Some(TargetPath::new("watch.prop.token_lantern_10m.effect")),
         TOKEN_HANGING_VINE_25M => Some(TargetPath::new("watch.prop.token_hanging_vine_25m.effect")),
+        TOKEN_GEODE_50M => Some(TargetPath::new("watch.prop.token_geode_50m.effect")),
         CODEX_SIGNAL_LAMP => Some(TargetPath::new("watch.prop.codex_signal_lamp.effect")),
         HEAVY_SESSION_PLANTER => Some(TargetPath::new("watch.prop.heavy_session_planter.effect")),
         WILT_RECOVERY_SPROUT => Some(TargetPath::new("watch.prop.wilt_recovery_sprout.effect")),
@@ -794,6 +795,70 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
                 dx: 2,
                 dy: 1,
                 glyph: '╲',
+            },
+        ],
+        TOKEN_GEODE_50M if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '◇',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '◆',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '◇',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '◣',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◈',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '◢',
+            },
+        ],
+        TOKEN_GEODE_50M => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '◆',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '◆',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '◣',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◆',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '◢',
             },
         ],
         _ => &[

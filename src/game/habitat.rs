@@ -81,6 +81,8 @@ pub const HEAVY_SESSION_PLANTER: &str = "heavy_session_planter";
 pub const WILT_RECOVERY_SPROUT: &str = "wilt_recovery_sprout";
 pub const FIRST_ENSEMBLE_DAY: &str = "first_ensemble_day";
 pub const RETURN_SPROUT: &str = "return_sprout";
+// Prestige ladder beyond 25M — grand habitat pieces for long-running pets.
+pub const TOKEN_GEODE_50M: &str = "token_geode_50m";
 
 pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
@@ -176,6 +178,15 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         lifetime_threshold: Some(25_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0x7a, 0xb8, 0x80), // leafy green
+    },
+    HabitatPropSpec {
+        id: TOKEN_GEODE_50M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::WallLeft,
+        display_priority: 67,
+        lifetime_threshold: Some(50_000_000.0),
+        pet_layer: HabitatPetLayer::Behind,
+        color: (0x9c, 0x5c, 0xd0), // amethyst geode
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
