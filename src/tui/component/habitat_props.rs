@@ -15,7 +15,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
 
-const MAX_TROPHIES: usize = 6;
+const MAX_TROPHIES: usize = 5;
 const MAX_ACCENTS: usize = 4;
 const ACCENT_ROTATION_SECS: i64 = 600;
 const ACCENT_CANDIDATES: u16 = 16;
@@ -1091,89 +1091,70 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
                 glyph: '·',
             },
         ],
-        // 500M aurora: shaded bands flow sideways across two rows.
+        // 500M aurora: a shimmering vertical light-curtain — bright streaks (╿) and
+        // faint ones (┊) trade places, so it reads as draping light, not a block.
         TOKEN_AURORA_500M if phase < 4 => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '░',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '▒',
+                glyph: '╿',
             },
             SpriteCell {
                 dx: 2,
                 dy: 0,
-                glyph: '▓',
+                glyph: '┊',
             },
             SpriteCell {
-                dx: 3,
+                dx: 4,
                 dy: 0,
-                glyph: '▒',
+                glyph: '╿',
             },
             SpriteCell {
                 dx: 0,
                 dy: 1,
-                glyph: '▒',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '▓',
+                glyph: '┊',
             },
             SpriteCell {
                 dx: 2,
                 dy: 1,
-                glyph: '▒',
+                glyph: '╿',
             },
             SpriteCell {
-                dx: 3,
+                dx: 4,
                 dy: 1,
-                glyph: '░',
+                glyph: '┊',
             },
         ],
         TOKEN_AURORA_500M => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '▒',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '▓',
+                glyph: '┊',
             },
             SpriteCell {
                 dx: 2,
                 dy: 0,
-                glyph: '▒',
+                glyph: '╿',
             },
             SpriteCell {
-                dx: 3,
+                dx: 4,
                 dy: 0,
-                glyph: '░',
+                glyph: '┊',
             },
             SpriteCell {
                 dx: 0,
                 dy: 1,
-                glyph: '▓',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '▒',
+                glyph: '╿',
             },
             SpriteCell {
                 dx: 2,
                 dy: 1,
-                glyph: '░',
+                glyph: '┊',
             },
             SpriteCell {
-                dx: 3,
+                dx: 4,
                 dy: 1,
-                glyph: '▒',
+                glyph: '╿',
             },
         ],
         // 1B moon: orb waxes/wanes (◐↔◑) with a twinkling sparkle (·↔✦) beside it.
@@ -1762,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn trophy_selection_caps_at_six_by_priority_then_age() {
+    fn trophy_selection_caps_at_five_by_priority_then_age() {
         let habitat = HabitatView {
             earned_props: vec![
                 earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
@@ -1785,7 +1766,6 @@ mod tests {
                 "token_treasure_chest_2m",
                 "extra_trophy_for_cap_test",
                 "wilt_recovery_sprout",
-                "heavy_session_planter",
             ]
         );
     }

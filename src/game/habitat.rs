@@ -116,7 +116,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: TOKEN_MOSS_TUFT_250K,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::FloorMid,
-        display_priority: 25,
+        display_priority: 150,
         lifetime_threshold: Some(250_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0x6f, 0xb0, 0x60), // moss green
@@ -179,7 +179,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: TOKEN_HANGING_VINE_25M,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::Ceiling,
-        display_priority: 65,
+        display_priority: 152, // vine — green plants anchor the tank
         lifetime_threshold: Some(25_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0x7a, 0xb8, 0x80), // leafy green
@@ -218,7 +218,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 130,
         lifetime_threshold: Some(500_000_000.0),
         pet_layer: HabitatPetLayer::Background,
-        color: (0x6c, 0xe0, 0xb0), // aurora teal
+        color: (0xc0, 0x88, 0xe0), // aurora violet
     },
     HabitatPropSpec {
         id: TOKEN_MOON_1B,
@@ -242,7 +242,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: HEAVY_SESSION_PLANTER,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::FloorRight,
-        display_priority: 80,
+        display_priority: 148,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Behind,
         color: (0x6f, 0xb0, 0x60), // potted foliage
