@@ -1091,28 +1091,28 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
                 glyph: '·',
             },
         ],
-        // 500M aurora: a shimmering vertical light-curtain — bright streaks (╿) and
-        // faint ones (┊) trade places, so it reads as draping light, not a block.
+        // 500M aurora: a vertical light-curtain hanging from the ceiling. The
+        // streaks hold still (no flicker) — only the crowning sparkles twinkle.
         TOKEN_AURORA_500M if phase < 4 => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '╿',
+                glyph: '✦',
             },
             SpriteCell {
                 dx: 2,
                 dy: 0,
-                glyph: '┊',
+                glyph: '·',
             },
             SpriteCell {
                 dx: 4,
                 dy: 0,
-                glyph: '╿',
+                glyph: '✦',
             },
             SpriteCell {
                 dx: 0,
                 dy: 1,
-                glyph: '┊',
+                glyph: '╿',
             },
             SpriteCell {
                 dx: 2,
@@ -1122,6 +1122,21 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
             SpriteCell {
                 dx: 4,
                 dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 2,
                 glyph: '┊',
             },
         ],
@@ -1129,17 +1144,17 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '┊',
+                glyph: '·',
             },
             SpriteCell {
                 dx: 2,
                 dy: 0,
-                glyph: '╿',
+                glyph: '✦',
             },
             SpriteCell {
                 dx: 4,
                 dy: 0,
-                glyph: '┊',
+                glyph: '·',
             },
             SpriteCell {
                 dx: 0,
@@ -1149,12 +1164,27 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
             SpriteCell {
                 dx: 2,
                 dy: 1,
-                glyph: '┊',
+                glyph: '╿',
             },
             SpriteCell {
                 dx: 4,
                 dy: 1,
                 glyph: '╿',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 2,
+                glyph: '┊',
             },
         ],
         // 1B moon: orb waxes/wanes (◐↔◑) with a twinkling sparkle (·↔✦) beside it.
