@@ -101,9 +101,10 @@ pub fn habitat_prop_placements_for(
                 sprite,
                 scene.habitat,
                 &exclusions,
-                trophy_style(ctx.color_capability, id, bloomed),
+                trophy_style(ctx.color_capability, id),
                 layer,
                 id,
+                bloomed,
             );
             if !rendered.is_empty() {
                 let bounds = bounds_for_cells(&rendered);
@@ -1525,6 +1526,7 @@ fn trophy_sprite(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_sprite(
     anchor: Position,
     sprite: &'static [SpriteCell],
@@ -1533,6 +1535,7 @@ fn render_sprite(
     style: Style,
     pet_layer: HabitatPetLayer,
     id: &str,
+    bloomed: bool,
 ) -> Vec<HabitatPropCell> {
     let mut cells = Vec::new();
     for cell in sprite {
@@ -1542,12 +1545,18 @@ fn render_sprite(
         if !habitat.contains(pos) || exclusions.iter().any(|rect| rect.contains(pos)) {
             return Vec::new();
         }
+        // Blossoms on a bloomed plant render pink; the green stems keep `style`.
+        let cell_style = if bloomed && cell.glyph == '*' && style.fg.is_some() {
+            Style::default().fg(BLOSSOM_PINK)
+        } else {
+            style
+        };
         cells.push(HabitatPropCell {
             prop_id: HabitatPropId::new(id),
             row: pos.y,
             col: pos.x,
             glyph: cell.glyph,
-            style,
+            style: cell_style,
             pet_layer,
         });
     }
@@ -1780,25 +1789,16 @@ fn prop_visual_glyphs_for_test() -> &'static [char] {
     ]
 }
 
-fn trophy_style(color_capability: ColorCapability, id: &str, bloomed: bool) -> Style {
+fn trophy_style(color_capability: ColorCapability, id: &str) -> Style {
     match color_capability {
-        ColorCapability::Truecolor => Style::default().fg(trophy_color(id, bloomed)),
+        ColorCapability::Truecolor => Style::default().fg(prop_color(id)),
         ColorCapability::Flat => Style::default(),
     }
 }
 
-/// A bloomed plant tints rosy-pink (covered in blossoms); everything else keeps
-/// its natural color.
-fn trophy_color(id: &str, bloomed: bool) -> Color {
-    let base = prop_color(id);
-    if bloomed {
-        if let Color::Rgb(r, g, b) = base {
-            let blend = |c: u8, t: u16| ((u16::from(c) + t) / 2) as u8;
-            return Color::Rgb(blend(r, 0xe0), blend(g, 0x90), blend(b, 0xc0));
-        }
-    }
-    base
-}
+/// Blossom color for a bloomed plant's flower glyphs — the stems keep their green;
+/// only the `*` blossoms turn pink, so the plant reads as a green plant in flower.
+const BLOSSOM_PINK: Color = Color::Rgb(0xe8, 0x84, 0xbc);
 
 fn accent_style(id: &str) -> Style {
     Style::default().fg(prop_color(id))
@@ -2455,6 +2455,7 @@ mod tests {
             Style::default(),
             HabitatPetLayer::Background,
             "codex_signal_lamp",
+            false,
         );
 
         assert!(cells.is_empty());
