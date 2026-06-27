@@ -118,7 +118,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorMid,
         display_priority: 150,
         lifetime_threshold: Some(250_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Foreground,
         color: (0x6f, 0xb0, 0x60), // moss green
     },
     HabitatPropSpec {
@@ -181,7 +181,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::Ceiling,
         display_priority: 152, // vine — green plants anchor the tank
         lifetime_threshold: Some(25_000_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Foreground,
         color: (0x7a, 0xb8, 0x80), // leafy green
     },
     HabitatPropSpec {
@@ -244,7 +244,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorRight,
         display_priority: 148,
         lifetime_threshold: None,
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Foreground,
         color: (0x6f, 0xb0, 0x60), // potted foliage
     },
     HabitatPropSpec {
@@ -530,10 +530,11 @@ mod tests {
     }
 
     #[test]
-    fn flowering_plants_are_background_layer() {
-        // The flowering plants render in FRONT of the pet (clear of its
-        // silhouette) so the player can watch them grow and bloom, rather than
-        // being occluded by the body.
+    fn flowering_plants_are_foreground_layer() {
+        // The flowering plants render in FRONT of the pet at a FIXED anchor, so
+        // the player can watch them grow and bloom. Foreground (unlike Background)
+        // does not dodge the pet's silhouette, so the plants stay put instead of
+        // chasing the free-floating pet around the tank.
         for id in [
             TOKEN_MOSS_TUFT_250K,
             TOKEN_HANGING_VINE_25M,
@@ -541,8 +542,8 @@ mod tests {
         ] {
             assert_eq!(
                 catalog_prop_by_str(id).unwrap().pet_layer,
-                HabitatPetLayer::Background,
-                "{id} is a visible plant; should be Background so it isn't hidden"
+                HabitatPetLayer::Foreground,
+                "{id} is a visible plant; should be Foreground so it stays put + visible"
             );
         }
     }
