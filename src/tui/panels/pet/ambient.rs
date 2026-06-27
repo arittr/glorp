@@ -110,14 +110,22 @@ pub(super) fn contact_shadow_color(floor_wash: ratatui::style::Color) -> ratatui
     Color::Rgb(darken(r), darken(g), darken(b))
 }
 
-/// Sky-glyph count by stage tier.
+/// Sky-glyph count by stage tier. Kept restrained so the scene reads composed,
+/// not full — especially once the habitat fills with earned props.
 fn stage_base_count(stage: Stage) -> usize {
     match stage {
         Stage::S0 | Stage::S1 => 4,
-        Stage::S2 | Stage::S3 => 6,
-        Stage::S4 | Stage::S5 => 8,
-        Stage::S6 => 10,
+        Stage::S2 | Stage::S3 => 5,
+        Stage::S4 | Stage::S5 => 6,
+        Stage::S6 => 7,
     }
+}
+
+/// Extra ambient glyphs a larger habitat earns. The divisor is gentle (vs the
+/// old /60) so big surfaces like the round companion stay composed, not cluttered,
+/// while larger panels still earn proportionally more.
+fn ambient_area_term(habitat_cells: usize) -> usize {
+    habitat_cells.saturating_sub(200) / 90
 }
 
 /// Seed discriminant for species, avoiding `as u64` on an enum without repr.
@@ -367,7 +375,7 @@ pub fn ambient_glyphs_for_phase(
     let mut glyphs = Vec::new();
 
     let habitat_cells = (habitat.width as usize) * (habitat.height as usize);
-    let area_term = habitat_cells.saturating_sub(200) / 60;
+    let area_term = ambient_area_term(habitat_cells);
     let count =
         ((stage_base_count(stage) + area_term) as f64 * phase_count_scale(phase)).round() as usize;
 
@@ -448,7 +456,7 @@ pub(super) fn mote_glyphs_for(
     }
 
     let habitat_cells = (habitat.width as usize) * (habitat.height as usize);
-    let area_term = habitat_cells.saturating_sub(200) / 60;
+    let area_term = ambient_area_term(habitat_cells);
     let allocation_floor = (4 + area_term) as f64 * phase_count_scale(day.day_phase);
     let budget = (MOTE_BUDGET_SHARE * allocation_floor).floor();
 
