@@ -81,8 +81,13 @@ pub const HEAVY_SESSION_PLANTER: &str = "heavy_session_planter";
 pub const WILT_RECOVERY_SPROUT: &str = "wilt_recovery_sprout";
 pub const FIRST_ENSEMBLE_DAY: &str = "first_ensemble_day";
 pub const RETURN_SPROUT: &str = "return_sprout";
-// Prestige ladder beyond 25M — grand habitat pieces for long-running pets.
+// Prestige ladder beyond 25M — grand, animated habitat pieces for long-running
+// pets, ranked above the event props so the grandest earned pieces always show.
 pub const TOKEN_GEODE_50M: &str = "token_geode_50m";
+pub const TOKEN_BONSAI_100M: &str = "token_bonsai_100m";
+pub const TOKEN_CONSTELLATION_250M: &str = "token_constellation_250m";
+pub const TOKEN_AURORA_500M: &str = "token_aurora_500m";
+pub const TOKEN_MOON_1B: &str = "token_moon_1b";
 
 pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
@@ -183,10 +188,46 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: TOKEN_GEODE_50M,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::WallLeft,
-        display_priority: 67,
+        display_priority: 100,
         lifetime_threshold: Some(50_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0x9c, 0x5c, 0xd0), // amethyst geode
+    },
+    HabitatPropSpec {
+        id: TOKEN_BONSAI_100M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::FloorRight,
+        display_priority: 110,
+        lifetime_threshold: Some(100_000_000.0),
+        pet_layer: HabitatPetLayer::Behind,
+        color: (0xe8, 0x9c, 0xc0), // cherry blossom
+    },
+    HabitatPropSpec {
+        id: TOKEN_CONSTELLATION_250M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::AirMid,
+        display_priority: 120,
+        lifetime_threshold: Some(250_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
+        color: (0xf0, 0xe4, 0x9c), // starlight gold
+    },
+    HabitatPropSpec {
+        id: TOKEN_AURORA_500M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::Ceiling,
+        display_priority: 130,
+        lifetime_threshold: Some(500_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
+        color: (0x6c, 0xe0, 0xb0), // aurora teal
+    },
+    HabitatPropSpec {
+        id: TOKEN_MOON_1B,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::AirRight,
+        display_priority: 140,
+        lifetime_threshold: Some(1_000_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
+        color: (0xe0, 0xe4, 0xf0), // moonlight silver
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,

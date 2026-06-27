@@ -1,7 +1,8 @@
 use crate::game::habitat::{
     catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone, CODEX_SIGNAL_LAMP,
-    HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_GEODE_50M, TOKEN_HANGING_VINE_25M,
-    TOKEN_LANTERN_10M, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M,
+    HEAVY_SESSION_PLANTER, TOKEN_AURORA_500M, TOKEN_BONSAI_100M, TOKEN_CONSTELLATION_250M,
+    TOKEN_FRIENDLY_CLOUD_750K, TOKEN_GEODE_50M, TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M,
+    TOKEN_MOON_1B, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M,
     TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
@@ -162,6 +163,12 @@ pub fn prop_effect_target_path(id: &str) -> Option<TargetPath> {
         TOKEN_LANTERN_10M => Some(TargetPath::new("watch.prop.token_lantern_10m.effect")),
         TOKEN_HANGING_VINE_25M => Some(TargetPath::new("watch.prop.token_hanging_vine_25m.effect")),
         TOKEN_GEODE_50M => Some(TargetPath::new("watch.prop.token_geode_50m.effect")),
+        TOKEN_BONSAI_100M => Some(TargetPath::new("watch.prop.token_bonsai_100m.effect")),
+        TOKEN_CONSTELLATION_250M => Some(TargetPath::new(
+            "watch.prop.token_constellation_250m.effect",
+        )),
+        TOKEN_AURORA_500M => Some(TargetPath::new("watch.prop.token_aurora_500m.effect")),
+        TOKEN_MOON_1B => Some(TargetPath::new("watch.prop.token_moon_1b.effect")),
         CODEX_SIGNAL_LAMP => Some(TargetPath::new("watch.prop.codex_signal_lamp.effect")),
         HEAVY_SESSION_PLANTER => Some(TargetPath::new("watch.prop.heavy_session_planter.effect")),
         WILT_RECOVERY_SPROUT => Some(TargetPath::new("watch.prop.wilt_recovery_sprout.effect")),
@@ -892,6 +899,386 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
                 dx: 2,
                 dy: 2,
                 glyph: '◢',
+            },
+        ],
+        // 100M bonsai: blossoms (*) rustle across the canopy (▓) over a trunk + pot.
+        TOKEN_BONSAI_100M if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '▂',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '▂',
+            },
+        ],
+        TOKEN_BONSAI_100M => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '▂',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '▂',
+            },
+        ],
+        // 250M constellation: the bright stars (✦) rotate corners↔edges, twinkling.
+        TOKEN_CONSTELLATION_250M if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '✦',
+            },
+        ],
+        TOKEN_CONSTELLATION_250M => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '·',
+            },
+        ],
+        // 500M aurora: shaded bands flow sideways across two rows.
+        TOKEN_AURORA_500M if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '░',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '▒',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
+                glyph: '▒',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '▒',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '▒',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 1,
+                glyph: '░',
+            },
+        ],
+        TOKEN_AURORA_500M => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '▒',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '▒',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
+                glyph: '░',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '▒',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '░',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 1,
+                glyph: '▒',
+            },
+        ],
+        // 1B moon: orb waxes/wanes (◐↔◑) with a twinkling sparkle (·↔✦) beside it.
+        TOKEN_MOON_1B if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╭',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
+                glyph: '╮',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◖',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '◐',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 1,
+                glyph: '◗',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '╰',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 2,
+                glyph: '╯',
+            },
+        ],
+        TOKEN_MOON_1B => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╭',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
+                glyph: '╮',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◖',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '◑',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 1,
+                glyph: '◗',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '╰',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 2,
+                glyph: '╯',
             },
         ],
         _ => &[
