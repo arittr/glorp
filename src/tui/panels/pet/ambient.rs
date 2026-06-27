@@ -121,9 +121,9 @@ fn stage_base_count(stage: Stage) -> usize {
     }
 }
 
-/// Extra ambient glyphs a larger habitat earns. The divisor is gentle (vs the
-/// old /60) so big surfaces like the round companion stay composed, not cluttered,
-/// while larger panels still earn proportionally more.
+/// Extra ambient glyphs a larger habitat earns. The divisor is gentle so big
+/// surfaces like the round companion stay composed, not cluttered, while larger
+/// panels still earn proportionally more.
 fn ambient_area_term(habitat_cells: usize) -> usize {
     habitat_cells.saturating_sub(200) / 90
 }

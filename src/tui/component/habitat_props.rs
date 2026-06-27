@@ -2566,4 +2566,195 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn plants_bloom_only_after_three_days() {
+        let planted = datetime!(2026-05-11 12:00 UTC);
+        let moss = HabitatView {
+            earned_props: vec![earned(
+                "token_moss_tuft_250k",
+                HabitatPropKind::Trophy,
+                150,
+                0,
+            )],
+        };
+        assert!(
+            !prop_bloomed(
+                &moss,
+                "token_moss_tuft_250k",
+                planted + time::Duration::days(2)
+            ),
+            "a plant younger than 3 days has not bloomed"
+        );
+        assert!(
+            prop_bloomed(
+                &moss,
+                "token_moss_tuft_250k",
+                planted + time::Duration::days(3)
+            ),
+            "a plant blooms once it reaches 3 days"
+        );
+        let chest = HabitatView {
+            earned_props: vec![earned(
+                "token_treasure_chest_2m",
+                HabitatPropKind::Trophy,
+                55,
+                0,
+            )],
+        };
+        assert!(
+            !prop_bloomed(
+                &chest,
+                "token_treasure_chest_2m",
+                planted + time::Duration::days(365)
+            ),
+            "a non-plant trophy never blooms, however old"
+        );
+    }
+
+    #[test]
+    fn foreground_plant_stays_put_when_the_pet_moves() {
+        // The vine is Foreground, so its placement must NOT dodge the pet's
+        // silhouette halo — it stays anchored as the free-floating pet wanders past.
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let habitat = HabitatView {
+            earned_props: vec![earned(
+                "token_hanging_vine_25m",
+                HabitatPropKind::Trophy,
+                152,
+                0,
+            )],
+        };
+        let vine_cells = |halo: &[Rect]| {
+            let mut cells: Vec<(u16, u16, char)> = habitat_props_for(
+                &habitat,
+                &scene(),
+                halo,
+                Species::Blob,
+                "fixture-seed",
+                &ctx(now),
+            )
+            .into_iter()
+            .filter(|c| c.prop_id == HabitatPropId::new("token_hanging_vine_25m"))
+            .map(|c| (c.row, c.col, c.glyph))
+            .collect();
+            cells.sort();
+            cells
+        };
+        let pet_left = [Rect::new(6, 2, 8, 6)];
+        let pet_right = [Rect::new(24, 4, 8, 6)];
+        let a = vine_cells(&pet_left);
+        let b = vine_cells(&pet_right);
+        assert!(!a.is_empty(), "the vine should render");
+        assert_eq!(
+            a, b,
+            "a Foreground plant stays anchored regardless of pet position"
+        );
+    }
+
+    #[test]
+    fn prestige_props_have_own_sprites_targets_thresholds_and_colors() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let glyphs = |s: &[SpriteCell]| s.iter().map(|c| c.glyph).collect::<Vec<char>>();
+        let fallback = glyphs(trophy_sprite("not_a_real_prop", Species::Blob, false, now));
+        let cases = [
+            ("token_geode_50m", 50_000_000.0_f64),
+            ("token_bonsai_100m", 100_000_000.0),
+            ("token_constellation_250m", 250_000_000.0),
+            ("token_aurora_500m", 500_000_000.0),
+            ("token_moon_1b", 1_000_000_000.0),
+        ];
+        let mut colors = std::collections::HashSet::new();
+        for (id, threshold) in cases {
+            let sprite = trophy_sprite(id, Species::Blob, false, now);
+            assert!(!sprite.is_empty(), "{id} must render a sprite");
+            assert_ne!(
+                glyphs(sprite),
+                fallback,
+                "{id} must have its own sprite, not the fallback"
+            );
+            assert_eq!(
+                prop_effect_target_path(id).unwrap().as_str(),
+                format!("watch.prop.{id}.effect").as_str()
+            );
+            let spec = catalog_prop_by_str(id).unwrap();
+            assert_eq!(spec.lifetime_threshold, Some(threshold), "{id} threshold");
+            assert!(colors.insert(spec.color), "{id} color must be distinct");
+        }
+    }
+
+    #[test]
+    fn bloomed_plant_blossoms_are_pink_while_stems_stay_green() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let green = trophy_style(ColorCapability::Truecolor, "token_moss_tuft_250k");
+        assert_ne!(
+            green.fg,
+            Some(BLOSSOM_PINK),
+            "the stem color is not the blossom color"
+        );
+        let cells = render_sprite(
+            Position::new(2, 2),
+            trophy_sprite("token_moss_tuft_250k", Species::Blob, true, now),
+            Rect::new(0, 0, 40, 12),
+            &[],
+            green,
+            HabitatPetLayer::Foreground,
+            "token_moss_tuft_250k",
+            true,
+        );
+        let blossom = cells
+            .iter()
+            .find(|c| c.glyph == '*')
+            .expect("a bloomed moss has a blossom");
+        assert_eq!(blossom.style.fg, Some(BLOSSOM_PINK), "blossoms render pink");
+        let stem = cells
+            .iter()
+            .find(|c| c.glyph != '*')
+            .expect("a moss has stems");
+        assert_eq!(stem.style.fg, green.fg, "stems keep their green");
+
+        // A non-plant prop with '*' (the bonsai) is never bloomed, so its blossoms
+        // keep the prop's own color rather than the plant blossom-pink.
+        let bonsai_style = trophy_style(ColorCapability::Truecolor, "token_bonsai_100m");
+        let bonsai = render_sprite(
+            Position::new(2, 2),
+            trophy_sprite("token_bonsai_100m", Species::Blob, false, now),
+            Rect::new(0, 0, 40, 12),
+            &[],
+            bonsai_style,
+            HabitatPetLayer::Foreground,
+            "token_bonsai_100m",
+            false,
+        );
+        if let Some(star) = bonsai.iter().find(|c| c.glyph == '*') {
+            assert_eq!(
+                star.style.fg, bonsai_style.fg,
+                "bonsai blossoms keep the bonsai color"
+            );
+        }
+    }
+
+    #[test]
+    fn aurora_streaks_hold_still_while_only_the_top_twinkles() {
+        // Contract: the curtain streaks (dy>0) are identical across phases; only
+        // the crowning sparkles (dy==0) change.
+        let secs = datetime!(2026-05-11 12:00 UTC).unix_timestamp();
+        let at = |offset: i64| {
+            time::OffsetDateTime::from_unix_timestamp(secs - secs.rem_euclid(8) + offset).unwrap()
+        };
+        let rows = |s: &[SpriteCell], dy: i16| {
+            let mut r: Vec<(i16, char)> = s
+                .iter()
+                .filter(|c| c.dy == dy)
+                .map(|c| (c.dx, c.glyph))
+                .collect();
+            r.sort();
+            r
+        };
+        let a = trophy_sprite("token_aurora_500m", Species::Blob, false, at(0));
+        let b = trophy_sprite("token_aurora_500m", Species::Blob, false, at(4));
+        assert_eq!(rows(a, 1), rows(b, 1), "bright streaks hold still");
+        assert_eq!(rows(a, 2), rows(b, 2), "fade streaks hold still");
+        assert_ne!(rows(a, 0), rows(b, 0), "the top sparkles twinkle");
+    }
 }

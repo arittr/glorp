@@ -82,7 +82,9 @@ pub const WILT_RECOVERY_SPROUT: &str = "wilt_recovery_sprout";
 pub const FIRST_ENSEMBLE_DAY: &str = "first_ensemble_day";
 pub const RETURN_SPROUT: &str = "return_sprout";
 // Prestige ladder beyond 25M — grand, animated habitat pieces for long-running
-// pets, ranked above the event props so the grandest earned pieces always show.
+// pets. Ranked above the event props, but below the plant anchors (vine/moss/
+// planter): the plants always hold the top trophy slots, and the grandest earned
+// prestige pieces fill the remaining slots.
 pub const TOKEN_GEODE_50M: &str = "token_geode_50m";
 pub const TOKEN_BONSAI_100M: &str = "token_bonsai_100m";
 pub const TOKEN_CONSTELLATION_250M: &str = "token_constellation_250m";

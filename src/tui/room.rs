@@ -261,6 +261,13 @@ fn derive_biome(
     let recent_cutoff = now - Duration::hours(24);
 
     for prop in earned {
+        // Grander (higher-priority) props pull the biome harder, so the room
+        // flavor follows the standout pieces rather than the count of small ones.
+        //
+        // NOTE: display_priority is shared with trophy-display ordering
+        // (visible_trophy_ids), so retuning a prop's priority for *display* also
+        // shifts this biome weighting. Keep both in mind when changing it; a
+        // dedicated biome weight is the cleaner long-term split.
         let base = prop.display_priority as f32 / 100.0 + BASE_EARNED_PROP_WEIGHT;
         let recent = if prop.earned_at >= recent_cutoff {
             RECENT_EARNED_BONUS
@@ -1124,19 +1131,30 @@ mod tests {
 
     #[test]
     fn biome_uses_all_earned_props_not_visible_rotation_only() {
+        // Read priorities from the live catalog (not hardcoded) so this guard tracks
+        // production: display_priority feeds biome weighting, so the plant anchors
+        // (planter/moss at 148-150) make Botanical the primary biome here. If a future
+        // priority change shifts the biome, this test catches it instead of passing
+        // blind on stale numbers.
+        let live = |id: &str| {
+            earned(
+                id,
+                crate::game::habitat::catalog_prop_by_str(id)
+                    .unwrap()
+                    .display_priority,
+            )
+        };
         let vm = vm_with_props(vec![
-            earned(HEAVY_SESSION_PLANTER, 80),
-            earned(TOKEN_MOSS_TUFT_250K, 25),
-            earned(CODEX_SIGNAL_LAMP, 70),
-            earned(TOKEN_ORBIT_5M, 50),
-            earned(TOKEN_SHELL_100K, 20),
+            live(HEAVY_SESSION_PLANTER),
+            live(TOKEN_MOSS_TUFT_250K),
+            live(CODEX_SIGNAL_LAMP),
+            live(TOKEN_ORBIT_5M),
+            live(TOKEN_SHELL_100K),
         ]);
 
         let profile = derive_room_life_profile(&vm, datetime!(2026-06-11 10:00 UTC));
 
-        // Both CODEX_SIGNAL_LAMP and TOKEN_ORBIT_5M contribute Technical weight,
-        // so Technical edges out Botanical as the primary biome here.
-        assert_eq!(profile.biome.primary, RoomBiomeTag::Technical);
+        assert_eq!(profile.biome.primary, RoomBiomeTag::Botanical);
         assert!(profile.biome.secondary.is_some());
         assert!(
             profile
