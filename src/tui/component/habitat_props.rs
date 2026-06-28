@@ -1408,109 +1408,59 @@ fn trophy_sprite(
                 glyph: '┊',
             },
         ],
-        // 1B moon: orb waxes/wanes (◐↔◑) with a twinkling sparkle (·↔✦) beside it.
+        // 1B moon: a round moon with a star twinkling beside it.
         TOKEN_MOON_1B if phase < 4 => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
+                glyph: '◜',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '◝',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '◟',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◞',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
                 glyph: '·',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╭',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '─',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 0,
-                glyph: '╮',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '◖',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '◐',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 1,
-                glyph: '◗',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '╰',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '─',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 2,
-                glyph: '╯',
             },
         ],
         TOKEN_MOON_1B => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
+                glyph: '◜',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '◝',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '◟',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◞',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
                 glyph: '✦',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╭',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '─',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 0,
-                glyph: '╮',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '◖',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '◑',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 1,
-                glyph: '◗',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '╰',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '─',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 2,
-                glyph: '╯',
             },
         ],
         _ => &[

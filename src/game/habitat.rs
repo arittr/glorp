@@ -229,7 +229,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 140,
         lifetime_threshold: Some(1_000_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
-        color: (0xb4, 0xbc, 0xd0), // muted moon silver
+        color: (0x88, 0x94, 0xb0), // dusk moon silver
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
