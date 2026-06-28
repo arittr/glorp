@@ -261,14 +261,10 @@ fn derive_biome(
     let recent_cutoff = now - Duration::hours(24);
 
     for prop in earned {
-        // Grander (higher-priority) props pull the biome harder, so the room
-        // flavor follows the standout pieces rather than the count of small ones.
-        //
-        // NOTE: display_priority is shared with trophy-display ordering
-        // (visible_trophy_ids), so retuning a prop's priority for *display* also
-        // shifts this biome weighting. Keep both in mind when changing it; a
-        // dedicated biome weight is the cleaner long-term split.
-        let base = prop.display_priority as f32 / 100.0 + BASE_EARNED_PROP_WEIGHT;
+        // Standout pieces pull the room flavor harder than minor accents. The pull
+        // comes from biome_weight_for_prop — a source independent of display_priority,
+        // so tuning a prop's trophy-display rank never shifts the habitat's flavor.
+        let base = biome_weight_for_prop(prop.id.as_str()) + BASE_EARNED_PROP_WEIGHT;
         let recent = if prop.earned_at >= recent_cutoff {
             RECENT_EARNED_BONUS
         } else {
@@ -486,6 +482,33 @@ fn tags_for_prop(id: &str) -> &'static [RoomBiomeTag] {
             &[RoomBiomeTag::Artifact]
         }
         _ => &[],
+    }
+}
+
+/// How strongly an earned prop pulls the room/companion biome toward its tags.
+///
+/// Deliberately SEPARATE from display_priority (which orders trophy *display*):
+/// retuning a prop's display rank must never shift the habitat's flavor. Untagged
+/// props (e.g. the prestige ladder) never reach this — they carry no biome tags.
+fn biome_weight_for_prop(id: &str) -> f32 {
+    match id {
+        // Plants anchor the habitat's character.
+        TOKEN_HANGING_VINE_25M => 1.52,
+        TOKEN_MOSS_TUFT_250K => 1.50,
+        HEAVY_SESSION_PLANTER => 1.48,
+        WILT_RECOVERY_SPROUT => 0.90,
+        // Feature pieces pull moderately.
+        CODEX_SIGNAL_LAMP => 0.70,
+        TOKEN_LANTERN_10M => 0.60,
+        TOKEN_TREASURE_CHEST_2M => 0.55,
+        TOKEN_ORBIT_5M => 0.50,
+        TOKEN_FRIENDLY_CLOUD_750K => 0.45,
+        // Minor accents barely shift the vibe.
+        TOKEN_SHARD_1M => 0.40,
+        TOKEN_SPARK_500K => 0.30,
+        TOKEN_SHELL_100K => 0.20,
+        TOKEN_PEBBLE_25K => 0.10,
+        _ => 0.0,
     }
 }
 
@@ -1131,11 +1154,10 @@ mod tests {
 
     #[test]
     fn biome_uses_all_earned_props_not_visible_rotation_only() {
-        // Read priorities from the live catalog (not hardcoded) so this guard tracks
-        // production: display_priority feeds biome weighting, so the plant anchors
-        // (planter/moss at 148-150) make Botanical the primary biome here. If a future
-        // priority change shifts the biome, this test catches it instead of passing
-        // blind on stale numbers.
+        // Biome is sourced from biome_weight_for_prop (independent of
+        // display_priority), where the plant anchors outweigh codex/orbit/shell — so
+        // a plant habitat reads Botanical. Priorities here come from the live catalog
+        // only to give the identity ordering realistic values.
         let live = |id: &str| {
             earned(
                 id,

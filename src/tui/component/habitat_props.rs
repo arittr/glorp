@@ -96,7 +96,7 @@ pub fn habitat_prop_placements_for(
         let sprite = trophy_sprite(id, species, bloomed, now);
         let exclusions = exclusions_for_layer(layer, scene, &occupied, silhouette_halo);
         for anchor in trophy_anchor_candidates(id, scene.habitat, sprite) {
-            let rendered = render_sprite(
+            let mut rendered = render_sprite(
                 anchor,
                 sprite,
                 scene.habitat,
@@ -104,9 +104,11 @@ pub fn habitat_prop_placements_for(
                 trophy_style(ctx.color_capability, id),
                 layer,
                 id,
-                bloomed,
             );
             if !rendered.is_empty() {
+                if bloomed {
+                    recolor_blossoms(&mut rendered);
+                }
                 let bounds = bounds_for_cells(&rendered);
                 occupied.push(bounds);
                 placements.push(HabitatPropPlacement {
@@ -1526,7 +1528,6 @@ fn trophy_sprite(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_sprite(
     anchor: Position,
     sprite: &'static [SpriteCell],
@@ -1535,7 +1536,6 @@ fn render_sprite(
     style: Style,
     pet_layer: HabitatPetLayer,
     id: &str,
-    bloomed: bool,
 ) -> Vec<HabitatPropCell> {
     let mut cells = Vec::new();
     for cell in sprite {
@@ -1545,22 +1545,27 @@ fn render_sprite(
         if !habitat.contains(pos) || exclusions.iter().any(|rect| rect.contains(pos)) {
             return Vec::new();
         }
-        // Blossoms on a bloomed plant render pink; the green stems keep `style`.
-        let cell_style = if bloomed && cell.glyph == '*' && style.fg.is_some() {
-            Style::default().fg(BLOSSOM_PINK)
-        } else {
-            style
-        };
         cells.push(HabitatPropCell {
             prop_id: HabitatPropId::new(id),
             row: pos.y,
             col: pos.x,
             glyph: cell.glyph,
-            style: cell_style,
+            style,
             pet_layer,
         });
     }
     cells
+}
+
+/// Recolor a bloomed plant's blossom glyphs (`*`) pink, leaving the green stems
+/// (and any flat/uncolored cells) untouched. Kept out of `render_sprite` so that
+/// renderer stays a content-agnostic geometry+style emitter.
+fn recolor_blossoms(cells: &mut [HabitatPropCell]) {
+    for cell in cells {
+        if cell.glyph == '*' && cell.style.fg.is_some() {
+            cell.style = Style::default().fg(BLOSSOM_PINK);
+        }
+    }
 }
 
 fn offset_position(anchor: Position, dx: i16, dy: i16) -> Option<Position> {
@@ -2455,7 +2460,6 @@ mod tests {
             Style::default(),
             HabitatPetLayer::Background,
             "codex_signal_lamp",
-            false,
         );
 
         assert!(cells.is_empty());
@@ -2684,7 +2688,7 @@ mod tests {
     }
 
     #[test]
-    fn bloomed_plant_blossoms_are_pink_while_stems_stay_green() {
+    fn recolor_blossoms_pinks_flowers_but_leaves_stems_and_flat_cells() {
         let now = datetime!(2026-05-11 12:00 UTC);
         let green = trophy_style(ColorCapability::Truecolor, "token_moss_tuft_250k");
         assert_ne!(
@@ -2692,7 +2696,9 @@ mod tests {
             Some(BLOSSOM_PINK),
             "the stem color is not the blossom color"
         );
-        let cells = render_sprite(
+        // Render a bloomed moss (its sprite carries '*' blossoms + stems) in green,
+        // then apply the caller-side recolor the placement loop uses.
+        let mut cells = render_sprite(
             Position::new(2, 2),
             trophy_sprite("token_moss_tuft_250k", Species::Blob, true, now),
             Rect::new(0, 0, 40, 12),
@@ -2700,38 +2706,32 @@ mod tests {
             green,
             HabitatPetLayer::Foreground,
             "token_moss_tuft_250k",
-            true,
         );
-        let blossom = cells
-            .iter()
-            .find(|c| c.glyph == '*')
-            .expect("a bloomed moss has a blossom");
-        assert_eq!(blossom.style.fg, Some(BLOSSOM_PINK), "blossoms render pink");
-        let stem = cells
-            .iter()
-            .find(|c| c.glyph != '*')
-            .expect("a moss has stems");
-        assert_eq!(stem.style.fg, green.fg, "stems keep their green");
-
-        // A non-plant prop with '*' (the bonsai) is never bloomed, so its blossoms
-        // keep the prop's own color rather than the plant blossom-pink.
-        let bonsai_style = trophy_style(ColorCapability::Truecolor, "token_bonsai_100m");
-        let bonsai = render_sprite(
-            Position::new(2, 2),
-            trophy_sprite("token_bonsai_100m", Species::Blob, false, now),
-            Rect::new(0, 0, 40, 12),
-            &[],
-            bonsai_style,
-            HabitatPetLayer::Foreground,
-            "token_bonsai_100m",
-            false,
+        assert!(
+            cells.iter().any(|c| c.glyph == '*'),
+            "a bloomed moss has a blossom"
         );
-        if let Some(star) = bonsai.iter().find(|c| c.glyph == '*') {
-            assert_eq!(
-                star.style.fg, bonsai_style.fg,
-                "bonsai blossoms keep the bonsai color"
-            );
+        recolor_blossoms(&mut cells);
+        for cell in &cells {
+            if cell.glyph == '*' {
+                assert_eq!(cell.style.fg, Some(BLOSSOM_PINK), "blossoms render pink");
+            } else {
+                assert_eq!(cell.style.fg, green.fg, "stems keep their green");
+            }
         }
+
+        // The fg guard: a flat (uncolored) blossom is left alone, so flat-mode props
+        // never gain spurious color.
+        let mut flat = vec![HabitatPropCell {
+            prop_id: HabitatPropId::new("x"),
+            row: 0,
+            col: 0,
+            glyph: '*',
+            style: Style::default(),
+            pet_layer: HabitatPetLayer::Foreground,
+        }];
+        recolor_blossoms(&mut flat);
+        assert_eq!(flat[0].style.fg, None, "a flat blossom stays uncolored");
     }
 
     #[test]
