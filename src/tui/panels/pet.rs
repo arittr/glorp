@@ -1008,8 +1008,8 @@ pub(crate) mod tests {
             .filter(|g| g.row < tall.height - 1)
             .count();
 
-        // Normal: 8 (S4 base) + (728 - 200) / 60 = 8 + 8 = 16.
-        // Tall: 8 + (1820 - 200) / 60 = 8 + 27 = 35.
+        // Normal: 6 (S4 base) + (728 - 200) / 90 = 6 + 5 = 11.
+        // Tall: 6 + (1820 - 200) / 90 = 6 + 18 = 24.
         assert!(
             tall_sky_count > normal_sky_count + 10,
             "tall habitat should produce noticeably more sky glyphs; normal={normal_sky_count} tall={tall_sky_count}"

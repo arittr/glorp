@@ -1,7 +1,8 @@
 use crate::game::habitat::{
     catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone, CODEX_SIGNAL_LAMP,
-    HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_GEODE_50M, TOKEN_HANGING_VINE_25M,
-    TOKEN_LANTERN_10M, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M,
+    HEAVY_SESSION_PLANTER, TOKEN_AURORA_500M, TOKEN_BONSAI_100M, TOKEN_CONSTELLATION_250M,
+    TOKEN_FRIENDLY_CLOUD_750K, TOKEN_GEODE_50M, TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M,
+    TOKEN_MOON_1B, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M,
     TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
@@ -14,7 +15,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
 
-const MAX_TROPHIES: usize = 6;
+const MAX_TROPHIES: usize = 5;
 const MAX_ACCENTS: usize = 4;
 const ACCENT_ROTATION_SECS: i64 = 600;
 const ACCENT_CANDIDATES: u16 = 16;
@@ -91,7 +92,8 @@ pub fn habitat_prop_placements_for(
 
     for id in visible_trophy_ids(habitat) {
         let layer = prop_pet_layer(id);
-        let sprite = trophy_sprite(id, species, now);
+        let bloomed = prop_bloomed(habitat, id, now);
+        let sprite = trophy_sprite(id, species, bloomed, now);
         let exclusions = exclusions_for_layer(layer, scene, &occupied, silhouette_halo);
         for anchor in trophy_anchor_candidates(id, scene.habitat, sprite) {
             let rendered = render_sprite(
@@ -102,6 +104,7 @@ pub fn habitat_prop_placements_for(
                 trophy_style(ctx.color_capability, id),
                 layer,
                 id,
+                bloomed,
             );
             if !rendered.is_empty() {
                 let bounds = bounds_for_cells(&rendered);
@@ -162,6 +165,12 @@ pub fn prop_effect_target_path(id: &str) -> Option<TargetPath> {
         TOKEN_LANTERN_10M => Some(TargetPath::new("watch.prop.token_lantern_10m.effect")),
         TOKEN_HANGING_VINE_25M => Some(TargetPath::new("watch.prop.token_hanging_vine_25m.effect")),
         TOKEN_GEODE_50M => Some(TargetPath::new("watch.prop.token_geode_50m.effect")),
+        TOKEN_BONSAI_100M => Some(TargetPath::new("watch.prop.token_bonsai_100m.effect")),
+        TOKEN_CONSTELLATION_250M => Some(TargetPath::new(
+            "watch.prop.token_constellation_250m.effect",
+        )),
+        TOKEN_AURORA_500M => Some(TargetPath::new("watch.prop.token_aurora_500m.effect")),
+        TOKEN_MOON_1B => Some(TargetPath::new("watch.prop.token_moon_1b.effect")),
         CODEX_SIGNAL_LAMP => Some(TargetPath::new("watch.prop.codex_signal_lamp.effect")),
         HEAVY_SESSION_PLANTER => Some(TargetPath::new("watch.prop.heavy_session_planter.effect")),
         WILT_RECOVERY_SPROUT => Some(TargetPath::new("watch.prop.wilt_recovery_sprout.effect")),
@@ -173,6 +182,29 @@ fn prop_pet_layer(id: &str) -> HabitatPetLayer {
     catalog_prop_by_str(id)
         .map(|spec| spec.pet_layer)
         .unwrap_or(HabitatPetLayer::Background)
+}
+
+/// Days a plant must live in the habitat before it flowers.
+const PLANT_BLOOM_DAYS: i64 = 3;
+
+/// Living plants that mature and flower with age (unlike static trophies such as
+/// the geode or chest, which look the same forever).
+fn is_plant(id: &str) -> bool {
+    matches!(
+        id,
+        "token_moss_tuft_250k" | "token_hanging_vine_25m" | "heavy_session_planter"
+    )
+}
+
+/// A plant blooms once it has been in the habitat long enough — so the tank grows
+/// and flowers over time alongside the pet.
+fn prop_bloomed(habitat: &HabitatView, id: &str, now: time::OffsetDateTime) -> bool {
+    is_plant(id)
+        && habitat
+            .earned_props
+            .iter()
+            .find(|p| p.id.as_str() == id)
+            .is_some_and(|p| (now - p.earned_at).whole_days() >= PLANT_BLOOM_DAYS)
 }
 
 /// Drops the pet's bounding rect from the inherited `occupied` set and adds
@@ -388,9 +420,203 @@ fn push_anchor_candidate(
     }
 }
 
-fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'static [SpriteCell] {
+fn trophy_sprite(
+    id: &str,
+    species: Species,
+    bloomed: bool,
+    now: time::OffsetDateTime,
+) -> &'static [SpriteCell] {
     let phase = now.unix_timestamp().rem_euclid(8);
     match id {
+        // Bloomed plants flower once matured in the tank (rosy tint from
+        // trophy_color); the blossoms (*) twinkle between phases.
+        "token_moss_tuft_250k" if bloomed && phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▂',
+            },
+        ],
+        "token_moss_tuft_250k" if bloomed => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▂',
+            },
+        ],
+        "token_hanging_vine_25m" if bloomed && phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╽',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '╲',
+            },
+        ],
+        "token_hanging_vine_25m" if bloomed => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╽',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '╱',
+            },
+        ],
+        "heavy_session_planter" if bloomed && phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '◌',
+            },
+        ],
+        "heavy_session_planter" if bloomed => &[
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '◌',
+            },
+        ],
         "token_moss_tuft_250k" if phase < 4 => &[
             SpriteCell {
                 dx: 0,
@@ -894,6 +1120,397 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
                 glyph: '◢',
             },
         ],
+        // 100M bonsai: blossoms (*) rustle across the canopy (▓) over a trunk + pot.
+        TOKEN_BONSAI_100M if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '▂',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '▂',
+            },
+        ],
+        TOKEN_BONSAI_100M => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '▓',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╲',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '┃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╱',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '▂',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '▃',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '▂',
+            },
+        ],
+        // 250M constellation: the bright stars (✦) rotate corners↔edges, twinkling.
+        TOKEN_CONSTELLATION_250M if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '✦',
+            },
+        ],
+        TOKEN_CONSTELLATION_250M => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '*',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '·',
+            },
+        ],
+        // 500M aurora: a vertical light-curtain hanging from the ceiling. The
+        // streaks hold still (no flicker) — only the crowning sparkles twinkle.
+        TOKEN_AURORA_500M if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 2,
+                glyph: '┊',
+            },
+        ],
+        TOKEN_AURORA_500M => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 1,
+                glyph: '╿',
+            },
+            SpriteCell {
+                dx: 0,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '┊',
+            },
+            SpriteCell {
+                dx: 4,
+                dy: 2,
+                glyph: '┊',
+            },
+        ],
+        // 1B moon: orb waxes/wanes (◐↔◑) with a twinkling sparkle (·↔✦) beside it.
+        TOKEN_MOON_1B if phase < 4 => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '·',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╭',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
+                glyph: '╮',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◖',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '◐',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 1,
+                glyph: '◗',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '╰',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 2,
+                glyph: '╯',
+            },
+        ],
+        TOKEN_MOON_1B => &[
+            SpriteCell {
+                dx: 0,
+                dy: 0,
+                glyph: '✦',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 0,
+                glyph: '╭',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 0,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 0,
+                glyph: '╮',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 1,
+                glyph: '◖',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 1,
+                glyph: '◑',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 1,
+                glyph: '◗',
+            },
+            SpriteCell {
+                dx: 1,
+                dy: 2,
+                glyph: '╰',
+            },
+            SpriteCell {
+                dx: 2,
+                dy: 2,
+                glyph: '─',
+            },
+            SpriteCell {
+                dx: 3,
+                dy: 2,
+                glyph: '╯',
+            },
+        ],
         _ => &[
             SpriteCell {
                 dx: 0,
@@ -909,6 +1526,7 @@ fn trophy_sprite(id: &str, species: Species, now: time::OffsetDateTime) -> &'sta
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_sprite(
     anchor: Position,
     sprite: &'static [SpriteCell],
@@ -917,6 +1535,7 @@ fn render_sprite(
     style: Style,
     pet_layer: HabitatPetLayer,
     id: &str,
+    bloomed: bool,
 ) -> Vec<HabitatPropCell> {
     let mut cells = Vec::new();
     for cell in sprite {
@@ -926,12 +1545,18 @@ fn render_sprite(
         if !habitat.contains(pos) || exclusions.iter().any(|rect| rect.contains(pos)) {
             return Vec::new();
         }
+        // Blossoms on a bloomed plant render pink; the green stems keep `style`.
+        let cell_style = if bloomed && cell.glyph == '*' && style.fg.is_some() {
+            Style::default().fg(BLOSSOM_PINK)
+        } else {
+            style
+        };
         cells.push(HabitatPropCell {
             prop_id: HabitatPropId::new(id),
             row: pos.y,
             col: pos.x,
             glyph: cell.glyph,
-            style,
+            style: cell_style,
             pet_layer,
         });
     }
@@ -1171,6 +1796,10 @@ fn trophy_style(color_capability: ColorCapability, id: &str) -> Style {
     }
 }
 
+/// Blossom color for a bloomed plant's flower glyphs — the stems keep their green;
+/// only the `*` blossoms turn pink, so the plant reads as a green plant in flower.
+const BLOSSOM_PINK: Color = Color::Rgb(0xe8, 0x84, 0xbc);
+
 fn accent_style(id: &str) -> Style {
     Style::default().fg(prop_color(id))
 }
@@ -1375,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn trophy_selection_caps_at_six_by_priority_then_age() {
+    fn trophy_selection_caps_at_five_by_priority_then_age() {
         let habitat = HabitatView {
             earned_props: vec![
                 earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
@@ -1398,7 +2027,6 @@ mod tests {
                 "token_treasure_chest_2m",
                 "extra_trophy_for_cap_test",
                 "wilt_recovery_sprout",
-                "heavy_session_planter",
             ]
         );
     }
@@ -1773,8 +2401,8 @@ mod tests {
         let now = time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
 
         assert_ne!(
-            trophy_sprite(CODEX_SIGNAL_LAMP, Species::Glitch, now),
-            trophy_sprite(CODEX_SIGNAL_LAMP, Species::Crystal, now)
+            trophy_sprite(CODEX_SIGNAL_LAMP, Species::Glitch, false, now),
+            trophy_sprite(CODEX_SIGNAL_LAMP, Species::Crystal, false, now)
         );
         assert_eq!(
             prop_effect_target_path(CODEX_SIGNAL_LAMP).unwrap().as_str(),
@@ -1819,6 +2447,7 @@ mod tests {
             trophy_sprite(
                 "codex_signal_lamp",
                 Species::Fuzz,
+                false,
                 datetime!(2026-05-11 12:00 UTC),
             ),
             Rect::new(0, 0, 8, 4),
@@ -1826,6 +2455,7 @@ mod tests {
             Style::default(),
             HabitatPetLayer::Background,
             "codex_signal_lamp",
+            false,
         );
 
         assert!(cells.is_empty());
@@ -1836,19 +2466,19 @@ mod tests {
         let first_time = datetime!(2026-05-11 12:00:00 UTC);
         let second_time = first_time + time::Duration::seconds(4);
 
-        let planter_a = trophy_sprite("heavy_session_planter", Species::Fuzz, first_time)
+        let planter_a = trophy_sprite("heavy_session_planter", Species::Fuzz, false, first_time)
             .iter()
             .map(|cell| cell.glyph)
             .collect::<Vec<_>>();
-        let planter_b = trophy_sprite("heavy_session_planter", Species::Fuzz, second_time)
+        let planter_b = trophy_sprite("heavy_session_planter", Species::Fuzz, false, second_time)
             .iter()
             .map(|cell| cell.glyph)
             .collect::<Vec<_>>();
-        let sprout_a = trophy_sprite("wilt_recovery_sprout", Species::Fuzz, first_time)
+        let sprout_a = trophy_sprite("wilt_recovery_sprout", Species::Fuzz, false, first_time)
             .iter()
             .map(|cell| cell.glyph)
             .collect::<Vec<_>>();
-        let sprout_b = trophy_sprite("wilt_recovery_sprout", Species::Fuzz, second_time)
+        let sprout_b = trophy_sprite("wilt_recovery_sprout", Species::Fuzz, false, second_time)
             .iter()
             .map(|cell| cell.glyph)
             .collect::<Vec<_>>();
@@ -1935,5 +2565,196 @@ mod tests {
                 .flat_map(|placement| placement.cells.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn plants_bloom_only_after_three_days() {
+        let planted = datetime!(2026-05-11 12:00 UTC);
+        let moss = HabitatView {
+            earned_props: vec![earned(
+                "token_moss_tuft_250k",
+                HabitatPropKind::Trophy,
+                150,
+                0,
+            )],
+        };
+        assert!(
+            !prop_bloomed(
+                &moss,
+                "token_moss_tuft_250k",
+                planted + time::Duration::days(2)
+            ),
+            "a plant younger than 3 days has not bloomed"
+        );
+        assert!(
+            prop_bloomed(
+                &moss,
+                "token_moss_tuft_250k",
+                planted + time::Duration::days(3)
+            ),
+            "a plant blooms once it reaches 3 days"
+        );
+        let chest = HabitatView {
+            earned_props: vec![earned(
+                "token_treasure_chest_2m",
+                HabitatPropKind::Trophy,
+                55,
+                0,
+            )],
+        };
+        assert!(
+            !prop_bloomed(
+                &chest,
+                "token_treasure_chest_2m",
+                planted + time::Duration::days(365)
+            ),
+            "a non-plant trophy never blooms, however old"
+        );
+    }
+
+    #[test]
+    fn foreground_plant_stays_put_when_the_pet_moves() {
+        // The vine is Foreground, so its placement must NOT dodge the pet's
+        // silhouette halo — it stays anchored as the free-floating pet wanders past.
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let habitat = HabitatView {
+            earned_props: vec![earned(
+                "token_hanging_vine_25m",
+                HabitatPropKind::Trophy,
+                152,
+                0,
+            )],
+        };
+        let vine_cells = |halo: &[Rect]| {
+            let mut cells: Vec<(u16, u16, char)> = habitat_props_for(
+                &habitat,
+                &scene(),
+                halo,
+                Species::Blob,
+                "fixture-seed",
+                &ctx(now),
+            )
+            .into_iter()
+            .filter(|c| c.prop_id == HabitatPropId::new("token_hanging_vine_25m"))
+            .map(|c| (c.row, c.col, c.glyph))
+            .collect();
+            cells.sort();
+            cells
+        };
+        let pet_left = [Rect::new(6, 2, 8, 6)];
+        let pet_right = [Rect::new(24, 4, 8, 6)];
+        let a = vine_cells(&pet_left);
+        let b = vine_cells(&pet_right);
+        assert!(!a.is_empty(), "the vine should render");
+        assert_eq!(
+            a, b,
+            "a Foreground plant stays anchored regardless of pet position"
+        );
+    }
+
+    #[test]
+    fn prestige_props_have_own_sprites_targets_thresholds_and_colors() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let glyphs = |s: &[SpriteCell]| s.iter().map(|c| c.glyph).collect::<Vec<char>>();
+        let fallback = glyphs(trophy_sprite("not_a_real_prop", Species::Blob, false, now));
+        let cases = [
+            ("token_geode_50m", 50_000_000.0_f64),
+            ("token_bonsai_100m", 100_000_000.0),
+            ("token_constellation_250m", 250_000_000.0),
+            ("token_aurora_500m", 500_000_000.0),
+            ("token_moon_1b", 1_000_000_000.0),
+        ];
+        let mut colors = std::collections::HashSet::new();
+        for (id, threshold) in cases {
+            let sprite = trophy_sprite(id, Species::Blob, false, now);
+            assert!(!sprite.is_empty(), "{id} must render a sprite");
+            assert_ne!(
+                glyphs(sprite),
+                fallback,
+                "{id} must have its own sprite, not the fallback"
+            );
+            assert_eq!(
+                prop_effect_target_path(id).unwrap().as_str(),
+                format!("watch.prop.{id}.effect").as_str()
+            );
+            let spec = catalog_prop_by_str(id).unwrap();
+            assert_eq!(spec.lifetime_threshold, Some(threshold), "{id} threshold");
+            assert!(colors.insert(spec.color), "{id} color must be distinct");
+        }
+    }
+
+    #[test]
+    fn bloomed_plant_blossoms_are_pink_while_stems_stay_green() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let green = trophy_style(ColorCapability::Truecolor, "token_moss_tuft_250k");
+        assert_ne!(
+            green.fg,
+            Some(BLOSSOM_PINK),
+            "the stem color is not the blossom color"
+        );
+        let cells = render_sprite(
+            Position::new(2, 2),
+            trophy_sprite("token_moss_tuft_250k", Species::Blob, true, now),
+            Rect::new(0, 0, 40, 12),
+            &[],
+            green,
+            HabitatPetLayer::Foreground,
+            "token_moss_tuft_250k",
+            true,
+        );
+        let blossom = cells
+            .iter()
+            .find(|c| c.glyph == '*')
+            .expect("a bloomed moss has a blossom");
+        assert_eq!(blossom.style.fg, Some(BLOSSOM_PINK), "blossoms render pink");
+        let stem = cells
+            .iter()
+            .find(|c| c.glyph != '*')
+            .expect("a moss has stems");
+        assert_eq!(stem.style.fg, green.fg, "stems keep their green");
+
+        // A non-plant prop with '*' (the bonsai) is never bloomed, so its blossoms
+        // keep the prop's own color rather than the plant blossom-pink.
+        let bonsai_style = trophy_style(ColorCapability::Truecolor, "token_bonsai_100m");
+        let bonsai = render_sprite(
+            Position::new(2, 2),
+            trophy_sprite("token_bonsai_100m", Species::Blob, false, now),
+            Rect::new(0, 0, 40, 12),
+            &[],
+            bonsai_style,
+            HabitatPetLayer::Foreground,
+            "token_bonsai_100m",
+            false,
+        );
+        if let Some(star) = bonsai.iter().find(|c| c.glyph == '*') {
+            assert_eq!(
+                star.style.fg, bonsai_style.fg,
+                "bonsai blossoms keep the bonsai color"
+            );
+        }
+    }
+
+    #[test]
+    fn aurora_streaks_hold_still_while_only_the_top_twinkles() {
+        // Contract: the curtain streaks (dy>0) are identical across phases; only
+        // the crowning sparkles (dy==0) change.
+        let secs = datetime!(2026-05-11 12:00 UTC).unix_timestamp();
+        let at = |offset: i64| {
+            time::OffsetDateTime::from_unix_timestamp(secs - secs.rem_euclid(8) + offset).unwrap()
+        };
+        let rows = |s: &[SpriteCell], dy: i16| {
+            let mut r: Vec<(i16, char)> = s
+                .iter()
+                .filter(|c| c.dy == dy)
+                .map(|c| (c.dx, c.glyph))
+                .collect();
+            r.sort();
+            r
+        };
+        let a = trophy_sprite("token_aurora_500m", Species::Blob, false, at(0));
+        let b = trophy_sprite("token_aurora_500m", Species::Blob, false, at(4));
+        assert_eq!(rows(a, 1), rows(b, 1), "bright streaks hold still");
+        assert_eq!(rows(a, 2), rows(b, 2), "fade streaks hold still");
+        assert_ne!(rows(a, 0), rows(b, 0), "the top sparkles twinkle");
     }
 }

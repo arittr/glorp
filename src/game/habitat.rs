@@ -81,8 +81,15 @@ pub const HEAVY_SESSION_PLANTER: &str = "heavy_session_planter";
 pub const WILT_RECOVERY_SPROUT: &str = "wilt_recovery_sprout";
 pub const FIRST_ENSEMBLE_DAY: &str = "first_ensemble_day";
 pub const RETURN_SPROUT: &str = "return_sprout";
-// Prestige ladder beyond 25M — grand habitat pieces for long-running pets.
+// Prestige ladder beyond 25M — grand, animated habitat pieces for long-running
+// pets. Ranked above the event props, but below the plant anchors (vine/moss/
+// planter): the plants always hold the top trophy slots, and the grandest earned
+// prestige pieces fill the remaining slots.
 pub const TOKEN_GEODE_50M: &str = "token_geode_50m";
+pub const TOKEN_BONSAI_100M: &str = "token_bonsai_100m";
+pub const TOKEN_CONSTELLATION_250M: &str = "token_constellation_250m";
+pub const TOKEN_AURORA_500M: &str = "token_aurora_500m";
+pub const TOKEN_MOON_1B: &str = "token_moon_1b";
 
 pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
@@ -111,9 +118,9 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: TOKEN_MOSS_TUFT_250K,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::FloorMid,
-        display_priority: 25,
+        display_priority: 150,
         lifetime_threshold: Some(250_000.0),
-        pet_layer: HabitatPetLayer::Behind,
+        pet_layer: HabitatPetLayer::Foreground,
         color: (0x6f, 0xb0, 0x60), // moss green
     },
     HabitatPropSpec {
@@ -174,19 +181,55 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: TOKEN_HANGING_VINE_25M,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::Ceiling,
-        display_priority: 65,
+        display_priority: 152, // vine — green plants anchor the tank
         lifetime_threshold: Some(25_000_000.0),
-        pet_layer: HabitatPetLayer::Behind,
+        pet_layer: HabitatPetLayer::Foreground,
         color: (0x7a, 0xb8, 0x80), // leafy green
     },
     HabitatPropSpec {
         id: TOKEN_GEODE_50M,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::WallLeft,
-        display_priority: 67,
+        display_priority: 100,
         lifetime_threshold: Some(50_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0x9c, 0x5c, 0xd0), // amethyst geode
+    },
+    HabitatPropSpec {
+        id: TOKEN_BONSAI_100M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::FloorRight,
+        display_priority: 110,
+        lifetime_threshold: Some(100_000_000.0),
+        pet_layer: HabitatPetLayer::Behind,
+        color: (0xe8, 0x9c, 0xc0), // cherry blossom
+    },
+    HabitatPropSpec {
+        id: TOKEN_CONSTELLATION_250M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::AirMid,
+        display_priority: 120,
+        lifetime_threshold: Some(250_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
+        color: (0xf0, 0xe4, 0x9c), // starlight gold
+    },
+    HabitatPropSpec {
+        id: TOKEN_AURORA_500M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::Ceiling,
+        display_priority: 130,
+        lifetime_threshold: Some(500_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
+        color: (0xc0, 0x88, 0xe0), // aurora violet
+    },
+    HabitatPropSpec {
+        id: TOKEN_MOON_1B,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::AirRight,
+        display_priority: 140,
+        lifetime_threshold: Some(1_000_000_000.0),
+        pet_layer: HabitatPetLayer::Background,
+        color: (0xe0, 0xe4, 0xf0), // moonlight silver
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
@@ -201,9 +244,9 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: HEAVY_SESSION_PLANTER,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::FloorRight,
-        display_priority: 80,
+        display_priority: 148,
         lifetime_threshold: None,
-        pet_layer: HabitatPetLayer::Behind,
+        pet_layer: HabitatPetLayer::Foreground,
         color: (0x6f, 0xb0, 0x60), // potted foliage
     },
     HabitatPropSpec {
@@ -479,15 +522,9 @@ mod tests {
     }
 
     #[test]
-    fn cloud_and_vine_are_behind_pet_layer() {
+    fn cloud_is_behind_pet_layer() {
         assert_eq!(
             catalog_prop_by_str(TOKEN_FRIENDLY_CLOUD_750K)
-                .unwrap()
-                .pet_layer,
-            HabitatPetLayer::Behind
-        );
-        assert_eq!(
-            catalog_prop_by_str(TOKEN_HANGING_VINE_25M)
                 .unwrap()
                 .pet_layer,
             HabitatPetLayer::Behind
@@ -495,16 +532,32 @@ mod tests {
     }
 
     #[test]
+    fn flowering_plants_are_foreground_layer() {
+        // The flowering plants render in FRONT of the pet at a FIXED anchor, so
+        // the player can watch them grow and bloom. Foreground (unlike Background)
+        // does not dodge the pet's silhouette, so the plants stay put instead of
+        // chasing the free-floating pet around the tank.
+        for id in [
+            TOKEN_MOSS_TUFT_250K,
+            TOKEN_HANGING_VINE_25M,
+            HEAVY_SESSION_PLANTER,
+        ] {
+            assert_eq!(
+                catalog_prop_by_str(id).unwrap().pet_layer,
+                HabitatPetLayer::Foreground,
+                "{id} is a visible plant; should be Foreground so it stays put + visible"
+            );
+        }
+    }
+
+    #[test]
     fn floor_props_are_behind_pet_layer() {
-        // Floor-row props share the pet's walking row. They should render
-        // behind the pet so the pet visually occludes them when it wanders
-        // past, rather than being shoved aside by the silhouette halo.
+        // Non-plant floor-row props still render behind the pet so it occludes
+        // them when it wanders past (the plants moved to Background — see above).
         for id in [
             TOKEN_PEBBLE_25K,
             TOKEN_SHELL_100K,
-            TOKEN_MOSS_TUFT_250K,
             TOKEN_TREASURE_CHEST_2M,
-            HEAVY_SESSION_PLANTER,
             WILT_RECOVERY_SPROUT,
         ] {
             assert_eq!(
