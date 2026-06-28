@@ -139,7 +139,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 45,
         lifetime_threshold: Some(750_000.0),
         pet_layer: HabitatPetLayer::Behind,
-        color: (0xe8, 0xed, 0xf2), // soft cloud white
+        color: (0x9c, 0xac, 0xc0), // overcast blue-grey
     },
     HabitatPropSpec {
         id: TOKEN_SHARD_1M,
@@ -219,7 +219,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::Ceiling,
         display_priority: 130,
         lifetime_threshold: Some(500_000_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
         color: (0xc0, 0x88, 0xe0), // aurora violet
     },
     HabitatPropSpec {
@@ -228,8 +228,8 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::AirRight,
         display_priority: 140,
         lifetime_threshold: Some(1_000_000_000.0),
-        pet_layer: HabitatPetLayer::Background,
-        color: (0xe0, 0xe4, 0xf0), // moonlight silver
+        pet_layer: HabitatPetLayer::Behind,
+        color: (0xb4, 0xbc, 0xd0), // muted moon silver
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
