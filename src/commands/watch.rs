@@ -138,6 +138,7 @@ pub(crate) fn build_watch_view_model_at(
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
             work_accent: work_accent_for_profile(&life_profile),
+            feed_reaction: false,
         },
     );
 
@@ -515,6 +516,7 @@ pub fn rerender_pet_for_view_model(
     vm: &mut WatchViewModel,
     tick: u64,
     hold_eyes_closed: bool,
+    now: time::OffsetDateTime,
 ) -> Result<()> {
     // Eye color rides mood at the same cadence as the eye glyph (expression_for),
     // overwriting only the eye role. The ~10s worker palette rebuild stays
@@ -540,6 +542,8 @@ pub fn rerender_pet_for_view_model(
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
             work_accent: work_accent_for_profile(&vm.life_profile),
+            feed_reaction: crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now)
+                .is_some(),
         },
     );
     vm.pet_art = rendered.lines;
@@ -574,6 +578,7 @@ fn apply_dev_pet_species_override(
         vm,
         now.unix_timestamp().max(0) as u64,
         vm.day_context.asleep,
+        now,
     )
 }
 
@@ -1560,11 +1565,13 @@ mod tests {
         let mut rested_blinks = 0;
         let mut tired_blinks = 0;
         for tick in 0..1500_u64 {
-            rerender_pet_for_view_model(&mut rested, tick, false).unwrap();
+            rerender_pet_for_view_model(&mut rested, tick, false, time::OffsetDateTime::UNIX_EPOCH)
+                .unwrap();
             if rested.pet_art.join("\n").contains(closed) {
                 rested_blinks += 1;
             }
-            rerender_pet_for_view_model(&mut tired, tick, false).unwrap();
+            rerender_pet_for_view_model(&mut tired, tick, false, time::OffsetDateTime::UNIX_EPOCH)
+                .unwrap();
             if tired.pet_art.join("\n").contains(closed) {
                 tired_blinks += 1;
             }
@@ -1712,7 +1719,7 @@ mod tests {
         let mut vm = WatchViewModel::fixture();
 
         vm.pet_render.mood = Mood::Sleepy;
-        rerender_pet_for_view_model(&mut vm, 1, false).unwrap();
+        rerender_pet_for_view_model(&mut vm, 1, false, time::OffsetDateTime::UNIX_EPOCH).unwrap();
         assert_eq!(
             vm.pet_palette.eye,
             eye_color_for_mood(Mood::Sleepy),
@@ -1720,7 +1727,7 @@ mod tests {
         );
 
         vm.pet_render.mood = Mood::Ecstatic;
-        rerender_pet_for_view_model(&mut vm, 2, false).unwrap();
+        rerender_pet_for_view_model(&mut vm, 2, false, time::OffsetDateTime::UNIX_EPOCH).unwrap();
         assert_eq!(
             vm.pet_palette.eye,
             eye_color_for_mood(Mood::Ecstatic),

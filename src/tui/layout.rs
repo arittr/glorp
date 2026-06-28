@@ -495,6 +495,7 @@ mod render_compact_tests {
                 blink_slowdown: 0,
                 soft_eyes: false,
                 work_accent: crate::pet::render::work_accent_for_profile(&vm.life_profile),
+                feed_reaction: false,
             },
         );
         vm.pet_art = rendered.lines;
