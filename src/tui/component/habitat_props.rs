@@ -1408,31 +1408,21 @@ fn trophy_sprite(
                 glyph: '┊',
             },
         ],
-        // 1B moon: a round moon with a star twinkling beside it.
+        // 1B moon: a half-lit moon with stars twinkling beside it.
         TOKEN_MOON_1B if phase < 4 => &[
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '◜',
+                glyph: '◑',
             },
             SpriteCell {
-                dx: 1,
+                dx: 2,
                 dy: 0,
-                glyph: '◝',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◟',
+                glyph: '✦',
             },
             SpriteCell {
                 dx: 1,
                 dy: 1,
-                glyph: '◞',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 0,
                 glyph: '·',
             },
         ],
@@ -1440,26 +1430,16 @@ fn trophy_sprite(
             SpriteCell {
                 dx: 0,
                 dy: 0,
-                glyph: '◜',
+                glyph: '◑',
             },
             SpriteCell {
-                dx: 1,
+                dx: 2,
                 dy: 0,
-                glyph: '◝',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◟',
+                glyph: '·',
             },
             SpriteCell {
                 dx: 1,
                 dy: 1,
-                glyph: '◞',
-            },
-            SpriteCell {
-                dx: 3,
-                dy: 0,
                 glyph: '✦',
             },
         ],
