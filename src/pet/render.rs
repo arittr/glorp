@@ -242,25 +242,27 @@ fn close_eyes(eyes: &str, species: Species) -> String {
     format!("{c}{}{c}", chars[1])
 }
 
-/// Idle "look around": a calm pet occasionally drifts its gaze left or right for a
-/// beat, then back — extra life beyond the blink. Deterministic per pet + tick so
-/// renders stay reproducible. Returns `None` outside a glance window.
-fn idle_glance_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'static str> {
-    const GLANCE_PERIOD: u64 = 32; // ~8s between glances at 250ms/tick
-    const GLANCE_HOLD: u64 = 4; // ~1s holding the glance
+/// Idle gestures: a calm pet occasionally breaks idle with a small beat — a glance
+/// left or right, or a wink — then settles. Deterministic per pet + tick so renders
+/// stay reproducible. Returns `None` outside a gesture window. The vocabulary is
+/// kept distinct from the mood faces so a gesture reads as behavior, not a mood.
+fn idle_gesture_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'static str> {
+    const GESTURE_PERIOD: u64 = 32; // ~8s between gestures at 250ms/tick
+    const GESTURE_HOLD: u64 = 4; // ~1s holding the gesture
+    const GESTURES: [&str; 4] = ["<.<", ">.>", "^.-", "-.^"];
     let seed = u64::from(pet.animation_phase.blink)
         .wrapping_mul(31)
         .wrapping_add(17);
     let t = frame.tick.wrapping_add(seed);
-    // The glance sits in the middle of its window, clear of the blink (window start).
-    let pos = t % GLANCE_PERIOD;
-    let start = GLANCE_PERIOD / 2;
-    if pos < start || pos >= start + GLANCE_HOLD {
+    // The gesture sits in the middle of its window, clear of the blink (window start).
+    let pos = t % GESTURE_PERIOD;
+    let start = GESTURE_PERIOD / 2;
+    if pos < start || pos >= start + GESTURE_HOLD {
         return None;
     }
-    let window = t / GLANCE_PERIOD;
+    let window = t / GESTURE_PERIOD;
     let h = (window ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
-    Some(if h & 1 == 0 { ">.>" } else { "<.<" })
+    Some(GESTURES[(h % GESTURES.len() as u64) as usize])
 }
 
 struct Expression {
@@ -370,11 +372,11 @@ fn expression_for(
             }
         }
     }
-    // Idle glance: a calm, non-droopy pet occasionally looks around (no real work
-    // or sleepy signal is overriding the eyes).
+    // Idle gesture: a calm, non-droopy pet occasionally breaks idle with a small
+    // beat — a glance or a wink — when no real work or sleepy signal owns the eyes.
     if !overridden && !matches!(mood, Mood::Sad | Mood::Sleepy | Mood::Wilted) {
-        if let Some(glance) = idle_glance_eyes(pet, frame) {
-            expr.eyes = glance.to_string();
+        if let Some(gesture) = idle_gesture_eyes(pet, frame) {
+            expr.eyes = gesture.to_string();
         }
     }
     expr
@@ -1002,6 +1004,33 @@ mod tests {
         assert!(
             !sleeping.contains(&ecstatic_eyes),
             "an asleep pet should not perk up from feeding, got:\n{sleeping}"
+        );
+    }
+
+    #[test]
+    fn idle_gaze_rotates_through_varied_gestures_including_a_wink() {
+        let pet = generate_pet("idle-variety-seed");
+        let mut seen = std::collections::HashSet::new();
+        for tick in 0..4000u64 {
+            let frame = AnimationFrame {
+                tick,
+                ..AnimationFrame::default()
+            };
+            if let Some(g) = idle_gesture_eyes(&pet, frame) {
+                seen.insert(g);
+            }
+        }
+        assert!(
+            seen.len() >= 3,
+            "idle gaze should rotate through varied gestures, saw: {seen:?}"
+        );
+        assert!(
+            seen.contains("<.<") || seen.contains(">.>"),
+            "keeps the look-around glances, saw: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|g| g.contains('^') && g.contains('-')),
+            "includes a wink, saw: {seen:?}"
         );
     }
 
