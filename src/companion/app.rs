@@ -332,7 +332,7 @@ fn advance_companion_animation(
     let prev_pet_art = vm.pet_art.clone();
     let prev_pet_spans = vm.pet_spans.clone();
     let prev_breath_offset_y = vm.breath_offset_y;
-    rerender_pet_for_view_model(vm, frame, vm.day_context.asleep)?;
+    rerender_pet_for_view_model(vm, frame, vm.day_context.asleep, now)?;
     let species = vm.pet_render.generated_species;
     let rhythm = crate::pet::animator::breath_rhythm_for_day(&vm.day_context);
     vm.breath_offset_y =

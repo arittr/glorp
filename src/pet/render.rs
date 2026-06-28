@@ -56,6 +56,10 @@ pub struct AnimationFrame {
     pub soft_eyes: bool,
     /// Subtle work-type expression accent (E). Applied only to positive moods.
     pub work_accent: WorkAccent,
+    /// The pet was freshly fed (a recent usage pulse). Briefly perks the face into
+    /// an excited beat, regardless of resting mood — set by producers from the feed
+    /// pulse recency. Inert while blinking or asleep.
+    pub feed_reaction: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -337,6 +341,12 @@ fn expression_for(
         // Only the eyes shut — keep the bridge and the mood mouth.
         expr.eyes = close_eyes(&expr.eyes, pet.species);
         return expr;
+    }
+    // A fresh feed perks the pet into a brief excited beat — its ecstatic face —
+    // over whatever its resting mood is. Blink and sleep still win (handled above /
+    // guarded here), so a sleeping pet stays asleep.
+    if frame.feed_reaction && !frame.hold_eyes_closed {
+        return mood_face(pet.species, Mood::Ecstatic);
     }
     let mut overridden = false;
     if frame.soft_eyes && matches!(mood, Mood::Content | Mood::Happy) {
@@ -927,6 +937,7 @@ mod tests {
             blink_slowdown: 0,
             soft_eyes: false,
             work_accent: WorkAccent::None,
+            feed_reaction: false,
         };
         let soft = AnimationFrame {
             soft_eyes: true,
@@ -950,6 +961,47 @@ mod tests {
         assert!(
             b.contains(&pet.traits.mouth),
             "soft eyes should not change the mouth, got:\n{b}"
+        );
+    }
+
+    #[test]
+    fn feed_reaction_perks_the_face_into_an_excited_beat() {
+        let pet = generate_pet("feed-react-seed");
+        // Suppress blink so the open-eyed reaction is observable.
+        let base = AnimationFrame {
+            tick: 3,
+            blink_suppression_ticks: 1,
+            ..AnimationFrame::default()
+        };
+        let fed = AnimationFrame {
+            feed_reaction: true,
+            ..base
+        };
+        let calm = render_pet(&pet, Stage::S3, Mood::Content, base)
+            .lines
+            .join("\n");
+        let reacting = render_pet(&pet, Stage::S3, Mood::Content, fed)
+            .lines
+            .join("\n");
+        assert_ne!(calm, reacting, "a feed reaction should change the face");
+        // The reaction briefly wears the species' ecstatic eyes.
+        let ecstatic_eyes = mood_face(pet.species, Mood::Ecstatic).eyes;
+        assert!(
+            reacting.contains(&ecstatic_eyes),
+            "feed reaction should show excited eyes ({ecstatic_eyes}), got:\n{reacting}"
+        );
+        // An asleep pet does not perk up.
+        let asleep = AnimationFrame {
+            feed_reaction: true,
+            hold_eyes_closed: true,
+            ..base
+        };
+        let sleeping = render_pet(&pet, Stage::S3, Mood::Content, asleep)
+            .lines
+            .join("\n");
+        assert!(
+            !sleeping.contains(&ecstatic_eyes),
+            "an asleep pet should not perk up from feeding, got:\n{sleeping}"
         );
     }
 
@@ -1003,6 +1055,7 @@ mod tests {
             blink_slowdown: 0,
             soft_eyes: false,
             work_accent: WorkAccent::None,
+            feed_reaction: false,
         };
         let rendered = render_pet(&pet, Stage::S3, Mood::Content, frame);
         let art = rendered.lines.join("\n");
@@ -1026,6 +1079,7 @@ mod tests {
                 blink_slowdown: 0,
                 soft_eyes: false,
                 work_accent: WorkAccent::None,
+                feed_reaction: false,
             },
         );
         assert!(
@@ -1234,6 +1288,7 @@ mod tests {
                             blink_slowdown: slowdown,
                             soft_eyes: false,
                             work_accent: WorkAccent::None,
+                            feed_reaction: false,
                         },
                     );
                     rendered

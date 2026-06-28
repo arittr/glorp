@@ -267,6 +267,7 @@ fn render_watch_frame_from_state_with_life(
             &mut vm,
             now.unix_timestamp().max(0) as u64,
             hold_eyes_closed,
+            now,
         )?;
     }
     let layout = layout_watch_with_context(Rect::new(0, 0, width, height), &vm, &render);

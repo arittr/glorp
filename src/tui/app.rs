@@ -260,12 +260,13 @@ impl WatchApp {
             &self.evolution_overlay_started_at,
         );
         self.last_hold_eyes_closed = hold_eyes_closed;
+        let now = time::OffsetDateTime::now_utc();
         let _ = crate::commands::watch::rerender_pet_for_view_model(
             &mut self.vm,
             self.animation_frame,
             hold_eyes_closed,
+            now,
         );
-        let now = time::OffsetDateTime::now_utc();
         let species = self.vm.pet_render.generated_species;
         let rhythm = crate::pet::animator::breath_rhythm_for_day(&self.vm.day_context);
         // wander_offset_x and facing are computed at render time in the panel
@@ -487,6 +488,7 @@ impl WatchApp {
             &mut self.vm,
             self.animation_frame,
             hold_eyes_closed,
+            time::OffsetDateTime::now_utc(),
         );
     }
 

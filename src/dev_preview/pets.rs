@@ -119,6 +119,7 @@ fn render_seeded_pet_cell(
             blink_slowdown: 0,
             soft_eyes: false,
             work_accent: WorkAccent::None,
+            feed_reaction: false,
         },
     );
     let mut lines = vec![Line::styled(
@@ -174,6 +175,7 @@ fn render_mood_set(_ctx: &PreviewRenderContext) -> PreviewFrame {
                     blink_slowdown: 0,
                     soft_eyes: false,
                     work_accent: WorkAccent::None,
+                    feed_reaction: false,
                 },
             );
             let mut lines = vec![Line::styled(species.as_str(), styles.label)];
@@ -246,6 +248,7 @@ fn render_pet_cell(
             blink_slowdown: 0,
             soft_eyes: false,
             work_accent: crate::pet::render::WorkAccent::None,
+            feed_reaction: false,
         },
     );
 
@@ -339,6 +342,7 @@ fn render_glitch_state_cell(area: Rect, buffer: &mut Buffer, fixture: GlitchStat
             blink_slowdown: 0,
             soft_eyes: false,
             work_accent: fixture.work_accent,
+            feed_reaction: false,
         },
     );
 

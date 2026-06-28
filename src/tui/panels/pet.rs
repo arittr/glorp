@@ -247,6 +247,7 @@ pub(crate) mod tests {
                 blink_slowdown: 0,
                 soft_eyes: false,
                 work_accent: crate::pet::render::WorkAccent::None,
+                feed_reaction: false,
             },
         );
         let mut vm = WatchViewModel::fixture();
