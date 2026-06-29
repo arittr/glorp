@@ -155,7 +155,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: TOKEN_TREASURE_CHEST_2M,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::FloorMid,
-        display_priority: 55,
+        display_priority: 145, // animated bubbling centerpiece — a featured trophy
         lifetime_threshold: Some(2_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0xd8, 0xa4, 0x4c), // antique gold

@@ -16,7 +16,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
 
-const MAX_TROPHIES: usize = 5;
+const MAX_TROPHIES: usize = 6;
 const MAX_ACCENTS: usize = 4;
 const ACCENT_ROTATION_SECS: i64 = 600;
 const ACCENT_CANDIDATES: u16 = 16;
@@ -499,12 +499,13 @@ fn trophy_sprite(
             SpriteCell { dx: 1, dy: 1, glyph: '◡' },
             SpriteCell { dx: 2, dy: 1, glyph: '˙' },
         ],
-        "token_treasure_chest_2m" if phase < 4 => &[
+        // Treasure chest: lid open (gap in the lid + a ✦ glint) during the bubble
+        // cycle's open window, closed (solid lid + ◆) otherwise.
+        "token_treasure_chest_2m" if crate::pet::animator::chest_lid_open(now) => &[
             SpriteCell { dx: 0, dy: 0, glyph: '╭' },
-            SpriteCell { dx: 1, dy: 0, glyph: '─' },
             SpriteCell { dx: 2, dy: 0, glyph: '╮' },
             SpriteCell { dx: 0, dy: 1, glyph: '▣' },
-            SpriteCell { dx: 1, dy: 1, glyph: '◇' },
+            SpriteCell { dx: 1, dy: 1, glyph: '✦' },
             SpriteCell { dx: 2, dy: 1, glyph: '▣' },
         ],
         "token_treasure_chest_2m" => &[
@@ -1219,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn trophy_selection_caps_at_five_by_priority_then_age() {
+    fn trophy_selection_caps_at_six_by_priority_then_age() {
         let habitat = HabitatView {
             earned_props: vec![
                 earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
@@ -1242,6 +1243,7 @@ mod tests {
                 "token_treasure_chest_2m",
                 "extra_trophy_for_cap_test",
                 "wilt_recovery_sprout",
+                "heavy_session_planter",
             ]
         );
     }
@@ -1778,6 +1780,30 @@ mod tests {
                 .iter()
                 .flat_map(|placement| placement.cells.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn chest_lid_opens_during_the_bubble_cycle() {
+        use crate::pet::animator::CHEST_BUBBLE_CYCLE_SECS;
+        let open_now = time::OffsetDateTime::from_unix_timestamp(0).unwrap(); // t=0, lid open
+        let closed_now =
+            time::OffsetDateTime::from_unix_timestamp(CHEST_BUBBLE_CYCLE_SECS as i64 / 2).unwrap();
+        let open = trophy_sprite("token_treasure_chest_2m", Species::Blob, false, open_now);
+        let closed = trophy_sprite("token_treasure_chest_2m", Species::Blob, false, closed_now);
+        let glyphs = |s: &[SpriteCell]| s.iter().map(|c| c.glyph).collect::<Vec<char>>();
+        assert_ne!(
+            glyphs(open),
+            glyphs(closed),
+            "the chest lid opens vs closes"
+        );
+        assert!(
+            open.iter().any(|c| c.glyph == '✦'),
+            "open chest reveals a treasure glint"
+        );
+        assert!(
+            closed.iter().any(|c| c.glyph == '◆'),
+            "closed chest shows its gem"
         );
     }
 

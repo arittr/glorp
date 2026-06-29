@@ -767,6 +767,27 @@ pub fn compute_token_pop(
     Some(TokenPop { duration_remaining_secs: 2 - elapsed })
 }
 
+/// Seconds per treasure-chest bubble cycle: the chest opens, puffs one bubble,
+/// then sits closed and quiet until the next cycle.
+pub const CHEST_BUBBLE_CYCLE_SECS: f64 = 16.0;
+/// How long the chest lid stays open at the start of each cycle.
+pub const CHEST_LID_OPEN_SECS: f64 = 2.0;
+
+/// `(cycle_index, seconds_into_cycle)` for the treasure-chest bubble animation,
+/// shared by the chest lid sprite and the rising-bubble pass so they stay in sync.
+/// Uses fractional seconds so the bubble rises smoothly between ticks.
+pub fn chest_bubble_cycle(now: time::OffsetDateTime) -> (u64, f64) {
+    let secs = now.unix_timestamp() as f64 + f64::from(now.nanosecond()) / 1e9;
+    let cycle = (secs / CHEST_BUBBLE_CYCLE_SECS).floor();
+    let t = secs - cycle * CHEST_BUBBLE_CYCLE_SECS;
+    (cycle.max(0.0) as u64, t)
+}
+
+/// The chest's lid is open during the first moment of each bubble cycle.
+pub fn chest_lid_open(now: time::OffsetDateTime) -> bool {
+    chest_bubble_cycle(now).1 < CHEST_LID_OPEN_SECS
+}
+
 /// Multiplier (1.0..=3.0) that stretches idle gesture timing as idle grows:
 /// a long-idle pet wanders and sparkles less, reading as settled rather than
 /// loop-frozen.
