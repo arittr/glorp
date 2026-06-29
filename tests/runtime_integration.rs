@@ -696,7 +696,7 @@ fn habitat_catalog_exposes_v1_prop_ids_and_kinds() {
     assert_eq!(pebble.lifetime_threshold, Some(10_000.0));
 
     for (id, zone) in [
-        ("token_moss_tuft_250k", HabitatPropZone::FloorLeft),
+        ("token_moss_tuft_250k", HabitatPropZone::FloorMid),
         ("token_friendly_cloud_750k", HabitatPropZone::AirMid),
         ("token_treasure_chest_2m", HabitatPropZone::FloorMid),
         ("token_hanging_vine_25m", HabitatPropZone::Ceiling),

@@ -118,7 +118,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
         id: TOKEN_MOSS_TUFT_250K,
         kind: HabitatPropKind::Trophy,
-        zone: HabitatPropZone::FloorLeft,
+        zone: HabitatPropZone::FloorMid,
         display_priority: 150,
         lifetime_threshold: Some(250_000.0),
         pet_layer: HabitatPetLayer::Foreground,
