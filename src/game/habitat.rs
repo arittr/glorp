@@ -76,6 +76,7 @@ pub const TOKEN_TREASURE_CHEST_2M: &str = "token_treasure_chest_2m";
 pub const TOKEN_ORBIT_5M: &str = "token_orbit_5m";
 pub const TOKEN_LANTERN_10M: &str = "token_lantern_10m";
 pub const TOKEN_HANGING_VINE_25M: &str = "token_hanging_vine_25m";
+pub const TOKEN_REEDS_5M: &str = "token_reeds_5m";
 pub const CODEX_SIGNAL_LAMP: &str = "codex_signal_lamp";
 pub const HEAVY_SESSION_PLANTER: &str = "heavy_session_planter";
 pub const WILT_RECOVERY_SPROUT: &str = "wilt_recovery_sprout";
@@ -117,7 +118,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
         id: TOKEN_MOSS_TUFT_250K,
         kind: HabitatPropKind::Trophy,
-        zone: HabitatPropZone::FloorMid,
+        zone: HabitatPropZone::FloorLeft,
         display_priority: 150,
         lifetime_threshold: Some(250_000.0),
         pet_layer: HabitatPetLayer::Foreground,
@@ -185,6 +186,15 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         lifetime_threshold: Some(25_000_000.0),
         pet_layer: HabitatPetLayer::Foreground,
         color: (0x7a, 0xb8, 0x80), // leafy green
+    },
+    HabitatPropSpec {
+        id: TOKEN_REEDS_5M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::FloorRight,
+        display_priority: 151, // reeds — third green plant anchor
+        lifetime_threshold: Some(5_000_000.0),
+        pet_layer: HabitatPetLayer::Foreground,
+        color: (0x8c, 0xc4, 0x6c), // reed green
     },
     HabitatPropSpec {
         id: TOKEN_GEODE_50M,

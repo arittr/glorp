@@ -1,8 +1,8 @@
 use crate::game::habitat::{
     catalog_prop_by_str, CODEX_SIGNAL_LAMP, HEAVY_SESSION_PLANTER, TOKEN_FRIENDLY_CLOUD_750K,
     TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M,
-    TOKEN_PEBBLE_25K, TOKEN_SHARD_1M, TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M,
-    WILT_RECOVERY_SPROUT,
+    TOKEN_PEBBLE_25K, TOKEN_REEDS_5M, TOKEN_SHARD_1M, TOKEN_SHELL_100K, TOKEN_SPARK_500K,
+    TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
 use crate::storage::state::{EarnedHabitatProp, HabitatPropId, HabitatPropSource};
@@ -468,6 +468,7 @@ fn tags_for_prop(id: &str) -> &'static [RoomBiomeTag] {
         TOKEN_MOSS_TUFT_250K
         | TOKEN_HANGING_VINE_25M
         | HEAVY_SESSION_PLANTER
+        | TOKEN_REEDS_5M
         | WILT_RECOVERY_SPROUT => &[RoomBiomeTag::Botanical, RoomBiomeTag::Cozy],
         CODEX_SIGNAL_LAMP => &[RoomBiomeTag::Technical],
         TOKEN_ORBIT_5M => &[RoomBiomeTag::Technical, RoomBiomeTag::Celestial],
@@ -490,6 +491,7 @@ fn biome_weight_for_prop(id: &str) -> f32 {
     match id {
         // Plants anchor the habitat's character.
         TOKEN_HANGING_VINE_25M => 1.52,
+        TOKEN_REEDS_5M => 1.51,
         TOKEN_MOSS_TUFT_250K => 1.50,
         HEAVY_SESSION_PLANTER => 1.48,
         WILT_RECOVERY_SPROUT => 0.90,

@@ -2,8 +2,9 @@ use crate::game::habitat::{
     catalog_prop_by_str, HabitatPetLayer, HabitatPropKind, HabitatPropZone, CODEX_SIGNAL_LAMP,
     HEAVY_SESSION_PLANTER, TOKEN_AURORA_500M, TOKEN_BONSAI_100M, TOKEN_CONSTELLATION_250M,
     TOKEN_FRIENDLY_CLOUD_750K, TOKEN_GEODE_50M, TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M,
-    TOKEN_MOON_1B, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_SHARD_1M,
-    TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
+    TOKEN_MOON_1B, TOKEN_MOSS_TUFT_250K, TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_REEDS_5M,
+    TOKEN_SHARD_1M, TOKEN_SHELL_100K, TOKEN_SPARK_500K, TOKEN_TREASURE_CHEST_2M,
+    WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
 use crate::storage::state::HabitatPropId;
@@ -166,6 +167,7 @@ pub fn prop_effect_target_path(id: &str) -> Option<TargetPath> {
         TOKEN_ORBIT_5M => Some(TargetPath::new("watch.prop.token_orbit_5m.effect")),
         TOKEN_LANTERN_10M => Some(TargetPath::new("watch.prop.token_lantern_10m.effect")),
         TOKEN_HANGING_VINE_25M => Some(TargetPath::new("watch.prop.token_hanging_vine_25m.effect")),
+        TOKEN_REEDS_5M => Some(TargetPath::new("watch.prop.token_reeds_5m.effect")),
         TOKEN_GEODE_50M => Some(TargetPath::new("watch.prop.token_geode_50m.effect")),
         TOKEN_BONSAI_100M => Some(TargetPath::new("watch.prop.token_bonsai_100m.effect")),
         TOKEN_CONSTELLATION_250M => Some(TargetPath::new(
@@ -194,7 +196,10 @@ const PLANT_BLOOM_DAYS: i64 = 3;
 fn is_plant(id: &str) -> bool {
     matches!(
         id,
-        "token_moss_tuft_250k" | "token_hanging_vine_25m" | "heavy_session_planter"
+        "token_moss_tuft_250k"
+            | "token_hanging_vine_25m"
+            | "heavy_session_planter"
+            | "token_reeds_5m"
     )
 }
 
@@ -692,6 +697,39 @@ fn trophy_sprite(
             SpriteCell { dx: 2, dy: 1, glyph: '·' },
             SpriteCell { dx: 1, dy: 2, glyph: '·' },
             SpriteCell { dx: 3, dy: 1, glyph: '·' },
+        ],
+        // Reeds: a clump of upright blades; the bloomed tier flowers at a tip.
+        "token_reeds_5m" if bloomed && phase < 4 => &[
+            SpriteCell { dx: 0, dy: 0, glyph: '*' },
+            SpriteCell { dx: 1, dy: 0, glyph: '│' },
+            SpriteCell { dx: 2, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 0, dy: 1, glyph: '│' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '│' },
+        ],
+        "token_reeds_5m" if bloomed => &[
+            SpriteCell { dx: 0, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 1, dy: 0, glyph: '│' },
+            SpriteCell { dx: 2, dy: 0, glyph: '*' },
+            SpriteCell { dx: 0, dy: 1, glyph: '│' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '│' },
+        ],
+        "token_reeds_5m" if phase < 4 => &[
+            SpriteCell { dx: 0, dy: 0, glyph: '╵' },
+            SpriteCell { dx: 1, dy: 0, glyph: '│' },
+            SpriteCell { dx: 2, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 0, dy: 1, glyph: '│' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '│' },
+        ],
+        "token_reeds_5m" => &[
+            SpriteCell { dx: 0, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 1, dy: 0, glyph: '│' },
+            SpriteCell { dx: 2, dy: 0, glyph: '╵' },
+            SpriteCell { dx: 0, dy: 1, glyph: '│' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '│' },
         ],
         _ => &[
             SpriteCell { dx: 0, dy: 0, glyph: '◈' },
@@ -1740,6 +1778,28 @@ mod tests {
                 .iter()
                 .flat_map(|placement| placement.cells.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reeds_is_a_third_flowering_plant_with_its_own_sprite() {
+        let now = datetime!(2026-05-11 12:00 UTC);
+        assert!(is_plant("token_reeds_5m"), "reeds count as a plant");
+        let sprite = trophy_sprite("token_reeds_5m", Species::Blob, false, now);
+        assert!(
+            sprite.iter().any(|c| c.glyph == '┃'),
+            "reeds render upright blades"
+        );
+        assert_eq!(
+            prop_effect_target_path("token_reeds_5m").unwrap().as_str(),
+            "watch.prop.token_reeds_5m.effect"
+        );
+        let habitat = HabitatView {
+            earned_props: vec![earned("token_reeds_5m", HabitatPropKind::Trophy, 151, 0)],
+        };
+        assert!(
+            prop_bloomed(&habitat, "token_reeds_5m", now + time::Duration::days(3)),
+            "reeds bloom with age like the other plants"
         );
     }
 
