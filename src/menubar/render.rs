@@ -249,10 +249,7 @@ struct StyledRun {
 
 impl StyledRun {
     fn new(text: impl Into<String>, color: Rgb) -> Self {
-        Self {
-            text: text.into(),
-            color,
-        }
+        Self { text: text.into(), color }
     }
     fn plain(text: impl Into<String>) -> Self {
         Self::new(text, COLOR_FG)
@@ -385,10 +382,7 @@ fn materialize(runs: Vec<StyledRun>) -> RenderedBlock {
             );
         }
     }
-    RenderedBlock {
-        attr: attr_str,
-        char_len: total_chars,
-    }
+    RenderedBlock { attr: attr_str, char_len: total_chars }
 }
 
 fn monospace_font() -> Retained<NSFont> {

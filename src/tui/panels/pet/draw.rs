@@ -212,6 +212,32 @@ pub(crate) fn render_pet_to_draw_list(
         &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
     ));
 
+    // ── Pass 6.5: treasure-chest bubble ──────────────────────────────────────
+    // If the chest is placed, puff its ambient rising bubble from just above it.
+    let chest_cells: Vec<_> = prop_cells
+        .iter()
+        .filter(|c| c.prop_id.as_str() == "token_treasure_chest_2m")
+        .collect();
+    if !chest_cells.is_empty() {
+        let top = chest_cells.iter().map(|c| c.row).min().unwrap();
+        let min_col = chest_cells.iter().map(|c| c.col).min().unwrap();
+        let max_col = chest_cells.iter().map(|c| c.col).max().unwrap();
+        let center_col = (min_col + max_col) / 2;
+        let seed = vm
+            .pet_render
+            .seed
+            .bytes()
+            .fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(u64::from(b)));
+        list.extend(super::chest_bubble::chest_bubble_cells(
+            top,
+            center_col,
+            scene.habitat,
+            now,
+            seed,
+            crate::pet::palette::Rgb { r: 0x8c, g: 0xc8, b: 0xd4 },
+        ));
+    }
+
     // ── Pass 7: contact shadow ────────────────────────────────────────────────
     list.extend(grounding::contact_shadow_draw_cells(
         scene.pet_art,
@@ -234,11 +260,7 @@ pub(crate) fn render_pet_to_draw_list(
         resolve_watch_pet_styles(&vm.pet_palette, &inputs, ctx.color_capability);
 
     let effective_twinkle = if effects.token_pop.is_some() {
-        Some(crate::pet::animator::TwinkleSpec {
-            row: 4,
-            col: 5,
-            glyph: '\u{2726}',
-        })
+        Some(crate::pet::animator::TwinkleSpec { row: 4, col: 5, glyph: '\u{2726}' })
     } else {
         effects.twinkle
     };

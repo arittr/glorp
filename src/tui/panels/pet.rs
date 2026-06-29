@@ -13,6 +13,7 @@ use crate::tui::view_model::WatchViewModel;
 mod ambient;
 mod art_lines;
 mod blit;
+mod chest_bubble;
 mod colors;
 mod draw;
 mod grounding;

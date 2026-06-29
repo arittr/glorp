@@ -111,10 +111,7 @@ impl RhythmProfile {
             .collect::<Vec<_>>();
         let active_hours = learned_active_hours(&active_timestamps);
 
-        Self {
-            active_hours,
-            weekend_activity_weight,
-        }
+        Self { active_hours, weekend_activity_weight }
     }
 
     pub fn from_active_hours(timestamps: &[OffsetDateTime]) -> Self {
@@ -157,10 +154,7 @@ pub fn apply_food(vitals: Vitals, effective_tokens: f64, baseline_daily: f64) ->
         energy: clamp_vital(vitals.energy + energy_gain),
     };
 
-    MetabolismResult {
-        vitals,
-        mood: mood_for(vitals),
-    }
+    MetabolismResult { vitals, mood: mood_for(vitals) }
 }
 
 pub fn apply_decay(
@@ -170,10 +164,7 @@ pub fn apply_decay(
     rhythm: RhythmProfile,
 ) -> MetabolismResult {
     if now <= last_seen {
-        return MetabolismResult {
-            vitals,
-            mood: mood_for(vitals),
-        };
+        return MetabolismResult { vitals, mood: mood_for(vitals) };
     }
 
     let weighted_hours = weighted_elapsed_hours(last_seen, now, &rhythm);
@@ -183,10 +174,7 @@ pub fn apply_decay(
         energy: clamp_vital(vitals.energy - weighted_hours * 1.65),
     };
 
-    MetabolismResult {
-        vitals,
-        mood: mood_for(vitals),
-    }
+    MetabolismResult { vitals, mood: mood_for(vitals) }
 }
 
 fn weighted_elapsed_hours(
@@ -287,21 +275,13 @@ mod tests {
 
     #[test]
     fn peak_vitals_are_ecstatic() {
-        let peak = Vitals {
-            fed: 95.0,
-            happiness: 95.0,
-            energy: 80.0,
-        };
+        let peak = Vitals { fed: 95.0, happiness: 95.0, energy: 80.0 };
         assert_eq!(mood_for_vitals(peak), Mood::Ecstatic);
     }
 
     #[test]
     fn mood_threshold_keeps_near_peak_happy() {
-        let happy = Vitals {
-            fed: 80.0,
-            happiness: 80.0,
-            energy: 60.0,
-        };
+        let happy = Vitals { fed: 80.0, happiness: 80.0, energy: 60.0 };
         assert_eq!(mood_for_vitals(happy), Mood::Happy);
     }
 

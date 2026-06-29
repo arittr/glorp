@@ -166,9 +166,9 @@ fn earned_view(prop: &HabitatPropSpec, earned_at: OffsetDateTime) -> EarnedHabit
     let source = match prop.lifetime_threshold {
         Some(threshold) => HabitatPropSource::LifetimeTokens { threshold },
         None => match prop.id {
-            crate::game::habitat::CODEX_SIGNAL_LAMP => HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            crate::game::habitat::CODEX_SIGNAL_LAMP => {
+                HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() }
+            }
             crate::game::habitat::WILT_RECOVERY_SPROUT => HabitatPropSource::WiltRecovery,
             _ => HabitatPropSource::HeavySession,
         },
@@ -276,11 +276,7 @@ fn watch_state(
     state.stage = stage;
     state.xp = 40.0;
     state.lifetime_effective_tokens = lifetime_tokens;
-    state.vitals = Vitals {
-        fed: 82.0,
-        happiness: 78.0,
-        energy: 74.0,
-    };
+    state.vitals = Vitals { fed: 82.0, happiness: 78.0, energy: 74.0 };
     state.created_at = ctx.fixed_now - Duration::days(42);
     state.last_updated_at = ctx.fixed_now;
     state.last_usage_poll_at = Some(ctx.fixed_now - Duration::minutes(4));
@@ -321,9 +317,9 @@ fn prop_source(id: &str) -> HabitatPropSource {
     }
 
     match id {
-        CODEX_SIGNAL_LAMP => HabitatPropSource::ProviderFirstUse {
-            provider_surface: "codex".to_string(),
-        },
+        CODEX_SIGNAL_LAMP => {
+            HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() }
+        }
         HEAVY_SESSION_PLANTER => HabitatPropSource::HeavySession,
         WILT_RECOVERY_SPROUT => HabitatPropSource::WiltRecovery,
         _ => HabitatPropSource::HeavySession,

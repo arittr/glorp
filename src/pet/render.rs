@@ -163,10 +163,7 @@ pub fn render_pet(
     let (framed_lines, framed_spans) =
         frame_with_particles(lines, spans, pet.species, stage, frame.tick);
 
-    RenderedPet {
-        lines: framed_lines,
-        spans: framed_spans,
-    }
+    RenderedPet { lines: framed_lines, spans: framed_spans }
 }
 
 pub fn species_animation_profile(species: Species) -> AnimationProfile {
@@ -174,30 +171,12 @@ pub fn species_animation_profile(species: Species) -> AnimationProfile {
         // Blink cadence in ticks (~250ms each). Lowered from the raw tokenpet mockup
         // numbers (which assumed a faster ~214ms tick) so a glance actually catches a
         // blink: nominal Fuzz ~4s, Crystal ~7.5s, jittered around that.
-        Species::Fuzz => AnimationProfile {
-            blink_average: 16,
-            blink_jitter: 6,
-        },
-        Species::Blob => AnimationProfile {
-            blink_average: 20,
-            blink_jitter: 7,
-        },
-        Species::Ghost => AnimationProfile {
-            blink_average: 26,
-            blink_jitter: 9,
-        },
-        Species::Glitch => AnimationProfile {
-            blink_average: 12,
-            blink_jitter: 4,
-        },
-        Species::Crystal => AnimationProfile {
-            blink_average: 30,
-            blink_jitter: 11,
-        },
-        Species::Mech => AnimationProfile {
-            blink_average: 12,
-            blink_jitter: 4,
-        },
+        Species::Fuzz => AnimationProfile { blink_average: 16, blink_jitter: 6 },
+        Species::Blob => AnimationProfile { blink_average: 20, blink_jitter: 7 },
+        Species::Ghost => AnimationProfile { blink_average: 26, blink_jitter: 9 },
+        Species::Glitch => AnimationProfile { blink_average: 12, blink_jitter: 4 },
+        Species::Crystal => AnimationProfile { blink_average: 30, blink_jitter: 11 },
+        Species::Mech => AnimationProfile { blink_average: 12, blink_jitter: 4 },
     }
 }
 
@@ -242,25 +221,27 @@ fn close_eyes(eyes: &str, species: Species) -> String {
     format!("{c}{}{c}", chars[1])
 }
 
-/// Idle "look around": a calm pet occasionally drifts its gaze left or right for a
-/// beat, then back — extra life beyond the blink. Deterministic per pet + tick so
-/// renders stay reproducible. Returns `None` outside a glance window.
-fn idle_glance_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'static str> {
-    const GLANCE_PERIOD: u64 = 32; // ~8s between glances at 250ms/tick
-    const GLANCE_HOLD: u64 = 4; // ~1s holding the glance
+/// Idle gestures: a calm pet occasionally breaks idle with a small beat — a glance
+/// left or right, or a wink — then settles. Deterministic per pet + tick so renders
+/// stay reproducible. Returns `None` outside a gesture window. The vocabulary is
+/// kept distinct from the mood faces so a gesture reads as behavior, not a mood.
+fn idle_gesture_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'static str> {
+    const GESTURE_PERIOD: u64 = 32; // ~8s between gestures at 250ms/tick
+    const GESTURE_HOLD: u64 = 4; // ~1s holding the gesture
+    const GESTURES: [&str; 4] = ["<.<", ">.>", "^.-", "-.^"];
     let seed = u64::from(pet.animation_phase.blink)
         .wrapping_mul(31)
         .wrapping_add(17);
     let t = frame.tick.wrapping_add(seed);
-    // The glance sits in the middle of its window, clear of the blink (window start).
-    let pos = t % GLANCE_PERIOD;
-    let start = GLANCE_PERIOD / 2;
-    if pos < start || pos >= start + GLANCE_HOLD {
+    // The gesture sits in the middle of its window, clear of the blink (window start).
+    let pos = t % GESTURE_PERIOD;
+    let start = GESTURE_PERIOD / 2;
+    if pos < start || pos >= start + GESTURE_HOLD {
         return None;
     }
-    let window = t / GLANCE_PERIOD;
+    let window = t / GESTURE_PERIOD;
     let h = (window ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
-    Some(if h & 1 == 0 { ">.>" } else { "<.<" })
+    Some(GESTURES[(h % GESTURES.len() as u64) as usize])
 }
 
 struct Expression {
@@ -370,11 +351,11 @@ fn expression_for(
             }
         }
     }
-    // Idle glance: a calm, non-droopy pet occasionally looks around (no real work
-    // or sleepy signal is overriding the eyes).
+    // Idle gesture: a calm, non-droopy pet occasionally breaks idle with a small
+    // beat — a glance or a wink — when no real work or sleepy signal owns the eyes.
     if !overridden && !matches!(mood, Mood::Sad | Mood::Sleepy | Mood::Wilted) {
-        if let Some(glance) = idle_glance_eyes(pet, frame) {
-            expr.eyes = glance.to_string();
+        if let Some(gesture) = idle_gesture_eyes(pet, frame) {
+            expr.eyes = gesture.to_string();
         }
     }
     expr
@@ -740,64 +721,32 @@ fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
         Species::Fuzz => {
             // Tail flick: row 9 col 6, '~' when tick % 23 < 3.
             if tick % 23 < 3 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 6,
-                    glyph: '~',
-                });
+                particles.push(Particle { row: 9, col: 6, glyph: '~' });
             }
         }
         Species::Blob => {
             if tick % 19 < 3 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 4,
-                    glyph: '.',
-                });
+                particles.push(Particle { row: 9, col: 4, glyph: '.' });
             }
             if tick % 23 < 4 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 6,
-                    glyph: '\u{b0}',
-                });
+                particles.push(Particle { row: 9, col: 6, glyph: '\u{b0}' });
             }
             if tick % 17 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 8,
-                    glyph: '.',
-                });
+                particles.push(Particle { row: 9, col: 8, glyph: '.' });
             }
         }
         Species::Ghost => {
             if tick % 13 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 5,
-                    glyph: '~',
-                });
+                particles.push(Particle { row: 0, col: 5, glyph: '~' });
             }
             if tick % 19 < 4 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 7,
-                    glyph: '\u{b7}',
-                });
+                particles.push(Particle { row: 9, col: 7, glyph: '\u{b7}' });
             }
             if tick % 21 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 3,
-                    glyph: '\'',
-                });
+                particles.push(Particle { row: 9, col: 3, glyph: '\'' });
             }
             if tick % 17 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 9,
-                    glyph: '.',
-                });
+                particles.push(Particle { row: 0, col: 9, glyph: '.' });
             }
         }
         Species::Glitch => {
@@ -805,92 +754,44 @@ fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
             if tick.is_multiple_of(41) {
                 let row = ((tick / 41) as usize) % FRAME_HEIGHT;
                 let col = ((tick / 41) as usize) % FRAME_WIDTH;
-                particles.push(Particle {
-                    row,
-                    col,
-                    glyph: ':',
-                });
+                particles.push(Particle { row, col, glyph: ':' });
             }
             if tick % 11 < 2 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 2,
-                    glyph: '\u{b7}',
-                });
+                particles.push(Particle { row: 0, col: 2, glyph: '\u{b7}' });
             }
             if tick % 13 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 4,
-                    glyph: '.',
-                });
+                particles.push(Particle { row: 9, col: 4, glyph: '.' });
             }
             if tick % 17 < 2 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 10,
-                    glyph: ':',
-                });
+                particles.push(Particle { row: 0, col: 10, glyph: ':' });
             }
         }
         Species::Crystal => {
             if tick % 23 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 1,
-                    glyph: '\u{2727}',
-                });
+                particles.push(Particle { row: 0, col: 1, glyph: '\u{2727}' });
             }
             if tick % 19 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 11,
-                    glyph: '\u{2726}',
-                });
+                particles.push(Particle { row: 0, col: 11, glyph: '\u{2726}' });
             }
             if tick % 21 < 3 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 1,
-                    glyph: '\u{2727}',
-                });
+                particles.push(Particle { row: 9, col: 1, glyph: '\u{2727}' });
             }
             if tick % 17 < 2 {
-                particles.push(Particle {
-                    row: 9,
-                    col: 11,
-                    glyph: '\u{b7}',
-                });
+                particles.push(Particle { row: 9, col: 11, glyph: '\u{b7}' });
             }
             if tick % 27 < 3 {
-                particles.push(Particle {
-                    row: 5,
-                    col: 0,
-                    glyph: '\u{2727}',
-                });
+                particles.push(Particle { row: 5, col: 0, glyph: '\u{2727}' });
             }
         }
         Species::Mech => {
             // LED at row 0 col 6: '●' when tick % 4 < 2 else '○'.
             let led_glyph = if tick % 4 < 2 { '\u{25cf}' } else { '\u{25cb}' };
-            particles.push(Particle {
-                row: 0,
-                col: 6,
-                glyph: led_glyph,
-            });
+            particles.push(Particle { row: 0, col: 6, glyph: led_glyph });
             if tick % 9 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 4,
-                    glyph: '~',
-                });
+                particles.push(Particle { row: 0, col: 4, glyph: '~' });
             }
             if tick % 11 < 3 {
-                particles.push(Particle {
-                    row: 0,
-                    col: 8,
-                    glyph: '\u{b0}',
-                });
+                particles.push(Particle { row: 0, col: 8, glyph: '\u{b0}' });
             }
         }
     }
@@ -939,10 +840,7 @@ mod tests {
             work_accent: WorkAccent::None,
             feed_reaction: false,
         };
-        let soft = AnimationFrame {
-            soft_eyes: true,
-            ..normal
-        };
+        let soft = AnimationFrame { soft_eyes: true, ..normal };
         let a = render_pet(&pet, Stage::S3, Mood::Content, normal)
             .lines
             .join("\n");
@@ -973,10 +871,7 @@ mod tests {
             blink_suppression_ticks: 1,
             ..AnimationFrame::default()
         };
-        let fed = AnimationFrame {
-            feed_reaction: true,
-            ..base
-        };
+        let fed = AnimationFrame { feed_reaction: true, ..base };
         let calm = render_pet(&pet, Stage::S3, Mood::Content, base)
             .lines
             .join("\n");
@@ -1006,6 +901,30 @@ mod tests {
     }
 
     #[test]
+    fn idle_gaze_rotates_through_varied_gestures_including_a_wink() {
+        let pet = generate_pet("idle-variety-seed");
+        let mut seen = std::collections::HashSet::new();
+        for tick in 0..4000u64 {
+            let frame = AnimationFrame { tick, ..AnimationFrame::default() };
+            if let Some(g) = idle_gesture_eyes(&pet, frame) {
+                seen.insert(g);
+            }
+        }
+        assert!(
+            seen.len() >= 3,
+            "idle gaze should rotate through varied gestures, saw: {seen:?}"
+        );
+        assert!(
+            seen.contains("<.<") || seen.contains(">.>"),
+            "keeps the look-around glances, saw: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|g| g.contains('^') && g.contains('-')),
+            "includes a wink, saw: {seen:?}"
+        );
+    }
+
+    #[test]
     fn work_accent_sharpens_positive_moods_and_ignored_for_negative() {
         let pet = generate_pet("accent-seed");
         // Suppress blink so the open-eyed work-accent change is observable (otherwise
@@ -1016,10 +935,7 @@ mod tests {
             ..AnimationFrame::default()
         };
         for accent in [WorkAccent::Alert, WorkAccent::Focused, WorkAccent::Dreamy] {
-            let accented = AnimationFrame {
-                work_accent: accent,
-                ..base
-            };
+            let accented = AnimationFrame { work_accent: accent, ..base };
             // Positive mood: accent changes the face.
             let happy_plain = render_pet(&pet, Stage::S3, Mood::Happy, base)
                 .lines
@@ -1108,10 +1024,7 @@ mod tests {
             should_blink(
                 &pet,
                 Mood::Ecstatic,
-                AnimationFrame {
-                    tick: t,
-                    ..AnimationFrame::default()
-                },
+                AnimationFrame { tick: t, ..AnimationFrame::default() },
                 profile,
             )
         });
@@ -1376,10 +1289,7 @@ mod tests {
     fn animation_profile_has_no_breath_fields() {
         // Construction must compile with ONLY blink fields — proves the dead
         // divergent breath table is gone and animator.rs owns breath alone.
-        let p = AnimationProfile {
-            blink_average: 30,
-            blink_jitter: 10,
-        };
+        let p = AnimationProfile { blink_average: 30, blink_jitter: 10 };
         assert_eq!(p.blink_average, 30);
         assert_eq!(p.blink_jitter, 10);
     }
@@ -1483,10 +1393,7 @@ mod tests {
     fn glitch_corruption_emits_corruption_role_spans_on_active_tick() {
         let pet = generate_pet("corrupt-seed").with_species(Species::Glitch);
         // CORRUPTION_GATE_TICKS == 13; tick 13 opens the gate.
-        let frame = AnimationFrame {
-            tick: 13,
-            ..AnimationFrame::default()
-        };
+        let frame = AnimationFrame { tick: 13, ..AnimationFrame::default() };
         let rendered = render_pet(&pet, Stage::S4, Mood::Content, frame);
         let has_corruption = rendered
             .spans
@@ -1504,10 +1411,7 @@ mod tests {
         // Scan many gate-open ticks; the eye-center must never become Corruption.
         for gate in 1..400_u64 {
             let tick = gate * CORRUPTION_GATE_TICKS;
-            let frame = AnimationFrame {
-                tick,
-                ..AnimationFrame::default()
-            };
+            let frame = AnimationFrame { tick, ..AnimationFrame::default() };
             // Re-derive the pre-frame spans the same way render_pet does, then
             // run the public render and check no Corruption span lands on an
             // eye-center cell (in the pre-frame coordinate space).
@@ -1556,10 +1460,7 @@ mod tests {
             Species::Mech,
         ] {
             let pet = generate_pet("no-corrupt").with_species(species);
-            let frame = AnimationFrame {
-                tick: 13,
-                ..AnimationFrame::default()
-            };
+            let frame = AnimationFrame { tick: 13, ..AnimationFrame::default() };
             let rendered = render_pet(&pet, Stage::S4, Mood::Content, frame);
             assert!(
                 !rendered
@@ -1575,10 +1476,7 @@ mod tests {
     fn glitch_corruption_quiet_off_gate_tick() {
         let pet = generate_pet("corrupt-seed").with_species(Species::Glitch);
         // Tick 1 is not a multiple of CORRUPTION_GATE_TICKS (13): gate closed.
-        let frame = AnimationFrame {
-            tick: 1,
-            ..AnimationFrame::default()
-        };
+        let frame = AnimationFrame { tick: 1, ..AnimationFrame::default() };
         let rendered = render_pet(&pet, Stage::S4, Mood::Content, frame);
         assert!(
             !rendered

@@ -1024,9 +1024,7 @@ impl WatchUsagePoller for ForeverBlockingPoller {
 #[test]
 fn drop_does_not_block_on_in_flight_poll() {
     let entered = Arc::new(Barrier::new(2));
-    let poller = ForeverBlockingPoller {
-        entered: Arc::clone(&entered),
-    };
+    let poller = ForeverBlockingPoller { entered: Arc::clone(&entered) };
     let mut app = WatchApp::with_poll_callback(
         WatchViewModel::fixture(),
         WatchAppConfig {

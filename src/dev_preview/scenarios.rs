@@ -575,10 +575,7 @@ fn scenario_from_parts(
         kind,
         title: frame.title.clone(),
         intent: intent.to_string(),
-        dimensions: PreviewDimensions {
-            width: frame.width,
-            height: frame.height,
-        },
+        dimensions: PreviewDimensions { width: frame.width, height: frame.height },
         files: PreviewScenarioFiles {
             text: text_path(frame),
             cells: cells_path(frame),

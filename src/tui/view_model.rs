@@ -183,9 +183,7 @@ impl WatchViewModel {
                 mood: Mood::Content,
             },
             pet_palette: crate::pet::palette::default_theme_palette(),
-            habitat: HabitatView {
-                earned_props: Vec::new(),
-            },
+            habitat: HabitatView { earned_props: Vec::new() },
             life_profile: PetLifeProfile::default(),
             activity_identity: ActivityIdentityProfile::default(),
             day_context: crate::tui::day::DayContext::default(),
@@ -313,9 +311,7 @@ impl WatchViewModel {
                 earned_at: time::OffsetDateTime::UNIX_EPOCH,
                 kind: crate::game::habitat::HabitatPropKind::Accent,
                 display_priority: 10,
-                source: HabitatPropSource::LifetimeTokens {
-                    threshold: 25_000.0,
-                },
+                source: HabitatPropSource::LifetimeTokens { threshold: 25_000.0 },
             },
         ];
         vm

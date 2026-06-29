@@ -230,14 +230,7 @@ fn render_watch_frame_from_state_with_life(
     hold_eyes_closed: bool,
     seed_usage: fn(&Path, OffsetDateTime) -> Result<()>,
 ) -> Result<PreviewFrame> {
-    let WatchFrameFixture {
-        id,
-        title,
-        width,
-        height,
-        state,
-        now,
-    } = fixture;
+    let WatchFrameFixture { id, title, width, height, state, now } = fixture;
     let usage_path = scratch_dir.join(format!("{id}.sqlite"));
     seed_usage(&usage_path, now)?;
     let color_capability = life.map_or(ctx.render.color_capability, |life| life.color_capability);
@@ -757,9 +750,7 @@ fn alive_room_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFi
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_moss_tuft_250k"),
                     earned_at: fixed_now - Duration::days(15),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 250_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 250_000.0 },
                 },
             ],
             life: WatchLifeFixture {
@@ -823,16 +814,12 @@ fn alive_room_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFi
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_lantern_10m"),
                     earned_at: fixed_now - Duration::days(8),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 10_000_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 10_000_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_shell_100k"),
                     earned_at: fixed_now - Duration::days(10),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 100_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 100_000.0 },
                 },
             ],
             life: WatchLifeFixture {
@@ -873,16 +860,12 @@ fn alive_room_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFi
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_lantern_10m"),
                     earned_at: fixed_now - Duration::days(7),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 10_000_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 10_000_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_moss_tuft_250k"),
                     earned_at: fixed_now - Duration::days(9),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 250_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 250_000.0 },
                 },
             ],
             life: WatchLifeFixture {
@@ -923,65 +906,47 @@ fn alive_room_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFi
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_shard_1m"),
                     earned_at: fixed_now - Duration::days(11),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 1_000_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 1_000_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_treasure_chest_2m"),
                     earned_at: fixed_now - Duration::days(10),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 2_000_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 2_000_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_orbit_5m"),
                     earned_at: fixed_now - Duration::days(9),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 5_000_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 5_000_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_spark_500k"),
                     earned_at: fixed_now - Duration::days(8),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 500_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 500_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_friendly_cloud_750k"),
                     earned_at: fixed_now - Duration::days(7),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 750_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 750_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_lantern_10m"),
                     earned_at: fixed_now - Duration::days(6),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 10_000_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 10_000_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_hanging_vine_25m"),
                     earned_at: fixed_now - Duration::days(5),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 25_000_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 25_000_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_shell_100k"),
                     earned_at: fixed_now - Duration::days(4),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 100_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 100_000.0 },
                 },
                 EarnedHabitatProp {
                     id: HabitatPropId::new("token_moss_tuft_250k"),
                     earned_at: fixed_now - Duration::days(3),
-                    source: HabitatPropSource::LifetimeTokens {
-                        threshold: 250_000.0,
-                    },
+                    source: HabitatPropSource::LifetimeTokens { threshold: 250_000.0 },
                 },
             ],
             life: WatchLifeFixture {
@@ -1051,9 +1016,7 @@ fn alive_room_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<AliveRoomFrameFi
             props: vec![EarnedHabitatProp {
                 id: HabitatPropId::new("token_lantern_10m"),
                 earned_at: fixed_now - Duration::days(4),
-                source: HabitatPropSource::LifetimeTokens {
-                    threshold: 10_000_000.0,
-                },
+                source: HabitatPropSource::LifetimeTokens { threshold: 10_000_000.0 },
             }],
             life: WatchLifeFixture {
                 profile: {
@@ -1088,30 +1051,22 @@ fn species_dialect_props(fixed_now: OffsetDateTime) -> Vec<EarnedHabitatProp> {
         EarnedHabitatProp {
             id: HabitatPropId::new("codex_signal_lamp"),
             earned_at: fixed_now - Duration::days(12),
-            source: HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            source: HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() },
         },
         EarnedHabitatProp {
             id: HabitatPropId::new("token_shard_1m"),
             earned_at: fixed_now - Duration::days(11),
-            source: HabitatPropSource::LifetimeTokens {
-                threshold: 1_000_000.0,
-            },
+            source: HabitatPropSource::LifetimeTokens { threshold: 1_000_000.0 },
         },
         EarnedHabitatProp {
             id: HabitatPropId::new("token_orbit_5m"),
             earned_at: fixed_now - Duration::days(9),
-            source: HabitatPropSource::LifetimeTokens {
-                threshold: 5_000_000.0,
-            },
+            source: HabitatPropSource::LifetimeTokens { threshold: 5_000_000.0 },
         },
         EarnedHabitatProp {
             id: HabitatPropId::new("token_lantern_10m"),
             earned_at: fixed_now - Duration::days(6),
-            source: HabitatPropSource::LifetimeTokens {
-                threshold: 10_000_000.0,
-            },
+            source: HabitatPropSource::LifetimeTokens { threshold: 10_000_000.0 },
         },
     ]
 }
@@ -1306,11 +1261,7 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state.stage = Stage::S4;
     state.xp = 8.5;
     state.lifetime_effective_tokens = 125_000.0;
-    state.vitals = Vitals {
-        fed: 70.0,
-        happiness: 72.0,
-        energy: 68.0,
-    };
+    state.vitals = Vitals { fed: 70.0, happiness: 72.0, energy: 68.0 };
     state.created_at = ctx.fixed_now - Duration::days(18);
     state.last_updated_at = ctx.fixed_now;
     state.last_usage_poll_at = Some(ctx.fixed_now - Duration::minutes(5));
@@ -1339,9 +1290,7 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
         EarnedHabitatProp {
             id: HabitatPropId::new("codex_signal_lamp"),
             earned_at: ctx.fixed_now - Duration::days(12),
-            source: HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            source: HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() },
         },
         EarnedHabitatProp {
             id: HabitatPropId::new("heavy_session_planter"),
@@ -1351,16 +1300,12 @@ fn seeded_pet_state(ctx: &PreviewRenderContext) -> PetState {
         EarnedHabitatProp {
             id: HabitatPropId::new("token_pebble_25k"),
             earned_at: ctx.fixed_now - Duration::days(10),
-            source: HabitatPropSource::LifetimeTokens {
-                threshold: 25_000.0,
-            },
+            source: HabitatPropSource::LifetimeTokens { threshold: 25_000.0 },
         },
         EarnedHabitatProp {
             id: HabitatPropId::new("token_shell_100k"),
             earned_at: ctx.fixed_now - Duration::days(4),
-            source: HabitatPropSource::LifetimeTokens {
-                threshold: 100_000.0,
-            },
+            source: HabitatPropSource::LifetimeTokens { threshold: 100_000.0 },
         },
     ];
     state
@@ -1372,11 +1317,7 @@ fn liveliness_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state.stage = Stage::S6;
     state.xp = 72.0;
     state.lifetime_effective_tokens = 2_400_000.0;
-    state.vitals = Vitals {
-        fed: 86.0,
-        happiness: 88.0,
-        energy: 84.0,
-    };
+    state.vitals = Vitals { fed: 86.0, happiness: 88.0, energy: 84.0 };
     state.created_at = ctx.fixed_now - Duration::days(96);
     state.last_updated_at = ctx.fixed_now;
     state.last_usage_poll_at = Some(ctx.fixed_now - Duration::minutes(1));
@@ -1513,11 +1454,7 @@ fn newborn_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state.stage = Stage::S0;
     state.xp = 0.0;
     state.lifetime_effective_tokens = 0.0;
-    state.vitals = Vitals {
-        fed: 80.0,
-        happiness: 80.0,
-        energy: 80.0,
-    };
+    state.vitals = Vitals { fed: 80.0, happiness: 80.0, energy: 80.0 };
     state.created_at = ctx.fixed_now;
     state.last_updated_at = ctx.fixed_now;
     state.last_usage_poll_at = None;
@@ -1624,10 +1561,7 @@ fn light_day_morning_day_context(now: OffsetDateTime) -> DayContext {
         phase_started_at_utc: now - Duration::minutes(40),
         phase_ends_at_utc: now + Duration::minutes(80),
         today_ratio: 0.02,
-        yesterday: Some(DaySummary {
-            ratio: 0.04,
-            dominant_shape: None,
-        }),
+        yesterday: Some(DaySummary { ratio: 0.04, dominant_shape: None }),
         mature: true,
         local_day_started_utc: now - Duration::hours(7),
         local_day_rollover_utc: now + Duration::hours(17),
@@ -1869,9 +1803,7 @@ fn orbit_prop_pet_state(ctx: &PreviewRenderContext) -> PetState {
     state.habitat.earned_props.push(EarnedHabitatProp {
         id: HabitatPropId::new("token_orbit_5m"),
         earned_at: ctx.fixed_now - Duration::days(3),
-        source: HabitatPropSource::LifetimeTokens {
-            threshold: 5_000_000.0,
-        },
+        source: HabitatPropSource::LifetimeTokens { threshold: 5_000_000.0 },
     });
     state
 }

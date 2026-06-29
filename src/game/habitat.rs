@@ -76,6 +76,7 @@ pub const TOKEN_TREASURE_CHEST_2M: &str = "token_treasure_chest_2m";
 pub const TOKEN_ORBIT_5M: &str = "token_orbit_5m";
 pub const TOKEN_LANTERN_10M: &str = "token_lantern_10m";
 pub const TOKEN_HANGING_VINE_25M: &str = "token_hanging_vine_25m";
+pub const TOKEN_REEDS_5M: &str = "token_reeds_5m";
 pub const CODEX_SIGNAL_LAMP: &str = "codex_signal_lamp";
 pub const HEAVY_SESSION_PLANTER: &str = "heavy_session_planter";
 pub const WILT_RECOVERY_SPROUT: &str = "wilt_recovery_sprout";
@@ -139,7 +140,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 45,
         lifetime_threshold: Some(750_000.0),
         pet_layer: HabitatPetLayer::Behind,
-        color: (0xe8, 0xed, 0xf2), // soft cloud white
+        color: (0x9c, 0xac, 0xc0), // overcast blue-grey
     },
     HabitatPropSpec {
         id: TOKEN_SHARD_1M,
@@ -154,7 +155,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         id: TOKEN_TREASURE_CHEST_2M,
         kind: HabitatPropKind::Trophy,
         zone: HabitatPropZone::FloorMid,
-        display_priority: 55,
+        display_priority: 145, // animated bubbling centerpiece — a featured trophy
         lifetime_threshold: Some(2_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
         color: (0xd8, 0xa4, 0x4c), // antique gold
@@ -185,6 +186,15 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         lifetime_threshold: Some(25_000_000.0),
         pet_layer: HabitatPetLayer::Foreground,
         color: (0x7a, 0xb8, 0x80), // leafy green
+    },
+    HabitatPropSpec {
+        id: TOKEN_REEDS_5M,
+        kind: HabitatPropKind::Trophy,
+        zone: HabitatPropZone::FloorRight,
+        display_priority: 151, // reeds — third green plant anchor
+        lifetime_threshold: Some(5_000_000.0),
+        pet_layer: HabitatPetLayer::Foreground,
+        color: (0x8c, 0xc4, 0x6c), // reed green
     },
     HabitatPropSpec {
         id: TOKEN_GEODE_50M,
@@ -219,7 +229,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::Ceiling,
         display_priority: 130,
         lifetime_threshold: Some(500_000_000.0),
-        pet_layer: HabitatPetLayer::Background,
+        pet_layer: HabitatPetLayer::Behind,
         color: (0xc0, 0x88, 0xe0), // aurora violet
     },
     HabitatPropSpec {
@@ -228,8 +238,8 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::AirRight,
         display_priority: 140,
         lifetime_threshold: Some(1_000_000_000.0),
-        pet_layer: HabitatPetLayer::Background,
-        color: (0xe0, 0xe4, 0xf0), // moonlight silver
+        pet_layer: HabitatPetLayer::Behind,
+        color: (0xb4, 0xa0, 0xf0), // moonlit violet — aurora palette, its own shade
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
@@ -350,9 +360,7 @@ fn unlock_first_codex(
         record_prop(
             state,
             HabitatPropId::new(CODEX_SIGNAL_LAMP),
-            HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() },
             now,
             unlocked,
         );
@@ -401,9 +409,7 @@ fn unlock_return_sprout(
         record_prop(
             state,
             HabitatPropId::new(RETURN_SPROUT),
-            HabitatPropSource::ActivityMilestone {
-                milestone: RETURN_SPROUT.to_string(),
-            },
+            HabitatPropSource::ActivityMilestone { milestone: RETURN_SPROUT.to_string() },
             now,
             unlocked,
         );
@@ -458,11 +464,10 @@ fn record_prop(
         return;
     }
 
-    state.habitat.earned_props.push(EarnedHabitatProp {
-        id: id.clone(),
-        earned_at,
-        source,
-    });
+    state
+        .habitat
+        .earned_props
+        .push(EarnedHabitatProp { id: id.clone(), earned_at, source });
     unlocked.push(id);
 }
 

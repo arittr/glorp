@@ -225,14 +225,7 @@ fn insert_target(
 ) {
     targets.insert(
         path,
-        GeometryTarget {
-            owner,
-            rect,
-            z,
-            clip,
-            role,
-            cell_count,
-        },
+        GeometryTarget { owner, rect, z, clip, role, cell_count },
     );
 }
 

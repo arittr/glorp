@@ -64,11 +64,7 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
         stage: Stage::S0,
         xp: 0.0,
         lifetime_effective_tokens: 0.0,
-        vitals: Vitals {
-            fed: 70.0,
-            happiness: 70.0,
-            energy: 70.0,
-        },
+        vitals: Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 },
         calibration,
         rhythm,
         seen_stage_transitions: Vec::new(),

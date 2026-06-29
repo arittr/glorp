@@ -552,9 +552,7 @@ mod tests {
         let mut blit_buf = Buffer::empty(Rect::new(0, 0, 20, 14));
         blit_draw_list(
             &mut blit_buf,
-            &SceneDrawList {
-                cells: pet_body_cells(area, &lines),
-            },
+            &SceneDrawList { cells: pet_body_cells(area, &lines) },
         );
 
         assert_eq!(

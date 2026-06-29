@@ -309,9 +309,7 @@ fn provider_uses_configured_cache_read_weight_for_real_deltas() {
         codex: None,
         node: None,
     })
-    .with_weights(EffectiveTokenWeights {
-        cache_read_weight: 0.05,
-    });
+    .with_weights(EffectiveTokenWeights { cache_read_weight: 0.05 });
 
     complete_poll_lifecycle(&provider, &mut store);
     let next_provider = CcusageCommandProvider::new(HelperPaths {
@@ -320,9 +318,7 @@ fn provider_uses_configured_cache_read_weight_for_real_deltas() {
         codex: None,
         node: None,
     })
-    .with_weights(EffectiveTokenWeights {
-        cache_read_weight: 0.05,
-    });
+    .with_weights(EffectiveTokenWeights { cache_read_weight: 0.05 });
 
     let second = next_provider.poll(&mut store).unwrap();
     assert_eq!(second.total_effective_tokens, 1500.0);
@@ -837,9 +833,7 @@ fn agentsview_configured_missing_path_returns_sanitized_diagnostic() {
     let missing_helper = dir.path().join("missing-agentsview");
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
-        glorp::usage::agentsview::AgentsviewPaths {
-            agentsview: Some(missing_helper),
-        },
+        glorp::usage::agentsview::AgentsviewPaths { agentsview: Some(missing_helper) },
     );
 
     let result = provider.poll(&mut store).unwrap();

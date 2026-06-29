@@ -809,11 +809,7 @@ impl UsageStore {
                     provider_version,
                     parser_version,
                 };
-                Ok(UsageLedgerRow {
-                    id: row.get(0)?,
-                    event,
-                    cursor_update,
-                })
+                Ok(UsageLedgerRow { id: row.get(0)?, event, cursor_update })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
