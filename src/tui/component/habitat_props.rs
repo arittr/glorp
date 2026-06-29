@@ -502,10 +502,11 @@ fn trophy_sprite(
         // Treasure chest: lid open (gap in the lid + a ✦ glint) during the bubble
         // cycle's open window, closed (solid lid + ◆) otherwise.
         "token_treasure_chest_2m" if crate::pet::animator::chest_lid_open(now) => &[
-            SpriteCell { dx: 0, dy: 0, glyph: '╭' },
-            SpriteCell { dx: 2, dy: 0, glyph: '╮' },
+            SpriteCell { dx: 0, dy: 0, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 0, glyph: '✦' },
+            SpriteCell { dx: 2, dy: 0, glyph: '╱' },
             SpriteCell { dx: 0, dy: 1, glyph: '▣' },
-            SpriteCell { dx: 1, dy: 1, glyph: '✦' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◆' },
             SpriteCell { dx: 2, dy: 1, glyph: '▣' },
         ],
         "token_treasure_chest_2m" => &[
