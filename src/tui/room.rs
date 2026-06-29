@@ -102,11 +102,7 @@ impl RoomSpeciesDialect {
                 RoomDialectStatus::Default
             }
         };
-        Self {
-            species,
-            key,
-            status,
-        }
+        Self { species, key, status }
     }
 }
 
@@ -828,13 +824,7 @@ fn place_zone_glyphs<R: Rng>(
             let row = rect.y + rng.gen_range(0..rect.height);
             if placed.insert((col, row)) {
                 let glyph = *symbols.choose(rng).unwrap_or(&symbols[0]);
-                glyphs.push(RoomGlyph {
-                    row,
-                    col,
-                    glyph,
-                    style,
-                    zone,
-                });
+                glyphs.push(RoomGlyph { row, col, glyph, style, zone });
                 break;
             }
         }
@@ -1115,9 +1105,7 @@ mod tests {
 
     fn vm_with_props(props: Vec<EarnedHabitatPropView>) -> WatchViewModel {
         let mut vm = WatchViewModel::fixture();
-        vm.habitat = HabitatView {
-            earned_props: props,
-        };
+        vm.habitat = HabitatView { earned_props: props };
         vm.day_context = DayContext {
             day_phase: DayPhase::Day,
             mature: true,

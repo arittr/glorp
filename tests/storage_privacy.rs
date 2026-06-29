@@ -59,11 +59,7 @@ fn pet_state_round_trips_schema_and_vitals() {
     assert_eq!(loaded.pet.accepted_name, "mochi");
     assert_eq!(
         loaded.vitals,
-        Vitals {
-            fed: 70.0,
-            happiness: 70.0,
-            energy: 70.0
-        }
+        Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 }
     );
 }
 

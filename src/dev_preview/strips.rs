@@ -69,10 +69,7 @@ pub fn scene_strip_smoke() -> PreviewStripBundle {
             title: "Scene Strip Smoke".to_string(),
             intent: "Proves Preview Lab can export and play deterministic scene strips."
                 .to_string(),
-            dimensions: PreviewDimensions {
-                width: 40,
-                height: 8,
-            },
+            dimensions: PreviewDimensions { width: 40, height: 8 },
             target_id: "watch.room.effect".to_string(),
             playback: PreviewPlayback {
                 starts_paused: true,

@@ -834,10 +834,7 @@ mod tests {
         let day = crate::tui::day::DayContext {
             mature: true,
             today_ratio: 0.0,
-            yesterday: Some(crate::tui::day::DaySummary {
-                ratio: 3.0,
-                dominant_shape: None,
-            }),
+            yesterday: Some(crate::tui::day::DaySummary { ratio: 3.0, dominant_shape: None }),
             local_day_started_utc: day_start,
             date_seed: 7,
             ..crate::tui::day::DayContext::default()

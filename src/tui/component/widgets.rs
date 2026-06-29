@@ -20,10 +20,7 @@ pub struct Panel {
 
 impl Panel {
     pub const fn new(title: &'static str) -> Self {
-        Self {
-            title,
-            style: ComponentStyle::new(),
-        }
+        Self { title, style: ComponentStyle::new() }
     }
 
     pub const fn style(mut self, style: ComponentStyle) -> Self {
@@ -206,11 +203,7 @@ pub struct StatRow<'a> {
 
 impl<'a> StatRow<'a> {
     pub const fn new(label: &'a str, fraction: f64, color: Color) -> Self {
-        Self {
-            label,
-            fraction,
-            color,
-        }
+        Self { label, fraction, color }
     }
 
     pub const fn fraction(mut self, fraction: f64) -> Self {
@@ -365,9 +358,7 @@ pub struct FeedList<'a> {
 
 impl<'a> FeedList<'a> {
     pub fn new(lines: impl IntoIterator<Item = Line<'a>>) -> Self {
-        Self {
-            lines: lines.into_iter().collect(),
-        }
+        Self { lines: lines.into_iter().collect() }
     }
 
     pub fn from_lines(lines: impl IntoIterator<Item = Line<'a>>) -> Self {

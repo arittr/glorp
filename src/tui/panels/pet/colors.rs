@@ -328,10 +328,7 @@ pub(super) fn resolve_watch_pet_styles(
 ) -> (SemanticStyles, SemanticStyles) {
     use crate::presentation::surface::{resolve_pet_colors, SurfaceStyle, WATCH_STYLE};
     let live_style = if matches!(color_capability, ColorCapability::Flat) {
-        SurfaceStyle {
-            activity_lift: false,
-            ..WATCH_STYLE
-        }
+        SurfaceStyle { activity_lift: false, ..WATCH_STYLE }
     } else {
         WATCH_STYLE
     };

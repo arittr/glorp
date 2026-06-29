@@ -16,9 +16,7 @@ pub struct EffectiveTokenWeights {
 
 impl Default for EffectiveTokenWeights {
     fn default() -> Self {
-        Self {
-            cache_read_weight: 0.03,
-        }
+        Self { cache_read_weight: 0.03 }
     }
 }
 

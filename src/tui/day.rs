@@ -873,10 +873,7 @@ mod tests {
         // Pet existed yesterday but ate nothing: observed idle day.
         assert_eq!(
             ctx.yesterday,
-            Some(DaySummary {
-                ratio: 0.0,
-                dominant_shape: None
-            })
+            Some(DaySummary { ratio: 0.0, dominant_shape: None })
         );
         // Pet created today: no coverage.
         state.created_at = now - time::Duration::hours(1);
@@ -1332,9 +1329,7 @@ mod tests {
         assert_eq!(resonant_prop_for_day(&day, &[]), None, "earned-only");
         let ladder = earned_prop(
             "token_pebble_25k",
-            HabitatPropSource::LifetimeTokens {
-                threshold: 25_000.0,
-            },
+            HabitatPropSource::LifetimeTokens { threshold: 25_000.0 },
             datetime!(2026-06-07 12:00 UTC),
         );
         assert_eq!(resonant_prop_for_day(&day, &[ladder]), None);
@@ -1352,10 +1347,7 @@ mod tests {
             resonant_prop_for_day(&day, std::slice::from_ref(&planter)),
             Some(HabitatPropId::new("heavy_session_planter"))
         );
-        let immature = DayContext {
-            mature: false,
-            ..day
-        };
+        let immature = DayContext { mature: false, ..day };
         assert_eq!(
             resonant_prop_for_day(&immature, &[planter]),
             None,
@@ -1367,9 +1359,7 @@ mod tests {
     fn codex_heavy_yesterday_and_fresh_recovery_resonate_without_maturity() {
         let lamp = earned_prop(
             "codex_signal_lamp",
-            HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() },
             datetime!(2026-05-20 15:00 UTC),
         );
         let sprout = earned_prop(
@@ -1396,9 +1386,7 @@ mod tests {
     fn stale_event_unlocks_and_ordinary_yesterdays_resonate_nothing() {
         let lamp = earned_prop(
             "codex_signal_lamp",
-            HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() },
             datetime!(2026-05-20 15:00 UTC),
         );
         let planter = earned_prop(
@@ -1418,9 +1406,7 @@ mod tests {
     fn date_seed_tie_breaks_equally_qualified_props_deterministically() {
         let lamp = earned_prop(
             "codex_signal_lamp",
-            HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() },
             datetime!(2026-05-20 15:00 UTC),
         );
         let planter = earned_prop(
@@ -1459,10 +1445,7 @@ mod tests {
             HabitatPropSource::HeavySession,
             datetime!(2026-05-01 12:00 UTC),
         );
-        let day = DayContext {
-            asleep: true,
-            ..resonance_day(0, 1.8)
-        };
+        let day = DayContext { asleep: true, ..resonance_day(0, 1.8) };
         assert_eq!(
             resonant_prop_for_day(&day, &[planter]),
             None,

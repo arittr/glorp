@@ -100,9 +100,7 @@ impl CcusageCommandProvider {
                 &format!("{command_name} helper was not found"),
             );
             persist_diagnostic(store, &diagnostic)?;
-            return Ok(HelperInvocation::EarlyExit {
-                diagnostics: vec![diagnostic],
-            });
+            return Ok(HelperInvocation::EarlyExit { diagnostics: vec![diagnostic] });
         };
 
         let helper_command = match helper_command(
@@ -114,9 +112,7 @@ impl CcusageCommandProvider {
             Ok(helper_command) => helper_command,
             Err(diagnostic) => {
                 persist_diagnostic(store, &diagnostic)?;
-                return Ok(HelperInvocation::EarlyExit {
-                    diagnostics: vec![diagnostic],
-                });
+                return Ok(HelperInvocation::EarlyExit { diagnostics: vec![diagnostic] });
             }
         };
         let version = self
@@ -160,9 +156,7 @@ impl CcusageCommandProvider {
                     ),
                 );
                 persist_diagnostic(store, &diagnostic)?;
-                return Ok(HelperInvocation::EarlyExit {
-                    diagnostics: vec![diagnostic],
-                });
+                return Ok(HelperInvocation::EarlyExit { diagnostics: vec![diagnostic] });
             }
             Err(err) => return Err(err),
         };
@@ -174,9 +168,7 @@ impl CcusageCommandProvider {
                 &format!("{command_name} exited with status {code}"),
             );
             persist_diagnostic(store, &diagnostic)?;
-            return Ok(HelperInvocation::EarlyExit {
-                diagnostics: vec![diagnostic],
-            });
+            return Ok(HelperInvocation::EarlyExit { diagnostics: vec![diagnostic] });
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -184,9 +176,7 @@ impl CcusageCommandProvider {
             Ok(batch) => batch,
             Err(diagnostic) => {
                 persist_diagnostic(store, &diagnostic)?;
-                return Ok(HelperInvocation::EarlyExit {
-                    diagnostics: vec![diagnostic],
-                });
+                return Ok(HelperInvocation::EarlyExit { diagnostics: vec![diagnostic] });
             }
         };
         for diagnostic in &batch.diagnostics {
@@ -211,11 +201,9 @@ impl CcusageCommandProvider {
     ) -> Result<UsagePollResult> {
         let (version, records, invoke_diagnostics) =
             match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
-                HelperInvocation::Records {
-                    version,
-                    records,
-                    diagnostics,
-                } => (version, records, diagnostics),
+                HelperInvocation::Records { version, records, diagnostics } => {
+                    (version, records, diagnostics)
+                }
                 HelperInvocation::EarlyExit { diagnostics } => {
                     return Ok(UsagePollResult {
                         deltas: Vec::new(),
@@ -407,11 +395,9 @@ impl CcusageCommandProvider {
     ) -> Result<UsageSnapshot> {
         let (version, records, invoke_diagnostics) =
             match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
-                HelperInvocation::Records {
-                    version,
-                    records,
-                    diagnostics,
-                } => (version, records, diagnostics),
+                HelperInvocation::Records { version, records, diagnostics } => {
+                    (version, records, diagnostics)
+                }
                 HelperInvocation::EarlyExit { diagnostics } => {
                     return Ok(UsageSnapshot {
                         daily_usage: Vec::new(),
@@ -473,11 +459,7 @@ impl CcusageCommandProvider {
         }
 
         diagnostics.extend(invoke_diagnostics);
-        Ok(UsageSnapshot {
-            daily_usage,
-            cursor_updates,
-            diagnostics,
-        })
+        Ok(UsageSnapshot { daily_usage, cursor_updates, diagnostics })
     }
 
     fn run_command(
@@ -538,11 +520,7 @@ pub(crate) fn run_command_with_timeout(command: &mut Command, timeout: Duration)
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
 
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
+    Ok(Output { status, stdout, stderr })
 }
 
 impl UsageProvider for CcusageCommandProvider {
@@ -625,11 +603,7 @@ impl UsageProvider for CcusageCommandProvider {
         let mut diagnostics = unified.diagnostics;
         diagnostics.extend(claude.diagnostics);
         diagnostics.extend(codex.diagnostics);
-        Ok(UsageSnapshot {
-            daily_usage,
-            cursor_updates,
-            diagnostics,
-        })
+        Ok(UsageSnapshot { daily_usage, cursor_updates, diagnostics })
     }
 }
 
@@ -644,11 +618,7 @@ impl HelperDiscovery {
         let node = std::env::var_os("GLORP_NODE_BIN")
             .map(PathBuf::from)
             .or_else(|| find_on_path("node"));
-        let mut discovered = Self {
-            claude,
-            codex,
-            node,
-        };
+        let mut discovered = Self { claude, codex, node };
         if discovered.claude.is_none() || discovered.codex.is_none() || discovered.node.is_none() {
             if let Ok(paths) = crate::paths::AppPaths::resolve() {
                 let locator_path = paths

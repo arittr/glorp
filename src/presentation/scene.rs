@@ -116,15 +116,11 @@ impl PresentationScene {
             targets: BTreeMap::from([
                 (
                     SurfaceTargetId::new("room.effect"),
-                    PresentationTargetAnchor {
-                        layer: PresentationLayer::Room,
-                    },
+                    PresentationTargetAnchor { layer: PresentationLayer::Room },
                 ),
                 (
                     SurfaceTargetId::new("pet.art"),
-                    PresentationTargetAnchor {
-                        layer: PresentationLayer::Pet,
-                    },
+                    PresentationTargetAnchor { layer: PresentationLayer::Pet },
                 ),
             ]),
         }

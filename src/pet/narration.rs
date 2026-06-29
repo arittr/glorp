@@ -352,11 +352,7 @@ mod tests {
     // ── vital_crossing ───────────────────────────────────────────────────────
 
     fn vitals(fed: f64, energy: f64) -> Vitals {
-        Vitals {
-            fed,
-            happiness: 70.0,
-            energy,
-        }
+        Vitals { fed, happiness: 70.0, energy }
     }
 
     #[test]

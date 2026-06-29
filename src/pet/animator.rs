@@ -764,9 +764,7 @@ pub fn compute_token_pop(
     if !(0..=2).contains(&elapsed) {
         return None;
     }
-    Some(TokenPop {
-        duration_remaining_secs: 2 - elapsed,
-    })
+    Some(TokenPop { duration_remaining_secs: 2 - elapsed })
 }
 
 /// Multiplier (1.0..=3.0) that stretches idle gesture timing as idle grows:
@@ -1458,18 +1456,12 @@ mod tests {
             breath_rhythm_for_day(&asleep),
             BreathRhythm::Asleep { onset }
         );
-        let tired = crate::tui::day::DayContext {
-            tiredness: 0.5,
-            ..Default::default()
-        };
+        let tired = crate::tui::day::DayContext { tiredness: 0.5, ..Default::default() };
         assert_eq!(
             breath_rhythm_for_day(&tired),
             BreathRhythm::Tired { eighths: 4 }
         );
-        let barely = crate::tui::day::DayContext {
-            tiredness: 0.05,
-            ..Default::default()
-        };
+        let barely = crate::tui::day::DayContext { tiredness: 0.05, ..Default::default() };
         assert_eq!(breath_rhythm_for_day(&barely), BreathRhythm::Awake);
         assert_eq!(
             breath_rhythm_for_day(&crate::tui::day::DayContext::default()),

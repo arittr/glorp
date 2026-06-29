@@ -229,7 +229,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 140,
         lifetime_threshold: Some(1_000_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
-        color: (0x88, 0x94, 0xb0), // dusk moon silver
+        color: (0xb4, 0xa0, 0xf0), // moonlit violet — aurora palette, its own shade
     },
     HabitatPropSpec {
         id: CODEX_SIGNAL_LAMP,
@@ -350,9 +350,7 @@ fn unlock_first_codex(
         record_prop(
             state,
             HabitatPropId::new(CODEX_SIGNAL_LAMP),
-            HabitatPropSource::ProviderFirstUse {
-                provider_surface: "codex".to_string(),
-            },
+            HabitatPropSource::ProviderFirstUse { provider_surface: "codex".to_string() },
             now,
             unlocked,
         );
@@ -401,9 +399,7 @@ fn unlock_return_sprout(
         record_prop(
             state,
             HabitatPropId::new(RETURN_SPROUT),
-            HabitatPropSource::ActivityMilestone {
-                milestone: RETURN_SPROUT.to_string(),
-            },
+            HabitatPropSource::ActivityMilestone { milestone: RETURN_SPROUT.to_string() },
             now,
             unlocked,
         );
@@ -458,11 +454,10 @@ fn record_prop(
         return;
     }
 
-    state.habitat.earned_props.push(EarnedHabitatProp {
-        id: id.clone(),
-        earned_at,
-        source,
-    });
+    state
+        .habitat
+        .earned_props
+        .push(EarnedHabitatProp { id: id.clone(), earned_at, source });
     unlocked.push(id);
 }
 

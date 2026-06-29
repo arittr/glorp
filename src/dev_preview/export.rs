@@ -684,10 +684,7 @@ mod tests {
                 kind: PreviewScenarioKind::Watch,
                 title: "Frame One".to_string(),
                 intent: "Exercise a sample watch preview.".to_string(),
-                dimensions: PreviewDimensions {
-                    width: 2,
-                    height: 2,
-                },
+                dimensions: PreviewDimensions { width: 2, height: 2 },
                 files: PreviewScenarioFiles {
                     text: PathBuf::from("frames/frame-one.txt"),
                     cells: PathBuf::from("frames/frame-one.cells.json"),
@@ -848,18 +845,8 @@ mod tests {
             schema_version: 2,
             frame_id: "frame-one".to_string(),
             mode: "wide".to_string(),
-            frame: crate::tui::component::PreviewRect {
-                x: 0,
-                y: 0,
-                width: 2,
-                height: 2,
-            },
-            content: crate::tui::component::PreviewRect {
-                x: 0,
-                y: 0,
-                width: 2,
-                height: 2,
-            },
+            frame: crate::tui::component::PreviewRect { x: 0, y: 0, width: 2, height: 2 },
+            content: crate::tui::component::PreviewRect { x: 0, y: 0, width: 2, height: 2 },
             components: BTreeMap::new(),
             targets: BTreeMap::from([(
                 "watch.room.effect".to_string(),
@@ -870,12 +857,7 @@ mod tests {
                     height: 2,
                     owner: "watch.pet".to_string(),
                     role: "RoomEffect".to_string(),
-                    clip: crate::tui::component::PreviewRect {
-                        x: 0,
-                        y: 0,
-                        width: 2,
-                        height: 2,
-                    },
+                    clip: crate::tui::component::PreviewRect { x: 0, y: 0, width: 2, height: 2 },
                     z: 5,
                     layer: "room-background".to_string(),
                     cell_count: None,
@@ -888,12 +870,7 @@ mod tests {
             &path,
             &frame,
             "watch.room.effect",
-            &[PreviewMaskRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 2,
-            }],
+            &[PreviewMaskRect { x: 0, y: 0, width: 1, height: 2 }],
         )
         .unwrap();
 

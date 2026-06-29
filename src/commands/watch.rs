@@ -334,10 +334,7 @@ pub(crate) fn build_watch_view_model_at(
                 local.hour(),
                 local.minute(),
             );
-            BioView {
-                hatched_label,
-                age_label,
-            }
+            BioView { hatched_label, age_label }
         },
     })
 }
@@ -484,10 +481,7 @@ pub(crate) fn poll_usage_and_apply(
         // Mark after save: a failure here drifts state.lifetime ahead of the
         // usage store; the next successful run reconciles via the ledger.
         usage_store.mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
-        return Ok(Some(PollUsageOutcome {
-            state,
-            applied_signal,
-        }));
+        return Ok(Some(PollUsageOutcome { state, applied_signal }));
     }
     let elapsed = state
         .last_usage_poll_at

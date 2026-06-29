@@ -28,11 +28,7 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
-    state.vitals = Vitals {
-        fed: 40.0,
-        happiness: 40.0,
-        energy: 40.0,
-    };
+    state.vitals = Vitals { fed: 40.0, happiness: 40.0, energy: 40.0 };
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
     establish_provider_contact(&mut usage_store, "claude-code", now);
     let poll = poll_with_delta(100_000.0, now);
@@ -75,11 +71,7 @@ fn no_delta_poll_applies_rhythm_decay_without_granting_xp() {
     let dir = tempdir().unwrap();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
-    state.vitals = Vitals {
-        fed: 70.0,
-        happiness: 70.0,
-        energy: 70.0,
-    };
+    state.vitals = Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 };
     state.last_usage_poll_at = Some(datetime!(2026 - 05 - 09 09:00 UTC));
     let now = datetime!(2026 - 05 - 09 13:00 UTC);
 
@@ -899,11 +891,7 @@ fn wilted_recovery_unlocks_sprout_once() {
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
-    state.vitals = Vitals {
-        fed: 2.0,
-        happiness: 2.0,
-        energy: 2.0,
-    };
+    state.vitals = Vitals { fed: 2.0, happiness: 2.0, energy: 2.0 };
     let now = datetime!(2026 - 05 - 09 12:00 UTC);
     establish_provider_contact(&mut usage_store, "claude-code", now);
 

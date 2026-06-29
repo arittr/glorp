@@ -227,10 +227,7 @@ mod tests {
     #[test]
     fn speech_uses_profile_burst_for_munch_reaction() {
         let visible = datetime!(2026-05-11 12:00 UTC);
-        let profile = crate::tui::life::PetLifeProfile {
-            burst_level: 1.0,
-            ..Default::default()
-        };
+        let profile = crate::tui::life::PetLifeProfile { burst_level: 1.0, ..Default::default() };
 
         let speech = current_pet_speech_for_scene(
             Mood::Content,
@@ -286,14 +283,9 @@ mod tests {
     fn asleep_speech_is_a_sparse_zzz_cadence_and_suppresses_munch_and_mood_lines() {
         use crate::tui::day::DayContext;
         let cycle0 = OffsetDateTime::from_unix_timestamp(90 * (1_700_000_000 / 90)).unwrap();
-        let hot_profile = crate::tui::life::PetLifeProfile {
-            burst_level: 1.0,
-            ..Default::default()
-        };
-        let asleep = DayContext {
-            asleep: true,
-            ..Default::default()
-        };
+        let hot_profile =
+            crate::tui::life::PetLifeProfile { burst_level: 1.0, ..Default::default() };
+        let asleep = DayContext { asleep: true, ..Default::default() };
         let line = current_pet_speech_for_scene(Mood::Hungry, &hot_profile, &asleep, cycle0);
         assert!(
             matches!(line.as_deref(), Some(l) if SLEEP_SPEECH_PHRASES.contains(&l)),
@@ -333,13 +325,7 @@ mod tests {
     fn hungry_at_dawn_after_an_idle_yesterday_shows_the_vitals_line_not_a_greeting() {
         use crate::tui::day::DaySummary;
         let visible = datetime!(2026-05-11 12:00 UTC);
-        let day = dawn_day(
-            Some(DaySummary {
-                ratio: 0.0,
-                dominant_shape: None,
-            }),
-            true,
-        );
+        let day = dawn_day(Some(DaySummary { ratio: 0.0, dominant_shape: None }), true);
         let line = current_pet_speech_for_scene(
             Mood::Hungry,
             &crate::tui::life::PetLifeProfile::default(),
@@ -361,13 +347,7 @@ mod tests {
         let profile = crate::tui::life::PetLifeProfile::default();
         let content = ["hmm", "thinking deeply", "just chilling", "all is well"];
 
-        let observed_idle = dawn_day(
-            Some(DaySummary {
-                ratio: 0.0,
-                dominant_shape: None,
-            }),
-            true,
-        );
+        let observed_idle = dawn_day(Some(DaySummary { ratio: 0.0, dominant_shape: None }), true);
         let line =
             current_pet_speech_for_scene(Mood::Content, &profile, &observed_idle, visible).unwrap();
         assert!(
@@ -375,13 +355,7 @@ mod tests {
             "Some(0.0) selects the rested flavor, got {line}"
         );
 
-        let feast = dawn_day(
-            Some(DaySummary {
-                ratio: 2.0,
-                dominant_shape: None,
-            }),
-            true,
-        );
+        let feast = dawn_day(Some(DaySummary { ratio: 2.0, dominant_shape: None }), true);
         let line = current_pet_speech_for_scene(Mood::Content, &profile, &feast, visible).unwrap();
         assert!(
             MORNING_MELLOW_PHRASES.contains(&line.as_str()),
@@ -396,13 +370,7 @@ mod tests {
             "None must fall through to the mood line, got {line}"
         );
 
-        let immature = dawn_day(
-            Some(DaySummary {
-                ratio: 0.0,
-                dominant_shape: None,
-            }),
-            false,
-        );
+        let immature = dawn_day(Some(DaySummary { ratio: 0.0, dominant_shape: None }), false);
         let line =
             current_pet_speech_for_scene(Mood::Content, &profile, &immature, visible).unwrap();
         assert!(
@@ -461,19 +429,13 @@ mod tests {
 
         for yesterday in [
             None,
-            Some(DaySummary {
-                ratio: 0.7,
-                dominant_shape: None,
-            }),
+            Some(DaySummary { ratio: 0.7, dominant_shape: None }),
             Some(DaySummary {
                 ratio: 0.7,
                 dominant_shape: Some(WorkWeather::Clear),
             }),
         ] {
-            let day = DayContext {
-                yesterday,
-                ..sparks_day
-            };
+            let day = DayContext { yesterday, ..sparks_day };
             let any_dream = scan(&day).into_iter().any(|d| d);
             assert!(
                 !any_dream,

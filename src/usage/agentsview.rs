@@ -331,9 +331,7 @@ impl AgentsviewDiscovery {
 
 impl From<AgentsviewDiscovery> for AgentsviewPaths {
     fn from(value: AgentsviewDiscovery) -> Self {
-        Self {
-            agentsview: value.agentsview,
-        }
+        Self { agentsview: value.agentsview }
     }
 }
 
@@ -583,9 +581,7 @@ mod tests {
             "#!/usr/bin/env bash\nif [[ \"$1\" == \"--version\" ]]; then echo 'agentsview v0.32.1'; exit 0; fi\nsleep 2\necho '{{\"daily\":[]}}'",
             "@echo off\nif \"%~1\"==\"--version\" (\n  echo agentsview v0.32.1\n  exit /b 0\n)\npowershell -NoProfile -Command \"Start-Sleep -Seconds 2\" >NUL\necho {\"daily\":[]}",
         );
-        let provider = AgentsviewCommandProvider::new(AgentsviewPaths {
-            agentsview: Some(helper),
-        });
+        let provider = AgentsviewCommandProvider::new(AgentsviewPaths { agentsview: Some(helper) });
         let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
 
         let started = Instant::now();

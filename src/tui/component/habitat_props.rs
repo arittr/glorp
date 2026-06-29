@@ -308,12 +308,7 @@ fn sprite_footprint(sprite: &'static [SpriteCell]) -> SpriteFootprint {
         min_dy = min_dy.min(cell.dy);
         max_dy = max_dy.max(cell.dy);
     }
-    SpriteFootprint {
-        min_dx,
-        max_dx,
-        min_dy,
-        max_dy,
-    }
+    SpriteFootprint { min_dx, max_dx, min_dy, max_dy }
 }
 
 fn zone_anchor_candidates(
@@ -433,1027 +428,274 @@ fn trophy_sprite(
         // Bloomed plants flower once matured in the tank (rosy tint from
         // trophy_color); the blossoms (*) twinkle between phases.
         "token_moss_tuft_250k" if bloomed && phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '▂',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '*' },
+            SpriteCell { dx: 2, dy: 0, glyph: '*' },
+            SpriteCell { dx: 0, dy: 1, glyph: '▂' },
+            SpriteCell { dx: 1, dy: 1, glyph: '▃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '▂' },
         ],
         "token_moss_tuft_250k" if bloomed => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '▂',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '*' },
+            SpriteCell { dx: 0, dy: 1, glyph: '▃' },
+            SpriteCell { dx: 1, dy: 1, glyph: '▂' },
+            SpriteCell { dx: 2, dy: 1, glyph: '▃' },
         ],
         "token_hanging_vine_25m" if bloomed && phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╽',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '╲',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '*' },
+            SpriteCell { dx: 1, dy: 0, glyph: '╽' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╱' },
+            SpriteCell { dx: 1, dy: 2, glyph: '*' },
+            SpriteCell { dx: 2, dy: 2, glyph: '╲' },
         ],
         "token_hanging_vine_25m" if bloomed => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╽',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '╱',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '╽' },
+            SpriteCell { dx: 2, dy: 0, glyph: '*' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 2, glyph: '*' },
+            SpriteCell { dx: 2, dy: 2, glyph: '╱' },
         ],
         "heavy_session_planter" if bloomed && phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '◌',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '*' },
+            SpriteCell { dx: 1, dy: 0, glyph: '*' },
+            SpriteCell { dx: 2, dy: 0, glyph: '*' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╱' },
+            SpriteCell { dx: 1, dy: 2, glyph: '◌' },
         ],
         "heavy_session_planter" if bloomed => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '◌',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '*' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╱' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 2, glyph: '◌' },
         ],
         "token_moss_tuft_250k" if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '▂',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '▂' },
+            SpriteCell { dx: 1, dy: 0, glyph: '▃' },
+            SpriteCell { dx: 2, dy: 0, glyph: '▂' },
         ],
         "token_moss_tuft_250k" => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '▂',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '▃' },
+            SpriteCell { dx: 1, dy: 0, glyph: '▂' },
+            SpriteCell { dx: 2, dy: 0, glyph: '▃' },
         ],
         "token_friendly_cloud_750k" if phase < 4 => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '☁',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◦',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '◡',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '◦',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '☁' },
+            SpriteCell { dx: 0, dy: 1, glyph: '◦' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◡' },
+            SpriteCell { dx: 2, dy: 1, glyph: '◦' },
         ],
         "token_friendly_cloud_750k" => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '☁',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '˙',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '◡',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '˙',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '☁' },
+            SpriteCell { dx: 0, dy: 1, glyph: '˙' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◡' },
+            SpriteCell { dx: 2, dy: 1, glyph: '˙' },
         ],
         "token_treasure_chest_2m" if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╭',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '─',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '╮',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '▣',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '◇',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '▣',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '╭' },
+            SpriteCell { dx: 1, dy: 0, glyph: '─' },
+            SpriteCell { dx: 2, dy: 0, glyph: '╮' },
+            SpriteCell { dx: 0, dy: 1, glyph: '▣' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◇' },
+            SpriteCell { dx: 2, dy: 1, glyph: '▣' },
         ],
         "token_treasure_chest_2m" => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╭',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '─',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '╮',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '▣',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '◆',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '▣',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '╭' },
+            SpriteCell { dx: 1, dy: 0, glyph: '─' },
+            SpriteCell { dx: 2, dy: 0, glyph: '╮' },
+            SpriteCell { dx: 0, dy: 1, glyph: '▣' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◆' },
+            SpriteCell { dx: 2, dy: 1, glyph: '▣' },
         ],
         "token_hanging_vine_25m" if phase < 4 => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╽',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '╲',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '╽' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╱' },
+            SpriteCell { dx: 1, dy: 2, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 2, glyph: '╲' },
         ],
         "token_hanging_vine_25m" => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╽',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '╱',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '╽' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 2, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 2, glyph: '╱' },
         ],
         CODEX_SIGNAL_LAMP if matches!(species, Species::Glitch) && phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╷',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '#',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '_',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 0, dy: 1, glyph: '#' },
+            SpriteCell { dx: 0, dy: 2, glyph: '_' },
         ],
         CODEX_SIGNAL_LAMP if matches!(species, Species::Glitch) => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '_',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: ':',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╵',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '_' },
+            SpriteCell { dx: 0, dy: 1, glyph: ':' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╵' },
         ],
         CODEX_SIGNAL_LAMP if matches!(species, Species::Crystal) && phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╷',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◆',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╵',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 0, dy: 1, glyph: '◆' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╵' },
         ],
         CODEX_SIGNAL_LAMP if matches!(species, Species::Crystal) => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╷',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◇',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╵',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 0, dy: 1, glyph: '◇' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╵' },
         ],
         CODEX_SIGNAL_LAMP if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╷',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◉',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╵',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 0, dy: 1, glyph: '◉' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╵' },
         ],
         CODEX_SIGNAL_LAMP => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '╷',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '○',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '╵',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '╷' },
+            SpriteCell { dx: 0, dy: 1, glyph: '○' },
+            SpriteCell { dx: 0, dy: 2, glyph: '╵' },
         ],
         "heavy_session_planter" if phase < 4 => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: 'ѱ',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '◌',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: 'ѱ' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╱' },
+            SpriteCell { dx: 1, dy: 2, glyph: '◌' },
         ],
         "heavy_session_planter" => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: 'ѱ',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '◌',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: 'ѱ' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╱' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 2, glyph: '◌' },
         ],
         "wilt_recovery_sprout" if phase < 4 => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╱',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '╿' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╱' },
         ],
         "wilt_recovery_sprout" => &[
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╲',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '╿' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╱' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╲' },
         ],
         // Amethyst geode: a 3×3 facet cluster in a rock cradle that SHIMMERS —
         // every facet swaps bright◆/dim◇ between phases and the core pulses to a
         // sparkle, so it reads as light catching the crystals (not a static pile).
         TOKEN_GEODE_50M if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '◆',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '◇',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '◆',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◇',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '◈',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '◇',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '◣',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '▼',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '◢',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '◆' },
+            SpriteCell { dx: 1, dy: 0, glyph: '◇' },
+            SpriteCell { dx: 2, dy: 0, glyph: '◆' },
+            SpriteCell { dx: 0, dy: 1, glyph: '◇' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◈' },
+            SpriteCell { dx: 2, dy: 1, glyph: '◇' },
+            SpriteCell { dx: 0, dy: 2, glyph: '◣' },
+            SpriteCell { dx: 1, dy: 2, glyph: '▼' },
+            SpriteCell { dx: 2, dy: 2, glyph: '◢' },
         ],
         TOKEN_GEODE_50M => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '◇',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '◆',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '◇',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '◆',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '◆',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '◣',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '▼',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '◢',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '◇' },
+            SpriteCell { dx: 1, dy: 0, glyph: '◆' },
+            SpriteCell { dx: 2, dy: 0, glyph: '◇' },
+            SpriteCell { dx: 0, dy: 1, glyph: '◆' },
+            SpriteCell { dx: 1, dy: 1, glyph: '✦' },
+            SpriteCell { dx: 2, dy: 1, glyph: '◆' },
+            SpriteCell { dx: 0, dy: 2, glyph: '◣' },
+            SpriteCell { dx: 1, dy: 2, glyph: '▼' },
+            SpriteCell { dx: 2, dy: 2, glyph: '◢' },
         ],
         // 100M bonsai: blossoms (*) rustle across the canopy (▓) over a trunk + pot.
         TOKEN_BONSAI_100M if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '▓',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '▂',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '▃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '▂',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '*' },
+            SpriteCell { dx: 1, dy: 0, glyph: '▓' },
+            SpriteCell { dx: 2, dy: 0, glyph: '*' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╱' },
+            SpriteCell { dx: 0, dy: 2, glyph: '▂' },
+            SpriteCell { dx: 1, dy: 2, glyph: '▃' },
+            SpriteCell { dx: 2, dy: 2, glyph: '▂' },
         ],
         TOKEN_BONSAI_100M => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '▓',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '▓',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╲',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '┃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╱',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '▂',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '▃',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '▂',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '▓' },
+            SpriteCell { dx: 1, dy: 0, glyph: '*' },
+            SpriteCell { dx: 2, dy: 0, glyph: '▓' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╲' },
+            SpriteCell { dx: 1, dy: 1, glyph: '┃' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╱' },
+            SpriteCell { dx: 0, dy: 2, glyph: '▂' },
+            SpriteCell { dx: 1, dy: 2, glyph: '▃' },
+            SpriteCell { dx: 2, dy: 2, glyph: '▂' },
         ],
         // 250M constellation: the bright stars (✦) rotate corners↔edges, twinkling.
         TOKEN_CONSTELLATION_250M if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '✦',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '✦' },
+            SpriteCell { dx: 1, dy: 0, glyph: '·' },
+            SpriteCell { dx: 2, dy: 0, glyph: '✦' },
+            SpriteCell { dx: 0, dy: 1, glyph: '·' },
+            SpriteCell { dx: 1, dy: 1, glyph: '*' },
+            SpriteCell { dx: 2, dy: 1, glyph: '·' },
+            SpriteCell { dx: 0, dy: 2, glyph: '✦' },
+            SpriteCell { dx: 1, dy: 2, glyph: '·' },
+            SpriteCell { dx: 2, dy: 2, glyph: '✦' },
         ],
         TOKEN_CONSTELLATION_250M => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 0,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '*',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 2,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '·',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '·' },
+            SpriteCell { dx: 1, dy: 0, glyph: '✦' },
+            SpriteCell { dx: 2, dy: 0, glyph: '·' },
+            SpriteCell { dx: 0, dy: 1, glyph: '✦' },
+            SpriteCell { dx: 1, dy: 1, glyph: '*' },
+            SpriteCell { dx: 2, dy: 1, glyph: '✦' },
+            SpriteCell { dx: 0, dy: 2, glyph: '·' },
+            SpriteCell { dx: 1, dy: 2, glyph: '✦' },
+            SpriteCell { dx: 2, dy: 2, glyph: '·' },
         ],
         // 500M aurora: a vertical light-curtain hanging from the ceiling. The
         // streaks hold still (no flicker) — only the crowning sparkles twinkle.
         TOKEN_AURORA_500M if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 4,
-                dy: 0,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 4,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '┊',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '┊',
-            },
-            SpriteCell {
-                dx: 4,
-                dy: 2,
-                glyph: '┊',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '✦' },
+            SpriteCell { dx: 2, dy: 0, glyph: '·' },
+            SpriteCell { dx: 4, dy: 0, glyph: '✦' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╿' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╿' },
+            SpriteCell { dx: 4, dy: 1, glyph: '╿' },
+            SpriteCell { dx: 0, dy: 2, glyph: '┊' },
+            SpriteCell { dx: 2, dy: 2, glyph: '┊' },
+            SpriteCell { dx: 4, dy: 2, glyph: '┊' },
         ],
         TOKEN_AURORA_500M => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 4,
-                dy: 0,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 4,
-                dy: 1,
-                glyph: '╿',
-            },
-            SpriteCell {
-                dx: 0,
-                dy: 2,
-                glyph: '┊',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 2,
-                glyph: '┊',
-            },
-            SpriteCell {
-                dx: 4,
-                dy: 2,
-                glyph: '┊',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '·' },
+            SpriteCell { dx: 2, dy: 0, glyph: '✦' },
+            SpriteCell { dx: 4, dy: 0, glyph: '·' },
+            SpriteCell { dx: 0, dy: 1, glyph: '╿' },
+            SpriteCell { dx: 2, dy: 1, glyph: '╿' },
+            SpriteCell { dx: 4, dy: 1, glyph: '╿' },
+            SpriteCell { dx: 0, dy: 2, glyph: '┊' },
+            SpriteCell { dx: 2, dy: 2, glyph: '┊' },
+            SpriteCell { dx: 4, dy: 2, glyph: '┊' },
         ],
-        // 1B moon: a half-lit moon with stars twinkling beside it.
+        // 1B moon: a glowing half-lit moon (◑) with a soft halo and a twinkling
+        // star, tinted the aurora's violet so it reads as part of the same night sky.
         TOKEN_MOON_1B if phase < 4 => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '◑',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '✦',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '·',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '·' },
+            SpriteCell { dx: 0, dy: 1, glyph: '·' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◑' },
+            SpriteCell { dx: 2, dy: 1, glyph: '·' },
+            SpriteCell { dx: 1, dy: 2, glyph: '·' },
+            SpriteCell { dx: 3, dy: 1, glyph: '✦' },
         ],
         TOKEN_MOON_1B => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '◑',
-            },
-            SpriteCell {
-                dx: 2,
-                dy: 0,
-                glyph: '·',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '✦',
-            },
+            SpriteCell { dx: 1, dy: 0, glyph: '·' },
+            SpriteCell { dx: 0, dy: 1, glyph: '·' },
+            SpriteCell { dx: 1, dy: 1, glyph: '◑' },
+            SpriteCell { dx: 2, dy: 1, glyph: '·' },
+            SpriteCell { dx: 1, dy: 2, glyph: '·' },
+            SpriteCell { dx: 3, dy: 1, glyph: '·' },
         ],
         _ => &[
-            SpriteCell {
-                dx: 0,
-                dy: 0,
-                glyph: '◈',
-            },
-            SpriteCell {
-                dx: 1,
-                dy: 1,
-                glyph: '▝',
-            },
+            SpriteCell { dx: 0, dy: 0, glyph: '◈' },
+            SpriteCell { dx: 1, dy: 1, glyph: '▝' },
         ],
     }
 }

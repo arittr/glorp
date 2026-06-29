@@ -330,10 +330,9 @@ pub fn apply_unapplied_usage(
         if let Some(bucket) = narration::poll_bucket(recent_effective_tokens) {
             if should_narrate_poll_cycle(state, bucket, recent_effective_tokens, now) {
                 let text = narration::poll_phrase(&state.pet.accepted_name, bucket, now);
-                state.recent_events.push(NarrativeEvent {
-                    observed_at: now,
-                    text,
-                });
+                state
+                    .recent_events
+                    .push(NarrativeEvent { observed_at: now, text });
             }
         }
     } else if rows.is_empty() {
@@ -347,10 +346,9 @@ pub fn apply_unapplied_usage(
                 && last_narration_age.is_none_or(|age| age >= Duration::hours(6))
             {
                 let text = narration::idle_phrase(&state.pet.accepted_name, now, scene_asleep);
-                state.recent_events.push(NarrativeEvent {
-                    observed_at: now,
-                    text,
-                });
+                state
+                    .recent_events
+                    .push(NarrativeEvent { observed_at: now, text });
                 state.last_idle_narration_at = Some(now);
             }
         }
@@ -366,10 +364,9 @@ pub fn apply_unapplied_usage(
             if let Some(new_stage) = Stage::from_index(idx) {
                 let text =
                     narration::stage_phrase(&state.pet.accepted_name.clone(), species, new_stage);
-                state.recent_events.push(NarrativeEvent {
-                    observed_at: now,
-                    text,
-                });
+                state
+                    .recent_events
+                    .push(NarrativeEvent { observed_at: now, text });
             }
         }
     }
@@ -378,10 +375,9 @@ pub fn apply_unapplied_usage(
     let new_mood = mood_for_vitals(game_vitals(state.vitals));
     if state.last_seen_mood.is_some() && state.last_seen_mood != Some(new_mood) {
         let text = narration::mood_phrase(&state.pet.accepted_name.clone(), new_mood, now);
-        state.recent_events.push(NarrativeEvent {
-            observed_at: now,
-            text,
-        });
+        state
+            .recent_events
+            .push(NarrativeEvent { observed_at: now, text });
     }
     state.last_seen_mood = Some(new_mood);
 
@@ -389,10 +385,9 @@ pub fn apply_unapplied_usage(
     if let Some(prev) = state.previous_vitals {
         if let Some(crossing) = narration::vital_crossing(prev, state.vitals) {
             let text = narration::vital_phrase(&state.pet.accepted_name.clone(), crossing);
-            state.recent_events.push(NarrativeEvent {
-                observed_at: now,
-                text,
-            });
+            state
+                .recent_events
+                .push(NarrativeEvent { observed_at: now, text });
         }
     }
     let mapper = LocalDayMapper::System;

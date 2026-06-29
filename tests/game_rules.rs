@@ -21,10 +21,7 @@ fn effective_tokens_count_cache_reads_lightly() {
         cache_read: 0,
         reasoning_output: 0,
     };
-    let cache_heavy = TokenBuckets {
-        cache_read: 2500,
-        ..regular
-    };
+    let cache_heavy = TokenBuckets { cache_read: 2500, ..regular };
     assert_eq!(weights.compute(regular), 2500.0);
     assert_eq!(weights.cache_read_weight, 0.03);
     assert!(weights.compute(cache_heavy) < 5000.0);
@@ -140,12 +137,8 @@ fn calibration_groups_multiple_rows_on_the_same_active_day_before_median() {
 
 #[test]
 fn low_and_high_usage_users_progress_by_relative_effort() {
-    let low = CalibrationBaseline {
-        daily_effective_tokens: 50_000.0,
-    };
-    let high = CalibrationBaseline {
-        daily_effective_tokens: 500_000_000.0,
-    };
+    let low = CalibrationBaseline { daily_effective_tokens: 50_000.0 };
+    let high = CalibrationBaseline { daily_effective_tokens: 500_000_000.0 };
     let low_xp = (0..35).fold(0.0, |xp, _| apply_xp_delta(xp, 50_000.0, low).xp);
     let high_xp = (0..35).fold(0.0, |xp, _| apply_xp_delta(xp, 500_000_000.0, high).xp);
     assert_eq!(stage_for_xp(low_xp), stage_for_xp(high_xp));
@@ -153,9 +146,7 @@ fn low_and_high_usage_users_progress_by_relative_effort() {
 
 #[test]
 fn extreme_bucket_cannot_skip_most_of_lifecycle() {
-    let baseline = CalibrationBaseline {
-        daily_effective_tokens: 100_000.0,
-    };
+    let baseline = CalibrationBaseline { daily_effective_tokens: 100_000.0 };
     let result = apply_xp_delta(0.0, 100_000_000.0, baseline);
     assert!(result.stage_transitions.len() <= 3);
     assert!(result.mood_food_benefit <= 25.0);
@@ -163,9 +154,7 @@ fn extreme_bucket_cannot_skip_most_of_lifecycle() {
 
 #[test]
 fn stage_transition_event_is_recorded_once() {
-    let baseline = CalibrationBaseline {
-        daily_effective_tokens: 100_000.0,
-    };
+    let baseline = CalibrationBaseline { daily_effective_tokens: 100_000.0 };
     let before = apply_xp_delta(0.0, 100_000.0, baseline);
     let after = apply_xp_delta(before.xp, 100_000.0, baseline);
     let mut all = before.stage_transitions.clone();
@@ -179,11 +168,7 @@ fn stage_transition_event_is_recorded_once() {
 
 #[test]
 fn effective_usage_improves_vitals_without_exceeding_caps() {
-    let vitals = Vitals {
-        fed: 35.0,
-        happiness: 40.0,
-        energy: 30.0,
-    };
+    let vitals = Vitals { fed: 35.0, happiness: 40.0, energy: 30.0 };
     let out = apply_food(vitals, 25_000.0, 100_000.0);
     assert!(out.vitals.fed > vitals.fed);
     assert!(out.vitals.happiness > vitals.happiness);
@@ -195,11 +180,7 @@ fn effective_usage_improves_vitals_without_exceeding_caps() {
 
 #[test]
 fn same_day_gap_does_not_jump_to_wilted() {
-    let vitals = Vitals {
-        fed: 70.0,
-        happiness: 70.0,
-        energy: 70.0,
-    };
+    let vitals = Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 };
     let out = apply_decay(
         vitals,
         datetime!(2026 - 05 - 09 09:00 UTC),
@@ -212,11 +193,7 @@ fn same_day_gap_does_not_jump_to_wilted() {
 
 #[test]
 fn overnight_and_weekend_decay_is_slower() {
-    let vitals = Vitals {
-        fed: 70.0,
-        happiness: 70.0,
-        energy: 70.0,
-    };
+    let vitals = Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 };
     let overnight = apply_decay(
         vitals,
         datetime!(2026 - 05 - 08 22:00 UTC),
@@ -264,11 +241,7 @@ fn historically_inactive_hours_decay_slowly() {
         datetime!(2026 - 05 - 08 09:00 UTC),
         datetime!(2026 - 05 - 12 10:00 UTC),
     ]);
-    let vitals = Vitals {
-        fed: 70.0,
-        happiness: 70.0,
-        energy: 70.0,
-    };
+    let vitals = Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 };
     let inactive_window = apply_decay(
         vitals,
         datetime!(2026 - 05 - 08 02:00 UTC),
@@ -326,11 +299,7 @@ fn timestamped_history_learns_active_and_inactive_hour_rhythm() {
     assert!(profile.active_hours[21]);
     assert!(!profile.active_hours[9]);
 
-    let vitals = Vitals {
-        fed: 70.0,
-        happiness: 70.0,
-        energy: 70.0,
-    };
+    let vitals = Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 };
     let learned_active_window = apply_decay(
         vitals,
         datetime!(2026 - 05 - 08 20:00 UTC),
@@ -363,11 +332,7 @@ fn history_learns_weekend_activity_from_enough_active_days() {
 
 #[test]
 fn sustained_absence_can_wilt_but_real_usage_recovers() {
-    let vitals = Vitals {
-        fed: 20.0,
-        happiness: 25.0,
-        energy: 20.0,
-    };
+    let vitals = Vitals { fed: 20.0, happiness: 25.0, energy: 20.0 };
     let wilted = apply_decay(
         vitals,
         datetime!(2026 - 05 - 01 09:00 UTC),
@@ -381,11 +346,7 @@ fn sustained_absence_can_wilt_but_real_usage_recovers() {
 
 #[test]
 fn there_is_no_death_transition() {
-    let vitals = Vitals {
-        fed: 0.0,
-        happiness: 0.0,
-        energy: 0.0,
-    };
+    let vitals = Vitals { fed: 0.0, happiness: 0.0, energy: 0.0 };
     let out = apply_decay(
         vitals,
         datetime!(2026 - 01 - 01 00:00 UTC),
@@ -398,9 +359,7 @@ fn there_is_no_death_transition() {
 
 #[test]
 fn one_active_day_catchup_splits_into_six_to_twelve_buckets() {
-    let baseline = CalibrationBaseline {
-        daily_effective_tokens: 100_000.0,
-    };
+    let baseline = CalibrationBaseline { daily_effective_tokens: 100_000.0 };
     let buckets = smear_catchup_delta(100_000.0, baseline);
     assert!((6..=12).contains(&buckets.len()));
     assert!(buckets.iter().all(|bucket| *bucket <= 25_000.0));
@@ -412,9 +371,7 @@ fn one_active_day_catchup_splits_into_six_to_twelve_buckets() {
 
 #[test]
 fn sixty_daily_catchups_reach_s6_without_duplicate_transition_pressure() {
-    let baseline = CalibrationBaseline {
-        daily_effective_tokens: 100_000.0,
-    };
+    let baseline = CalibrationBaseline { daily_effective_tokens: 100_000.0 };
     let mut xp = 0.0;
     for _ in 0..60 {
         for bucket in smear_catchup_delta(100_000.0, baseline) {
@@ -427,9 +384,7 @@ fn sixty_daily_catchups_reach_s6_without_duplicate_transition_pressure() {
 
 #[test]
 fn activity_milestone_source_round_trips() {
-    let source = HabitatPropSource::ActivityMilestone {
-        milestone: "first_ensemble_day".into(),
-    };
+    let source = HabitatPropSource::ActivityMilestone { milestone: "first_ensemble_day".into() };
     let json = serde_json::to_string(&source).unwrap();
     let back: HabitatPropSource = serde_json::from_str(&json).unwrap();
     assert_eq!(back, source);

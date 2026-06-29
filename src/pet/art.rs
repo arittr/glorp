@@ -1303,10 +1303,7 @@ mod tests {
             &pet,
             Stage::S4,
             Mood::Content,
-            AnimationFrame {
-                tick: 1,
-                ..AnimationFrame::default()
-            },
+            AnimationFrame { tick: 1, ..AnimationFrame::default() },
         )
         .lines
         .join("\n");

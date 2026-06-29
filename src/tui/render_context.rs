@@ -36,10 +36,7 @@ impl RenderContext {
     }
 
     pub const fn with_clock(color_capability: ColorCapability, clock: WatchClock) -> Self {
-        Self {
-            color_capability,
-            clock,
-        }
+        Self { color_capability, clock }
     }
 
     pub fn from_environment() -> Self {

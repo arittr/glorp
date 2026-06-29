@@ -264,14 +264,7 @@ mod tests {
     #[test]
     fn black_and_white_are_exact() {
         assert_eq!(oklch_to_rgb(0.0, 0.0, 0.0), Rgb { r: 0, g: 0, b: 0 });
-        assert_eq!(
-            oklch_to_rgb(1.0, 0.0, 0.0),
-            Rgb {
-                r: 255,
-                g: 255,
-                b: 255
-            }
-        );
+        assert_eq!(oklch_to_rgb(1.0, 0.0, 0.0), Rgb { r: 255, g: 255, b: 255 });
     }
 
     #[test]

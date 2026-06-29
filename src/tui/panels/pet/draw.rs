@@ -234,11 +234,7 @@ pub(crate) fn render_pet_to_draw_list(
         resolve_watch_pet_styles(&vm.pet_palette, &inputs, ctx.color_capability);
 
     let effective_twinkle = if effects.token_pop.is_some() {
-        Some(crate::pet::animator::TwinkleSpec {
-            row: 4,
-            col: 5,
-            glyph: '\u{2726}',
-        })
+        Some(crate::pet::animator::TwinkleSpec { row: 4, col: 5, glyph: '\u{2726}' })
     } else {
         effects.twinkle
     };

@@ -147,11 +147,7 @@ impl PetState {
             last_seen_mood: None,
             previous_vitals: None,
             last_idle_narration_at: None,
-            vitals: Vitals {
-                fed: 70.0,
-                happiness: 70.0,
-                energy: 70.0,
-            },
+            vitals: Vitals { fed: 70.0, happiness: 70.0, energy: 70.0 },
             created_at: now,
             last_updated_at: now,
             last_usage_poll_at: None,
