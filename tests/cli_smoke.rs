@@ -1,9 +1,9 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-const AGENTSVIEW_OK: &str = "tests/fixtures/helpers/agentsview-ok.mjs";
-const AGENTSVIEW_DATA_WITH_DIAGNOSTIC: &str =
-    "tests/fixtures/helpers/agentsview-data-with-diagnostic.mjs";
+const CCUSAGE_OK: &str = "tests/fixtures/helpers/ccusage-ok.mjs";
+const CCUSAGE_CODEX_EMPTY: &str = "tests/fixtures/helpers/ccusage-codex-empty.mjs";
+const CCUSAGE_WITH_DIAGNOSTIC: &str = "ccusage-daily-with-diagnostic.json";
 
 #[test]
 fn help_hides_dev_preview_command() {
@@ -212,7 +212,8 @@ fn init_uses_historical_usage_for_calibration_without_initial_xp() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_EMPTY)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -230,7 +231,8 @@ fn init_does_not_feed_pet_or_persist_history_as_usage_events() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_EMPTY)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -265,11 +267,13 @@ fn init_does_not_feed_pet_or_persist_history_as_usage_events() {
 fn init_with_diagnostic_snapshot_advances_cursors_in_usage_db() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Init with a fixture that has valid data + a benign diagnostic.
+    // Init with a ccusage fixture that has valid data + a benign diagnostic.
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_DATA_WITH_DIAGNOSTIC)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_EMPTY)
+        .env("CCUSAGE_FIXTURE", CCUSAGE_WITH_DIAGNOSTIC)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success()

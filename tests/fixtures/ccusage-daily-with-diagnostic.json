@@ -1,0 +1,33 @@
+{
+  "daily": [
+    {
+      "date": "2026-05-08",
+      "inputTokens": 1000,
+      "outputTokens": 2000,
+      "cacheCreationTokens": 300,
+      "cacheReadTokens": 40000,
+      "totalTokens": 43300,
+      "totalCost": 1.25,
+      "modelsUsed": ["claude-sonnet-4", "claude-malformed-fixture"],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-sonnet-4",
+          "inputTokens": 1000,
+          "outputTokens": 2000,
+          "cacheCreationTokens": 300,
+          "cacheReadTokens": 40000,
+          "totalTokens": 43300,
+          "cost": 1.25
+        },
+        {
+          "modelName": "claude-malformed-fixture",
+          "inputTokens": "this-is-not-a-number",
+          "outputTokens": 100,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.0
+        }
+      ]
+    }
+  ]
+}
