@@ -322,9 +322,7 @@ pub fn apply_unapplied_usage(
     let initial_mood = mood_for_vitals(game_vitals(state.vitals));
 
     if recent_effective_tokens > 0.0 {
-        for row in &rows_to_apply {
-            apply_effective_delta(state, row.event.effective_tokens.max(0.0));
-        }
+        apply_effective_delta(state, recent_effective_tokens);
 
         // Poll cycle narration: token rate bucket.
         if let Some(bucket) = narration::poll_bucket(recent_effective_tokens) {
@@ -912,6 +910,68 @@ mod tests {
             row.event.token_contract == crate::usage::token_contract::TOKENMAXXING_TOTAL_V1
                 && row.event.effective_tokens == row.event.total_tokens
         }));
+    }
+
+    #[test]
+    fn smeared_catchup_uses_aggregate_xp_curve_once() {
+        let dir = tempdir().unwrap();
+        let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+        let mut state = PetState::new_for_test("seed", "buddy");
+        state.calibration.daily_effective_tokens = 100_000_000.0;
+        let baseline = state.calibration;
+        let now = datetime!(2026 - 06 - 18 19:10 UTC);
+
+        usage_store
+            .advance_cursors(
+                vec![ProviderCursorUpdate {
+                    provider_surface: "claude".into(),
+                    cursor_key: "contact".into(),
+                    cursor_value: "seeded".into(),
+                    provider_version: "test".into(),
+                    parser_version: "test".into(),
+                }],
+                now - Duration::hours(1),
+            )
+            .unwrap();
+
+        let total_tokens = 200_000_000.0;
+        let poll = UsagePollResult {
+            deltas: vec![UsageDelta {
+                provider_surface: "claude".into(),
+                source_identity: SourceIdentity::from_provider_surface("claude"),
+                command: "agentsview daily".into(),
+                effective_tokens: total_tokens,
+                total_tokens,
+                token_contract: crate::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+                confidence: "local-log-derived".into(),
+                period_start: now,
+                observed_at: now,
+                model: Some("claude-opus".into()),
+                cursor_update: ProviderCursorUpdate {
+                    provider_surface: "claude".into(),
+                    cursor_key: "claude-catchup".into(),
+                    cursor_value: "totals-v1".into(),
+                    provider_version: "test".into(),
+                    parser_version: "test".into(),
+                },
+                token_totals: None,
+            }],
+            diagnostics: vec![],
+            total_effective_tokens: total_tokens,
+            total_tokens,
+        };
+
+        let update = apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
+        let expected = apply_xp_delta(0.0, total_tokens, baseline);
+
+        assert!((update.recent_effective_tokens - total_tokens).abs() < 0.1);
+        assert!(
+            (state.xp - expected.xp).abs() < f64::EPSILON,
+            "smeared buckets must not bypass aggregate XP diminishing returns: got {}, expected {}",
+            state.xp,
+            expected.xp
+        );
+        assert_eq!(state.stage, stage_for_xp(expected.xp));
     }
 
     #[test]

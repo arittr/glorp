@@ -45,7 +45,7 @@ A newly observed provider delta is **one coherent pet event**, idempotently dete
 
 1. **`provider.poll(&mut usage_store)`** (`src/usage/ccusage.rs`) — shells out to ccusage / ccusage-codex helpers, normalizes JSON into per-record raw token totals, diffs against the previous cursor, emits `UsageDelta` items each carrying a `ProviderCursorUpdate` for later cursor advance.
 2. **`stage_usage_poll_deltas`** (`src/game/runtime.rs`) — smears each delta into 6–12 ten-minute buckets via `smear_catchup_delta` (`src/game/catchup.rs`) and inserts each bucket as an **unapplied ledger row** in `usage_events`. The unique partial index `(provider_delta_id, bucket_index)` guarantees idempotency.
-3. **`apply_unapplied_usage`** (`src/game/runtime.rs`) — reads unapplied rows in `bucket_at ASC` order, applies them per-row to `PetState.xp` / vitals / stage transitions, runs `compact_before` for retention.
+3. **`apply_unapplied_usage`** (`src/game/runtime.rs`) — reads unapplied rows in `bucket_at ASC` order, applies the aggregate unapplied effective-token total once to `PetState.xp` / vitals / stage transitions, then runs `compact_before` for retention. Smeared rows are for ledger history and rate display; they must not bypass the aggregate XP curve.
 4. **`state_store.save(&state)`** — JSON write to `state.json`.
 5. **`mark_events_applied_and_advance_cursors`** — single transaction that flips `applied_at`, advances `provider_cursors`, and bumps `lifetime_counters`.
 

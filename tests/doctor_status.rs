@@ -7,6 +7,7 @@ use time::{Duration, OffsetDateTime};
 
 const CCUSAGE_OK: &str = "tests/fixtures/helpers/ccusage-v20-multiagent.mjs";
 const CCUSAGE_CODEX_OK: &str = "tests/fixtures/helpers/ccusage-codex-ok.mjs";
+const CCUSAGE_CODEX_EMPTY: &str = "tests/fixtures/helpers/ccusage-codex-empty.mjs";
 const CCUSAGE_FAILS: &str = "tests/fixtures/helpers/ccusage-fails.mjs";
 const CCUSAGE_LEGACY_OK: &str = "tests/fixtures/helpers/ccusage-ok.mjs";
 const CCUSAGE_LEGACY_NEXT: &str = "tests/fixtures/helpers/ccusage-next.mjs";
@@ -103,6 +104,7 @@ fn doctor_sanitizes_ccusage_helper_stderr() {
             "GLORP_CCUSAGE_BIN",
             "tests/fixtures/helpers/ccusage-secret-stderr.mjs",
         )
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_FAILS)
         .arg("doctor")
         .assert()
         .success()
@@ -142,6 +144,7 @@ fn diagnostics_do_not_print_raw_transcript_content() {
             "GLORP_CCUSAGE_BIN",
             "tests/fixtures/helpers/ccusage-secret-stderr.mjs",
         )
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_FAILS)
         .arg("doctor")
         .assert()
         .success()
@@ -160,6 +163,7 @@ fn doctor_sanitizes_invalid_json_and_helper_stderr() {
             "GLORP_CCUSAGE_BIN",
             "tests/fixtures/helpers/ccusage-invalid-json.mjs",
         )
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_FAILS)
         .arg("doctor")
         .assert()
         .success()
@@ -173,6 +177,7 @@ fn doctor_sanitizes_invalid_json_and_helper_stderr() {
             "GLORP_CCUSAGE_BIN",
             "tests/fixtures/helpers/ccusage-secret-stderr.mjs",
         )
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_FAILS)
         .arg("doctor")
         .assert()
         .success()
@@ -197,6 +202,7 @@ fn repeated_provider_failures_keep_last_known_pet_state() {
             .unwrap()
             .env("GLORP_CONFIG_DIR", dir.path())
             .env("GLORP_CCUSAGE_BIN", CCUSAGE_FAILS)
+            .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_FAILS)
             .arg("status")
             .assert()
             .success()
@@ -295,6 +301,7 @@ fn status_uses_tokenmaxxing_day_axis_under_non_los_angeles_tz() {
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("TZ", "UTC")
         .env("GLORP_CCUSAGE_BIN", CCUSAGE_FAILS)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_FAILS)
         .arg("status")
         .assert()
         .success()
@@ -318,6 +325,7 @@ fn status_persists_real_usage_delta_into_pet_state() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_CCUSAGE_BIN", CCUSAGE_LEGACY_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_EMPTY)
         .arg("status")
         .assert()
         .success()
@@ -329,6 +337,7 @@ fn status_persists_real_usage_delta_into_pet_state() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_CCUSAGE_BIN", CCUSAGE_LEGACY_NEXT)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_EMPTY)
         .arg("status")
         .assert()
         .success()
@@ -367,6 +376,7 @@ fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_CCUSAGE_BIN", CCUSAGE_FAILS)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_FAILS)
         .arg("status")
         .assert()
         .success()

@@ -39,16 +39,18 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
     apply_usage_poll(&mut state, &mut usage_store, &poll2, now).unwrap();
 
-    // Two polls of one calibrated active day each smear into ledger buckets,
-    // crossing s0->s1, s1->s2, and s2->s3. Each transition records once.
+    // Two polls of one calibrated active day each cross s0->s1 and s1->s2.
+    // Smearing still writes multiple ledger rows, but XP is based on the
+    // aggregate poll total so the bucket split cannot accelerate evolution.
     assert_eq!(state.lifetime_effective_tokens, 200_000.0);
-    assert_eq!(state.stage, Stage::S3);
-    assert!(state.xp >= 1.0);
+    assert_eq!(state.stage, Stage::S2);
+    assert!(state.xp >= 0.25);
+    assert!(state.xp < 1.0);
     assert!(state.vitals.fed > 40.0);
     assert_eq!(state.last_usage_poll_at, Some(now));
     assert_eq!(state.last_updated_at, now);
-    // PetState::new_for_test defaults to Species::Fuzz; S1=fuzzling, S2=kit, S3=pup.
-    for label in ["fuzzling", "kit", "pup"] {
+    // PetState::new_for_test defaults to Species::Fuzz; S1=fuzzling, S2=kit.
+    for label in ["fuzzling", "kit"] {
         let expected_text = format!("mochi evolved into {label}");
         assert_eq!(
             state
@@ -60,10 +62,7 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
             "expected '{expected_text}' recorded once",
         );
     }
-    assert_eq!(
-        state.seen_stage_transitions,
-        vec![Stage::S1, Stage::S2, Stage::S3]
-    );
+    assert_eq!(state.seen_stage_transitions, vec![Stage::S1, Stage::S2]);
 }
 
 #[test]
@@ -612,19 +611,9 @@ fn catchup_application_records_each_stage_transition_once() {
         .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
         .unwrap();
 
-    assert_eq!(state.stage, Stage::S6);
-    assert_eq!(state.seen_stage_transitions.len(), 6);
-    assert_eq!(
-        state.seen_stage_transitions,
-        vec![
-            Stage::S1,
-            Stage::S2,
-            Stage::S3,
-            Stage::S4,
-            Stage::S5,
-            Stage::S6
-        ]
-    );
+    assert_eq!(state.stage, Stage::S2);
+    assert_eq!(state.seen_stage_transitions.len(), 2);
+    assert_eq!(state.seen_stage_transitions, vec![Stage::S1, Stage::S2]);
 }
 
 #[test]
