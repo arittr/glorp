@@ -89,6 +89,10 @@ fn provider_normalizes_claude_and_codex_records() {
         .deltas
         .iter()
         .any(|d| d.model.as_deref() == Some("claude-sonnet-4")));
+    assert!(result.deltas.iter().all(|d| {
+        d.token_contract == glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1
+            && d.effective_tokens == d.total_tokens
+    }));
 }
 
 #[test]
@@ -136,8 +140,8 @@ fn poll_with_increased_same_day_total_emits_only_increment() {
     let second = next_provider.poll(&mut store).unwrap();
 
     // 2026-05-09 increased by input 200 + output 600 + cache creation 200
-    // + cache reads 10000 * 0.03.
-    assert_eq!(second.total_effective_tokens, 1300.0);
+    // + cache reads 10000. Cached input now counts fully for canonical food.
+    assert_eq!(second.total_effective_tokens, 11_000.0);
     assert_eq!(second.deltas.len(), 1);
 }
 
@@ -300,7 +304,7 @@ fn helper_discovery_prefers_env_then_path_without_reading_real_logs() {
 }
 
 #[test]
-fn provider_uses_configured_cache_read_weight_for_real_deltas() {
+fn provider_ignores_legacy_cache_read_weight_for_canonical_deltas() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let provider = CcusageCommandProvider::new(HelperPaths {
@@ -321,7 +325,11 @@ fn provider_uses_configured_cache_read_weight_for_real_deltas() {
     .with_weights(EffectiveTokenWeights { cache_read_weight: 0.05 });
 
     let second = next_provider.poll(&mut store).unwrap();
-    assert_eq!(second.total_effective_tokens, 1500.0);
+    assert_eq!(second.total_effective_tokens, 11_000.0);
+    assert!(second.deltas.iter().all(|delta| {
+        delta.token_contract == glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1
+            && delta.effective_tokens == delta.total_tokens
+    }));
 }
 
 #[test]
@@ -513,9 +521,9 @@ fn ccusage_v20_uses_the_claude_scoped_subcommand() {
         "non-claude agent rows must never reach the ledger: {claude:?}"
     );
     let total: f64 = claude.iter().map(|d| d.effective_tokens).sum();
-    // 100 + 200 + 0 + 0.03 * 1000 = 330 from the claude-scoped payload; the
-    // all-agents payload would be ~2M.
-    assert!((total - 330.0).abs() < 1.0, "got {total}");
+    // 100 + 200 + 0 + 1000 = 1300 from the claude-scoped payload; the
+    // all-agents payload would be ~3M.
+    assert!((total - 1300.0).abs() < 1.0, "got {total}");
 }
 
 #[test]

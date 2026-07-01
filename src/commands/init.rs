@@ -7,7 +7,7 @@ use crate::{
         state::{HabitatState, NarrativeEvent, PetIdentity, PetState, StateStore, Vitals},
         usage_store::UsageStore,
     },
-    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
+    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
 use std::io::{self, IsTerminal, Write};
 use time::OffsetDateTime;
@@ -32,7 +32,7 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
     let mut rhythm = RhythmProfile::default();
     if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
         if let Ok(snapshot) =
-            AgentsviewCommandProvider::from_environment().snapshot_for_calibration(&mut usage_store)
+            CcusageCommandProvider::from_environment().snapshot_for_calibration(&mut usage_store)
         {
             let now = OffsetDateTime::now_utc();
             // Advance cursors unconditionally to prevent a bolus on the next poll.

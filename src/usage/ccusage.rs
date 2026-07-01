@@ -8,7 +8,7 @@ use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
     UsageSnapshot,
 };
-use crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1;
+use crate::usage::token_contract::TOKENMAXXING_TOTAL_V1;
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -50,7 +50,6 @@ pub struct HelperDiscovery {
 #[derive(Debug, Clone)]
 pub struct CcusageCommandProvider {
     helpers: HelperPaths,
-    weights: EffectiveTokenWeights,
 }
 
 enum HelperInvocation {
@@ -66,14 +65,11 @@ enum HelperInvocation {
 
 impl CcusageCommandProvider {
     pub fn new(helpers: HelperPaths) -> Self {
-        Self {
-            helpers,
-            weights: EffectiveTokenWeights::default(),
-        }
+        Self { helpers }
     }
 
-    pub fn with_weights(mut self, weights: EffectiveTokenWeights) -> Self {
-        self.weights = weights;
+    pub fn with_weights(self, weights: EffectiveTokenWeights) -> Self {
+        let _ = weights;
         self
     }
 
@@ -225,7 +221,6 @@ impl CcusageCommandProvider {
 
         let mut deltas = Vec::new();
         let mut diagnostics = Vec::new();
-        let weights = self.weights;
         let observed_at = OffsetDateTime::now_utc();
         for record in records {
             let parsed_period_start = match parse_period_start(&record.period_start) {
@@ -345,7 +340,7 @@ impl CcusageCommandProvider {
                 continue;
             }
 
-            let effective_tokens = delta_totals.effective_tokens(weights);
+            let total_tokens = delta_totals.total_tokens();
             let cursor_value = serde_json::to_string(&record.raw_totals)?;
             let cursor_update = ProviderCursorUpdate {
                 provider_surface: cursor_partition,
@@ -363,9 +358,9 @@ impl CcusageCommandProvider {
                 provider_surface: record.source_identity.provider_surface.clone(),
                 source_identity: record.source_identity.clone(),
                 command: command_name.to_string(),
-                effective_tokens,
-                total_tokens: effective_tokens,
-                token_contract: WEIGHTED_EFFECTIVE_V1.to_string(),
+                effective_tokens: total_tokens,
+                total_tokens,
+                token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
                 confidence: CONFIDENCE.to_string(),
                 period_start: parsed_period_start,
                 observed_at,
@@ -410,7 +405,6 @@ impl CcusageCommandProvider {
         let mut daily_usage = Vec::new();
         let mut cursor_updates = Vec::new();
         let mut diagnostics = Vec::new();
-        let weights = self.weights;
         for record in records {
             let parsed_period_start = match parse_period_start(&record.period_start) {
                 Ok(parsed) => parsed,
@@ -430,11 +424,10 @@ impl CcusageCommandProvider {
                 }
             };
 
-            let effective_tokens = record.raw_totals.effective_tokens(weights);
             daily_usage.push(
                 crate::game::calibration::DailyUsage::with_activity_timestamp(
                     parsed_period_start,
-                    effective_tokens,
+                    record.raw_totals.total_tokens(),
                 ),
             );
 
@@ -555,10 +548,19 @@ impl UsageProvider for CcusageCommandProvider {
 
         let mut deltas = claude.deltas;
         deltas.extend(codex.deltas);
-        let mut diagnostics = unified.diagnostics;
-        diagnostics.extend(claude.diagnostics);
-        diagnostics.extend(codex.diagnostics);
         let total_effective_tokens = deltas.iter().map(|delta| delta.effective_tokens).sum();
+        let focused_diagnostics = claude
+            .diagnostics
+            .iter()
+            .chain(codex.diagnostics.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut diagnostics = if focused_diagnostics.is_empty() {
+            Vec::new()
+        } else {
+            unified.diagnostics
+        };
+        diagnostics.extend(focused_diagnostics);
         Ok(UsagePollResult {
             deltas,
             diagnostics,
@@ -600,9 +602,18 @@ impl UsageProvider for CcusageCommandProvider {
         daily_usage.extend(codex.daily_usage);
         let mut cursor_updates = claude.cursor_updates;
         cursor_updates.extend(codex.cursor_updates);
-        let mut diagnostics = unified.diagnostics;
-        diagnostics.extend(claude.diagnostics);
-        diagnostics.extend(codex.diagnostics);
+        let focused_diagnostics = claude
+            .diagnostics
+            .iter()
+            .chain(codex.diagnostics.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut diagnostics = if focused_diagnostics.is_empty() {
+            Vec::new()
+        } else {
+            unified.diagnostics
+        };
+        diagnostics.extend(focused_diagnostics);
         Ok(UsageSnapshot { daily_usage, cursor_updates, diagnostics })
     }
 }

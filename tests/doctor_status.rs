@@ -5,9 +5,11 @@ use predicates::prelude::*;
 use tempfile::tempdir;
 use time::{Duration, OffsetDateTime};
 
-const AGENTSVIEW_OK: &str = "tests/fixtures/helpers/agentsview-ok.mjs";
-const AGENTSVIEW_NEXT: &str = "tests/fixtures/helpers/agentsview-next.mjs";
-const AGENTSVIEW_FAILS: &str = "tests/fixtures/helpers/agentsview-fails.mjs";
+const CCUSAGE_OK: &str = "tests/fixtures/helpers/ccusage-v20-multiagent.mjs";
+const CCUSAGE_CODEX_OK: &str = "tests/fixtures/helpers/ccusage-codex-ok.mjs";
+const CCUSAGE_FAILS: &str = "tests/fixtures/helpers/ccusage-fails.mjs";
+const CCUSAGE_LEGACY_OK: &str = "tests/fixtures/helpers/ccusage-ok.mjs";
+const CCUSAGE_LEGACY_NEXT: &str = "tests/fixtures/helpers/ccusage-next.mjs";
 
 #[test]
 fn status_is_pipe_friendly_when_pet_exists() {
@@ -15,7 +17,8 @@ fn status_is_pipe_friendly_when_pet_exists() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_OK)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -23,7 +26,8 @@ fn status_is_pipe_friendly_when_pet_exists() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_OK)
         .arg("status")
         .assert()
         .success()
@@ -49,53 +53,55 @@ fn doctor_reports_missing_helpers_with_setup_instructions() {
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicate::str::contains("provider: agentsview"))
-        .stdout(predicate::str::contains("Tokenmaxxing-compatible: no"))
-        .stdout(predicate::str::contains("Canonical provider blocked."))
-        .stdout(predicate::str::contains("GLORP_AGENTSVIEW_BIN"));
+        .stdout(predicate::str::contains("provider: ccusage"))
+        .stdout(predicate::str::contains("bundled usage helpers: blocked"))
+        .stdout(predicate::str::contains("Default provider blocked."))
+        .stdout(predicate::str::contains("GLORP_CCUSAGE_BIN"));
 }
 
 #[test]
-fn doctor_reports_agentsview_provider_as_tokenmaxxing_compatible() {
+fn doctor_reports_ccusage_provider_as_bundled_default() {
     let dir = tempdir().unwrap();
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_OK)
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicate::str::contains("provider: agentsview"))
-        .stdout(predicate::str::contains("Tokenmaxxing-compatible: yes"))
-        .stdout(predicate::str::contains("agentsview v0.32.1"));
+        .stdout(predicate::str::contains("provider: ccusage"))
+        .stdout(predicate::str::contains("bundled usage helpers: yes"))
+        .stdout(predicate::str::contains("ccusage 20.0.6"));
 }
 
 #[test]
-fn doctor_reports_missing_agentsview_as_canonical_provider_blocked() {
+fn doctor_reports_missing_ccusage_as_default_provider_blocked() {
     let dir = tempdir().unwrap();
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env_remove("GLORP_CCUSAGE_BIN")
+        .env_remove("GLORP_CCUSAGE_CODEX_BIN")
         .env("PATH", "/bin")
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Tokenmaxxing-compatible: no"))
-        .stdout(predicate::str::contains("Canonical provider blocked."))
-        .stdout(predicate::str::contains("agentsview helper was not found"))
-        .stdout(predicate::str::contains("GLORP_AGENTSVIEW_BIN"));
+        .stdout(predicate::str::contains("bundled usage helpers: blocked"))
+        .stdout(predicate::str::contains("Default provider blocked."))
+        .stdout(predicate::str::contains("ccusage helper was not found"))
+        .stdout(predicate::str::contains("GLORP_CCUSAGE_BIN"));
 }
 
 #[test]
-fn doctor_sanitizes_agentsview_helper_stderr() {
+fn doctor_sanitizes_ccusage_helper_stderr() {
     let dir = tempdir().unwrap();
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env(
-            "GLORP_AGENTSVIEW_BIN",
-            "tests/fixtures/helpers/agentsview-secret-stderr.mjs",
+            "GLORP_CCUSAGE_BIN",
+            "tests/fixtures/helpers/ccusage-secret-stderr.mjs",
         )
         .arg("doctor")
         .assert()
@@ -113,15 +119,16 @@ fn doctor_reports_helper_versions_when_available() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_OK)
         .arg("doctor")
         .assert()
         .success()
         .stdout(predicate::str::contains("helpers: found"))
         .stdout(predicate::str::contains("provider command health: ok"))
-        .stdout(predicate::str::contains("provider: agentsview"))
+        .stdout(predicate::str::contains("provider: ccusage"))
         .stdout(predicate::str::contains(
-            "helper version: agentsview provider=agentsview v0.32.1 parser=agentsview v0.32.1",
+            "helper version: claude-code provider=ccusage 20.0.6 parser=ccusage 20.0.6",
         ));
 }
 
@@ -132,8 +139,8 @@ fn diagnostics_do_not_print_raw_transcript_content() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env(
-            "GLORP_AGENTSVIEW_BIN",
-            "tests/fixtures/helpers/agentsview-secret-stderr.mjs",
+            "GLORP_CCUSAGE_BIN",
+            "tests/fixtures/helpers/ccusage-secret-stderr.mjs",
         )
         .arg("doctor")
         .assert()
@@ -150,8 +157,8 @@ fn doctor_sanitizes_invalid_json_and_helper_stderr() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env(
-            "GLORP_AGENTSVIEW_BIN",
-            "tests/fixtures/helpers/agentsview-invalid-json.mjs",
+            "GLORP_CCUSAGE_BIN",
+            "tests/fixtures/helpers/ccusage-invalid-json.mjs",
         )
         .arg("doctor")
         .assert()
@@ -163,8 +170,8 @@ fn doctor_sanitizes_invalid_json_and_helper_stderr() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env(
-            "GLORP_AGENTSVIEW_BIN",
-            "tests/fixtures/helpers/agentsview-secret-stderr.mjs",
+            "GLORP_CCUSAGE_BIN",
+            "tests/fixtures/helpers/ccusage-secret-stderr.mjs",
         )
         .arg("doctor")
         .assert()
@@ -179,7 +186,8 @@ fn repeated_provider_failures_keep_last_known_pet_state() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_OK)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -188,7 +196,7 @@ fn repeated_provider_failures_keep_last_known_pet_state() {
         Command::cargo_bin("glorp")
             .unwrap()
             .env("GLORP_CONFIG_DIR", dir.path())
-            .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_FAILS)
+            .env("GLORP_CCUSAGE_BIN", CCUSAGE_FAILS)
             .arg("status")
             .assert()
             .success()
@@ -286,7 +294,7 @@ fn status_uses_tokenmaxxing_day_axis_under_non_los_angeles_tz() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("TZ", "UTC")
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_FAILS)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_FAILS)
         .arg("status")
         .assert()
         .success()
@@ -309,7 +317,7 @@ fn status_persists_real_usage_delta_into_pet_state() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_LEGACY_OK)
         .arg("status")
         .assert()
         .success()
@@ -320,7 +328,7 @@ fn status_persists_real_usage_delta_into_pet_state() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_NEXT)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_LEGACY_NEXT)
         .arg("status")
         .assert()
         .success()
@@ -358,7 +366,7 @@ fn provider_failure_does_not_decay_or_overwrite_last_known_pet_state() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_FAILS)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_FAILS)
         .arg("status")
         .assert()
         .success()
@@ -382,13 +390,14 @@ fn status_surfaces_first_contact_without_claiming_blocked() {
     glorp::storage::state::StateStore::new(dir.path().join("state.json"))
         .save(&state)
         .unwrap();
-    // Deliberately no pre-seeded agentsview cursors: cutover should seed
+    // Deliberately no pre-seeded ccusage cursors: cutover should seed
     // history without feeding the pet.
 
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_OK)
         .arg("status")
         .assert()
         .success()
@@ -467,6 +476,6 @@ fn doctor_lists_discovered_sources_generically() {
         .assert()
         .success()
         .stdout(predicate::str::contains("source: gemini"))
-        .stdout(predicate::str::contains("agentsview"))
+        .stdout(predicate::str::contains("provider: ccusage"))
         .stdout(predicate::str::contains("claude-code provider=").not());
 }

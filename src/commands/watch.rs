@@ -29,7 +29,7 @@ use crate::{
             SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel,
         },
     },
-    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
+    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
 use std::path::Path;
 use time::{Duration, OffsetDateTime};
@@ -449,7 +449,7 @@ pub(crate) fn poll_usage_and_apply(
     let mut usage_store = UsageStore::open(usage_db)?;
     let config = crate::config::AppConfig::load_or_default(config_file)?;
     let now = OffsetDateTime::now_utc();
-    let provider = AgentsviewCommandProvider::from_environment();
+    let provider = CcusageCommandProvider::from_environment();
     let cutover = crate::usage::cutover::ensure_tokenmaxxing_contract_active(
         &mut state,
         &mut usage_store,

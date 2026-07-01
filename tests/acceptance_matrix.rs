@@ -96,8 +96,8 @@ fn npm_wrapper_contract_matches_platform_package_topology() {
 
     let launcher = read_json("npm/glorp/package.json");
     assert_eq!(launcher["bin"]["glorp"], "bin/glorp.js");
-    assert!(launcher["dependencies"].get("ccusage").is_some());
-    assert!(launcher["dependencies"].get("@ccusage/codex").is_some());
+    assert_eq!(launcher["dependencies"]["ccusage"], "^20.0.14");
+    assert_eq!(launcher["dependencies"]["@ccusage/codex"], "^19.0.0");
 
     let optional = launcher["optionalDependencies"]
         .as_object()
@@ -154,7 +154,36 @@ fn wrapper_wires_bundled_helpers_without_disabling_path_fallback() {
 }
 
 #[test]
-fn tokenmaxxing_provider_contract_is_agentsview_canonical() {
+fn default_usage_provider_is_bundled_ccusage() {
+    for command in [
+        "src/commands/init.rs",
+        "src/commands/watch.rs",
+        "src/commands/status.rs",
+        "src/commands/doctor.rs",
+    ] {
+        let source = read(command);
+        assert!(
+            source.contains("CcusageCommandProvider::from_environment"),
+            "{command} should use the bundled ccusage provider by default"
+        );
+        assert!(
+            !source.contains("AgentsviewCommandProvider::from_environment"),
+            "{command} should not require agentsview for normal npm installs"
+        );
+    }
+
+    let readme = read("README.md");
+    assert!(readme.contains("The npm package bundles the native binary and usage helpers"));
+    assert!(readme.contains("Glorp polls bundled `ccusage`"));
+    assert!(!readme.contains("install it separately"));
+
+    let npm_readme = read("npm/glorp/README.md");
+    assert!(npm_readme.contains("bundles the native binary and usage helpers"));
+    assert!(!npm_readme.contains("install it separately"));
+}
+
+#[test]
+fn optional_agentsview_provider_contract_remains_available() {
     let provider = read("src/usage/agentsview.rs");
     assert!(provider.contains("GLORP_AGENTSVIEW_BIN"));
     assert!(provider.contains("which::which(\"agentsview\")"));
@@ -165,9 +194,7 @@ fn tokenmaxxing_provider_contract_is_agentsview_canonical() {
     let readme = read("README.md");
     assert!(readme.contains("agentsview"));
     assert!(readme.contains("GLORP_AGENTSVIEW_BIN"));
-    assert!(!readme.contains("Glorp polls `ccusage` and `ccusage-codex` every ten seconds"));
     assert!(readme.contains("`cache_read_weight` is accepted for older local config files"));
-    assert!(readme.contains("no longer affects canonical pet progression"));
 
     let npm_readme = read("npm/glorp/README.md");
     assert!(npm_readme.contains("agentsview"));

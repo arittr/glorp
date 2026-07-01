@@ -3,7 +3,7 @@ use crate::{
     game::runtime::{apply_unapplied_usage, stage_usage_poll_deltas},
     paths::AppPaths,
     storage::{day_axis::LocalDayMapper, state::StateStore, usage_store::UsageStore},
-    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
+    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
 };
 use time::OffsetDateTime;
 
@@ -25,7 +25,7 @@ pub fn run() -> Result<()> {
     let mut diagnostic_line = None;
     if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
         let config = crate::config::AppConfig::load_or_default(&paths.config_file)?;
-        let provider = AgentsviewCommandProvider::from_environment();
+        let provider = CcusageCommandProvider::from_environment();
         let cutover = crate::usage::cutover::ensure_tokenmaxxing_contract_active(
             &mut state,
             &mut usage_store,
