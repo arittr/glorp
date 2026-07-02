@@ -129,7 +129,6 @@ pub(crate) fn build_watch_view_model_at(
         mood,
         AnimationFrame {
             tick: now.unix_timestamp().max(0) as u64,
-            blink_suppression_ticks: 0,
             hold_eyes_closed: day_context.asleep,
             blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(day_context.tiredness),
             soft_eyes: matches!(
@@ -138,7 +137,7 @@ pub(crate) fn build_watch_view_model_at(
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
             work_accent: work_accent_for_profile(&life_profile),
-            feed_reaction: false,
+            ..AnimationFrame::default()
         },
     );
 
@@ -525,7 +524,6 @@ pub fn rerender_pet_for_view_model(
         vm.pet_render.mood,
         AnimationFrame {
             tick,
-            blink_suppression_ticks: 0,
             hold_eyes_closed,
             blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(
                 vm.day_context.tiredness,
@@ -538,6 +536,7 @@ pub fn rerender_pet_for_view_model(
             work_accent: work_accent_for_profile(&vm.life_profile),
             feed_reaction: crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now)
                 .is_some(),
+            ..AnimationFrame::default()
         },
     );
     vm.pet_art = rendered.lines;

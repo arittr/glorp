@@ -241,15 +241,7 @@ pub(crate) mod tests {
             &pet,
             Stage::S2,
             Mood::Content,
-            AnimationFrame {
-                tick: 0,
-                blink_suppression_ticks: 0,
-                hold_eyes_closed: false,
-                blink_slowdown: 0,
-                soft_eyes: false,
-                work_accent: crate::pet::render::WorkAccent::None,
-                feed_reaction: false,
-            },
+            AnimationFrame { tick: 0, ..AnimationFrame::default() },
         );
         let mut vm = WatchViewModel::fixture();
         vm.pet_art = rendered.lines;

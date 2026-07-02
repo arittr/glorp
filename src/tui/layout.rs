@@ -490,12 +490,8 @@ mod render_compact_tests {
             Mood::Content,
             AnimationFrame {
                 tick: 0,
-                blink_suppression_ticks: 0,
-                hold_eyes_closed: false,
-                blink_slowdown: 0,
-                soft_eyes: false,
                 work_accent: crate::pet::render::work_accent_for_profile(&vm.life_profile),
-                feed_reaction: false,
+                ..AnimationFrame::default()
             },
         );
         vm.pet_art = rendered.lines;

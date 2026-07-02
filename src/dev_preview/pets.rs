@@ -112,15 +112,7 @@ fn render_seeded_pet_cell(
         &pet,
         stage,
         Mood::Content,
-        AnimationFrame {
-            tick: 0,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: false,
-            blink_slowdown: 0,
-            soft_eyes: false,
-            work_accent: WorkAccent::None,
-            feed_reaction: false,
-        },
+        AnimationFrame { tick: 0, ..AnimationFrame::default() },
     );
     let mut lines = vec![Line::styled(
         format!("{} s{} {}", species.as_str(), stage_index(stage), seed),
@@ -168,15 +160,7 @@ fn render_mood_set(_ctx: &PreviewRenderContext) -> PreviewFrame {
                 &pet,
                 Stage::S4,
                 *mood,
-                AnimationFrame {
-                    tick: 1,
-                    blink_suppression_ticks: 0,
-                    hold_eyes_closed: false,
-                    blink_slowdown: 0,
-                    soft_eyes: false,
-                    work_accent: WorkAccent::None,
-                    feed_reaction: false,
-                },
+                AnimationFrame { tick: 1, ..AnimationFrame::default() },
             );
             let mut lines = vec![Line::styled(species.as_str(), styles.label)];
             for (line_index, art_line) in rendered.lines.iter().enumerate() {
@@ -241,15 +225,7 @@ fn render_pet_cell(
         &pet,
         stage,
         Mood::Content,
-        AnimationFrame {
-            tick: 0,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: false,
-            blink_slowdown: 0,
-            soft_eyes: false,
-            work_accent: crate::pet::render::WorkAccent::None,
-            feed_reaction: false,
-        },
+        AnimationFrame { tick: 0, ..AnimationFrame::default() },
     );
 
     let mut lines = vec![Line::styled(
@@ -337,12 +313,8 @@ fn render_glitch_state_cell(area: Rect, buffer: &mut Buffer, fixture: GlitchStat
         fixture.mood,
         AnimationFrame {
             tick: fixture.tick,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: false,
-            blink_slowdown: 0,
-            soft_eyes: false,
             work_accent: fixture.work_accent,
-            feed_reaction: false,
+            ..AnimationFrame::default()
         },
     );
 

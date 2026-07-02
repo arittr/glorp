@@ -43,6 +43,101 @@ pub fn work_accent_for_profile(profile: &crate::tui::life::PetLifeProfile) -> Wo
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GlitchCorruptionFrame {
+    pub day_seed: u64,
+    pub patch_tier: GlitchPatchTier,
+    pub burst_level: GlitchBurstLevel,
+    pub calm_mode: bool,
+    pub feed_reaction: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlitchPatchTier {
+    Pristine,
+    #[default]
+    Quiet,
+    Active,
+    Heavy,
+}
+
+impl GlitchPatchTier {
+    pub const fn max_marks(self) -> usize {
+        match self {
+            Self::Pristine => 0,
+            Self::Quiet => 1,
+            Self::Active => 2,
+            Self::Heavy => 3,
+        }
+    }
+
+    pub fn from_today_ratio(today_ratio: f32) -> Self {
+        if !today_ratio.is_finite() {
+            return Self::Quiet;
+        }
+        if today_ratio >= 1.5 {
+            Self::Heavy
+        } else if today_ratio >= 0.75 {
+            Self::Active
+        } else {
+            Self::Quiet
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pristine => "pristine",
+            Self::Quiet => "quiet",
+            Self::Active => "active",
+            Self::Heavy => "heavy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlitchBurstLevel {
+    #[default]
+    None,
+    Small,
+    Strong,
+}
+
+impl GlitchBurstLevel {
+    pub fn from_burst_level(burst_level: f32) -> Self {
+        if !burst_level.is_finite() || burst_level <= 0.2 {
+            Self::None
+        } else if burst_level < 0.7 {
+            Self::Small
+        } else {
+            Self::Strong
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Small => "small",
+            Self::Strong => "strong",
+        }
+    }
+}
+
+pub fn glitch_corruption_frame_for_inputs(
+    day_seed: u64,
+    today_ratio: f32,
+    burst_level: f32,
+    calm_mode: bool,
+    feed_reaction: bool,
+) -> GlitchCorruptionFrame {
+    GlitchCorruptionFrame {
+        day_seed,
+        patch_tier: GlitchPatchTier::from_today_ratio(today_ratio),
+        burst_level: GlitchBurstLevel::from_burst_level(burst_level),
+        calm_mode,
+        feed_reaction,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AnimationFrame {
     pub tick: u64,
     pub blink_suppression_ticks: u8,
@@ -60,6 +155,9 @@ pub struct AnimationFrame {
     /// an excited beat, regardless of resting mood — set by producers from the feed
     /// pulse recency. Inert while blinking or asleep.
     pub feed_reaction: bool,
+    /// Glitch-species persistent corruption state for this frame. `None` for
+    /// non-Glitch species or when no corruption data is available yet.
+    pub glitch_corruption: Option<GlitchCorruptionFrame>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -831,15 +929,7 @@ mod tests {
     #[test]
     fn soft_eyes_relax_a_positive_mood_without_changing_mouth() {
         let pet = generate_pet("soft-eyes-seed");
-        let normal = AnimationFrame {
-            tick: 1,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: false,
-            blink_slowdown: 0,
-            soft_eyes: false,
-            work_accent: WorkAccent::None,
-            feed_reaction: false,
-        };
+        let normal = AnimationFrame { tick: 1, ..AnimationFrame::default() };
         let soft = AnimationFrame { soft_eyes: true, ..normal };
         let a = render_pet(&pet, Stage::S3, Mood::Content, normal)
             .lines
@@ -966,12 +1056,8 @@ mod tests {
         let pet = generate_pet("hold-eyes-seed");
         let frame = AnimationFrame {
             tick: 1, // a tick that does NOT blink on its own
-            blink_suppression_ticks: 0,
             hold_eyes_closed: true,
-            blink_slowdown: 0,
-            soft_eyes: false,
-            work_accent: WorkAccent::None,
-            feed_reaction: false,
+            ..AnimationFrame::default()
         };
         let rendered = render_pet(&pet, Stage::S3, Mood::Content, frame);
         let art = rendered.lines.join("\n");
@@ -988,15 +1074,7 @@ mod tests {
             &pet,
             Stage::S3,
             Mood::Content,
-            AnimationFrame {
-                tick: 1,
-                blink_suppression_ticks: 0,
-                hold_eyes_closed: false,
-                blink_slowdown: 0,
-                soft_eyes: false,
-                work_accent: WorkAccent::None,
-                feed_reaction: false,
-            },
+            AnimationFrame { tick: 1, ..AnimationFrame::default() },
         );
         assert!(
             open.lines.join("\n").contains(&pet.traits.eyes),
@@ -1196,12 +1274,8 @@ mod tests {
                         Mood::Content,
                         AnimationFrame {
                             tick,
-                            blink_suppression_ticks: 0,
-                            hold_eyes_closed: false,
                             blink_slowdown: slowdown,
-                            soft_eyes: false,
-                            work_accent: WorkAccent::None,
-                            feed_reaction: false,
+                            ..AnimationFrame::default()
                         },
                     );
                     rendered
@@ -1485,5 +1559,80 @@ mod tests {
                 .any(|s| s.role == PaletteRoleName::Corruption),
             "off-gate tick must stay calm (no corruption)"
         );
+    }
+
+    #[test]
+    fn glitch_patch_tier_quantizes_today_ratio_without_live_activity() {
+        assert_eq!(
+            GlitchPatchTier::from_today_ratio(-1.0),
+            GlitchPatchTier::Quiet
+        );
+        assert_eq!(
+            GlitchPatchTier::from_today_ratio(f32::NAN),
+            GlitchPatchTier::Quiet
+        );
+        assert_eq!(
+            GlitchPatchTier::from_today_ratio(0.0),
+            GlitchPatchTier::Quiet
+        );
+        assert_eq!(
+            GlitchPatchTier::from_today_ratio(0.74),
+            GlitchPatchTier::Quiet
+        );
+        assert_eq!(
+            GlitchPatchTier::from_today_ratio(0.75),
+            GlitchPatchTier::Active
+        );
+        assert_eq!(
+            GlitchPatchTier::from_today_ratio(1.49),
+            GlitchPatchTier::Active
+        );
+        assert_eq!(
+            GlitchPatchTier::from_today_ratio(1.5),
+            GlitchPatchTier::Heavy
+        );
+        assert_eq!(GlitchPatchTier::Pristine.max_marks(), 0);
+        assert_eq!(GlitchPatchTier::Quiet.max_marks(), 1);
+        assert_eq!(GlitchPatchTier::Active.max_marks(), 2);
+        assert_eq!(GlitchPatchTier::Heavy.max_marks(), 3);
+    }
+
+    #[test]
+    fn glitch_burst_level_quantizes_live_burst_for_eq_animation_frame() {
+        assert_eq!(
+            GlitchBurstLevel::from_burst_level(-1.0),
+            GlitchBurstLevel::None
+        );
+        assert_eq!(
+            GlitchBurstLevel::from_burst_level(f32::NAN),
+            GlitchBurstLevel::None
+        );
+        assert_eq!(
+            GlitchBurstLevel::from_burst_level(0.2),
+            GlitchBurstLevel::None
+        );
+        assert_eq!(
+            GlitchBurstLevel::from_burst_level(0.21),
+            GlitchBurstLevel::Small
+        );
+        assert_eq!(
+            GlitchBurstLevel::from_burst_level(0.69),
+            GlitchBurstLevel::Small
+        );
+        assert_eq!(
+            GlitchBurstLevel::from_burst_level(0.7),
+            GlitchBurstLevel::Strong
+        );
+    }
+
+    #[test]
+    fn glitch_corruption_frame_keeps_patch_inputs_separate_from_live_inputs() {
+        let frame = glitch_corruption_frame_for_inputs(42, 1.6, 0.8, true, false);
+
+        assert_eq!(frame.day_seed, 42);
+        assert_eq!(frame.patch_tier, GlitchPatchTier::Heavy);
+        assert_eq!(frame.burst_level, GlitchBurstLevel::Strong);
+        assert!(frame.calm_mode);
+        assert!(!frame.feed_reaction);
     }
 }
