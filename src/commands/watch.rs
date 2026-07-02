@@ -2,7 +2,7 @@ use crate::{
     error::{GlorpError, Result},
     format::format_tokens,
     game::{
-        evolution::Stage,
+        evolution::{next_stage_xp_target, stage_start_xp, Stage},
         metabolism::{apply_food, Mood, Vitals as GameVitals},
         runtime::{apply_unapplied_usage, stage_usage_poll_deltas},
     },
@@ -574,29 +574,6 @@ fn apply_dev_pet_species_override(
         vm.day_context.asleep,
         now,
     )
-}
-
-fn next_stage_xp_target(stage: Stage) -> f64 {
-    match stage {
-        Stage::S0 => 0.04,
-        Stage::S1 => 0.25,
-        Stage::S2 => 1.0,
-        Stage::S3 => 4.0,
-        Stage::S4 => 14.0,
-        Stage::S5 | Stage::S6 => 60.0,
-    }
-}
-
-fn stage_start_xp(stage: Stage) -> f64 {
-    match stage {
-        Stage::S0 => 0.0,
-        Stage::S1 => 0.04,
-        Stage::S2 => 0.25,
-        Stage::S3 => 1.0,
-        Stage::S4 => 4.0,
-        Stage::S5 => 14.0,
-        Stage::S6 => 60.0,
-    }
 }
 
 fn source_health(

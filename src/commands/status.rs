@@ -1,5 +1,6 @@
 use crate::{
     error::{GlorpError, Result},
+    game::evolution::{next_stage_xp_target, stage_start_xp, Stage},
     game::runtime::{apply_unapplied_usage, stage_usage_poll_deltas},
     paths::AppPaths,
     storage::{day_axis::LocalDayMapper, state::StateStore, usage_store::UsageStore},
@@ -145,29 +146,20 @@ fn display_tokens(value: f64) -> f64 {
 }
 
 fn stage_progress_line(xp: f64) -> String {
-    const THRESHOLDS: [f64; 7] = [0.0, 0.04, 0.25, 1.0, 4.0, 14.0, 60.0];
     let xp = xp.max(0.0);
-    let current = THRESHOLDS
-        .iter()
-        .rposition(|threshold| xp >= *threshold)
-        .unwrap_or(0);
-
-    if current >= THRESHOLDS.len() - 1 {
+    let stage = crate::game::evolution::stage_for_xp(xp);
+    if matches!(stage, Stage::S6) {
         return "stage progress: s6 complete".into();
     }
 
-    let start = THRESHOLDS[current];
-    let next = THRESHOLDS[current + 1];
-    let progress = if next > start {
-        ((xp - start) / (next - start) * 100.0).clamp(0.0, 100.0)
-    } else {
-        100.0
-    };
+    let start = stage_start_xp(stage);
+    let next = next_stage_xp_target(stage);
+    let span = (next - start).max(f64::EPSILON);
+    let percent = ((xp - start) / span * 100.0).clamp(0.0, 100.0);
 
     format!(
-        "stage progress: s{} {:.0}% toward s{}",
-        current,
-        progress,
-        current + 1
+        "stage progress: {:.0}% to {}",
+        percent,
+        Stage::from_index(stage.index() + 1).unwrap_or(Stage::S6)
     )
 }

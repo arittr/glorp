@@ -5,7 +5,16 @@ use std::str::FromStr;
 use super::calibration::CalibrationBaseline;
 use crate::error::GlorpError;
 
-const STAGE_THRESHOLDS: [f64; 7] = [0.0, 0.04, 0.25, 1.0, 4.0, 14.0, 60.0];
+pub const ACTIVE_HOURS_PER_DAY: f64 = 8.0;
+pub const STAGE_THRESHOLDS: [f64; 7] = [
+    0.0,
+    1.0 / ACTIVE_HOURS_PER_DAY,
+    6.0 / ACTIVE_HOURS_PER_DAY,
+    1.0,
+    4.0,
+    14.0,
+    60.0,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -132,9 +141,18 @@ pub fn apply_xp_delta(
 pub fn calibrated_xp_units(delta_effective: f64, baseline: CalibrationBaseline) -> f64 {
     let daily = baseline.daily_effective_tokens.max(1.0);
     let relative = (delta_effective / daily).max(0.0);
-    let direct = relative.min(0.25);
-    let excess = (relative - 0.25).max(0.0);
+    let direct = relative.min(1.0);
+    let excess = (relative - 1.0).max(0.0);
     direct + excess.sqrt() * 0.05
+}
+
+pub fn stage_start_xp(stage: Stage) -> f64 {
+    STAGE_THRESHOLDS[stage.index()]
+}
+
+pub fn next_stage_xp_target(stage: Stage) -> f64 {
+    let next = (stage.index() + 1).min(Stage::S6.index());
+    STAGE_THRESHOLDS[next]
 }
 
 fn mood_food_benefit(delta_effective: f64, baseline: CalibrationBaseline) -> f64 {

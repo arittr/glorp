@@ -216,6 +216,33 @@ fn low_and_high_usage_users_progress_by_relative_effort() {
 }
 
 #[test]
+fn active_hour_equivalents_drive_early_stages() {
+    let baseline = CalibrationBaseline { daily_effective_tokens: 800_000.0 };
+    let active_hour = baseline.daily_effective_tokens / 8.0;
+
+    let five_minute_fraction = apply_xp_delta(0.0, active_hour * (5.0 / 60.0), baseline);
+    assert_eq!(stage_for_xp(five_minute_fraction.xp), Stage::S0);
+
+    let one_active_hour = apply_xp_delta(0.0, active_hour, baseline);
+    assert_eq!(stage_for_xp(one_active_hour.xp), Stage::S1);
+
+    let six_active_hours = apply_xp_delta(0.0, active_hour * 6.0, baseline);
+    assert_eq!(stage_for_xp(six_active_hours.xp), Stage::S2);
+
+    let one_active_day = apply_xp_delta(0.0, baseline.daily_effective_tokens, baseline);
+    assert_eq!(stage_for_xp(one_active_day.xp), Stage::S3);
+}
+
+#[test]
+fn xp_is_linear_through_one_active_day() {
+    let baseline = CalibrationBaseline { daily_effective_tokens: 800_000.0 };
+
+    assert_eq!(apply_xp_delta(0.0, 100_000.0, baseline).xp, 0.125);
+    assert_eq!(apply_xp_delta(0.0, 600_000.0, baseline).xp, 0.75);
+    assert_eq!(apply_xp_delta(0.0, 800_000.0, baseline).xp, 1.0);
+}
+
+#[test]
 fn extreme_bucket_cannot_skip_most_of_lifecycle() {
     let baseline = CalibrationBaseline { daily_effective_tokens: 100_000.0 };
     let result = apply_xp_delta(0.0, 100_000_000.0, baseline);

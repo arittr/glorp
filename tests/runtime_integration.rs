@@ -39,18 +39,19 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
     apply_usage_poll(&mut state, &mut usage_store, &poll2, now).unwrap();
 
-    // Two polls of one calibrated active day each cross s0->s1 and s1->s2.
+    // Two polls of one calibrated active day each reach s3, with the second
+    // poll staying in the post-day diminishing-return range.
     // Smearing still writes multiple ledger rows, but XP is based on the
     // aggregate poll total so the bucket split cannot accelerate evolution.
     assert_eq!(state.lifetime_effective_tokens, 200_000.0);
-    assert_eq!(state.stage, Stage::S2);
-    assert!(state.xp >= 0.25);
-    assert!(state.xp < 1.0);
+    assert_eq!(state.stage, Stage::S3);
+    assert!(state.xp >= 1.0);
+    assert!(state.xp < 4.0);
     assert!(state.vitals.fed > 40.0);
     assert_eq!(state.last_usage_poll_at, Some(now));
     assert_eq!(state.last_updated_at, now);
     // PetState::new_for_test defaults to Species::Fuzz; S1=fuzzling, S2=kit.
-    for label in ["fuzzling", "kit"] {
+    for label in ["fuzzling", "kit", "pup"] {
         let expected_text = format!("mochi evolved into {label}");
         assert_eq!(
             state
@@ -62,7 +63,10 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
             "expected '{expected_text}' recorded once",
         );
     }
-    assert_eq!(state.seen_stage_transitions, vec![Stage::S1, Stage::S2]);
+    assert_eq!(
+        state.seen_stage_transitions,
+        vec![Stage::S1, Stage::S2, Stage::S3]
+    );
 }
 
 #[test]
@@ -123,16 +127,16 @@ fn apply_reconciles_saved_stage_when_xp_outranks_it() {
 
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     state.calibration.daily_effective_tokens = 100_000.0;
-    // Simulate state from before a threshold change: xp passes the new s1 and
-    // s2 thresholds (0.04 and 0.25) but stage was last saved as "s0".
+    // Simulate state from before a threshold change: xp passes the new s1
+    // threshold (0.125) but stage was last saved as "s0".
     state.xp = 0.30;
     state.stage = Stage::S0;
     state.seen_stage_transitions = Vec::new();
 
     apply_usage_poll(&mut state, &mut usage_store, &empty_poll(), now).unwrap();
 
-    assert_eq!(state.stage, Stage::S2);
-    assert_eq!(state.seen_stage_transitions, vec![Stage::S1, Stage::S2]);
+    assert_eq!(state.stage, Stage::S1);
+    assert_eq!(state.seen_stage_transitions, vec![Stage::S1]);
 }
 
 #[test]
@@ -207,6 +211,25 @@ fn staged_usage_apportions_token_buckets_across_smear_rows() {
     assert!((cache_creation_sum - 2_000.0).abs() < 0.01);
     assert!((cache_read_sum - 1_000.0).abs() < 0.01);
     assert!((reasoning_sum - 500.0).abs() < 0.01);
+}
+
+#[test]
+fn smear_buckets_do_not_change_lifecycle_xp_for_one_apply_window() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    establish_provider_contact(&mut usage_store, "claude-code", now);
+
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 800_000.0;
+    let poll = poll_with_delta(800_000.0, now);
+
+    let direct = glorp::game::evolution::apply_xp_delta(0.0, 800_000.0, state.calibration).xp;
+    apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
+
+    assert_eq!(direct, 1.0);
+    assert_eq!(state.xp, direct);
+    assert_eq!(state.stage, Stage::S3);
 }
 
 #[test]
@@ -611,9 +634,12 @@ fn catchup_application_records_each_stage_transition_once() {
         .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
         .unwrap();
 
-    assert_eq!(state.stage, Stage::S2);
-    assert_eq!(state.seen_stage_transitions.len(), 2);
-    assert_eq!(state.seen_stage_transitions, vec![Stage::S1, Stage::S2]);
+    assert_eq!(state.stage, Stage::S3);
+    assert_eq!(state.seen_stage_transitions.len(), 3);
+    assert_eq!(
+        state.seen_stage_transitions,
+        vec![Stage::S1, Stage::S2, Stage::S3]
+    );
 }
 
 #[test]
