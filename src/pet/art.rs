@@ -186,9 +186,14 @@ pub(crate) fn apply_interior_texture(
 ) -> [String; 8] {
     // Crystal is hand-shaded for a faceted, dimensional look (intentional light/dark
     // facets); the per-seed ▒/▓ swap would scramble that into checkerboard noise, so
-    // crystal renders its template verbatim.
-    let pinned =
-        matches!(stage, Stage::S0 | Stage::S1 | Stage::S2) || matches!(species, Species::Crystal);
+    // crystal renders its template verbatim. Glitch S5/S6 are hand-shaded elders for
+    // the same reason; S3/S4 stay unpinned so their static bodies carry per-pet noise.
+    let pinned = matches!(stage, Stage::S0 | Stage::S1 | Stage::S2)
+        || matches!(species, Species::Crystal)
+        || matches!(
+            (species, stage),
+            (Species::Glitch, Stage::S5) | (Species::Glitch, Stage::S6)
+        );
     let mut out: [String; 8] = Default::default();
     for (row, line) in base.iter().enumerate() {
         if pinned {
@@ -1352,5 +1357,35 @@ mod tests {
                 "Glitch {stage:?} needs a {{mouth}} slot"
             );
         }
+    }
+
+    #[test]
+    fn glitch_elder_texture_is_pinned_but_mid_varies() {
+        // S5/S6 are hand-shaded, so their interior texture must be pinned (crystal
+        // lesson). S3/S4 static bodies keep per-seed variety.
+        let base_s5 = stage_base_template(Species::Glitch, Stage::S5);
+        let a = apply_interior_texture(base_s5, Species::Glitch, Stage::S5, 1);
+        let b = apply_interior_texture(base_s5, Species::Glitch, Stage::S5, 999);
+        assert_eq!(
+            a, b,
+            "Glitch S5 is hand-shaded: interior texture must be pinned"
+        );
+
+        let base_s6 = stage_base_template(Species::Glitch, Stage::S6);
+        let c = apply_interior_texture(base_s6, Species::Glitch, Stage::S6, 1);
+        let d = apply_interior_texture(base_s6, Species::Glitch, Stage::S6, 999);
+        assert_eq!(
+            c, d,
+            "Glitch S6 is hand-shaded: interior texture must be pinned"
+        );
+
+        let base_s4 = stage_base_template(Species::Glitch, Stage::S4);
+        let variants: std::collections::HashSet<_> = (0..8u64)
+            .map(|s| apply_interior_texture(base_s4, Species::Glitch, Stage::S4, s))
+            .collect();
+        assert!(
+            variants.len() > 1,
+            "Glitch S4 must keep per-seed interior variety"
+        );
     }
 }
