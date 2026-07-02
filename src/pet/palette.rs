@@ -160,7 +160,7 @@ fn species_base_hue(species: Species) -> f32 {
         Species::Fuzz => 40.0,     // peach
         Species::Blob => 150.0,    // mint
         Species::Ghost => 300.0,   // lavender
-        Species::Glitch => 135.0,  // acid/phosphor
+        Species::Glitch => 345.0,  // magenta/hot-pink daemon
         Species::Crystal => 230.0, // ice
         Species::Mech => 75.0,     // amber/brass
     }
@@ -168,7 +168,7 @@ fn species_base_hue(species: Species) -> f32 {
 
 /// Per-species body chroma (OKLCH). Raised off the old pinned 0.10 so the
 /// species hue actually registers. Soft-bodied/pale species (Crystal ice,
-/// Ghost lavender) stay lower; saturated identities (Glitch acid, Mech amber)
+/// Ghost lavender) stay lower; saturated identities (Glitch magenta, Mech amber)
 /// go higher. `oklch_to_rgb` gamut-maps any out-of-gamut request, so these are
 /// safe ceilings, not exact realized chroma.
 fn species_body_chroma(species: Species) -> f32 {
@@ -176,7 +176,7 @@ fn species_body_chroma(species: Species) -> f32 {
         Species::Fuzz => 0.13,    // peach
         Species::Blob => 0.14,    // mint
         Species::Ghost => 0.12,   // lavender (pale, keep soft)
-        Species::Glitch => 0.18,  // acid/phosphor (loud)
+        Species::Glitch => 0.18,  // magenta/hot-pink (loud)
         Species::Crystal => 0.11, // ice (cold, pale shell)
         Species::Mech => 0.15,    // amber/brass
     }
@@ -550,12 +550,12 @@ mod tests {
     fn species_base_hues_match_identity_family() {
         use crate::pet::generation::Species;
         // OKLCH hue degrees (approx): peach ~40, mint ~150, lavender ~300,
-        // acid ~135, ice ~230, amber ~75. Verify the family anchor, not exact
+        // magenta ~345, ice ~230, amber ~75. Verify the family anchor, not exact
         // realized RGB (that depends on chroma/jitter).
         assert!((species_base_hue(Species::Fuzz) - 40.0).abs() < 1.0);
         assert!((species_base_hue(Species::Blob) - 150.0).abs() < 1.0);
         assert!((species_base_hue(Species::Ghost) - 300.0).abs() < 1.0);
-        assert!((species_base_hue(Species::Glitch) - 135.0).abs() < 1.0);
+        assert!((species_base_hue(Species::Glitch) - 345.0).abs() < 1.0);
         assert!((species_base_hue(Species::Crystal) - 230.0).abs() < 1.0);
         assert!((species_base_hue(Species::Mech) - 75.0).abs() < 1.0);
     }
