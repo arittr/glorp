@@ -16,7 +16,8 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
     let paths = AppPaths::resolve()?;
     paths.ensure()?;
     let store = StateStore::new(paths.state_file.clone());
-    if store.load()?.is_some() && !yes {
+    let replacing_existing = store.load()?.is_some();
+    if replacing_existing && !yes {
         return Err(GlorpError::Message(
             "glorp already has a pet; pass --yes to replace pet state".into(),
         ));
@@ -30,7 +31,20 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
 
     let mut calibration = CalibrationBaseline::default();
     let mut rhythm = RhythmProfile::default();
-    if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
+    if replacing_existing && yes && paths.usage_db.exists() {
+        std::fs::remove_file(&paths.usage_db).map_err(|err| {
+            GlorpError::Message(format!(
+                "failed to remove usage cache at {}: {err}",
+                paths.usage_db.display()
+            ))
+        })?;
+    }
+    let usage_store = match UsageStore::open(&paths.usage_db) {
+        Ok(store) => Some(store),
+        Err(err) if replacing_existing && yes => return Err(err),
+        Err(_) => None,
+    };
+    if let Some(mut usage_store) = usage_store {
         if let Ok(snapshot) =
             CcusageCommandProvider::from_environment().snapshot_for_calibration(&mut usage_store)
         {

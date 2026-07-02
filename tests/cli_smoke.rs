@@ -128,7 +128,7 @@ fn reset_requires_confirmation_and_removes_pet_state() {
 }
 
 #[test]
-fn init_with_confirmed_reinit_replaces_pet_state_without_touching_usage_db() {
+fn init_with_confirmed_reinit_replaces_pet_state_and_resets_usage_db() {
     let dir = tempfile::tempdir().unwrap();
     Command::cargo_bin("glorp")
         .unwrap()
@@ -152,10 +152,10 @@ fn init_with_confirmed_reinit_replaces_pet_state_without_touching_usage_db() {
 
     let state = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
     assert!(state.contains("ori-shard"));
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("usage.sqlite")).unwrap(),
-        "sentinel usage db"
-    );
+
+    let usage_store =
+        glorp::storage::usage_store::UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    assert_eq!(usage_store.recent_event_count().unwrap(), 0);
 }
 
 #[test]

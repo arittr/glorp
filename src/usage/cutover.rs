@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::game::{calibration::CalibrationBaseline, metabolism::RhythmProfile};
+use crate::game::metabolism::RhythmProfile;
 use crate::storage::{state::PetState, usage_store::UsageStore};
 use crate::usage::provider::UsageProvider;
 use crate::usage::token_contract::TOKENMAXXING_TOTAL_V1;
@@ -33,7 +33,9 @@ pub fn ensure_tokenmaxxing_contract_active(
         return Ok(CutoverOutcome { activated: false });
     }
     if !snapshot.daily_usage.is_empty() {
-        state.calibration = CalibrationBaseline::from_history(&snapshot.daily_usage);
+        state.calibration = state
+            .calibration
+            .refresh_from_history(&snapshot.daily_usage);
         state.rhythm = RhythmProfile::from_history(&snapshot.daily_usage);
     }
     usage_store.mark_token_contract_active(TOKENMAXXING_TOTAL_V1, now)?;
