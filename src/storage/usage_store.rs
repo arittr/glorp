@@ -1095,8 +1095,8 @@ impl UsageStore {
 
     /// Applied-only per-source effective sums over the half-open bucket_at
     /// window `[start, end)`. DayContext's yesterday source mix; the
-    /// unfiltered variant (`token_totals_by_source_between`) serves the
-    /// today panel and must not change.
+    /// closed-interval `token_totals_by_source_between` variant serves the
+    /// today panel on the same feedable-only ledger.
     pub fn applied_effective_tokens_by_source_between(
         &self,
         start: OffsetDateTime,
@@ -1445,6 +1445,7 @@ impl UsageStore {
             "ALTER TABLE usage_events ADD COLUMN token_contract TEXT NOT NULL DEFAULT 'weighted_effective_v1';",
             "",
         )?;
+        backfill_legacy_seeded_feedable_rows(&self.conn)?;
         self.conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_usage_events_observed_at
@@ -1499,6 +1500,80 @@ fn migrate_provider_cursors_to_source_label(conn: &Connection) -> rusqlite::Resu
         }
     }
     Ok(())
+}
+
+fn backfill_legacy_seeded_feedable_rows(conn: &Connection) -> crate::error::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT provider_surface, recorded_at, message
+         FROM provider_diagnostics
+         WHERE code = ?1
+         ORDER BY id ASC",
+    )?;
+    let diagnostics = stmt
+        .query_map(
+            params![crate::game::runtime::SOURCE_FIRST_CONTACT_CODE],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for (provider_surface, recorded_at, message) in diagnostics {
+        let Some(expected_count) = parse_source_first_contact_seed_count(&message) else {
+            continue;
+        };
+        let mut candidate_stmt = conn.prepare(
+            "SELECT id
+             FROM usage_events
+             WHERE provider_surface = ?1
+               AND source_surface = 'daily'
+               AND applied_at = ?2
+               AND provider_delta_id IS NOT NULL
+               AND provider_cursor_key IS NOT NULL
+               AND provider_cursor_value IS NOT NULL
+               AND bucket_index = 0
+               AND bucket_count = 1
+               AND feedable = 1
+             ORDER BY id ASC",
+        )?;
+        let candidate_ids = candidate_stmt
+            .query_map(params![provider_surface, recorded_at], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(candidate_stmt);
+
+        // Be conservative: if the diagnostic's seeded-row count does not
+        // match the exact candidate set, leave the rows untouched rather than
+        // risk reclassifying ordinary one-bucket applied history.
+        if candidate_ids.len() != expected_count || candidate_ids.is_empty() {
+            continue;
+        }
+
+        let placeholders = candidate_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        conn.execute(
+            &format!("UPDATE usage_events SET feedable = 0 WHERE id IN ({placeholders})"),
+            rusqlite::params_from_iter(candidate_ids.iter()),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn parse_source_first_contact_seed_count(message: &str) -> Option<usize> {
+    message
+        .rsplit_once(": ")
+        .and_then(|(_, tail)| tail.strip_suffix(" historical rows seeded without feeding"))
+        .and_then(|count| count.parse().ok())
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> crate::error::Result<bool> {
@@ -1596,6 +1671,8 @@ fn upsert_provider_cursor(
 mod tests {
     use super::*;
     use crate::storage::day_axis::LocalDayMapper;
+    use rusqlite::Connection;
+    use tempfile::tempdir;
     use time::macros::datetime;
 
     fn sample_event_at(observed_at: OffsetDateTime, tokens: f64) -> NormalizedUsageEvent {
@@ -2336,6 +2413,199 @@ mod tests {
                 .applied_effective_tokens_between(
                     now - time::Duration::hours(1),
                     now + time::Duration::seconds(1)
+                )
+                .unwrap(),
+            42_000.0
+        );
+    }
+
+    #[test]
+    fn migrate_backfills_legacy_seed_rows_without_touching_real_applied_rows() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("usage.sqlite");
+        let seeded_at = datetime!(2026-06-10 12:00 UTC);
+        let historical = seeded_at - time::Duration::days(1);
+        let live_applied_at = seeded_at + time::Duration::hours(3);
+        let seeded_cursor_key = "gemini|daily|2026-06-09";
+        let seeded_cursor_value = "totals-v1";
+        let live_cursor_key = "gemini|daily|2026-06-10";
+        let live_cursor_value = "totals-v2";
+
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE usage_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_surface TEXT NOT NULL,
+                    provider_version TEXT NOT NULL,
+                    parser_version TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    source_surface TEXT NOT NULL,
+                    period_start TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    bucket_at TEXT NOT NULL,
+                    period_date TEXT NOT NULL,
+                    model TEXT,
+                    input_tokens REAL NOT NULL,
+                    output_tokens REAL NOT NULL,
+                    cache_creation_tokens REAL NOT NULL,
+                    cache_read_tokens REAL NOT NULL,
+                    reasoning_output_tokens REAL NOT NULL,
+                    effective_tokens REAL NOT NULL,
+                    total_tokens REAL NOT NULL DEFAULT 0.0,
+                    token_contract TEXT NOT NULL DEFAULT 'weighted_effective_v1',
+                    cost_usd REAL,
+                    confidence TEXT NOT NULL,
+                    provider_delta_id TEXT,
+                    bucket_index INTEGER NOT NULL DEFAULT 0,
+                    bucket_count INTEGER NOT NULL DEFAULT 1,
+                    applied_at TEXT,
+                    provider_cursor_key TEXT,
+                    provider_cursor_value TEXT
+                );
+
+                CREATE TABLE provider_diagnostics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_surface TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
+                ",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO usage_events (
+                    provider_surface, provider_version, parser_version, command, source_surface,
+                    period_start, observed_at, bucket_at, period_date, model,
+                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                    reasoning_output_tokens, effective_tokens, total_tokens, token_contract,
+                    cost_usd, confidence,
+                    provider_delta_id, bucket_index, bucket_count, applied_at,
+                    provider_cursor_key, provider_cursor_value
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                    ?21, ?22, ?23, ?24, ?25, ?26
+                )",
+                params![
+                    "gemini",
+                    "test-provider",
+                    "test-parser",
+                    "ccusage daily --json --offline",
+                    "daily",
+                    format_time(historical).unwrap(),
+                    format_time(seeded_at).unwrap(),
+                    format_time(historical).unwrap(),
+                    historical.date().to_string(),
+                    Option::<String>::None,
+                    50_000.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    50_000.0,
+                    50_000.0,
+                    crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1,
+                    Option::<f64>::None,
+                    "local-log-derived",
+                    format!("gemini|{seeded_cursor_key}|{seeded_cursor_value}"),
+                    0_i64,
+                    1_i64,
+                    format_time(seeded_at).unwrap(),
+                    seeded_cursor_key,
+                    seeded_cursor_value,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO usage_events (
+                    provider_surface, provider_version, parser_version, command, source_surface,
+                    period_start, observed_at, bucket_at, period_date, model,
+                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                    reasoning_output_tokens, effective_tokens, total_tokens, token_contract,
+                    cost_usd, confidence,
+                    provider_delta_id, bucket_index, bucket_count, applied_at,
+                    provider_cursor_key, provider_cursor_value
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                    ?21, ?22, ?23, ?24, ?25, ?26
+                )",
+                params![
+                    "gemini",
+                    "test-provider",
+                    "test-parser",
+                    "ccusage daily --json --offline",
+                    "daily",
+                    format_time(live_applied_at).unwrap(),
+                    format_time(live_applied_at).unwrap(),
+                    format_time(live_applied_at).unwrap(),
+                    live_applied_at.date().to_string(),
+                    Option::<String>::None,
+                    42_000.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    42_000.0,
+                    42_000.0,
+                    crate::usage::token_contract::WEIGHTED_EFFECTIVE_V1,
+                    Option::<f64>::None,
+                    "local-log-derived",
+                    format!("gemini|{live_cursor_key}|{live_cursor_value}"),
+                    0_i64,
+                    1_i64,
+                    format_time(live_applied_at).unwrap(),
+                    live_cursor_key,
+                    live_cursor_value,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO provider_diagnostics (
+                    provider_surface, code, message, recorded_at
+                ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    "gemini",
+                    "source_first_contact",
+                    "first contact with gemini: 1 historical rows seeded without feeding",
+                    format_time(seeded_at).unwrap(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = UsageStore::open(&db).unwrap();
+        let rows: Vec<(String, i64)> = {
+            let mut stmt = store
+                .conn
+                .prepare(
+                    "SELECT provider_cursor_value, feedable
+                     FROM usage_events
+                     ORDER BY applied_at ASC, id ASC",
+                )
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        assert_eq!(
+            rows,
+            vec![
+                (seeded_cursor_value.to_string(), 0_i64),
+                (live_cursor_value.to_string(), 1_i64),
+            ]
+        );
+        assert_eq!(store.recent_event_count().unwrap(), 1);
+        assert_eq!(
+            store
+                .applied_effective_tokens_between(
+                    historical - time::Duration::hours(1),
+                    live_applied_at + time::Duration::seconds(1),
                 )
                 .unwrap(),
             42_000.0
