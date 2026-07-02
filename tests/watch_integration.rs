@@ -541,3 +541,40 @@ fn watch_token_totals_use_tokenmaxxing_day_axis_and_external_source_labels() {
         .iter()
         .any(|source| source.name == "codex" && source.effective_tokens == 669_369_020.0));
 }
+
+#[test]
+fn seeded_history_is_hidden_from_watch_activity_surfaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage_store = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026 - 06 - 10 12:00 UTC);
+    let historical = now - time::Duration::days(1);
+    let event = NormalizedUsageEvent {
+        provider_surface: "codex".into(),
+        ..NormalizedUsageEvent::for_test_at(historical, 669_000_000.0)
+    };
+    let cursor = ProviderCursorUpdate {
+        provider_surface: "codex".into(),
+        cursor_key: "codex-seed-key".into(),
+        cursor_value: "codex-seed-value".into(),
+        provider_version: "test-provider".into(),
+        parser_version: "test-parser".into(),
+    };
+    usage_store
+        .seed_source_history(&[(event, cursor)], None, now)
+        .unwrap();
+
+    let vm = build_watch_view_model_for_test_at(
+        &PetState::new_for_test("mochi-7f3a", "mochi"),
+        &usage_db,
+        now,
+    )
+    .unwrap();
+
+    assert_eq!(vm.today_effective_tokens, 0.0);
+    assert!(vm.source_breakdown.is_empty());
+    assert!(vm
+        .recent_events
+        .iter()
+        .all(|event| !event.text.contains("codex")));
+}

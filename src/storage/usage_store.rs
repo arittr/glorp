@@ -153,10 +153,11 @@ impl UsageStore {
                 token_contract,
                 cost_usd,
                 confidence,
-                applied_at
+                applied_at,
+                feedable
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
             )",
             params![
                 event.provider_surface,
@@ -180,6 +181,7 @@ impl UsageStore {
                 event.cost_usd,
                 event.confidence,
                 format_time(event.observed_at)?,
+                1_i64,
             ],
         )?;
         add_lifetime_counter(&tx, event.effective_tokens)?;
@@ -227,12 +229,13 @@ impl UsageStore {
                 bucket_index,
                 bucket_count,
                 applied_at,
+                feedable,
                 provider_cursor_key,
                 provider_cursor_value
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                ?19, ?20, ?21, ?22, ?23, NULL, ?24, ?25
+                ?19, ?20, ?21, ?22, ?23, NULL, ?24, ?25, ?26
             )",
             params![
                 event.provider_surface,
@@ -258,6 +261,7 @@ impl UsageStore {
                 provider_delta_id,
                 bucket_index_i64,
                 bucket_count_i64,
+                1_i64,
                 cursor_update.cursor_key,
                 cursor_update.cursor_value,
             ],
@@ -302,12 +306,12 @@ impl UsageStore {
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
                     reasoning_output_tokens, effective_tokens, total_tokens, token_contract,
                     cost_usd, confidence,
-                    provider_delta_id, bucket_index, bucket_count, applied_at,
+                    provider_delta_id, bucket_index, bucket_count, applied_at, feedable,
                     provider_cursor_key, provider_cursor_value
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                     ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                    ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+                    ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
                 )",
                 params![
                     event.provider_surface,
@@ -334,6 +338,7 @@ impl UsageStore {
                     0_i64,
                     1_i64,
                     &seeded_at_text,
+                    0_i64,
                     cursor_update.cursor_key,
                     cursor_update.cursor_value,
                 ],
@@ -392,7 +397,10 @@ impl UsageStore {
                 SUM(COALESCE(cost_usd, 0.0)),
                 COUNT(*)
             FROM usage_events
-            WHERE period_start < ?1 AND bucket_at < ?1 AND applied_at IS NOT NULL
+            WHERE period_start < ?1
+              AND bucket_at < ?1
+              AND applied_at IS NOT NULL
+              AND feedable = 1
             GROUP BY provider_surface, period_date, source_surface
             ON CONFLICT(provider_surface, period_date, source_surface) DO UPDATE SET
                 input_tokens = daily_aggregates.input_tokens + excluded.input_tokens,
@@ -406,7 +414,11 @@ impl UsageStore {
             params![format_time(cutoff)?],
         )?;
         tx.execute(
-            "DELETE FROM usage_events WHERE period_start < ?1 AND bucket_at < ?1 AND applied_at IS NOT NULL",
+            "DELETE FROM usage_events
+             WHERE period_start < ?1
+               AND bucket_at < ?1
+               AND applied_at IS NOT NULL
+               AND feedable = 1",
             params![format_time(cutoff)?],
         )?;
         tx.commit()?;
@@ -415,7 +427,11 @@ impl UsageStore {
 
     pub fn recent_event_count(&self) -> crate::error::Result<u64> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE feedable = 1",
+                [],
+                |row| row.get(0),
+            )
             .map_err(Into::into)
     }
 
@@ -646,6 +662,7 @@ impl UsageStore {
                 provider_delta_id
              FROM usage_events
              WHERE observed_at >= ?1
+               AND feedable = 1
              ORDER BY observed_at DESC, id DESC",
         )?;
         let events = stmt
@@ -704,6 +721,7 @@ impl UsageStore {
                 confidence,
                 provider_delta_id
              FROM usage_events
+             WHERE feedable = 1
              ORDER BY observed_at DESC, id DESC
              LIMIT ?1",
         )?;
@@ -767,6 +785,7 @@ impl UsageStore {
                 provider_delta_id
              FROM usage_events
              WHERE applied_at IS NULL
+               AND feedable = 1
              ORDER BY bucket_at ASC, id ASC
              LIMIT ?1",
         )?;
@@ -840,7 +859,9 @@ impl UsageStore {
                     provider_cursor_value,
                     effective_tokens
                  FROM usage_events
-                 WHERE id IN ({placeholders}) AND applied_at IS NULL"
+                 WHERE id IN ({placeholders})
+                   AND applied_at IS NULL
+                   AND feedable = 1"
             );
             let mut stmt = tx.prepare(&select_sql)?;
             let rows = stmt.query_map(
@@ -876,7 +897,9 @@ impl UsageStore {
         let update_sql = format!(
             "UPDATE usage_events
              SET applied_at = ?
-             WHERE id IN ({placeholders}) AND applied_at IS NULL"
+             WHERE id IN ({placeholders})
+               AND applied_at IS NULL
+               AND feedable = 1"
         );
         let mut update_params: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(applied_at_text.clone())];
@@ -978,7 +1001,9 @@ impl UsageStore {
         let mut stmt = self.conn.prepare(
             "SELECT provider_surface, COALESCE(SUM(effective_tokens), 0.0) AS total
              FROM usage_events
-             WHERE bucket_at >= ?1 AND bucket_at <= ?2
+             WHERE bucket_at >= ?1
+               AND bucket_at <= ?2
+               AND feedable = 1
              GROUP BY provider_surface
              ORDER BY provider_surface",
         )?;
@@ -1005,7 +1030,10 @@ impl UsageStore {
             .query_row(
                 "SELECT COALESCE(SUM(effective_tokens), 0.0)
                  FROM usage_events
-                 WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2",
+                 WHERE applied_at IS NOT NULL
+                   AND feedable = 1
+                   AND bucket_at >= ?1
+                   AND bucket_at < ?2",
                 params![format_time(start)?, format_time(end)?],
                 |row| row.get(0),
             )
@@ -1022,6 +1050,7 @@ impl UsageStore {
                 "SELECT COALESCE(SUM(total_tokens), 0.0)
                  FROM usage_events
                  WHERE applied_at IS NOT NULL
+                   AND feedable = 1
                    AND token_contract = ?1
                    AND bucket_at >= ?2
                    AND bucket_at < ?3",
@@ -1044,6 +1073,7 @@ impl UsageStore {
             "SELECT provider_surface, COALESCE(SUM(total_tokens), 0.0)
              FROM usage_events
              WHERE applied_at IS NOT NULL
+               AND feedable = 1
                AND token_contract = ?1
                AND bucket_at >= ?2
                AND bucket_at < ?3
@@ -1075,7 +1105,10 @@ impl UsageStore {
         let mut stmt = self.conn.prepare(
             "SELECT provider_surface, COALESCE(SUM(effective_tokens), 0.0)
              FROM usage_events
-             WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2
+             WHERE applied_at IS NOT NULL
+               AND feedable = 1
+               AND bucket_at >= ?1
+               AND bucket_at < ?2
              GROUP BY provider_surface
              ORDER BY provider_surface",
         )?;
@@ -1102,7 +1135,10 @@ impl UsageStore {
         let mut stmt = self.conn.prepare(
             "SELECT bucket_at, SUM(effective_tokens)
              FROM usage_events
-             WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2
+             WHERE applied_at IS NOT NULL
+               AND feedable = 1
+               AND bucket_at >= ?1
+               AND bucket_at < ?2
              GROUP BY bucket_at
              ORDER BY bucket_at ASC",
         )?;
@@ -1135,7 +1171,10 @@ impl UsageStore {
                     COALESCE(SUM(reasoning_output_tokens), 0.0),
                     COALESCE(SUM(effective_tokens), 0.0)
                  FROM usage_events
-                 WHERE applied_at IS NOT NULL AND bucket_at >= ?1 AND bucket_at < ?2",
+                 WHERE applied_at IS NOT NULL
+                   AND feedable = 1
+                   AND bucket_at >= ?1
+                   AND bucket_at < ?2",
                 params![format_time(start)?, format_time(end)?],
                 |row| {
                     Ok(AppliedShapeSums {
@@ -1155,7 +1194,9 @@ impl UsageStore {
     /// (clock set backwards) surface here, which is the fail-awake rule.
     pub fn latest_applied_bucket_at(&self) -> crate::error::Result<Option<OffsetDateTime>> {
         let max: Option<String> = self.conn.query_row(
-            "SELECT MAX(bucket_at) FROM usage_events WHERE applied_at IS NOT NULL",
+            "SELECT MAX(bucket_at) FROM usage_events
+             WHERE applied_at IS NOT NULL
+               AND feedable = 1",
             [],
             |row| row.get(0),
         )?;
@@ -1168,7 +1209,9 @@ impl UsageStore {
     /// coarse for an 8-second ease.
     pub fn latest_applied_marked_at(&self) -> crate::error::Result<Option<OffsetDateTime>> {
         let max: Option<String> = self.conn.query_row(
-            "SELECT MAX(applied_at) FROM usage_events WHERE applied_at IS NOT NULL",
+            "SELECT MAX(applied_at) FROM usage_events
+             WHERE applied_at IS NOT NULL
+               AND feedable = 1",
             [],
             |row| row.get(0),
         )?;
@@ -1187,7 +1230,9 @@ impl UsageStore {
     ) -> crate::error::Result<Option<OffsetDateTime>> {
         let max: Option<String> = self.conn.query_row(
             "SELECT MAX(bucket_at) FROM usage_events
-             WHERE applied_at IS NOT NULL AND bucket_at < ?1",
+             WHERE applied_at IS NOT NULL
+               AND feedable = 1
+               AND bucket_at < ?1",
             params![format_time(at)?],
             |row| row.get(0),
         )?;
@@ -1195,12 +1240,16 @@ impl UsageStore {
             .transpose()
     }
 
-    /// Whether any applied ledger row exists (including seeded history).
+    /// Whether any applied, feedable ledger row exists.
     /// Newborn sleep gate.
     pub fn has_any_applied_events(&self) -> crate::error::Result<bool> {
         self.conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM usage_events WHERE applied_at IS NOT NULL)",
+                "SELECT EXISTS(
+                    SELECT 1 FROM usage_events
+                    WHERE applied_at IS NOT NULL
+                      AND feedable = 1
+                )",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -1234,6 +1283,7 @@ impl UsageStore {
                 SELECT period_date, SUM(effective_tokens) AS daily_total
                 FROM (
                     SELECT period_date, effective_tokens FROM usage_events
+                    WHERE feedable = 1
                     UNION ALL
                     SELECT period_date, effective_tokens FROM daily_aggregates
                 )
@@ -1290,6 +1340,7 @@ impl UsageStore {
                 bucket_index INTEGER NOT NULL DEFAULT 0,
                 bucket_count INTEGER NOT NULL DEFAULT 1,
                 applied_at TEXT,
+                feedable INTEGER NOT NULL DEFAULT 1,
                 provider_cursor_key TEXT,
                 provider_cursor_value TEXT
             );
@@ -1363,6 +1414,12 @@ impl UsageStore {
             "applied_at",
             "ALTER TABLE usage_events ADD COLUMN applied_at TEXT;",
             "UPDATE usage_events SET applied_at = observed_at WHERE applied_at IS NULL;",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "feedable",
+            "ALTER TABLE usage_events ADD COLUMN feedable INTEGER NOT NULL DEFAULT 1;",
+            "",
         )?;
         ensure_usage_event_column(
             &self.conn,
@@ -2210,7 +2267,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.lifetime_effective_tokens().unwrap(), 0.0);
-        assert!(store.has_any_applied_events().unwrap());
+        assert!(!store.has_any_applied_events().unwrap());
         assert_eq!(
             store
                 .provider_cursor("gemini", "gemini|daily|2026-06-09")
@@ -2218,16 +2275,71 @@ mod tests {
                 .as_deref(),
             Some("totals-v1")
         );
-
-        let totals = store
+        assert!(store
             .applied_effective_tokens_by_source_between(
-                now - time::Duration::days(3),
+                historical - time::Duration::hours(1),
                 now + time::Duration::seconds(1),
             )
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn seed_source_history_rows_are_non_feedable_for_activity_queries() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = datetime!(2026 - 06 - 10 12:00 UTC);
+        let historical = now - time::Duration::days(1);
+        let event = NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            ..NormalizedUsageEvent::for_test_at(historical, 50_000.0)
+        };
+        let cursor = ProviderCursorUpdate {
+            provider_surface: "claude-code".into(),
+            cursor_key: "seed-key".into(),
+            cursor_value: "seed-value".into(),
+            provider_version: "test-provider".into(),
+            parser_version: "test-parser".into(),
+        };
+
+        store
+            .seed_source_history(&[(event, cursor)], None, now)
             .unwrap();
-        assert!(totals
-            .iter()
-            .any(|(s, v)| s == "gemini" && (*v - 50_000.0).abs() < 0.1));
+
+        assert_eq!(store.lifetime_effective_tokens().unwrap(), 0.0);
+        assert_eq!(store.recent_event_count().unwrap(), 0);
+        assert!(!store.has_any_applied_events().unwrap());
+        assert_eq!(
+            store
+                .applied_effective_tokens_between(historical - time::Duration::hours(1), now)
+                .unwrap(),
+            0.0
+        );
+        assert!(store
+            .applied_effective_tokens_by_source_between(historical - time::Duration::hours(1), now)
+            .unwrap()
+            .is_empty());
+        assert!(store.recent_events(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn feedable_applied_rows_still_drive_activity_queries() {
+        let mut store = UsageStore::open(":memory:".as_ref()).unwrap();
+        let now = datetime!(2026 - 06 - 10 12:00 UTC);
+        store
+            .insert_event(&NormalizedUsageEvent::for_test_at(now, 42_000.0))
+            .unwrap();
+
+        assert_eq!(store.recent_event_count().unwrap(), 1);
+        assert!(store.has_any_applied_events().unwrap());
+        assert_eq!(
+            store
+                .applied_effective_tokens_between(
+                    now - time::Duration::hours(1),
+                    now + time::Duration::seconds(1)
+                )
+                .unwrap(),
+            42_000.0
+        );
     }
 
     #[test]
