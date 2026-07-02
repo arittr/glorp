@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-02
 **Status:** direction approved by Drew in visual brainstorm ("way, way better"); hero
-lineup and sequencing recorded below as defaults pending his spec review.
+lineup and sequencing recorded below as defaults pending his spec review. Color
+identity shift to magenta approved by Drew ("i agree with your rec").
 
 ## Goal
 
@@ -177,6 +178,19 @@ Cell ramp: 3, 8, 20, 34, 48, 58, 70 — strictly increasing, every value in band
 3. **New glyph audit**: the templates introduce `╪` and `═` (S3/S6) plus `▪ · ◆ :`
    already used elsewhere. Verify width-1 rendering on the target terminals and
    in the companion's AppKit path during preview-lab review.
+4. **Color identity: glitch body hue 135° → 345° (magenta), chroma stays 0.18.**
+   Rationale: blob (mint 150°) sat only 15° from glitch, and the ±18° per-pet
+   jitter made the ranges overlap (a high-jitter glitch `#28ca71` vs high-jitter
+   blob `#2cc69a` is a near-twin); the fixed acid-green corruption color (145°,
+   chosen "so it always contrasts the body") contrasted on every species *except*
+   glitch itself. Magenta raises the minimum hue gap to any species from 15° to
+   45° (nearest: ghost lavender 300°), makes corruption sparks pop on glitch —
+   green-on-pink — and the derived roles land well: resting eye becomes spring
+   green (complementary 165°), mouth warm coral (+35° = 20°). Implementation:
+   `species_base_hue` (`src/pet/palette.rs`) plus its comment, and rewrite the
+   palette test asserting the body stays green-dominant under max activity lift
+   (`colors.rs`) to assert magenta-dominance instead. Mood-eye colors and the
+   fixed corruption hue are unchanged by design.
 
 ## Sequencing with `private/glitch-persistent-corruption` (default: branch first)
 
@@ -211,8 +225,10 @@ Land the persistence branch as-is, then this art pass on top:
 
 ## Out of scope
 
-Habitat/room dialect, particle families, palette hues, animation profiles, other
-species' art. The full 22-candidate archive (including unused alternates) lives in
+Habitat/room dialect, particle families, other species' palette hues, animation
+profiles, other species' art. Also deferred: a second "glow" body shade role (so
+`██` cells could render brighter in color, not just ink density) — would deepen
+every species; revisit after this ships. The full 22-candidate archive (including unused alternates) lives in
 `.superpowers/brainstorm/70621-1783016793/glitch-art-candidates-all22.json`
 (gitignored); the two closest-call alternates are recorded below for posterity.
 
