@@ -262,7 +262,14 @@ pub fn render_pet(
         if let Some(glitch) = frame.glitch_corruption {
             apply_glitch_repair_marks(pet, stage, &mut lines, &mut spans, glitch);
             if !glitch.calm_mode {
-                apply_glitch_corruption(&mut lines, &mut spans, frame.tick);
+                apply_glitch_transient_corruption(
+                    &mut lines,
+                    &mut spans,
+                    stage,
+                    frame.tick,
+                    glitch.burst_level,
+                    glitch.feed_reaction || frame.feed_reaction,
+                );
             }
         } else {
             apply_glitch_corruption(&mut lines, &mut spans, frame.tick);
@@ -971,6 +978,83 @@ fn replace_char_in_line(line: &mut String, char_index: usize, replacement: char)
         let mut replacement_buf = [0u8; 4];
         let replacement_str = replacement.encode_utf8(&mut replacement_buf);
         line.replace_range(start_byte..end_byte, replacement_str);
+    }
+}
+
+/// Transient corruption footprint for this moment: normally just the calm
+/// periodic gate (`corruption_cells_for_tick`), but a feed reaction or a
+/// Strong session burst forces a short off-gate glitch regardless of tick,
+/// with a footprint sized by `burst_level`.
+fn corruption_cells_for_moment(
+    art_lines: &[String],
+    spans: &[StyledSegment],
+    stage: Stage,
+    tick: u64,
+    burst_level: GlitchBurstLevel,
+    feed_reaction: bool,
+) -> Vec<(usize, usize)> {
+    let force = feed_reaction || matches!(burst_level, GlitchBurstLevel::Strong);
+    if !force {
+        return corruption_cells_for_tick(art_lines, tick);
+    }
+
+    // Pre-filter protected/eye cells out of the forced-burst pool (rather than
+    // selecting a fixed-size slice and skipping protected hits afterward) so a
+    // feed reaction or Strong burst can't land its whole bounded footprint on
+    // the face band and silently render nothing.
+    let mut candidates = Vec::new();
+    for (row, line) in art_lines.iter().enumerate() {
+        for (col, ch) in line.chars().enumerate() {
+            if ch != ' '
+                && !is_protected_glitch_face_cell(stage, row, col, spans)
+                && !is_eye_center(spans, row, col)
+            {
+                candidates.push((row, col));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let count = match burst_level {
+        GlitchBurstLevel::None => 1,
+        GlitchBurstLevel::Small => 2,
+        GlitchBurstLevel::Strong => CORRUPTION_MAX_CELLS,
+    }
+    .min(candidates.len());
+    let start = (tick.wrapping_mul(5) as usize) % candidates.len();
+    candidates.rotate_left(start);
+    candidates.truncate(count);
+    candidates.sort_unstable();
+    candidates
+}
+
+/// Bounded transient glitch burst: like `apply_glitch_corruption`, but driven
+/// by `corruption_cells_for_moment` so a feed reaction or Strong session
+/// burst can force a short off-gate glitch. Respects both the living-face
+/// rule (never the eye-center) and the persistent-repair face band
+/// (`is_protected_glitch_face_cell`), so a burst never recolors a
+/// day-repaired or protected face cell.
+fn apply_glitch_transient_corruption(
+    lines: &mut [String],
+    spans: &mut Vec<StyledSegment>,
+    stage: Stage,
+    tick: u64,
+    burst_level: GlitchBurstLevel,
+    feed_reaction: bool,
+) {
+    let cells = corruption_cells_for_moment(lines, spans, stage, tick, burst_level, feed_reaction);
+    if cells.is_empty() {
+        return;
+    }
+    for (i, (row, col)) in cells.into_iter().enumerate() {
+        if is_protected_glitch_face_cell(stage, row, col, spans) || is_eye_center(spans, row, col) {
+            continue;
+        }
+        let noise =
+            GLITCH_NOISE[((tick as usize).wrapping_mul(3).wrapping_add(i)) % GLITCH_NOISE.len()];
+        replace_char_in_line(&mut lines[row], col, noise);
+        retag_cell_as_corruption(spans, row, col);
     }
 }
 
@@ -2142,5 +2226,72 @@ mod tests {
                 span
             );
         }
+    }
+
+    #[test]
+    fn glitch_feed_reaction_can_trigger_transient_corruption_off_gate() {
+        let pet = generate_pet("glitch-feed-burst").with_species(Species::Glitch);
+        let rendered = render_pet(
+            &pet,
+            Stage::S4,
+            Mood::Happy,
+            AnimationFrame {
+                tick: 2,
+                feed_reaction: true,
+                glitch_corruption: Some(GlitchCorruptionFrame {
+                    day_seed: 42,
+                    patch_tier: GlitchPatchTier::Quiet,
+                    burst_level: GlitchBurstLevel::Small,
+                    calm_mode: false,
+                    feed_reaction: true,
+                }),
+                ..AnimationFrame::default()
+            },
+        );
+
+        assert!(
+            rendered
+                .spans
+                .iter()
+                .any(|span| span.role == PaletteRoleName::Corruption),
+            "feed reaction should allow a short transient glitch off the old gate"
+        );
+    }
+
+    #[test]
+    fn glitch_calm_mode_suppresses_transient_corruption_but_keeps_repairs() {
+        let pet = generate_pet("glitch-calm-burst").with_species(Species::Glitch);
+        let rendered = render_pet(
+            &pet,
+            Stage::S4,
+            Mood::Content,
+            AnimationFrame {
+                tick: 13,
+                feed_reaction: true,
+                glitch_corruption: Some(GlitchCorruptionFrame {
+                    day_seed: 42,
+                    patch_tier: GlitchPatchTier::Heavy,
+                    burst_level: GlitchBurstLevel::Strong,
+                    calm_mode: true,
+                    feed_reaction: true,
+                }),
+                ..AnimationFrame::default()
+            },
+        );
+
+        assert!(
+            rendered
+                .spans
+                .iter()
+                .all(|span| span.role != PaletteRoleName::Corruption),
+            "calm mode should suppress transient corruption"
+        );
+        assert!(
+            rendered.spans.iter().any(|span| matches!(
+                span.role,
+                PaletteRoleName::Pattern | PaletteRoleName::Accent
+            )),
+            "calm mode should keep day-local repair marks"
+        );
     }
 }
