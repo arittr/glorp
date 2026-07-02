@@ -1122,6 +1122,8 @@ mod tests {
 
         let now = datetime!(2026-06-11 12:00 UTC);
         let historical = datetime!(2026-06-10 00:00 UTC);
+        let cursor_key = r#"{"provider_surface":"gemini","command":"ccusage daily","source_surface":"daily","period_start":"2026-06-10","model":"gemini-2.5-pro"}"#;
+        let cursor_value = r#"{"uncached_input":100000,"output":50000,"cache_creation":10000,"cache_read":200000,"reasoning_output":5000}"#;
 
         let poll = UsagePollResult {
             deltas: vec![UsageDelta {
@@ -1137,8 +1139,8 @@ mod tests {
                 model: Some("gemini-2.5-pro".into()),
                 cursor_update: ProviderCursorUpdate {
                     provider_surface: "gemini".into(),
-                    cursor_key: r#"{"provider_surface":"gemini","command":"ccusage daily","source_surface":"daily","period_start":"2026-06-10","model":"gemini-2.5-pro"}"#.into(),
-                    cursor_value: r#"{"uncached_input":100000,"output":50000,"cache_creation":10000,"cache_read":200000,"reasoning_output":5000}"#.into(),
+                    cursor_key: cursor_key.into(),
+                    cursor_value: cursor_value.into(),
                     provider_version: "ccusage 20.0.6".into(),
                     parser_version: "ccusage 20.0.6".into(),
                 },
@@ -1172,6 +1174,16 @@ mod tests {
         assert!(
             !usage_store.has_any_applied_events().unwrap(),
             "seeded first-contact history is applied but intentionally non-feedable"
+        );
+        assert_eq!(
+            usage_store.provider_cursor("gemini", cursor_key).unwrap().as_deref(),
+            Some(cursor_value),
+            "first-contact seeding must persist the provider cursor even though the row stays non-feedable"
+        );
+        assert_eq!(
+            usage_store.latest_cursor_updated_at("gemini").unwrap(),
+            Some(now),
+            "first-contact seeding must advance the provider cursor timestamp to the seed instant"
         );
 
         let diags = usage_store.recent_diagnostics(10).unwrap();
