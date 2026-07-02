@@ -2012,18 +2012,57 @@ mod tests {
         let (_pet, lines, spans) = raw_glitch_art_for_test("glitch-safe-candidates", Stage::S4);
         let candidates = safe_glitch_patch_candidates(Stage::S4, &lines, &spans);
 
+        // The S4 allowlist (GLITCH_S4_PATCH_CELLS) only names rows 3-4, so these
+        // rows are excluded because they were never offered as candidates, not
+        // because `is_protected_glitch_face_cell` ran. That's still a real
+        // safety property worth asserting (the allowlist itself never strays
+        // into the face/outline band); the protection filter's own behavior is
+        // exercised directly below in
+        // `glitch_safe_patch_candidates_excludes_allowlisted_cell_under_face_span`.
         assert!(candidates.contains(&GlitchPatchCell { row: 3, col: 5 }));
         assert!(
             !candidates.contains(&GlitchPatchCell { row: 1, col: 5 }),
-            "eye row is protected"
+            "eye row is not in the S4 allowlist"
         );
         assert!(
             !candidates.contains(&GlitchPatchCell { row: 2, col: 5 }),
-            "mouth row is protected"
+            "mouth row is not in the S4 allowlist"
         );
         assert!(
             !candidates.contains(&GlitchPatchCell { row: 0, col: 1 }),
-            "top outline is protected"
+            "top outline row is not in the S4 allowlist"
+        );
+    }
+
+    #[test]
+    fn glitch_safe_patch_candidates_excludes_allowlisted_cell_under_face_span() {
+        let (_pet, lines, base_spans) =
+            raw_glitch_art_for_test("glitch-safe-candidates", Stage::S4);
+
+        // Baseline: row 3, col 5 is a real S4 allowlisted body cell and is
+        // offered as a candidate absent any overlapping face span.
+        let baseline = safe_glitch_patch_candidates(Stage::S4, &lines, &base_spans);
+        assert!(baseline.contains(&GlitchPatchCell { row: 3, col: 5 }));
+
+        // A synthetic Eye span covering that same allowlisted cell must still
+        // exclude it from the candidates returned by the public entry point --
+        // proving the protection filter itself runs inside
+        // `safe_glitch_patch_candidates`, not just that the allowlist avoids
+        // the face band by construction. `span_role_at` returns the first
+        // matching span, so the synthetic span is prepended ahead of the
+        // real body-texture span already covering this cell.
+        let mut spans_with_face_overlap = vec![StyledSegment {
+            line: 3,
+            start: 5,
+            end: 6,
+            role: PaletteRoleName::Eye,
+        }];
+        spans_with_face_overlap.extend(base_spans);
+
+        let candidates = safe_glitch_patch_candidates(Stage::S4, &lines, &spans_with_face_overlap);
+        assert!(
+            !candidates.contains(&GlitchPatchCell { row: 3, col: 5 }),
+            "allowlisted cell overlapped by a face span must still be protected"
         );
     }
 
