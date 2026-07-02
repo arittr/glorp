@@ -219,7 +219,7 @@ pub(crate) fn build_watch_view_model_at(
 
     let pet_palette = crate::pet::palette::resolve_pet_palette(species, &generated.traits);
 
-    Ok(WatchViewModel {
+    let mut vm = WatchViewModel {
         pet_art: rendered.lines,
         pet_spans: rendered.spans,
         pet_render: PetRenderModel {
@@ -335,7 +335,14 @@ pub(crate) fn build_watch_view_model_at(
             );
             BioView { hatched_label, age_label }
         },
-    })
+    };
+    rerender_pet_for_view_model(
+        &mut vm,
+        now.unix_timestamp().max(0) as u64,
+        day_context.asleep,
+        now,
+    )?;
+    Ok(vm)
 }
 
 fn build_habitat_view(state: &PetState) -> HabitatView {
@@ -505,6 +512,27 @@ fn mood_from_state(state: &PetState) -> Mood {
     .mood
 }
 
+/// Glitch-species persistent corruption inputs for the current view model, or
+/// `None` for non-Glitch species. `feed_reaction` mirrors the same token-pop
+/// recency check used for the face's `AnimationFrame.feed_reaction`.
+fn glitch_corruption_frame_for_view_model(
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+) -> Option<crate::pet::render::GlitchCorruptionFrame> {
+    if vm.pet_render.generated_species != Species::Glitch {
+        return None;
+    }
+    let feed_reaction =
+        crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now).is_some();
+    Some(crate::pet::render::glitch_corruption_frame_for_inputs(
+        vm.day_context.date_seed,
+        vm.day_context.today_ratio,
+        vm.life_profile.burst_level,
+        vm.life_profile.calm_mode,
+        feed_reaction,
+    ))
+}
+
 pub fn rerender_pet_for_view_model(
     vm: &mut WatchViewModel,
     tick: u64,
@@ -536,6 +564,7 @@ pub fn rerender_pet_for_view_model(
             work_accent: work_accent_for_profile(&vm.life_profile),
             feed_reaction: crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now)
                 .is_some(),
+            glitch_corruption: glitch_corruption_frame_for_view_model(vm, now),
             ..AnimationFrame::default()
         },
     );
@@ -1725,6 +1754,74 @@ mod tests {
             vm.pet_palette.eye,
             eye_color_for_mood(Mood::Ecstatic),
             "ecstatic mood should warm the eye color"
+        );
+    }
+}
+
+#[cfg(test)]
+mod glitch_corruption_tests {
+    use super::*;
+    use crate::game::evolution::Stage;
+    use crate::pet::generation::Species;
+    use crate::pet::render::PaletteRoleName;
+    use crate::storage::{
+        state::PetState,
+        usage_store::{NormalizedUsageEvent, UsageStore},
+    };
+    use tempfile::tempdir;
+    use time::OffsetDateTime;
+
+    #[test]
+    fn glitch_watch_view_model_rerender_adds_day_local_repair_spans() {
+        let dir = tempdir().unwrap();
+        let usage_db = dir.path().join("usage.sqlite");
+        let mut state = PetState::new_for_test("glitch-watch-patches", "Mux");
+        state.pet.generated_species = Species::Glitch;
+        state.stage = Stage::S6;
+        state.calibration.daily_effective_tokens = 10_000.0;
+        let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let mut store = UsageStore::open(&usage_db).unwrap();
+        let mut event = NormalizedUsageEvent::for_test_at(now, 18_000.0);
+        event.provider_surface = "codex".to_string();
+        store.insert_event(&event).unwrap();
+
+        let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
+
+        assert!(
+            vm.pet_spans.iter().any(|span| {
+                matches!(
+                    span.role,
+                    PaletteRoleName::Pattern | PaletteRoleName::Accent
+                ) && span.end == span.start + 1
+            }),
+            "Glitch watch VM should include soft one-cell repair spans"
+        );
+        assert!(
+            vm.pet_spans
+                .iter()
+                .all(|span| span.role != PaletteRoleName::Corruption),
+            "day-local repair marks should not use Corruption in the steady VM"
+        );
+    }
+
+    #[test]
+    fn non_glitch_watch_view_model_does_not_receive_glitch_repair_spans() {
+        let dir = tempdir().unwrap();
+        let usage_db = dir.path().join("usage.sqlite");
+        let mut state = PetState::new_for_test("fuzz-watch-patches", "Mochi");
+        state.pet.generated_species = Species::Fuzz;
+        state.stage = Stage::S6;
+        let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let _store = UsageStore::open(&usage_db).unwrap();
+
+        let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
+
+        assert_eq!(vm.pet_render.generated_species, Species::Fuzz);
+        assert!(
+            vm.pet_spans
+                .iter()
+                .all(|span| span.role != PaletteRoleName::Corruption),
+            "non-Glitch steady VM should not get Glitch corruption roles"
         );
     }
 }
