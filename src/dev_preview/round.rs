@@ -209,21 +209,7 @@ fn round_inputs_for_frame(
             ),
             (
                 "protected_face_cells".to_string(),
-                json!([
-                    {"row": 1, "col": 4},
-                    {"row": 1, "col": 5},
-                    {"row": 1, "col": 6},
-                    {"row": 2, "col": 3},
-                    {"row": 2, "col": 4},
-                    {"row": 2, "col": 5},
-                    {"row": 2, "col": 6},
-                    {"row": 2, "col": 7},
-                    {"row": 3, "col": 3},
-                    {"row": 3, "col": 4},
-                    {"row": 3, "col": 5},
-                    {"row": 3, "col": 6},
-                    {"row": 3, "col": 7}
-                ]),
+                crate::dev_preview::frame::protected_face_cells_json(),
             ),
         ]);
     }
