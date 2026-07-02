@@ -20,16 +20,15 @@ pub enum HabitatPropKind {
     Accent,
 }
 
-/// Determines whether a prop renders before or after the pet, and whether it
-/// avoids the pet's silhouette + halo when placing.
+/// Determines whether a prop renders before or after the pet. Props are placed
+/// at a fixed seeded/zoned spot regardless of the pet — chasing the wandering
+/// pet made them jump — so this is purely a paint-time z-order.
 ///
-/// - `Background`: rendered before pet, avoids silhouette+halo. The vast
-///   majority of props — they stay clear of the pet entirely.
-/// - `Behind`: rendered before pet, no silhouette exclusion. The pet's
-///   non-space glyphs paint over the prop where they overlap, so the prop
-///   appears to sit *behind* the pet (parts visible in the diamond's
-///   negative space).
-/// - `Foreground`: rendered after pet, paints over the pet's silhouette.
+/// - `Background` / `Behind`: rendered before the pet, so the pet's non-space
+///   glyphs paint over the prop where they overlap and it reads as sitting
+///   behind the pet (parts visible in the negative space). The vast majority
+///   of props.
+/// - `Foreground`: rendered after the pet, painting over the pet's silhouette.
 ///   The prop appears *in front of* the pet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HabitatPetLayer {
