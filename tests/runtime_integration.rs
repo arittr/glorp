@@ -259,7 +259,7 @@ fn runtime_feeds_cached_tokens_at_full_value_for_tokenmaxxing_deltas() {
             model: Some("gpt-5.5".into()),
             cursor_update: ProviderCursorUpdate {
                 provider_surface: "codex".into(),
-                cursor_key: "codex-tokenmaxxing".into(),
+                cursor_key: provider_cursor_key_for_test("codex"),
                 cursor_value: "v1".into(),
                 provider_version: "agentsview v0.32.1".into(),
                 parser_version: "agentsview v0.32.1".into(),
@@ -466,7 +466,7 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
             model: Some("test-model".to_string()),
             cursor_update: ProviderCursorUpdate {
                 provider_surface: "claude-code".to_string(),
-                cursor_key: format!("test-cursor-{}", now.unix_timestamp()),
+                cursor_key: provider_cursor_key_for_test("claude-code"),
                 cursor_value: format!(
                     r#"{{"uncached_input":{},"output":0,"cache_creation":0,"cache_read":0,"reasoning_output":0,"_counter":{}}}"#,
                     effective_tokens as u64, counter
@@ -518,6 +518,10 @@ fn usage_delta_with_cursor(
     }
 }
 
+fn provider_cursor_key_for_test(surface: &str) -> String {
+    format!("{surface}-cursor")
+}
+
 fn habitat_prop_ids(state: &PetState) -> Vec<&str> {
     state
         .habitat
@@ -536,8 +540,7 @@ fn poll_with_surface(
     for delta in &mut poll.deltas {
         delta.provider_surface = provider_surface.to_string();
         delta.cursor_update.provider_surface = provider_surface.to_string();
-        delta.cursor_update.cursor_key =
-            format!("{provider_surface}-cursor-{}", now.unix_timestamp());
+        delta.cursor_update.cursor_key = provider_cursor_key_for_test(provider_surface);
     }
     poll
 }
@@ -560,7 +563,7 @@ fn establish_provider_contact(
         .advance_cursors(
             vec![ProviderCursorUpdate {
                 provider_surface: surface.to_string(),
-                cursor_key: format!("{surface}-first-contact"),
+                cursor_key: provider_cursor_key_for_test(surface),
                 cursor_value: "seeded".to_string(),
                 provider_version: "test-provider".to_string(),
                 parser_version: "test-parser".to_string(),

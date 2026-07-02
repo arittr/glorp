@@ -885,7 +885,7 @@ mod tests {
             .advance_cursors(
                 vec![ProviderCursorUpdate {
                     provider_surface: surface.to_string(),
-                    cursor_key: format!("{surface}-first-contact"),
+                    cursor_key: "catchup-test".to_string(),
                     cursor_value: "seeded".to_string(),
                     provider_version: "test-provider".to_string(),
                     parser_version: "test-parser".to_string(),

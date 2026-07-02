@@ -891,7 +891,7 @@ mod tests {
             .advance_cursors(
                 vec![ProviderCursorUpdate {
                     provider_surface: "codex".into(),
-                    cursor_key: "contact".into(),
+                    cursor_key: "codex-canonical".into(),
                     cursor_value: "seeded".into(),
                     provider_version: "test".into(),
                     parser_version: "test".into(),
@@ -968,7 +968,7 @@ mod tests {
             .advance_cursors(
                 vec![ProviderCursorUpdate {
                     provider_surface: "claude".into(),
-                    cursor_key: "contact".into(),
+                    cursor_key: "claude-catchup".into(),
                     cursor_value: "seeded".into(),
                     provider_version: "test".into(),
                     parser_version: "test".into(),
@@ -1169,7 +1169,10 @@ mod tests {
             "first-contact deltas must not stage for feeding"
         );
         assert_eq!(state.lifetime_effective_tokens, 0.0);
-        assert!(usage_store.has_any_applied_events().unwrap());
+        assert!(
+            !usage_store.has_any_applied_events().unwrap(),
+            "seeded first-contact history is applied but intentionally non-feedable"
+        );
 
         let diags = usage_store.recent_diagnostics(10).unwrap();
         assert!(diags.iter().any(|d| d.code == "source_first_contact"));
@@ -1180,9 +1183,10 @@ mod tests {
                 now + time::Duration::seconds(1),
             )
             .unwrap();
-        assert!(totals
-            .iter()
-            .any(|(s, v)| s == "gemini" && (*v - 500_000.0).abs() < 0.1));
+        assert!(
+            totals.is_empty(),
+            "seeded first-contact history must stay out of feedable activity queries"
+        );
     }
 
     #[test]
