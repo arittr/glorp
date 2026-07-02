@@ -639,6 +639,198 @@ fn is_eye_center(spans: &[StyledSegment], row: usize, col: usize) -> bool {
     })
 }
 
+/// A single day-local repair-cell candidate on the 11x8 art grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GlitchPatchCell {
+    pub row: usize,
+    pub col: usize,
+}
+
+const GLITCH_S3_PATCH_CELLS: &[GlitchPatchCell] = &[
+    GlitchPatchCell { row: 4, col: 4 },
+    GlitchPatchCell { row: 4, col: 5 },
+    GlitchPatchCell { row: 4, col: 6 },
+];
+
+const GLITCH_S4_PATCH_CELLS: &[GlitchPatchCell] = &[
+    GlitchPatchCell { row: 3, col: 4 },
+    GlitchPatchCell { row: 3, col: 5 },
+    GlitchPatchCell { row: 3, col: 6 },
+    GlitchPatchCell { row: 4, col: 4 },
+    GlitchPatchCell { row: 4, col: 5 },
+    GlitchPatchCell { row: 4, col: 6 },
+];
+
+const GLITCH_S5_PATCH_CELLS: &[GlitchPatchCell] = &[
+    GlitchPatchCell { row: 4, col: 3 },
+    GlitchPatchCell { row: 4, col: 4 },
+    GlitchPatchCell { row: 4, col: 5 },
+    GlitchPatchCell { row: 4, col: 6 },
+    GlitchPatchCell { row: 4, col: 7 },
+    GlitchPatchCell { row: 5, col: 3 },
+    GlitchPatchCell { row: 5, col: 5 },
+    GlitchPatchCell { row: 5, col: 7 },
+];
+
+const GLITCH_S6_PATCH_CELLS: &[GlitchPatchCell] = &[
+    GlitchPatchCell { row: 4, col: 3 },
+    GlitchPatchCell { row: 4, col: 4 },
+    GlitchPatchCell { row: 4, col: 5 },
+    GlitchPatchCell { row: 4, col: 6 },
+    GlitchPatchCell { row: 4, col: 7 },
+    GlitchPatchCell { row: 5, col: 3 },
+    GlitchPatchCell { row: 5, col: 4 },
+    GlitchPatchCell { row: 5, col: 5 },
+    GlitchPatchCell { row: 5, col: 6 },
+    GlitchPatchCell { row: 5, col: 7 },
+];
+
+/// Per-stage allowlist of body cells eligible to carry a persistent repair
+/// mark. Kept below the face band and clear of the outline so a mark always
+/// reads as a body scuff, never a face injury. S0-S2 are too small to spare a
+/// safe cell, so they carry none.
+fn glitch_patch_allowlist(stage: Stage) -> &'static [GlitchPatchCell] {
+    match stage {
+        Stage::S3 => GLITCH_S3_PATCH_CELLS,
+        Stage::S4 => GLITCH_S4_PATCH_CELLS,
+        Stage::S5 => GLITCH_S5_PATCH_CELLS,
+        Stage::S6 => GLITCH_S6_PATCH_CELLS,
+        Stage::S0 | Stage::S1 | Stage::S2 => &[],
+    }
+}
+
+/// The role of the span covering (row, col), if any.
+fn span_role_at(spans: &[StyledSegment], row: usize, col: usize) -> Option<PaletteRoleName> {
+    spans
+        .iter()
+        .find(|span| span.line == row && col >= span.start && col < span.end)
+        .map(|span| span.role)
+}
+
+/// The persistent-mark counterpart to the living-face rule above: a repair
+/// mark must never sit on the eyes or mouth, and at the S5/S6 elder stages
+/// (whose expression widens onto its own island) the whole expression band is
+/// off-limits rather than just the eye/mouth spans.
+pub fn is_protected_glitch_face_cell(
+    stage: Stage,
+    row: usize,
+    col: usize,
+    spans: &[StyledSegment],
+) -> bool {
+    if matches!(
+        span_role_at(spans, row, col),
+        Some(PaletteRoleName::Eye | PaletteRoleName::Mouth)
+    ) {
+        return true;
+    }
+
+    match stage {
+        Stage::S5 | Stage::S6 => row == 1 || ((2..=3).contains(&row) && (3..=7).contains(&col)),
+        _ => false,
+    }
+}
+
+/// Allowlisted cells that are actually safe to mark for this rendered frame:
+/// non-blank, single-width, and clear of the protected face band.
+pub fn safe_glitch_patch_candidates(
+    stage: Stage,
+    lines: &[String],
+    spans: &[StyledSegment],
+) -> Vec<GlitchPatchCell> {
+    glitch_patch_allowlist(stage)
+        .iter()
+        .copied()
+        .filter(|cell| {
+            let Some(line) = lines.get(cell.row) else {
+                return false;
+            };
+            let Some(ch) = line.chars().nth(cell.col) else {
+                return false;
+            };
+            ch != ' '
+                && unicode_width::UnicodeWidthChar::width(ch) == Some(1)
+                && !is_protected_glitch_face_cell(stage, cell.row, cell.col, spans)
+        })
+        .collect()
+}
+
+/// FNV-1a over the pet's seed string, giving each pet its own stable ordering
+/// salt independent of the day/stage/cell inputs mixed in below.
+fn hash_pet_seed(seed: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in seed.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+/// SplitMix64 finalizer: spreads a seed's low bits across the full range so
+/// nearby inputs (e.g. adjacent day_seeds) don't produce nearby orderings.
+fn mix64(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn stage_discriminant(stage: Stage) -> u64 {
+    stage.index() as u64
+}
+
+/// The safe candidates for this pet/stage/day, sorted into a stable,
+/// day-local order. Deterministic per (pet, stage, day_seed): the same day
+/// always reorders the same way, and different days reshuffle the order —
+/// but never the candidate set itself — so `selected_glitch_patch_cells`
+/// below can reveal marks by simply taking a longer prefix as the tier rises,
+/// without ever relocating a mark already shown.
+pub fn ordered_glitch_patch_cells(
+    pet: &GeneratedPet,
+    stage: Stage,
+    day_seed: u64,
+    lines: &[String],
+    spans: &[StyledSegment],
+) -> Vec<GlitchPatchCell> {
+    if pet.species != Species::Glitch {
+        return Vec::new();
+    }
+    let seed_hash = hash_pet_seed(&pet.seed);
+    let mut scored = safe_glitch_patch_candidates(stage, lines, spans)
+        .into_iter()
+        .map(|cell| {
+            let score = mix64(
+                seed_hash
+                    ^ day_seed.rotate_left(17)
+                    ^ stage_discriminant(stage).rotate_left(29)
+                    ^ ((cell.row as u64) << 8)
+                    ^ cell.col as u64,
+            );
+            (score, cell)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by_key(|(score, cell)| (*score, *cell));
+    scored.into_iter().map(|(_, cell)| cell).collect()
+}
+
+/// The cells that should actually carry a persistent mark this tier: a prefix
+/// of the day-local order, bounded by `GlitchPatchTier::max_marks`. A prefix
+/// (not a re-roll) so a Quiet-day mark stays put when the tier rises to
+/// Active/Heavy instead of jumping to a new cell.
+pub fn selected_glitch_patch_cells(
+    pet: &GeneratedPet,
+    stage: Stage,
+    day_seed: u64,
+    tier: GlitchPatchTier,
+    lines: &[String],
+    spans: &[StyledSegment],
+) -> Vec<GlitchPatchCell> {
+    ordered_glitch_patch_cells(pet, stage, day_seed, lines, spans)
+        .into_iter()
+        .take(tier.max_marks())
+        .collect()
+}
+
 /// Glitch corruption: a bounded, deterministic, loud data-glitch effect.
 ///
 /// On a periodic gate (calm — not every frame) it corrupts up to
@@ -1634,5 +1826,112 @@ mod tests {
         assert_eq!(frame.burst_level, GlitchBurstLevel::Strong);
         assert!(frame.calm_mode);
         assert!(!frame.feed_reaction);
+    }
+
+    fn raw_glitch_art_for_test(
+        seed: &str,
+        stage: Stage,
+    ) -> (GeneratedPet, Vec<String>, Vec<StyledSegment>) {
+        let pet = generate_pet(seed).with_species(Species::Glitch);
+        let expression = expression_for(&pet, Mood::Content, false, AnimationFrame::default());
+        let raw = stage_template_lines(Species::Glitch, stage, u64::from(pet.traits.seed_hue));
+        let rendered = raw
+            .iter()
+            .enumerate()
+            .map(|(line_index, line)| render_template_line(line, line_index, &pet, &expression))
+            .collect::<Vec<_>>();
+        let lines = rendered
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>();
+        let spans = rendered
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .collect::<Vec<_>>();
+        (pet, lines, spans)
+    }
+
+    #[test]
+    fn glitch_safe_patch_candidates_exclude_face_and_outline() {
+        let (_pet, lines, spans) = raw_glitch_art_for_test("glitch-safe-candidates", Stage::S4);
+        let candidates = safe_glitch_patch_candidates(Stage::S4, &lines, &spans);
+
+        assert!(candidates.contains(&GlitchPatchCell { row: 3, col: 5 }));
+        assert!(
+            !candidates.contains(&GlitchPatchCell { row: 1, col: 5 }),
+            "eye row is protected"
+        );
+        assert!(
+            !candidates.contains(&GlitchPatchCell { row: 2, col: 5 }),
+            "mouth row is protected"
+        );
+        assert!(
+            !candidates.contains(&GlitchPatchCell { row: 0, col: 1 }),
+            "top outline is protected"
+        );
+    }
+
+    #[test]
+    fn glitch_elder_expression_island_is_protected() {
+        let spans = vec![StyledSegment {
+            line: 1,
+            start: 4,
+            end: 7,
+            role: PaletteRoleName::Eye,
+        }];
+
+        assert!(is_protected_glitch_face_cell(Stage::S5, 1, 5, &spans));
+        assert!(is_protected_glitch_face_cell(Stage::S5, 2, 5, &spans));
+        assert!(is_protected_glitch_face_cell(Stage::S6, 3, 7, &spans));
+        assert!(!is_protected_glitch_face_cell(Stage::S6, 4, 5, &spans));
+    }
+
+    #[test]
+    fn ordered_glitch_patch_cells_are_stable_and_day_local() {
+        let (pet, lines, spans) = raw_glitch_art_for_test("glitch-ordered-patches", Stage::S4);
+
+        let first = ordered_glitch_patch_cells(&pet, Stage::S4, 123, &lines, &spans);
+        let second = ordered_glitch_patch_cells(&pet, Stage::S4, 123, &lines, &spans);
+        let next_day = ordered_glitch_patch_cells(&pet, Stage::S4, 124, &lines, &spans);
+
+        assert_eq!(first, second);
+        assert_ne!(first, next_day);
+        assert!(
+            first.len() >= 3,
+            "S4 should have enough safe cells for a heavy day"
+        );
+    }
+
+    #[test]
+    fn tier_selection_reveals_prefix_without_relocating_marks() {
+        let (pet, lines, spans) = raw_glitch_art_for_test("glitch-tier-prefix", Stage::S4);
+
+        let quiet = selected_glitch_patch_cells(
+            &pet,
+            Stage::S4,
+            555,
+            GlitchPatchTier::Quiet,
+            &lines,
+            &spans,
+        );
+        let active = selected_glitch_patch_cells(
+            &pet,
+            Stage::S4,
+            555,
+            GlitchPatchTier::Active,
+            &lines,
+            &spans,
+        );
+        let heavy = selected_glitch_patch_cells(
+            &pet,
+            Stage::S4,
+            555,
+            GlitchPatchTier::Heavy,
+            &lines,
+            &spans,
+        );
+
+        assert_eq!(&active[..quiet.len()], quiet.as_slice());
+        assert_eq!(&heavy[..active.len()], active.as_slice());
     }
 }
