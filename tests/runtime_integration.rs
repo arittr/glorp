@@ -39,8 +39,8 @@ fn provider_delta_updates_pet_state_and_records_evolution_once() {
     apply_usage_poll(&mut state, &mut usage_store, &poll, now).unwrap();
     apply_usage_poll(&mut state, &mut usage_store, &poll2, now).unwrap();
 
-    // Two polls of one calibrated active day each reach s3, with the second
-    // poll staying in the post-day diminishing-return range.
+    // Two polls of one calibrated active day each reach S3, and each window
+    // applies linearly even though the cumulative total is already past S3.
     // Smearing still writes multiple ledger rows, but XP is based on the
     // aggregate poll total so the bucket split cannot accelerate evolution.
     assert_eq!(state.lifetime_effective_tokens, 200_000.0);
