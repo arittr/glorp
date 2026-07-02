@@ -161,12 +161,36 @@ fn round_inputs(ctx: &PreviewRenderContext) -> BTreeMap<String, Value> {
     ])
 }
 
+/// Manifest inputs for the Glitch S6 patched round fixture, derived from the
+/// same pet identity, stage, and day-seed the fixture renders with (not the
+/// built view-model), so the contract is truthful. Mirrors
+/// `watch::glitch_persistence_extra_inputs`.
 fn round_inputs_for_frame(
     frame: &PreviewFrame,
     ctx: &PreviewRenderContext,
 ) -> BTreeMap<String, Value> {
     let mut inputs = round_inputs(ctx);
     if frame.id == "round-glitch-patched-s6" {
+        let pet = crate::pet::generation::generate_pet("glorp-preview-glitch-persistence")
+            .with_species(crate::pet::generation::Species::Glitch);
+        let (raw_lines, raw_spans) =
+            crate::dev_preview::pets::raw_glitch_render_for_patch_selection(
+                &pet,
+                crate::game::evolution::Stage::S6,
+            );
+        let selected_patch_cells = crate::pet::render::selected_glitch_patch_cells(
+            &pet,
+            crate::game::evolution::Stage::S6,
+            42,
+            crate::pet::render::GlitchPatchTier::Heavy,
+            &raw_lines,
+            &raw_spans,
+        );
+        let selected_patch_cells_json = selected_patch_cells
+            .iter()
+            .map(|cell| json!({"row": cell.row, "col": cell.col}))
+            .collect::<Vec<_>>();
+
         inputs.extend([
             ("species".to_string(), json!("glitch")),
             ("stage".to_string(), json!("s6")),
@@ -175,12 +199,13 @@ fn round_inputs_for_frame(
             ("burst_level".to_string(), json!("none")),
             ("calm_mode".to_string(), json!(true)),
             ("feed_reaction".to_string(), json!(false)),
-            ("expected_patch_count".to_string(), json!(3)),
+            (
+                "expected_patch_count".to_string(),
+                json!(selected_patch_cells.len()),
+            ),
             (
                 "selected_patch_cells".to_string(),
-                json!([
-                    {"row": 4, "col": 5}
-                ]),
+                json!(selected_patch_cells_json),
             ),
             (
                 "protected_face_cells".to_string(),
