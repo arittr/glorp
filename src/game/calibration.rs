@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime};
 
-const DEFAULT_DAILY_EFFECTIVE_TOKENS: f64 = 100_000.0;
-const MIN_ACTIVE_DAYS_FOR_MEDIAN: usize = 5;
-const RECENT_ACTIVE_DAY_LIMIT: usize = 30;
+pub const DEFAULT_DAILY_EFFECTIVE_TOKENS: f64 = 100_000.0;
+pub const RECENT_ACTIVE_DAY_LIMIT: usize = 30;
+pub const BASELINE_REFRESH_MIN_MULTIPLIER: f64 = 0.5;
+pub const BASELINE_REFRESH_MAX_MULTIPLIER: f64 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CalibrationBaseline {
@@ -24,7 +25,7 @@ impl CalibrationBaseline {
         for day in history
             .iter()
             .copied()
-            .filter(|day| day.effective_tokens > 0.0)
+            .filter(|day| day.effective_tokens.is_finite() && day.effective_tokens > 0.0)
         {
             *by_day.entry(day.day).or_insert(0.0) += day.effective_tokens;
         }
@@ -33,20 +34,33 @@ impl CalibrationBaseline {
             .map(|(day, effective_tokens)| DailyUsage::new(day, effective_tokens))
             .collect::<Vec<_>>();
 
-        if active_days.len() < MIN_ACTIVE_DAYS_FOR_MEDIAN {
-            return Self::default();
-        }
-
         active_days.sort_by_key(|day| day.day);
         let recent_start = active_days.len().saturating_sub(RECENT_ACTIVE_DAY_LIMIT);
         let mut recent_values = active_days[recent_start..]
             .iter()
             .map(|day| day.effective_tokens)
+            .filter(|value| value.is_finite() && *value > 0.0)
             .collect::<Vec<_>>();
+
+        if recent_values.is_empty() {
+            return Self::default();
+        }
+
         recent_values.sort_by(f64::total_cmp);
 
         Self {
             daily_effective_tokens: median(&recent_values).max(1.0),
+        }
+    }
+
+    pub fn refresh_from_history(self, history: &[DailyUsage]) -> Self {
+        let candidate = Self::from_history(history);
+        let current = self.daily_effective_tokens.max(1.0);
+        Self {
+            daily_effective_tokens: candidate.daily_effective_tokens.clamp(
+                current * BASELINE_REFRESH_MIN_MULTIPLIER,
+                current * BASELINE_REFRESH_MAX_MULTIPLIER,
+            ),
         }
     }
 }

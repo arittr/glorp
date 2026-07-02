@@ -119,10 +119,10 @@ fn historical_usage_calibrates_but_does_not_grant_initial_xp() {
 
 #[test]
 fn calibration_groups_multiple_rows_on_the_same_active_day_before_median() {
-    // Without grouping, this is 5 records (>= MIN_ACTIVE_DAYS_FOR_MEDIAN)
-    // sorted as [50k, 50k, 200k, 200k, 200k] with median 200_000.
-    // With grouping, it is 4 distinct active days (< MIN_ACTIVE_DAYS_FOR_MEDIAN)
-    // and the baseline falls back to DEFAULT_DAILY_EFFECTIVE_TOKENS (100_000).
+    // Without grouping, this is 5 records sorted as
+    // [50k, 50k, 200k, 200k, 200k] with median 200_000.
+    // With grouping, it is 4 distinct active days and sparse history now uses
+    // the observed median across those grouped daily totals.
     let history = vec![
         DailyUsage::new(date!(2026 - 05 - 01), 50_000.0),
         DailyUsage::new(date!(2026 - 05 - 01), 50_000.0),
@@ -132,7 +132,78 @@ fn calibration_groups_multiple_rows_on_the_same_active_day_before_median() {
     ];
 
     let baseline = CalibrationBaseline::from_history(&history);
-    assert_eq!(baseline.daily_effective_tokens, 100_000.0);
+    assert_eq!(baseline.daily_effective_tokens, 200_000.0);
+}
+
+#[test]
+fn sparse_active_days_use_observed_median_instead_of_default() {
+    let history = vec![
+        DailyUsage::new(date!(2026 - 05 - 01), 200_000_000.0),
+        DailyUsage::new(date!(2026 - 05 - 02), 300_000_000.0),
+        DailyUsage::new(date!(2026 - 05 - 03), 400_000_000.0),
+    ];
+
+    let baseline = CalibrationBaseline::from_history(&history);
+
+    assert_eq!(baseline.daily_effective_tokens, 300_000_000.0);
+}
+
+#[test]
+fn calibration_filters_bad_totals_groups_by_day_and_uses_latest_thirty_active_days() {
+    let mut history = Vec::new();
+    history.push(DailyUsage::new(date!(2026 - 04 - 01), f64::NAN));
+    history.push(DailyUsage::new(date!(2026 - 04 - 02), f64::INFINITY));
+    history.push(DailyUsage::new(date!(2026 - 04 - 03), 0.0));
+    history.push(DailyUsage::new(date!(2026 - 04 - 04), -10.0));
+    history.push(DailyUsage::new(date!(2026 - 04 - 05), 999_999_999.0));
+    for day in 1..=30 {
+        let date = time::Date::from_calendar_date(2026, time::Month::May, day).unwrap();
+        history.push(DailyUsage::new(date, day as f64 * 1_000.0));
+    }
+    history.push(DailyUsage::new(date!(2026 - 05 - 30), 10_000.0));
+
+    let baseline = CalibrationBaseline::from_history(&history);
+
+    assert_eq!(baseline.daily_effective_tokens, 15_500.0);
+}
+
+#[test]
+fn empty_or_only_bad_history_uses_default_baseline() {
+    assert_eq!(
+        CalibrationBaseline::from_history(&[]).daily_effective_tokens,
+        100_000.0
+    );
+    assert_eq!(
+        CalibrationBaseline::from_history(&[
+            DailyUsage::new(date!(2026 - 05 - 01), 0.0),
+            DailyUsage::new(date!(2026 - 05 - 02), f64::NEG_INFINITY),
+        ])
+        .daily_effective_tokens,
+        100_000.0
+    );
+}
+
+#[test]
+fn baseline_refresh_clamps_existing_pet_changes() {
+    let old = CalibrationBaseline { daily_effective_tokens: 1_000_000.0 };
+
+    let high = old.refresh_from_history(&[
+        DailyUsage::new(date!(2026 - 05 - 01), 10_000_000.0),
+        DailyUsage::new(date!(2026 - 05 - 02), 11_000_000.0),
+        DailyUsage::new(date!(2026 - 05 - 03), 12_000_000.0),
+        DailyUsage::new(date!(2026 - 05 - 04), 13_000_000.0),
+        DailyUsage::new(date!(2026 - 05 - 05), 14_000_000.0),
+    ]);
+    let low = old.refresh_from_history(&[
+        DailyUsage::new(date!(2026 - 05 - 01), 10_000.0),
+        DailyUsage::new(date!(2026 - 05 - 02), 11_000.0),
+        DailyUsage::new(date!(2026 - 05 - 03), 12_000.0),
+        DailyUsage::new(date!(2026 - 05 - 04), 13_000.0),
+        DailyUsage::new(date!(2026 - 05 - 05), 14_000.0),
+    ]);
+
+    assert_eq!(high.daily_effective_tokens, 2_000_000.0);
+    assert_eq!(low.daily_effective_tokens, 500_000.0);
 }
 
 #[test]
