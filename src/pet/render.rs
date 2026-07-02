@@ -222,6 +222,10 @@ const GLITCH_NOISE: &[char] = &[
     '\u{2592}', '\u{2591}', '\u{2593}', '\u{2580}', '\u{2584}', '\u{258c}', '\u{2590}',
 ];
 
+/// Repair-mark glyphs: quiet, soldered-looking marks (not the loud noise
+/// blocks used by active corruption).
+const GLITCH_REPAIR_GLYPHS: &[char] = &['+', '=', ':', '.'];
+
 /// Corruption fires on a periodic gate so it reads as a calm, intentional
 /// data-glitch rather than a constant flicker.
 const CORRUPTION_GATE_TICKS: u64 = 13;
@@ -252,9 +256,17 @@ pub fn render_pet(
         .flat_map(|line| line.spans)
         .collect::<Vec<_>>();
 
-    // Glitch corruption: rare per-tick body cell swap.
+    // Glitch corruption: persistent repair marks, then a rare per-tick body
+    // cell swap (suppressed in calm mode).
     if pet.species == Species::Glitch {
-        apply_glitch_corruption(&mut lines, &mut spans, frame.tick);
+        if let Some(glitch) = frame.glitch_corruption {
+            apply_glitch_repair_marks(pet, stage, &mut lines, &mut spans, glitch);
+            if !glitch.calm_mode {
+                apply_glitch_corruption(&mut lines, &mut spans, frame.tick);
+            }
+        } else {
+            apply_glitch_corruption(&mut lines, &mut spans, frame.tick);
+        }
     }
 
     // Wrap pet art in a 13x10 frame and overlay particles.
@@ -831,6 +843,46 @@ pub fn selected_glitch_patch_cells(
         .collect()
 }
 
+/// Deterministic repair glyph for a patch cell: stable per (day, cell) so a
+/// mark doesn't jitter glyphs while it's shown, but still varies across cells
+/// and reshuffles across days like the cell ordering itself.
+fn repair_glyph_for(cell: GlitchPatchCell, day_seed: u64) -> char {
+    let index = mix64(day_seed ^ ((cell.row as u64) << 8) ^ cell.col as u64) as usize
+        % GLITCH_REPAIR_GLYPHS.len();
+    GLITCH_REPAIR_GLYPHS[index]
+}
+
+/// The first (most prominent) repair mark reads as a soft Accent highlight;
+/// the rest blend in as Pattern so a Heavy day's three marks don't all
+/// compete for attention.
+fn repair_role_for(index: usize) -> PaletteRoleName {
+    if index == 0 {
+        PaletteRoleName::Accent
+    } else {
+        PaletteRoleName::Pattern
+    }
+}
+
+/// Persistent glitch repair marks: this day's selected patch cells
+/// (Task 2's `selected_glitch_patch_cells`) get a stable repair glyph and are
+/// retagged Pattern/Accent — never Corruption — so a healed cell reads as a
+/// quiet scar instead of active glitching.
+fn apply_glitch_repair_marks(
+    pet: &GeneratedPet,
+    stage: Stage,
+    lines: &mut [String],
+    spans: &mut Vec<StyledSegment>,
+    frame: GlitchCorruptionFrame,
+) {
+    let cells =
+        selected_glitch_patch_cells(pet, stage, frame.day_seed, frame.patch_tier, lines, spans);
+    for (index, cell) in cells.into_iter().enumerate() {
+        let glyph = repair_glyph_for(cell, frame.day_seed);
+        replace_char_in_line(&mut lines[cell.row], cell.col, glyph);
+        retag_cell_as_role(spans, cell.row, cell.col, repair_role_for(index));
+    }
+}
+
 /// Glitch corruption: a bounded, deterministic, loud data-glitch effect.
 ///
 /// On a periodic gate (calm — not every frame) it corrupts up to
@@ -858,11 +910,18 @@ fn apply_glitch_corruption(lines: &mut [String], spans: &mut Vec<StyledSegment>,
     }
 }
 
-/// Re-tag the single cell (row, col) as the Corruption role. If an existing
-/// span covers the cell, it is split around the cell so the surrounding cells
-/// keep their original role and the cell itself becomes a width-1 Corruption
-/// span. If no span covers the cell, a standalone Corruption span is added.
-fn retag_cell_as_corruption(spans: &mut Vec<StyledSegment>, row: usize, col: usize) {
+/// Re-tag the single cell (row, col) with `role`. If an existing span covers
+/// the cell, it is split around the cell so the surrounding cells keep their
+/// original role and the cell itself becomes a width-1 `role` span. If no
+/// span covers the cell, a standalone `role` span is added. Spans are
+/// re-sorted by (line, start, end) afterward so repeated retagging (e.g. one
+/// call per repair mark) always leaves the vector in TUI-consumer order.
+fn retag_cell_as_role(
+    spans: &mut Vec<StyledSegment>,
+    row: usize,
+    col: usize,
+    role: PaletteRoleName,
+) {
     let mut split: Vec<StyledSegment> = Vec::new();
     for span in spans.iter_mut() {
         if span.line != row || col < span.start || col >= span.end {
@@ -884,17 +943,24 @@ fn retag_cell_as_corruption(spans: &mut Vec<StyledSegment>, row: usize, col: usi
         }
         break;
     }
-    // The corrupted cell itself. If no span covered the cell (a body-gap cell),
-    // this standalone Corruption span overrides that single cell for the consumer.
+    // The retagged cell itself. If no span covered the cell (a body-gap cell),
+    // this standalone span overrides that single cell for the consumer.
     split.push(StyledSegment {
         line: row,
         start: col,
         end: col + 1,
-        role: PaletteRoleName::Corruption,
+        role,
     });
     // Drop any now-empty left fragments produced by the shrink.
     spans.retain(|s| s.start < s.end);
     spans.extend(split);
+    spans.sort_by_key(|s| (s.line, s.start, s.end));
+}
+
+/// Corruption-specific alias for [`retag_cell_as_role`] — corruption is the
+/// original, still most-called retag site, so it keeps a named entry point.
+fn retag_cell_as_corruption(spans: &mut Vec<StyledSegment>, row: usize, col: usize) {
+    retag_cell_as_role(spans, row, col, PaletteRoleName::Corruption);
 }
 
 fn replace_char_in_line(line: &mut String, char_index: usize, replacement: char) {
@@ -971,6 +1037,12 @@ fn frame_with_particles(
         .into_iter()
         .map(|row| row.into_iter().collect::<String>())
         .collect();
+    // Sort for TUI consumers and collapse exact duplicate spans (e.g. a
+    // contested cell where a species particle glyph-overrides the S6 gutter
+    // sparkle at the same coordinates), so the result stays a well-ordered,
+    // non-overlapping span list.
+    framed_spans.sort_by_key(|span| (span.line, span.start, span.end));
+    framed_spans.dedup();
     (lines, framed_spans)
 }
 
@@ -1933,5 +2005,142 @@ mod tests {
 
         assert_eq!(&active[..quiet.len()], quiet.as_slice());
         assert_eq!(&heavy[..active.len()], active.as_slice());
+    }
+
+    #[test]
+    fn glitch_repair_marks_use_soft_roles_not_corruption() {
+        let pet = generate_pet("glitch-repair-soft").with_species(Species::Glitch);
+        let rendered = render_pet(
+            &pet,
+            Stage::S4,
+            Mood::Content,
+            AnimationFrame {
+                tick: 1,
+                glitch_corruption: Some(GlitchCorruptionFrame {
+                    day_seed: 42,
+                    patch_tier: GlitchPatchTier::Heavy,
+                    burst_level: GlitchBurstLevel::None,
+                    calm_mode: false,
+                    feed_reaction: false,
+                }),
+                ..AnimationFrame::default()
+            },
+        );
+
+        let repair_spans = rendered
+            .spans
+            .iter()
+            .filter(|span| {
+                matches!(
+                    span.role,
+                    PaletteRoleName::Pattern | PaletteRoleName::Accent
+                )
+            })
+            .filter(|span| span.end == span.start + 1)
+            .collect::<Vec<_>>();
+        let text = rendered.lines.join("\n");
+        assert!(
+            repair_spans.len() >= 3,
+            "heavy Glitch day should emit at least three one-cell repair spans"
+        );
+        assert!(
+            text.contains('+') || text.contains('=') || text.contains(':') || text.contains('.'),
+            "heavy Glitch day should show at least one repair glyph"
+        );
+        assert!(
+            rendered
+                .spans
+                .iter()
+                .all(|span| span.role != PaletteRoleName::Corruption),
+            "persistent repair marks must not use the loud Corruption role"
+        );
+    }
+
+    #[test]
+    fn glitch_repair_spans_are_sorted_and_non_overlapping() {
+        let pet = generate_pet("glitch-repair-spans").with_species(Species::Glitch);
+        let rendered = render_pet(
+            &pet,
+            Stage::S6,
+            Mood::Content,
+            AnimationFrame {
+                tick: 1,
+                glitch_corruption: Some(GlitchCorruptionFrame {
+                    day_seed: 777,
+                    patch_tier: GlitchPatchTier::Heavy,
+                    burst_level: GlitchBurstLevel::None,
+                    calm_mode: true,
+                    feed_reaction: false,
+                }),
+                ..AnimationFrame::default()
+            },
+        );
+
+        let mut spans = rendered.spans.clone();
+        let sorted = {
+            let mut clone = spans.clone();
+            clone.sort_by_key(|span| (span.line, span.start, span.end));
+            clone
+        };
+        assert_eq!(
+            spans, sorted,
+            "rendered spans should be sorted for TUI consumers"
+        );
+
+        spans.sort_by_key(|span| (span.line, span.start));
+        for pair in spans.windows(2) {
+            let left = &pair[0];
+            let right = &pair[1];
+            if left.line == right.line {
+                assert!(
+                    left.end <= right.start,
+                    "overlapping spans on line {}: {:?} then {:?}",
+                    left.line,
+                    left,
+                    right
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn glitch_repair_marks_do_not_touch_elder_expression_island() {
+        let pet = generate_pet("glitch-elder-repair").with_species(Species::Glitch);
+        let rendered = render_pet(
+            &pet,
+            Stage::S6,
+            Mood::Content,
+            AnimationFrame {
+                tick: 1,
+                glitch_corruption: Some(GlitchCorruptionFrame {
+                    day_seed: 42,
+                    patch_tier: GlitchPatchTier::Heavy,
+                    burst_level: GlitchBurstLevel::None,
+                    calm_mode: true,
+                    feed_reaction: false,
+                }),
+                ..AnimationFrame::default()
+            },
+        );
+
+        for span in rendered
+            .spans
+            .iter()
+            .filter(|span| {
+                matches!(
+                    span.role,
+                    PaletteRoleName::Pattern | PaletteRoleName::Accent
+                )
+            })
+            .filter(|span| span.end == span.start + 1)
+        {
+            let raw_row = span.line.saturating_sub(1);
+            let raw_col = span.start.saturating_sub(1);
+            assert!(
+                !((2..=3).contains(&raw_row) && (3..=7).contains(&raw_col)),
+                "repair span touched protected elder expression island: {:?}",
+                span
+            );
+        }
     }
 }
