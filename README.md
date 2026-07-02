@@ -87,7 +87,7 @@ saved cursor, and turns positive deltas into pet food.
 Each delta is smeared across 6–12 ten-minute buckets so a heavy hour of coding
 doesn't crush a single tick.
 
-Stages are gated by **calibrated XP**: roughly "one active day at your typical pace." A 500M-token/day user and a 50k-token/day user evolve at the same wall-clock cadence.
+Stages grow from calibrated Tokenmaxxing `total_tokens`: Glorp compares new work against your recent active-day baseline. Early stages are active-hour equivalents, not real-time locks, and historical usage calibrates a newborn pet without feeding it.
 
 ```
 S0 fluff   →  S1 fuzzling  →  S2 kit     →  S3 pup       →  S4 fuzz   →  S5 archfuzz  →  S6 mythic-fuzz
