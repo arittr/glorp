@@ -82,7 +82,10 @@ pub fn habitat_props_for(
 pub fn habitat_prop_placements_for(
     habitat: &HabitatView,
     scene: &PetSceneLayout,
-    silhouette_halo: &[Rect],
+    // Retained for call-site stability. Props are now placed independently of
+    // the live pet (chasing it made them jump); the silhouette is no longer a
+    // placement input, only a paint-time z-order concern handled by the caller.
+    _silhouette_halo: &[Rect],
     species: Species,
     seed: &str,
     ctx: &RenderContext,
@@ -95,7 +98,7 @@ pub fn habitat_prop_placements_for(
         let layer = prop_pet_layer(id);
         let bloomed = prop_bloomed(habitat, id, now);
         let sprite = trophy_sprite(id, species, bloomed, now);
-        let exclusions = exclusions_for_layer(layer, scene, &occupied, silhouette_halo);
+        let exclusions = prop_exclusions(scene, &occupied);
         for anchor in trophy_anchor_candidates(id, scene.habitat, sprite) {
             let mut rendered = render_sprite(
                 anchor,
@@ -125,15 +128,7 @@ pub fn habitat_prop_placements_for(
     }
 
     if matches!(ctx.color_capability, ColorCapability::Truecolor) {
-        let accent_cells = stable_accent_cells_by_id(
-            habitat,
-            scene,
-            &occupied,
-            silhouette_halo,
-            species,
-            seed,
-            now,
-        );
+        let accent_cells = stable_accent_cells_by_id(habitat, scene, &occupied, species, seed, now);
         for id in visible_accent_ids(habitat, now) {
             if let Some(cell) = accent_cells.get(id) {
                 let layer = prop_pet_layer(id);
@@ -214,28 +209,18 @@ fn prop_bloomed(habitat: &HabitatView, id: &str, now: time::OffsetDateTime) -> b
             .is_some_and(|p| (now - p.earned_at).whole_days() >= PLANT_BLOOM_DAYS)
 }
 
-/// Drops the pet's bounding rect from the inherited `occupied` set and adds
-/// the silhouette halo for layers that should avoid the pet. The 13×10
-/// bounding rect is the rough box used for layout, but for placement we want
-/// the precise per-cell silhouette + halo — replacing it gives Background
-/// props access to the diamond's negative space while still respecting the
-/// actual pet outline. Behind / Foreground props drop the rect and skip the
-/// halo, so they can overlap with the pet's silhouette directly.
-fn exclusions_for_layer(
-    layer: HabitatPetLayer,
-    scene: &PetSceneLayout,
-    occupied: &[Rect],
-    silhouette_halo: &[Rect],
-) -> Vec<Rect> {
-    let mut without_pet_rect: Vec<Rect> = occupied
+/// Placement exclusions for a prop: the other props already placed, minus the
+/// pet's own rect. Props are deliberately placed *independently of the live
+/// pet* — chasing the wandering/drifting pet made them jump every time it
+/// passed over their spot. The pet renders on top of Background/Behind props
+/// (it simply occludes them) or under Foreground props, so overlap is a
+/// z-order concern at paint time, never a placement one.
+fn prop_exclusions(scene: &PetSceneLayout, occupied: &[Rect]) -> Vec<Rect> {
+    occupied
         .iter()
         .copied()
         .filter(|rect| *rect != scene.pet_art)
-        .collect();
-    if matches!(layer, HabitatPetLayer::Background) {
-        without_pet_rect.extend_from_slice(silhouette_halo);
-    }
-    without_pet_rect
+        .collect()
 }
 
 pub(crate) fn visible_trophy_ids(habitat: &HabitatView) -> Vec<&str> {
@@ -796,12 +781,11 @@ fn stable_accent_cells_by_id<'a>(
     habitat: &'a HabitatView,
     scene: &PetSceneLayout,
     occupied: &[Rect],
-    silhouette_halo: &[Rect],
     species: Species,
     seed: &str,
     now: time::OffsetDateTime,
 ) -> HashMap<&'a str, HabitatPropCell> {
-    let anchors = stable_accent_anchors_by_id(habitat, scene, occupied, silhouette_halo, seed);
+    let anchors = stable_accent_anchors_by_id(habitat, scene, occupied, seed);
     let mut rendered = occupied.to_vec();
     let mut cells = HashMap::new();
 
@@ -810,8 +794,7 @@ fn stable_accent_cells_by_id<'a>(
             continue;
         };
         let layer = prop_pet_layer(id);
-        let layer_excl = exclusions_for_layer(layer, scene, &rendered, silhouette_halo);
-        let mut blocked = layer_excl;
+        let mut blocked = prop_exclusions(scene, &rendered);
         blocked.extend(anchor_exclusions_except(&anchors, id));
         if let Some(cell) =
             accent_cell_from_anchor(id, anchor, scene.habitat, &blocked, layer, species, now)
@@ -841,16 +824,14 @@ fn stable_accent_anchors_by_id<'a>(
     habitat: &'a HabitatView,
     scene: &PetSceneLayout,
     occupied_base: &[Rect],
-    silhouette_halo: &[Rect],
     seed: &str,
 ) -> HashMap<&'a str, Position> {
     let mut occupied = occupied_base.to_vec();
     let mut anchors = HashMap::new();
 
     for id in sorted_accent_ids(habitat) {
-        let layer = prop_pet_layer(id);
-        let layer_excl = exclusions_for_layer(layer, scene, &occupied, silhouette_halo);
-        if let Some(anchor) = accent_anchor_for(id, scene.habitat, &layer_excl, seed) {
+        let excl = prop_exclusions(scene, &occupied);
+        if let Some(anchor) = accent_anchor_for(id, scene.habitat, &excl, seed) {
             occupied.push(Rect::new(anchor.x, anchor.y, 1, 1));
             anchors.insert(id, anchor);
         }
@@ -890,25 +871,57 @@ fn accent_anchor_for(id: &str, habitat: Rect, exclusions: &[Rect], seed: &str) -
     let row_min = habitat.y.saturating_add(1);
     let row_max = habitat.y.saturating_add(habitat.height.saturating_sub(2));
     let col_span = col_max.saturating_sub(col_min).saturating_add(1);
-    let row_span = row_max.saturating_sub(row_min).saturating_add(1);
     let base = prop_hash(seed, id);
 
-    for attempt in 0..ACCENT_CANDIDATES {
-        let phase = base.wrapping_add(
-            attempt
-                .wrapping_mul(37)
-                .wrapping_add(attempt.wrapping_mul(attempt).wrapping_mul(11)),
-        );
-        let col = col_min + (phase % col_span);
-        let row_phase = phase / 3 + attempt.wrapping_mul(23);
-        let row = row_min + (row_phase % row_span);
-        let pos = Position::new(col, row);
-        if habitat.contains(pos) && !exclusions.iter().any(|rect| rect.contains(pos)) {
-            return Some(pos);
+    // Keep the accent inside its catalog zone's vertical band (Ceiling near the
+    // top, Air upper, Wall middle, Floor bottom). If the zone band is full, fall
+    // back to the whole interior so crowded/tiny tanks still place the accent.
+    let zone = catalog_prop_by_str(id)
+        .map(|prop| prop.zone)
+        .unwrap_or(HabitatPropZone::AirMid);
+    let (zone_row_min, zone_row_max) = accent_zone_row_band(zone, row_min, row_max);
+
+    for (band_min, band_max) in [(zone_row_min, zone_row_max), (row_min, row_max)] {
+        let row_span = band_max.saturating_sub(band_min).saturating_add(1);
+        for attempt in 0..ACCENT_CANDIDATES {
+            let phase = base.wrapping_add(
+                attempt
+                    .wrapping_mul(37)
+                    .wrapping_add(attempt.wrapping_mul(attempt).wrapping_mul(11)),
+            );
+            let col = col_min + (phase % col_span);
+            let row_phase = phase / 3 + attempt.wrapping_mul(23);
+            let row = band_min + (row_phase % row_span);
+            let pos = Position::new(col, row);
+            if habitat.contains(pos) && !exclusions.iter().any(|rect| rect.contains(pos)) {
+                return Some(pos);
+            }
         }
     }
 
     None
+}
+
+/// Vertical band an accent's catalog zone confines it to, within the habitat's
+/// interior rows `[row_min, row_max]`. Columns stay full-width (the collision
+/// retry needs the horizontal room); the zone drives vertical placement so e.g.
+/// the Ceiling sun sits near the top rather than a seed-random height.
+fn accent_zone_row_band(zone: HabitatPropZone, row_min: u16, row_max: u16) -> (u16, u16) {
+    let span = row_max.saturating_sub(row_min);
+    let quarter = span / 4;
+    let third = span / 3;
+    match zone {
+        HabitatPropZone::Ceiling => (row_min, row_min.saturating_add(quarter)),
+        HabitatPropZone::AirLeft | HabitatPropZone::AirMid | HabitatPropZone::AirRight => {
+            (row_min, row_min.saturating_add(third))
+        }
+        HabitatPropZone::WallLeft | HabitatPropZone::WallRight => {
+            (row_min.saturating_add(third), row_max.saturating_sub(third))
+        }
+        HabitatPropZone::FloorLeft | HabitatPropZone::FloorMid | HabitatPropZone::FloorRight => {
+            (row_max.saturating_sub(third), row_max)
+        }
+    }
 }
 
 fn accent_cell_from_anchor(
@@ -1119,39 +1132,77 @@ mod tests {
         assert_eq!(shard_cell.pet_layer, HabitatPetLayer::Background);
     }
 
+    fn spark_pos(scene: &PetSceneLayout, halo: &[Rect]) -> (u16, u16) {
+        let habitat = HabitatView {
+            earned_props: vec![earned(TOKEN_SPARK_500K, HabitatPropKind::Accent, 30, 0)],
+        };
+        habitat_prop_placements_for(
+            &habitat,
+            scene,
+            halo,
+            Species::Fuzz,
+            "fixture-seed",
+            &ctx(datetime!(2026-05-11 12:00:10 UTC)),
+        )
+        .into_iter()
+        .find(|p| p.prop_id.as_str() == TOKEN_SPARK_500K)
+        .map(|p| (p.bounds.x, p.bounds.y))
+        .expect("spark placed")
+    }
+
     #[test]
-    fn background_props_avoid_silhouette_halo_rects() {
-        // A Background prop (wall-mounted shard) must avoid cells in the
-        // silhouette halo. Cover most of the habitat with a per-cell
-        // silhouette except a small free strip on the right; the shard must
-        // land in the free strip.
-        let habitat_view = HabitatView {
-            earned_props: vec![earned(TOKEN_SHARD_1M, HabitatPropKind::Accent, 40, 0)],
+    fn background_props_hold_position_when_pet_overlaps() {
+        // Background props must NOT re-place to dodge the wandering pet — that is
+        // what made them jump around. They hold a fixed spot and the pet passes
+        // in front of them.
+        let mut scene = scene();
+        scene.exclusions.clear();
+
+        let at_rest = spark_pos(&scene, &[]);
+        let halo = vec![Rect::new(
+            at_rest.0.saturating_sub(2),
+            at_rest.1.saturating_sub(2),
+            5,
+            5,
+        )];
+        let overlapped = spark_pos(&scene, &halo);
+        assert_eq!(
+            overlapped, at_rest,
+            "a Background prop must hold its spot when the pet overlaps it, not jump"
+        );
+    }
+
+    #[test]
+    fn sun_anchors_toward_the_top() {
+        // The sun (Ceiling accent) must place toward the top of the tank for ANY
+        // seed, not at a seed-random height across the whole habitat. Sweep seeds
+        // so a single lucky-high seed can't mask a regression.
+        let habitat = HabitatView {
+            earned_props: vec![earned(TOKEN_LANTERN_10M, HabitatPropKind::Accent, 60, 0)],
         };
         let mut scene = scene();
         scene.exclusions.clear();
-        let blocked: Vec<Rect> = (0..scene.habitat.width.saturating_sub(4))
-            .flat_map(|dx| (0..scene.habitat.height).map(move |dy| Rect::new(dx, dy, 1, 1)))
-            .collect();
+        let top_band = scene.habitat.y + scene.habitat.height / 4;
 
-        let cells = habitat_props_for(
-            &habitat_view,
-            &scene,
-            &blocked,
-            Species::Fuzz,
-            "fixture-seed",
-            &ctx(datetime!(2026-05-11 12:00 UTC)),
-        );
-
-        let shard = cells
-            .iter()
-            .find(|cell| cell.glyph == '◆')
-            .expect("shard should still render in the free strip");
-        assert!(
-            shard.col >= scene.habitat.width - 4,
-            "Background shard must avoid blocked silhouette region; landed at col {}",
-            shard.col
-        );
+        for n in 0..12 {
+            let seed = format!("sun-seed-{n}");
+            let sun = habitat_prop_placements_for(
+                &habitat,
+                &scene,
+                &[],
+                Species::Glitch,
+                &seed,
+                &ctx(datetime!(2026-05-11 12:00:10 UTC)),
+            )
+            .into_iter()
+            .find(|p| p.prop_id.as_str() == TOKEN_LANTERN_10M)
+            .expect("sun placed");
+            assert!(
+                sun.bounds.y <= top_band,
+                "sun should sit toward the top (row <= {top_band}) for seed {seed}, got row {}",
+                sun.bounds.y
+            );
+        }
     }
 
     #[test]
