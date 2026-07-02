@@ -316,6 +316,16 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Use the cells artifact as Task 14 proof fixtures.".to_string(),
             ],
         ),
+        id if id.starts_with("watch-glitch-") => (
+            PreviewScenarioKind::Watch,
+            "Review Glitch persistent repair marks and transient glitch states in the full watch layout.",
+            frame.extra_inputs.clone(),
+            vec![
+                "Confirm patch marks remain legible in the pet scene.".to_string(),
+                "Check calm mode suppresses loud corruption while keeping calm repair marks.".to_string(),
+                "Verify no provider or source identity appears in Glitch behavior inputs.".to_string(),
+            ],
+        ),
         "pet-species-stage" => (
             PreviewScenarioKind::PetMatrix,
             "Review every Slice 1 pet species across all seven growth stages.",
@@ -403,6 +413,16 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
             vec![
                 "Confirm ecstatic Glitch never reads as sleepy when cache-mist work is active.".to_string(),
                 "Compare S4 and S6 silhouettes for visible elder progression.".to_string(),
+            ],
+        ),
+        "pet-glitch-persistence-states" => (
+            PreviewScenarioKind::PetMatrix,
+            "Review deterministic Glitch day-local repair memory across quiet, active, burst, same-day restart, and next-dawn reset states.",
+            frame.extra_inputs.clone(),
+            vec![
+                "Confirm repaired marks read as cute self-repair rather than injury.".to_string(),
+                "Check same-day restart preserves marks and next-dawn reset moves them.".to_string(),
+                "Verify S5/S6 keep a living elder expression.".to_string(),
             ],
         ),
         "pet-texture-variants" => (
@@ -1844,6 +1864,10 @@ mod tests {
                 "watch-daycontext-work-cache-mist",
                 "watch-daycontext-work-mixed",
                 "watch-daycontext-work-clear",
+                "watch-glitch-patched-quiet",
+                "watch-glitch-patched-active",
+                "watch-glitch-burst",
+                "watch-glitch-calm-hot",
                 "room-starter-day-clear",
                 "room-botanical-cache-evening",
                 "room-technical-output-active",
@@ -1873,13 +1897,15 @@ mod tests {
                 "pet-texture-variants",
                 "pet-mood-set",
                 "pet-glitch-live-states",
+                "pet-glitch-persistence-states",
                 "round-normal",
                 "round-active-pulse",
                 "round-asleep-night",
                 "round-helper-trouble",
                 "round-flat-color",
                 "round-glitch-dialect",
-                "round-crystal-dialect"
+                "round-crystal-dialect",
+                "round-glitch-patched-s6"
             ]
         );
     }
