@@ -121,25 +121,7 @@ pub(crate) fn build_watch_view_model_at(
     let stage = state.stage;
     let mood = mood_from_state(state);
     let generated = generate_pet(&state.pet.seed).with_species(species);
-    let pet_performance = crate::tui::room::pet_performance_from_day_context(&day_context);
     let life_profile = crate::tui::life::PetLifeProfile::default();
-    let rendered = render_pet(
-        &generated,
-        stage,
-        mood,
-        AnimationFrame {
-            tick: now.unix_timestamp().max(0) as u64,
-            hold_eyes_closed: day_context.asleep,
-            blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(day_context.tiredness),
-            soft_eyes: matches!(
-                pet_performance,
-                crate::tui::room::PetPerformance::TiredAwake
-                    | crate::tui::room::PetPerformance::HeavyDayCozy
-            ),
-            work_accent: work_accent_for_profile(&life_profile),
-            ..AnimationFrame::default()
-        },
-    );
 
     // Keep local time for presentation and pet behavior; visible token totals
     // below use the Tokenmaxxing Los Angeles accounting day.
@@ -220,8 +202,8 @@ pub(crate) fn build_watch_view_model_at(
     let pet_palette = crate::pet::palette::resolve_pet_palette(species, &generated.traits);
 
     let mut vm = WatchViewModel {
-        pet_art: rendered.lines,
-        pet_spans: rendered.spans,
+        pet_art: Vec::new(),
+        pet_spans: Vec::new(),
         pet_render: PetRenderModel {
             seed: state.pet.seed.clone(),
             generated_species: state.pet.generated_species,
@@ -514,16 +496,15 @@ fn mood_from_state(state: &PetState) -> Mood {
 
 /// Glitch-species persistent corruption inputs for the current view model, or
 /// `None` for non-Glitch species. `feed_reaction` mirrors the same token-pop
-/// recency check used for the face's `AnimationFrame.feed_reaction`.
+/// recency check used for the face's `AnimationFrame.feed_reaction`; callers
+/// compute it once and pass it in rather than recomputing here.
 fn glitch_corruption_frame_for_view_model(
     vm: &WatchViewModel,
-    now: time::OffsetDateTime,
+    feed_reaction: bool,
 ) -> Option<crate::pet::render::GlitchCorruptionFrame> {
     if vm.pet_render.generated_species != Species::Glitch {
         return None;
     }
-    let feed_reaction =
-        crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now).is_some();
     Some(crate::pet::render::glitch_corruption_frame_for_inputs(
         vm.day_context.date_seed,
         vm.day_context.today_ratio,
@@ -539,13 +520,16 @@ pub fn rerender_pet_for_view_model(
     hold_eyes_closed: bool,
     now: time::OffsetDateTime,
 ) -> Result<()> {
-    // Eye color rides mood at the same cadence as the eye glyph (expression_for),
-    // overwriting only the eye role. The ~10s worker palette rebuild stays
-    // mood-blind; this per-tick site owns mood -> eye color.
+    // This is the single canonical pet render for the view model: it applies
+    // mood -> eye color (riding the same cadence as the eye glyph in
+    // expression_for, overwriting only the eye role) and glitch corruption on
+    // top of the base species/stage art.
     crate::pet::palette::apply_mood_eye_color(&mut vm.pet_palette, vm.pet_render.mood);
     let species = vm.pet_render.generated_species;
     let generated = generate_pet(&vm.pet_render.seed).with_species(species);
     let pet_performance = crate::tui::room::pet_performance_from_day_context(&vm.day_context);
+    let feed_reaction =
+        crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now).is_some();
     let rendered = render_pet(
         &generated,
         vm.pet_render.stage,
@@ -562,9 +546,8 @@ pub fn rerender_pet_for_view_model(
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
             work_accent: work_accent_for_profile(&vm.life_profile),
-            feed_reaction: crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now)
-                .is_some(),
-            glitch_corruption: glitch_corruption_frame_for_view_model(vm, now),
+            feed_reaction,
+            glitch_corruption: glitch_corruption_frame_for_view_model(vm, feed_reaction),
             ..AnimationFrame::default()
         },
     );
