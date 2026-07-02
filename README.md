@@ -91,10 +91,10 @@ Stages grow from calibrated Tokenmaxxing `total_tokens`: Glorp compares new work
 
 ```
 S0 fluff   →  S1 fuzzling  →  S2 kit     →  S3 pup       →  S4 fuzz   →  S5 archfuzz  →  S6 mythic-fuzz
- ~1 hour     ~6 hours        ~1 day         ~4 days          ~2 weeks      ~2 months       (sage)
+ B/8          6B/8            B               4B               14B           60B             (sage)
 ```
 
-(That's the `fuzz` species arc — each of the six species — fuzz, blob, ghost, glitch, crystal, mech — has its own stage names and silhouettes.)
+(B is your recent active-day baseline; the `fuzz` species arc — fuzz, blob, ghost, glitch, crystal, mech — keeps its own stage names and silhouettes.)
 
 ## Configuration
 
