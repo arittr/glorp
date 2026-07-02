@@ -250,6 +250,18 @@ fn mirror_char(c: char) -> char {
         '}' => '{',
         '[' => ']',
         ']' => '[',
+        '\u{259B}' => '\u{259C}', // ▛ <-> ▜
+        '\u{259C}' => '\u{259B}',
+        '\u{2599}' => '\u{259F}', // ▙ <-> ▟
+        '\u{259F}' => '\u{2599}',
+        '\u{258C}' => '\u{2590}', // ▌ <-> ▐
+        '\u{2590}' => '\u{258C}',
+        '\u{2596}' => '\u{2597}', // ▖ <-> ▗
+        '\u{2597}' => '\u{2596}',
+        '\u{2598}' => '\u{259D}', // ▘ <-> ▝
+        '\u{259D}' => '\u{2598}',
+        '\u{259A}' => '\u{259E}', // ▚ <-> ▞
+        '\u{259E}' => '\u{259A}',
         _ => c,
     }
 }
@@ -476,6 +488,16 @@ mod tests {
                 Style::default().fg(Color::Rgb(0x10, 0x20, 0x30)),
             )]),
         ]
+    }
+
+    #[test]
+    fn mirror_line_swaps_block_quadrant_pairs() {
+        // Block-built silhouettes must flip glyph handedness when the pet turns,
+        // not merely reverse position. Reverse + swap: "▛▙▌▖▘▚" -> "▞▝▗▐▟▜".
+        assert_eq!(mirror_line("▛▙▌▖▘▚"), "▞▝▗▐▟▜");
+        // Each pair is an involution, so mirroring twice is identity.
+        let s = "▟▒▒▙▐░▌";
+        assert_eq!(mirror_line(&mirror_line(s)), s);
     }
 
     #[test]

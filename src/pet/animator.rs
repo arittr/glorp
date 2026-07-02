@@ -384,7 +384,7 @@ fn species_feed_color(species: Option<Species>) -> Color {
         Some(Species::Fuzz) => Color::Rgb(255, 200, 150), // warm peach
         Some(Species::Blob) => Color::Rgb(140, 220, 160), // mint
         Some(Species::Ghost) => Color::Rgb(190, 170, 240), // pale lavender
-        Some(Species::Glitch) => Color::Rgb(120, 255, 180), // acid green
+        Some(Species::Glitch) => Color::Rgb(255, 140, 215), // hot magenta
         Some(Species::Crystal) => Color::Rgb(170, 220, 255), // ice cyan
         Some(Species::Mech) => Color::Rgb(255, 220, 100), // amber
         None => Color::Yellow,

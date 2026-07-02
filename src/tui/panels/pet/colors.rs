@@ -376,8 +376,9 @@ mod tests {
     fn activity_lift_does_not_invert_body_hue_at_high_chroma() {
         use crate::pet::generation::{Species, VisibleTraits};
         use crate::pet::palette::resolve_pet_palette;
-        // The loudest body (Glitch acid). Lift it hard and confirm green still
-        // dominates (no channel pins to 255 and flips the hue read).
+        // The loudest body (Glitch magenta). Lift it hard and confirm the magenta
+        // hue read survives (red and blue stay over green; no channel pins to 255
+        // and flips the read).
         let palette = resolve_pet_palette(
             Species::Glitch,
             &VisibleTraits {
@@ -394,15 +395,15 @@ mod tests {
         );
         let body_before = palette.body;
         assert!(
-            body_before.g >= body_before.r && body_before.g >= body_before.b,
-            "glitch body should be green-dominant before lift: {body_before:?}"
+            body_before.r >= body_before.g && body_before.b >= body_before.g,
+            "glitch body should read magenta (r,b over g) before lift: {body_before:?}"
         );
         let styles = seed_pet_palette(&semantic_styles(), &palette);
         let lifted = activity_lift_style(styles.pet_body, 2.0, ColorCapability::Truecolor);
         if let Some(ratatui::style::Color::Rgb(r, g, b)) = lifted.fg {
             assert!(
-                g >= r && g >= b,
-                "max activity lift must not flip glitch body off green: ({r},{g},{b})"
+                r >= g && b >= g,
+                "max activity lift must not flip glitch body off magenta: ({r},{g},{b})"
             );
         } else {
             panic!("lifted body should stay Rgb");

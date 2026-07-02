@@ -116,11 +116,12 @@ fn ghost_base(stage: Stage) -> &'static Template {
     }
 }
 
-// Validated Packet Daemon cast: a closed packet-frame silhouette (not open ▌▐
-// walls), living lens eyes (◉ via the {eyes} slot), torn-data base. The mouth is
-// wired to the {mouth} slot at S2-S4 (clean 1-cell mouth per spec Rendering #5);
-// S5/S6 dense elder bodies bake their mouth decoration verbatim (no clean 1-cell
-// mouth slot in the elder data-cube). Validated cell ramp [3,10,19,32,44,62,85].
+// Validated Packet Daemon cast, "digital metamorph": each stage is a distinct
+// digital object, not a scaled packet. The packet-box is the creature's
+// childhood shell — popped lid (S2), towed frame-trailer (S3), askew slabs (S4),
+// glowing chest-dock panel (S5), half-shed carapace (S6). Living lens eyes via
+// {eyes}; {mouth} slot wired at S2-S6 so every stage including the elders keeps
+// a living face. Validated cell ramp [3,8,20,34,48,58,70], strictly increasing.
 fn glitch_base(stage: Stage) -> &'static Template {
     match stage {
         Stage::S0 => &GLITCH_S0,
@@ -185,9 +186,14 @@ pub(crate) fn apply_interior_texture(
 ) -> [String; 8] {
     // Crystal is hand-shaded for a faceted, dimensional look (intentional light/dark
     // facets); the per-seed ▒/▓ swap would scramble that into checkerboard noise, so
-    // crystal renders its template verbatim.
-    let pinned =
-        matches!(stage, Stage::S0 | Stage::S1 | Stage::S2) || matches!(species, Species::Crystal);
+    // crystal renders its template verbatim. Glitch S5/S6 are hand-shaded elders for
+    // the same reason; S3/S4 stay unpinned so their static bodies carry per-pet noise.
+    let pinned = matches!(stage, Stage::S0 | Stage::S1 | Stage::S2)
+        || matches!(species, Species::Crystal)
+        || matches!(
+            (species, stage),
+            (Species::Glitch, Stage::S5) | (Species::Glitch, Stage::S6)
+        );
     let mut out: [String; 8] = Default::default();
     for (row, line) in base.iter().enumerate() {
         if pinned {
@@ -495,62 +501,62 @@ const GLITCH_S0: Template = [
 const GLITCH_S1: Template = [
     "           ",
     "           ",
-    "    ▛▀▜    ",
-    "    ▌◉▐    ",
-    "    ▙▄▟    ",
-    "     ▚     ",
+    "     ▀▜    ",
+    "    ▐◉▌    ",
+    "    ▘ ▝    ",
+    "   ▪       ",
     "           ",
     "           ",
 ];
 const GLITCH_S2: Template = [
     "           ",
-    "   ▛▀▀▀▜   ",
+    "  ▗▄▪▄ ·   ",
     "   ▌{eyes}▐   ",
-    "   ▌ {mouth} ▐   ",
+    "   ▌░{mouth} ▐   ",
     "   ▙▄▄▄▟   ",
-    "    ▚ ▞    ",
+    "    ▘ ▞    ",
     "           ",
     "           ",
 ];
 const GLITCH_S3: Template = [
+    "  ▪·       ",
+    " ▗▒▒▓▓▖    ",
+    " ▒{eyes}▒▓    ",
+    " ▒░{mouth}░▒▓    ",
+    " ▝▓▓██▘╪▛▜ ",
+    "  ▚▞    ▙▟·",
+    "        :  ",
     "           ",
-    "  ▛▀▀▀▀▀▜  ",
-    "  ▌ {eyes} ▐  ",
-    "  ▌  {mouth}  ▐  ",
-    "  ▌ ░▄░ ▐  ",
-    "  ▙▄▄▄▄▄▟  ",
-    "   ▚▞ ▚▞   ",
-    "    ▘  ▝   ",
 ];
 const GLITCH_S4: Template = [
-    " ▛▀▀▀▀▀▀▀▜ ",
-    " ▌  {eyes}  ▐ ",
-    " ▌   {mouth}   ▐ ",
-    " ▌  ▒▓▒  ▐ ",
-    " ▌  ░▒░  ▐ ",
-    " ▙▄▄▄▄▄▄▄▟ ",
-    "  ▚▞▙ ▟▚▞  ",
-    "   ▘ ▝ ▘   ",
+    "     ▛▀▀▀▜ ",
+    "   ·░▌▒▓▒▐ ",
+    "  ▌░{eyes}░▐  ",
+    "  ▌▒ {mouth} ▪▐  ",
+    "▌▓█▒▓▐░·   ",
+    "▌▒▓▓▒▐ ▖   ",
+    "▙▄▄▄▄▟     ",
+    " ▘▝  ▝▘    ",
 ];
 const GLITCH_S5: Template = [
-    " ▛▀▀▀▀▀▀▀▜ ",
-    " ▌▒ {eyes} ▒▐ ",
-    " ▌░▄▄▄▄▄░▐ ",
-    " ▌▒░ █ ░▒▐ ",
-    " ▌▓░▒▒▒░▓▐ ",
-    " ▌░▒ ▒ ▒░▐ ",
-    " ▙▄▄▄▄▄▄▄▟ ",
-    "  ▝▟▙ ▟▙▘  ",
+    " ▟▙     ▐  ",
+    " ██▄▀▄▀▄▞  ",
+    "▐░░{eyes}▒▓▌  ",
+    " ▌▒▒{mouth}▒▒▓█▐ ",
+    "▚▟▛◆▜▒▓█▙  ",
+    " ▐▒▒▓▓███▟▘",
+    "  ▜▓▓██▛   ",
+    "  ▘▀ ▝█▘   ",
 ];
 const GLITCH_S6: Template = [
-    "▛▀▀▀▀▀▀▀▀▀▜",
-    "▌▓▒ {eyes} ▒▓▐",
-    "▌▒░█▀▀▀█░▒▐",
-    "▌▓▒░▓▓▓░▒▓▐",
-    "▌█▒░▒▒▒░▒█▐",
-    "▌▓▒░▒▒▒░▒▓▐",
-    "▙▟▙▟▙▟▙▟▙▟▟",
-    "▝▟▙▟▙▟▙▟▙▟▘",
+    "▛▀▀▀▖  :░  ",
+    "▌▓▛▀▀▀▜▒░  ",
+    "▌▒▌{eyes}▐▓▒ ▜",
+    "▌▓▌░{mouth}░▐▓▒ ▐",
+    "▌▒▙▄▄▄▟▒██ ",
+    "▌░▓═▓▓▒▓█ ▗",
+    "▙▄▄▄▟▓▓▒░  ",
+    " ▚▞  ▄▓▄ · ",
 ];
 
 // ── Crystal ───────────────────────────────────────────────────────
@@ -1313,7 +1319,73 @@ mod tests {
         );
         assert!(
             art.chars().filter(|c| !c.is_whitespace()).count() > 30,
-            "Glitch S4 must render a dense closed packet, got:\n{art}"
+            "Glitch S4 must render a dense glitching body, got:\n{art}"
+        );
+    }
+
+    #[test]
+    fn glitch_metamorph_cell_counts_and_face_slots() {
+        // Locks the metamorph silhouettes: exact occupied-cell counts per stage
+        // (a transcription typo shifts these) and the elder face-slot restoration
+        // (S5/S6 regain {mouth} so the daemon and kernel keep a living face).
+        let counts = [
+            (Stage::S1, 8),
+            (Stage::S2, 20),
+            (Stage::S3, 34),
+            (Stage::S4, 48),
+            (Stage::S5, 58),
+            (Stage::S6, 70),
+        ];
+        for (stage, want) in counts {
+            assert_eq!(
+                rendered_occupied_cells(Species::Glitch, stage),
+                want,
+                "Glitch {stage:?} occupied cells"
+            );
+        }
+        for stage in [Stage::S2, Stage::S3, Stage::S4, Stage::S5, Stage::S6] {
+            let t = stage_base_template(Species::Glitch, stage)
+                .iter()
+                .copied()
+                .collect::<String>();
+            assert!(
+                t.contains("{eyes}"),
+                "Glitch {stage:?} needs an {{eyes}} slot"
+            );
+            assert!(
+                t.contains("{mouth}"),
+                "Glitch {stage:?} needs a {{mouth}} slot"
+            );
+        }
+    }
+
+    #[test]
+    fn glitch_elder_texture_is_pinned_but_mid_varies() {
+        // S5/S6 are hand-shaded, so their interior texture must be pinned (crystal
+        // lesson). S3/S4 static bodies keep per-seed variety.
+        let base_s5 = stage_base_template(Species::Glitch, Stage::S5);
+        let a = apply_interior_texture(base_s5, Species::Glitch, Stage::S5, 1);
+        let b = apply_interior_texture(base_s5, Species::Glitch, Stage::S5, 999);
+        assert_eq!(
+            a, b,
+            "Glitch S5 is hand-shaded: interior texture must be pinned"
+        );
+
+        let base_s6 = stage_base_template(Species::Glitch, Stage::S6);
+        let c = apply_interior_texture(base_s6, Species::Glitch, Stage::S6, 1);
+        let d = apply_interior_texture(base_s6, Species::Glitch, Stage::S6, 999);
+        assert_eq!(
+            c, d,
+            "Glitch S6 is hand-shaded: interior texture must be pinned"
+        );
+
+        let base_s4 = stage_base_template(Species::Glitch, Stage::S4);
+        let variants: std::collections::HashSet<_> = (0..8u64)
+            .map(|s| apply_interior_texture(base_s4, Species::Glitch, Stage::S4, s))
+            .collect();
+        assert!(
+            variants.len() > 1,
+            "Glitch S4 must keep per-seed interior variety"
         );
     }
 }
