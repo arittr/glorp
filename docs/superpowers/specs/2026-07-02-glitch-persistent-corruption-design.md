@@ -1,7 +1,7 @@
 # Glorp Glitch Persistent Corruption - Design
 
 - Date: 2026-07-02
-- Status: direction approved by Drew; spec pending review
+- Status: direction approved by Drew; revised after staff review
 - Scope: Glitch species polish only
 
 ## Goal
@@ -19,8 +19,8 @@ The new north star:
 
 > Glitch is a mischievous little packet-being that sometimes breaks in cute ways,
 > then patches itself. Its species feature is persistent corruption memory:
-> small, bounded visual artifacts that linger after activity, feeding, or rare
-> idle glitch-outs.
+> small, bounded visual repair artifacts that linger after activity, feeding, or
+> rare idle glitch-outs.
 
 ## Decisions
 
@@ -28,21 +28,28 @@ The new north star:
    Glitch should feel clever, playful, and slightly unstable, but never broken or
    dead.
 2. **Signature feature:** Persistent corruption memory.
-   Glitch occasionally glitches out, then carries tiny self-repair marks for a
-   while.
+   Glitch occasionally glitches out, then carries tiny self-repair marks for the
+   current day.
 3. **Persistence model for v1:** hybrid A/B.
    Day-local patch memory is the core feature; session-local glitching is the
    animated layer.
 4. **No permanent pet-memory in v1.**
    Rare permanent scars could be delightful later, but v1 must not change pet
    identity or require a `state.json` migration.
+5. **Elder charm is blocking.**
+   S5/S6 must keep a readable living face, or a protected equivalent expression
+   island, before this feature is considered shippable.
 
 ## Non-goals
 
 - No new persisted pet identity fields.
 - No `state.json` schema migration.
 - No provider- or harness-branded Glitch behavior.
+- No reads from `source_accent`, `source_diversity`, provider names, display
+  names, or provider-first-use props when deriving Glitch corruption.
 - No high-frequency flicker that makes the pet unreadable.
+- No render-time stage-up trigger in v1. Stage-up glitching needs an explicit
+  event input before it can be implemented correctly.
 - No change to prop IDs, unlock semantics, calibration, ledger storage, or
   activity identity derivation.
 - No broad species refactor. This is the Glitch pass.
@@ -51,37 +58,68 @@ The new north star:
 
 ### Day-local patch memory
 
-Glitch gets one to three tiny repaired-corruption marks for the current local
-day. They are deterministic from existing data:
+Glitch gets zero to three tiny repaired-corruption marks for the current local
+day. Selection is deterministic and storage-free:
 
-- pet seed,
-- `DayContext.date_seed`,
-- stage,
-- today's activity intensity or activity tier.
+```text
+(pet seed, DayContext.date_seed, Species::Glitch, stage) -> ordered safe cells
+```
 
-The marks survive app restart because they are recomputed from the dawn-rolled
-day seed. They reset at the next local dawn because `date_seed` already rolls at
-dawn. This keeps the feature feeling persistent without adding new storage.
+The ordered cell list must not depend on live activity, feed reactions, calm
+mode, work weather, provider/source identity, or tick timing. This prevents
+restart drift and prevents already-visible marks from moving as the day changes.
+
+The number of visible marks is a discrete day tier:
+
+```text
+GlitchPatchTier::Pristine -> 0 marks
+GlitchPatchTier::Quiet    -> first 1 safe cell
+GlitchPatchTier::Active   -> first 2 safe cells
+GlitchPatchTier::Heavy    -> first 3 safe cells
+```
+
+`GlitchPatchTier` may be derived from stable ledger-backed day shape such as
+`DayContext.today_ratio`. If a surface cannot provide that value, it should
+fall back to `Quiet` rather than reading live `PetLifeProfile.activity_level`.
+Small stages with fewer safe cells may render fewer marks.
+
+Marks survive app restart because the same pet seed, day seed, stage, and day
+tier recompute the same prefix of the same ordered cell list. They reset at the
+next local dawn because `date_seed` already rolls at dawn. If activity grows
+during the day, new marks reveal later cells from the ordered list; existing
+marks do not relocate.
 
 Patch marks should read as self-repair, not damage. Good vocabulary:
 
-- small stitch-like cells,
-- one-cell repaired seams,
-- a tiny patched packet edge,
-- a leftover symbol in the body interior.
+- one-cell checksum ticks,
+- tiny `+` / `=` repair glyphs,
+- bracket clamps on explicitly safe interior cells,
+- cursor welds,
+- softened packet repair dots.
 
 Bad vocabulary:
 
 - corpse eyes,
+- wounds or scars,
 - large scrambled regions,
 - broken outline,
-- anything that makes the terminal look corrupted.
+- anything that makes the terminal itself look corrupted.
+
+All runtime patch glyphs must be display-width 1 under `unicode_width`.
 
 ### Session-local glitching
 
-During live bursts, feed reactions, stage-up moments, or rare idle windows,
-Glitch can briefly glitch more dramatically. The burst settles back into the
-day-local patch marks.
+During live bursts, feed reactions, or rare tick-derived idle windows, Glitch can
+briefly glitch more dramatically. The burst settles back into the day-local patch
+marks.
+
+Allowed v1 session inputs:
+
+- `PetLifeProfile.burst_level`, after quantizing into an `Eq`-friendly enum,
+- `AnimationFrame.feed_reaction`,
+- `PetLifeProfile.calm_mode`,
+- `PetLifeProfile.work_weather`, only as transient flavor,
+- `AnimationFrame.tick`.
 
 Session-local glitching should be short, legible, and bounded. It can include:
 
@@ -90,28 +128,45 @@ Session-local glitching should be short, legible, and bounded. It can include:
 - a "patching itself" mouth/eye beat,
 - a one-cell packet fragment that fades.
 
-It should not persist across restart unless it resolves into the deterministic
-day-local patch memory.
+It should not persist across restart. Feed uses the same burst-to-repair path in
+v1; it does not introduce separate permanent feed marks.
+
+`calm_mode` suppresses dramatic transient glitching, but it can keep the calm
+day-local patch marks.
 
 ### Elder charm
 
 S5/S6 are the biggest current risk. S4 still has a clean mouth slot and can look
 alive; S5/S6 bake mouth decoration and can drift toward "terminal boss block."
 
-The Glitch pass should restore companionable elder charm by giving daemon/kernel
-forms a readable living face or an equivalent cute repair beat. This can be done
-by either:
+The implementation must choose one of these two approaches before merging:
 
-- reintroducing clean face slots for S5/S6 if the art constraints allow it, or
-- adding a stable, protected expression region plus tiny patch marks that do not
-  disturb the silhouette.
+1. Re-slot S5/S6 with explicit expression cells that preserve the current kernel
+   silhouette.
+2. Keep the baked elder art, but define a protected expression island that patch
+   marks and transient corruption may never disturb.
 
-The goal is not to make elder Glitch smaller or softer. It can still be powerful;
-it just needs to remain a pet.
+Acceptance criteria:
+
+- S5/S6 show a living expression in truecolor and flat-color previews.
+- S5/S6 patch marks never overlap the eye span, baked expression island, or
+  outline.
+- The round S6 preview shows at least one declared safe patch cell inside the
+  circular aperture when the tier permits one.
+- The elder form can still feel powerful, but it must remain a pet.
+
+Suggested protected elder islands, in raw 11-column pet-art coordinates before
+the 13x10 frame is added:
+
+- S5: row 1 eye span; rows 2-3, cols 3-7.
+- S6: row 1 eye span; rows 2-3, cols 3-7.
+
+These ranges can be adjusted during implementation only if the preview contract
+and tests are updated with the replacement protected cells.
 
 ## Architecture
 
-### Existing seams to use
+### Existing integration points
 
 - `src/pet/art.rs`
   Owns Glitch stage templates, stage labels, and art invariants.
@@ -119,51 +174,148 @@ it just needs to remain a pet.
   Owns render-time expression, blink cadence, bounded corruption, particles, and
   role spans.
 - `src/tui/day.rs`
-  Provides `DayContext.date_seed`, a stable dawn-rolled day seed derived from
-  local date and pet seed.
+  Provides `DayContext.date_seed` and `DayContext.today_ratio`.
 - `src/tui/life.rs`
-  Provides `PetLifeProfile.activity_level`, `burst_level`, `work_weather`, and
-  `calm_mode`.
+  Provides `PetLifeProfile.burst_level`, `work_weather`, and `calm_mode` for
+  transient behavior only.
 - `src/commands/watch.rs`
-  Re-renders the pet per tick and passes `AnimationFrame`.
-- `src/dev_preview/pets.rs`
-  Provides the Glitch live-state fixture and species-stage contact sheets.
+  Builds the watch view model, then re-renders the pet after day/activity data
+  is available.
+- `src/tui/panels/pet/art_lines.rs`
+  Consumes sorted, non-overlapping role spans.
+- `src/dev_preview/pets.rs` and `src/dev_preview/scenarios.rs`
+  Own Glitch preview frames and manifest inputs.
 
 ### Render contract
 
-Extend `AnimationFrame` with an optional Glitch corruption presentation input,
-or add an adjacent render-time struct if that stays cleaner:
+Add an optional Glitch presentation input to `AnimationFrame`, or add an adjacent
+render-time struct if that keeps `AnimationFrame` simpler. Do not put raw `f32`
+values into `AnimationFrame`; it currently derives `Eq`.
+
+The desired shape is discrete and deterministic:
 
 ```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GlitchCorruptionFrame {
     pub day_seed: u64,
-    pub activity_level: f32,
-    pub burst_level: f32,
+    pub patch_tier: GlitchPatchTier,
+    pub burst_level: GlitchBurstLevel,
     pub calm_mode: bool,
+    pub feed_reaction: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlitchPatchTier {
+    Pristine,
+    #[default]
+    Quiet,
+    Active,
+    Heavy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlitchBurstLevel {
+    #[default]
+    None,
+    Small,
+    Strong,
 }
 ```
 
-The final shape should follow surrounding style. The important boundary is that
-`render_pet` remains pure: given pet, stage, mood, animation frame, and derived
-presentation inputs, it returns deterministic lines/spans. It must not read the
-clock, ledger, or state file.
+The final type names can follow surrounding style. The important boundary is
+that `render_pet` remains pure: given pet, stage, mood, animation frame, and
+derived presentation inputs, it returns deterministic lines/spans. It must not
+read the clock, ledger, provider metadata, or state file.
+
+### Watch and round integration
+
+`build_watch_view_model_at` currently renders the pet before all day/activity
+context has been attached to the view model. The Glitch implementation should
+derive `GlitchCorruptionFrame` after the view model has `day_context`,
+ledger-backed day tier, life profile, feed reaction, and calm mode, then call the
+existing `rerender_pet_for_view_model` path.
+
+The round companion copies `vm.pet_art`, so the round renderer should receive the
+already-rerendered Glitch art. Do not implement a separate round-only corruption
+path.
 
 ### Patch selection
 
 Patch marks should be selected by a small deterministic function:
 
 ```text
-(pet seed, date_seed, species, stage, activity tier) -> patch cells
+ordered_glitch_patch_cells(pet, stage, day_seed) -> Vec<Cell>
+visible prefix length = patch_tier.max_marks()
 ```
 
 Rules:
 
 - Only Glitch receives patch marks.
-- Patch marks target interior body cells or explicitly safe edge cells.
-- Never target eye spans, mouth spans, or the protected face center.
-- Never break the closed packet-frame silhouette.
-- Cap to one mark on quiet days, two on active days, three on heavy days.
-- `calm_mode` suppresses live glitch bursts but can keep calm day-local marks.
+- Patch positions are based on pet seed, day seed, species, and stage only.
+- Patch count is based on `GlitchPatchTier`.
+- Stage S0/S1 may render zero marks if no safe body cell exists.
+- Patch marks target interior body cells or explicitly allowlisted edge cells.
+- Patch marks never target eye spans, mouth spans, protected expression cells, or
+  the face center.
+- Patch marks never break the closed packet-frame silhouette.
+- The ordered list must be stable when `GlitchPatchTier`, `burst_level`,
+  `feed_reaction`, `calm_mode`, or `work_weather` changes.
+
+### Safe-cell classifier
+
+Do not reuse the current `apply_glitch_corruption` target filter directly for
+day-local repair marks. It only protects the eye center, which is not strict
+enough for persistent marks.
+
+Add a shared safety helper with a shape like:
+
+```rust
+fn safe_glitch_patch_candidates(
+    stage: Stage,
+    lines: &[String],
+    spans: &[StyledSegment],
+) -> Vec<Cell>;
+
+fn is_protected_glitch_face_cell(
+    stage: Stage,
+    row: usize,
+    col: usize,
+    spans: &[StyledSegment],
+) -> bool;
+```
+
+The classifier must reject:
+
+- every cell covered by an `Eye` span,
+- every cell covered by a `Mouth` span,
+- protected S5/S6 baked expression islands,
+- outline/silhouette cells unless explicitly allowlisted,
+- whitespace cells,
+- glyphs whose replacement would change display width.
+
+The classifier may accept:
+
+- interior `Body`, `Pattern`, or `Accent` cells,
+- a tiny stage-specific allowlist of safe packet-edge cells if preview proves the
+  silhouette remains intact.
+
+### Span and role behavior
+
+Existing TUI rendering expects sorted, non-overlapping spans. Persistent repair
+marks must mutate the glyph in `lines` and retag that exact cell by splitting the
+original span into non-overlapping segments, following the pattern of
+`retag_cell_as_corruption`.
+
+Do not add overlapping overlay spans for repair marks.
+
+Use role semantics to distinguish the two effects:
+
+- transient glitch-out cells use `PaletteRoleName::Corruption`,
+- day-local repaired marks use existing softer roles, preferably `Pattern` for
+  integrated repairs and `Accent` for at most one brighter clamp.
+
+Do not use the loud `Corruption` role for persistent repaired marks unless a
+future visual pass adds a softer corruption palette role.
 
 ### Interaction with existing corruption
 
@@ -173,9 +325,9 @@ feature changes the meaning:
 - transient corruption is the moment of glitching,
 - patch marks are the memory after repair.
 
-The existing "protect the eye center" rule remains non-negotiable. Any new
-patching code should reuse the same safety concept, ideally through shared helper
-logic instead of duplicating coordinate exclusions.
+The existing corruption path can be refactored to share the safer protected-cell
+logic, but the day-local patch path needs stricter candidate selection than the
+current "protect eye center" rule.
 
 ### Habitat and room flavor
 
@@ -191,17 +343,36 @@ If the body patch marks work, the room can remain secondary.
 
 ## Preview And Review
 
-Preview Lab should be the control surface before live TUI review.
+Preview Lab is the control surface before live TUI review. The preview contract
+must prove the mechanics, not only show nice frames.
 
 Required preview updates:
 
-- `pet-glitch-live-states` should include a quiet day, active day, burst, and
-  post-burst patched state.
-- `pet-species-stage` should make S5/S6 Glitch's elder charm reviewable.
-- Watch species dialect frames should be regenerated for Glitch vs Crystal
-  figure-ground comparison if the room particles change.
-- Round companion preview should include a Glitch dialect frame after any face or
-  patch-mark change, because the circular aperture can hide tiny details.
+- Add `pet-glitch-persistence-states`, or expand `pet-glitch-live-states`, with
+  the same pet seed/day rendered as quiet, active, burst, feed-repair, patched
+  rest, same-day restart, and next-dawn reset.
+- Include S5/S6 truecolor and flat-color variants for elder charm review.
+- Add watch frames for `watch-glitch-patched-quiet`,
+  `watch-glitch-patched-active`, `watch-glitch-burst`, and
+  `watch-glitch-calm-hot`.
+- Include compact/flat watch variants if repair color is hard to distinguish.
+- Add `round-glitch-patched-s6` and assert at least one declared patch cell is
+  visible inside the circular aperture when the tier permits one.
+
+Typed preview artifacts should record, per relevant frame:
+
+- `date_seed`,
+- `patch_tier`,
+- `burst_level`,
+- `calm_mode`,
+- `feed_reaction`,
+- `expected_patch_count`,
+- `selected_patch_cells`,
+- `protected_face_cells`,
+- whether the frame is same-day restart or next-dawn reset.
+
+Cells JSON remains useful visual evidence, but it is not the mechanics contract
+by itself. Add a typed artifact or manifest input block that tests can read.
 
 Useful commands:
 
@@ -215,14 +386,23 @@ cargo run -- dev-preview --scenario round --out target/glorp-preview
 
 Focused checks should cover:
 
-- patch marks are deterministic for the same seed/date/stage/activity tier,
+- patch marks are deterministic for the same seed/date/stage/tier,
+- patch position order does not change when only the tier changes,
+- increasing the tier reveals a prefix instead of relocating previous marks,
 - patch marks change when `date_seed` changes,
 - patch marks are absent for non-Glitch species,
-- patch marks never overlap eye or mouth spans,
-- patch marks never break art width or occupied-cell invariants,
-- live burst corruption remains bounded,
+- patch marks never overlap eye spans, mouth spans, or protected elder islands,
+- patch marks never target outline/silhouette cells unless allowlisted,
+- patch glyphs are display-width 1,
+- repair marks produce sorted, non-overlapping spans,
+- repair marks do not use `PaletteRoleName::Corruption`,
+- transient corruption remains bounded and may still use `Corruption`,
 - `calm_mode` suppresses dramatic glitching,
-- S5/S6 Glitch still render a living face or equivalent companionable expression.
+- feed reactions use the transient repair beat and do not create separate
+  permanent feed marks,
+- S5/S6 Glitch still render a living face or equivalent companionable expression,
+- preview manifest/artifact data records patch inputs, protected cells, and
+  expected counts.
 
 Likely existing tests to extend:
 
@@ -236,31 +416,44 @@ cargo test --features dev-preview --test dev_preview dev_preview_pets_writes_spe
 cargo test --test round_scene
 ```
 
+Add new tests for:
+
+- `ordered_glitch_patch_cells` stability and tier-prefix behavior,
+- `safe_glitch_patch_candidates` on S2-S6,
+- S5/S6 protected expression islands,
+- repair span splitting,
+- preview artifact fields and expected counts.
+
 ## Delivery Shape
 
-1. **Preview fixtures first.**
-   Add or adjust Glitch preview states so the work can be judged visually before
-   changing live behavior.
-2. **Patch-mark derivation.**
-   Implement deterministic day-local patch cells and safety tests.
-3. **Render integration.**
-   Apply patch marks to Glitch art with role spans and protected face logic.
-4. **Burst-to-patch behavior.**
-   Layer session-local live glitching from `PetLifeProfile`/`AnimationFrame`.
-5. **Elder charm pass.**
-   Tune S5/S6 face/patch readability in the pet matrix and round preview.
-6. **Optional room flourish.**
+1. **Lock render contract and persistence boundary.**
+   Add the discrete Glitch corruption frame/tier types and confirm no persisted
+   state or provider/source metadata is involved.
+2. **Add preview and manifest contracts.**
+   Create the deterministic Glitch persistence frames and typed artifacts before
+   tuning live behavior.
+3. **Implement pure patch selection and safety tests.**
+   Build ordered day-local patch cells, safe-cell classification, and protected
+   elder islands.
+4. **Integrate through watch rerendering.**
+   Derive the presentation frame from `WatchViewModel` data and re-render through
+   `rerender_pet_for_view_model`, so round previews inherit the same art.
+5. **Add session-local bursts.**
+   Quantize burst/feed/calm inputs and layer transient glitching separately from
+   day-local repair marks.
+6. **Tune S5/S6 elder charm.**
+   Choose re-slotted expressions or protected elder islands, then verify
+   truecolor, flat-color, and round previews.
+7. **Run pet/watch/round preview review.**
+   Use Preview Lab artifacts as the go/no-go gate before live TUI review.
+8. **Optional room flourish.**
    Add packet-tail particles only if the body feature needs environmental
    reinforcement.
 
-## Open Questions
+## Implementation Tuning Notes
 
-- Should quiet days always get exactly one tiny mark, or should completely idle
-  days be pristine?
-- Should feed reactions create their own distinct patch vocabulary, or just
-  trigger the same burst-to-patch path?
-- Can S5/S6 regain clean face slots without weakening the current kernel
-  silhouette?
-
-These do not block the design. They should be resolved during implementation
-against Preview Lab artifacts.
+- Quiet days should render one tiny mark when a safe cell exists. `Pristine` is
+  reserved for no safe cells, non-Glitch species, and explicit test fixtures.
+- Feed reactions should use the same transient burst-to-repair path in v1.
+- Exact repair glyph choices are visual tuning, but they must stay width-1 and
+  must not read as injury.
