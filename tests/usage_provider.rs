@@ -62,6 +62,15 @@ fn complete_poll_lifecycle(
     result
 }
 
+fn cursor_key_values(
+    updates: &[ProviderCursorUpdate],
+) -> std::collections::BTreeSet<(String, String)> {
+    updates
+        .iter()
+        .map(|update| (update.provider_surface.clone(), update.cursor_key.clone()))
+        .collect()
+}
+
 #[test]
 fn provider_normalizes_claude_and_codex_records() {
     let dir = tempdir().unwrap();
@@ -242,22 +251,17 @@ fn transcript_like_fields_are_ignored() {
     let now = OffsetDateTime::now_utc();
     store
         .advance_cursors(
-            vec![
-                ProviderCursorUpdate {
-                    provider_surface: "claude-code".to_string(),
-                    cursor_key: "claude-code-first-contact".to_string(),
+            result
+                .deltas
+                .iter()
+                .map(|delta| ProviderCursorUpdate {
+                    provider_surface: delta.cursor_update.provider_surface.clone(),
+                    cursor_key: delta.cursor_update.cursor_key.clone(),
                     cursor_value: "seeded".to_string(),
                     provider_version: "test-provider".to_string(),
                     parser_version: "test-parser".to_string(),
-                },
-                ProviderCursorUpdate {
-                    provider_surface: "codex".to_string(),
-                    cursor_key: "codex-first-contact".to_string(),
-                    cursor_value: "seeded".to_string(),
-                    provider_version: "test-provider".to_string(),
-                    parser_version: "test-parser".to_string(),
-                },
-            ],
+                })
+                .collect(),
             now,
         )
         .unwrap();
@@ -333,6 +337,40 @@ fn provider_ignores_legacy_cache_read_weight_for_canonical_deltas() {
 }
 
 #[test]
+fn snapshot_and_poll_serialize_byte_identical_cursor_keys() {
+    let dir = tempdir().unwrap();
+    let mut snapshot_store = UsageStore::open(&dir.path().join("snapshot.sqlite")).unwrap();
+    let provider = provider(Some("ccusage-ok.mjs"), Some("ccusage-codex-ok.mjs"));
+
+    let snapshot = provider
+        .snapshot_for_calibration(&mut snapshot_store)
+        .unwrap();
+    let snapshot_keys = cursor_key_values(&snapshot.cursor_updates);
+
+    let mut poll_store = UsageStore::open(&dir.path().join("poll.sqlite")).unwrap();
+    let poll = provider.poll(&mut poll_store).unwrap();
+    let poll_keys = poll
+        .deltas
+        .iter()
+        .map(|delta| {
+            (
+                delta.cursor_update.provider_surface.clone(),
+                delta.cursor_update.cursor_key.clone(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(snapshot_keys, poll_keys);
+    for (_, key) in snapshot_keys {
+        let parsed: ProviderCursorKey = serde_json::from_str(&key).unwrap();
+        assert_eq!(
+            parsed.token_contract.as_deref(),
+            Some(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1)
+        );
+    }
+}
+
+#[test]
 fn helper_version_change_does_not_create_new_food_for_same_totals() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
@@ -370,7 +408,7 @@ fn legacy_cursor_with_parser_version_migrates_without_double_feeding() {
     fn new_key_json(period_start: &str, model: Option<&str>) -> String {
         serde_json::to_string(&ProviderCursorKey {
             provider_surface: "claude-code".to_string(),
-            token_contract: None,
+            token_contract: Some(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string()),
             command: "ccusage".to_string(),
             source_surface: "daily".to_string(),
             period_start: period_start.to_string(),

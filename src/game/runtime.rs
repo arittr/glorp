@@ -51,6 +51,19 @@ pub struct RuntimeUpdate {
     pub applied_signal: AppliedUsageSignal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CursorSkipKey {
+    provider_surface: String,
+    cursor_key: String,
+}
+
+fn cursor_skip_key(delta: &UsageDelta) -> CursorSkipKey {
+    CursorSkipKey {
+        provider_surface: delta.cursor_update.provider_surface.clone(),
+        cursor_key: delta.cursor_update.cursor_key.clone(),
+    }
+}
+
 pub fn stage_usage_poll_deltas(
     usage_store: &mut UsageStore,
     poll: &UsagePollResult,
@@ -59,12 +72,12 @@ pub fn stage_usage_poll_deltas(
     now: OffsetDateTime,
 ) -> Result<Vec<i64>> {
     let baseline = state.calibration;
-    let skip_surfaces =
+    let skip_cursors =
         handle_first_contact_and_discontinuity(usage_store, poll, state, guard_ratio, now)?;
     let mut ids = Vec::new();
     let current_bucket = floor_to_ten_minute_bucket(now);
     for delta in &poll.deltas {
-        if skip_surfaces.contains(&delta.provider_surface) {
+        if skip_cursors.contains(&cursor_skip_key(delta)) {
             continue;
         }
         if usage_store
@@ -77,7 +90,8 @@ pub fn stage_usage_poll_deltas(
         {
             continue;
         }
-        let buckets = crate::game::catchup::smear_catchup_delta(delta.total_tokens, baseline);
+        let mut buckets = crate::game::catchup::smear_catchup_delta(delta.total_tokens, baseline);
+        absorb_smear_rounding_residual(&mut buckets, delta.total_tokens.max(0.0));
         let bucket_count = buckets.len();
         let total_effective: f64 = buckets.iter().sum();
         for (bucket_index, effective_tokens) in buckets.into_iter().enumerate() {
@@ -111,6 +125,18 @@ pub fn stage_usage_poll_deltas(
     Ok(ids)
 }
 
+fn absorb_smear_rounding_residual(buckets: &mut [f64], target_total: f64) {
+    let current_total: f64 = buckets.iter().sum();
+    let Some(last) = buckets.last_mut() else {
+        return;
+    };
+    let residual = target_total - current_total;
+    let tolerance = target_total.abs().max(1.0) * 1e-9;
+    if residual.abs() <= tolerance && *last + residual >= 0.0 {
+        *last += residual;
+    }
+}
+
 /// The usage discontinuity guard (spec Amendment 2026-06-10). Per provider
 /// surface, a poll whose summed canonical total-token delta exceeds
 /// `max(guard_ratio x baseline x days_factor, DISCONTINUITY_GUARD_FLOOR_TOKENS)`
@@ -132,66 +158,83 @@ fn handle_first_contact_and_discontinuity(
     state: &mut PetState,
     guard_ratio: f64,
     now: OffsetDateTime,
-) -> Result<std::collections::BTreeSet<String>> {
+) -> Result<std::collections::BTreeSet<CursorSkipKey>> {
     let mut surface_sums: std::collections::BTreeMap<String, f64> =
         std::collections::BTreeMap::new();
     let mut surface_deltas: std::collections::BTreeMap<String, Vec<&UsageDelta>> =
         std::collections::BTreeMap::new();
+    let mut first_contact_deltas: std::collections::BTreeMap<String, Vec<&UsageDelta>> =
+        std::collections::BTreeMap::new();
+    let mut skip_cursors: std::collections::BTreeSet<CursorSkipKey> =
+        std::collections::BTreeSet::new();
 
     for delta in &poll.deltas {
+        match usage_store.provider_cursor(
+            &delta.cursor_update.provider_surface,
+            &delta.cursor_update.cursor_key,
+        )? {
+            Some(value) if value == delta.cursor_update.cursor_value => {
+                skip_cursors.insert(cursor_skip_key(delta));
+                continue;
+            }
+            None => {
+                first_contact_deltas
+                    .entry(delta.cursor_update.provider_surface.clone())
+                    .or_default()
+                    .push(delta);
+                skip_cursors.insert(cursor_skip_key(delta));
+                continue;
+            }
+            Some(_) => {}
+        }
+
         *surface_sums
-            .entry(delta.provider_surface.clone())
+            .entry(delta.cursor_update.provider_surface.clone())
             .or_insert(0.0) += delta.total_tokens.max(0.0);
         surface_deltas
-            .entry(delta.provider_surface.clone())
+            .entry(delta.cursor_update.provider_surface.clone())
             .or_default()
             .push(delta);
     }
 
-    let mut skip_surfaces: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut discontinuity_surfaces: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
 
     for (surface, sum) in surface_sums {
-        match usage_store.latest_cursor_updated_at(&surface)? {
-            None => {
-                let deltas = surface_deltas
-                    .get(&surface)
-                    .expect("surface_deltas must contain every surface in surface_sums");
-                seed_first_contact_surface(usage_store, &surface, deltas, now)?;
-                skip_surfaces.insert(surface);
-            }
-            Some(updated_at) => {
-                let days_factor = ((now - updated_at).whole_days().max(0) + 1) as f64;
-                let threshold =
-                    (guard_ratio * state.calibration.daily_effective_tokens * days_factor)
-                        .max(DISCONTINUITY_GUARD_FLOOR_TOKENS);
-                if sum <= threshold {
-                    continue;
-                }
-                let deltas = surface_deltas
-                    .get(&surface)
-                    .expect("surface_deltas must contain every surface in surface_sums");
-                let updates: Vec<_> = deltas
-                    .iter()
-                    .map(|delta| delta.cursor_update.clone())
-                    .collect();
-                usage_store.refuse_poll_discontinuity(
-                    updates,
-                    &ProviderDiagnostic {
-                        provider_surface: surface.clone(),
-                        code: USAGE_DISCONTINUITY_CODE.to_string(),
-                        message: format!(
-                            "refused {sum:.0} total tokens (threshold {threshold:.0})"
-                        ),
-                        recorded_at: now,
-                    },
-                    now,
-                )?;
-                skip_surfaces.insert(surface.clone());
-                discontinuity_surfaces.insert(surface);
-            }
+        let Some(updated_at) = usage_store.latest_cursor_updated_at(&surface)? else {
+            continue;
+        };
+        let days_factor = ((now - updated_at).whole_days().max(0) + 1) as f64;
+        let threshold = (guard_ratio * state.calibration.daily_effective_tokens * days_factor)
+            .max(DISCONTINUITY_GUARD_FLOOR_TOKENS);
+        if sum <= threshold {
+            continue;
         }
+        let deltas = surface_deltas
+            .get(&surface)
+            .expect("surface_deltas must contain every surface in surface_sums");
+        let updates: Vec<_> = deltas
+            .iter()
+            .map(|delta| {
+                skip_cursors.insert(cursor_skip_key(delta));
+                delta.cursor_update.clone()
+            })
+            .collect();
+        usage_store.refuse_poll_discontinuity(
+            updates,
+            &ProviderDiagnostic {
+                provider_surface: surface.clone(),
+                code: USAGE_DISCONTINUITY_CODE.to_string(),
+                message: format!("refused {sum:.0} total tokens (threshold {threshold:.0})"),
+                recorded_at: now,
+            },
+            now,
+        )?;
+        discontinuity_surfaces.insert(surface);
+    }
+
+    for (surface, deltas) in first_contact_deltas {
+        seed_first_contact_surface(usage_store, &surface, &deltas, now)?;
     }
 
     if !discontinuity_surfaces.is_empty() {
@@ -202,7 +245,7 @@ fn handle_first_contact_and_discontinuity(
         state.last_idle_narration_at = Some(now);
     }
 
-    Ok(skip_surfaces)
+    Ok(skip_cursors)
 }
 
 fn seed_first_contact_surface(

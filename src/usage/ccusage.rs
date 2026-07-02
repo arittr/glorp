@@ -241,16 +241,7 @@ impl CcusageCommandProvider {
                 }
             };
 
-            let key = ProviderCursorKey {
-                provider_surface: record.source_identity.provider_surface.clone(),
-                token_contract: None,
-                command: command_name.to_string(),
-                source_surface: "daily".to_string(),
-                period_start: record.period_start.clone(),
-                model: record.model.clone(),
-                raw_source_id: None,
-            };
-
+            let key = provider_cursor_key_for_record(&record, command_name);
             let cursor_key = cursor_key(&key)?;
             let cursor_partition = record.source_identity.provider_surface.clone();
             let previous_raw = match store.provider_cursor(&cursor_partition, &cursor_key) {
@@ -431,15 +422,7 @@ impl CcusageCommandProvider {
                 ),
             );
 
-            let key = ProviderCursorKey {
-                provider_surface: record.source_identity.provider_surface.clone(),
-                token_contract: None,
-                command: command_name.to_string(),
-                source_surface: "daily".to_string(),
-                period_start: record.period_start.clone(),
-                model: record.model.clone(),
-                raw_source_id: None,
-            };
+            let key = provider_cursor_key_for_record(&record, command_name);
             let cursor_key = cursor_key(&key)?;
             let cursor_value = serde_json::to_string(&record.raw_totals)?;
             cursor_updates.push(ProviderCursorUpdate {
@@ -804,6 +787,21 @@ fn persist_diagnostic(store: &mut UsageStore, diagnostic: &ProviderDiagnostic) -
 
 fn cursor_key(key: &ProviderCursorKey) -> Result<String> {
     serde_json::to_string(key).map_err(GlorpError::from)
+}
+
+fn provider_cursor_key_for_record(
+    record: &NormalizedUsageRecord,
+    command_name: &str,
+) -> ProviderCursorKey {
+    ProviderCursorKey {
+        provider_surface: record.source_identity.provider_surface.clone(),
+        token_contract: Some(TOKENMAXXING_TOTAL_V1.to_string()),
+        command: command_name.to_string(),
+        source_surface: "daily".to_string(),
+        period_start: record.period_start.clone(),
+        model: record.model.clone(),
+        raw_source_id: None,
+    }
 }
 
 // Sentinel cursor key used to record the helper version without claiming any

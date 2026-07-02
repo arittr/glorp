@@ -482,6 +482,42 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
     }
 }
 
+fn usage_delta_with_cursor(
+    provider_surface: &str,
+    cursor_key: &str,
+    cursor_value: &str,
+    total_tokens: f64,
+    now: time::OffsetDateTime,
+) -> UsageDelta {
+    let sequence = POLL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    UsageDelta {
+        provider_surface: provider_surface.into(),
+        source_identity: SourceIdentity::from_provider_surface(provider_surface),
+        command: "ccusage".into(),
+        effective_tokens: total_tokens,
+        total_tokens,
+        token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+        confidence: "local-log-derived".into(),
+        period_start: now + Duration::seconds(sequence as i64),
+        observed_at: now,
+        model: Some("claude-sonnet-4".into()),
+        cursor_update: ProviderCursorUpdate {
+            provider_surface: provider_surface.into(),
+            cursor_key: cursor_key.into(),
+            cursor_value: cursor_value.into(),
+            provider_version: "test-provider".into(),
+            parser_version: "test-parser".into(),
+        },
+        token_totals: Some(RawTokenTotals {
+            uncached_input: total_tokens as u64,
+            output: 0,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        }),
+    }
+}
+
 fn habitat_prop_ids(state: &PetState) -> Vec<&str> {
     state
         .habitat
@@ -1051,6 +1087,75 @@ fn first_contact_provider_seeds_history_without_staging_history() {
     )
     .unwrap();
     assert!(!staged_ids.is_empty());
+}
+
+#[test]
+fn first_contact_is_per_cursor_key_not_entire_surface() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 05 - 09 12:00 UTC);
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 800_000.0;
+
+    usage_store
+        .advance_cursors(
+            vec![ProviderCursorUpdate {
+                provider_surface: "claude-code".into(),
+                cursor_key: "known-key".into(),
+                cursor_value: "old-known".into(),
+                provider_version: "test-provider".into(),
+                parser_version: "test-parser".into(),
+            }],
+            now - Duration::minutes(10),
+        )
+        .unwrap();
+
+    let mut known =
+        usage_delta_with_cursor("claude-code", "known-key", "new-known", 100_000.0, now);
+    known.period_start = now;
+    let mut missing = usage_delta_with_cursor(
+        "claude-code",
+        "missing-key",
+        "seeded-missing",
+        700_000.0,
+        now,
+    );
+    missing.period_start = now - Duration::days(1);
+
+    let poll = UsagePollResult {
+        deltas: vec![known, missing],
+        diagnostics: Vec::new(),
+        total_effective_tokens: 800_000.0,
+        total_tokens: 800_000.0,
+    };
+
+    stage_usage_poll_deltas(
+        &mut usage_store,
+        &poll,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        now,
+    )
+    .unwrap();
+    let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
+    usage_store
+        .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+        .unwrap();
+
+    assert_eq!(state.lifetime_effective_tokens, 100_000.0);
+    assert_eq!(state.stage, Stage::S1);
+    assert_eq!(
+        usage_store
+            .provider_cursor("claude-code", "missing-key")
+            .unwrap()
+            .as_deref(),
+        Some("seeded-missing")
+    );
+    assert!(usage_store
+        .recent_diagnostics(5)
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic.code == glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE));
 }
 
 #[test]
