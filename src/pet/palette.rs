@@ -176,6 +176,17 @@ fn species_base_hue(species: Species) -> f32 {
     }
 }
 
+/// Per-species body lightness (OKLCH). Most species sit at the 0.74 default.
+/// Glitch is lifted because its silhouette is ▒/▓-heavy — those partial-density
+/// glyphs read dim against the dark porthole, so the color needs more headroom
+/// to land at the same perceived brightness as a block-bodied species.
+fn species_body_lightness(species: Species) -> f32 {
+    match species {
+        Species::Glitch => 0.80,
+        _ => 0.74,
+    }
+}
+
 /// Per-species body chroma (OKLCH). Raised off the old pinned 0.10 so the
 /// species hue actually registers. Soft-bodied/pale species (Crystal ice,
 /// Ghost lavender) stay lower; saturated identities (Glitch magenta, Mech amber)
@@ -231,7 +242,11 @@ pub fn resolve_pet_palette(species: Species, traits: &VisibleTraits) -> Resolved
     let role = |lightness: f32, chroma: f32, hue: f32| oklch_to_rgb(lightness, chroma * sat, hue);
 
     ResolvedPalette {
-        body: role(0.74, species_body_chroma(species), h),
+        body: role(
+            species_body_lightness(species),
+            species_body_chroma(species),
+            h,
+        ),
         // Bright resting eye at the complementary hue to the body, so it reads as a
         // distinct, vivid eye (via hue, not a dark luminance shift) and gives each
         // species its own resting eye color.
