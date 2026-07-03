@@ -64,6 +64,13 @@ pub fn watch_frames(ctx: &PreviewRenderContext, scratch_dir: &Path) -> Result<Ve
         frames.push(render_day_context_watch_frame(ctx, scratch_dir, fixture)?);
     }
 
+    for fixture in glitch_persistence_frame_fixtures(ctx) {
+        let extra_inputs = glitch_persistence_extra_inputs(&fixture);
+        let mut frame = render_day_context_watch_frame(ctx, scratch_dir, fixture)?;
+        frame.extra_inputs = extra_inputs;
+        frames.push(frame);
+    }
+
     for fixture in alive_room_frame_fixtures(ctx) {
         frames.push(render_alive_room_watch_frame(ctx, scratch_dir, fixture)?);
     }
@@ -247,7 +254,10 @@ fn render_watch_frame_from_state_with_life(
     }
     if let Some(day) = day_context {
         vm.day_context = day;
-        vm.life_profile.calm_mode = day.asleep;
+        // Asleep always implies calm, but a fixture's own calm-mode life
+        // profile (e.g. a daytime "calm mode enabled" preview) must survive
+        // this override rather than being forced back to false.
+        vm.life_profile.calm_mode = vm.life_profile.calm_mode || day.asleep;
         vm.current_speech = crate::pet::speech::current_pet_speech_for_scene(
             vm.pet_render.mood,
             &vm.life_profile,
@@ -694,6 +704,144 @@ fn day_context_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrame
             hold_eyes_closed: false,
         },
     ]
+}
+
+fn glitch_pet_state(ctx: &PreviewRenderContext) -> PetState {
+    let mut state = seeded_pet_state(ctx);
+    state.pet.seed = "glorp-preview-glitch-persistence".to_string();
+    state.pet.accepted_name = "Mux".to_string();
+    state.pet.generated_species = Species::Glitch;
+    state.stage = Stage::S6;
+    state.xp = 72.0;
+    state.lifetime_effective_tokens = 2_400_000.0;
+    state.vitals = Vitals { fed: 86.0, happiness: 88.0, energy: 84.0 };
+    state
+}
+
+/// Starts from an existing heavy-day-evening day-context fixture (for a
+/// realistic tiredness/phase baseline) and overrides only the deterministic
+/// fields the Glitch persistence contract depends on.
+fn preview_glitch_day_context(now: OffsetDateTime, today_ratio: f32, date_seed: u64) -> DayContext {
+    let mut day = heavy_day_evening_day_context(now);
+    day.today_ratio = today_ratio;
+    day.date_seed = date_seed;
+    day.asleep = false;
+    day
+}
+
+fn glitch_persistence_frame_fixtures(ctx: &PreviewRenderContext) -> Vec<DayContextFrameFixture> {
+    let now = ctx.fixed_now + Duration::hours(4);
+    vec![
+        DayContextFrameFixture {
+            id: "watch-glitch-patched-quiet",
+            title: "Watch Glitch Patched Quiet",
+            width: 120,
+            height: 32,
+            now,
+            state: glitch_pet_state,
+            life: WatchLifeFixture {
+                profile: idle_life_profile(),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: preview_glitch_day_context(now, 0.4, 42),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-glitch-patched-active",
+            title: "Watch Glitch Patched Active",
+            width: 120,
+            height: 32,
+            now,
+            state: glitch_pet_state,
+            life: WatchLifeFixture {
+                profile: warm_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: None,
+            },
+            day_context: preview_glitch_day_context(now, 1.0, 42),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-glitch-burst",
+            title: "Watch Glitch Burst",
+            width: 120,
+            height: 32,
+            now,
+            state: glitch_pet_state,
+            life: WatchLifeFixture {
+                profile: hot_life_profile(false),
+                color_capability: ColorCapability::Truecolor,
+                last_feed_pulse_at: Some(now - Duration::milliseconds(400)),
+            },
+            day_context: preview_glitch_day_context(now, 1.7, 42),
+            hold_eyes_closed: false,
+        },
+        DayContextFrameFixture {
+            id: "watch-glitch-calm-hot",
+            title: "Watch Glitch Calm Hot",
+            width: 120,
+            height: 32,
+            now,
+            state: glitch_pet_state,
+            life: WatchLifeFixture {
+                profile: hot_life_profile(true),
+                color_capability: ColorCapability::Flat,
+                last_feed_pulse_at: Some(now - Duration::milliseconds(400)),
+            },
+            day_context: preview_glitch_day_context(now, 1.7, 42),
+            hold_eyes_closed: false,
+        },
+    ]
+}
+
+/// Manifest inputs for a Glitch persistence watch fixture, derived from the
+/// same deterministic fields the fixture renders with (not the built
+/// view-model), so the contract is truthful even before the frame draws.
+fn glitch_persistence_extra_inputs(fixture: &DayContextFrameFixture) -> BTreeMap<String, Value> {
+    let today_ratio = fixture.day_context.today_ratio;
+    let date_seed = fixture.day_context.date_seed;
+    let burst_level_value = fixture.life.profile.burst_level;
+    let calm_mode = fixture.life.profile.calm_mode;
+    let patch_tier = crate::pet::render::GlitchPatchTier::from_today_ratio(today_ratio);
+    let burst_level = crate::pet::render::GlitchBurstLevel::from_burst_level(burst_level_value);
+
+    let pet = crate::pet::generation::generate_pet("glorp-preview-glitch-persistence")
+        .with_species(Species::Glitch);
+    let (raw_lines, raw_spans) =
+        crate::dev_preview::pets::raw_glitch_render_for_patch_selection(&pet, Stage::S6);
+    let selected_patch_cells = crate::pet::render::selected_glitch_patch_cells(
+        &pet,
+        Stage::S6,
+        date_seed,
+        patch_tier,
+        &raw_lines,
+        &raw_spans,
+    );
+    let selected_patch_cells_json = selected_patch_cells
+        .iter()
+        .map(|cell| json!({"row": cell.row, "col": cell.col}))
+        .collect::<Vec<_>>();
+
+    BTreeMap::from([
+        ("species".to_string(), json!("glitch")),
+        ("date_seed".to_string(), json!(date_seed)),
+        ("patch_tier".to_string(), json!(patch_tier.as_str())),
+        ("burst_level".to_string(), json!(burst_level.as_str())),
+        ("calm_mode".to_string(), json!(calm_mode)),
+        (
+            "expected_patch_count".to_string(),
+            json!(selected_patch_cells.len()),
+        ),
+        (
+            "selected_patch_cells".to_string(),
+            json!(selected_patch_cells_json),
+        ),
+        (
+            "protected_face_cells".to_string(),
+            crate::dev_preview::frame::protected_face_cells_json(&raw_spans),
+        ),
+    ])
 }
 
 struct AliveRoomFrameFixture {
@@ -1819,7 +1967,7 @@ mod tests {
 
         let frames = watch_frames(&ctx, dir.path()).unwrap();
 
-        assert_eq!(frames.len(), 48);
+        assert_eq!(frames.len(), 52);
         assert_eq!(frames[0].id, "watch-wide-normal");
         assert_eq!((frames[0].width, frames[0].height), (120, 32));
         assert_eq!(frames[1].id, "watch-tall-wide");
@@ -1873,33 +2021,38 @@ mod tests {
         assert_eq!((frames[27].width, frames[27].height), (120, 32));
         assert_eq!(frames[28].id, "watch-daycontext-work-clear");
         assert_eq!((frames[28].width, frames[28].height), (120, 32));
-        assert_eq!(frames[29].id, "room-starter-day-clear");
+        assert_eq!(frames[29].id, "watch-glitch-patched-quiet");
         assert_eq!((frames[29].width, frames[29].height), (120, 32));
-        assert_eq!(frames[30].id, "room-botanical-cache-evening");
-        assert_eq!(frames[31].id, "room-technical-output-active");
-        assert_eq!(frames[32].id, "room-celestial-artifact-night");
-        assert_eq!(frames[33].id, "room-cozy-weekend-quiet");
-        assert_eq!(frames[34].id, "room-mixed-full-wide");
-        assert_eq!((frames[34].width, frames[34].height), (180, 50));
-        assert_eq!(frames[35].id, "room-heavy-day-cozy-large");
-        assert_eq!((frames[35].width, frames[35].height), (120, 32));
-        assert_eq!(frames[36].id, "room-dawn-wake-small");
-        assert_eq!((frames[36].width, frames[36].height), (72, 24));
-        assert_eq!(frames[37].id, "watch-species-dialect-fuzz");
-        assert_eq!((frames[37].width, frames[37].height), (120, 32));
-        assert_eq!(frames[38].id, "watch-species-dialect-blob");
-        assert_eq!(frames[39].id, "watch-species-dialect-ghost");
-        assert_eq!(frames[40].id, "watch-species-dialect-glitch");
-        assert_eq!(frames[41].id, "watch-species-dialect-crystal");
-        assert_eq!(frames[42].id, "watch-species-dialect-mech");
-        assert_eq!(frames[43].id, "watch-species-dialect-glitch-flat");
-        assert_eq!(frames[44].id, "watch-species-dialect-crystal-flat");
-        assert_eq!(frames[45].id, "watch-activity-identity-ensemble");
-        assert_eq!((frames[45].width, frames[45].height), (120, 32));
-        assert_eq!(frames[46].id, "watch-activity-identity-unknown");
-        assert_eq!((frames[46].width, frames[46].height), (120, 32));
-        assert_eq!(frames[47].id, "watch-habitat-props-orbit");
-        assert_eq!((frames[47].width, frames[47].height), (120, 32));
+        assert_eq!(frames[30].id, "watch-glitch-patched-active");
+        assert_eq!(frames[31].id, "watch-glitch-burst");
+        assert_eq!(frames[32].id, "watch-glitch-calm-hot");
+        assert_eq!(frames[33].id, "room-starter-day-clear");
+        assert_eq!((frames[33].width, frames[33].height), (120, 32));
+        assert_eq!(frames[34].id, "room-botanical-cache-evening");
+        assert_eq!(frames[35].id, "room-technical-output-active");
+        assert_eq!(frames[36].id, "room-celestial-artifact-night");
+        assert_eq!(frames[37].id, "room-cozy-weekend-quiet");
+        assert_eq!(frames[38].id, "room-mixed-full-wide");
+        assert_eq!((frames[38].width, frames[38].height), (180, 50));
+        assert_eq!(frames[39].id, "room-heavy-day-cozy-large");
+        assert_eq!((frames[39].width, frames[39].height), (120, 32));
+        assert_eq!(frames[40].id, "room-dawn-wake-small");
+        assert_eq!((frames[40].width, frames[40].height), (72, 24));
+        assert_eq!(frames[41].id, "watch-species-dialect-fuzz");
+        assert_eq!((frames[41].width, frames[41].height), (120, 32));
+        assert_eq!(frames[42].id, "watch-species-dialect-blob");
+        assert_eq!(frames[43].id, "watch-species-dialect-ghost");
+        assert_eq!(frames[44].id, "watch-species-dialect-glitch");
+        assert_eq!(frames[45].id, "watch-species-dialect-crystal");
+        assert_eq!(frames[46].id, "watch-species-dialect-mech");
+        assert_eq!(frames[47].id, "watch-species-dialect-glitch-flat");
+        assert_eq!(frames[48].id, "watch-species-dialect-crystal-flat");
+        assert_eq!(frames[49].id, "watch-activity-identity-ensemble");
+        assert_eq!((frames[49].width, frames[49].height), (120, 32));
+        assert_eq!(frames[50].id, "watch-activity-identity-unknown");
+        assert_eq!((frames[50].width, frames[50].height), (120, 32));
+        assert_eq!(frames[51].id, "watch-habitat-props-orbit");
+        assert_eq!((frames[51].width, frames[51].height), (120, 32));
     }
 
     #[test]

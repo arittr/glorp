@@ -121,26 +121,7 @@ pub(crate) fn build_watch_view_model_at(
     let stage = state.stage;
     let mood = mood_from_state(state);
     let generated = generate_pet(&state.pet.seed).with_species(species);
-    let pet_performance = crate::tui::room::pet_performance_from_day_context(&day_context);
     let life_profile = crate::tui::life::PetLifeProfile::default();
-    let rendered = render_pet(
-        &generated,
-        stage,
-        mood,
-        AnimationFrame {
-            tick: now.unix_timestamp().max(0) as u64,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: day_context.asleep,
-            blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(day_context.tiredness),
-            soft_eyes: matches!(
-                pet_performance,
-                crate::tui::room::PetPerformance::TiredAwake
-                    | crate::tui::room::PetPerformance::HeavyDayCozy
-            ),
-            work_accent: work_accent_for_profile(&life_profile),
-            feed_reaction: false,
-        },
-    );
 
     // Keep local time for presentation and pet behavior; visible token totals
     // below use the Tokenmaxxing Los Angeles accounting day.
@@ -220,9 +201,9 @@ pub(crate) fn build_watch_view_model_at(
 
     let pet_palette = crate::pet::palette::resolve_pet_palette(species, &generated.traits);
 
-    Ok(WatchViewModel {
-        pet_art: rendered.lines,
-        pet_spans: rendered.spans,
+    let mut vm = WatchViewModel {
+        pet_art: Vec::new(),
+        pet_spans: Vec::new(),
         pet_render: PetRenderModel {
             seed: state.pet.seed.clone(),
             generated_species: state.pet.generated_species,
@@ -336,7 +317,14 @@ pub(crate) fn build_watch_view_model_at(
             );
             BioView { hatched_label, age_label }
         },
-    })
+    };
+    rerender_pet_for_view_model(
+        &mut vm,
+        now.unix_timestamp().max(0) as u64,
+        day_context.asleep,
+        now,
+    )?;
+    Ok(vm)
 }
 
 fn build_habitat_view(state: &PetState) -> HabitatView {
@@ -506,26 +494,48 @@ fn mood_from_state(state: &PetState) -> Mood {
     .mood
 }
 
+/// Glitch-species persistent corruption inputs for the current view model, or
+/// `None` for non-Glitch species. `feed_reaction` mirrors the same token-pop
+/// recency check used for the face's `AnimationFrame.feed_reaction`; callers
+/// compute it once and pass it in rather than recomputing here.
+fn glitch_corruption_frame_for_view_model(
+    vm: &WatchViewModel,
+    feed_reaction: bool,
+) -> Option<crate::pet::render::GlitchCorruptionFrame> {
+    if vm.pet_render.generated_species != Species::Glitch {
+        return None;
+    }
+    Some(crate::pet::render::glitch_corruption_frame_for_inputs(
+        vm.day_context.date_seed,
+        vm.day_context.today_ratio,
+        vm.life_profile.burst_level,
+        vm.life_profile.calm_mode,
+        feed_reaction,
+    ))
+}
+
 pub fn rerender_pet_for_view_model(
     vm: &mut WatchViewModel,
     tick: u64,
     hold_eyes_closed: bool,
     now: time::OffsetDateTime,
 ) -> Result<()> {
-    // Eye color rides mood at the same cadence as the eye glyph (expression_for),
-    // overwriting only the eye role. The ~10s worker palette rebuild stays
-    // mood-blind; this per-tick site owns mood -> eye color.
+    // This is the single canonical pet render for the view model: it applies
+    // mood -> eye color (riding the same cadence as the eye glyph in
+    // expression_for, overwriting only the eye role) and glitch corruption on
+    // top of the base species/stage art.
     crate::pet::palette::apply_mood_eye_color(&mut vm.pet_palette, vm.pet_render.mood);
     let species = vm.pet_render.generated_species;
     let generated = generate_pet(&vm.pet_render.seed).with_species(species);
     let pet_performance = crate::tui::room::pet_performance_from_day_context(&vm.day_context);
+    let feed_reaction =
+        crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now).is_some();
     let rendered = render_pet(
         &generated,
         vm.pet_render.stage,
         vm.pet_render.mood,
         AnimationFrame {
             tick,
-            blink_suppression_ticks: 0,
             hold_eyes_closed,
             blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(
                 vm.day_context.tiredness,
@@ -536,8 +546,9 @@ pub fn rerender_pet_for_view_model(
                     | crate::tui::room::PetPerformance::HeavyDayCozy
             ),
             work_accent: work_accent_for_profile(&vm.life_profile),
-            feed_reaction: crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now)
-                .is_some(),
+            feed_reaction,
+            glitch_corruption: glitch_corruption_frame_for_view_model(vm, feed_reaction),
+            ..AnimationFrame::default()
         },
     );
     vm.pet_art = rendered.lines;
@@ -1703,6 +1714,74 @@ mod tests {
             vm.pet_palette.eye,
             eye_color_for_mood(Mood::Ecstatic),
             "ecstatic mood should warm the eye color"
+        );
+    }
+}
+
+#[cfg(test)]
+mod glitch_corruption_tests {
+    use super::*;
+    use crate::game::evolution::Stage;
+    use crate::pet::generation::Species;
+    use crate::pet::render::PaletteRoleName;
+    use crate::storage::{
+        state::PetState,
+        usage_store::{NormalizedUsageEvent, UsageStore},
+    };
+    use tempfile::tempdir;
+    use time::OffsetDateTime;
+
+    #[test]
+    fn glitch_watch_view_model_rerender_adds_day_local_repair_spans() {
+        let dir = tempdir().unwrap();
+        let usage_db = dir.path().join("usage.sqlite");
+        let mut state = PetState::new_for_test("glitch-watch-patches", "Mux");
+        state.pet.generated_species = Species::Glitch;
+        state.stage = Stage::S6;
+        state.calibration.daily_effective_tokens = 10_000.0;
+        let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let mut store = UsageStore::open(&usage_db).unwrap();
+        let mut event = NormalizedUsageEvent::for_test_at(now, 18_000.0);
+        event.provider_surface = "codex".to_string();
+        store.insert_event(&event).unwrap();
+
+        let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
+
+        assert!(
+            vm.pet_spans.iter().any(|span| {
+                matches!(
+                    span.role,
+                    PaletteRoleName::Pattern | PaletteRoleName::Accent
+                ) && span.end == span.start + 1
+            }),
+            "Glitch watch VM should include soft one-cell repair spans"
+        );
+        assert!(
+            vm.pet_spans
+                .iter()
+                .all(|span| span.role != PaletteRoleName::Corruption),
+            "day-local repair marks should not use Corruption in the steady VM"
+        );
+    }
+
+    #[test]
+    fn non_glitch_watch_view_model_does_not_receive_glitch_repair_spans() {
+        let dir = tempdir().unwrap();
+        let usage_db = dir.path().join("usage.sqlite");
+        let mut state = PetState::new_for_test("fuzz-watch-patches", "Mochi");
+        state.pet.generated_species = Species::Fuzz;
+        state.stage = Stage::S6;
+        let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        let _store = UsageStore::open(&usage_db).unwrap();
+
+        let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
+
+        assert_eq!(vm.pet_render.generated_species, Species::Fuzz);
+        assert!(
+            vm.pet_spans
+                .iter()
+                .all(|span| span.role != PaletteRoleName::Corruption),
+            "non-Glitch steady VM should not get Glitch corruption roles"
         );
     }
 }

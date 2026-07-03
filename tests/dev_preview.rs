@@ -56,6 +56,17 @@ const ACTIVITY_IDENTITY_WATCH_IDS: [&str; 2] = [
 
 const HABITAT_PROPS_ORBIT_ID: &str = "watch-habitat-props-orbit";
 
+const GLITCH_PERSISTENCE_PET_ID: &str = "pet-glitch-persistence-states";
+
+const GLITCH_PERSISTENCE_WATCH_IDS: [&str; 4] = [
+    "watch-glitch-patched-quiet",
+    "watch-glitch-patched-active",
+    "watch-glitch-burst",
+    "watch-glitch-calm-hot",
+];
+
+const GLITCH_PERSISTENCE_ROUND_ID: &str = "round-glitch-patched-s6";
+
 const SPECIES_DIALECT_WATCH_IDS: [&str; 8] = [
     "watch-species-dialect-fuzz",
     "watch-species-dialect-blob",
@@ -879,6 +890,95 @@ fn dev_preview_pets_writes_species_stage_matrix() {
 }
 
 #[test]
+fn dev_preview_glitch_persistence_pet_frame_records_patch_contract() {
+    let run = PreviewRun::new();
+
+    run.run_success("pets");
+
+    assert!(run
+        .out
+        .join(format!("frames/{GLITCH_PERSISTENCE_PET_ID}.txt"))
+        .is_file());
+    let manifest = run.manifest();
+    let scenario = scenario(&manifest, GLITCH_PERSISTENCE_PET_ID);
+    assert_eq!(scenario["kind"], "pet-matrix");
+    assert_eq!(scenario["inputs"]["species"], "glitch");
+    assert!(scenario["inputs"]["date_seed"].as_u64().unwrap() > 0);
+    assert_eq!(scenario["inputs"]["same_day_restart"], true);
+    assert_eq!(scenario["inputs"]["next_dawn_reset"], true);
+    assert!(
+        scenario["inputs"]["selected_patch_cells"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 3
+    );
+    // Span-derived face protection: the 3-cell {eyes} span + the 1-cell
+    // {mouth} span (the old 13-cell static elder island is gone).
+    assert!(
+        scenario["inputs"]["protected_face_cells"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 4
+    );
+}
+
+#[test]
+fn dev_preview_glitch_watch_frames_record_patch_inputs() {
+    let run = PreviewRun::new();
+
+    run.run_success("watch");
+
+    let manifest = run.manifest();
+    for id in GLITCH_PERSISTENCE_WATCH_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id}.txt"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.cells.json")).is_file(),
+            "missing {id}.cells.json"
+        );
+        assert!(
+            run.out.join(format!("frames/{id}.layout.json")).is_file(),
+            "missing {id}.layout.json"
+        );
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["kind"], "watch");
+        assert_eq!(scenario["inputs"]["species"], "glitch");
+        assert!(scenario["inputs"]["date_seed"].as_u64().unwrap() > 0);
+        assert!(scenario["inputs"]["patch_tier"].is_string());
+        assert!(scenario["inputs"]["burst_level"].is_string());
+        assert!(scenario["inputs"]["expected_patch_count"].as_u64().unwrap() <= 3);
+        assert!(scenario["inputs"]["selected_patch_cells"].is_array());
+        assert!(scenario["inputs"]["protected_face_cells"].is_array());
+    }
+}
+
+#[test]
+fn dev_preview_round_glitch_patched_s6_records_patch_contract() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    assert!(run
+        .out
+        .join(format!("frames/{GLITCH_PERSISTENCE_ROUND_ID}.txt"))
+        .is_file());
+    let manifest = run.manifest();
+    let scenario = scenario(&manifest, GLITCH_PERSISTENCE_ROUND_ID);
+    assert_eq!(scenario["kind"], "round");
+    assert_eq!(scenario["inputs"]["species"], "glitch");
+    assert_eq!(scenario["inputs"]["stage"], "s6");
+    assert!(!scenario["inputs"]["selected_patch_cells"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(scenario["round"]["aperture"]["shape"], "circle");
+}
+
+#[test]
 fn dev_preview_props_writes_habitat_prop_gallery_and_watch_variants() {
     let run = PreviewRun::new();
 
@@ -1015,6 +1115,10 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/watch-daycontext-work-cache-mist.txt",
         "frames/watch-daycontext-work-mixed.txt",
         "frames/watch-daycontext-work-clear.txt",
+        "frames/watch-glitch-patched-quiet.txt",
+        "frames/watch-glitch-patched-active.txt",
+        "frames/watch-glitch-burst.txt",
+        "frames/watch-glitch-calm-hot.txt",
         "frames/room-starter-day-clear.txt",
         "frames/room-botanical-cache-evening.txt",
         "frames/room-technical-output-active.txt",
@@ -1062,6 +1166,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/pet-texture-variants.txt",
         "frames/pet-mood-set.txt",
         "frames/pet-glitch-live-states.txt",
+        "frames/pet-glitch-persistence-states.txt",
         "frames/round-normal.txt",
         "frames/round-normal.cells.json",
         "frames/round-active-pulse.txt",
@@ -1070,6 +1175,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/round-flat-color.txt",
         "frames/round-glitch-dialect.txt",
         "frames/round-crystal-dialect.txt",
+        "frames/round-glitch-patched-s6.txt",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1108,6 +1214,10 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "watch-daycontext-work-cache-mist".to_string(),
             "watch-daycontext-work-mixed".to_string(),
             "watch-daycontext-work-clear".to_string(),
+            "watch-glitch-patched-quiet".to_string(),
+            "watch-glitch-patched-active".to_string(),
+            "watch-glitch-burst".to_string(),
+            "watch-glitch-calm-hot".to_string(),
             "room-starter-day-clear".to_string(),
             "room-botanical-cache-evening".to_string(),
             "room-technical-output-active".to_string(),
@@ -1137,6 +1247,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "pet-texture-variants".to_string(),
             "pet-mood-set".to_string(),
             "pet-glitch-live-states".to_string(),
+            "pet-glitch-persistence-states".to_string(),
             "round-normal".to_string(),
             "round-active-pulse".to_string(),
             "round-asleep-night".to_string(),
@@ -1144,6 +1255,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "round-flat-color".to_string(),
             "round-glitch-dialect".to_string(),
             "round-crystal-dialect".to_string(),
+            "round-glitch-patched-s6".to_string(),
         ]
     );
 }
@@ -1625,7 +1737,7 @@ fn dev_preview_watch_daycontext_heavy_day_evening_frame_snapshot() {
     insta::assert_snapshot!("watch_daycontext_heavy_day_evening_frame", frame);
 }
 
-const ROUND_IDS: [&str; 7] = [
+const ROUND_IDS: [&str; 8] = [
     "round-normal",
     "round-active-pulse",
     "round-asleep-night",
@@ -1633,6 +1745,7 @@ const ROUND_IDS: [&str; 7] = [
     "round-flat-color",
     "round-glitch-dialect",
     "round-crystal-dialect",
+    "round-glitch-patched-s6",
 ];
 
 #[test]

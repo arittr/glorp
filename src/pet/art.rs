@@ -484,10 +484,10 @@ const GHOST_S6: Template = [
     " ░▒▓█▓█▓▒░ ",
 ];
 
-// ── Glitch · Packet Daemon (validated) ── S0-S6 base silhouettes. Transcribed
-// verbatim from the art-assets doc with the mouth wired to {mouth} at S2-S4
-// (per spec Rendering #5; the {eyes} slot is already in the doc). S5/S6 keep
-// their baked mouth decoration (no clean 1-cell mouth in the elder data-cube).
+// ── Glitch · Packet Daemon (validated) ── S0-S6 metamorph silhouettes.
+// {eyes}/{mouth} slots wired at S2-S6 (elders included). Displacement details
+// flow ONE direction per stage (opposing offsets read rotationally); the mouth
+// always gets blank/░ clearance so thin glitch mouth glyphs stay legible.
 const GLITCH_S0: Template = [
     "           ",
     "           ",
@@ -541,9 +541,9 @@ const GLITCH_S4: Template = [
 const GLITCH_S5: Template = [
     " ▟▙     ▐  ",
     " ██▄▀▄▀▄▞  ",
-    "▐░░{eyes}▒▓▌  ",
-    " ▌▒▒{mouth}▒▒▓█▐ ",
-    "▚▟▛◆▜▒▓█▙  ",
+    " ░░{eyes}▒▓█▐ ",
+    " ▌▒ {mouth} ▒▓█▐ ",
+    " ▟▛◆▜▒▓█▙▞ ",
     " ▐▒▒▓▓███▟▘",
     "  ▜▓▓██▛   ",
     "  ▘▀ ▝█▘   ",
@@ -556,7 +556,7 @@ const GLITCH_S6: Template = [
     "▌▒▙▄▄▄▟▒██ ",
     "▌░▓═▓▓▒▓█ ▗",
     "▙▄▄▄▟▓▓▒░  ",
-    " ▚▞  ▄▓▄ · ",
+    " ▚▞▄▄▄▓▄ · ",
 ];
 
 // ── Crystal ───────────────────────────────────────────────────────
@@ -1333,8 +1333,8 @@ mod tests {
             (Stage::S2, 20),
             (Stage::S3, 34),
             (Stage::S4, 44),
-            (Stage::S5, 58),
-            (Stage::S6, 70),
+            (Stage::S5, 56),
+            (Stage::S6, 72),
         ];
         for (stage, want) in counts {
             assert_eq!(
