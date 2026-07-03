@@ -177,6 +177,9 @@ pub struct StyledSegment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteRoleName {
     Body,
+    /// The brightest body cells (`█`): a lighter tint of the body color so the
+    /// silhouette reads with luminance depth, not just ink density.
+    BodyGlow,
     Eye,
     Mouth,
     Accent,
@@ -525,43 +528,57 @@ fn render_template_line(
 
     while let Some(open) = rest.find('{') {
         let (body, after_body) = rest.split_at(open);
-        push_segment(
-            &mut text,
-            &mut spans,
-            line,
-            body,
-            PaletteRoleName::Body,
-            &mut cursor,
-        );
+        push_body_run(&mut text, &mut spans, line, body, &mut cursor);
 
         if let Some(close) = after_body.find('}') {
             let token = &after_body[..=close];
-            let (value, role) =
-                slot_value(token, pet, expression).unwrap_or((token, PaletteRoleName::Body));
-            push_segment(&mut text, &mut spans, line, value, role, &mut cursor);
+            match slot_value(token, pet, expression) {
+                Some((value, role)) => {
+                    push_segment(&mut text, &mut spans, line, value, role, &mut cursor);
+                }
+                None => push_body_run(&mut text, &mut spans, line, token, &mut cursor),
+            }
             rest = &after_body[close + 1..];
         } else {
-            push_segment(
-                &mut text,
-                &mut spans,
-                line,
-                after_body,
-                PaletteRoleName::Body,
-                &mut cursor,
-            );
+            push_body_run(&mut text, &mut spans, line, after_body, &mut cursor);
             rest = "";
         }
     }
 
-    push_segment(
-        &mut text,
-        &mut spans,
-        line,
-        rest,
-        PaletteRoleName::Body,
-        &mut cursor,
-    );
+    push_body_run(&mut text, &mut spans, line, rest, &mut cursor);
     RenderedTemplateLine { text, spans }
+}
+
+/// Push a run of body glyphs, splitting so each maximal run of `█` cells is
+/// tagged `BodyGlow` (a lit tint) and everything else stays `Body`.
+fn push_body_run(
+    text: &mut String,
+    spans: &mut Vec<StyledSegment>,
+    line: usize,
+    value: &str,
+    cursor: &mut usize,
+) {
+    let role_for = |glow: bool| {
+        if glow {
+            PaletteRoleName::BodyGlow
+        } else {
+            PaletteRoleName::Body
+        }
+    };
+    let mut run = String::new();
+    let mut run_glow = false;
+    for ch in value.chars() {
+        let glow = ch == '\u{2588}';
+        if !run.is_empty() && glow != run_glow {
+            push_segment(text, spans, line, &run, role_for(run_glow), cursor);
+            run.clear();
+        }
+        run.push(ch);
+        run_glow = glow;
+    }
+    if !run.is_empty() {
+        push_segment(text, spans, line, &run, role_for(run_glow), cursor);
+    }
 }
 
 fn slot_value<'a>(

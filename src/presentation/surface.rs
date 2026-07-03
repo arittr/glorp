@@ -214,6 +214,7 @@ pub fn resolve_pet_colors(
 pub fn role_rgb(c: &ResolvedColors, role: PaletteRoleName) -> Rgb {
     match role {
         PaletteRoleName::Body => c.body,
+        PaletteRoleName::BodyGlow => crate::pet::palette::body_glow(c.body),
         PaletteRoleName::Eye => c.eye,
         PaletteRoleName::Mouth => c.mouth,
         PaletteRoleName::Accent => c.accent,
