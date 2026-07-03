@@ -262,6 +262,20 @@ fn mirror_char(c: char) -> char {
         '\u{259D}' => '\u{2598}',
         '\u{259A}' => '\u{259E}', // ▚ <-> ▞
         '\u{259E}' => '\u{259A}',
+        '\u{250C}' => '\u{2510}', // ┌ <-> ┐
+        '\u{2510}' => '\u{250C}',
+        '\u{2514}' => '\u{2518}', // └ <-> ┘
+        '\u{2518}' => '\u{2514}',
+        '\u{251C}' => '\u{2524}', // ├ <-> ┤
+        '\u{2524}' => '\u{251C}',
+        '\u{256D}' => '\u{256E}', // ╭ <-> ╮
+        '\u{256E}' => '\u{256D}',
+        '\u{256F}' => '\u{2570}', // ╯ <-> ╰
+        '\u{2570}' => '\u{256F}',
+        '\u{2559}' => '\u{255C}', // ╙ <-> ╜
+        '\u{255C}' => '\u{2559}',
+        '\u{2571}' => '\u{2572}', // ╱ <-> ╲
+        '\u{2572}' => '\u{2571}',
         _ => c,
     }
 }
@@ -488,6 +502,23 @@ mod tests {
                 Style::default().fg(Color::Rgb(0x10, 0x20, 0x30)),
             )]),
         ]
+    }
+
+    #[test]
+    fn mirror_line_swaps_box_drawing_corners() {
+        // Box-drawing chassis (mech) and arc hoods (ghost) must flip their
+        // corners/arcs so a facing turn reads, instead of leaving an inverted
+        // frame. Reverse + swap keeps a proper box.
+        assert_eq!(mirror_line("┌─┐"), "┌─┐");
+        assert_eq!(mirror_line("└─┘"), "└─┘");
+        assert_eq!(mirror_line("├─┤"), "├─┤");
+        assert_eq!(mirror_line("╭─╮"), "╭─╮");
+        assert_eq!(mirror_line("╯─╰"), "╯─╰");
+        assert_eq!(mirror_line("╱╲"), "╱╲");
+        assert_eq!(mirror_line("╙─╜"), "╙─╜");
+        // Left-right symmetric junctions just reposition, glyph unchanged.
+        assert_eq!(mirror_line("┬─┴"), "┴─┬");
+        assert_eq!(mirror_line("║═╨"), "╨═║");
     }
 
     #[test]
