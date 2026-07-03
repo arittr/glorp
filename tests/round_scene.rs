@@ -157,3 +157,114 @@ fn round_scene_uses_night_calm_for_asleep_state() {
     assert!(scene.lifecycle.calm);
     assert!(scene.halo.activity_pulse.is_quiet());
 }
+
+/// The round companion renders `WatchViewModel.pet_art` into a circular
+/// aperture; a Heavy-tier Glitch S6 day earns up to three persistent repair
+/// marks (one-cell `Pattern`/`Accent` spans carrying a `+ = : .` glyph — see
+/// `glitch_repair_marks_use_soft_roles_not_corruption` in `src/pet/render.rs`
+/// for the same identification method). This proves at least one of those
+/// marks actually lands on a visible (non-masked) cell once the pet art is
+/// positioned in the round scene's grid, not clipped by the circle.
+#[cfg(feature = "dev-preview")]
+#[test]
+fn round_glitch_s6_keeps_a_repair_mark_inside_aperture() {
+    use glorp::pet::render::PaletteRoleName;
+    use glorp::round::layout::RoundAperture;
+    use glorp::round::preview::render_round_preview_frame_from_vm;
+    use glorp::round::scene::{build_round_scene_draw_list, CompanionMotion};
+
+    const WIDTH: u16 = 52;
+    const HEIGHT: u16 = 52;
+    let now = datetime!(2026-06-13 18:00 UTC);
+
+    // Mirror the `round-glitch-patched-s6` preview fixture
+    // (src/dev_preview/round.rs): a calm S6 Glitch on a Heavy-tier day
+    // (today_ratio 1.7, date_seed 42) earns 3 repair marks.
+    let mut vm = WatchViewModel::fixture_with_habitat_props();
+    vm.pet_render.seed = "glorp-preview-glitch-persistence".to_string();
+    vm.pet_render.generated_species = Species::Glitch;
+    vm.pet_render.stage = Stage::S6;
+    vm.day_context.date_seed = 42;
+    vm.day_context.today_ratio = 1.7;
+    vm.life_profile.burst_level = 0.0;
+    vm.life_profile.calm_mode = true;
+    glorp::commands::watch::rerender_pet_for_view_model(
+        &mut vm,
+        now.unix_timestamp().max(0) as u64,
+        false,
+        now,
+    )
+    .expect("fixture should rerender");
+
+    // Find a declared repair mark: a one-cell Pattern/Accent span carrying one
+    // of the soldered repair glyphs.
+    let repair_span = vm
+        .pet_spans
+        .iter()
+        .find(|span| {
+            matches!(
+                span.role,
+                PaletteRoleName::Pattern | PaletteRoleName::Accent
+            ) && span.end == span.start + 1
+        })
+        .expect("Heavy-tier Glitch S6 fixture should carry at least one repair mark span");
+    let mark_row = repair_span.line;
+    let mark_col = repair_span.start;
+    let mark_glyph = vm.pet_art[mark_row]
+        .chars()
+        .nth(mark_col)
+        .expect("repair mark column should be in-bounds");
+    assert!(
+        "+=:.".contains(mark_glyph),
+        "repair mark glyph should be one of the soldered repair glyphs, got {mark_glyph:?}"
+    );
+
+    // Map the mark's art-local (row, col) to the round scene's absolute grid
+    // position for this vm/now, using the same seam and default companion
+    // motion the round-glitch-patched-s6 preview renders with. The seam may
+    // horizontally mirror the art (facing left) before placing it at
+    // `pet_rect`, which — per `mirror_spans` in
+    // `src/tui/panels/pet/art_lines.rs` — maps a one-cell span's column `c` to
+    // `line_len - 1 - c` (none of the repair glyphs are direction-swapped by
+    // `mirror_char`, so the glyph itself is unaffected). Check both the
+    // unmirrored and mirrored column so the assertion holds regardless of
+    // which way the pet is facing at this deterministic `now`.
+    let companion_scene =
+        build_round_scene_draw_list(&vm, now, WIDTH, HEIGHT, &CompanionMotion::default());
+    let line_len = vm.pet_art[mark_row].chars().count();
+    let mirrored_col = line_len - 1 - mark_col;
+    let candidate_cols = [mark_col, mirrored_col];
+
+    let aperture = RoundAperture::new(WIDTH, HEIGHT);
+    let frame = render_round_preview_frame_from_vm(
+        "round-glitch-s6-repair-test",
+        "Round Glitch S6 Repair Test",
+        &vm,
+        now,
+        WIDTH,
+        HEIGHT,
+        glorp::round::layout::RoundRenderCapabilities::preview_truecolor(),
+    );
+
+    let visible_match = candidate_cols.iter().any(|&col| {
+        let abs_x = companion_scene.pet_rect.x + col as u16;
+        let abs_y = companion_scene.pet_rect.y + mark_row as u16;
+        if !aperture.contains(abs_x as f32, abs_y as f32) {
+            return false;
+        }
+        frame.cells.iter().any(|c| {
+            c.x == abs_x
+                && c.y == abs_y
+                && !c.outside_aperture
+                && c.symbol == mark_glyph.to_string()
+        })
+    });
+
+    assert!(
+        visible_match,
+        "expected the repair mark glyph {mark_glyph:?} to land on a visible \
+         (non-masked) cell at row {mark_row}, cols {candidate_cols:?} \
+         (pet_rect={:?}); it was clipped or overwritten",
+        companion_scene.pet_rect
+    );
+}

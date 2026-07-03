@@ -9,7 +9,7 @@ use crate::round::layout::{RoundAperture, RoundRenderCapabilities, SAFE_INNER_RA
 use crate::round::preview::render_round_preview_frame_from_vm;
 use crate::tui::identity::SourceDiversity;
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use time::Duration;
 
@@ -86,6 +86,29 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
+    let mut patched_glitch = WatchViewModel::fixture_with_habitat_props();
+    patched_glitch.pet_render.seed = "glorp-preview-glitch-persistence".to_string();
+    patched_glitch.pet_render.generated_species = crate::pet::generation::Species::Glitch;
+    patched_glitch.pet_render.stage = crate::game::evolution::Stage::S6;
+    patched_glitch.day_context.date_seed = 42;
+    patched_glitch.day_context.today_ratio = 1.7;
+    patched_glitch.life_profile.burst_level = 0.0;
+    patched_glitch.life_profile.calm_mode = true;
+    crate::commands::watch::rerender_pet_for_view_model(
+        &mut patched_glitch,
+        ctx.fixed_now.unix_timestamp().max(0) as u64,
+        false,
+        ctx.fixed_now,
+    )
+    .expect("round preview fixture should rerender");
+    frames.push(frame(
+        "round-glitch-patched-s6",
+        "Round Glitch Patched S6",
+        &patched_glitch,
+        ctx,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
     frames
 }
 
@@ -98,11 +121,12 @@ pub fn round_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBundle> {
 
 fn round_bundle(frame: PreviewFrame, ctx: &PreviewRenderContext) -> PreviewScenarioBundle {
     let round = round_metadata(&frame);
+    let inputs = round_inputs_for_frame(&frame, ctx);
     PreviewScenarioBundle::from_parts(
         frame,
         PreviewScenarioKind::Round,
         "Review round macOS companion preview with aperture masking and privacy metadata.",
-        round_inputs(ctx),
+        inputs,
         Some(round),
         vec![
             "Confirm the circular aperture masks the frame corners.".to_string(),
@@ -135,6 +159,61 @@ fn round_inputs(ctx: &PreviewRenderContext) -> BTreeMap<String, Value> {
             Value::Bool(false),
         ),
     ])
+}
+
+/// Manifest inputs for the Glitch S6 patched round fixture, derived from the
+/// same pet identity, stage, and day-seed the fixture renders with (not the
+/// built view-model), so the contract is truthful. Mirrors
+/// `watch::glitch_persistence_extra_inputs`.
+fn round_inputs_for_frame(
+    frame: &PreviewFrame,
+    ctx: &PreviewRenderContext,
+) -> BTreeMap<String, Value> {
+    let mut inputs = round_inputs(ctx);
+    if frame.id == "round-glitch-patched-s6" {
+        let pet = crate::pet::generation::generate_pet("glorp-preview-glitch-persistence")
+            .with_species(crate::pet::generation::Species::Glitch);
+        let (raw_lines, raw_spans) =
+            crate::dev_preview::pets::raw_glitch_render_for_patch_selection(
+                &pet,
+                crate::game::evolution::Stage::S6,
+            );
+        let selected_patch_cells = crate::pet::render::selected_glitch_patch_cells(
+            &pet,
+            crate::game::evolution::Stage::S6,
+            42,
+            crate::pet::render::GlitchPatchTier::Heavy,
+            &raw_lines,
+            &raw_spans,
+        );
+        let selected_patch_cells_json = selected_patch_cells
+            .iter()
+            .map(|cell| json!({"row": cell.row, "col": cell.col}))
+            .collect::<Vec<_>>();
+
+        inputs.extend([
+            ("species".to_string(), json!("glitch")),
+            ("stage".to_string(), json!("s6")),
+            ("date_seed".to_string(), json!(42_u64)),
+            ("patch_tier".to_string(), json!("heavy")),
+            ("burst_level".to_string(), json!("none")),
+            ("calm_mode".to_string(), json!(true)),
+            ("feed_reaction".to_string(), json!(false)),
+            (
+                "expected_patch_count".to_string(),
+                json!(selected_patch_cells.len()),
+            ),
+            (
+                "selected_patch_cells".to_string(),
+                json!(selected_patch_cells_json),
+            ),
+            (
+                "protected_face_cells".to_string(),
+                crate::dev_preview::frame::protected_face_cells_json(),
+            ),
+        ]);
+    }
+    inputs
 }
 
 fn round_metadata(frame: &PreviewFrame) -> PreviewRoundMetadata {

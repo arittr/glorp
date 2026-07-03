@@ -4,8 +4,11 @@ use crate::error::Result;
 use crate::game::{evolution::Stage, metabolism::Mood};
 use crate::pet::{
     art::stage_label,
-    generation::{generate_pet, Species},
-    render::{render_pet, AnimationFrame, WorkAccent},
+    generation::{generate_pet, GeneratedPet, Species},
+    render::{
+        render_pet, selected_glitch_patch_cells, AnimationFrame, GlitchBurstLevel,
+        GlitchCorruptionFrame, GlitchPatchTier, StyledSegment, WorkAccent,
+    },
 };
 use crate::tui::panels::pet::pet_role_spans_for_line;
 use crate::tui::style::{semantic_styles, ColorCapability, SemanticStyles};
@@ -14,6 +17,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use serde_json::json;
+use std::collections::BTreeMap;
 
 const FRAME_WIDTH: u16 = 120;
 const COLUMN_WIDTH: u16 = FRAME_WIDTH / 6;
@@ -63,6 +68,7 @@ pub fn pet_frames(ctx: &PreviewRenderContext) -> Result<Vec<PreviewFrame>> {
         render_texture_variants(ctx),
         render_mood_set(ctx),
         render_glitch_live_states(ctx),
+        render_glitch_persistence_states(ctx),
     ])
 }
 
@@ -112,15 +118,7 @@ fn render_seeded_pet_cell(
         &pet,
         stage,
         Mood::Content,
-        AnimationFrame {
-            tick: 0,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: false,
-            blink_slowdown: 0,
-            soft_eyes: false,
-            work_accent: WorkAccent::None,
-            feed_reaction: false,
-        },
+        AnimationFrame { tick: 0, ..AnimationFrame::default() },
     );
     let mut lines = vec![Line::styled(
         format!("{} s{} {}", species.as_str(), stage_index(stage), seed),
@@ -168,15 +166,7 @@ fn render_mood_set(_ctx: &PreviewRenderContext) -> PreviewFrame {
                 &pet,
                 Stage::S4,
                 *mood,
-                AnimationFrame {
-                    tick: 1,
-                    blink_suppression_ticks: 0,
-                    hold_eyes_closed: false,
-                    blink_slowdown: 0,
-                    soft_eyes: false,
-                    work_accent: WorkAccent::None,
-                    feed_reaction: false,
-                },
+                AnimationFrame { tick: 1, ..AnimationFrame::default() },
             );
             let mut lines = vec![Line::styled(species.as_str(), styles.label)];
             for (line_index, art_line) in rendered.lines.iter().enumerate() {
@@ -241,15 +231,7 @@ fn render_pet_cell(
         &pet,
         stage,
         Mood::Content,
-        AnimationFrame {
-            tick: 0,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: false,
-            blink_slowdown: 0,
-            soft_eyes: false,
-            work_accent: crate::pet::render::WorkAccent::None,
-            feed_reaction: false,
-        },
+        AnimationFrame { tick: 0, ..AnimationFrame::default() },
     );
 
     let mut lines = vec![Line::styled(
@@ -337,12 +319,8 @@ fn render_glitch_state_cell(area: Rect, buffer: &mut Buffer, fixture: GlitchStat
         fixture.mood,
         AnimationFrame {
             tick: fixture.tick,
-            blink_suppression_ticks: 0,
-            hold_eyes_closed: false,
-            blink_slowdown: 0,
-            soft_eyes: false,
             work_accent: fixture.work_accent,
-            feed_reaction: false,
+            ..AnimationFrame::default()
         },
     );
 
@@ -360,6 +338,210 @@ fn render_glitch_state_cell(area: Rect, buffer: &mut Buffer, fixture: GlitchStat
             spans,
             ColorCapability::Truecolor,
         )));
+    }
+    Paragraph::new(lines).render(area, buffer);
+}
+
+#[derive(Clone, Copy)]
+struct GlitchPersistenceFixture {
+    label: &'static str,
+    stage: Stage,
+    date_seed: u64,
+    patch_tier: GlitchPatchTier,
+    burst_level: GlitchBurstLevel,
+    calm_mode: bool,
+    feed_reaction: bool,
+    tick: u64,
+}
+
+/// Reconstructs the same pre-13x10-frame art and spans that `render_pet`
+/// feeds into `selected_glitch_patch_cells` internally (see
+/// `apply_glitch_repair_marks` in `pet::render`), so the preview manifest can
+/// report the exact day-local repair-mark contract for a given pet/stage.
+/// `render_pet` never exposes this pre-wrap state directly, so this renders
+/// at a probe tick where the random corruption gate (every 13 ticks) and
+/// every Glitch particle effect stay clear of the 11x8 interior, then peels
+/// the 1-cell particle-frame border back off.
+pub(crate) fn raw_glitch_render_for_patch_selection(
+    pet: &GeneratedPet,
+    stage: Stage,
+) -> (Vec<String>, Vec<StyledSegment>) {
+    const SAFE_PROBE_TICK: u64 = 1;
+    let framed = render_pet(
+        pet,
+        stage,
+        Mood::Content,
+        AnimationFrame {
+            tick: SAFE_PROBE_TICK,
+            ..AnimationFrame::default()
+        },
+    );
+    let raw_lines = framed.lines[1..9]
+        .iter()
+        .map(|line| line.chars().skip(1).take(11).collect::<String>())
+        .collect::<Vec<_>>();
+    let raw_spans = framed
+        .spans
+        .into_iter()
+        .filter(|span| (1..9).contains(&span.line))
+        .map(|span| StyledSegment {
+            line: span.line - 1,
+            start: span.start - 1,
+            end: span.end - 1,
+            role: span.role,
+        })
+        .collect::<Vec<_>>();
+    (raw_lines, raw_spans)
+}
+
+fn render_glitch_persistence_states(_ctx: &PreviewRenderContext) -> PreviewFrame {
+    let fixtures = [
+        GlitchPersistenceFixture {
+            label: "quiet",
+            stage: Stage::S6,
+            date_seed: 10,
+            patch_tier: GlitchPatchTier::Quiet,
+            burst_level: GlitchBurstLevel::None,
+            calm_mode: false,
+            feed_reaction: false,
+            tick: 1,
+        },
+        GlitchPersistenceFixture {
+            label: "active",
+            stage: Stage::S6,
+            date_seed: 21,
+            patch_tier: GlitchPatchTier::Active,
+            burst_level: GlitchBurstLevel::Small,
+            calm_mode: false,
+            feed_reaction: false,
+            tick: 1,
+        },
+        GlitchPersistenceFixture {
+            label: "heavy burst",
+            stage: Stage::S6,
+            date_seed: 42,
+            patch_tier: GlitchPatchTier::Heavy,
+            burst_level: GlitchBurstLevel::Strong,
+            calm_mode: false,
+            feed_reaction: true,
+            tick: 13,
+        },
+        GlitchPersistenceFixture {
+            label: "same-day restart",
+            stage: Stage::S6,
+            date_seed: 42,
+            patch_tier: GlitchPatchTier::Heavy,
+            burst_level: GlitchBurstLevel::None,
+            calm_mode: false,
+            feed_reaction: false,
+            tick: 500,
+        },
+        GlitchPersistenceFixture {
+            label: "next-dawn reset",
+            stage: Stage::S6,
+            date_seed: 43,
+            patch_tier: GlitchPatchTier::Heavy,
+            burst_level: GlitchBurstLevel::None,
+            calm_mode: false,
+            feed_reaction: false,
+            tick: 1,
+        },
+    ];
+    let cell_width = FRAME_WIDTH / fixtures.len() as u16;
+    let mut buffer = Buffer::empty(Rect::new(0, 0, FRAME_WIDTH, GLITCH_STATE_HEIGHT));
+    let pet = generate_pet("glorp-preview-glitch-persistence").with_species(Species::Glitch);
+
+    for (index, fixture) in fixtures.into_iter().enumerate() {
+        let area = Rect::new(
+            index as u16 * cell_width,
+            0,
+            cell_width,
+            GLITCH_STATE_HEIGHT,
+        );
+        render_glitch_persistence_cell(area, &mut buffer, &pet, fixture);
+    }
+
+    let mut frame = frame_from_buffer(
+        "pet-glitch-persistence-states",
+        "Pet Glitch Persistence States",
+        &buffer,
+    );
+
+    let (raw_lines, raw_spans) = raw_glitch_render_for_patch_selection(&pet, Stage::S6);
+    let selected_patch_cells = selected_glitch_patch_cells(
+        &pet,
+        Stage::S6,
+        42,
+        GlitchPatchTier::Heavy,
+        &raw_lines,
+        &raw_spans,
+    );
+    let selected_patch_cells_json = selected_patch_cells
+        .iter()
+        .map(|cell| json!({"row": cell.row, "col": cell.col}))
+        .collect::<Vec<_>>();
+
+    frame.extra_inputs = BTreeMap::from([
+        ("species".to_string(), json!("glitch")),
+        ("fixture".to_string(), json!("glitch-persistence-states")),
+        ("date_seed".to_string(), json!(42_u64)),
+        ("patch_tier".to_string(), json!("heavy")),
+        ("burst_level".to_string(), json!("strong")),
+        ("calm_mode".to_string(), json!(false)),
+        ("feed_reaction".to_string(), json!(true)),
+        ("expected_patch_count".to_string(), json!(3)),
+        (
+            "selected_patch_cells".to_string(),
+            json!(selected_patch_cells_json),
+        ),
+        (
+            "protected_face_cells".to_string(),
+            crate::dev_preview::frame::protected_face_cells_json(),
+        ),
+        ("same_day_restart".to_string(), json!(true)),
+        ("next_dawn_reset".to_string(), json!(true)),
+    ]);
+
+    frame
+}
+
+fn render_glitch_persistence_cell(
+    area: Rect,
+    buffer: &mut Buffer,
+    pet: &GeneratedPet,
+    fixture: GlitchPersistenceFixture,
+) {
+    let styles = semantic_styles();
+    let mut palette = crate::pet::palette::resolve_pet_palette(Species::Glitch, &pet.traits);
+    crate::pet::palette::apply_mood_eye_color(&mut palette, Mood::Content);
+    let rendered = render_pet(
+        pet,
+        fixture.stage,
+        Mood::Content,
+        AnimationFrame {
+            tick: fixture.tick,
+            glitch_corruption: Some(GlitchCorruptionFrame {
+                day_seed: fixture.date_seed,
+                patch_tier: fixture.patch_tier,
+                burst_level: fixture.burst_level,
+                calm_mode: fixture.calm_mode,
+                feed_reaction: fixture.feed_reaction,
+            }),
+            ..AnimationFrame::default()
+        },
+    );
+
+    let mut lines = vec![Line::styled(fixture.label, styles.label)];
+    for (line_index, art_line) in rendered.lines.iter().enumerate() {
+        let spans = pet_role_spans_for_line(
+            art_line,
+            line_index,
+            &rendered.spans,
+            &styles,
+            &palette,
+            None,
+        );
+        lines.push(Line::from(spans));
     }
     Paragraph::new(lines).render(area, buffer);
 }
