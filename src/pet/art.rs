@@ -118,7 +118,7 @@ fn ghost_base(stage: Stage) -> &'static Template {
 
 // Validated Packet Daemon cast, "digital metamorph": each stage is a distinct
 // digital object, not a scaled packet. The packet-box is the creature's
-// childhood shell — popped lid (S2), towed frame-trailer (S3), askew slabs (S4),
+// childhood shell — popped lid (S2), towed frame-trailer (S3), leaning wafer (S4),
 // glowing chest-dock panel (S5), half-shed carapace (S6). Living lens eyes via
 // {eyes}; {mouth} slot wired at S2-S6 so every stage including the elders keeps
 // a living face. Validated cell ramp [3,8,20,34,48,58,70], strictly increasing.
@@ -529,14 +529,14 @@ const GLITCH_S3: Template = [
     "           ",
 ];
 const GLITCH_S4: Template = [
-    "     ▛▀▀▀▜ ",
-    "   ·░▌▒▓▒▐ ",
+    "  ▛▀▀▀▜    ",
+    "  ▌░▒▓▐    ",
     "  ▌░{eyes}░▐  ",
     "  ▌▒ {mouth} ▪▐  ",
-    "▌▓█▒▓▐░·   ",
-    "▌▒▓▓▒▐ ▖   ",
-    "▙▄▄▄▄▟     ",
-    " ▘▝  ▝▘    ",
+    "   ▐█▓▒▓▌· ",
+    "   ▐▒▓▓▒▌  ",
+    "   ▙▄▄▄▄▟  ",
+    "    ▘▝ ▝▘  ",
 ];
 const GLITCH_S5: Template = [
     " ▟▙     ▐  ",
@@ -1332,7 +1332,7 @@ mod tests {
             (Stage::S1, 8),
             (Stage::S2, 20),
             (Stage::S3, 34),
-            (Stage::S4, 48),
+            (Stage::S4, 44),
             (Stage::S5, 58),
             (Stage::S6, 70),
         ];
