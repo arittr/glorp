@@ -839,7 +839,7 @@ fn glitch_persistence_extra_inputs(fixture: &DayContextFrameFixture) -> BTreeMap
         ),
         (
             "protected_face_cells".to_string(),
-            crate::dev_preview::frame::protected_face_cells_json(),
+            crate::dev_preview::frame::protected_face_cells_json(&raw_spans),
         ),
     ])
 }

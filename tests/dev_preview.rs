@@ -913,12 +913,14 @@ fn dev_preview_glitch_persistence_pet_frame_records_patch_contract() {
             .len()
             >= 3
     );
+    // Span-derived face protection: the 3-cell {eyes} span + the 1-cell
+    // {mouth} span (the old 13-cell static elder island is gone).
     assert!(
         scenario["inputs"]["protected_face_cells"]
             .as_array()
             .unwrap()
             .len()
-            >= 6
+            >= 4
     );
 }
 

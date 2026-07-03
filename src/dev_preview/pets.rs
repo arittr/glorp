@@ -496,7 +496,7 @@ fn render_glitch_persistence_states(_ctx: &PreviewRenderContext) -> PreviewFrame
         ),
         (
             "protected_face_cells".to_string(),
-            crate::dev_preview::frame::protected_face_cells_json(),
+            crate::dev_preview::frame::protected_face_cells_json(&raw_spans),
         ),
         ("same_day_restart".to_string(), json!(true)),
         ("next_dawn_reset".to_string(), json!(true)),

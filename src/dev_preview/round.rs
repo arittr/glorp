@@ -209,7 +209,7 @@ fn round_inputs_for_frame(
             ),
             (
                 "protected_face_cells".to_string(),
-                crate::dev_preview::frame::protected_face_cells_json(),
+                crate::dev_preview::frame::protected_face_cells_json(&raw_spans),
             ),
         ]);
     }

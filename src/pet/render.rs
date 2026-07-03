@@ -265,7 +265,6 @@ pub fn render_pet(
                 apply_glitch_transient_corruption(
                     &mut lines,
                     &mut spans,
-                    stage,
                     frame.tick,
                     glitch.burst_level,
                     glitch.feed_reaction || frame.feed_reaction,
@@ -665,35 +664,33 @@ pub struct GlitchPatchCell {
     pub col: usize,
 }
 
+// Picked against the metamorph silhouettes (art.rs): interior ░▒▓█ body fill
+// only — never outline glyphs, face rows, or focal details (S3 ██ data-core,
+// S5 ▛◆▜ chest-dock, S6 ██ heart / inner face-frame / ═ weld seam).
 const GLITCH_S3_PATCH_CELLS: &[GlitchPatchCell] = &[
-    GlitchPatchCell { row: 4, col: 4 },
-    GlitchPatchCell { row: 4, col: 5 },
-    GlitchPatchCell { row: 4, col: 6 },
+    // chip-and-caboose: cap fill (row 1) + belly shading left of the data-core.
+    GlitchPatchCell { row: 1, col: 2 },
+    GlitchPatchCell { row: 1, col: 3 },
+    GlitchPatchCell { row: 1, col: 4 },
+    GlitchPatchCell { row: 1, col: 5 },
+    GlitchPatchCell { row: 4, col: 2 },
+    GlitchPatchCell { row: 4, col: 3 },
 ];
 
 const GLITCH_S4_PATCH_CELLS: &[GlitchPatchCell] = &[
-    GlitchPatchCell { row: 3, col: 4 },
-    GlitchPatchCell { row: 3, col: 5 },
-    GlitchPatchCell { row: 3, col: 6 },
-    GlitchPatchCell { row: 4, col: 4 },
-    GlitchPatchCell { row: 4, col: 5 },
-    GlitchPatchCell { row: 4, col: 6 },
-];
-
-const GLITCH_S5_PATCH_CELLS: &[GlitchPatchCell] = &[
-    GlitchPatchCell { row: 4, col: 3 },
+    // leaning wafer: the two belly rows between the ▐…▌ walls.
     GlitchPatchCell { row: 4, col: 4 },
     GlitchPatchCell { row: 4, col: 5 },
     GlitchPatchCell { row: 4, col: 6 },
     GlitchPatchCell { row: 4, col: 7 },
-    GlitchPatchCell { row: 5, col: 3 },
+    GlitchPatchCell { row: 5, col: 4 },
     GlitchPatchCell { row: 5, col: 5 },
+    GlitchPatchCell { row: 5, col: 6 },
     GlitchPatchCell { row: 5, col: 7 },
 ];
 
-const GLITCH_S6_PATCH_CELLS: &[GlitchPatchCell] = &[
-    GlitchPatchCell { row: 4, col: 3 },
-    GlitchPatchCell { row: 4, col: 4 },
+const GLITCH_S5_PATCH_CELLS: &[GlitchPatchCell] = &[
+    // coredock imp: shaded mass right of the ▛◆▜ dock + belly + haunch fill.
     GlitchPatchCell { row: 4, col: 5 },
     GlitchPatchCell { row: 4, col: 6 },
     GlitchPatchCell { row: 4, col: 7 },
@@ -701,7 +698,20 @@ const GLITCH_S6_PATCH_CELLS: &[GlitchPatchCell] = &[
     GlitchPatchCell { row: 5, col: 4 },
     GlitchPatchCell { row: 5, col: 5 },
     GlitchPatchCell { row: 5, col: 6 },
+    GlitchPatchCell { row: 6, col: 4 },
+];
+
+const GLITCH_S6_PATCH_CELLS: &[GlitchPatchCell] = &[
+    // shed carapace: molten body fill, dodging the ██ heart (rows 4-5 cols
+    // 8-9), the inner face-frame ▙▄▄▄▟ (row 4 cols 2-6), and the ═ seam.
+    GlitchPatchCell { row: 4, col: 7 },
+    GlitchPatchCell { row: 5, col: 2 },
+    GlitchPatchCell { row: 5, col: 4 },
+    GlitchPatchCell { row: 5, col: 5 },
+    GlitchPatchCell { row: 5, col: 6 },
     GlitchPatchCell { row: 5, col: 7 },
+    GlitchPatchCell { row: 6, col: 5 },
+    GlitchPatchCell { row: 6, col: 6 },
 ];
 
 /// Per-stage allowlist of body cells eligible to carry a persistent repair
@@ -727,26 +737,15 @@ fn span_role_at(spans: &[StyledSegment], row: usize, col: usize) -> Option<Palet
 }
 
 /// The persistent-mark counterpart to the living-face rule above: a repair
-/// mark must never sit on the eyes or mouth, and at the S5/S6 elder stages
-/// (whose expression widens onto its own island) the whole expression band is
-/// off-limits rather than just the eye/mouth spans.
-pub fn is_protected_glitch_face_cell(
-    stage: Stage,
-    row: usize,
-    col: usize,
-    spans: &[StyledSegment],
-) -> bool {
-    if matches!(
+/// mark must never sit on the eyes or mouth. Every glitch stage — elders
+/// included — carries real {eyes}/{mouth} slots since the metamorph art, so
+/// span-role protection covers the whole face; no per-stage coordinate
+/// islands.
+pub fn is_protected_glitch_face_cell(row: usize, col: usize, spans: &[StyledSegment]) -> bool {
+    matches!(
         span_role_at(spans, row, col),
         Some(PaletteRoleName::Eye | PaletteRoleName::Mouth)
-    ) {
-        return true;
-    }
-
-    match stage {
-        Stage::S5 | Stage::S6 => row == 1 || ((2..=3).contains(&row) && (3..=7).contains(&col)),
-        _ => false,
-    }
+    )
 }
 
 /// Allowlisted cells that are actually safe to mark for this rendered frame:
@@ -768,7 +767,7 @@ pub fn safe_glitch_patch_candidates(
             };
             ch != ' '
                 && unicode_width::UnicodeWidthChar::width(ch) == Some(1)
-                && !is_protected_glitch_face_cell(stage, cell.row, cell.col, spans)
+                && !is_protected_glitch_face_cell(cell.row, cell.col, spans)
         })
         .collect()
 }
@@ -988,7 +987,6 @@ fn replace_char_in_line(line: &mut String, char_index: usize, replacement: char)
 fn corruption_cells_for_moment(
     art_lines: &[String],
     spans: &[StyledSegment],
-    stage: Stage,
     tick: u64,
     burst_level: GlitchBurstLevel,
     feed_reaction: bool,
@@ -1006,7 +1004,7 @@ fn corruption_cells_for_moment(
     for (row, line) in art_lines.iter().enumerate() {
         for (col, ch) in line.chars().enumerate() {
             if ch != ' '
-                && !is_protected_glitch_face_cell(stage, row, col, spans)
+                && !is_protected_glitch_face_cell(row, col, spans)
                 && !is_eye_center(spans, row, col)
             {
                 candidates.push((row, col));
@@ -1038,17 +1036,16 @@ fn corruption_cells_for_moment(
 fn apply_glitch_transient_corruption(
     lines: &mut [String],
     spans: &mut Vec<StyledSegment>,
-    stage: Stage,
     tick: u64,
     burst_level: GlitchBurstLevel,
     feed_reaction: bool,
 ) {
-    let cells = corruption_cells_for_moment(lines, spans, stage, tick, burst_level, feed_reaction);
+    let cells = corruption_cells_for_moment(lines, spans, tick, burst_level, feed_reaction);
     if cells.is_empty() {
         return;
     }
     for (i, (row, col)) in cells.into_iter().enumerate() {
-        if is_protected_glitch_face_cell(stage, row, col, spans) || is_eye_center(spans, row, col) {
+        if is_protected_glitch_face_cell(row, col, spans) || is_eye_center(spans, row, col) {
             continue;
         }
         let noise =
@@ -2012,24 +2009,29 @@ mod tests {
         let (_pet, lines, spans) = raw_glitch_art_for_test("glitch-safe-candidates", Stage::S4);
         let candidates = safe_glitch_patch_candidates(Stage::S4, &lines, &spans);
 
-        // The S4 allowlist (GLITCH_S4_PATCH_CELLS) only names rows 3-4, so these
-        // rows are excluded because they were never offered as candidates, not
-        // because `is_protected_glitch_face_cell` ran. That's still a real
-        // safety property worth asserting (the allowlist itself never strays
-        // into the face/outline band); the protection filter's own behavior is
-        // exercised directly below in
+        // The S4 allowlist (GLITCH_S4_PATCH_CELLS) only names the belly rows
+        // 4-5, so face/outline rows are excluded because they were never
+        // offered as candidates, not because `is_protected_glitch_face_cell`
+        // ran. That's still a real safety property worth asserting (the
+        // allowlist itself never strays into the face/outline band); the
+        // protection filter's own behavior is exercised directly below in
         // `glitch_safe_patch_candidates_excludes_allowlisted_cell_under_face_span`.
-        assert!(candidates.contains(&GlitchPatchCell { row: 3, col: 5 }));
+        assert!(candidates.contains(&GlitchPatchCell { row: 4, col: 5 }));
         assert!(
-            !candidates.contains(&GlitchPatchCell { row: 1, col: 5 }),
-            "eye row is not in the S4 allowlist"
+            candidates.len() >= 6,
+            "S4 needs enough safe cells for day-local variety, got {}",
+            candidates.len()
         );
         assert!(
             !candidates.contains(&GlitchPatchCell { row: 2, col: 5 }),
+            "eye row is not in the S4 allowlist"
+        );
+        assert!(
+            !candidates.contains(&GlitchPatchCell { row: 3, col: 5 }),
             "mouth row is not in the S4 allowlist"
         );
         assert!(
-            !candidates.contains(&GlitchPatchCell { row: 0, col: 1 }),
+            !candidates.contains(&GlitchPatchCell { row: 0, col: 3 }),
             "top outline row is not in the S4 allowlist"
         );
     }
@@ -2039,10 +2041,10 @@ mod tests {
         let (_pet, lines, base_spans) =
             raw_glitch_art_for_test("glitch-safe-candidates", Stage::S4);
 
-        // Baseline: row 3, col 5 is a real S4 allowlisted body cell and is
+        // Baseline: row 4, col 5 is a real S4 allowlisted body cell and is
         // offered as a candidate absent any overlapping face span.
         let baseline = safe_glitch_patch_candidates(Stage::S4, &lines, &base_spans);
-        assert!(baseline.contains(&GlitchPatchCell { row: 3, col: 5 }));
+        assert!(baseline.contains(&GlitchPatchCell { row: 4, col: 5 }));
 
         // A synthetic Eye span covering that same allowlisted cell must still
         // exclude it from the candidates returned by the public entry point --
@@ -2052,7 +2054,7 @@ mod tests {
         // matching span, so the synthetic span is prepended ahead of the
         // real body-texture span already covering this cell.
         let mut spans_with_face_overlap = vec![StyledSegment {
-            line: 3,
+            line: 4,
             start: 5,
             end: 6,
             role: PaletteRoleName::Eye,
@@ -2061,24 +2063,40 @@ mod tests {
 
         let candidates = safe_glitch_patch_candidates(Stage::S4, &lines, &spans_with_face_overlap);
         assert!(
-            !candidates.contains(&GlitchPatchCell { row: 3, col: 5 }),
+            !candidates.contains(&GlitchPatchCell { row: 4, col: 5 }),
             "allowlisted cell overlapped by a face span must still be protected"
         );
     }
 
     #[test]
-    fn glitch_elder_expression_island_is_protected() {
-        let spans = vec![StyledSegment {
-            line: 1,
-            start: 4,
-            end: 7,
-            role: PaletteRoleName::Eye,
-        }];
+    fn glitch_face_protection_is_span_driven_at_every_stage() {
+        // Elders carry real {eyes}/{mouth} slots since the metamorph art, so
+        // face protection is purely span-role-driven — no coordinate islands.
+        let spans = vec![
+            StyledSegment {
+                line: 2,
+                start: 3,
+                end: 6,
+                role: PaletteRoleName::Eye,
+            },
+            StyledSegment {
+                line: 3,
+                start: 4,
+                end: 5,
+                role: PaletteRoleName::Mouth,
+            },
+        ];
 
-        assert!(is_protected_glitch_face_cell(Stage::S5, 1, 5, &spans));
-        assert!(is_protected_glitch_face_cell(Stage::S5, 2, 5, &spans));
-        assert!(is_protected_glitch_face_cell(Stage::S6, 3, 7, &spans));
-        assert!(!is_protected_glitch_face_cell(Stage::S6, 4, 5, &spans));
+        assert!(is_protected_glitch_face_cell(2, 4, &spans), "eye span cell");
+        assert!(
+            is_protected_glitch_face_cell(3, 4, &spans),
+            "mouth span cell"
+        );
+        assert!(
+            !is_protected_glitch_face_cell(1, 5, &spans),
+            "body cell off the face spans is unprotected (the old S5/S6 island is gone)"
+        );
+        assert!(!is_protected_glitch_face_cell(5, 5, &spans), "belly cell");
     }
 
     #[test]
@@ -2092,8 +2110,8 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, next_day);
         assert!(
-            first.len() >= 3,
-            "S4 should have enough safe cells for a heavy day"
+            first.len() >= 6,
+            "S4 needs enough safe cells that day reshuffles show different marks"
         );
     }
 
@@ -2227,7 +2245,9 @@ mod tests {
     }
 
     #[test]
-    fn glitch_repair_marks_do_not_touch_elder_expression_island() {
+    fn glitch_repair_marks_never_touch_face_spans() {
+        // Span-based successor to the old elder-island test: on a heavy day,
+        // no 1-cell repair span may overlap the rendered Eye/Mouth spans.
         let pet = generate_pet("glitch-elder-repair").with_species(Species::Glitch);
         let rendered = render_pet(
             &pet,
@@ -2246,6 +2266,17 @@ mod tests {
             },
         );
 
+        let face_spans: Vec<_> = rendered
+            .spans
+            .iter()
+            .filter(|span| matches!(span.role, PaletteRoleName::Eye | PaletteRoleName::Mouth))
+            .cloned()
+            .collect();
+        assert!(
+            !face_spans.is_empty(),
+            "S6 elder must render live Eye/Mouth spans"
+        );
+
         for span in rendered
             .spans
             .iter()
@@ -2257,12 +2288,12 @@ mod tests {
             })
             .filter(|span| span.end == span.start + 1)
         {
-            let raw_row = span.line.saturating_sub(1);
-            let raw_col = span.start.saturating_sub(1);
+            let overlaps_face = face_spans
+                .iter()
+                .any(|f| f.line == span.line && span.start >= f.start && span.start < f.end);
             assert!(
-                !((2..=3).contains(&raw_row) && (3..=7).contains(&raw_col)),
-                "repair span touched protected elder expression island: {:?}",
-                span
+                !overlaps_face,
+                "repair span overlapped a face span: {span:?}"
             );
         }
     }
