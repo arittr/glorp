@@ -127,9 +127,19 @@ pub struct ResolvedPalette {
     pub corruption: Rgb,
 }
 
+/// The `█` "glow" cells are a lifted tint of whatever the body color resolved
+/// to — derived, not stored, so it automatically tracks every dim/lift/tint
+/// transform the body goes through. ~30% toward white reads as a lit highlight
+/// while keeping the hue.
+pub fn body_glow(body: Rgb) -> Rgb {
+    let lift = |c: u8| c.saturating_add(((255 - c) as u16 * 30 / 100) as u8);
+    Rgb::new(lift(body.r), lift(body.g), lift(body.b))
+}
+
 pub fn role_color(role: PaletteRoleName, palette: &ResolvedPalette) -> Rgb {
     match role {
         PaletteRoleName::Body => palette.body,
+        PaletteRoleName::BodyGlow => body_glow(palette.body),
         PaletteRoleName::Eye => palette.eye,
         PaletteRoleName::Mouth => palette.mouth,
         PaletteRoleName::Accent => palette.accent,

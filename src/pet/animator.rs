@@ -1516,7 +1516,6 @@ mod tests {
             trigger_id: crate::tui::room::SceneTriggerId::new("wake:1"),
             target_id: "watch.room.effect",
             duration_ms: 900,
-            max_replay_age_ms: 3_600_000,
         };
 
         animator.update_scene_moments(std::slice::from_ref(&moment), &dummy_targets());
@@ -1537,7 +1536,6 @@ mod tests {
             trigger_id: crate::tui::room::SceneTriggerId::new("prop:1"),
             target_id: "watch.room.effect",
             duration_ms: 700,
-            max_replay_age_ms: 3_600_000,
         };
 
         animator.update_scene_moments(&[moment], &dummy_targets());
@@ -1555,7 +1553,6 @@ mod tests {
             trigger_id: crate::tui::room::SceneTriggerId::new("heavy:123"),
             target_id: "watch.room.effect",
             duration_ms: 700,
-            max_replay_age_ms: 3_600_000,
         };
         animator.update_scene_moments(std::slice::from_ref(&moment), &dummy_targets());
         assert!(

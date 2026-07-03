@@ -245,7 +245,6 @@ pub fn scene_prop_resonance_ripple(ctx: &PreviewRenderContext) -> PreviewStripBu
         trigger_id: crate::tui::room::SceneTriggerId::new("prop:codex_signal_lamp:1"),
         target_id: "watch.prop.codex_signal_lamp.effect",
         duration_ms: 700,
-        max_replay_age_ms: 3_600_000,
     };
     scene_strip_bundle(
         "scene-prop-resonance-ripple",
@@ -269,7 +268,6 @@ pub fn scene_feed_sweep(ctx: &PreviewRenderContext) -> PreviewStripBundle {
         trigger_id: crate::tui::room::SceneTriggerId::new("feed:1000"),
         target_id: "watch.pet.effect",
         duration_ms: 500,
-        max_replay_age_ms: 8_000,
     };
     scene_strip_bundle(
         "scene-feed-sweep",
@@ -291,7 +289,6 @@ pub fn scene_dawn_wake_wipe(ctx: &PreviewRenderContext) -> PreviewStripBundle {
         trigger_id: crate::tui::room::SceneTriggerId::new("wake:1"),
         target_id: "watch.room.effect",
         duration_ms: 900,
-        max_replay_age_ms: 3_600_000,
     };
     scene_strip_bundle(
         "scene-dawn-wake-wipe",
@@ -313,7 +310,6 @@ pub fn scene_heavy_session_shimmer(ctx: &PreviewRenderContext) -> PreviewStripBu
         trigger_id: crate::tui::room::SceneTriggerId::new("heavy:1"),
         target_id: "watch.room.effect",
         duration_ms: 600,
-        max_replay_age_ms: 3_600_000,
     };
     scene_strip_bundle(
         "scene-heavy-session-shimmer",

@@ -1,10 +1,13 @@
 /// Format an effective-tokens count for compact display.
 ///
 /// Clamps negative values to zero, then renders raw integers below 1k, a
-/// one-decimal `k` suffix below 1M, and a one-decimal `M` suffix above.
+/// one-decimal `k` suffix below 1M, a `M` suffix below 1B, and a `B` suffix
+/// above.
 pub fn format_tokens(value: f64) -> String {
     let value = value.max(0.0);
-    if value >= 1_000_000.0 {
+    if value >= 1_000_000_000.0 {
+        format!("{:.1}B", value / 1_000_000_000.0)
+    } else if value >= 1_000_000.0 {
         format!("{:.1}M", value / 1_000_000.0)
     } else if value >= 1_000.0 {
         format!("{:.1}k", value / 1_000.0)
@@ -30,6 +33,10 @@ mod tests {
         assert_eq!(format_tokens(999_999.0), "1000.0k");
         assert_eq!(format_tokens(1_000_000.0), "1.0M");
         assert_eq!(format_tokens(2_345_678.0), "2.3M");
+        assert_eq!(format_tokens(1_000_000_000.0), "1.0B");
+        // The reading that motivated this: ~1.0011B used to show as "1001.1M".
+        assert_eq!(format_tokens(1_001_100_000.0), "1.0B");
+        assert_eq!(format_tokens(2_500_000_000.0), "2.5B");
         // Tiny positive floats round down to "0".
         assert_eq!(format_tokens(0.4), "0");
         // Negatives clamp to zero.

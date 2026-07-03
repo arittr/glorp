@@ -34,6 +34,7 @@ pub fn role_names(spans: &[StyledSegment]) -> Vec<String> {
 pub fn role_name(role: PaletteRoleName) -> &'static str {
     match role {
         PaletteRoleName::Body => "body",
+        PaletteRoleName::BodyGlow => "body_glow",
         PaletteRoleName::Eye => "eye",
         PaletteRoleName::Mouth => "mouth",
         PaletteRoleName::Accent => "accent",

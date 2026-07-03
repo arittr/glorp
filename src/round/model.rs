@@ -30,7 +30,6 @@ pub struct RoundPetModel {
     pub asleep: bool,
     pub breath_offset_y: u8,
     pub facing: i8,
-    pub palette: crate::pet::palette::ResolvedPalette,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,7 +142,6 @@ pub fn derive_round_scene_model(vm: &WatchViewModel, now: OffsetDateTime) -> Rou
             asleep: vm.day_context.asleep,
             breath_offset_y: vm.breath_offset_y,
             facing: vm.facing,
-            palette: vm.pet_palette,
         },
         room: RoundRoomModel {
             biome: room_profile.biome,
