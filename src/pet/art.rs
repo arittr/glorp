@@ -932,7 +932,6 @@ mod tests {
     }
 
     // Called by the Phase 2 growth gate; see plan Task 4.
-    #[allow(dead_code)]
     #[cfg(test)]
     fn assert_in_stage_band(species: Species, stage: Stage) {
         assert_in_stage_band_value(stage, rendered_occupied_cells(species, stage));

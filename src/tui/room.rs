@@ -184,8 +184,6 @@ pub struct SceneMoment {
     pub trigger_id: SceneTriggerId,
     pub target_id: &'static str,
     pub duration_ms: u16,
-    // TODO: reserved for future replay-gating logic
-    pub max_replay_age_ms: u32,
 }
 
 /// Stable identifier for a class of scene effect.
@@ -414,7 +412,6 @@ fn scene_moments_for(
             )),
             target_id: "watch.pet.effect",
             duration_ms: 500,
-            max_replay_age_ms: 8_000,
         });
     }
     if let Some(emitter) = emitter {
@@ -427,7 +424,6 @@ fn scene_moments_for(
             )),
             target_id: prop_target_id(emitter.prop_id.as_str()),
             duration_ms: 700,
-            max_replay_age_ms: 3_600_000,
         });
     }
     if in_morning_after_window(&vm.day_context, now)
@@ -438,7 +434,6 @@ fn scene_moments_for(
             trigger_id: SceneTriggerId::new(format!("wake:{}", vm.day_context.date_seed)),
             target_id: "watch.room.effect",
             duration_ms: 900,
-            max_replay_age_ms: 3_600_000,
         });
     }
     if !vm.day_context.asleep {
@@ -456,7 +451,6 @@ fn scene_moments_for(
                 )),
                 target_id: "watch.room.effect",
                 duration_ms: 700,
-                max_replay_age_ms: 3_600_000,
             });
         }
     }

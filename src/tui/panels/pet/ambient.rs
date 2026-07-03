@@ -221,7 +221,7 @@ fn phase_count_scale(phase: DayPhase) -> f64 {
 /// reference; the other seasons nudge channels by at most
 /// SEASON_DRIFT_MAX_CHANNEL_NUDGE. Drift only — the season is never named in
 /// any UI text, speech, or dream (spec: Seasons).
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) const SEASON_DRIFT_MAX_CHANNEL_NUDGE: u8 = 8;
 
 pub(super) fn season_hue_drift(color: Color, season: Season) -> Color {
