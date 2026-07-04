@@ -2002,6 +2002,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xtask"
+version = "0.1.0"
+
+[[package]]
 name = "xterm-query"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

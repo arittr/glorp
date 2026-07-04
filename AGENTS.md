@@ -60,6 +60,21 @@ cargo test --features dev-preview dev_preview::habitat_props
 cargo test --test round_scene
 ```
 
+## Dev Task Runner
+
+Use the Rust xtask runner for repo-local development workflows that would
+otherwise become shell snippets.
+
+```bash
+cargo xtask companion fresh
+cargo xtask companion fresh --release
+```
+
+`cargo xtask companion fresh` builds the macOS companion app bundle, quits any
+running Glorp companion, waits briefly for macOS to release the process, and
+opens the freshly built `target/macos/Glorp.app`. `npm run companion` delegates
+to the same command.
+
 ## Release Procedure
 
 Glorp's full npm release is CI-owned. Do not publish from the repository root:

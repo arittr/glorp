@@ -4,6 +4,10 @@ version = "0.13.0"
 edition = "2021"
 license = "MIT"
 
+[workspace]
+members = [".", "xtask"]
+default-members = ["."]
+
 [[bin]]
 name = "glorp"
 path = "src/main.rs"

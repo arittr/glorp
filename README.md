@@ -38,6 +38,15 @@ glorp doctor
 When installing from source, make sure `ccusage` is on `PATH` or set
 `GLORP_CCUSAGE_BIN`. `glorp doctor` will tell you what's missing.
 
+### Development tasks
+
+```bash
+cargo xtask companion fresh            # debug build, rebuild and relaunch Glorp.app
+cargo xtask companion fresh --release  # release build, rebuild and relaunch Glorp.app
+```
+
+`npm run companion` delegates to the same xtask command.
+
 ## Quickstart
 
 ```bash
