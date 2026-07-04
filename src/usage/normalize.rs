@@ -207,21 +207,21 @@ fn normalize_usage_value(provider_surface: &str, value: &Value) -> NormalizedUsa
 }
 
 fn source_identity_from_row(provider_surface: &str, row: &Value) -> SourceIdentity {
-    if let Some(raw) = optional_string(row, "agent")
-        .or_else(|| optional_string(row, "source"))
-        .or_else(|| first_string(row, "sources"))
-    {
+    if let Some(raw) = source_label_from_row(row) {
         SourceIdentity::from_raw_agent(&raw)
     } else {
         SourceIdentity::from_provider_surface(provider_surface)
     }
 }
 
-fn is_aggregate_all_row(row: &Value) -> bool {
+fn source_label_from_row(row: &Value) -> Option<String> {
     optional_string(row, "agent")
         .or_else(|| optional_string(row, "source"))
         .or_else(|| first_string(row, "sources"))
-        .is_some_and(|s| s.eq_ignore_ascii_case("all"))
+}
+
+fn is_aggregate_all_row(row: &Value) -> bool {
+    source_label_from_row(row).is_some_and(|s| s.eq_ignore_ascii_case("all"))
 }
 
 fn normalize_row(
@@ -259,6 +259,16 @@ fn normalize_row(
             code: "aggregate_all_source_ignored".to_string(),
             message: format!(
                 "{provider_surface} row has agent:all with no per-source breakdown; ignoring"
+            ),
+        });
+    }
+
+    if provider_surface == "unified" && source_label_from_row(row).is_none() {
+        return Err(ProviderDiagnostic {
+            provider_surface: provider_surface.to_string(),
+            code: "aggregate_unidentified_source_ignored".to_string(),
+            message: format!(
+                "{provider_surface} row has no concrete source identity; ignoring aggregate row"
             ),
         });
     }

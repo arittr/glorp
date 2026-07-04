@@ -489,3 +489,44 @@ fn doctor_lists_discovered_sources_generically() {
         .stdout(predicate::str::contains("provider: ccusage"))
         .stdout(predicate::str::contains("claude-code provider=").not());
 }
+
+#[test]
+fn doctor_recent_24h_uses_canonical_tokenmaxxing_totals() {
+    let dir = tempdir().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "gemini".to_string(),
+            observed_at: now,
+            bucket_at: now,
+            token_contract: glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
+            total_tokens: 999_999.0,
+            effective_tokens: 999_999.0,
+            ..NormalizedUsageEvent::for_test_at(now, 999_999.0)
+        })
+        .unwrap();
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "gemini".to_string(),
+            observed_at: now,
+            bucket_at: now,
+            token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+            total_tokens: 12_000.0,
+            effective_tokens: 12_000.0,
+            ..NormalizedUsageEvent::for_test_at(now, 12_000.0)
+        })
+        .unwrap();
+    drop(usage_store);
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_CCUSAGE_BIN")
+        .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env("PATH", "/bin")
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("source: gemini recent_24h=12000"));
+}

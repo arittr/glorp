@@ -1446,6 +1446,7 @@ impl UsageStore {
             "",
         )?;
         backfill_legacy_seeded_feedable_rows(&self.conn)?;
+        mark_unified_helper_rows_non_feedable(&self.conn)?;
         self.conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_usage_events_observed_at
@@ -1566,6 +1567,17 @@ fn backfill_legacy_seeded_feedable_rows(conn: &Connection) -> crate::error::Resu
         )?;
     }
 
+    Ok(())
+}
+
+fn mark_unified_helper_rows_non_feedable(conn: &Connection) -> crate::error::Result<()> {
+    conn.execute(
+        "UPDATE usage_events
+         SET feedable = 0
+         WHERE provider_surface = 'unified'
+           AND feedable = 1",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1759,6 +1771,49 @@ mod tests {
             .token_totals_by_source_between(now - time::Duration::hours(1), now)
             .unwrap();
         assert!(totals.is_empty(), "outside-window event must be excluded");
+    }
+
+    #[test]
+    fn migration_marks_historical_unified_helper_rows_non_feedable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("usage.sqlite");
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        {
+            let mut store = UsageStore::open(&path).unwrap();
+            store
+                .insert_event(&NormalizedUsageEvent {
+                    provider_surface: "unified".to_string(),
+                    ..sample_event_at(now, 1_000.0)
+                })
+                .unwrap();
+            store
+                .insert_event(&NormalizedUsageEvent {
+                    provider_surface: "claude-code".to_string(),
+                    ..sample_event_at(now, 2_000.0)
+                })
+                .unwrap();
+        }
+
+        let store = UsageStore::open(&path).unwrap();
+        let totals = store
+            .canonical_total_tokens_by_source_between(
+                now - time::Duration::seconds(1),
+                now + time::Duration::seconds(1),
+            )
+            .unwrap();
+        let map: std::collections::BTreeMap<String, f64> = totals.into_iter().collect();
+
+        assert_eq!(map.get("claude-code"), Some(&2_000.0));
+        assert!(!map.contains_key("unified"));
+        let unified_feedable: i64 = store
+            .conn
+            .query_row(
+                "SELECT feedable FROM usage_events WHERE provider_surface = 'unified'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unified_feedable, 0);
     }
 
     #[test]

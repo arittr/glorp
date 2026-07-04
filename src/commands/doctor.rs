@@ -56,7 +56,7 @@ pub fn run() -> Result<()> {
 
     let now = OffsetDateTime::now_utc();
     let recent_sources = usage_store
-        .token_totals_by_source_between(now - time::Duration::hours(24), now)
+        .canonical_total_tokens_by_source_between(now - time::Duration::hours(24), now)
         .unwrap_or_default();
     for (source, total) in recent_sources {
         println!("source: {} recent_24h={:.0}", source, total.max(0.0));

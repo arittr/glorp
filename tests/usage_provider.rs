@@ -648,6 +648,26 @@ fn repeated_unified_poll_after_cursor_advance_emits_zero_deltas() {
 }
 
 #[test]
+fn unified_aggregate_model_breakdowns_without_source_do_not_feed() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = unified_provider("ccusage-unified-aggregate-no-source.mjs");
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_effective_tokens, 0.0);
+    assert!(
+        result.deltas.is_empty(),
+        "unidentified unified aggregate rows must not become a billable source: {:?}",
+        result.deltas
+    );
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.provider_surface == "unified"
+            && diagnostic.code == "aggregate_unidentified_source_ignored"
+    }));
+}
+
+#[test]
 fn tokenmaxxing_comparison_fixture_preserves_captured_public_totals() {
     let comparison: Value = serde_json::from_str(
         &std::fs::read_to_string(fixture_json("agentsview-drew-2026-06-18-tokenmaxxing.json"))
