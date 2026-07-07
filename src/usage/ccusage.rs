@@ -74,6 +74,27 @@ struct HelperSnapshotFlow {
     outcome: HelperSnapshotOutcome,
 }
 
+#[derive(Debug)]
+struct PreparedHelperSnapshot {
+    scope: ProviderSnapshotScope,
+    collector_surface: String,
+    command_name: String,
+    version: String,
+    rows: Vec<ProviderSnapshotRowInput>,
+    legacy_cursor_migrations: Vec<PreparedCursorMigration>,
+    diagnostics: Vec<ProviderDiagnostic>,
+    outcome: HelperSnapshotOutcome,
+    helper_configured: bool,
+}
+
+#[derive(Debug)]
+struct PreparedCursorMigration {
+    row: ProviderSnapshotRowInput,
+    record: NormalizedUsageRecord,
+    command_name: String,
+    version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelperSnapshotOutcome {
     Completed,
@@ -282,6 +303,30 @@ impl CcusageCommandProvider {
     ) -> Result<HelperSnapshotFlow> {
         let requested_provider_days = requested_provider_days_for_poll((self.clock)());
         let scope = snapshot_scope(provider_surface, command_name, requested_provider_days);
+        let prepared = self.prepare_helper_snapshot(
+            store,
+            provider_surface,
+            command_name,
+            helper,
+            daily_args,
+            feed,
+            scope,
+        )?;
+        self.finish_prepared_helper_snapshot(store, prepared, feed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_helper_snapshot(
+        &self,
+        store: &mut UsageStore,
+        provider_surface: &str,
+        command_name: &str,
+        helper: Option<&Path>,
+        daily_args: &[&str],
+        feed: bool,
+        scope: ProviderSnapshotScope,
+    ) -> Result<PreparedHelperSnapshot> {
+        let helper_configured = helper.is_some();
         let observed_at = OffsetDateTime::now_utc();
         let (version, records, invoke_diagnostics) =
             match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
@@ -297,7 +342,17 @@ impl CcusageCommandProvider {
                         observed_at,
                     )?;
                     let outcome = helper_early_exit_outcome(provider_surface, &diagnostics);
-                    return Ok(HelperSnapshotFlow { result: empty_poll(diagnostics), outcome });
+                    return Ok(PreparedHelperSnapshot {
+                        scope,
+                        collector_surface: collector_surface(command_name, provider_surface),
+                        command_name: command_name.to_string(),
+                        version: "unknown".to_string(),
+                        rows: Vec::new(),
+                        legacy_cursor_migrations: Vec::new(),
+                        diagnostics,
+                        outcome,
+                        helper_configured,
+                    });
                 }
             };
 
@@ -321,15 +376,7 @@ impl CcusageCommandProvider {
             let provider_day = match provider_day_for_record(&record) {
                 Ok(day) => day,
                 Err(_) => {
-                    let diagnostic = diagnostic(
-                        provider_surface,
-                        "invalid_period_start",
-                        &format!(
-                            "{provider_surface} invalid_period_start for period {} model {}",
-                            record.period_start,
-                            record.model.as_deref().unwrap_or("none")
-                        ),
-                    );
+                    let diagnostic = invalid_period_diagnostic(provider_surface);
                     persist_diagnostic(store, &diagnostic)?;
                     diagnostics.push(diagnostic);
                     blocking_parse_failure = true;
@@ -368,7 +415,12 @@ impl CcusageCommandProvider {
                 provider_day,
             )?;
             if feed {
-                legacy_cursor_migrations.push((row.clone(), record));
+                legacy_cursor_migrations.push(PreparedCursorMigration {
+                    row: row.clone(),
+                    record,
+                    command_name: command_name.to_string(),
+                    version: version.clone(),
+                });
             }
             rows.push(row);
         }
@@ -399,49 +451,86 @@ impl CcusageCommandProvider {
                 &failure_diagnostics,
                 observed_at,
             )?;
-            return Ok(HelperSnapshotFlow {
-                result: empty_poll(diagnostics),
+            return Ok(PreparedHelperSnapshot {
+                scope,
+                collector_surface: collector_surface(command_name, provider_surface),
+                command_name: command_name.to_string(),
+                version,
+                rows: Vec::new(),
+                legacy_cursor_migrations: Vec::new(),
+                diagnostics,
                 outcome: HelperSnapshotOutcome::Blocked,
+                helper_configured,
             });
         }
 
         if unusable_unified_response(provider_surface, &rows, &diagnostics) {
             record_snapshot_failures(store, &scope, provider_surface, &diagnostics, observed_at)?;
-            return Ok(HelperSnapshotFlow {
-                result: empty_poll(diagnostics),
+            return Ok(PreparedHelperSnapshot {
+                scope,
+                collector_surface: collector_surface(command_name, provider_surface),
+                command_name: command_name.to_string(),
+                version,
+                rows: Vec::new(),
+                legacy_cursor_migrations: Vec::new(),
+                diagnostics,
                 outcome: HelperSnapshotOutcome::FallbackAllowed,
+                helper_configured,
             });
         }
 
-        let batch = ProviderSnapshotBatchInput {
-            collector_scope_id: scope.collector_scope_id.clone(),
+        Ok(PreparedHelperSnapshot {
+            scope,
             collector_surface: collector_surface(command_name, provider_surface),
-            command: command_name.to_string(),
-            token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
-            requested_provider_days: scope.requested_provider_days.clone(),
-            provider_version: version.clone(),
-            parser_version: version.clone(),
-            observed_at,
-        };
-        store.write_provider_snapshot_batch(&batch, &rows, &[])?;
+            command_name: command_name.to_string(),
+            version,
+            rows,
+            legacy_cursor_migrations,
+            diagnostics,
+            outcome: HelperSnapshotOutcome::Completed,
+            helper_configured,
+        })
+    }
+
+    fn finish_prepared_helper_snapshot(
+        &self,
+        store: &mut UsageStore,
+        prepared: PreparedHelperSnapshot,
+        feed: bool,
+    ) -> Result<HelperSnapshotFlow> {
+        if prepared.outcome != HelperSnapshotOutcome::Completed {
+            return Ok(HelperSnapshotFlow {
+                result: empty_poll(prepared.diagnostics),
+                outcome: prepared.outcome,
+            });
+        }
+        write_prepared_snapshot(store, &prepared)?;
 
         if feed {
-            for (row, record) in legacy_cursor_migrations {
-                migrate_legacy_cursor_for_record(store, &row, &record, command_name, &version)?;
+            for migration in &prepared.legacy_cursor_migrations {
+                migrate_legacy_cursor_for_record(
+                    store,
+                    &migration.row,
+                    &migration.record,
+                    &migration.command_name,
+                    &migration.version,
+                )?;
             }
         }
 
         if !feed {
             return Ok(HelperSnapshotFlow {
-                result: empty_poll(diagnostics),
+                result: empty_poll(prepared.diagnostics),
                 outcome: HelperSnapshotOutcome::Completed,
             });
         }
 
-        let plan = store.feed_deltas_for_snapshot_rows(&rows, observed_at)?;
+        let observed_at = OffsetDateTime::now_utc();
+        let plan = store.feed_deltas_for_snapshot_rows(&prepared.rows, observed_at)?;
         if !plan.cursor_seeds.is_empty() {
             store.advance_cursors(plan.cursor_seeds.clone(), observed_at)?;
         }
+        let mut diagnostics = prepared.diagnostics;
         diagnostics.extend(
             plan.diagnostics
                 .into_iter()
@@ -451,6 +540,99 @@ impl CcusageCommandProvider {
             result: result_from_parts(plan.deltas, diagnostics),
             outcome: HelperSnapshotOutcome::Completed,
         })
+    }
+
+    fn finish_combined_helper_snapshots(
+        &self,
+        store: &mut UsageStore,
+        prepared: Vec<PreparedHelperSnapshot>,
+        combined_scope: ProviderSnapshotScope,
+        feed: bool,
+    ) -> Result<UsagePollResult> {
+        let mut diagnostics = Vec::new();
+        let mut rows = Vec::new();
+        let mut migrations = Vec::new();
+        let mut versions = Vec::new();
+        let mut has_completed = false;
+        let mut has_configured_blocker = false;
+
+        for mut helper in prepared {
+            diagnostics.extend(helper.diagnostics.clone());
+            if helper.outcome == HelperSnapshotOutcome::Blocked && helper.helper_configured {
+                has_configured_blocker = true;
+            }
+            if helper.outcome != HelperSnapshotOutcome::Completed {
+                continue;
+            }
+            has_completed = true;
+            versions.push(format!("{}={}", helper.collector_surface, helper.version));
+            rows.append(&mut helper.rows);
+            migrations.append(&mut helper.legacy_cursor_migrations);
+        }
+
+        if has_configured_blocker || !has_completed {
+            return Ok(empty_poll(diagnostics));
+        }
+
+        let version = if versions.is_empty() {
+            "unknown".to_string()
+        } else {
+            versions.join(";")
+        };
+        let prepared = PreparedHelperSnapshot {
+            scope: combined_scope,
+            collector_surface: "ccusage:scoped".to_string(),
+            command_name: "ccusage:scoped".to_string(),
+            version,
+            rows,
+            legacy_cursor_migrations: migrations,
+            diagnostics,
+            outcome: HelperSnapshotOutcome::Completed,
+            helper_configured: true,
+        };
+
+        self.finish_prepared_helper_snapshot(store, prepared, feed)
+            .map(|flow| flow.result)
+    }
+
+    fn poll_scoped_helpers(&self, store: &mut UsageStore, feed: bool) -> Result<UsagePollResult> {
+        let requested_provider_days = requested_provider_days_for_poll((self.clock)());
+        let combined_scope = ProviderSnapshotScope {
+            collector_scope_id: "ccusage:scoped:local-usage".to_string(),
+            replacement_scope_id: "ccusage:scoped:local-usage".to_string(),
+            requested_provider_days,
+        };
+        let claude = self.prepare_helper_snapshot(
+            store,
+            CLAUDE_SURFACE,
+            "ccusage",
+            self.helpers.claude.as_deref(),
+            &["daily", "--json", "--offline", "--order", "asc"],
+            feed,
+            combined_scope.clone(),
+        )?;
+        let codex = self.prepare_helper_snapshot(
+            store,
+            CODEX_SURFACE,
+            "ccusage-codex",
+            self.helpers.codex.as_deref(),
+            &["daily", "--json", "--offline"],
+            feed,
+            combined_scope.clone(),
+        )?;
+
+        self.finish_combined_helper_snapshots(store, vec![claude, codex], combined_scope, feed)
+    }
+
+    fn refresh_scoped_helper_snapshots_only(
+        &self,
+        store: &mut UsageStore,
+    ) -> Result<Vec<ProviderDiagnostic>> {
+        Ok(self.poll_scoped_helpers(store, false)?.diagnostics)
+    }
+
+    fn poll_scoped_helper_snapshots(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
+        self.poll_scoped_helpers(store, true)
     }
 
     fn snapshot_helper(
@@ -482,15 +664,7 @@ impl CcusageCommandProvider {
             let parsed_period_start = match parse_period_start(&record.period_start) {
                 Ok(parsed) => parsed,
                 Err(_) => {
-                    let diagnostic = diagnostic(
-                        provider_surface,
-                        "invalid_period_start",
-                        &format!(
-                            "{provider_surface} invalid_period_start for period {} model {}",
-                            record.period_start,
-                            record.model.as_deref().unwrap_or("none")
-                        ),
-                    );
+                    let diagnostic = invalid_period_diagnostic(provider_surface);
                     persist_diagnostic(store, &diagnostic)?;
                     diagnostics.push(diagnostic);
                     continue;
@@ -599,43 +773,13 @@ impl UsageProvider for CcusageCommandProvider {
             return Ok(unified.result);
         }
 
-        let claude = self.poll_helper(
-            store,
-            CLAUDE_SURFACE,
-            "ccusage",
-            self.helpers.claude.as_deref(),
-            &["daily", "--json", "--offline", "--order", "asc"],
-        )?;
-        let codex = self.poll_helper(
-            store,
-            CODEX_SURFACE,
-            "ccusage-codex",
-            self.helpers.codex.as_deref(),
-            &["daily", "--json", "--offline"],
-        )?;
-
-        let mut deltas = claude.result.deltas;
-        deltas.extend(codex.result.deltas);
-        let total_effective_tokens = deltas.iter().map(|delta| delta.effective_tokens).sum();
-        let focused_diagnostics = claude
-            .result
-            .diagnostics
-            .iter()
-            .chain(codex.result.diagnostics.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut diagnostics = if focused_diagnostics.is_empty() {
-            Vec::new()
-        } else {
-            unified.result.diagnostics
-        };
-        diagnostics.extend(focused_diagnostics);
-        Ok(UsagePollResult {
-            deltas,
-            diagnostics,
-            total_effective_tokens,
-            total_tokens: total_effective_tokens,
-        })
+        let mut scoped = self.poll_scoped_helper_snapshots(store)?;
+        if !scoped.diagnostics.is_empty() {
+            let mut diagnostics = unified.result.diagnostics;
+            diagnostics.extend(scoped.diagnostics);
+            scoped.diagnostics = diagnostics;
+        }
+        Ok(scoped)
     }
 
     fn refresh_snapshots_only(&self, store: &mut UsageStore) -> Result<Vec<ProviderDiagnostic>> {
@@ -653,28 +797,7 @@ impl UsageProvider for CcusageCommandProvider {
             return Ok(unified.result.diagnostics);
         }
 
-        let claude = self.refresh_helper_snapshots_only(
-            store,
-            CLAUDE_SURFACE,
-            "ccusage",
-            self.helpers.claude.as_deref(),
-            &["daily", "--json", "--offline", "--order", "asc"],
-        )?;
-        let codex = self.refresh_helper_snapshots_only(
-            store,
-            CODEX_SURFACE,
-            "ccusage-codex",
-            self.helpers.codex.as_deref(),
-            &["daily", "--json", "--offline"],
-        )?;
-
-        let focused_diagnostics = claude
-            .result
-            .diagnostics
-            .iter()
-            .chain(codex.result.diagnostics.iter())
-            .cloned()
-            .collect::<Vec<_>>();
+        let focused_diagnostics = self.refresh_scoped_helper_snapshots_only(store)?;
         let mut diagnostics = if focused_diagnostics.is_empty() {
             Vec::new()
         } else {
@@ -950,6 +1073,16 @@ fn diagnostic(provider_surface: &str, code: &str, message: &str) -> ProviderDiag
     }
 }
 
+fn invalid_period_diagnostic(provider_surface: &str) -> ProviderDiagnostic {
+    diagnostic(
+        provider_surface,
+        "invalid_period_start",
+        &format!(
+            "{provider_surface} invalid_period_start for requested provider-day row with malformed period"
+        ),
+    )
+}
+
 fn persist_diagnostic(store: &mut UsageStore, diagnostic: &ProviderDiagnostic) -> Result<()> {
     store.insert_diagnostic(&StoredProviderDiagnostic {
         provider_surface: diagnostic.provider_surface.clone(),
@@ -965,6 +1098,25 @@ fn provider_diagnostic_from_stored(diagnostic: StoredProviderDiagnostic) -> Prov
         code: diagnostic.code,
         message: diagnostic.message,
     }
+}
+
+fn write_prepared_snapshot(
+    store: &mut UsageStore,
+    prepared: &PreparedHelperSnapshot,
+) -> Result<()> {
+    let observed_at = OffsetDateTime::now_utc();
+    let batch = ProviderSnapshotBatchInput {
+        collector_scope_id: prepared.scope.collector_scope_id.clone(),
+        collector_surface: prepared.collector_surface.clone(),
+        command: prepared.command_name.clone(),
+        token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
+        requested_provider_days: prepared.scope.requested_provider_days.clone(),
+        provider_version: prepared.version.clone(),
+        parser_version: prepared.version.clone(),
+        observed_at,
+    };
+    store.write_provider_snapshot_batch(&batch, &prepared.rows, &[])?;
+    Ok(())
 }
 
 fn record_snapshot_failures(

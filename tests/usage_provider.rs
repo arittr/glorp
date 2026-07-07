@@ -1150,6 +1150,50 @@ fn malformed_ccusage_period_blocks_zero_snapshot() {
 }
 
 #[test]
+fn malformed_ccusage_period_diagnostic_omits_raw_period_and_model() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let mut store = UsageStore::open(&db_path).unwrap();
+    let provider = provider_at(
+        Some("ccusage-malformed-period-sensitive.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+    let rendered = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let persisted = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .prepare("SELECT message FROM provider_diagnostics ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    let snapshot_persisted = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .prepare("SELECT message FROM provider_snapshot_diagnostics ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    let all_messages = format!("{rendered}\n{persisted}\n{snapshot_persisted}");
+
+    assert!(all_messages.contains("invalid_period_start"));
+    assert!(!all_messages.contains("/Users/drew/private"));
+    assert!(!all_messages.contains("secret transcript"));
+    assert!(!all_messages.contains("secret-model-project-name"));
+}
+
+#[test]
 fn malformed_ccusage_period_blocks_valid_sibling_rows() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
@@ -1182,6 +1226,76 @@ fn malformed_ccusage_period_blocks_valid_sibling_rows() {
         snapshot.state,
         glorp::usage::snapshot::SnapshotState::Blocked
     );
+}
+
+#[test]
+fn ccusage_scoped_fallback_writes_one_complete_snapshot_for_sibling_sources() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude-code", "codex"]);
+    let provider = provider(Some("ccusage-ok.mjs"), Some("ccusage-codex-ok.mjs"));
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result
+        .deltas
+        .iter()
+        .any(|delta| delta.provider_surface == "claude-code"));
+    assert!(result
+        .deltas
+        .iter()
+        .any(|delta| delta.provider_surface == "codex"));
+    let snapshot = store
+        .snapshot_totals_by_source_for_provider_day(date!(2026 - 05 - 09))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    let sources = snapshot
+        .value
+        .unwrap()
+        .sources
+        .iter()
+        .map(|source| source.accounting_source.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(sources.contains("claude-code"), "{sources:?}");
+    assert!(sources.contains("codex"), "{sources:?}");
+}
+
+#[test]
+fn agentsview_poll_writes_one_complete_snapshot_for_sibling_sources() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude", "codex"]);
+    let provider = agentsview_provider("agentsview-ok.mjs");
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result
+        .deltas
+        .iter()
+        .any(|delta| delta.provider_surface == "claude"));
+    assert!(result
+        .deltas
+        .iter()
+        .any(|delta| delta.provider_surface == "codex"));
+    let snapshot = store
+        .snapshot_totals_by_source_for_provider_day(date!(2026 - 06 - 18))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    let sources = snapshot
+        .value
+        .unwrap()
+        .sources
+        .iter()
+        .map(|source| source.accounting_source.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(sources.contains("claude"), "{sources:?}");
+    assert!(sources.contains("codex"), "{sources:?}");
 }
 
 #[test]

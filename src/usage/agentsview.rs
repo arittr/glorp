@@ -50,6 +50,24 @@ struct AgentSnapshotFlow {
     result: UsagePollResult,
 }
 
+#[derive(Debug)]
+struct PreparedAgentSnapshot {
+    scope: ProviderSnapshotScope,
+    collector_surface: String,
+    command_name: String,
+    version: String,
+    rows: Vec<ProviderSnapshotRowInput>,
+    diagnostics: Vec<ProviderDiagnostic>,
+    outcome: AgentSnapshotOutcome,
+    helper_configured: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSnapshotOutcome {
+    Completed,
+    Blocked,
+}
+
 impl fmt::Debug for AgentsviewCommandProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentsviewCommandProvider")
@@ -89,58 +107,16 @@ impl AgentsviewCommandProvider {
 
     pub fn poll_current_day(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
         let now = (self.clock)();
-        let claude = self.poll_agent_current_day(store, "claude", false, now)?;
-        let codex = self.poll_agent_current_day(store, "codex", true, now)?;
-
-        let mut deltas = claude.result.deltas;
-        deltas.extend(codex.result.deltas);
-        let mut diagnostics = claude.result.diagnostics;
-        diagnostics.extend(codex.result.diagnostics);
-        Ok(result_from_parts(deltas, diagnostics))
+        let date = tokenmaxxing_provider_day(now).to_string();
+        self.poll_combined_agents(
+            store,
+            UsageRange::CurrentDay { since: date.clone(), until: date },
+            true,
+        )
     }
 
     pub fn poll_full_history(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
-        let claude = self.poll_agent_full_history(store, "claude", false)?;
-        let codex = self.poll_agent_full_history(store, "codex", true)?;
-        let mut deltas = claude.result.deltas;
-        deltas.extend(codex.result.deltas);
-        let mut diagnostics = claude.result.diagnostics;
-        diagnostics.extend(codex.result.diagnostics);
-        Ok(result_from_parts(deltas, diagnostics))
-    }
-
-    fn poll_agent_current_day(
-        &self,
-        store: &mut UsageStore,
-        agent: &str,
-        no_sync: bool,
-        now: OffsetDateTime,
-    ) -> Result<AgentSnapshotFlow> {
-        let date = tokenmaxxing_provider_day(now).to_string();
-        self.poll_agent_flow_with_timeout(
-            store,
-            agent,
-            no_sync,
-            UsageRange::CurrentDay { since: date.clone(), until: date },
-            HELPER_SUBPROCESS_TIMEOUT,
-            true,
-        )
-    }
-
-    fn poll_agent_full_history(
-        &self,
-        store: &mut UsageStore,
-        agent: &str,
-        no_sync: bool,
-    ) -> Result<AgentSnapshotFlow> {
-        self.poll_agent_flow_with_timeout(
-            store,
-            agent,
-            no_sync,
-            UsageRange::FullHistory,
-            HELPER_SUBPROCESS_TIMEOUT,
-            true,
-        )
+        self.poll_combined_agents(store, UsageRange::FullHistory, true)
     }
 
     #[cfg(test)]
@@ -157,24 +133,7 @@ impl AgentsviewCommandProvider {
             .result)
     }
 
-    fn refresh_agent_snapshots_only(
-        &self,
-        store: &mut UsageStore,
-        agent: &str,
-        no_sync: bool,
-    ) -> Result<AgentSnapshotFlow> {
-        let now = (self.clock)();
-        let date = tokenmaxxing_provider_day(now).to_string();
-        self.poll_agent_flow_with_timeout(
-            store,
-            agent,
-            no_sync,
-            UsageRange::CurrentDay { since: date.clone(), until: date },
-            HELPER_SUBPROCESS_TIMEOUT,
-            false,
-        )
-    }
-
+    #[cfg(test)]
     fn poll_agent_flow_with_timeout(
         &self,
         store: &mut UsageStore,
@@ -186,6 +145,21 @@ impl AgentsviewCommandProvider {
     ) -> Result<AgentSnapshotFlow> {
         let requested_provider_days = requested_provider_days_for_poll((self.clock)());
         let scope = snapshot_scope(agent, requested_provider_days);
+        let prepared =
+            self.prepare_agent_snapshot(store, agent, no_sync, range, timeout, scope)?;
+        self.finish_prepared_agent_snapshot(store, prepared, feed)
+    }
+
+    fn prepare_agent_snapshot(
+        &self,
+        store: &mut UsageStore,
+        agent: &str,
+        no_sync: bool,
+        range: UsageRange,
+        timeout: Duration,
+        scope: ProviderSnapshotScope,
+    ) -> Result<PreparedAgentSnapshot> {
+        let helper_configured = self.paths.agentsview.is_some();
         let observed_at = OffsetDateTime::now_utc();
         let Some(helper) = self.paths.agentsview.as_deref() else {
             let diagnostic = diagnostic(agent, "missing_helper", "agentsview helper was not found");
@@ -197,7 +171,16 @@ impl AgentsviewCommandProvider {
                 std::slice::from_ref(&diagnostic),
                 observed_at,
             )?;
-            return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
+            return Ok(PreparedAgentSnapshot {
+                scope,
+                collector_surface: collector_surface(agent),
+                command_name: AGENTSVIEW_COMMAND.to_string(),
+                version: "unknown".to_string(),
+                rows: Vec::new(),
+                diagnostics: vec![diagnostic],
+                outcome: AgentSnapshotOutcome::Blocked,
+                helper_configured,
+            });
         };
         if !helper.exists() {
             let diagnostic = diagnostic(agent, "missing_helper", "agentsview helper was not found");
@@ -209,7 +192,16 @@ impl AgentsviewCommandProvider {
                 std::slice::from_ref(&diagnostic),
                 observed_at,
             )?;
-            return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
+            return Ok(PreparedAgentSnapshot {
+                scope,
+                collector_surface: collector_surface(agent),
+                command_name: AGENTSVIEW_COMMAND.to_string(),
+                version: "unknown".to_string(),
+                rows: Vec::new(),
+                diagnostics: vec![diagnostic],
+                outcome: AgentSnapshotOutcome::Blocked,
+                helper_configured,
+            });
         }
 
         let version = self
@@ -234,7 +226,16 @@ impl AgentsviewCommandProvider {
                     std::slice::from_ref(&diagnostic),
                     observed_at,
                 )?;
-                return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
+                return Ok(PreparedAgentSnapshot {
+                    scope,
+                    collector_surface: collector_surface(agent),
+                    command_name: AGENTSVIEW_COMMAND.to_string(),
+                    version,
+                    rows: Vec::new(),
+                    diagnostics: vec![diagnostic],
+                    outcome: AgentSnapshotOutcome::Blocked,
+                    helper_configured,
+                });
             }
             Err(err) => return Err(err),
         };
@@ -253,7 +254,16 @@ impl AgentsviewCommandProvider {
                 std::slice::from_ref(&diagnostic),
                 observed_at,
             )?;
-            return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
+            return Ok(PreparedAgentSnapshot {
+                scope,
+                collector_surface: collector_surface(agent),
+                command_name: AGENTSVIEW_COMMAND.to_string(),
+                version,
+                rows: Vec::new(),
+                diagnostics: vec![diagnostic],
+                outcome: AgentSnapshotOutcome::Blocked,
+                helper_configured,
+            });
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -268,7 +278,16 @@ impl AgentsviewCommandProvider {
                     std::slice::from_ref(&diagnostic),
                     observed_at,
                 )?;
-                return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
+                return Ok(PreparedAgentSnapshot {
+                    scope,
+                    collector_surface: collector_surface(agent),
+                    command_name: AGENTSVIEW_COMMAND.to_string(),
+                    version,
+                    rows: Vec::new(),
+                    diagnostics: vec![diagnostic],
+                    outcome: AgentSnapshotOutcome::Blocked,
+                    helper_configured,
+                });
             }
         };
         for diagnostic in &batch.diagnostics {
@@ -346,29 +365,51 @@ impl AgentsviewCommandProvider {
                 diagnostics.push(diagnostic);
             }
             record_snapshot_failures(store, &scope, agent, &failure_diagnostics, observed_at)?;
-            return Ok(AgentSnapshotFlow { result: empty_poll(diagnostics) });
+            return Ok(PreparedAgentSnapshot {
+                scope,
+                collector_surface: collector_surface(agent),
+                command_name: AGENTSVIEW_COMMAND.to_string(),
+                version,
+                rows: Vec::new(),
+                diagnostics,
+                outcome: AgentSnapshotOutcome::Blocked,
+                helper_configured,
+            });
         }
 
-        let batch = ProviderSnapshotBatchInput {
-            collector_scope_id: scope.collector_scope_id.clone(),
+        Ok(PreparedAgentSnapshot {
+            scope,
             collector_surface: collector_surface(agent),
-            command: AGENTSVIEW_COMMAND.to_string(),
-            token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
-            requested_provider_days: scope.requested_provider_days.clone(),
-            provider_version: version.clone(),
-            parser_version: version,
-            observed_at,
-        };
-        store.write_provider_snapshot_batch(&batch, &rows, &[])?;
+            command_name: AGENTSVIEW_COMMAND.to_string(),
+            version,
+            rows,
+            diagnostics,
+            outcome: AgentSnapshotOutcome::Completed,
+            helper_configured,
+        })
+    }
+
+    fn finish_prepared_agent_snapshot(
+        &self,
+        store: &mut UsageStore,
+        prepared: PreparedAgentSnapshot,
+        feed: bool,
+    ) -> Result<AgentSnapshotFlow> {
+        if prepared.outcome != AgentSnapshotOutcome::Completed {
+            return Ok(AgentSnapshotFlow { result: empty_poll(prepared.diagnostics) });
+        }
+        write_prepared_snapshot(store, &prepared)?;
 
         if !feed {
-            return Ok(AgentSnapshotFlow { result: empty_poll(diagnostics) });
+            return Ok(AgentSnapshotFlow { result: empty_poll(prepared.diagnostics) });
         }
 
-        let plan = store.feed_deltas_for_snapshot_rows(&rows, observed_at)?;
+        let observed_at = OffsetDateTime::now_utc();
+        let plan = store.feed_deltas_for_snapshot_rows(&prepared.rows, observed_at)?;
         if !plan.cursor_seeds.is_empty() {
             store.advance_cursors(plan.cursor_seeds.clone(), observed_at)?;
         }
+        let mut diagnostics = prepared.diagnostics;
         diagnostics.extend(
             plan.diagnostics
                 .into_iter()
@@ -377,6 +418,89 @@ impl AgentsviewCommandProvider {
         Ok(AgentSnapshotFlow {
             result: result_from_parts(plan.deltas, diagnostics),
         })
+    }
+
+    fn poll_combined_agents(
+        &self,
+        store: &mut UsageStore,
+        range: UsageRange,
+        feed: bool,
+    ) -> Result<UsagePollResult> {
+        let requested_provider_days = requested_provider_days_for_poll((self.clock)());
+        let combined_scope = ProviderSnapshotScope {
+            collector_scope_id: "agentsview:scoped:local-usage".to_string(),
+            replacement_scope_id: "agentsview:scoped:local-usage".to_string(),
+            requested_provider_days,
+        };
+        let claude = self.prepare_agent_snapshot(
+            store,
+            "claude",
+            false,
+            range.clone(),
+            HELPER_SUBPROCESS_TIMEOUT,
+            combined_scope.clone(),
+        )?;
+        let codex = self.prepare_agent_snapshot(
+            store,
+            "codex",
+            true,
+            range,
+            HELPER_SUBPROCESS_TIMEOUT,
+            combined_scope.clone(),
+        )?;
+
+        self.finish_combined_agent_snapshots(store, vec![claude, codex], combined_scope, feed)
+    }
+
+    fn finish_combined_agent_snapshots(
+        &self,
+        store: &mut UsageStore,
+        prepared: Vec<PreparedAgentSnapshot>,
+        combined_scope: ProviderSnapshotScope,
+        feed: bool,
+    ) -> Result<UsagePollResult> {
+        let mut diagnostics = Vec::new();
+        let mut rows = Vec::new();
+        let mut versions = Vec::new();
+        let mut has_completed = false;
+        let mut has_configured_blocker = false;
+
+        for mut agent in prepared {
+            diagnostics.extend(agent.diagnostics.clone());
+            if agent.outcome == AgentSnapshotOutcome::Blocked && agent.helper_configured {
+                has_configured_blocker = true;
+            }
+            if agent.outcome != AgentSnapshotOutcome::Completed {
+                continue;
+            }
+            has_completed = true;
+            versions.push(format!("{}={}", agent.collector_surface, agent.version));
+            rows.append(&mut agent.rows);
+        }
+
+        if has_configured_blocker || !has_completed {
+            return Ok(empty_poll(diagnostics));
+        }
+
+        let version = if versions.is_empty() {
+            "unknown".to_string()
+        } else {
+            versions.join(";")
+        };
+        let prepared = PreparedAgentSnapshot {
+            scope: combined_scope,
+            collector_surface: "agentsview:scoped".to_string(),
+            command_name: AGENTSVIEW_COMMAND.to_string(),
+            version,
+            rows,
+            diagnostics,
+            outcome: AgentSnapshotOutcome::Completed,
+            helper_configured: true,
+        };
+
+        Ok(self
+            .finish_prepared_agent_snapshot(store, prepared, feed)?
+            .result)
     }
 
     fn snapshot_agent_for_calibration(
@@ -545,12 +669,15 @@ impl UsageProvider for AgentsviewCommandProvider {
     }
 
     fn refresh_snapshots_only(&self, store: &mut UsageStore) -> Result<Vec<ProviderDiagnostic>> {
-        let claude = self.refresh_agent_snapshots_only(store, "claude", false)?;
-        let codex = self.refresh_agent_snapshots_only(store, "codex", true)?;
-
-        let mut diagnostics = claude.result.diagnostics;
-        diagnostics.extend(codex.result.diagnostics);
-        Ok(diagnostics)
+        let now = (self.clock)();
+        let date = tokenmaxxing_provider_day(now).to_string();
+        Ok(self
+            .poll_combined_agents(
+                store,
+                UsageRange::CurrentDay { since: date.clone(), until: date },
+                false,
+            )?
+            .diagnostics)
     }
 
     fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot> {
@@ -636,6 +763,7 @@ fn empty_poll(diagnostics: Vec<ProviderDiagnostic>) -> UsagePollResult {
     }
 }
 
+#[cfg(test)]
 fn snapshot_scope(agent: &str, requested_provider_days: Vec<Date>) -> ProviderSnapshotScope {
     ProviderSnapshotScope {
         collector_scope_id: format!("agentsview:{agent}:local-usage"),
@@ -671,6 +799,22 @@ fn provider_diagnostic_from_stored(diagnostic: StoredProviderDiagnostic) -> Prov
         code: diagnostic.code,
         message: diagnostic.message,
     }
+}
+
+fn write_prepared_snapshot(store: &mut UsageStore, prepared: &PreparedAgentSnapshot) -> Result<()> {
+    let observed_at = OffsetDateTime::now_utc();
+    let batch = ProviderSnapshotBatchInput {
+        collector_scope_id: prepared.scope.collector_scope_id.clone(),
+        collector_surface: prepared.collector_surface.clone(),
+        command: prepared.command_name.clone(),
+        token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
+        requested_provider_days: prepared.scope.requested_provider_days.clone(),
+        provider_version: prepared.version.clone(),
+        parser_version: prepared.version.clone(),
+        observed_at,
+    };
+    store.write_provider_snapshot_batch(&batch, &prepared.rows, &[])?;
+    Ok(())
 }
 
 fn record_snapshot_failures(
