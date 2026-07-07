@@ -19,6 +19,7 @@ use crate::usage::snapshot::{
     ProviderSnapshotBatchInput, ProviderSnapshotDiagnosticInput, ProviderSnapshotRowInput,
 };
 use crate::usage::token_contract::TOKENMAXXING_TOTAL_V1;
+use serde_json::Value;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -60,6 +61,7 @@ struct PreparedAgentSnapshot {
     diagnostics: Vec<ProviderDiagnostic>,
     outcome: AgentSnapshotOutcome,
     helper_configured: bool,
+    covered_accounting_sources: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +182,7 @@ impl AgentsviewCommandProvider {
                 diagnostics: vec![diagnostic],
                 outcome: AgentSnapshotOutcome::Blocked,
                 helper_configured,
+                covered_accounting_sources: Some(vec![agent.to_string()]),
             });
         };
         if !helper.exists() {
@@ -201,6 +204,7 @@ impl AgentsviewCommandProvider {
                 diagnostics: vec![diagnostic],
                 outcome: AgentSnapshotOutcome::Blocked,
                 helper_configured,
+                covered_accounting_sources: Some(vec![agent.to_string()]),
             });
         }
 
@@ -235,6 +239,7 @@ impl AgentsviewCommandProvider {
                     diagnostics: vec![diagnostic],
                     outcome: AgentSnapshotOutcome::Blocked,
                     helper_configured,
+                    covered_accounting_sources: Some(vec![agent.to_string()]),
                 });
             }
             Err(err) => return Err(err),
@@ -263,10 +268,42 @@ impl AgentsviewCommandProvider {
                 diagnostics: vec![diagnostic],
                 outcome: AgentSnapshotOutcome::Blocked,
                 helper_configured,
+                covered_accounting_sources: Some(vec![agent.to_string()]),
             });
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let (stdout, mut diagnostics) = match filter_agentsview_json_to_requested_days(
+            agent,
+            &stdout,
+            &scope.requested_provider_days,
+        ) {
+            Ok(filtered) => filtered,
+            Err(diagnostic) => {
+                persist_diagnostic(store, &diagnostic)?;
+                record_snapshot_failures(
+                    store,
+                    &scope,
+                    agent,
+                    std::slice::from_ref(&diagnostic),
+                    observed_at,
+                )?;
+                return Ok(PreparedAgentSnapshot {
+                    scope,
+                    collector_surface: collector_surface(agent),
+                    command_name: AGENTSVIEW_COMMAND.to_string(),
+                    version,
+                    rows: Vec::new(),
+                    diagnostics: vec![diagnostic],
+                    outcome: AgentSnapshotOutcome::Blocked,
+                    helper_configured,
+                    covered_accounting_sources: Some(vec![agent.to_string()]),
+                });
+            }
+        };
+        for diagnostic in &diagnostics {
+            persist_diagnostic(store, diagnostic)?;
+        }
         let batch = match normalize_agentsview_json(agent, &stdout) {
             Ok(batch) => batch,
             Err(diagnostic) => {
@@ -287,6 +324,7 @@ impl AgentsviewCommandProvider {
                     diagnostics: vec![diagnostic],
                     outcome: AgentSnapshotOutcome::Blocked,
                     helper_configured,
+                    covered_accounting_sources: Some(vec![agent.to_string()]),
                 });
             }
         };
@@ -295,7 +333,7 @@ impl AgentsviewCommandProvider {
         }
 
         let mut rows = Vec::new();
-        let mut diagnostics = batch.diagnostics.clone();
+        diagnostics.extend(batch.diagnostics.clone());
         let mut blocking_parse_failure = batch
             .diagnostics
             .iter()
@@ -374,6 +412,7 @@ impl AgentsviewCommandProvider {
                 diagnostics,
                 outcome: AgentSnapshotOutcome::Blocked,
                 helper_configured,
+                covered_accounting_sources: Some(vec![agent.to_string()]),
             });
         }
 
@@ -386,6 +425,7 @@ impl AgentsviewCommandProvider {
             diagnostics,
             outcome: AgentSnapshotOutcome::Completed,
             helper_configured,
+            covered_accounting_sources: Some(vec![agent.to_string()]),
         })
     }
 
@@ -462,6 +502,8 @@ impl AgentsviewCommandProvider {
         let mut diagnostics = Vec::new();
         let mut rows = Vec::new();
         let mut versions = Vec::new();
+        let mut covered_sources = Vec::new();
+        let mut coverage_known = true;
         let mut has_completed = false;
         let mut has_configured_blocker = false;
 
@@ -475,6 +517,10 @@ impl AgentsviewCommandProvider {
             }
             has_completed = true;
             versions.push(format!("{}={}", agent.collector_surface, agent.version));
+            match agent.covered_accounting_sources.take() {
+                Some(sources) => covered_sources.extend(sources),
+                None => coverage_known = false,
+            }
             rows.append(&mut agent.rows);
         }
 
@@ -496,6 +542,13 @@ impl AgentsviewCommandProvider {
             diagnostics,
             outcome: AgentSnapshotOutcome::Completed,
             helper_configured: true,
+            covered_accounting_sources: if coverage_known {
+                covered_sources.sort();
+                covered_sources.dedup();
+                Some(covered_sources)
+            } else {
+                None
+            },
         };
 
         Ok(self
@@ -784,6 +837,49 @@ fn diagnostic(provider_surface: &str, code: &str, message: &str) -> ProviderDiag
     }
 }
 
+fn filter_agentsview_json_to_requested_days(
+    agent: &str,
+    text: &str,
+    requested_provider_days: &[Date],
+) -> std::result::Result<(String, Vec<ProviderDiagnostic>), ProviderDiagnostic> {
+    let mut value: Value = serde_json::from_str(text).map_err(|_| {
+        diagnostic(
+            agent,
+            "invalid_json",
+            &format!("agentsview {agent} returned invalid_json"),
+        )
+    })?;
+    let Some(rows) = value.get_mut("daily").and_then(Value::as_array_mut) else {
+        return Ok((text.to_string(), Vec::new()));
+    };
+
+    let mut diagnostics = Vec::new();
+    let mut kept = Vec::new();
+    for row in std::mem::take(rows) {
+        if let Some(provider_day) = provider_day_from_raw_agentsview_row(&row) {
+            if !requested_provider_days.contains(&provider_day) {
+                diagnostics.push(diagnostic(
+                    agent,
+                    "unexpected_provider_day",
+                    &format!("agentsview returned unrequested provider day {provider_day}"),
+                ));
+                continue;
+            }
+        }
+        kept.push(row);
+    }
+    *rows = kept;
+    Ok((value.to_string(), diagnostics))
+}
+
+fn provider_day_from_raw_agentsview_row(row: &Value) -> Option<Date> {
+    row.get("date")
+        .or_else(|| row.get("period"))
+        .and_then(Value::as_str)
+        .and_then(|period| parse_agentsview_period_date(period).ok())
+        .map(|(_date, period_start)| period_start.date())
+}
+
 fn persist_diagnostic(store: &UsageStore, diagnostic: &ProviderDiagnostic) -> Result<()> {
     store.insert_diagnostic(&StoredProviderDiagnostic {
         provider_surface: diagnostic.provider_surface.clone(),
@@ -809,7 +905,7 @@ fn write_prepared_snapshot(store: &mut UsageStore, prepared: &PreparedAgentSnaps
         command: prepared.command_name.clone(),
         token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
         requested_provider_days: prepared.scope.requested_provider_days.clone(),
-        covered_accounting_sources: None,
+        covered_accounting_sources: prepared.covered_accounting_sources.clone(),
         provider_version: prepared.version.clone(),
         parser_version: prepared.version.clone(),
         observed_at,

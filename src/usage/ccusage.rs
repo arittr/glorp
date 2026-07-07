@@ -13,6 +13,7 @@ use crate::usage::snapshot::{
     ProviderSnapshotBatchInput, ProviderSnapshotDiagnosticInput, ProviderSnapshotRowInput,
 };
 use crate::usage::token_contract::TOKENMAXXING_TOTAL_V1;
+use serde_json::Value;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::{self, Read};
@@ -158,6 +159,7 @@ impl CcusageCommandProvider {
         command_name: &str,
         helper: Option<&Path>,
         daily_args: &[&str],
+        requested_provider_days: Option<&[Date]>,
     ) -> Result<HelperInvocation> {
         let Some(helper) = helper else {
             let diagnostic = diagnostic(
@@ -238,6 +240,20 @@ impl CcusageCommandProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let (stdout, mut diagnostics) = if let Some(days) = requested_provider_days {
+            match filter_usage_json_to_requested_days(provider_surface, &stdout, days) {
+                Ok(filtered) => filtered,
+                Err(diagnostic) => {
+                    persist_diagnostic(store, &diagnostic)?;
+                    return Ok(HelperInvocation::EarlyExit { diagnostics: vec![diagnostic] });
+                }
+            }
+        } else {
+            (stdout.to_string(), Vec::new())
+        };
+        for diagnostic in &diagnostics {
+            persist_diagnostic(store, diagnostic)?;
+        }
         let batch = match normalize_usage_json(provider_surface, &stdout) {
             Ok(batch) => batch,
             Err(diagnostic) => {
@@ -248,13 +264,10 @@ impl CcusageCommandProvider {
         for diagnostic in &batch.diagnostics {
             persist_diagnostic(store, diagnostic)?;
         }
+        diagnostics.extend(batch.diagnostics);
         let records = batch.records;
 
-        Ok(HelperInvocation::Records {
-            version,
-            records,
-            diagnostics: batch.diagnostics,
-        })
+        Ok(HelperInvocation::Records { version, records, diagnostics })
     }
 
     fn poll_helper(
@@ -329,34 +342,40 @@ impl CcusageCommandProvider {
     ) -> Result<PreparedHelperSnapshot> {
         let helper_configured = helper.is_some();
         let observed_at = OffsetDateTime::now_utc();
-        let (version, records, invoke_diagnostics) =
-            match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
-                HelperInvocation::Records { version, records, diagnostics } => {
-                    (version, records, diagnostics)
-                }
-                HelperInvocation::EarlyExit { diagnostics } => {
-                    record_snapshot_failures(
-                        store,
-                        &scope,
-                        provider_surface,
-                        &diagnostics,
-                        observed_at,
-                    )?;
-                    let outcome = helper_early_exit_outcome(provider_surface, &diagnostics);
-                    return Ok(PreparedHelperSnapshot {
-                        scope,
-                        collector_surface: collector_surface(command_name, provider_surface),
-                        command_name: command_name.to_string(),
-                        version: "unknown".to_string(),
-                        rows: Vec::new(),
-                        legacy_cursor_migrations: Vec::new(),
-                        diagnostics,
-                        outcome,
-                        helper_configured,
-                        covered_accounting_sources: covered_sources_for_helper(provider_surface),
-                    });
-                }
-            };
+        let (version, records, invoke_diagnostics) = match self.invoke_helper(
+            store,
+            provider_surface,
+            command_name,
+            helper,
+            daily_args,
+            Some(&scope.requested_provider_days),
+        )? {
+            HelperInvocation::Records { version, records, diagnostics } => {
+                (version, records, diagnostics)
+            }
+            HelperInvocation::EarlyExit { diagnostics } => {
+                record_snapshot_failures(
+                    store,
+                    &scope,
+                    provider_surface,
+                    &diagnostics,
+                    observed_at,
+                )?;
+                let outcome = helper_early_exit_outcome(provider_surface, &diagnostics);
+                return Ok(PreparedHelperSnapshot {
+                    scope,
+                    collector_surface: collector_surface(command_name, provider_surface),
+                    command_name: command_name.to_string(),
+                    version: "unknown".to_string(),
+                    rows: Vec::new(),
+                    legacy_cursor_migrations: Vec::new(),
+                    diagnostics,
+                    outcome,
+                    helper_configured,
+                    covered_accounting_sources: covered_sources_for_helper(provider_surface),
+                });
+            }
+        };
 
         // Record the helper version on the metadata cursor. This is a sentinel row
         // distinct from the data cursors that gate `UsageDelta` emission: data
@@ -661,19 +680,25 @@ impl CcusageCommandProvider {
         helper: Option<&Path>,
         daily_args: &[&str],
     ) -> Result<UsageSnapshot> {
-        let (version, records, invoke_diagnostics) =
-            match self.invoke_helper(store, provider_surface, command_name, helper, daily_args)? {
-                HelperInvocation::Records { version, records, diagnostics } => {
-                    (version, records, diagnostics)
-                }
-                HelperInvocation::EarlyExit { diagnostics } => {
-                    return Ok(UsageSnapshot {
-                        daily_usage: Vec::new(),
-                        cursor_updates: Vec::new(),
-                        diagnostics,
-                    });
-                }
-            };
+        let (version, records, invoke_diagnostics) = match self.invoke_helper(
+            store,
+            provider_surface,
+            command_name,
+            helper,
+            daily_args,
+            None,
+        )? {
+            HelperInvocation::Records { version, records, diagnostics } => {
+                (version, records, diagnostics)
+            }
+            HelperInvocation::EarlyExit { diagnostics } => {
+                return Ok(UsageSnapshot {
+                    daily_usage: Vec::new(),
+                    cursor_updates: Vec::new(),
+                    diagnostics,
+                });
+            }
+        };
 
         let mut daily_usage = Vec::new();
         let mut cursor_updates = Vec::new();
@@ -1096,6 +1121,55 @@ fn diagnostic(provider_surface: &str, code: &str, message: &str) -> ProviderDiag
         code: code.to_string(),
         message: message.to_string(),
     }
+}
+
+fn filter_usage_json_to_requested_days(
+    provider_surface: &str,
+    text: &str,
+    requested_provider_days: &[Date],
+) -> std::result::Result<(String, Vec<ProviderDiagnostic>), ProviderDiagnostic> {
+    let mut value: Value = serde_json::from_str(text).map_err(|_| {
+        diagnostic(
+            provider_surface,
+            "invalid_json",
+            &format!("{provider_surface} returned invalid_json"),
+        )
+    })?;
+    let rows = if value.get("daily").is_some() {
+        value.get_mut("daily")
+    } else {
+        value.get_mut("data")
+    }
+    .and_then(Value::as_array_mut);
+    let Some(rows) = rows else {
+        return Ok((text.to_string(), Vec::new()));
+    };
+
+    let mut diagnostics = Vec::new();
+    let mut kept = Vec::new();
+    for row in std::mem::take(rows) {
+        if let Some(provider_day) = provider_day_from_raw_usage_row(&row) {
+            if !requested_provider_days.contains(&provider_day) {
+                diagnostics.push(diagnostic(
+                    provider_surface,
+                    "unexpected_provider_day",
+                    &format!("{provider_surface} returned unrequested provider day {provider_day}"),
+                ));
+                continue;
+            }
+        }
+        kept.push(row);
+    }
+    *rows = kept;
+    Ok((value.to_string(), diagnostics))
+}
+
+fn provider_day_from_raw_usage_row(row: &Value) -> Option<Date> {
+    row.get("date")
+        .or_else(|| row.get("period"))
+        .and_then(Value::as_str)
+        .and_then(|period| parse_period_start(period).ok())
+        .map(|period_start| period_start.date())
 }
 
 fn invalid_period_diagnostic(provider_surface: &str) -> ProviderDiagnostic {

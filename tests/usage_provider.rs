@@ -6,6 +6,7 @@ use glorp::usage::ccusage::{CcusageCommandProvider, HelperDiscovery, HelperPaths
 use glorp::usage::identity::SourceFamily;
 use glorp::usage::normalize::RawTokenTotals;
 use glorp::usage::provider::{ProviderCursorKey, UsagePollResult, UsageProvider};
+use glorp::usage::snapshot::{ProviderSnapshotBatchInput, ProviderSnapshotRowInput};
 use serde::Serialize;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -140,6 +141,55 @@ fn record_common_fixture_sources(store: &mut UsageStore) {
             "claude",
         ],
     );
+}
+
+fn seed_source_snapshot(
+    store: &mut UsageStore,
+    provider_day: time::Date,
+    accounting_source: &str,
+    total_tokens: f64,
+) {
+    let observed_at = OffsetDateTime::now_utc();
+    let cursor_update = ProviderCursorUpdate {
+        provider_surface: accounting_source.to_string(),
+        cursor_key: format!("test:{accounting_source}:{provider_day}"),
+        cursor_value: "{}".to_string(),
+        provider_version: "test".to_string(),
+        parser_version: "test".to_string(),
+    };
+    let row = ProviderSnapshotRowInput {
+        replacement_scope_id: format!("{accounting_source}:local-usage"),
+        collector_scope_id: "test:seed".to_string(),
+        collector_surface: "test:seed".to_string(),
+        command: "test".to_string(),
+        token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+        accounting_source: accounting_source.to_string(),
+        provider_day,
+        model: Some("seed-model".to_string()),
+        source_surface: "daily".to_string(),
+        provider_period: provider_day.to_string(),
+        raw_source_id_hash: None,
+        cursor_key_hash: format!("test-hash:{accounting_source}:{provider_day}"),
+        cursor_update,
+        raw_token_buckets: None,
+        total_tokens,
+        cost_usd: None,
+        confidence: "test".to_string(),
+    };
+    let batch = ProviderSnapshotBatchInput {
+        collector_scope_id: "test:seed".to_string(),
+        collector_surface: "test:seed".to_string(),
+        command: "test".to_string(),
+        token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+        requested_provider_days: vec![provider_day],
+        covered_accounting_sources: Some(vec![accounting_source.to_string()]),
+        provider_version: "test".to_string(),
+        parser_version: "test".to_string(),
+        observed_at,
+    };
+    store
+        .write_provider_snapshot_batch(&batch, &[row], &[])
+        .unwrap();
 }
 
 #[test]
@@ -751,7 +801,12 @@ fn repeated_unified_poll_after_cursor_advance_emits_zero_deltas() {
 fn unified_aggregate_model_breakdowns_without_source_do_not_feed() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = unified_provider("ccusage-unified-aggregate-no-source.mjs");
+    let provider = provider_with_unified_at(
+        Some("ccusage-unified-aggregate-no-source.mjs"),
+        None,
+        None,
+        datetime!(2026 - 07 - 03 12:00 UTC),
+    );
 
     let result = provider.poll(&mut store).unwrap();
 
@@ -1024,6 +1079,121 @@ fn unexpected_extra_provider_day_does_not_write_snapshot_or_feed() {
         snapshot.state,
         glorp::usage::snapshot::SnapshotState::Missing
     );
+}
+
+#[test]
+fn unrequested_malformed_ccusage_row_writes_requested_zero_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = provider_at(
+        Some("ccusage-unrequested-malformed-row.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 07 - 06))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
+}
+
+#[test]
+fn unrequested_unsupported_ccusage_row_does_not_block_requested_valid_row() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-unrequested-unsupported-shape-with-valid-requested.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 100.0);
+    assert!(result
+        .deltas
+        .iter()
+        .any(|delta| delta.provider_surface == "claude-code"));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 07 - 06))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(snapshot.value.unwrap().total_tokens, 100.0);
+}
+
+#[test]
+fn unrequested_unidentified_unified_row_does_not_force_scoped_fallback() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_with_unified_at(
+        Some("ccusage-unified-aggregate-unrequested.mjs"),
+        Some("ccusage-extra-day.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.provider_surface == "unified" && diagnostic.code == "unexpected_provider_day"
+    }));
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "aggregate_unidentified_source_ignored"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 07 - 06))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
 }
 
 #[test]
@@ -1427,6 +1597,66 @@ fn agentsview_poll_writes_one_complete_snapshot_for_sibling_sources() {
 }
 
 #[test]
+fn agentsview_scoped_refresh_preserves_uncovered_snapshot_truth() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude", "codex", "gemini"]);
+    seed_source_snapshot(&mut store, date!(2026 - 06 - 18), "gemini", 4242.0);
+    let provider = agentsview_provider("agentsview-ok.mjs");
+
+    provider.refresh_snapshots_only(&mut store).unwrap();
+
+    let snapshot = store
+        .snapshot_totals_by_source_for_provider_day(date!(2026 - 06 - 18))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    let sources = snapshot.value.unwrap().sources;
+    assert!(sources
+        .iter()
+        .any(|source| source.accounting_source == "claude"));
+    assert!(sources
+        .iter()
+        .any(|source| source.accounting_source == "codex"));
+    let gemini_after = sources
+        .iter()
+        .find(|source| source.accounting_source == "gemini")
+        .map(|source| source.total_tokens);
+    assert_eq!(gemini_after, Some(4242.0), "{sources:?}");
+}
+
+#[test]
+fn unrequested_malformed_agentsview_row_writes_requested_zero_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude", "codex"]);
+    let provider = agentsview_provider("agentsview-unrequested-malformed-row.mjs");
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 06 - 18))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
+}
+
+#[test]
 fn malformed_unified_ccusage_blocks_scoped_fallback() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
@@ -1675,10 +1905,11 @@ fn agentsview_invalid_json_and_helper_stderr_are_sanitized() {
 fn agentsview_present_malformed_token_field_rejects_row_with_sanitized_diagnostic() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
+    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new_with_now_for_test(
         glorp::usage::agentsview::AgentsviewPaths {
             agentsview: Some(agentsview_fixture("agentsview-malformed-number.mjs")),
         },
+        datetime!(2026 - 06 - 18 20:00 UTC),
     );
 
     let result = provider.poll(&mut store).unwrap();

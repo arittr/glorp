@@ -143,8 +143,6 @@ status: DONE
 
 - None.
 
----
-
 # Task 4 Third Review Fix Report
 
 status: DONE
@@ -314,6 +312,63 @@ status: DONE
 
 - Commit hash: recorded in final handoff after commit creation.
 - Commit message: `fix: block unsupported ccusage token shape`
+
+## Concerns
+
+- None.
+
+---
+
+# Task 4 Provider-Day Scope Fix Report
+
+status: DONE
+
+## Files Changed
+
+- `src/usage/agentsview.rs`
+- `src/usage/ccusage.rs`
+- `tests/usage_provider.rs`
+- `tests/fixtures/helpers/agentsview-unrequested-malformed-row.mjs`
+- `tests/fixtures/helpers/ccusage-unified-aggregate-unrequested.mjs`
+- `tests/fixtures/helpers/ccusage-unrequested-malformed-row.mjs`
+- `tests/fixtures/helpers/ccusage-unrequested-unsupported-shape-with-valid-requested.mjs`
+
+## Red Test Summary
+
+- `cargo test --test usage_provider agentsview_scoped_refresh_preserves_uncovered_snapshot_truth -- --exact`
+  - Failed before the fix as expected: the seeded `gemini` snapshot disappeared after AgentsView wrote a claude/codex combined snapshot.
+- `cargo test --test usage_provider unrequested_malformed_ccusage_row_writes_requested_zero_snapshot -- --exact`
+  - Failed before the fix as expected: no `unexpected_provider_day` diagnostic was emitted because the malformed unrequested row blocked before provider-day filtering.
+- `cargo test --test usage_provider unrequested_unsupported_ccusage_row_does_not_block_requested_valid_row -- --exact`
+  - Failed before the fix as expected: requested-day valid tokens were blocked by an unsupported-shape row from an unrequested day.
+- `cargo test --test usage_provider unrequested_unidentified_unified_row_does_not_force_scoped_fallback -- --exact`
+  - Failed before the fix as expected: an unrequested aggregate unified row forced scoped fallback and fed `100.0` tokens.
+- `cargo test --test usage_provider unrequested_malformed_agentsview_row_writes_requested_zero_snapshot -- --exact`
+  - Failed before the fix as expected: no `unexpected_provider_day` diagnostic was emitted because the malformed unrequested row blocked before provider-day filtering.
+
+## Green Verification Summary
+
+- `cargo test --test usage_provider agentsview_scoped_refresh_preserves_uncovered_snapshot_truth -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider unrequested_malformed_ccusage_row_writes_requested_zero_snapshot -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider unrequested_unsupported_ccusage_row_does_not_block_requested_valid_row -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider unrequested_unidentified_unified_row_does_not_force_scoped_fallback -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider unrequested_malformed_agentsview_row_writes_requested_zero_snapshot -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider`
+  - Passed: 54 passed, 0 failed.
+- `cargo test --test usage_snapshots`
+  - Passed: 9 passed, 0 failed.
+- `cargo fmt --check`
+  - Passed.
+
+## Commit
+
+- Commit hash: recorded in final handoff after commit creation.
+- Commit message: `fix: scope provider snapshots to requested days`
 
 ## Concerns
 
