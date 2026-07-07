@@ -551,20 +551,20 @@ mod tests {
         }
 
         // Pet spans full body width at the top.
-        // fixture: vitals=4, progress=2, bio=3, today=6, feed=3
-        // lane1_height=max(4,6)=6, lane2_left=2+1+3=6, lane2=max(6,3)=6
-        // info_band=6+1+6=13, padded height=28, pet=28-1-13=14
+        // fixture: vitals=4, progress=2, bio=3, today=7, feed=3
+        // lane1_height=max(4,7)=7, lane2_left=2+1+3=6, lane2=max(6,3)=6
+        // info_band=7+1+6=14, padded height=28, pet=28-1-14=13
         assert_eq!(
             layout.node(WatchComponentId::Pet.path()).unwrap().bounds,
-            Rect::new(1, 2, 118, 14)
+            Rect::new(1, 2, 118, 13)
         );
-        // Info band starts at y=17 (2+14+1).
+        // Info band starts at y=16 (2+13+1).
         // Left info column: x=1, w=48.
         assert_eq!(
             layout.node(WatchComponentId::Vitals.path()).unwrap().bounds,
-            Rect::new(1, 17, 48, 4)
+            Rect::new(1, 16, 48, 4)
         );
-        // Progress at lane2 top: y=17+6+1=24.
+        // Progress at lane2 top: y=16+7+1=24.
         assert_eq!(
             layout
                 .node(WatchComponentId::Progress.path())
@@ -580,7 +580,7 @@ mod tests {
         // Right info column: x=53 (1+48+4), w=66 (118-48-4).
         assert_eq!(
             layout.node(WatchComponentId::Today.path()).unwrap().bounds,
-            Rect::new(53, 17, 66, 6)
+            Rect::new(53, 16, 66, 7)
         );
         // Feed fills full lane2 right column: y=24 (same as progress), h=lane2_height=6.
         assert_eq!(
@@ -589,7 +589,7 @@ mod tests {
         );
 
         let pet_panel = layout.target(TargetPath::new("watch.pet.panel")).unwrap();
-        assert_eq!(pet_panel.rect, Rect::new(1, 2, 118, 14));
+        assert_eq!(pet_panel.rect, Rect::new(1, 2, 118, 13));
 
         let pet_node = layout.node(WatchComponentId::Pet.path()).unwrap();
         assert!(pet_node
@@ -602,8 +602,8 @@ mod tests {
         let pet_art = layout.target(TargetPath::new("watch.pet.art")).unwrap();
         assert_eq!(pet_art.rect.width, 13);
         assert_eq!(pet_art.rect.height, 10);
-        // Art grounded in 118×14 panel: cx=1+(118-13)/2=53; feet anchor clamps to max_y=6.
-        assert_eq!(pet_art.rect, Rect::new(53, 6, 13, 10));
+        // Art grounded in 118×13 panel: cx=1+(118-13)/2=53.
+        assert_eq!(pet_art.rect, Rect::new(53, 5, 13, 10));
     }
 
     #[test]

@@ -34,7 +34,6 @@ impl LegacyPanel for ProgressPanel {
                 ProgressBar::new(vm.progress.fraction as f64)
                     .gradient(GradientToken::Xp)
                     .empty_tone(TextTone::Subtle)
-                    .rate_per_hour(vm.progress.rate_per_hour)
                     .render(content, buf, ctx);
             }
         });
@@ -103,6 +102,15 @@ mod tests {
         let s = render(&vm);
         assert!(!s.contains("↑"));
         assert!(!s.contains("/hr"));
+    }
+
+    #[test]
+    fn progress_panel_does_not_render_rate_segment() {
+        let mut vm = WatchViewModel::fixture();
+        vm.progress.rate_per_hour = 109_000.0;
+        let s = render(&vm);
+        assert!(!s.contains("/hr"));
+        assert!(!s.contains("↑ 109.0k"));
     }
 
     #[test]

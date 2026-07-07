@@ -26,7 +26,8 @@ use crate::{
         style::{source_display_name, LogKind},
         view_model::{
             BioView, EarnedHabitatPropView, EventView, HabitatView, PetRenderModel, ProgressView,
-            SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel,
+            RateDirection, RateMomentum, RateWindow, SourceHealthView, SourceStatus,
+            SourceUsageView, WatchViewModel,
         },
     },
     usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
@@ -127,10 +128,12 @@ pub(crate) fn build_watch_view_model_at(
     // below use the Tokenmaxxing Los Angeles accounting day.
     let local_offset = mapper.offset_at(now);
     let (today_start, today_end) = crate::usage::day_axis::tokenmaxxing_today_window(now);
-    let last_10m_start = now - Duration::minutes(10);
-    // Query bounds for today's applied identity signals are inclusive on the
-    // right; nudge the end by one second to include the current instant.
-    let window_end = now + Duration::seconds(1);
+    let rate_anchor = normalized_window_anchor(now);
+    let window_end = rate_anchor + Duration::seconds(1);
+    let last_10m_start = rate_anchor - Duration::minutes(10);
+    // Query bounds are half-open. `window_end` nudges the end by one
+    // whole second so rows stamped exactly at `now` remain visible without
+    // mixing fractional and whole-second RFC3339 bounds.
 
     let today_totals = usage_store
         .canonical_total_tokens_by_source_between(today_start, today_end)
@@ -139,7 +142,13 @@ pub(crate) fn build_watch_view_model_at(
         .canonical_total_tokens_by_source_between(last_10m_start, window_end)
         .unwrap_or_default();
     let today_total_tokens: f64 = today_totals.iter().map(|(_, v)| *v).sum();
-    let last_10m_total_tokens: f64 = last_10m_totals.iter().map(|(_, v)| *v).sum();
+    let pulse_window = build_rate_window(&usage_store, rate_anchor, Duration::minutes(10));
+    let hour_window = build_rate_window(&usage_store, rate_anchor, Duration::hours(1));
+    let rate_momentum = RateMomentum {
+        pulse: pulse_window,
+        hour: hour_window,
+        companion_direction: companion_direction(pulse_window.direction, hour_window.direction),
+    };
     let source_diversity = derive_source_diversity(&today_totals);
     let rhythm = derive_work_rhythm(&usage_store, today_start, window_end);
     let today_shape = usage_store
@@ -229,7 +238,8 @@ pub(crate) fn build_watch_view_model_at(
             .unwrap_or_else(|_| vec![0.0; 7]),
         source_breakdown,
         source_health,
-        current_bucket_effective_tokens: last_10m_total_tokens,
+        current_bucket_effective_tokens: pulse_window.current_tokens,
+        rate_momentum,
         recent_events,
         helper_status,
         errors,
@@ -254,9 +264,7 @@ pub(crate) fn build_watch_view_model_at(
         facing: 1,                // computed at render time by the panel from area.width
         last_feed_pulse_at: None, // populated by WatchApp when a token spike fires
         progress: {
-            let rate_per_hour: f64 = usage_store
-                .canonical_total_tokens_between(now - Duration::hours(1), now)
-                .unwrap_or(0.0);
+            let rate_per_hour = hour_window.current_tokens;
             let is_max = matches!(stage, Stage::S6);
             let stage_start = stage_start_xp(stage);
             let xp_in_stage = state.xp - stage_start;
@@ -325,6 +333,49 @@ pub(crate) fn build_watch_view_model_at(
         now,
     )?;
     Ok(vm)
+}
+
+fn normalized_window_anchor(now: OffsetDateTime) -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(now.unix_timestamp()).unwrap_or(now)
+}
+
+fn build_rate_window(
+    usage_store: &UsageStore,
+    anchor: OffsetDateTime,
+    width: Duration,
+) -> RateWindow {
+    let current_start = anchor - width;
+    let current_end = anchor + Duration::seconds(1);
+    let previous_start = current_start - width;
+    let current = usage_store
+        .canonical_total_tokens_between(current_start, current_end)
+        .unwrap_or(0.0);
+    let previous = usage_store
+        .canonical_total_tokens_between(previous_start, current_start)
+        .unwrap_or(0.0);
+    RateWindow {
+        current_tokens: current,
+        previous_tokens: previous,
+        direction: rate_direction(current, previous),
+    }
+}
+
+fn rate_direction(current: f64, previous: f64) -> RateDirection {
+    let threshold = 1_000.0_f64.max(previous.max(0.0) * 0.10);
+    if current > previous + threshold {
+        RateDirection::Up
+    } else if current < previous - threshold {
+        RateDirection::Down
+    } else {
+        RateDirection::Neutral
+    }
+}
+
+fn companion_direction(pulse: RateDirection, hour: RateDirection) -> RateDirection {
+    match pulse {
+        RateDirection::Up | RateDirection::Down => pulse,
+        RateDirection::Neutral => hour,
+    }
 }
 
 fn build_habitat_view(state: &PetState) -> HabitatView {

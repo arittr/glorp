@@ -33,6 +33,7 @@ pub struct WatchViewModel {
     pub source_breakdown: Vec<SourceUsageView>,
     pub source_health: Vec<SourceHealthView>,
     pub current_bucket_effective_tokens: f64,
+    pub rate_momentum: RateMomentum,
     pub recent_events: Vec<EventView>,
     pub helper_status: String,
     pub errors: Vec<String>,
@@ -130,6 +131,27 @@ pub struct EventView {
     pub timestamp: String,
     pub kind: LogKind,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateDirection {
+    Up,
+    Down,
+    Neutral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateWindow {
+    pub current_tokens: f64,
+    pub previous_tokens: f64,
+    pub direction: RateDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateMomentum {
+    pub pulse: RateWindow,
+    pub hour: RateWindow,
+    pub companion_direction: RateDirection,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -232,6 +254,19 @@ impl WatchViewModel {
                 },
             ],
             current_bucket_effective_tokens: 2_300.0,
+            rate_momentum: RateMomentum {
+                pulse: RateWindow {
+                    current_tokens: 2_300.0,
+                    previous_tokens: 900.0,
+                    direction: RateDirection::Up,
+                },
+                hour: RateWindow {
+                    current_tokens: 109_000.0,
+                    previous_tokens: 140_000.0,
+                    direction: RateDirection::Down,
+                },
+                companion_direction: RateDirection::Up,
+            },
             recent_events: vec![
                 EventView {
                     timestamp: "13:38".into(),
