@@ -102,6 +102,43 @@ fn round_scene_excludes_watch_dashboard_and_private_fields() {
 }
 
 #[test]
+fn round_scene_model_does_not_carry_companion_hud_metrics() {
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    let mut vm = WatchViewModel::fixture_with_habitat_props();
+    vm.today_effective_tokens = 842_000_000.0;
+    vm.rate_momentum.pulse.current_tokens = 31_000_000.0;
+    vm.daily_comparison = glorp::tui::view_model::DailyComparison {
+        today_provider_day: time::macros::date!(2026 - 07 - 06),
+        yesterday_provider_day: time::macros::date!(2026 - 07 - 05),
+        today_tokens: 842_000_000.0,
+        yesterday_tokens: Some(678_000_000.0),
+        today_snapshot_state: glorp::usage::snapshot::SnapshotState::Current,
+        yesterday_snapshot_state: glorp::usage::snapshot::SnapshotState::Current,
+        today_observed_at: Some(now),
+        yesterday_observed_at: Some(now - time::Duration::days(1)),
+        unavailable_reason: None,
+        fraction_of_yesterday: Some(842_000_000.0 / 678_000_000.0),
+    };
+
+    let scene = glorp::round::model::derive_round_scene_model(&vm, now);
+    let debug = format!("{scene:#?}");
+
+    for forbidden in [
+        "daily_comparison",
+        "fraction_of_yesterday",
+        "842000000",
+        "31000000",
+        "124% yday",
+        "/10m",
+    ] {
+        assert!(
+            !debug.contains(forbidden),
+            "RoundSceneModel leaked companion HUD metric {forbidden}: {debug}"
+        );
+    }
+}
+
+#[test]
 fn round_scene_maps_required_v1_signals() {
     let mut vm = WatchViewModel::fixture_with_habitat_props();
     vm.activity_identity.source_diversity = SourceDiversity::DualLane;
