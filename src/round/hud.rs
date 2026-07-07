@@ -16,6 +16,42 @@ pub struct GrowthRing {
     pub track_sweep_deg: f64,
 }
 
+pub const COMPANION_GAUGE_GAP_DEG: f64 = 70.0;
+pub const PACE_SOFT_CAP_10M_TOKENS: f64 = 50_000_000.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineCap {
+    Butt,
+    Round,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GaugeLane {
+    pub ring: GrowthRing,
+    pub stroke_width: f64,
+    pub cap: LineCap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerimeterGaugeLayout {
+    pub xp: GaugeLane,
+    pub daily: GaugeLane,
+    pub pace: GaugeLane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GaugeLaneColors {
+    pub track: RoundColor,
+    pub fill: RoundColor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerimeterGaugeColors {
+    pub xp: GaugeLaneColors,
+    pub daily: GaugeLaneColors,
+    pub pace: GaugeLaneColors,
+}
+
 pub fn growth_ring_layout(cx: f64, cy: f64, radius: f64, gap_deg: f64) -> GrowthRing {
     let gap = gap_deg.clamp(0.0, 180.0);
     GrowthRing {
@@ -30,6 +66,58 @@ pub fn growth_ring_layout(cx: f64, cy: f64, radius: f64, gap_deg: f64) -> Growth
 /// Angle (deg) where the violet fill ends for `fraction` of stage progress.
 pub fn growth_ring_fill_end_deg(ring: &GrowthRing, fraction: f64) -> f64 {
     ring.track_start_deg + ring.track_sweep_deg * fraction.clamp(0.0, 1.0)
+}
+
+pub fn perimeter_gauge_layout(
+    cx: f64,
+    cy: f64,
+    aperture_radius: f64,
+    gap_deg: f64,
+) -> PerimeterGaugeLayout {
+    let outer_inset_px = 3.0_f64.max(aperture_radius * 0.012);
+    let xp_width = (aperture_radius * 0.050).clamp(6.0, 16.0);
+    let daily_width = (aperture_radius * 0.040).clamp(5.0, 13.0);
+    let pace_width = (aperture_radius * 0.034).clamp(4.0, 11.0);
+    let lane_gap = (aperture_radius * 0.010).clamp(1.5, 4.0);
+
+    let xp_radius = aperture_radius - outer_inset_px - xp_width / 2.0;
+    let daily_radius = xp_radius - xp_width / 2.0 - lane_gap - daily_width / 2.0;
+    let pace_radius = daily_radius - daily_width / 2.0 - lane_gap - pace_width / 2.0;
+
+    PerimeterGaugeLayout {
+        xp: GaugeLane {
+            ring: growth_ring_layout(cx, cy, xp_radius, gap_deg),
+            stroke_width: xp_width,
+            cap: LineCap::Round,
+        },
+        daily: GaugeLane {
+            ring: growth_ring_layout(cx, cy, daily_radius, gap_deg),
+            stroke_width: daily_width,
+            cap: LineCap::Round,
+        },
+        pace: GaugeLane {
+            ring: growth_ring_layout(cx, cy, pace_radius, gap_deg),
+            stroke_width: pace_width,
+            cap: LineCap::Round,
+        },
+    }
+}
+
+pub fn perimeter_gauge_colors() -> PerimeterGaugeColors {
+    PerimeterGaugeColors {
+        xp: GaugeLaneColors {
+            track: RoundColor(0.71, 0.71, 0.78, 0.16),
+            fill: RoundColor(0.61, 0.48, 0.88, 0.90),
+        },
+        daily: GaugeLaneColors {
+            track: RoundColor(0.52, 0.80, 0.88, 0.14),
+            fill: RoundColor(0.36, 0.84, 0.95, 0.82),
+        },
+        pace: GaugeLaneColors {
+            track: RoundColor(0.96, 0.68, 0.31, 0.13),
+            fill: RoundColor(0.98, 0.67, 0.27, 0.86),
+        },
+    }
 }
 
 /// The region (in pixels) the token stat must fit inside: centered in the ring's
@@ -74,6 +162,73 @@ pub fn rate_direction_color(direction: crate::tui::view_model::RateDirection) ->
         crate::tui::view_model::RateDirection::Down => RoundColor(0.95, 0.38, 0.36, 1.0),
         crate::tui::view_model::RateDirection::Neutral => RoundColor(0.62, 0.63, 0.77, 1.0),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompanionHudText {
+    pub today_total: String,
+    pub daily_percent: String,
+    pub pace: String,
+}
+
+pub fn companion_pace_fraction(current_10m_tokens: f64) -> f64 {
+    if !current_10m_tokens.is_finite() || current_10m_tokens <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - (-current_10m_tokens / PACE_SOFT_CAP_10M_TOKENS).exp()).clamp(0.0, 1.0)
+}
+
+pub fn daily_fraction_for_gauge(fraction_of_yesterday: Option<f64>) -> f64 {
+    fraction_of_yesterday
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
+pub fn format_daily_percent(fraction_of_yesterday: Option<f64>) -> String {
+    let Some(fraction) = fraction_of_yesterday else {
+        return "--% yday".to_string();
+    };
+    if !fraction.is_finite() || fraction < 0.0 {
+        return "--% yday".to_string();
+    }
+
+    let percent = (fraction * 100.0).round();
+    if percent > 999.0 {
+        "999%+ yday".to_string()
+    } else {
+        format!("{percent:.0}% yday")
+    }
+}
+
+pub fn companion_hud_text(
+    today_tokens: f64,
+    daily_fraction: Option<f64>,
+    pulse_10m_tokens: f64,
+) -> CompanionHudText {
+    CompanionHudText {
+        today_total: compact_hud_tokens(today_tokens),
+        daily_percent: format_daily_percent(daily_fraction),
+        pace: format!("{}/10m", compact_hud_tokens(pulse_10m_tokens.max(0.0))),
+    }
+}
+
+fn compact_hud_tokens(value: f64) -> String {
+    let formatted = crate::format::format_tokens(value);
+    formatted
+        .strip_suffix(".0B")
+        .map(|prefix| format!("{prefix}B"))
+        .or_else(|| {
+            formatted
+                .strip_suffix(".0M")
+                .map(|prefix| format!("{prefix}M"))
+        })
+        .or_else(|| {
+            formatted
+                .strip_suffix(".0k")
+                .map(|prefix| format!("{prefix}k"))
+        })
+        .unwrap_or(formatted)
 }
 
 #[cfg(test)]
@@ -175,5 +330,72 @@ mod tests {
             "stat must fit within the gap chord"
         );
         assert!(gap.max_width > 0.0);
+    }
+
+    #[test]
+    fn perimeter_gauge_layout_keeps_three_round_lanes_inside_aperture() {
+        let layout = perimeter_gauge_layout(180.0, 180.0, 180.0, COMPANION_GAUGE_GAP_DEG);
+
+        assert_eq!(layout.xp.cap, LineCap::Round);
+        assert_eq!(layout.daily.cap, LineCap::Round);
+        assert_eq!(layout.pace.cap, LineCap::Round);
+
+        assert_eq!(
+            layout.xp.ring.track_start_deg,
+            layout.daily.ring.track_start_deg
+        );
+        assert_eq!(
+            layout.daily.ring.track_start_deg,
+            layout.pace.ring.track_start_deg
+        );
+        assert_eq!(
+            layout.xp.ring.track_sweep_deg,
+            layout.daily.ring.track_sweep_deg
+        );
+        assert_eq!(
+            layout.daily.ring.track_sweep_deg,
+            layout.pace.ring.track_sweep_deg
+        );
+
+        assert!(layout.xp.ring.radius > layout.daily.ring.radius);
+        assert!(layout.daily.ring.radius > layout.pace.ring.radius);
+        assert!(layout.xp.stroke_width > layout.daily.stroke_width);
+        assert!(layout.daily.stroke_width > layout.pace.stroke_width);
+
+        let xp_outer_edge = layout.xp.ring.radius + layout.xp.stroke_width / 2.0;
+        let pace_inner_edge = layout.pace.ring.radius - layout.pace.stroke_width / 2.0;
+
+        assert!(xp_outer_edge <= 177.0);
+        assert!(pace_inner_edge > 180.0 * 0.72);
+    }
+
+    #[test]
+    fn pace_fraction_uses_named_soft_cap_and_clamps_bad_inputs() {
+        assert_eq!(companion_pace_fraction(0.0), 0.0);
+        assert!((companion_pace_fraction(PACE_SOFT_CAP_10M_TOKENS) - 0.632).abs() < 0.002);
+        assert!((companion_pace_fraction(PACE_SOFT_CAP_10M_TOKENS * 2.0) - 0.865).abs() < 0.002);
+        assert!(companion_pace_fraction(PACE_SOFT_CAP_10M_TOKENS * 100.0) <= 1.0);
+        assert_eq!(companion_pace_fraction(-1.0), 0.0);
+        assert_eq!(companion_pace_fraction(f64::NAN), 0.0);
+        assert_eq!(companion_pace_fraction(f64::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn companion_hud_text_formats_total_daily_percent_and_pace_only() {
+        let text = companion_hud_text(842_000_000.0, Some(1.244), 31_000_000.0);
+
+        assert_eq!(text.today_total, "842M");
+        assert_eq!(text.daily_percent, "124% yday");
+        assert_eq!(text.pace, "31M/10m");
+        assert!(!text.pace.contains("/hr"));
+    }
+
+    #[test]
+    fn daily_percent_text_preserves_stack_when_unavailable_and_caps_extreme_values() {
+        assert_eq!(format_daily_percent(None), "--% yday");
+        assert_eq!(format_daily_percent(Some(0.944)), "94% yday");
+        assert_eq!(format_daily_percent(Some(10.5)), "999%+ yday");
+        assert_eq!(format_daily_percent(Some(f64::NAN)), "--% yday");
+        assert_eq!(format_daily_percent(Some(f64::INFINITY)), "--% yday");
     }
 }
