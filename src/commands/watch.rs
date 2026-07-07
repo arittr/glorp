@@ -999,6 +999,54 @@ mod tests {
             .unwrap();
     }
 
+    fn seed_snapshot_for_test(
+        usage_store: &mut UsageStore,
+        day: Date,
+        source: &str,
+        total_tokens: f64,
+        observed_at: OffsetDateTime,
+    ) {
+        let batch = crate::usage::snapshot::ProviderSnapshotBatchInput {
+            collector_scope_id: format!("{source}:local-usage"),
+            collector_surface: format!("ccusage:{source}"),
+            command: "test snapshot".into(),
+            token_contract: crate::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+            requested_provider_days: vec![day],
+            covered_accounting_sources: Some(vec![source.to_string()]),
+            provider_version: "test-provider".into(),
+            parser_version: "test-parser".into(),
+            observed_at,
+        };
+        let row = crate::usage::snapshot::ProviderSnapshotRowInput {
+            replacement_scope_id: format!("{source}:local-usage"),
+            collector_scope_id: format!("{source}:local-usage"),
+            collector_surface: format!("ccusage:{source}"),
+            command: "test snapshot".into(),
+            token_contract: crate::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+            accounting_source: source.into(),
+            provider_day: day,
+            model: Some("test-model".into()),
+            source_surface: "daily".into(),
+            provider_period: day.to_string(),
+            raw_source_id_hash: Some(format!("hash:{source}:test")),
+            cursor_key_hash: format!("hash:{source}:cursor"),
+            cursor_update: ProviderCursorUpdate {
+                provider_surface: source.into(),
+                cursor_key: "cursor".into(),
+                cursor_value: "value".into(),
+                provider_version: "test-provider".into(),
+                parser_version: "test-parser".into(),
+            },
+            raw_token_buckets: None,
+            total_tokens,
+            cost_usd: None,
+            confidence: "local-log-derived".into(),
+        };
+        usage_store
+            .write_provider_snapshot_batch(&batch, &[row], &[])
+            .unwrap();
+    }
+
     #[cfg(feature = "dev-preview")]
     #[test]
     fn build_dev_pet_view_model_preserves_real_watch_context() {
@@ -1015,6 +1063,13 @@ mod tests {
                 ..NormalizedUsageEvent::for_test_at(now, 4_200.0)
             })
             .unwrap();
+        seed_snapshot_for_test(
+            &mut usage_store,
+            crate::usage::day_axis::tokenmaxxing_provider_day(now),
+            "codex",
+            4_200.0,
+            now,
+        );
 
         let mut state = PetState::new_for_test("real-seed", "buddy");
         state.pet.generated_species = Species::Mech;
@@ -1056,6 +1111,10 @@ mod tests {
         assert_eq!(
             vm.pet_palette.eye,
             crate::pet::palette::eye_color_for_mood(vm.pet_render.mood)
+        );
+        assert_eq!(
+            vm.today_snapshot_state,
+            crate::usage::snapshot::SnapshotState::Current
         );
         assert_eq!(vm.today_effective_tokens, 4_200.0);
         assert_eq!(vm.source_breakdown.len(), 1);
@@ -1378,13 +1437,19 @@ mod tests {
         // day is on DST in June and starts at 07:00 UTC, so the 07:30 UTC row is
         // part of today's canonical Tokenmaxxing total.
         let now = late + Duration::hours(1);
+        let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(now);
+        seed_snapshot_for_test(&mut usage, provider_day, "claude-code", 4_500.0, now);
         let state = PetState::new_for_test("test", "buddy");
         let vm = build_watch_view_model_at(&state, &db_path, now, mapper).unwrap();
         let (today_start, today_end) = crate::usage::day_axis::tokenmaxxing_today_window(now);
         let canonical_today = usage
             .canonical_total_tokens_between(today_start, today_end)
             .unwrap();
-        assert_eq!(vm.today_effective_tokens, canonical_today);
+        assert_eq!(
+            vm.today_snapshot_state,
+            crate::usage::snapshot::SnapshotState::Current
+        );
+        assert_eq!(vm.today_effective_tokens, 4_500.0);
         assert_eq!(canonical_today, 3_000.0);
     }
 
@@ -1773,6 +1838,9 @@ mod tests {
         codex.provider_surface = "codex".into();
         store.insert_event(&claude).unwrap();
         store.insert_event(&codex).unwrap();
+        let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(now);
+        seed_snapshot_for_test(&mut store, provider_day, "claude-code", 50_000.0, now);
+        seed_snapshot_for_test(&mut store, provider_day, "codex", 50_000.0, now);
 
         drop(store);
         let mut state = PetState::new_for_test("test", "Mochi");
