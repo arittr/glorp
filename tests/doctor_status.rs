@@ -82,6 +82,11 @@ fn doctor_refresh_usage_snapshots_reports_before_after_without_feeding_pet() {
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
+    let state_before_refresh = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+    let lifetime_before_refresh = UsageStore::open(&dir.path().join("usage.sqlite"))
+        .unwrap()
+        .lifetime_effective_tokens()
+        .unwrap();
 
     Command::cargo_bin("glorp")
         .unwrap()
@@ -96,6 +101,27 @@ fn doctor_refresh_usage_snapshots_reports_before_after_without_feeding_pet() {
         .stdout(predicate::str::contains("after provider today"))
         .stdout(predicate::str::contains("after provider today: 1300"))
         .stdout(predicate::str::contains("pet state unchanged"));
+
+    let state_after_refresh = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+    let usage_after_refresh = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    assert_eq!(
+        state_after_refresh, state_before_refresh,
+        "snapshot-only doctor repair must not rewrite pet state"
+    );
+    assert_eq!(
+        usage_after_refresh.lifetime_effective_tokens().unwrap(),
+        lifetime_before_refresh,
+        "snapshot-only doctor repair must not feed the pet"
+    );
+    assert_eq!(
+        usage_after_refresh
+            .snapshot_totals_for_provider_day(time::macros::date!(2026 - 06 - 10))
+            .unwrap()
+            .value
+            .unwrap()
+            .total_tokens,
+        1300.0
+    );
 }
 
 #[test]

@@ -120,7 +120,7 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
 }
 
 #[test]
-fn legacy_applied_tokenmaxxing_rows_do_not_inflate_snapshot_today() {
+fn corrected_snapshot_today_does_not_hide_accepted_feed_activity() {
     let dir = tempdir().unwrap();
     let usage_db = dir.path().join("usage.sqlite");
     let mut usage = UsageStore::open(&usage_db).unwrap();
@@ -139,17 +139,31 @@ fn legacy_applied_tokenmaxxing_rows_do_not_inflate_snapshot_today() {
         &mut usage,
         time::macros::date!(2026 - 07 - 06),
         "claude-code",
-        531.0,
+        1_060.0,
         now,
+    );
+    seed_snapshot_for_test(
+        &mut usage,
+        time::macros::date!(2026 - 07 - 06),
+        "claude-code",
+        531.0,
+        now + Duration::minutes(10),
     );
 
     let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
 
     assert_eq!(
         vm.today_effective_tokens, 531.0,
-        "legacy applied tokenmaxxing rows must not inflate snapshot-backed provider truth"
+        "corrected snapshot truth must replace the old overcount in provider today"
     );
     assert_eq!(vm.current_bucket_effective_tokens, 1_060.0);
+    let correction_count: i64 = usage
+        .raw_connection_for_test()
+        .query_row("SELECT COUNT(*) FROM provider_corrections", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(correction_count, 1);
 }
 
 #[test]

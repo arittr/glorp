@@ -1489,11 +1489,31 @@ fn provider_correction_updates_visible_truth_without_rolling_back_pet_progress()
     usage_store
         .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
         .unwrap();
+    usage_store
+        .seed_exact_row_highwater_for_test(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            day,
+            Some("test-model"),
+            RawTokenTotals {
+                uncached_input: 1_060_000_000,
+                output: 0,
+                cache_creation: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            now,
+        )
+        .unwrap();
 
     let fed_lifetime = state.lifetime_effective_tokens;
     let fed_xp = state.xp;
     let fed_stage = state.stage;
     let fed_vitals = state.vitals;
+    let feed_rows_before_correction = usage_event_count_for_test(&usage_store);
+    let highwater_before_correction = usage_store
+        .source_day_highwater_for_test(TOKENMAXXING_TOTAL_V1, "claude-code", day)
+        .unwrap();
 
     seed_snapshot_for_runtime_test(&mut usage_store, day, "claude-code", 1_060_000_000.0, now);
     seed_snapshot_for_runtime_test(
@@ -1528,6 +1548,27 @@ fn provider_correction_updates_visible_truth_without_rolling_back_pet_progress()
         .applied_effective_tokens_between(now - Duration::minutes(1), now + Duration::minutes(1))
         .unwrap();
     assert_eq!(applied_total, 1_060_000_000.0);
+    assert_eq!(
+        usage_event_count_for_test(&usage_store),
+        feed_rows_before_correction,
+        "snapshot correction must not append compensating feed rows"
+    );
+    let negative_feed_rows: i64 = usage_store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT COUNT(*) FROM usage_events
+             WHERE effective_tokens < 0 OR total_tokens < 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(negative_feed_rows, 0);
+    assert_eq!(
+        usage_store
+            .source_day_highwater_for_test(TOKENMAXXING_TOTAL_V1, "claude-code", day)
+            .unwrap(),
+        highwater_before_correction
+    );
     assert_eq!(state.lifetime_effective_tokens, fed_lifetime);
     assert_eq!(state.xp, fed_xp);
     assert_eq!(state.stage, fed_stage);
@@ -1580,4 +1621,11 @@ fn seed_snapshot_for_runtime_test(
     usage
         .write_provider_snapshot_batch(&batch, &[row], &[])
         .unwrap();
+}
+
+fn usage_event_count_for_test(usage: &UsageStore) -> i64 {
+    usage
+        .raw_connection_for_test()
+        .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+        .unwrap()
 }
