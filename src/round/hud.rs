@@ -110,8 +110,8 @@ pub fn perimeter_gauge_colors() -> PerimeterGaugeColors {
             fill: RoundColor(0.61, 0.48, 0.88, 0.90),
         },
         daily: GaugeLaneColors {
-            track: RoundColor(0.52, 0.80, 0.88, 0.14),
-            fill: RoundColor(0.36, 0.84, 0.95, 0.82),
+            track: RoundColor(0.47, 0.63, 0.43, 0.12),
+            fill: RoundColor(0.50, 0.74, 0.56, 0.76),
         },
         pace: GaugeLaneColors {
             track: RoundColor(0.96, 0.68, 0.31, 0.13),
@@ -313,6 +313,30 @@ mod tests {
             rate_direction_color(RateDirection::Neutral),
             rate_direction_color(RateDirection::Up)
         );
+    }
+
+    #[test]
+    fn daily_gauge_color_is_muted_sage_not_cyan() {
+        let colors = perimeter_gauge_colors();
+        let RoundColor(track_red, track_green, track_blue, track_alpha) = colors.daily.track;
+        let RoundColor(fill_red, fill_green, fill_blue, fill_alpha) = colors.daily.fill;
+
+        assert!(
+            track_green > track_blue + 0.08,
+            "daily track should not read as blue/cyan: {:?}",
+            colors.daily.track
+        );
+        assert!(
+            fill_green > fill_blue + 0.10,
+            "daily fill should not read as blue/cyan: {:?}",
+            colors.daily.fill
+        );
+        assert!(track_green > track_red);
+        assert!(fill_green > fill_red + 0.12);
+        assert!(track_alpha <= 0.14);
+        assert!(fill_alpha <= 0.78);
+        assert_ne!(colors.daily.fill, colors.xp.fill);
+        assert_ne!(colors.daily.fill, colors.pace.fill);
     }
 
     #[test]
