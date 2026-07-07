@@ -63,6 +63,7 @@ enum HelperInvocation {
         version: String,
         records: Vec<NormalizedUsageRecord>,
         diagnostics: Vec<ProviderDiagnostic>,
+        unexpected_provider_days: Vec<UnexpectedProviderDayDiagnostic>,
     },
     EarlyExit {
         diagnostics: Vec<ProviderDiagnostic>,
@@ -95,6 +96,12 @@ struct PreparedCursorMigration {
     record: NormalizedUsageRecord,
     command_name: String,
     version: String,
+}
+
+#[derive(Debug, Clone)]
+struct UnexpectedProviderDayDiagnostic {
+    diagnostic: ProviderDiagnostic,
+    provider_day: Date,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +247,7 @@ impl CcusageCommandProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let (stdout, mut diagnostics) = if let Some(days) = requested_provider_days {
+        let (stdout, unexpected_provider_days) = if let Some(days) = requested_provider_days {
             match filter_usage_json_to_requested_days(provider_surface, &stdout, days) {
                 Ok(filtered) => filtered,
                 Err(diagnostic) => {
@@ -251,8 +258,10 @@ impl CcusageCommandProvider {
         } else {
             (stdout.to_string(), Vec::new())
         };
-        for diagnostic in &diagnostics {
-            persist_diagnostic(store, diagnostic)?;
+        let mut diagnostics = Vec::new();
+        for unexpected in &unexpected_provider_days {
+            persist_diagnostic(store, &unexpected.diagnostic)?;
+            diagnostics.push(unexpected.diagnostic.clone());
         }
         let batch = match normalize_usage_json(provider_surface, &stdout) {
             Ok(batch) => batch,
@@ -267,7 +276,12 @@ impl CcusageCommandProvider {
         diagnostics.extend(batch.diagnostics);
         let records = batch.records;
 
-        Ok(HelperInvocation::Records { version, records, diagnostics })
+        Ok(HelperInvocation::Records {
+            version,
+            records,
+            diagnostics,
+            unexpected_provider_days,
+        })
     }
 
     fn poll_helper(
@@ -342,17 +356,21 @@ impl CcusageCommandProvider {
     ) -> Result<PreparedHelperSnapshot> {
         let helper_configured = helper.is_some();
         let observed_at = OffsetDateTime::now_utc();
-        let (version, records, invoke_diagnostics) = match self.invoke_helper(
-            store,
-            provider_surface,
-            command_name,
-            helper,
-            daily_args,
-            Some(&scope.requested_provider_days),
-        )? {
-            HelperInvocation::Records { version, records, diagnostics } => {
-                (version, records, diagnostics)
-            }
+        let (version, records, invoke_diagnostics, unexpected_provider_days) = match self
+            .invoke_helper(
+                store,
+                provider_surface,
+                command_name,
+                helper,
+                daily_args,
+                Some(&scope.requested_provider_days),
+            )? {
+            HelperInvocation::Records {
+                version,
+                records,
+                diagnostics,
+                unexpected_provider_days,
+            } => (version, records, diagnostics, unexpected_provider_days),
             HelperInvocation::EarlyExit { diagnostics } => {
                 record_snapshot_failures(
                     store,
@@ -392,6 +410,19 @@ impl CcusageCommandProvider {
         let mut blocking_parse_failure = invoke_diagnostics
             .iter()
             .any(|diagnostic| blocks_requested_snapshot(diagnostic.code.as_str()));
+        for unexpected in &unexpected_provider_days {
+            record_snapshot_diagnostic(
+                store,
+                &scope,
+                provider_surface,
+                None,
+                Some(unexpected.provider_day),
+                "unexpected_provider_day",
+                "unexpected_provider_day",
+                &unexpected.diagnostic.message,
+                observed_at,
+            )?;
+        }
 
         for record in records {
             let provider_day = match provider_day_for_record(&record) {
@@ -688,7 +719,7 @@ impl CcusageCommandProvider {
             daily_args,
             None,
         )? {
-            HelperInvocation::Records { version, records, diagnostics } => {
+            HelperInvocation::Records { version, records, diagnostics, .. } => {
                 (version, records, diagnostics)
             }
             HelperInvocation::EarlyExit { diagnostics } => {
@@ -1127,7 +1158,7 @@ fn filter_usage_json_to_requested_days(
     provider_surface: &str,
     text: &str,
     requested_provider_days: &[Date],
-) -> std::result::Result<(String, Vec<ProviderDiagnostic>), ProviderDiagnostic> {
+) -> std::result::Result<(String, Vec<UnexpectedProviderDayDiagnostic>), ProviderDiagnostic> {
     let mut value: Value = serde_json::from_str(text).map_err(|_| {
         diagnostic(
             provider_surface,
@@ -1150,11 +1181,16 @@ fn filter_usage_json_to_requested_days(
     for row in std::mem::take(rows) {
         if let Some(provider_day) = provider_day_from_raw_usage_row(&row) {
             if !requested_provider_days.contains(&provider_day) {
-                diagnostics.push(diagnostic(
-                    provider_surface,
-                    "unexpected_provider_day",
-                    &format!("{provider_surface} returned unrequested provider day {provider_day}"),
-                ));
+                diagnostics.push(UnexpectedProviderDayDiagnostic {
+                    diagnostic: diagnostic(
+                        provider_surface,
+                        "unexpected_provider_day",
+                        &format!(
+                            "{provider_surface} returned unrequested provider day {provider_day}"
+                        ),
+                    ),
+                    provider_day,
+                });
                 continue;
             }
         }

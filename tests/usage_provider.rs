@@ -192,6 +192,20 @@ fn seed_source_snapshot(
         .unwrap();
 }
 
+fn unexpected_provider_day_snapshot_diagnostic_count(store: &UsageStore) -> i64 {
+    store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT COUNT(*)
+                FROM provider_snapshot_diagnostics
+               WHERE diagnostic_kind = 'unexpected_provider_day'
+                 AND reason_code = 'unexpected_provider_day'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn provider_normalizes_claude_and_codex_records() {
     let dir = tempdir().unwrap();
@@ -1079,6 +1093,7 @@ fn unexpected_extra_provider_day_does_not_write_snapshot_or_feed() {
         snapshot.state,
         glorp::usage::snapshot::SnapshotState::Missing
     );
+    assert_eq!(unexpected_provider_day_snapshot_diagnostic_count(&store), 1);
 }
 
 #[test]
@@ -1111,6 +1126,7 @@ fn unrequested_malformed_ccusage_row_writes_requested_zero_snapshot() {
         glorp::usage::snapshot::SnapshotState::Current
     );
     assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
+    assert_eq!(unexpected_provider_day_snapshot_diagnostic_count(&store), 1);
 }
 
 #[test]
@@ -1154,6 +1170,7 @@ fn unrequested_unsupported_ccusage_row_does_not_block_requested_valid_row() {
         glorp::usage::snapshot::SnapshotState::Current
     );
     assert_eq!(snapshot.value.unwrap().total_tokens, 100.0);
+    assert_eq!(unexpected_provider_day_snapshot_diagnostic_count(&store), 1);
 }
 
 #[test]
@@ -1194,6 +1211,7 @@ fn unrequested_unidentified_unified_row_does_not_force_scoped_fallback() {
         glorp::usage::snapshot::SnapshotState::Current
     );
     assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
+    assert_eq!(unexpected_provider_day_snapshot_diagnostic_count(&store), 1);
 }
 
 #[test]
@@ -1233,6 +1251,7 @@ fn disappeared_requested_provider_day_writes_current_zero_without_negative_food(
         glorp::usage::snapshot::SnapshotState::Current
     );
     assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
+    assert_eq!(unexpected_provider_day_snapshot_diagnostic_count(&store), 1);
 }
 
 #[test]
@@ -1625,6 +1644,29 @@ fn agentsview_scoped_refresh_preserves_uncovered_snapshot_truth() {
         .find(|source| source.accounting_source == "gemini")
         .map(|source| source.total_tokens);
     assert_eq!(gemini_after, Some(4242.0), "{sources:?}");
+}
+
+#[test]
+fn agentsview_extra_provider_day_persists_snapshot_diagnostic_without_snapshot_or_feed() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude", "codex"]);
+    let provider = agentsview_provider("agentsview-extra-day.mjs");
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result.total_tokens < 1_000.0);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
+    let extra_day = date!(2026 - 06 - 17);
+    let snapshot = store.snapshot_totals_for_provider_day(extra_day).unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Missing
+    );
+    assert_eq!(unexpected_provider_day_snapshot_diagnostic_count(&store), 1);
 }
 
 #[test]

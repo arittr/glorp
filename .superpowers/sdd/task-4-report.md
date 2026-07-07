@@ -143,6 +143,52 @@ status: DONE
 
 - None.
 
+---
+
+# Task 4 Provider Snapshot Diagnostic Fix Report
+
+status: DONE
+
+## Files Changed
+
+- `src/usage/agentsview.rs`
+- `src/usage/ccusage.rs`
+- `tests/usage_provider.rs`
+- `tests/fixtures/helpers/agentsview-extra-day.mjs`
+
+## Red Test Summary
+
+- `cargo test --test usage_provider unexpected_extra_provider_day_does_not_write_snapshot_or_feed -- --exact`
+  - Failed before the fix as expected: returned diagnostics included `unexpected_provider_day`, but persisted snapshot diagnostics count was `0` instead of `1`.
+- `cargo test --test usage_provider agentsview_extra_provider_day_persists_snapshot_diagnostic_without_snapshot_or_feed -- --exact`
+  - Failed before the fix as expected: parseable unrequested AgentsView rows were filtered out without a persisted snapshot diagnostic, with count `0` instead of `1`.
+- `cargo check`
+  - Ran before production edits and passed on the starting tree; the reported production compile blocker was not reproducible at current HEAD, but `snapshot_scope` is now production-visible and the final production build check is recorded below.
+
+## Green Verification Summary
+
+- `cargo test --test usage_provider unexpected_extra_provider_day_does_not_write_snapshot_or_feed -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider agentsview_extra_provider_day_persists_snapshot_diagnostic_without_snapshot_or_feed -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider`
+  - Passed: 55 passed, 0 failed.
+- `cargo test --test usage_snapshots`
+  - Passed: 9 passed, 0 failed.
+- `cargo fmt --check`
+  - Passed after running `cargo fmt`.
+- `cargo check`
+  - Passed.
+
+## Commit
+
+- Commit hash: recorded in final handoff after commit creation.
+- Commit message: `fix: persist unexpected provider-day diagnostics`
+
+## Concerns
+
+- None.
+
 # Task 4 Third Review Fix Report
 
 status: DONE

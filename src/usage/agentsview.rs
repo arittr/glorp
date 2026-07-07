@@ -64,6 +64,12 @@ struct PreparedAgentSnapshot {
     covered_accounting_sources: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone)]
+struct UnexpectedProviderDayDiagnostic {
+    diagnostic: ProviderDiagnostic,
+    provider_day: Date,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentSnapshotOutcome {
     Completed,
@@ -273,7 +279,7 @@ impl AgentsviewCommandProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let (stdout, mut diagnostics) = match filter_agentsview_json_to_requested_days(
+        let (stdout, unexpected_provider_days) = match filter_agentsview_json_to_requested_days(
             agent,
             &stdout,
             &scope.requested_provider_days,
@@ -301,8 +307,20 @@ impl AgentsviewCommandProvider {
                 });
             }
         };
-        for diagnostic in &diagnostics {
-            persist_diagnostic(store, diagnostic)?;
+        let mut diagnostics = Vec::new();
+        for unexpected in &unexpected_provider_days {
+            persist_diagnostic(store, &unexpected.diagnostic)?;
+            record_snapshot_diagnostic(
+                store,
+                &scope,
+                None,
+                Some(unexpected.provider_day),
+                "unexpected_provider_day",
+                "unexpected_provider_day",
+                &unexpected.diagnostic.message,
+                observed_at,
+            )?;
+            diagnostics.push(unexpected.diagnostic.clone());
         }
         let batch = match normalize_agentsview_json(agent, &stdout) {
             Ok(batch) => batch,
@@ -816,7 +834,7 @@ fn empty_poll(diagnostics: Vec<ProviderDiagnostic>) -> UsagePollResult {
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn snapshot_scope(agent: &str, requested_provider_days: Vec<Date>) -> ProviderSnapshotScope {
     ProviderSnapshotScope {
         collector_scope_id: format!("agentsview:{agent}:local-usage"),
@@ -841,7 +859,7 @@ fn filter_agentsview_json_to_requested_days(
     agent: &str,
     text: &str,
     requested_provider_days: &[Date],
-) -> std::result::Result<(String, Vec<ProviderDiagnostic>), ProviderDiagnostic> {
+) -> std::result::Result<(String, Vec<UnexpectedProviderDayDiagnostic>), ProviderDiagnostic> {
     let mut value: Value = serde_json::from_str(text).map_err(|_| {
         diagnostic(
             agent,
@@ -858,11 +876,14 @@ fn filter_agentsview_json_to_requested_days(
     for row in std::mem::take(rows) {
         if let Some(provider_day) = provider_day_from_raw_agentsview_row(&row) {
             if !requested_provider_days.contains(&provider_day) {
-                diagnostics.push(diagnostic(
-                    agent,
-                    "unexpected_provider_day",
-                    &format!("agentsview returned unrequested provider day {provider_day}"),
-                ));
+                diagnostics.push(UnexpectedProviderDayDiagnostic {
+                    diagnostic: diagnostic(
+                        agent,
+                        "unexpected_provider_day",
+                        &format!("agentsview returned unrequested provider day {provider_day}"),
+                    ),
+                    provider_day,
+                });
                 continue;
             }
         }
