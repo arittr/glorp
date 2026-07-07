@@ -96,3 +96,10 @@ pub struct ProviderSnapshotDiagnosticInput {
     pub message: String,
     pub observed_at: OffsetDateTime,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSnapshotWriteOutcome {
+    pub batch_id: i64,
+    pub complete_run_ids: Vec<i64>,
+    pub blocked_run_ids: Vec<i64>,
+}

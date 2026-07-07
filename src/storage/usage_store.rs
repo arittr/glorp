@@ -1,7 +1,8 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{format_description::well_known::Rfc3339, Date, OffsetDateTime};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NormalizedUsageEvent {
@@ -77,6 +78,23 @@ pub struct ProviderVersionInfo {
 
 pub struct UsageStore {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SourceDaySnapshot {
+    total_tokens: f64,
+    identity_fingerprints: BTreeSet<String>,
+}
+
+enum SnapshotAttemptState {
+    Complete {
+        observed_at: OffsetDateTime,
+    },
+    Blocked {
+        observed_at: OffsetDateTime,
+        reason: Option<String>,
+    },
+    Missing,
 }
 
 impl NormalizedUsageEvent {
@@ -532,6 +550,386 @@ impl UsageStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn write_provider_snapshot_batch(
+        &mut self,
+        batch: &crate::usage::snapshot::ProviderSnapshotBatchInput,
+        rows: &[crate::usage::snapshot::ProviderSnapshotRowInput],
+        diagnostics: &[crate::usage::snapshot::ProviderSnapshotDiagnosticInput],
+    ) -> crate::error::Result<crate::usage::snapshot::ProviderSnapshotWriteOutcome> {
+        let tx = self.conn.transaction()?;
+        let requested_days_json = provider_days_json(&batch.requested_provider_days)?;
+        tx.execute(
+            "INSERT INTO provider_snapshot_batches (
+                collector_scope_id, collector_surface, command, token_contract,
+                requested_provider_days_json, provider_version, parser_version,
+                observed_at, completion_status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'complete')",
+            params![
+                batch.collector_scope_id,
+                batch.collector_surface,
+                batch.command,
+                batch.token_contract,
+                requested_days_json,
+                batch.provider_version,
+                batch.parser_version,
+                format_time(batch.observed_at)?,
+            ],
+        )?;
+        let batch_id = tx.last_insert_rowid();
+        let mut complete_run_ids = Vec::new();
+        let mut blocked_run_ids = Vec::new();
+
+        for day in &batch.requested_provider_days {
+            let day_rows = rows
+                .iter()
+                .filter(|row| row.provider_day == *day)
+                .collect::<Vec<_>>();
+            let day_diagnostics = diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.provider_day == Some(*day))
+                .collect::<Vec<_>>();
+            let replacement_scope_id = day_rows
+                .first()
+                .map(|row| row.replacement_scope_id.as_str())
+                .or_else(|| {
+                    day_diagnostics
+                        .first()
+                        .and_then(|diagnostic| diagnostic.replacement_scope_id.as_deref())
+                })
+                .unwrap_or(batch.collector_scope_id.as_str());
+            let completion_status = if day_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.diagnostic_kind == "run_blocked")
+            {
+                "blocked"
+            } else {
+                "complete"
+            };
+            tx.execute(
+                "INSERT INTO provider_snapshot_runs (
+                    batch_id, replacement_scope_id, collector_scope_id, collector_surface,
+                    command, token_contract, provider_day, provider_version, parser_version,
+                    observed_at, completion_status, reason_code
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    batch_id,
+                    replacement_scope_id,
+                    batch.collector_scope_id,
+                    batch.collector_surface,
+                    batch.command,
+                    batch.token_contract,
+                    day.to_string(),
+                    batch.provider_version,
+                    batch.parser_version,
+                    format_time(batch.observed_at)?,
+                    completion_status,
+                    day_diagnostics
+                        .first()
+                        .map(|diagnostic| diagnostic.reason_code.as_str()),
+                ],
+            )?;
+            let run_id = tx.last_insert_rowid();
+            if completion_status == "blocked" {
+                blocked_run_ids.push(run_id);
+                insert_snapshot_diagnostics(&tx, batch_id, Some(run_id), &day_diagnostics)?;
+                continue;
+            }
+
+            let previous = active_source_day_snapshots(
+                &tx,
+                replacement_scope_id,
+                &batch.token_contract,
+                *day,
+            )?;
+            complete_run_ids.push(run_id);
+            supersede_previous_snapshot_rows(
+                &tx,
+                replacement_scope_id,
+                &batch.token_contract,
+                *day,
+            )?;
+            insert_snapshot_rows(&tx, run_id, &day_rows, batch.observed_at)?;
+            refresh_canonical_collectors(
+                &tx,
+                replacement_scope_id,
+                &batch.token_contract,
+                *day,
+                &day_rows,
+                batch.observed_at,
+            )?;
+            record_snapshot_corrections(&tx, batch_id, run_id, batch, *day, &day_rows, &previous)?;
+        }
+
+        tx.commit()?;
+        Ok(crate::usage::snapshot::ProviderSnapshotWriteOutcome {
+            batch_id,
+            complete_run_ids,
+            blocked_run_ids,
+        })
+    }
+
+    pub fn record_snapshot_failure(
+        &mut self,
+        diagnostic: &crate::usage::snapshot::ProviderSnapshotDiagnosticInput,
+    ) -> crate::error::Result<()> {
+        let requested_days_json = provider_days_json(&diagnostic.requested_provider_days)?;
+        self.conn.execute(
+            "INSERT INTO provider_snapshot_diagnostics (
+                diagnostic_kind, collector_scope_id, replacement_scope_id,
+                requested_provider_days_json, provider_day, reason_code, message,
+                batch_id, run_id, recorded_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)",
+            params![
+                diagnostic.diagnostic_kind,
+                diagnostic.collector_scope_id,
+                diagnostic.replacement_scope_id,
+                requested_days_json,
+                diagnostic.provider_day.map(|day| day.to_string()),
+                diagnostic.reason_code,
+                diagnostic.message,
+                format_time(diagnostic.observed_at)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn snapshot_totals_for_provider_day(
+        &self,
+        day: Date,
+    ) -> crate::error::Result<
+        crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>,
+    > {
+        let state = self.snapshot_state_for_provider_day(day)?;
+        let provider_day = day;
+        Ok(match state {
+            SnapshotAttemptState::Missing => crate::usage::snapshot::SnapshotResult {
+                state: crate::usage::snapshot::SnapshotState::Missing,
+                value: None,
+                provider_day,
+                observed_at: None,
+                reason: Some("not_polled".to_string()),
+            },
+            SnapshotAttemptState::Complete { observed_at } => {
+                crate::usage::snapshot::SnapshotResult {
+                    state: crate::usage::snapshot::SnapshotState::Current,
+                    value: Some(crate::usage::snapshot::DayTotals {
+                        total_tokens: self.active_snapshot_total_for_day(day)?,
+                    }),
+                    provider_day,
+                    observed_at: Some(observed_at),
+                    reason: None,
+                }
+            }
+            SnapshotAttemptState::Blocked { observed_at, reason } => {
+                if self.has_complete_snapshot_for_day(day)? {
+                    crate::usage::snapshot::SnapshotResult {
+                        state: crate::usage::snapshot::SnapshotState::Stale,
+                        value: Some(crate::usage::snapshot::DayTotals {
+                            total_tokens: self.active_snapshot_total_for_day(day)?,
+                        }),
+                        provider_day,
+                        observed_at: Some(observed_at),
+                        reason,
+                    }
+                } else {
+                    crate::usage::snapshot::SnapshotResult {
+                        state: crate::usage::snapshot::SnapshotState::Blocked,
+                        value: None,
+                        provider_day,
+                        observed_at: Some(observed_at),
+                        reason,
+                    }
+                }
+            }
+        })
+    }
+
+    pub fn snapshot_totals_by_source_for_provider_day(
+        &self,
+        day: Date,
+    ) -> crate::error::Result<
+        crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::SourceTotals>,
+    > {
+        let totals = self.snapshot_totals_for_provider_day(day)?;
+        let value = if totals.value.is_some() {
+            Some(crate::usage::snapshot::SourceTotals {
+                sources: self.active_snapshot_source_totals_for_day(day)?,
+            })
+        } else {
+            None
+        };
+        Ok(crate::usage::snapshot::SnapshotResult {
+            state: totals.state,
+            value,
+            provider_day: totals.provider_day,
+            observed_at: totals.observed_at,
+            reason: totals.reason,
+        })
+    }
+
+    pub fn snapshot_token_history_for_provider_days(
+        &self,
+        days: &[Date],
+    ) -> crate::error::Result<
+        Vec<crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>>,
+    > {
+        days.iter()
+            .map(|day| self.snapshot_totals_for_provider_day(*day))
+            .collect()
+    }
+
+    pub fn snapshot_health_for_provider_day(
+        &self,
+        day: Date,
+        recent_accepted: &[(String, f64)],
+    ) -> crate::error::Result<Vec<crate::usage::snapshot::SourceSnapshotHealth>> {
+        let snapshot = self.snapshot_totals_by_source_for_provider_day(day)?;
+        let mut recent_by_source = recent_accepted
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<String, f64>>();
+        let mut rows = Vec::new();
+
+        if let Some(totals) = snapshot.value {
+            for source in totals.sources {
+                let recent = recent_by_source
+                    .remove(&source.accounting_source)
+                    .unwrap_or(0.0);
+                rows.push(crate::usage::snapshot::SourceSnapshotHealth {
+                    display_name: source.accounting_source.clone(),
+                    accounting_source: source.accounting_source,
+                    snapshot_state: snapshot.state,
+                    snapshot_total_tokens: Some(source.total_tokens),
+                    recent_accepted_tokens: recent,
+                    reason: snapshot.reason.clone(),
+                });
+            }
+        }
+
+        for (source, recent) in recent_by_source {
+            rows.push(crate::usage::snapshot::SourceSnapshotHealth {
+                accounting_source: source.clone(),
+                display_name: source,
+                snapshot_state: snapshot.state,
+                snapshot_total_tokens: None,
+                recent_accepted_tokens: recent,
+                reason: snapshot.reason.clone(),
+            });
+        }
+
+        Ok(rows)
+    }
+
+    fn snapshot_state_for_provider_day(
+        &self,
+        day: Date,
+    ) -> crate::error::Result<SnapshotAttemptState> {
+        let mut stmt = self.conn.prepare(
+            "SELECT observed_at, completion_status, reason_code
+             FROM (
+                SELECT observed_at, completion_status, reason_code, id, 0 AS attempt_kind
+                FROM provider_snapshot_runs
+                WHERE token_contract = ?1 AND provider_day = ?2
+                UNION ALL
+                SELECT recorded_at AS observed_at, 'blocked' AS completion_status, reason_code, id, 1 AS attempt_kind
+                FROM provider_snapshot_diagnostics
+                WHERE diagnostic_kind = 'run_blocked' AND provider_day = ?2
+             )
+             ORDER BY observed_at DESC, attempt_kind DESC, id DESC
+             LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row(
+                params![
+                    crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                    day.to_string()
+                ],
+                |row| {
+                    let observed_at: String = row.get(0)?;
+                    let completion_status: String = row.get(1)?;
+                    let reason: Option<String> = row.get(2)?;
+                    Ok((observed_at, completion_status, reason))
+                },
+            )
+            .optional()?;
+
+        let Some((observed_at, completion_status, reason)) = row else {
+            return Ok(SnapshotAttemptState::Missing);
+        };
+        let observed_at = parse_time_for_sql(&observed_at)?;
+        if completion_status == "complete" {
+            Ok(SnapshotAttemptState::Complete { observed_at })
+        } else {
+            Ok(SnapshotAttemptState::Blocked { observed_at, reason })
+        }
+    }
+
+    fn has_complete_snapshot_for_day(&self, day: Date) -> crate::error::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM provider_snapshot_runs
+                    WHERE token_contract = ?1
+                      AND provider_day = ?2
+                      AND completion_status = 'complete'
+                )",
+                params![
+                    crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                    day.to_string()
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| value != 0)
+            .map_err(Into::into)
+    }
+
+    fn active_snapshot_total_for_day(&self, day: Date) -> crate::error::Result<f64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(total_tokens), 0.0)
+                 FROM provider_snapshot_rows
+                 WHERE token_contract = ?1
+                   AND provider_day = ?2
+                   AND status = 'active'",
+                params![
+                    crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                    day.to_string()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn active_snapshot_source_totals_for_day(
+        &self,
+        day: Date,
+    ) -> crate::error::Result<Vec<crate::usage::snapshot::SourceTotal>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT accounting_source, COALESCE(SUM(total_tokens), 0.0) AS total_tokens
+             FROM provider_snapshot_rows
+             WHERE token_contract = ?1
+               AND provider_day = ?2
+               AND status = 'active'
+             GROUP BY accounting_source
+             ORDER BY accounting_source",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                    day.to_string()
+                ],
+                |row| {
+                    Ok(crate::usage::snapshot::SourceTotal {
+                        accounting_source: row.get(0)?,
+                        total_tokens: row.get(1)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn is_token_contract_active(&self, contract: &str) -> crate::error::Result<bool> {
@@ -1762,6 +2160,330 @@ fn ensure_usage_event_column(
         if !backfill_sql.is_empty() {
             conn.execute_batch(backfill_sql)?;
         }
+    }
+    Ok(())
+}
+
+fn provider_days_json(days: &[Date]) -> crate::error::Result<String> {
+    Ok(serde_json::to_string(
+        &days.iter().map(Date::to_string).collect::<Vec<_>>(),
+    )?)
+}
+
+fn active_source_day_snapshots(
+    tx: &rusqlite::Transaction<'_>,
+    replacement_scope_id: &str,
+    token_contract: &str,
+    day: Date,
+) -> crate::error::Result<BTreeMap<String, SourceDaySnapshot>> {
+    let mut stmt = tx.prepare(
+        "SELECT accounting_source, total_tokens, model, source_surface, provider_period,
+                raw_source_id_hash, cursor_key_hash
+         FROM provider_snapshot_rows
+         WHERE replacement_scope_id = ?1
+           AND token_contract = ?2
+           AND provider_day = ?3
+           AND status = 'active'",
+    )?;
+    let mut snapshots = BTreeMap::new();
+    let rows = stmt.query_map(
+        params![replacement_scope_id, token_contract, day.to_string()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        },
+    )?;
+    for row in rows {
+        let (
+            accounting_source,
+            total_tokens,
+            model,
+            source_surface,
+            provider_period,
+            raw_source_id_hash,
+            cursor_key_hash,
+        ) = row?;
+        let entry = snapshots
+            .entry(accounting_source)
+            .or_insert_with(|| SourceDaySnapshot {
+                total_tokens: 0.0,
+                identity_fingerprints: BTreeSet::new(),
+            });
+        entry.total_tokens += total_tokens;
+        entry.identity_fingerprints.insert(snapshot_row_fingerprint(
+            model.as_deref(),
+            &source_surface,
+            &provider_period,
+            raw_source_id_hash.as_deref(),
+            &cursor_key_hash,
+        ));
+    }
+    Ok(snapshots)
+}
+
+fn current_source_day_snapshots(
+    rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
+) -> BTreeMap<String, SourceDaySnapshot> {
+    let mut snapshots = BTreeMap::new();
+    for row in rows {
+        let entry = snapshots
+            .entry(row.accounting_source.clone())
+            .or_insert_with(|| SourceDaySnapshot {
+                total_tokens: 0.0,
+                identity_fingerprints: BTreeSet::new(),
+            });
+        entry.total_tokens += row.total_tokens;
+        entry.identity_fingerprints.insert(snapshot_row_fingerprint(
+            row.model.as_deref(),
+            &row.source_surface,
+            &row.provider_period,
+            row.raw_source_id_hash.as_deref(),
+            &row.cursor_key_hash,
+        ));
+    }
+    snapshots
+}
+
+fn snapshot_row_fingerprint(
+    model: Option<&str>,
+    source_surface: &str,
+    provider_period: &str,
+    raw_source_id_hash: Option<&str>,
+    cursor_key_hash: &str,
+) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        model.unwrap_or(""),
+        source_surface,
+        provider_period,
+        raw_source_id_hash.unwrap_or(""),
+        cursor_key_hash
+    )
+}
+
+fn supersede_previous_snapshot_rows(
+    tx: &rusqlite::Transaction<'_>,
+    replacement_scope_id: &str,
+    token_contract: &str,
+    day: Date,
+) -> crate::error::Result<()> {
+    tx.execute(
+        "UPDATE provider_snapshot_rows
+         SET status = 'superseded'
+         WHERE replacement_scope_id = ?1
+           AND token_contract = ?2
+           AND provider_day = ?3
+           AND status = 'active'",
+        params![replacement_scope_id, token_contract, day.to_string()],
+    )?;
+    Ok(())
+}
+
+fn insert_snapshot_rows(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: i64,
+    rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
+    observed_at: OffsetDateTime,
+) -> crate::error::Result<()> {
+    let observed_at = format_time(observed_at)?;
+    for row in rows {
+        let raw = row.raw_token_buckets;
+        tx.execute(
+            "INSERT INTO provider_snapshot_rows (
+                run_id, replacement_scope_id, collector_scope_id, collector_surface,
+                command, token_contract, accounting_source, provider_day, model,
+                source_surface, provider_period, raw_source_id_hash, cursor_key_hash,
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                reasoning_output_tokens, total_tokens, cost_usd, confidence, status,
+                first_observed_at, last_observed_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 'active', ?22, ?23
+            )",
+            params![
+                run_id,
+                row.replacement_scope_id,
+                row.collector_scope_id,
+                row.collector_surface,
+                row.command,
+                row.token_contract,
+                row.accounting_source,
+                row.provider_day.to_string(),
+                row.model,
+                row.source_surface,
+                row.provider_period,
+                row.raw_source_id_hash,
+                row.cursor_key_hash,
+                raw.map(|totals| totals.uncached_input as f64),
+                raw.map(|totals| totals.output as f64),
+                raw.map(|totals| totals.cache_creation as f64),
+                raw.map(|totals| totals.cache_read as f64),
+                raw.map(|totals| totals.reasoning_output as f64),
+                row.total_tokens,
+                row.cost_usd,
+                row.confidence,
+                observed_at,
+                observed_at,
+            ],
+        )?;
+        upsert_provider_cursor(tx, &row.cursor_update, &observed_at)?;
+    }
+    Ok(())
+}
+
+fn refresh_canonical_collectors(
+    tx: &rusqlite::Transaction<'_>,
+    replacement_scope_id: &str,
+    token_contract: &str,
+    day: Date,
+    rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
+    observed_at: OffsetDateTime,
+) -> crate::error::Result<()> {
+    let observed_at = format_time(observed_at)?;
+    let sources = rows
+        .iter()
+        .map(|row| row.accounting_source.as_str())
+        .collect::<BTreeSet<_>>();
+    for source in sources {
+        tx.execute(
+            "INSERT INTO provider_canonical_collectors (
+                token_contract, accounting_source, provider_day, collector_scope_id,
+                replacement_scope_id, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(token_contract, accounting_source, provider_day) DO UPDATE SET
+                collector_scope_id = excluded.collector_scope_id,
+                replacement_scope_id = excluded.replacement_scope_id,
+                updated_at = excluded.updated_at",
+            params![
+                token_contract,
+                source,
+                day.to_string(),
+                rows.iter()
+                    .find(|row| row.accounting_source == source)
+                    .map(|row| row.collector_scope_id.as_str())
+                    .unwrap_or(replacement_scope_id),
+                replacement_scope_id,
+                observed_at,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn record_snapshot_corrections(
+    tx: &rusqlite::Transaction<'_>,
+    batch_id: i64,
+    run_id: i64,
+    batch: &crate::usage::snapshot::ProviderSnapshotBatchInput,
+    day: Date,
+    rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
+    previous: &BTreeMap<String, SourceDaySnapshot>,
+) -> crate::error::Result<()> {
+    let current = current_source_day_snapshots(rows);
+    let requested_days_json = provider_days_json(&[day])?;
+    let recorded_at = format_time(batch.observed_at)?;
+    for (source, previous_snapshot) in previous {
+        let current_snapshot = current.get(source);
+        let current_total = current_snapshot
+            .map(|snapshot| snapshot.total_tokens)
+            .unwrap_or(0.0);
+        if previous_snapshot.total_tokens > current_total {
+            let cursor_key_hash = rows
+                .iter()
+                .find(|row| row.accounting_source == *source)
+                .map(|row| row.cursor_key_hash.as_str());
+            tx.execute(
+                "INSERT INTO provider_corrections (
+                    correction_kind, token_contract, accounting_source, provider_day, model,
+                    previous_total_tokens, current_total_tokens, decrease_tokens,
+                    previous_raw_buckets_json, current_raw_buckets_json, collector_surface,
+                    cursor_key_hash, batch_id, run_id, recorded_at
+                ) VALUES (
+                    'source_day_decrease', ?1, ?2, ?3, NULL, ?4, ?5, ?6,
+                    NULL, NULL, ?7, ?8, ?9, ?10, ?11
+                )",
+                params![
+                    batch.token_contract,
+                    source,
+                    day.to_string(),
+                    previous_snapshot.total_tokens,
+                    current_total,
+                    previous_snapshot.total_tokens - current_total,
+                    batch.collector_surface,
+                    cursor_key_hash,
+                    batch_id,
+                    run_id,
+                    recorded_at,
+                ],
+            )?;
+        } else if (previous_snapshot.total_tokens - current_total).abs() < f64::EPSILON
+            && current_snapshot
+                .map(|snapshot| {
+                    snapshot.identity_fingerprints != previous_snapshot.identity_fingerprints
+                })
+                .unwrap_or(false)
+        {
+            tx.execute(
+                "INSERT INTO provider_snapshot_diagnostics (
+                    diagnostic_kind, collector_scope_id, replacement_scope_id,
+                    requested_provider_days_json, provider_day, reason_code, message,
+                    batch_id, run_id, recorded_at
+                ) VALUES (
+                    'identity_remap', ?1, ?2, ?3, ?4, 'identity_remap',
+                    'snapshot row identity changed without source-day total change',
+                    ?5, ?6, ?7
+                )",
+                params![
+                    batch.collector_scope_id,
+                    rows.iter()
+                        .find(|row| row.accounting_source == *source)
+                        .map(|row| row.replacement_scope_id.as_str())
+                        .unwrap_or(batch.collector_scope_id.as_str()),
+                    requested_days_json,
+                    day.to_string(),
+                    batch_id,
+                    run_id,
+                    recorded_at,
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_snapshot_diagnostics(
+    tx: &rusqlite::Transaction<'_>,
+    batch_id: i64,
+    run_id: Option<i64>,
+    diagnostics: &[&crate::usage::snapshot::ProviderSnapshotDiagnosticInput],
+) -> crate::error::Result<()> {
+    for diagnostic in diagnostics {
+        tx.execute(
+            "INSERT INTO provider_snapshot_diagnostics (
+                diagnostic_kind, collector_scope_id, replacement_scope_id,
+                requested_provider_days_json, provider_day, reason_code, message,
+                batch_id, run_id, recorded_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                diagnostic.diagnostic_kind,
+                diagnostic.collector_scope_id,
+                diagnostic.replacement_scope_id,
+                provider_days_json(&diagnostic.requested_provider_days)?,
+                diagnostic.provider_day.map(|day| day.to_string()),
+                diagnostic.reason_code,
+                diagnostic.message,
+                batch_id,
+                run_id,
+                format_time(diagnostic.observed_at)?,
+            ],
+        )?;
     }
     Ok(())
 }
