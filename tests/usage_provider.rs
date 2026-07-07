@@ -820,6 +820,30 @@ fn provider_writes_snapshot_before_emitting_feed_deltas() {
 }
 
 #[test]
+fn snapshot_only_refresh_does_not_seed_cursor_before_feed_poll() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    provider.refresh_snapshots_only(&mut store).unwrap();
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result.total_tokens > 0.0);
+}
+
+#[test]
 fn unexpected_extra_provider_day_does_not_write_snapshot_or_feed() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();

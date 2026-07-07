@@ -375,12 +375,6 @@ impl CcusageCommandProvider {
             });
         }
 
-        let plan = if feed {
-            Some(store.feed_deltas_for_snapshot_rows(&rows, observed_at)?)
-        } else {
-            None
-        };
-
         let batch = ProviderSnapshotBatchInput {
             collector_scope_id: scope.collector_scope_id.clone(),
             collector_surface: collector_surface(command_name, provider_surface),
@@ -400,7 +394,7 @@ impl CcusageCommandProvider {
             });
         }
 
-        let plan = plan.expect("feed plan should exist for feed mode");
+        let plan = store.feed_deltas_for_snapshot_rows(&rows, observed_at)?;
         if !plan.cursor_seeds.is_empty() {
             store.advance_cursors(plan.cursor_seeds.clone(), observed_at)?;
         }

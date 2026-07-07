@@ -331,6 +331,29 @@ fn complete_run_persists_non_blocking_diagnostic_and_returns_current_snapshot() 
 }
 
 #[test]
+fn snapshot_batch_does_not_advance_row_provider_cursor() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let day = date!(2026 - 07 - 06);
+    let observed_at = datetime!(2026 - 07 - 06 20:00 UTC);
+    let row = row(day, "claude-fable-5", 531.0, observed_at);
+
+    store
+        .write_provider_snapshot_batch(&batch(day, observed_at), std::slice::from_ref(&row), &[])
+        .unwrap();
+
+    assert_eq!(
+        store
+            .provider_cursor(
+                &row.cursor_update.provider_surface,
+                &row.cursor_update.cursor_key
+            )
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn complete_zero_row_run_replaces_prior_visible_day_with_current_zero() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();

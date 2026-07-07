@@ -343,12 +343,6 @@ impl AgentsviewCommandProvider {
             return Ok(AgentSnapshotFlow { result: empty_poll(diagnostics) });
         }
 
-        let plan = if feed {
-            Some(store.feed_deltas_for_snapshot_rows(&rows, observed_at)?)
-        } else {
-            None
-        };
-
         let batch = ProviderSnapshotBatchInput {
             collector_scope_id: scope.collector_scope_id.clone(),
             collector_surface: collector_surface(agent),
@@ -365,7 +359,7 @@ impl AgentsviewCommandProvider {
             return Ok(AgentSnapshotFlow { result: empty_poll(diagnostics) });
         }
 
-        let plan = plan.expect("feed plan should exist for feed mode");
+        let plan = store.feed_deltas_for_snapshot_rows(&rows, observed_at)?;
         if !plan.cursor_seeds.is_empty() {
             store.advance_cursors(plan.cursor_seeds.clone(), observed_at)?;
         }

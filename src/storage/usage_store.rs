@@ -3324,7 +3324,6 @@ fn insert_snapshot_rows(
                 observed_at,
             ],
         )?;
-        upsert_provider_cursor(tx, &row.cursor_update, &observed_at)?;
     }
     Ok(())
 }
