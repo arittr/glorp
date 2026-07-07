@@ -235,18 +235,47 @@ fn complete_zero_row_run_replaces_prior_visible_day_with_current_zero() {
 
     store
         .write_provider_snapshot_batch(
-            &batch(day, first_at),
-            &[row(day, "claude-fable-5", 531.0, first_at)],
+            &batch_in_scope(day, first_at, "collector:scope-a"),
+            &[row_in_scope(
+                day,
+                "claude-fable-5",
+                100.0,
+                first_at,
+                "replacement:scope-a",
+                "collector:scope-a",
+            )],
             &[],
         )
         .unwrap();
     store
-        .write_provider_snapshot_batch(&batch(day, second_at), &[], &[])
+        .write_provider_snapshot_batch(
+            &batch_in_scope(day, second_at, "replacement:scope-b"),
+            &[],
+            &[],
+        )
         .unwrap();
 
     let result = store.snapshot_totals_for_provider_day(day).unwrap();
     assert_eq!(result.state, SnapshotState::Current);
     assert_eq!(result.value, Some(DayTotals { total_tokens: 0.0 }));
+
+    let correction = store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT previous_total_tokens, current_total_tokens, decrease_tokens
+             FROM provider_corrections
+             WHERE token_contract = ?1 AND accounting_source = ?2 AND provider_day = ?3",
+            params![TOKENMAXXING_TOTAL_V1, "claude-code", day.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(correction, (100.0, 0.0, 100.0));
 }
 
 #[test]

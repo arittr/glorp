@@ -645,12 +645,16 @@ impl UsageStore {
             let previous =
                 canonical_visible_source_day_snapshots(&tx, &batch.token_contract, *day)?;
             complete_run_ids.push(run_id);
-            supersede_previous_snapshot_rows(
-                &tx,
-                replacement_scope_id,
-                &batch.token_contract,
-                *day,
-            )?;
+            if day_rows.is_empty() {
+                supersede_previous_snapshot_rows_for_day(&tx, &batch.token_contract, *day)?;
+            } else {
+                supersede_previous_snapshot_rows(
+                    &tx,
+                    replacement_scope_id,
+                    &batch.token_contract,
+                    *day,
+                )?;
+            }
             insert_snapshot_rows(&tx, run_id, &day_rows, batch.observed_at)?;
             refresh_canonical_collectors(
                 &tx,
@@ -2273,6 +2277,22 @@ fn supersede_previous_snapshot_rows(
            AND provider_day = ?3
            AND status = 'active'",
         params![replacement_scope_id, token_contract, day.to_string()],
+    )?;
+    Ok(())
+}
+
+fn supersede_previous_snapshot_rows_for_day(
+    tx: &rusqlite::Transaction<'_>,
+    token_contract: &str,
+    day: Date,
+) -> crate::error::Result<()> {
+    tx.execute(
+        "UPDATE provider_snapshot_rows
+         SET status = 'superseded'
+         WHERE token_contract = ?1
+           AND provider_day = ?2
+           AND status = 'active'",
+        params![token_contract, day.to_string()],
     )?;
     Ok(())
 }
