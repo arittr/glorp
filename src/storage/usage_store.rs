@@ -79,6 +79,15 @@ pub struct ProviderDiagnostic {
     pub recorded_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderCorrectionNotice {
+    pub accounting_source: String,
+    pub provider_day: String,
+    pub previous_total_tokens: f64,
+    pub current_total_tokens: f64,
+    pub decrease_tokens: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderVersionInfo {
     pub provider_surface: String,
@@ -2310,6 +2319,31 @@ impl UsageStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(diagnostics)
+    }
+
+    pub fn recent_provider_corrections(
+        &self,
+        limit: u32,
+    ) -> crate::error::Result<Vec<ProviderCorrectionNotice>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT accounting_source, provider_day, previous_total_tokens,
+                    current_total_tokens, decrease_tokens
+             FROM provider_corrections
+             ORDER BY recorded_at DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let corrections = stmt
+            .query_map(params![limit], |row| {
+                Ok(ProviderCorrectionNotice {
+                    accounting_source: row.get(0)?,
+                    provider_day: row.get(1)?,
+                    previous_total_tokens: row.get(2)?,
+                    current_total_tokens: row.get(3)?,
+                    decrease_tokens: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(corrections)
     }
 
     pub fn provider_versions(&self) -> crate::error::Result<Vec<ProviderVersionInfo>> {

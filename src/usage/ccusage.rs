@@ -373,14 +373,16 @@ impl CcusageCommandProvider {
                 unexpected_provider_days,
             } => (version, records, diagnostics, unexpected_provider_days),
             HelperInvocation::EarlyExit { diagnostics } => {
-                record_snapshot_failures(
-                    store,
-                    &scope,
-                    provider_surface,
-                    &diagnostics,
-                    observed_at,
-                )?;
                 let outcome = helper_early_exit_outcome(provider_surface, &diagnostics);
+                if outcome == HelperSnapshotOutcome::Blocked {
+                    record_snapshot_failures(
+                        store,
+                        &scope,
+                        provider_surface,
+                        &diagnostics,
+                        observed_at,
+                    )?;
+                }
                 return Ok(PreparedHelperSnapshot {
                     scope,
                     collector_surface: collector_surface(command_name, provider_surface),
@@ -1284,8 +1286,8 @@ fn record_snapshot_failures(
     Ok(())
 }
 
-fn should_record_snapshot_failure(code: &str) -> bool {
-    code != "missing_helper"
+fn should_record_snapshot_failure(_code: &str) -> bool {
+    true
 }
 
 fn helper_early_exit_outcome(

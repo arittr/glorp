@@ -120,10 +120,17 @@ pub fn run() -> Result<()> {
             crate::usage::snapshot::SnapshotState::Missing => "snapshot pending".into(),
             crate::usage::snapshot::SnapshotState::Blocked => "snapshot blocked".into(),
         };
-        let (today_start, today_end) =
-            crate::usage::day_axis::tokenmaxxing_today_window(status_now);
         today_sources = usage_store
-            .canonical_total_tokens_by_source_between(today_start, today_end)
+            .snapshot_totals_by_source_for_provider_day(provider_day)
+            .ok()
+            .and_then(|snapshot| snapshot.value)
+            .map(|totals| {
+                totals
+                    .sources
+                    .into_iter()
+                    .map(|source| (source.accounting_source, source.total_tokens))
+                    .collect()
+            })
             .unwrap_or_default();
     }
 

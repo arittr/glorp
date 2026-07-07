@@ -962,8 +962,8 @@ fn record_snapshot_failures(
     Ok(())
 }
 
-fn should_record_snapshot_failure(code: &str) -> bool {
-    code != "missing_helper"
+fn should_record_snapshot_failure(_code: &str) -> bool {
+    true
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1,9 +1,11 @@
 use assert_cmd::Command;
 use glorp::storage::state::{write_state_for_test, PetState, PetStateFixture};
-use glorp::storage::usage_store::{NormalizedUsageEvent, UsageStore};
+use glorp::storage::usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore};
+use glorp::usage::snapshot::{ProviderSnapshotBatchInput, ProviderSnapshotRowInput};
+use glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1;
 use predicates::prelude::*;
 use tempfile::tempdir;
-use time::{Duration, OffsetDateTime};
+use time::{Date, Duration, OffsetDateTime};
 
 const AGENTSVIEW_OK: &str = "tests/fixtures/helpers/agentsview-ok.mjs";
 const AGENTSVIEW_NEXT: &str = "tests/fixtures/helpers/agentsview-next.mjs";
@@ -312,6 +314,7 @@ fn status_includes_recent_evolution_event_when_present() {
 fn status_clamps_zero_usage_display() {
     let dir = tempdir().unwrap();
     write_state_for_test(dir.path(), PetStateFixture::named("mochi")).unwrap();
+    let now_for_test = "2026-07-06T20:00:00Z";
 
     Command::cargo_bin("glorp")
         .unwrap()
@@ -319,18 +322,31 @@ fn status_clamps_zero_usage_display() {
         .env_remove("GLORP_CCUSAGE_BIN")
         .env_remove("GLORP_CCUSAGE_CODEX_BIN")
         .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("GLORP_USAGE_NOW_FOR_TEST", now_for_test)
         .env("PATH", "/bin")
         .arg("status")
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "provider today (snapshot pending): 0",
+            "provider today (snapshot blocked): 0",
         ))
         .stdout(predicate::str::contains("accepted recent food: 0"))
         .stdout(predicate::str::contains("pet lifetime food: 0"))
         .stdout(predicate::str::contains("effective tokens").not())
         .stdout(predicate::str::contains("provider health: blocked"))
         .stdout(predicate::str::contains("-0").not());
+    let provider_day = glorp::usage::day_axis::tokenmaxxing_provider_day(
+        time::macros::datetime!(2026 - 07 - 06 20:00 UTC),
+    );
+    let snapshot = UsageStore::open(&dir.path().join("usage.sqlite"))
+        .unwrap()
+        .snapshot_totals_for_provider_day(provider_day)
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Blocked
+    );
+    assert!(snapshot.value.is_none());
 }
 
 #[test]
@@ -363,6 +379,13 @@ fn status_uses_tokenmaxxing_day_axis_under_non_los_angeles_tz() {
             ..NormalizedUsageEvent::for_test_at(event_at, 123_456.0)
         })
         .unwrap();
+    seed_status_snapshot_for_test(
+        &mut usage_store,
+        glorp::usage::day_axis::tokenmaxxing_provider_day(now),
+        "codex",
+        123_456.0,
+        event_at,
+    );
     drop(usage_store);
 
     Command::cargo_bin("glorp")
@@ -374,7 +397,7 @@ fn status_uses_tokenmaxxing_day_axis_under_non_los_angeles_tz() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "provider today (snapshot blocked): 0",
+            "provider today (current provider snapshot): 123456",
         ))
         .stdout(predicate::str::contains("accepted recent food: 0"))
         .stdout(predicate::str::contains("pet lifetime food: 0"))
@@ -505,16 +528,9 @@ fn status_lists_today_sources_generically() {
 
     let now = OffsetDateTime::now_utc();
     let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider_day = glorp::usage::day_axis::tokenmaxxing_provider_day(now);
     for (surface, tokens) in [("gemini", 12_000.0), ("opencode", 8_000.0)] {
-        usage_store
-            .insert_event(&NormalizedUsageEvent {
-                provider_surface: surface.to_string(),
-                observed_at: now,
-                bucket_at: now,
-                effective_tokens: tokens,
-                ..NormalizedUsageEvent::for_test_at(now, tokens)
-            })
-            .unwrap();
+        seed_status_snapshot_for_test(&mut usage_store, provider_day, surface, tokens, now);
     }
     drop(usage_store);
 
@@ -532,6 +548,49 @@ fn status_lists_today_sources_generically() {
         .stdout(predicate::str::contains("gemini"))
         .stdout(predicate::str::contains("opencode"))
         .stdout(predicate::str::contains("claude-code").not());
+}
+
+#[test]
+fn status_sources_today_use_corrected_snapshot_not_accepted_feed() {
+    let dir = tempdir().unwrap();
+    write_state_for_test(dir.path(), PetStateFixture::named("mochi")).unwrap();
+
+    let now = OffsetDateTime::now_utc();
+    let provider_day = glorp::usage::day_axis::tokenmaxxing_provider_day(now);
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            observed_at: now,
+            bucket_at: now,
+            total_tokens: 1_060.0,
+            effective_tokens: 1_060.0,
+            ..NormalizedUsageEvent::for_test_at(now, 1_060.0)
+        })
+        .unwrap();
+    seed_status_snapshot_for_test(&mut usage_store, provider_day, "claude-code", 1_060.0, now);
+    seed_status_snapshot_for_test(
+        &mut usage_store,
+        provider_day,
+        "claude-code",
+        531.0,
+        now + Duration::minutes(10),
+    );
+    drop(usage_store);
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_CCUSAGE_BIN")
+        .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sources today:"))
+        .stdout(predicate::str::contains("claude-code: 531"))
+        .stdout(predicate::str::contains("claude-code: 1060").not());
 }
 
 #[test]
@@ -562,6 +621,97 @@ fn doctor_lists_discovered_sources_generically() {
         .stdout(predicate::str::contains("source: gemini"))
         .stdout(predicate::str::contains("provider: agentsview"))
         .stdout(predicate::str::contains("claude provider=").not());
+}
+
+#[test]
+fn doctor_lists_provider_snapshot_sources_and_recent_corrections() {
+    let dir = tempdir().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let provider_day = glorp::usage::day_axis::tokenmaxxing_provider_day(now);
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    usage_store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            observed_at: now,
+            bucket_at: now,
+            total_tokens: 1_060.0,
+            effective_tokens: 1_060.0,
+            ..NormalizedUsageEvent::for_test_at(now, 1_060.0)
+        })
+        .unwrap();
+    seed_status_snapshot_for_test(&mut usage_store, provider_day, "claude-code", 1_060.0, now);
+    seed_status_snapshot_for_test(
+        &mut usage_store,
+        provider_day,
+        "claude-code",
+        531.0,
+        now + Duration::minutes(10),
+    );
+    drop(usage_store);
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env_remove("GLORP_CCUSAGE_BIN")
+        .env_remove("GLORP_CCUSAGE_CODEX_BIN")
+        .env_remove("GLORP_AGENTSVIEW_BIN")
+        .env("PATH", "/bin")
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "provider source: claude-code today=531",
+        ))
+        .stdout(predicate::str::contains("recent correction: claude-code"))
+        .stdout(predicate::str::contains("decreased=529"));
+}
+
+fn seed_status_snapshot_for_test(
+    usage: &mut UsageStore,
+    day: Date,
+    source: &str,
+    total: f64,
+    observed_at: OffsetDateTime,
+) {
+    let batch = ProviderSnapshotBatchInput {
+        collector_scope_id: format!("{source}:local-usage"),
+        collector_surface: format!("ccusage:{source}"),
+        command: "test snapshot".into(),
+        token_contract: TOKENMAXXING_TOTAL_V1.into(),
+        requested_provider_days: vec![day],
+        covered_accounting_sources: Some(vec![source.into()]),
+        provider_version: "test".into(),
+        parser_version: "test".into(),
+        observed_at,
+    };
+    let row = ProviderSnapshotRowInput {
+        replacement_scope_id: format!("{source}:local-usage"),
+        collector_scope_id: format!("{source}:local-usage"),
+        collector_surface: format!("ccusage:{source}"),
+        command: "test snapshot".into(),
+        token_contract: TOKENMAXXING_TOTAL_V1.into(),
+        accounting_source: source.into(),
+        provider_day: day,
+        model: Some("test-model".into()),
+        source_surface: "daily".into(),
+        provider_period: day.to_string(),
+        raw_source_id_hash: Some(format!("hash:{source}")),
+        cursor_key_hash: format!("hash:{source}:cursor"),
+        cursor_update: ProviderCursorUpdate {
+            provider_surface: source.into(),
+            cursor_key: "cursor".into(),
+            cursor_value: format!("value:{total}"),
+            provider_version: "test".into(),
+            parser_version: "test".into(),
+        },
+        raw_token_buckets: None,
+        total_tokens: total,
+        cost_usd: None,
+        confidence: "local-log-derived".into(),
+    };
+    usage
+        .write_provider_snapshot_batch(&batch, &[row], &[])
+        .unwrap();
 }
 
 #[test]
