@@ -18,6 +18,7 @@ use glorp::{
         token_contract::TOKENMAXXING_TOTAL_V1,
     },
 };
+use rusqlite::params;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 use time::{
@@ -1456,18 +1457,81 @@ fn provider_correction_updates_visible_truth_without_rolling_back_pet_progress()
     let usage_db = dir.path().join("usage.sqlite");
     let mut usage_store = UsageStore::open(&usage_db).unwrap();
     let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
-    state.lifetime_effective_tokens = 1_060_000_000.0;
-    state.xp = 5.0;
-    state.stage = Stage::S5;
+    state.calibration.daily_effective_tokens = 100_000_000.0;
     let now = datetime!(2026 - 07 - 06 20:00 UTC);
     let day = date!(2026 - 07 - 06);
 
-    seed_snapshot_for_runtime_test(&mut usage_store, day, "claude-code", 531_000_000.0, now);
+    let overcount_event = NormalizedUsageEvent {
+        provider_surface: "claude-code".into(),
+        observed_at: now,
+        bucket_at: now,
+        effective_tokens: 1_060_000_000.0,
+        total_tokens: 1_060_000_000.0,
+        input_tokens: 1_060_000_000.0,
+        ..NormalizedUsageEvent::for_test_at(now, 1_060_000_000.0)
+    };
+    usage_store
+        .insert_unapplied_event_bucket(
+            &overcount_event,
+            &ProviderCursorUpdate {
+                provider_surface: "claude-code".into(),
+                cursor_key: "july6-overcount".into(),
+                cursor_value: "overcount".into(),
+                provider_version: "test-provider".into(),
+                parser_version: "test-parser".into(),
+            },
+            0,
+            1,
+        )
+        .unwrap();
+    let update = apply_unapplied_usage(&mut state, &mut usage_store, now, false).unwrap();
+    assert_eq!(update.recent_effective_tokens, 1_060_000_000.0);
+    usage_store
+        .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+        .unwrap();
+
+    let fed_lifetime = state.lifetime_effective_tokens;
+    let fed_xp = state.xp;
+    let fed_stage = state.stage;
+    let fed_vitals = state.vitals;
+
+    seed_snapshot_for_runtime_test(&mut usage_store, day, "claude-code", 1_060_000_000.0, now);
+    seed_snapshot_for_runtime_test(
+        &mut usage_store,
+        day,
+        "claude-code",
+        531_000_000.0,
+        now + Duration::minutes(10),
+    );
 
     let visible = usage_store.snapshot_totals_for_provider_day(day).unwrap();
     assert_eq!(visible.value.unwrap().total_tokens, 531_000_000.0);
-    assert_eq!(state.lifetime_effective_tokens, 1_060_000_000.0);
-    assert_eq!(state.stage, Stage::S5);
+    let correction = usage_store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT previous_total_tokens, current_total_tokens, decrease_tokens
+             FROM provider_corrections
+             WHERE token_contract = ?1 AND accounting_source = ?2 AND provider_day = ?3",
+            params![TOKENMAXXING_TOTAL_V1, "claude-code", day.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(correction, (1_060_000_000.0, 531_000_000.0, 529_000_000.0));
+
+    let applied_total = usage_store
+        .applied_effective_tokens_between(now - Duration::minutes(1), now + Duration::minutes(1))
+        .unwrap();
+    assert_eq!(applied_total, 1_060_000_000.0);
+    assert_eq!(state.lifetime_effective_tokens, fed_lifetime);
+    assert_eq!(state.xp, fed_xp);
+    assert_eq!(state.stage, fed_stage);
+    assert_eq!(state.vitals, fed_vitals);
 }
 
 fn seed_snapshot_for_runtime_test(

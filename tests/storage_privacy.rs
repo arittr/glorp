@@ -1,10 +1,15 @@
 use glorp::config::AppConfig;
 use glorp::paths::AppPaths;
 use glorp::storage::state::{PetState, StateStore, Vitals};
-use glorp::storage::usage_store::{NormalizedUsageEvent, UsageStore};
-use rusqlite::Connection;
+use glorp::storage::usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore};
+use glorp::usage::ccusage::{CcusageCommandProvider, HelperPaths};
+use glorp::usage::provider::UsageProvider;
+use glorp::usage::snapshot::{ProviderSnapshotBatchInput, ProviderSnapshotRowInput};
+use glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1;
+use rusqlite::{params, Connection};
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
-use time::{macros::datetime, Duration, OffsetDateTime};
+use time::{macros::datetime, Date, Duration, OffsetDateTime};
 
 #[test]
 fn state_files_stay_inside_config_override() {
@@ -178,32 +183,154 @@ fn snapshot_tables_exist_without_raw_transcript_columns() {
 #[test]
 fn snapshot_corrections_and_diagnostics_do_not_store_raw_payloads() {
     let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let raw_project_path = "/Users/drew/private/project-secret";
+    let raw_model = "secret-model-project-name";
+    let raw_prompt = "secret prompt";
+    let raw_response = "secret response";
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
     let day = time::macros::date!(2026 - 07 - 06);
-    store
-        .record_snapshot_failure(&glorp::usage::snapshot::ProviderSnapshotDiagnosticInput {
-            diagnostic_kind: "helper_exit".into(),
-            collector_scope_id: "claude-code:local-usage".into(),
-            replacement_scope_id: None,
-            requested_provider_days: vec![day],
-            provider_day: Some(day),
-            reason_code: "helper_exit".into(),
-            message: "helper_exit sanitized".into(),
-            observed_at: time::macros::datetime!(2026 - 07 - 06 20:00 UTC),
-        })
+
+    let provider = CcusageCommandProvider::new_with_now_for_test(
+        HelperPaths {
+            unified: None,
+            claude: Some(helper_fixture("ccusage-malformed-raw-agent.mjs")),
+            codex: None,
+            node: None,
+        },
+        time::macros::datetime!(2026 - 07 - 06 20:00 UTC),
+    );
+    let poll = provider.poll(&mut store).unwrap();
+    assert!(poll
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+
+    seed_privacy_snapshot(
+        &mut store,
+        day,
+        1_060_000_000.0,
+        "hash:source-from-private-project",
+        "hash:cursor-from-secret-prompt",
+        time::macros::datetime!(2026 - 07 - 06 20:05 UTC),
+    );
+    seed_privacy_snapshot(
+        &mut store,
+        day,
+        531_000_000.0,
+        "hash:source-from-private-project",
+        "hash:cursor-from-secret-prompt",
+        time::macros::datetime!(2026 - 07 - 06 20:10 UTC),
+    );
+
+    let correction_count: i64 = store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM provider_corrections
+             WHERE token_contract = ?1 AND accounting_source = ?2 AND provider_day = ?3",
+            params![TOKENMAXXING_TOTAL_V1, "claude-code", day.to_string()],
+            |row| row.get(0),
+        )
         .unwrap();
+    assert_eq!(correction_count, 1);
 
     let rendered: String = store
         .raw_connection_for_test()
         .query_row(
-            "SELECT IFNULL(group_concat(message, '\n'), '') FROM provider_snapshot_diagnostics",
+            "SELECT IFNULL(group_concat(text, '\n'), '')
+             FROM (
+                SELECT provider_surface || ' ' || message AS text FROM provider_diagnostics
+                UNION ALL
+                SELECT collector_scope_id || ' ' || IFNULL(replacement_scope_id, '') || ' ' || message
+                    FROM provider_snapshot_diagnostics
+                UNION ALL
+                SELECT accounting_source || ' ' || collector_surface || ' ' || IFNULL(cursor_key_hash, '')
+                    FROM provider_corrections
+                UNION ALL
+                SELECT accounting_source || ' ' || IFNULL(raw_source_id_hash, '') || ' ' || cursor_key_hash
+                    FROM provider_snapshot_rows
+             )",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(!rendered.contains("secret prompt"));
-    assert!(!rendered.contains("secret response"));
-    assert!(!rendered.contains("/Users/drew/private"));
+    assert!(rendered.contains("malformed"));
+    assert!(rendered.contains("hash:source-from-private-project"));
+    assert!(rendered.contains("hash:cursor-from-secret-prompt"));
+
+    store
+        .insert_event(&NormalizedUsageEvent::for_test_with_ignored_payloads(
+            "claude-code",
+            raw_prompt,
+            raw_response,
+            raw_project_path,
+        ))
+        .unwrap();
+
+    let raw_db = String::from_utf8_lossy(&std::fs::read(&db_path).unwrap()).into_owned();
+    let persisted = format!("{rendered}\n{raw_db}");
+    for forbidden in [raw_project_path, raw_model, raw_prompt, raw_response] {
+        assert!(
+            !persisted.contains(forbidden),
+            "raw payload leaked into provider diagnostics or correction storage: {forbidden}"
+        );
+    }
+}
+
+fn helper_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/helpers")
+        .join(name)
+}
+
+fn seed_privacy_snapshot(
+    store: &mut UsageStore,
+    day: Date,
+    total: f64,
+    raw_source_id_hash: &str,
+    cursor_key_hash: &str,
+    observed_at: OffsetDateTime,
+) {
+    let batch = ProviderSnapshotBatchInput {
+        collector_scope_id: "claude-code:local-usage".into(),
+        collector_surface: "ccusage:claude-code".into(),
+        command: "ccusage claude daily --json --offline".into(),
+        token_contract: TOKENMAXXING_TOTAL_V1.into(),
+        requested_provider_days: vec![day],
+        covered_accounting_sources: None,
+        provider_version: "ccusage 20.0.6".into(),
+        parser_version: "ccusage 20.0.6".into(),
+        observed_at,
+    };
+    let row = ProviderSnapshotRowInput {
+        replacement_scope_id: "claude-code:local-usage".into(),
+        collector_scope_id: "claude-code:local-usage".into(),
+        collector_surface: "ccusage:claude-code".into(),
+        command: "ccusage claude daily --json --offline".into(),
+        token_contract: TOKENMAXXING_TOTAL_V1.into(),
+        accounting_source: "claude-code".into(),
+        provider_day: day,
+        model: Some("sanitized-model".into()),
+        source_surface: "daily".into(),
+        provider_period: day.to_string(),
+        raw_source_id_hash: Some(raw_source_id_hash.into()),
+        cursor_key_hash: cursor_key_hash.into(),
+        cursor_update: ProviderCursorUpdate {
+            provider_surface: "claude-code".into(),
+            cursor_key: "safe-cursor".into(),
+            cursor_value: format!("safe-total-{total}"),
+            provider_version: "ccusage 20.0.6".into(),
+            parser_version: "ccusage 20.0.6".into(),
+        },
+        raw_token_buckets: None,
+        total_tokens: total,
+        cost_usd: None,
+        confidence: "local-log-derived".into(),
+    };
+    store
+        .write_provider_snapshot_batch(&batch, &[row], &[])
+        .unwrap();
 }
 
 #[test]
