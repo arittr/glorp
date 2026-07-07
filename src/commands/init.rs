@@ -55,7 +55,12 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
             // and are safe to advance. Skipping this step leaves cursors at zero,
             // so the next clean poll diffs against nothing and applies the full
             // usage history as pet food in one shot.
-            usage_store.advance_cursors(snapshot.cursor_updates, now)?;
+            usage_store.advance_cursors(snapshot.cursor_updates.clone(), now)?;
+            usage_store.seed_cutover_highwaters_from_cursor_updates(
+                crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                &snapshot.cursor_updates,
+                now,
+            )?;
             if snapshot.diagnostics.is_empty() {
                 calibration = CalibrationBaseline::from_history(&snapshot.daily_usage);
                 rhythm = RhythmProfile::from_history(&snapshot.daily_usage);

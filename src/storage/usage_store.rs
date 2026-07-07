@@ -96,6 +96,7 @@ struct SourceDaySnapshot {
 }
 
 struct RowFeedHighwater {
+    exists: bool,
     total_high_water: f64,
     exact_raw_buckets: Option<RawTokenTotals>,
     bucket_confidence: String,
@@ -134,6 +135,15 @@ impl ExactFeedCandidate<'_> {
             token_totals: Some(self.delta_buckets),
         }
     }
+}
+
+fn rows_have_exact_baseline_shape(rows: &[&ProviderSnapshotRowInput]) -> bool {
+    rows.iter().all(|row| {
+        let Some(raw_buckets) = row.raw_token_buckets else {
+            return false;
+        };
+        (raw_buckets.total_tokens() - row.total_tokens.max(0.0)).abs() <= 0.000_001
+    })
 }
 
 struct SourceDaySnapshotComparison<'a> {
@@ -668,18 +678,38 @@ impl UsageStore {
                 .push(row);
         }
 
+        let mut source_known_at_call_start: BTreeMap<(String, String), bool> = BTreeMap::new();
+        for row in rows {
+            let key = (row.token_contract.clone(), row.accounting_source.clone());
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                source_known_at_call_start.entry(key)
+            {
+                entry.insert(
+                    self.source_has_feed_contact(&row.token_contract, &row.accounting_source)?,
+                );
+            }
+        }
+
         for ((token_contract, accounting_source, provider_day), group_rows) in groups {
             let aggregate_total = group_rows
                 .iter()
                 .map(|row| row.total_tokens.max(0.0))
                 .sum::<f64>();
 
-            if !self.source_has_feed_contact(&token_contract, &accounting_source)? {
+            if !source_known_at_call_start
+                .get(&(token_contract.clone(), accounting_source.clone()))
+                .copied()
+                .unwrap_or(false)
+            {
                 let seed_updates = group_rows
                     .iter()
                     .map(|row| row.cursor_update.clone())
                     .collect::<Vec<_>>();
-                self.advance_exact_highwaters(&group_rows, aggregate_total, now)?;
+                if rows_have_exact_baseline_shape(&group_rows) {
+                    self.advance_exact_highwaters(&group_rows, aggregate_total, now)?;
+                } else {
+                    self.advance_total_only_highwaters(&group_rows, aggregate_total, now)?;
+                }
                 self.record_source_contact(
                     &token_contract,
                     &accounting_source,
@@ -895,6 +925,7 @@ impl UsageStore {
                         .transpose()
                         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
                     Ok(RowFeedHighwater {
+                        exists: true,
                         total_high_water: row.get(0)?,
                         exact_raw_buckets,
                         bucket_confidence: row.get(2)?,
@@ -905,6 +936,7 @@ impl UsageStore {
             .optional()?;
 
         Ok(row.unwrap_or(RowFeedHighwater {
+            exists: false,
             total_high_water: 0.0,
             exact_raw_buckets: Some(RawTokenTotals::default()),
             bucket_confidence: BUCKET_CONFIDENCE_EXACT.to_string(),
@@ -1035,7 +1067,11 @@ impl UsageStore {
                 RowHighwaterWrite {
                     total_high_water: row_total,
                     latest_raw_buckets: row.raw_token_buckets,
-                    exact_raw_buckets: highwater.exact_raw_buckets,
+                    exact_raw_buckets: if highwater.exists {
+                        highwater.exact_raw_buckets
+                    } else {
+                        None
+                    },
                     bucket_confidence: BUCKET_CONFIDENCE_CORRECTED_TOTAL_ONLY,
                     unshaped_total_only_tokens: highwater.unshaped_total_only_tokens
                         + added_unshaped,

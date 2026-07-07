@@ -251,6 +251,55 @@ fn init_does_not_feed_pet_or_persist_history_as_usage_events() {
     assert_eq!(usage_store.recent_event_count().unwrap(), 0);
 }
 
+#[test]
+fn init_seeds_source_contact_and_highwaters_without_feeding_pet() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
+        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_EMPTY)
+        .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
+        .assert()
+        .success();
+
+    let state_json = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+    assert!(
+        state_json.contains(r#""xp": 0.0"#) || state_json.contains(r#""xp":0.0"#),
+        "expected xp to be zero after init, got: {state_json}"
+    );
+
+    let usage_store =
+        glorp::storage::usage_store::UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    assert_eq!(usage_store.recent_event_count().unwrap(), 0);
+    assert!(usage_store
+        .source_has_feed_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+        )
+        .unwrap());
+    assert_eq!(
+        usage_store
+            .source_day_highwater_for_test(
+                glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                time::macros::date!(2026 - 05 - 08),
+            )
+            .unwrap(),
+        43_300.0
+    );
+    assert_eq!(
+        usage_store
+            .source_day_highwater_for_test(
+                glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                time::macros::date!(2026 - 05 - 09),
+            )
+            .unwrap(),
+        84_500.0
+    );
+}
+
 // Regression test: init must advance cursors to current totals even when the
 // calibration snapshot has benign diagnostics alongside valid records.
 //

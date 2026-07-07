@@ -9,6 +9,19 @@ use tempfile::tempdir;
 use time::{macros::date, macros::datetime, Date};
 
 fn row(day: Date, model: &str, total: u64, buckets: RawTokenTotals) -> ProviderSnapshotRowInput {
+    row_with_buckets(day, model, total, Some(buckets))
+}
+
+fn row_without_buckets(day: Date, model: &str, total: u64) -> ProviderSnapshotRowInput {
+    row_with_buckets(day, model, total, None)
+}
+
+fn row_with_buckets(
+    day: Date,
+    model: &str,
+    total: u64,
+    buckets: Option<RawTokenTotals>,
+) -> ProviderSnapshotRowInput {
     ProviderSnapshotRowInput {
         replacement_scope_id: "claude-code:local-usage".into(),
         collector_scope_id: "claude-code:local-usage".into(),
@@ -25,11 +38,11 @@ fn row(day: Date, model: &str, total: u64, buckets: RawTokenTotals) -> ProviderS
         cursor_update: ProviderCursorUpdate {
             provider_surface: "claude-code".into(),
             cursor_key: format!("cursor:{model}"),
-            cursor_value: serde_json::to_string(&buckets).unwrap(),
+            cursor_value: serde_json::to_string(&buckets.unwrap_or_default()).unwrap(),
             provider_version: "ccusage 20.0.6".into(),
             parser_version: "ccusage 20.0.6".into(),
         },
-        raw_token_buckets: Some(buckets),
+        raw_token_buckets: buckets,
         total_tokens: total as f64,
         cost_usd: None,
         confidence: "local-log-derived".into(),
@@ -131,6 +144,145 @@ fn first_contact_snapshot_seeds_same_day_highwaters_without_feeding_history() {
             .unwrap(),
         120.0
     );
+}
+
+#[test]
+fn first_contact_snapshot_seeds_all_source_days_before_feeding() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let first = datetime!(2026 - 07 - 07 18:00 UTC);
+    let later = datetime!(2026 - 07 - 07 18:05 UTC);
+
+    let first_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[
+                row(
+                    date!(2026 - 07 - 06),
+                    "claude-fable-5",
+                    100,
+                    RawTokenTotals {
+                        uncached_input: 100,
+                        output: 0,
+                        cache_creation: 0,
+                        cache_read: 0,
+                        reasoning_output: 0,
+                    },
+                ),
+                row(
+                    date!(2026 - 07 - 07),
+                    "claude-fable-5",
+                    200,
+                    RawTokenTotals {
+                        uncached_input: 200,
+                        output: 0,
+                        cache_creation: 0,
+                        cache_read: 0,
+                        reasoning_output: 0,
+                    },
+                ),
+            ],
+            first,
+        )
+        .unwrap();
+
+    assert!(first_plan.deltas.is_empty());
+    assert_eq!(first_plan.cursor_seeds.len(), 2);
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 06),
+            )
+            .unwrap(),
+        100.0
+    );
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 07),
+            )
+            .unwrap(),
+        200.0
+    );
+
+    let later_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[row(
+                date!(2026 - 07 - 07),
+                "claude-fable-5",
+                250,
+                RawTokenTotals {
+                    uncached_input: 250,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                },
+            )],
+            later,
+        )
+        .unwrap();
+
+    assert_eq!(later_plan.deltas.len(), 1);
+    assert_eq!(later_plan.deltas[0].total_tokens, 50.0);
+}
+
+#[test]
+fn first_contact_with_missing_raw_buckets_seeds_corrected_total_only() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let first = datetime!(2026 - 07 - 07 18:00 UTC);
+    let later = datetime!(2026 - 07 - 07 18:05 UTC);
+
+    let first_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[
+                row(
+                    date!(2026 - 07 - 07),
+                    "claude-fable-5",
+                    100,
+                    RawTokenTotals {
+                        uncached_input: 100,
+                        output: 0,
+                        cache_creation: 0,
+                        cache_read: 0,
+                        reasoning_output: 0,
+                    },
+                ),
+                row_without_buckets(date!(2026 - 07 - 07), "unknown-breakdown", 0),
+            ],
+            first,
+        )
+        .unwrap();
+
+    assert!(first_plan.deltas.is_empty());
+    assert_eq!(first_plan.cursor_seeds.len(), 2);
+
+    let later_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[row(
+                date!(2026 - 07 - 07),
+                "claude-fable-5",
+                110,
+                RawTokenTotals {
+                    uncached_input: 110,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                },
+            )],
+            later,
+        )
+        .unwrap();
+
+    assert_eq!(later_plan.deltas.len(), 1);
+    assert_eq!(later_plan.deltas[0].total_tokens, 10.0);
+    assert_eq!(later_plan.deltas[0].confidence, "corrected-total-only");
+    assert_eq!(later_plan.deltas[0].token_totals, None);
 }
 
 #[test]
