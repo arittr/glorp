@@ -654,6 +654,12 @@ impl UsageStore {
                     &batch.token_contract,
                     *day,
                 )?;
+                supersede_canonical_snapshot_rows_absent_from_run(
+                    &tx,
+                    &batch.token_contract,
+                    *day,
+                    &day_rows,
+                )?;
             }
             insert_snapshot_rows(&tx, run_id, &day_rows, batch.observed_at)?;
             refresh_canonical_collectors(
@@ -2294,6 +2300,52 @@ fn supersede_previous_snapshot_rows_for_day(
            AND status = 'active'",
         params![token_contract, day.to_string()],
     )?;
+    Ok(())
+}
+
+fn supersede_canonical_snapshot_rows_absent_from_run(
+    tx: &rusqlite::Transaction<'_>,
+    token_contract: &str,
+    day: Date,
+    rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
+) -> crate::error::Result<()> {
+    let returned_sources = rows
+        .iter()
+        .map(|row| row.accounting_source.as_str())
+        .collect::<BTreeSet<_>>();
+    let previously_canonical = {
+        let mut stmt = tx.prepare(
+            "SELECT accounting_source, replacement_scope_id
+             FROM provider_canonical_collectors
+             WHERE token_contract = ?1 AND provider_day = ?2",
+        )?;
+        let rows = stmt.query_map(params![token_contract, day.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    for (source, replacement_scope_id) in previously_canonical {
+        if returned_sources.contains(source.as_str()) {
+            continue;
+        }
+        tx.execute(
+            "UPDATE provider_snapshot_rows
+             SET status = 'superseded'
+             WHERE token_contract = ?1
+               AND provider_day = ?2
+               AND accounting_source = ?3
+               AND replacement_scope_id = ?4
+               AND status = 'active'",
+            params![
+                token_contract,
+                day.to_string(),
+                source,
+                replacement_scope_id
+            ],
+        )?;
+    }
+
     Ok(())
 }
 

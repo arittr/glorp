@@ -58,22 +58,42 @@ fn row_in_scope(
     replacement_scope_id: &str,
     collector_scope_id: &str,
 ) -> ProviderSnapshotRowInput {
+    row_for_source_in_scope(
+        day,
+        "claude-code",
+        model,
+        total,
+        _observed_at,
+        replacement_scope_id,
+        collector_scope_id,
+    )
+}
+
+fn row_for_source_in_scope(
+    day: Date,
+    accounting_source: &str,
+    model: &str,
+    total: f64,
+    _observed_at: OffsetDateTime,
+    replacement_scope_id: &str,
+    collector_scope_id: &str,
+) -> ProviderSnapshotRowInput {
     ProviderSnapshotRowInput {
         replacement_scope_id: replacement_scope_id.into(),
         collector_scope_id: collector_scope_id.into(),
         collector_surface: "ccusage:claude-code".into(),
         command: "ccusage claude daily --json --offline".into(),
         token_contract: TOKENMAXXING_TOTAL_V1.into(),
-        accounting_source: "claude-code".into(),
+        accounting_source: accounting_source.into(),
         provider_day: day,
         model: Some(model.into()),
         source_surface: "daily".into(),
         provider_period: day.to_string(),
-        raw_source_id_hash: Some("hash:source".into()),
-        cursor_key_hash: format!("hash:{model}"),
+        raw_source_id_hash: Some(format!("hash:{accounting_source}:source")),
+        cursor_key_hash: format!("hash:{accounting_source}:{model}"),
         cursor_update: ProviderCursorUpdate {
-            provider_surface: "claude-code".into(),
-            cursor_key: format!("cursor:{model}"),
+            provider_surface: accounting_source.into(),
+            cursor_key: format!("cursor:{accounting_source}:{model}"),
             cursor_value: format!("raw:{total}"),
             provider_version: "ccusage 20.0.6".into(),
             parser_version: "ccusage 20.0.6".into(),
@@ -178,6 +198,91 @@ fn canonical_replacement_scope_cutover_uses_new_scope_total_and_records_decrease
         )
         .unwrap();
     assert_eq!(correction, (100.0, 60.0, 40.0));
+}
+
+#[test]
+fn replacement_scope_cutover_excludes_sources_absent_from_complete_run() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let day = date!(2026 - 07 - 06);
+    let first_at = datetime!(2026 - 07 - 06 20:00 UTC);
+    let second_at = datetime!(2026 - 07 - 06 21:00 UTC);
+
+    store
+        .write_provider_snapshot_batch(
+            &batch_in_scope(day, first_at, "collector:scope-a"),
+            &[
+                row_for_source_in_scope(
+                    day,
+                    "claude-code",
+                    "claude-fable-5",
+                    100.0,
+                    first_at,
+                    "replacement:scope-a",
+                    "collector:scope-a",
+                ),
+                row_for_source_in_scope(
+                    day,
+                    "codex",
+                    "gpt-oss-120b",
+                    50.0,
+                    first_at,
+                    "replacement:scope-a",
+                    "collector:scope-a",
+                ),
+            ],
+            &[],
+        )
+        .unwrap();
+    store
+        .write_provider_snapshot_batch(
+            &batch_in_scope(day, second_at, "collector:scope-b"),
+            &[row_for_source_in_scope(
+                day,
+                "claude-code",
+                "claude-fable-5",
+                60.0,
+                second_at,
+                "replacement:scope-b",
+                "collector:scope-b",
+            )],
+            &[],
+        )
+        .unwrap();
+
+    let result = store.snapshot_totals_for_provider_day(day).unwrap();
+    assert_eq!(result.state, SnapshotState::Current);
+    assert_eq!(result.value, Some(DayTotals { total_tokens: 60.0 }));
+
+    let by_source = store
+        .snapshot_totals_by_source_for_provider_day(day)
+        .unwrap();
+    assert_eq!(by_source.state, SnapshotState::Current);
+    assert_eq!(
+        by_source.value.unwrap().sources,
+        vec![glorp::usage::snapshot::SourceTotal {
+            accounting_source: "claude-code".to_string(),
+            total_tokens: 60.0,
+        }]
+    );
+
+    let correction = store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT previous_total_tokens, current_total_tokens, decrease_tokens
+             FROM provider_corrections
+             WHERE token_contract = ?1 AND accounting_source = ?2 AND provider_day = ?3",
+            params![TOKENMAXXING_TOTAL_V1, "codex", day.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(correction, (50.0, 0.0, 50.0));
 }
 
 #[test]
