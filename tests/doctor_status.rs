@@ -67,7 +67,7 @@ fn status_labels_provider_today_recent_food_and_pet_lifetime_separately() {
         .success()
         .stdout(predicate::str::contains("provider today"))
         .stdout(predicate::str::contains(
-            "provider today (current provider snapshot): 1300",
+            "provider today (current provider snapshot): 789824114",
         ))
         .stdout(predicate::str::contains("accepted recent food"))
         .stdout(predicate::str::contains("pet lifetime food"));
@@ -101,7 +101,7 @@ fn doctor_refresh_usage_snapshots_reports_before_after_without_feeding_pet() {
         .stdout(predicate::str::contains("refresh usage snapshots"))
         .stdout(predicate::str::contains("before provider today"))
         .stdout(predicate::str::contains("after provider today"))
-        .stdout(predicate::str::contains("after provider today: 1300"))
+        .stdout(predicate::str::contains("after provider today: 789824114"))
         .stdout(predicate::str::contains("pet state unchanged"));
 
     let state_after_refresh = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
@@ -117,12 +117,12 @@ fn doctor_refresh_usage_snapshots_reports_before_after_without_feeding_pet() {
     );
     assert_eq!(
         usage_after_refresh
-            .snapshot_totals_for_provider_day(time::macros::date!(2026 - 06 - 10))
+            .snapshot_totals_for_provider_day(time::macros::date!(2026 - 06 - 18))
             .unwrap()
             .value
             .unwrap()
             .total_tokens,
-        1300.0
+        789_824_114.0
     );
 }
 

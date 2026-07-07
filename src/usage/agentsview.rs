@@ -153,8 +153,7 @@ impl AgentsviewCommandProvider {
     ) -> Result<AgentSnapshotFlow> {
         let requested_provider_days = requested_provider_days_for_poll((self.clock)());
         let scope = snapshot_scope(agent, requested_provider_days);
-        let prepared =
-            self.prepare_agent_snapshot(store, agent, no_sync, range, timeout, scope)?;
+        let prepared = self.prepare_agent_snapshot(store, agent, no_sync, range, timeout, scope)?;
         self.finish_prepared_agent_snapshot(store, prepared, feed)
     }
 
@@ -602,27 +601,32 @@ impl AgentsviewCommandProvider {
         let version = self
             .version(helper)
             .unwrap_or_else(|| "unknown".to_string());
-        let output =
-            match self.run_usage_with_timeout(helper, agent, no_sync, UsageRange::FullHistory, HELPER_SUBPROCESS_TIMEOUT) {
-                Ok(output) => output,
-                Err(GlorpError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
-                    let diagnostic = diagnostic(
-                        agent,
-                        "helper_timeout",
-                        &format!(
-                            "agentsview did not return within {}s",
-                            HELPER_SUBPROCESS_TIMEOUT.as_secs()
-                        ),
-                    );
-                    persist_diagnostic(store, &diagnostic)?;
-                    return Ok(UsageSnapshot {
-                        daily_usage: Vec::new(),
-                        cursor_updates: Vec::new(),
-                        diagnostics: vec![diagnostic],
-                    });
-                }
-                Err(err) => return Err(err),
-            };
+        let output = match self.run_usage_with_timeout(
+            helper,
+            agent,
+            no_sync,
+            UsageRange::FullHistory,
+            HELPER_SUBPROCESS_TIMEOUT,
+        ) {
+            Ok(output) => output,
+            Err(GlorpError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
+                let diagnostic = diagnostic(
+                    agent,
+                    "helper_timeout",
+                    &format!(
+                        "agentsview did not return within {}s",
+                        HELPER_SUBPROCESS_TIMEOUT.as_secs()
+                    ),
+                );
+                persist_diagnostic(store, &diagnostic)?;
+                return Ok(UsageSnapshot {
+                    daily_usage: Vec::new(),
+                    cursor_updates: Vec::new(),
+                    diagnostics: vec![diagnostic],
+                });
+            }
+            Err(err) => return Err(err),
+        };
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
             let diagnostic = diagnostic(

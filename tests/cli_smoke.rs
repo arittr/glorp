@@ -257,8 +257,7 @@ fn init_seeds_source_contact_and_highwaters_without_feeding_pet() {
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
-        .env("GLORP_CCUSAGE_BIN", CCUSAGE_OK)
-        .env("GLORP_CCUSAGE_CODEX_BIN", CCUSAGE_CODEX_EMPTY)
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -275,28 +274,31 @@ fn init_seeds_source_contact_and_highwaters_without_feeding_pet() {
     assert!(usage_store
         .source_has_feed_contact(
             glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
-            "claude-code",
+            "claude",
         )
         .unwrap());
     assert_eq!(
         usage_store
             .source_day_highwater_for_test(
                 glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
-                "claude-code",
-                time::macros::date!(2026 - 05 - 08),
+                "claude",
+                time::macros::date!(2026 - 06 - 18),
             )
             .unwrap(),
-        43_300.0
+        46_011_892.0
     );
+    assert!(usage_store
+        .source_has_feed_contact(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1, "codex",)
+        .unwrap());
     assert_eq!(
         usage_store
             .source_day_highwater_for_test(
                 glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
-                "claude-code",
-                time::macros::date!(2026 - 05 - 09),
+                "codex",
+                time::macros::date!(2026 - 06 - 18),
             )
             .unwrap(),
-        84_500.0
+        743_812_222.0
     );
 }
 
