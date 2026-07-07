@@ -220,6 +220,96 @@ fn json_provider_cursor_counts_as_feed_contact_without_source_contact_row() {
 }
 
 #[test]
+fn existing_provider_cursor_seeds_known_source_snapshot_baseline() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let seed = datetime!(2026 - 07 - 07 18:00 UTC);
+    let now = datetime!(2026 - 07 - 07 18:05 UTC);
+
+    let cursor_key = serde_json::to_string(&ProviderCursorKey {
+        provider_surface: "claude-code".into(),
+        token_contract: Some(TOKENMAXXING_TOTAL_V1.into()),
+        command: "ccusage claude daily --json --offline".into(),
+        source_surface: "daily".into(),
+        period_start: "2026-07-07".into(),
+        model: Some("claude-fable-5".into()),
+        raw_source_id: None,
+    })
+    .unwrap();
+    let prior_buckets = RawTokenTotals {
+        uncached_input: 100,
+        output: 0,
+        cache_creation: 0,
+        cache_read: 0,
+        reasoning_output: 0,
+    };
+    store
+        .advance_cursors(
+            vec![ProviderCursorUpdate {
+                provider_surface: "claude-code".into(),
+                cursor_key: cursor_key.clone(),
+                cursor_value: serde_json::to_string(&prior_buckets).unwrap(),
+                provider_version: "ccusage 20.0.6".into(),
+                parser_version: "ccusage 20.0.6".into(),
+            }],
+            seed,
+        )
+        .unwrap();
+    assert!(store
+        .source_has_feed_contact(TOKENMAXXING_TOTAL_V1, "claude-code")
+        .unwrap());
+
+    let mut snapshot_row = row(
+        date!(2026 - 07 - 07),
+        "claude-fable-5",
+        120,
+        RawTokenTotals {
+            uncached_input: 120,
+            output: 0,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        },
+    );
+    snapshot_row.cursor_update.cursor_key = cursor_key;
+    snapshot_row.cursor_update.cursor_value =
+        serde_json::to_string(&snapshot_row.raw_token_buckets.unwrap()).unwrap();
+
+    let plan = store
+        .feed_deltas_for_snapshot_rows(&[snapshot_row], now)
+        .unwrap();
+
+    assert_eq!(plan.deltas.len(), 1);
+    assert_eq!(plan.deltas[0].total_tokens, 20.0);
+    assert!(plan.deltas[0].token_totals.is_some());
+
+    let total_tokens = plan
+        .deltas
+        .iter()
+        .map(|delta| delta.total_tokens)
+        .sum::<f64>();
+    let poll = UsagePollResult {
+        deltas: plan.deltas,
+        diagnostics: Vec::new(),
+        total_effective_tokens: total_tokens,
+        total_tokens,
+    };
+    apply_usage_poll(&mut state, &mut store, &poll, now).unwrap();
+
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 07),
+            )
+            .unwrap(),
+        120.0
+    );
+}
+
+#[test]
 fn corrected_total_only_baseline_resyncs_from_no_feed_exact_snapshot() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();

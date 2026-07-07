@@ -763,6 +763,8 @@ impl UsageStore {
                 continue;
             }
 
+            self.seed_known_source_highwaters_from_existing_cursors(&group_rows, now)?;
+
             let aggregate_highwater =
                 self.source_day_highwater(&token_contract, &accounting_source, provider_day)?;
             let aggregate_excess = aggregate_total - aggregate_highwater;
@@ -814,6 +816,70 @@ impl UsageStore {
         }
 
         Ok(plan)
+    }
+
+    fn seed_known_source_highwaters_from_existing_cursors(
+        &mut self,
+        rows: &[&ProviderSnapshotRowInput],
+        now: OffsetDateTime,
+    ) -> crate::error::Result<()> {
+        let Some(first) = rows.first() else {
+            return Ok(());
+        };
+
+        let mut source_day_total = 0.0;
+        let mut found_cursor_baseline = false;
+        for row in rows {
+            let Some(cursor_value) = self.provider_cursor(
+                &row.cursor_update.provider_surface,
+                &row.cursor_update.cursor_key,
+            )?
+            else {
+                continue;
+            };
+            let Ok(raw_buckets) = serde_json::from_str::<RawTokenTotals>(&cursor_value) else {
+                continue;
+            };
+
+            found_cursor_baseline = true;
+            let total_high_water = raw_buckets.total_tokens();
+            source_day_total += total_high_water;
+            if self
+                .row_highwater(
+                    &row.token_contract,
+                    &row.accounting_source,
+                    row.provider_day,
+                    row.model.as_deref(),
+                )?
+                .exists
+            {
+                continue;
+            }
+
+            self.insert_row_highwater(
+                row,
+                RowHighwaterWrite {
+                    total_high_water,
+                    latest_raw_buckets: Some(raw_buckets),
+                    exact_raw_buckets: Some(raw_buckets),
+                    bucket_confidence: BUCKET_CONFIDENCE_EXACT,
+                    unshaped_total_only_tokens: 0.0,
+                    updated_at: now,
+                },
+            )?;
+        }
+
+        if found_cursor_baseline {
+            self.advance_source_day_highwater(
+                &first.token_contract,
+                &first.accounting_source,
+                first.provider_day,
+                source_day_total,
+                now,
+            )?;
+        }
+
+        Ok(())
     }
 
     pub fn seed_cutover_highwaters_from_cursor_updates(
