@@ -85,6 +85,7 @@ struct PreparedHelperSnapshot {
     diagnostics: Vec<ProviderDiagnostic>,
     outcome: HelperSnapshotOutcome,
     helper_configured: bool,
+    covered_accounting_sources: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -352,6 +353,7 @@ impl CcusageCommandProvider {
                         diagnostics,
                         outcome,
                         helper_configured,
+                        covered_accounting_sources: covered_sources_for_helper(provider_surface),
                     });
                 }
             };
@@ -461,6 +463,7 @@ impl CcusageCommandProvider {
                 diagnostics,
                 outcome: HelperSnapshotOutcome::Blocked,
                 helper_configured,
+                covered_accounting_sources: covered_sources_for_helper(provider_surface),
             });
         }
 
@@ -476,6 +479,7 @@ impl CcusageCommandProvider {
                 diagnostics,
                 outcome: HelperSnapshotOutcome::FallbackAllowed,
                 helper_configured,
+                covered_accounting_sources: covered_sources_for_helper(provider_surface),
             });
         }
 
@@ -489,6 +493,7 @@ impl CcusageCommandProvider {
             diagnostics,
             outcome: HelperSnapshotOutcome::Completed,
             helper_configured,
+            covered_accounting_sources: covered_sources_for_helper(provider_surface),
         })
     }
 
@@ -553,6 +558,8 @@ impl CcusageCommandProvider {
         let mut rows = Vec::new();
         let mut migrations = Vec::new();
         let mut versions = Vec::new();
+        let mut covered_sources = Vec::new();
+        let mut coverage_known = true;
         let mut has_completed = false;
         let mut has_configured_blocker = false;
 
@@ -566,6 +573,10 @@ impl CcusageCommandProvider {
             }
             has_completed = true;
             versions.push(format!("{}={}", helper.collector_surface, helper.version));
+            match helper.covered_accounting_sources.take() {
+                Some(sources) => covered_sources.extend(sources),
+                None => coverage_known = false,
+            }
             rows.append(&mut helper.rows);
             migrations.append(&mut helper.legacy_cursor_migrations);
         }
@@ -589,6 +600,13 @@ impl CcusageCommandProvider {
             diagnostics,
             outcome: HelperSnapshotOutcome::Completed,
             helper_configured: true,
+            covered_accounting_sources: if coverage_known {
+                covered_sources.sort();
+                covered_sources.dedup();
+                Some(covered_sources)
+            } else {
+                None
+            },
         };
 
         self.finish_prepared_helper_snapshot(store, prepared, feed)
@@ -1001,6 +1019,13 @@ fn snapshot_scope(
     }
 }
 
+fn covered_sources_for_helper(provider_surface: &str) -> Option<Vec<String>> {
+    match provider_surface {
+        CLAUDE_SURFACE | CODEX_SURFACE => Some(vec![provider_surface.to_string()]),
+        _ => None,
+    }
+}
+
 fn collector_surface(command_name: &str, provider_surface: &str) -> String {
     format!("{command_name}:{provider_surface}")
 }
@@ -1111,6 +1136,7 @@ fn write_prepared_snapshot(
         command: prepared.command_name.clone(),
         token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
         requested_provider_days: prepared.scope.requested_provider_days.clone(),
+        covered_accounting_sources: prepared.covered_accounting_sources.clone(),
         provider_version: prepared.version.clone(),
         parser_version: prepared.version.clone(),
         observed_at,

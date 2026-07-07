@@ -28,6 +28,7 @@ fn batch_in_scope(
         command: "ccusage claude daily --json --offline".into(),
         token_contract: TOKENMAXXING_TOTAL_V1.into(),
         requested_provider_days: vec![day],
+        covered_accounting_sources: None,
         provider_version: "ccusage 20.0.6".into(),
         parser_version: "ccusage 20.0.6".into(),
         observed_at,

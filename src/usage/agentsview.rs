@@ -809,6 +809,7 @@ fn write_prepared_snapshot(store: &mut UsageStore, prepared: &PreparedAgentSnaps
         command: prepared.command_name.clone(),
         token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
         requested_provider_days: prepared.scope.requested_provider_days.clone(),
+        covered_accounting_sources: None,
         provider_version: prepared.version.clone(),
         parser_version: prepared.version.clone(),
         observed_at,

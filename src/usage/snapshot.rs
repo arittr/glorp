@@ -59,6 +59,7 @@ pub struct ProviderSnapshotBatchInput {
     pub command: String,
     pub token_contract: String,
     pub requested_provider_days: Vec<Date>,
+    pub covered_accounting_sources: Option<Vec<String>>,
     pub provider_version: String,
     pub parser_version: String,
     pub observed_at: OffsetDateTime,

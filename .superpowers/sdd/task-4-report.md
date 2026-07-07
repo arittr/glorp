@@ -239,3 +239,49 @@ status: DONE
 ## Concerns
 
 - None.
+
+---
+
+# Task 4 Fourth Review Fix Report
+
+status: DONE
+
+## Files Changed
+
+- `src/storage/usage_store.rs`
+- `src/usage/agentsview.rs`
+- `src/usage/ccusage.rs`
+- `src/usage/identity.rs`
+- `src/usage/snapshot.rs`
+- `tests/usage_provider.rs`
+- `tests/usage_snapshots.rs`
+- `tests/fixtures/helpers/ccusage-malformed-raw-agent.mjs`
+
+## Red Test Summary
+
+- `cargo test --test usage_provider malformed_ccusage_raw_agent_diagnostics_do_not_persist_raw_source_content -- --exact`
+  - Failed before the fix as expected: persisted diagnostics still contained `project-secret` from the raw helper `agent` value.
+- `cargo test --test usage_provider claude_only_scoped_refresh_preserves_uncovered_codex_snapshot_truth -- --exact`
+  - Failed before the fix as expected: codex was absent after a claude-only scoped refresh, with only `claude-code` remaining in source totals.
+
+## Green Verification Summary
+
+- `cargo test --test usage_provider malformed_ccusage_raw_agent_diagnostics_do_not_persist_raw_source_content -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider claude_only_scoped_refresh_preserves_uncovered_codex_snapshot_truth -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider`
+  - Passed: 48 passed, 0 failed.
+- `cargo test --test usage_snapshots`
+  - Passed: 9 passed, 0 failed.
+- `cargo fmt --check`
+  - Passed.
+
+## Commit
+
+- Commit hash: recorded in final handoff after commit creation.
+- Commit message: `fix: sanitize provider diagnostics and snapshot coverage`
+
+## Concerns
+
+- None.

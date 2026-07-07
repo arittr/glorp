@@ -1544,21 +1544,42 @@ impl UsageStore {
 
             let previous =
                 canonical_visible_source_day_snapshots(&tx, &batch.token_contract, *day)?;
+            let covered_sources = batch.covered_accounting_sources.as_deref();
             complete_run_ids.push(run_id);
             if day_rows.is_empty() {
-                supersede_previous_snapshot_rows_for_day(&tx, &batch.token_contract, *day)?;
+                if let Some(sources) = covered_sources {
+                    supersede_previous_snapshot_rows_for_sources(
+                        &tx,
+                        &batch.token_contract,
+                        *day,
+                        sources,
+                    )?;
+                } else {
+                    supersede_previous_snapshot_rows_for_day(&tx, &batch.token_contract, *day)?;
+                }
             } else {
-                supersede_previous_snapshot_rows(
-                    &tx,
-                    replacement_scope_id,
-                    &batch.token_contract,
-                    *day,
-                )?;
+                if let Some(sources) = covered_sources {
+                    supersede_previous_snapshot_rows_in_scope_for_sources(
+                        &tx,
+                        replacement_scope_id,
+                        &batch.token_contract,
+                        *day,
+                        sources,
+                    )?;
+                } else {
+                    supersede_previous_snapshot_rows(
+                        &tx,
+                        replacement_scope_id,
+                        &batch.token_contract,
+                        *day,
+                    )?;
+                }
                 supersede_canonical_snapshot_rows_absent_from_run(
                     &tx,
                     &batch.token_contract,
                     *day,
                     &day_rows,
+                    covered_sources,
                 )?;
             }
             insert_snapshot_rows(&tx, run_id, &day_rows, batch.observed_at)?;
@@ -3231,11 +3252,59 @@ fn supersede_previous_snapshot_rows_for_day(
     Ok(())
 }
 
+fn supersede_previous_snapshot_rows_for_sources(
+    tx: &rusqlite::Transaction<'_>,
+    token_contract: &str,
+    day: Date,
+    sources: &[String],
+) -> crate::error::Result<()> {
+    for source in sources {
+        tx.execute(
+            "UPDATE provider_snapshot_rows
+             SET status = 'superseded'
+             WHERE token_contract = ?1
+               AND provider_day = ?2
+               AND accounting_source = ?3
+               AND status = 'active'",
+            params![token_contract, day.to_string(), source],
+        )?;
+    }
+    Ok(())
+}
+
+fn supersede_previous_snapshot_rows_in_scope_for_sources(
+    tx: &rusqlite::Transaction<'_>,
+    replacement_scope_id: &str,
+    token_contract: &str,
+    day: Date,
+    sources: &[String],
+) -> crate::error::Result<()> {
+    for source in sources {
+        tx.execute(
+            "UPDATE provider_snapshot_rows
+             SET status = 'superseded'
+             WHERE replacement_scope_id = ?1
+               AND token_contract = ?2
+               AND provider_day = ?3
+               AND accounting_source = ?4
+               AND status = 'active'",
+            params![
+                replacement_scope_id,
+                token_contract,
+                day.to_string(),
+                source
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn supersede_canonical_snapshot_rows_absent_from_run(
     tx: &rusqlite::Transaction<'_>,
     token_contract: &str,
     day: Date,
     rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
+    covered_sources: Option<&[String]>,
 ) -> crate::error::Result<()> {
     let returned_sources = rows
         .iter()
@@ -3255,6 +3324,9 @@ fn supersede_canonical_snapshot_rows_absent_from_run(
 
     for (source, replacement_scope_id) in previously_canonical {
         if returned_sources.contains(source.as_str()) {
+            continue;
+        }
+        if covered_sources.is_some_and(|covered| !covered.iter().any(|item| item == &source)) {
             continue;
         }
         tx.execute(

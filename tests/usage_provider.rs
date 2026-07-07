@@ -1194,6 +1194,99 @@ fn malformed_ccusage_period_diagnostic_omits_raw_period_and_model() {
 }
 
 #[test]
+fn malformed_ccusage_raw_agent_diagnostics_do_not_persist_raw_source_content() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let mut store = UsageStore::open(&db_path).unwrap();
+    let provider = provider_at(
+        Some("ccusage-malformed-raw-agent.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+    let provider_persisted = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .prepare("SELECT provider_surface || ' ' || message FROM provider_diagnostics ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    let snapshot_persisted = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .prepare("SELECT message FROM provider_snapshot_diagnostics ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    let persisted = format!("{provider_persisted}\n{snapshot_persisted}");
+
+    assert!(persisted.contains("malformed"));
+    assert!(!persisted.contains("/Users/drew/private/project-secret"));
+    assert!(!persisted.contains("project-secret"));
+    assert!(!persisted.contains("secret-model-project-name"));
+}
+
+#[test]
+fn claude_only_scoped_refresh_preserves_uncovered_codex_snapshot_truth() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude-code", "codex"]);
+    let full_provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        Some("ccusage-codex-ok.mjs"),
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+    full_provider.refresh_snapshots_only(&mut store).unwrap();
+    let before = store
+        .snapshot_totals_by_source_for_provider_day(date!(2026 - 05 - 09))
+        .unwrap()
+        .value
+        .unwrap()
+        .sources;
+    assert!(before
+        .iter()
+        .any(|source| source.accounting_source == "codex"));
+    let codex_before = before
+        .iter()
+        .find(|source| source.accounting_source == "codex")
+        .unwrap()
+        .total_tokens;
+    let claude_only_provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    claude_only_provider
+        .refresh_snapshots_only(&mut store)
+        .unwrap();
+
+    let snapshot = store
+        .snapshot_totals_by_source_for_provider_day(date!(2026 - 05 - 09))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    let after = snapshot.value.unwrap().sources;
+    let codex_after = after
+        .iter()
+        .find(|source| source.accounting_source == "codex")
+        .map(|source| source.total_tokens);
+    assert_eq!(codex_after, Some(codex_before), "{after:?}");
+}
+
+#[test]
 fn malformed_ccusage_period_blocks_valid_sibling_rows() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();

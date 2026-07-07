@@ -26,10 +26,20 @@ pub fn normalize_source_label(raw: &str) -> (String, String) {
     let provider_surface = match lower.as_str() {
         "claude" | "claude-code" => "claude-code".to_string(),
         "codex" | "ccusage-codex" => "codex".to_string(),
+        "gemini" | "kimi" | "opencode" | "copilot" => lower,
         other => other.to_string(),
     };
     let display_name = trimmed.to_string();
     (provider_surface, display_name)
+}
+
+fn unknown_source_hash(raw: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in raw.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 impl SourceIdentity {
@@ -48,6 +58,13 @@ impl SourceIdentity {
 
     pub fn from_raw_agent(raw: &str) -> Self {
         let (provider_surface, display_name) = normalize_source_label(raw);
+        if !matches!(
+            provider_surface.as_str(),
+            "claude-code" | "codex" | "gemini" | "kimi" | "opencode" | "copilot" | "unknown"
+        ) {
+            let safe_label = format!("unknown-agent-{}", unknown_source_hash(raw));
+            return Self::new(safe_label.clone(), safe_label, None);
+        }
         Self::new(provider_surface, display_name, Some(raw.to_string()))
     }
 
