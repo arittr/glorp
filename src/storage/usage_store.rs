@@ -669,11 +669,17 @@ impl UsageStore {
         }
 
         for ((token_contract, accounting_source, provider_day), group_rows) in groups {
+            let aggregate_total = group_rows
+                .iter()
+                .map(|row| row.total_tokens.max(0.0))
+                .sum::<f64>();
+
             if !self.source_has_feed_contact(&token_contract, &accounting_source)? {
                 let seed_updates = group_rows
                     .iter()
                     .map(|row| row.cursor_update.clone())
                     .collect::<Vec<_>>();
+                self.advance_exact_highwaters(&group_rows, aggregate_total, now)?;
                 self.record_source_contact(
                     &token_contract,
                     &accounting_source,
@@ -684,10 +690,6 @@ impl UsageStore {
                 continue;
             }
 
-            let aggregate_total = group_rows
-                .iter()
-                .map(|row| row.total_tokens.max(0.0))
-                .sum::<f64>();
             let aggregate_highwater =
                 self.source_day_highwater(&token_contract, &accounting_source, provider_day)?;
             let aggregate_excess = aggregate_total - aggregate_highwater;

@@ -74,6 +74,66 @@ fn known_source_new_day_feeds_from_zero_instead_of_first_contact_seeding() {
 }
 
 #[test]
+fn first_contact_snapshot_seeds_same_day_highwaters_without_feeding_history() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let first = datetime!(2026 - 07 - 07 18:00 UTC);
+    let later = datetime!(2026 - 07 - 07 18:05 UTC);
+
+    let first_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[row(
+                date!(2026 - 07 - 07),
+                "claude-fable-5",
+                100,
+                RawTokenTotals {
+                    uncached_input: 100,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                },
+            )],
+            first,
+        )
+        .unwrap();
+
+    assert!(first_plan.deltas.is_empty());
+    assert_eq!(first_plan.cursor_seeds.len(), 1);
+
+    let later_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[row(
+                date!(2026 - 07 - 07),
+                "claude-fable-5",
+                120,
+                RawTokenTotals {
+                    uncached_input: 120,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                },
+            )],
+            later,
+        )
+        .unwrap();
+
+    assert_eq!(later_plan.deltas.len(), 1);
+    assert_eq!(later_plan.deltas[0].total_tokens, 20.0);
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 07),
+            )
+            .unwrap(),
+        120.0
+    );
+}
+
+#[test]
 fn source_day_aggregate_highwater_blocks_model_remap_double_feed() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
