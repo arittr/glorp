@@ -10,11 +10,23 @@ const agent = args[args.indexOf("--agent") + 1];
 const daily = agent === "claude"
   ? [
       {
-        date: "2026-06-16",
+        date: "2026-06-18",
         modelBreakdowns: [
           {
             modelName: "claude-opus-4-8",
-            inputTokens: "not-a-number",
+            inputTokens: 100,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0
+          }
+        ]
+      },
+      {
+        date: "2026-06-17",
+        modelBreakdowns: [
+          {
+            modelName: "claude-opus-4-8",
+            inputTokens: 999999,
             outputTokens: 0,
             cacheCreationTokens: 0,
             cacheReadTokens: 0

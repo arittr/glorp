@@ -3,7 +3,7 @@ use crate::game::effective_tokens::EffectiveTokenWeights;
 use crate::storage::usage_store::{
     ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
 };
-use crate::usage::day_axis::tokenmaxxing_provider_day;
+use crate::usage::day_axis::{tokenmaxxing_days_back, tokenmaxxing_provider_day};
 use crate::usage::normalize::{normalize_usage_json, NormalizedUsageRecord};
 use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, ProviderSnapshotScope, UsageDelta, UsagePollResult,
@@ -564,8 +564,19 @@ impl CcusageCommandProvider {
         }
         write_prepared_snapshot(store, &prepared)?;
 
+        let feed_provider_day = prepared
+            .scope
+            .requested_provider_days
+            .last()
+            .copied()
+            .unwrap_or_else(|| tokenmaxxing_provider_day((self.clock)()));
+
         if feed {
-            for migration in &prepared.legacy_cursor_migrations {
+            for migration in prepared
+                .legacy_cursor_migrations
+                .iter()
+                .filter(|migration| migration.row.provider_day == feed_provider_day)
+            {
                 migrate_legacy_cursor_for_record(
                     store,
                     &migration.row,
@@ -584,7 +595,8 @@ impl CcusageCommandProvider {
         }
 
         let observed_at = OffsetDateTime::now_utc();
-        let plan = store.feed_deltas_for_snapshot_rows(&prepared.rows, observed_at)?;
+        let feed_rows = snapshot_rows_for_provider_day(&prepared.rows, feed_provider_day);
+        let plan = store.feed_deltas_for_snapshot_rows(&feed_rows, observed_at)?;
         if !plan.cursor_seeds.is_empty() {
             store.advance_cursors(plan.cursor_seeds.clone(), observed_at)?;
         }
@@ -1063,7 +1075,17 @@ fn find_on_path(command: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn requested_provider_days_for_poll(now: OffsetDateTime) -> Vec<Date> {
-    vec![tokenmaxxing_provider_day(now)]
+    tokenmaxxing_days_back(now, 2)
+}
+
+fn snapshot_rows_for_provider_day(
+    rows: &[ProviderSnapshotRowInput],
+    provider_day: Date,
+) -> Vec<ProviderSnapshotRowInput> {
+    rows.iter()
+        .filter(|row| row.provider_day == provider_day)
+        .cloned()
+        .collect()
 }
 
 fn snapshot_scope(

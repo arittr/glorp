@@ -6,7 +6,7 @@ if (process.argv.includes("--version")) {
 console.log(JSON.stringify({
   daily: [
     {
-      date: "2026-07-05",
+      date: "2026-07-04",
       model: "claude-fable-5",
       inputTokens: "not-a-number",
       outputTokens: 0,

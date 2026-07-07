@@ -22,7 +22,7 @@ const daily = agent === "claude"
         ]
       },
       {
-        date: "2026-06-17",
+        date: "2026-06-16",
         modelBreakdowns: [
           {
             modelName: "claude-opus-4-8",

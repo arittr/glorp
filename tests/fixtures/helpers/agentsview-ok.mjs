@@ -27,8 +27,8 @@ if (!args.includes("--since")) {
 }
 const since = args[args.indexOf("--since") + 1];
 if (since !== "1970-01-01") {
-  if (!args.includes("--until") || args[args.indexOf("--until") + 1] !== since) {
-    console.error("missing current-day until");
+  if (!args.includes("--until") || since !== "2026-06-17" || args[args.indexOf("--until") + 1] !== "2026-06-18") {
+    console.error("missing recent-day window");
     process.exit(2);
   }
 }

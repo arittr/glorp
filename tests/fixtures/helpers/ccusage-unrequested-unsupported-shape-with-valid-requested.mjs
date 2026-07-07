@@ -15,7 +15,7 @@ console.log(JSON.stringify({
       cost: 0.01
     },
     {
-      date: "2026-07-05",
+      date: "2026-07-04",
       model: "secret-model-project-name",
       inputTokens: 999999,
       outputTokens: 0

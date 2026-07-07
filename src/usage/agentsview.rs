@@ -114,13 +114,7 @@ impl AgentsviewCommandProvider {
     }
 
     pub fn poll_current_day(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
-        let now = (self.clock)();
-        let date = tokenmaxxing_provider_day(now).to_string();
-        self.poll_combined_agents(
-            store,
-            UsageRange::CurrentDay { since: date.clone(), until: date },
-            true,
-        )
+        self.poll_combined_agents(store, usage_range_for_poll((self.clock)()), true)
     }
 
     pub fn poll_full_history(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
@@ -462,7 +456,14 @@ impl AgentsviewCommandProvider {
         }
 
         let observed_at = OffsetDateTime::now_utc();
-        let plan = store.feed_deltas_for_snapshot_rows(&prepared.rows, observed_at)?;
+        let feed_provider_day = prepared
+            .scope
+            .requested_provider_days
+            .last()
+            .copied()
+            .unwrap_or_else(|| tokenmaxxing_provider_day((self.clock)()));
+        let feed_rows = snapshot_rows_for_provider_day(&prepared.rows, feed_provider_day);
+        let plan = store.feed_deltas_for_snapshot_rows(&feed_rows, observed_at)?;
         if !plan.cursor_seeds.is_empty() {
             store.advance_cursors(plan.cursor_seeds.clone(), observed_at)?;
         }
@@ -744,14 +745,8 @@ impl UsageProvider for AgentsviewCommandProvider {
     }
 
     fn refresh_snapshots_only(&self, store: &mut UsageStore) -> Result<Vec<ProviderDiagnostic>> {
-        let now = (self.clock)();
-        let date = tokenmaxxing_provider_day(now).to_string();
         Ok(self
-            .poll_combined_agents(
-                store,
-                UsageRange::CurrentDay { since: date.clone(), until: date },
-                false,
-            )?
+            .poll_combined_agents(store, usage_range_for_poll((self.clock)()), false)?
             .diagnostics)
     }
 
@@ -772,6 +767,17 @@ impl UsageProvider for AgentsviewCommandProvider {
 enum UsageRange {
     CurrentDay { since: String, until: String },
     FullHistory,
+}
+
+fn usage_range_for_poll(now: OffsetDateTime) -> UsageRange {
+    let requested_provider_days = requested_provider_days_for_poll(now);
+    let fallback = tokenmaxxing_provider_day(now);
+    let since = requested_provider_days.first().copied().unwrap_or(fallback);
+    let until = requested_provider_days.last().copied().unwrap_or(fallback);
+    UsageRange::CurrentDay {
+        since: since.to_string(),
+        until: until.to_string(),
+    }
 }
 
 pub fn needs_full_history_poll(
@@ -895,6 +901,16 @@ fn filter_agentsview_json_to_requested_days(
     }
     *rows = kept;
     Ok((value.to_string(), diagnostics))
+}
+
+fn snapshot_rows_for_provider_day(
+    rows: &[ProviderSnapshotRowInput],
+    provider_day: Date,
+) -> Vec<ProviderSnapshotRowInput> {
+    rows.iter()
+        .filter(|row| row.provider_day == provider_day)
+        .cloned()
+        .collect()
 }
 
 fn provider_day_from_raw_agentsview_row(row: &Value) -> Option<Date> {

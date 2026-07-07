@@ -938,6 +938,45 @@ fn provider_writes_snapshot_before_emitting_feed_deltas() {
 }
 
 #[test]
+fn provider_snapshots_yesterday_for_comparison_without_feeding_it() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    let yesterday = store
+        .snapshot_totals_for_provider_day(date!(2026 - 05 - 08))
+        .unwrap();
+    assert_eq!(
+        yesterday.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(yesterday.value.unwrap().total_tokens, 43_300.0);
+    let today = store
+        .snapshot_totals_for_provider_day(date!(2026 - 05 - 09))
+        .unwrap();
+    assert_eq!(today.value.unwrap().total_tokens, 84_500.0);
+    assert_eq!(result.total_tokens, 84_500.0);
+    assert!(result
+        .deltas
+        .iter()
+        .all(|delta| delta.period_start.date() == date!(2026 - 05 - 09)));
+}
+
+#[test]
 fn snapshot_only_refresh_does_not_seed_cursor_before_feed_poll() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
@@ -1087,7 +1126,7 @@ fn unexpected_extra_provider_day_does_not_write_snapshot_or_feed() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
-    let extra_day = time::Date::from_calendar_date(2026, time::Month::July, 5).unwrap();
+    let extra_day = time::Date::from_calendar_date(2026, time::Month::July, 4).unwrap();
     let snapshot = store.snapshot_totals_for_provider_day(extra_day).unwrap();
     assert_eq!(
         snapshot.state,
@@ -1616,6 +1655,34 @@ fn agentsview_poll_writes_one_complete_snapshot_for_sibling_sources() {
 }
 
 #[test]
+fn agentsview_snapshots_yesterday_for_comparison_without_feeding_it() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude", "codex"]);
+    let provider = agentsview_provider("agentsview-yesterday.mjs");
+
+    let result = provider.poll(&mut store).unwrap();
+
+    let yesterday = store
+        .snapshot_totals_for_provider_day(date!(2026 - 06 - 17))
+        .unwrap();
+    assert_eq!(
+        yesterday.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(yesterday.value.unwrap().total_tokens, 999_999.0);
+    let today = store
+        .snapshot_totals_for_provider_day(date!(2026 - 06 - 18))
+        .unwrap();
+    assert_eq!(today.value.unwrap().total_tokens, 100.0);
+    assert_eq!(result.total_tokens, 100.0);
+    assert!(result
+        .deltas
+        .iter()
+        .all(|delta| delta.period_start.date() == date!(2026 - 06 - 18)));
+}
+
+#[test]
 fn agentsview_scoped_refresh_preserves_uncovered_snapshot_truth() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
@@ -1660,7 +1727,7 @@ fn agentsview_extra_provider_day_persists_snapshot_diagnostic_without_snapshot_o
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
-    let extra_day = date!(2026 - 06 - 17);
+    let extra_day = date!(2026 - 06 - 16);
     let snapshot = store.snapshot_totals_for_provider_day(extra_day).unwrap();
     assert_eq!(
         snapshot.state,
