@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::storage::usage_store::{ProviderCursorUpdate, UsageStore};
+use crate::usage::feed_high_water::FeedHighWaterUpdate;
 use crate::usage::identity::SourceIdentity;
 use crate::usage::normalize::RawTokenTotals;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ pub struct UsageDelta {
     pub model: Option<String>,
     pub cursor_update: ProviderCursorUpdate,
     pub token_totals: Option<RawTokenTotals>,
+    pub feed_highwater_updates: Vec<FeedHighWaterUpdate>,
 }
 
 #[derive(Debug, Clone)]

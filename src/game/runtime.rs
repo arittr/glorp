@@ -114,12 +114,15 @@ pub fn stage_usage_poll_deltas(
                 event.reasoning_output_tokens =
                     scaled_token_bucket(totals.reasoning_output, effective_tokens, total_effective);
             }
-            ids.push(usage_store.insert_unapplied_event_bucket(
-                &event,
-                &delta.cursor_update,
-                bucket_index,
-                bucket_count,
-            )?);
+            ids.push(
+                usage_store.insert_unapplied_event_bucket_with_feed_highwater_updates(
+                    &event,
+                    &delta.cursor_update,
+                    &delta.feed_highwater_updates,
+                    bucket_index,
+                    bucket_count,
+                )?,
+            );
         }
     }
     Ok(ids)
@@ -944,6 +947,7 @@ mod tests {
                     cache_read: 300_000,
                     reasoning_output: 999_999,
                 }),
+                feed_highwater_updates: Vec::new(),
             }],
             diagnostics: vec![],
             total_effective_tokens: 120_000.0,
@@ -1016,6 +1020,7 @@ mod tests {
                     parser_version: "test".into(),
                 },
                 token_totals: None,
+                feed_highwater_updates: Vec::new(),
             }],
             diagnostics: vec![],
             total_effective_tokens: total_tokens,
@@ -1169,6 +1174,7 @@ mod tests {
                     cache_read: 200_000,
                     reasoning_output: 5_000,
                 }),
+                feed_highwater_updates: Vec::new(),
             }],
             diagnostics: vec![],
             total_effective_tokens: 500_000.0,
@@ -1260,6 +1266,7 @@ mod tests {
                     parser_version: "test".into(),
                 },
                 token_totals: None,
+                feed_highwater_updates: Vec::new(),
             }],
             diagnostics: vec![],
             total_effective_tokens: 500_000_000.0,

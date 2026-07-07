@@ -1,7 +1,11 @@
 use glorp::{
+    game::runtime::apply_usage_poll,
+    storage::state::PetState,
     storage::usage_store::{ProviderCursorUpdate, UsageStore},
     usage::{
-        normalize::RawTokenTotals, snapshot::ProviderSnapshotRowInput,
+        normalize::RawTokenTotals,
+        provider::{ProviderCursorKey, UsagePollResult},
+        snapshot::ProviderSnapshotRowInput,
         token_contract::TOKENMAXXING_TOTAL_V1,
     },
 };
@@ -87,9 +91,295 @@ fn known_source_new_day_feeds_from_zero_instead_of_first_contact_seeding() {
 }
 
 #[test]
+fn known_source_feed_highwater_advances_only_after_usage_apply() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let now = datetime!(2026 - 07 - 07 18:00 UTC);
+    store
+        .record_source_contact(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            "source_first_contact",
+            now,
+        )
+        .unwrap();
+
+    let plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[row(
+                date!(2026 - 07 - 07),
+                "claude-fable-5",
+                100,
+                RawTokenTotals {
+                    uncached_input: 100,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                },
+            )],
+            now,
+        )
+        .unwrap();
+
+    assert_eq!(plan.deltas.len(), 1);
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 07),
+            )
+            .unwrap(),
+        0.0
+    );
+
+    let total_tokens = plan
+        .deltas
+        .iter()
+        .map(|delta| delta.total_tokens)
+        .sum::<f64>();
+    let poll = UsagePollResult {
+        deltas: plan.deltas,
+        diagnostics: Vec::new(),
+        total_effective_tokens: total_tokens,
+        total_tokens,
+    };
+    apply_usage_poll(&mut state, &mut store, &poll, now).unwrap();
+
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 07),
+            )
+            .unwrap(),
+        100.0
+    );
+}
+
+#[test]
+fn json_provider_cursor_counts_as_feed_contact_without_source_contact_row() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 07 - 07 18:00 UTC);
+
+    store
+        .advance_cursors(
+            vec![ProviderCursorUpdate {
+                provider_surface: "claude-code".into(),
+                cursor_key: "helper_version::ccusage".into(),
+                cursor_value: "20.0.6".into(),
+                provider_version: "ccusage 20.0.6".into(),
+                parser_version: "ccusage 20.0.6".into(),
+            }],
+            now,
+        )
+        .unwrap();
+    assert!(!store
+        .source_has_feed_contact(TOKENMAXXING_TOTAL_V1, "claude-code")
+        .unwrap());
+
+    let cursor_key = serde_json::to_string(&ProviderCursorKey {
+        provider_surface: "claude-code".into(),
+        token_contract: Some(TOKENMAXXING_TOTAL_V1.into()),
+        command: "ccusage claude daily --json --offline".into(),
+        source_surface: "daily".into(),
+        period_start: "2026-07-07".into(),
+        model: Some("claude-fable-5".into()),
+        raw_source_id: None,
+    })
+    .unwrap();
+    store
+        .advance_cursors(
+            vec![ProviderCursorUpdate {
+                provider_surface: "claude-code".into(),
+                cursor_key,
+                cursor_value: serde_json::to_string(&RawTokenTotals {
+                    uncached_input: 100,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                })
+                .unwrap(),
+                provider_version: "ccusage 20.0.6".into(),
+                parser_version: "ccusage 20.0.6".into(),
+            }],
+            now,
+        )
+        .unwrap();
+
+    assert!(store
+        .source_has_feed_contact(TOKENMAXXING_TOTAL_V1, "claude-code")
+        .unwrap());
+}
+
+#[test]
+fn corrected_total_only_baseline_resyncs_from_no_feed_exact_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let first = datetime!(2026 - 07 - 07 18:00 UTC);
+    let resync = datetime!(2026 - 07 - 07 18:05 UTC);
+    let later = datetime!(2026 - 07 - 07 18:10 UTC);
+
+    let first_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[
+                row(
+                    date!(2026 - 07 - 07),
+                    "claude-fable-5",
+                    100,
+                    RawTokenTotals {
+                        uncached_input: 100,
+                        output: 0,
+                        cache_creation: 0,
+                        cache_read: 0,
+                        reasoning_output: 0,
+                    },
+                ),
+                row_without_buckets(date!(2026 - 07 - 07), "unknown-breakdown", 0),
+            ],
+            first,
+        )
+        .unwrap();
+    assert!(first_plan.deltas.is_empty());
+
+    let resync_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[row(
+                date!(2026 - 07 - 07),
+                "claude-fable-5",
+                100,
+                RawTokenTotals {
+                    uncached_input: 100,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                },
+            )],
+            resync,
+        )
+        .unwrap();
+    assert!(resync_plan.deltas.is_empty());
+
+    let later_plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[row(
+                date!(2026 - 07 - 07),
+                "claude-fable-5",
+                120,
+                RawTokenTotals {
+                    uncached_input: 120,
+                    output: 0,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    reasoning_output: 0,
+                },
+            )],
+            later,
+        )
+        .unwrap();
+
+    assert_eq!(later_plan.deltas.len(), 1);
+    assert_eq!(later_plan.deltas[0].total_tokens, 20.0);
+    assert!(later_plan.deltas[0].token_totals.is_some());
+    assert_ne!(later_plan.deltas[0].confidence, "corrected-total-only");
+}
+
+#[test]
+fn unchanged_exact_row_does_not_force_total_only_for_matching_group_excess() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let now = datetime!(2026 - 07 - 07 18:00 UTC);
+    store
+        .seed_exact_row_highwater_for_test(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            date!(2026 - 07 - 07),
+            Some("unchanged-model"),
+            RawTokenTotals {
+                uncached_input: 100,
+                output: 0,
+                cache_creation: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            now,
+        )
+        .unwrap();
+    store
+        .seed_exact_row_highwater_for_test(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            date!(2026 - 07 - 07),
+            Some("growing-model"),
+            RawTokenTotals {
+                uncached_input: 50,
+                output: 0,
+                cache_creation: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            now,
+        )
+        .unwrap();
+    store
+        .seed_source_day_highwater_for_test(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            date!(2026 - 07 - 07),
+            150.0,
+            now,
+        )
+        .unwrap();
+
+    let plan = store
+        .feed_deltas_for_snapshot_rows(
+            &[
+                row(
+                    date!(2026 - 07 - 07),
+                    "unchanged-model",
+                    100,
+                    RawTokenTotals {
+                        uncached_input: 100,
+                        output: 0,
+                        cache_creation: 0,
+                        cache_read: 0,
+                        reasoning_output: 0,
+                    },
+                ),
+                row(
+                    date!(2026 - 07 - 07),
+                    "growing-model",
+                    70,
+                    RawTokenTotals {
+                        uncached_input: 70,
+                        output: 0,
+                        cache_creation: 0,
+                        cache_read: 0,
+                        reasoning_output: 0,
+                    },
+                ),
+            ],
+            now,
+        )
+        .unwrap();
+
+    assert_eq!(plan.deltas.len(), 1);
+    assert_eq!(plan.deltas[0].total_tokens, 20.0);
+    assert!(plan.deltas[0].token_totals.is_some());
+    assert_ne!(plan.deltas[0].confidence, "corrected-total-only");
+}
+
+#[test]
 fn first_contact_snapshot_seeds_same_day_highwaters_without_feeding_history() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
     let first = datetime!(2026 - 07 - 07 18:00 UTC);
     let later = datetime!(2026 - 07 - 07 18:05 UTC);
 
@@ -134,6 +424,30 @@ fn first_contact_snapshot_seeds_same_day_highwaters_without_feeding_history() {
 
     assert_eq!(later_plan.deltas.len(), 1);
     assert_eq!(later_plan.deltas[0].total_tokens, 20.0);
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 07),
+            )
+            .unwrap(),
+        100.0
+    );
+
+    let total_tokens = later_plan
+        .deltas
+        .iter()
+        .map(|delta| delta.total_tokens)
+        .sum::<f64>();
+    let poll = UsagePollResult {
+        deltas: later_plan.deltas,
+        diagnostics: Vec::new(),
+        total_effective_tokens: total_tokens,
+        total_tokens,
+    };
+    apply_usage_poll(&mut state, &mut store, &poll, later).unwrap();
+
     assert_eq!(
         store
             .source_day_highwater_for_test(

@@ -261,6 +261,7 @@ impl AgentsviewCommandProvider {
                     parser_version: version.clone(),
                 },
                 token_totals: Some(delta_totals),
+                feed_highwater_updates: Vec::new(),
             });
         }
 

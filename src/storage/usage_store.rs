@@ -5,6 +5,7 @@ use std::path::Path;
 use time::{format_description::well_known::Rfc3339, Date, OffsetDateTime};
 
 use crate::usage::{
+    feed_high_water::{FeedHighWaterUpdate, FeedRowHighWaterUpdate, FeedSourceDayHighWaterUpdate},
     identity::SourceIdentity,
     normalize::RawTokenTotals,
     provider::{ProviderCursorKey, UsageDelta},
@@ -119,7 +120,11 @@ struct ExactFeedCandidate<'a> {
 }
 
 impl ExactFeedCandidate<'_> {
-    fn into_usage_delta(self, now: OffsetDateTime) -> UsageDelta {
+    fn into_usage_delta(
+        self,
+        now: OffsetDateTime,
+        feed_highwater_updates: Vec<FeedHighWaterUpdate>,
+    ) -> UsageDelta {
         UsageDelta {
             provider_surface: self.row.accounting_source.clone(),
             source_identity: SourceIdentity::from_provider_surface(&self.row.accounting_source),
@@ -133,6 +138,7 @@ impl ExactFeedCandidate<'_> {
             model: self.row.model.clone(),
             cursor_update: self.row.cursor_update.clone(),
             token_totals: Some(self.delta_buckets),
+            feed_highwater_updates,
         }
     }
 }
@@ -142,8 +148,15 @@ fn rows_have_exact_baseline_shape(rows: &[&ProviderSnapshotRowInput]) -> bool {
         let Some(raw_buckets) = row.raw_token_buckets else {
             return false;
         };
-        (raw_buckets.total_tokens() - row.total_tokens.max(0.0)).abs() <= 0.000_001
+        row_has_exact_baseline_shape(row, raw_buckets)
     })
+}
+
+fn row_has_exact_baseline_shape(
+    row: &ProviderSnapshotRowInput,
+    raw_buckets: RawTokenTotals,
+) -> bool {
+    (raw_buckets.total_tokens() - row.total_tokens.max(0.0)).abs() <= 0.000_001
 }
 
 struct SourceDaySnapshotComparison<'a> {
@@ -284,12 +297,34 @@ impl UsageStore {
         bucket_index: usize,
         bucket_count: usize,
     ) -> crate::error::Result<i64> {
+        self.insert_unapplied_event_bucket_with_feed_highwater_updates(
+            event,
+            cursor_update,
+            &[],
+            bucket_index,
+            bucket_count,
+        )
+    }
+
+    pub fn insert_unapplied_event_bucket_with_feed_highwater_updates(
+        &mut self,
+        event: &NormalizedUsageEvent,
+        cursor_update: &ProviderCursorUpdate,
+        feed_highwater_updates: &[FeedHighWaterUpdate],
+        bucket_index: usize,
+        bucket_count: usize,
+    ) -> crate::error::Result<i64> {
         let provider_delta_id = format!(
             "{}|{}|{}",
             cursor_update.provider_surface, cursor_update.cursor_key, cursor_update.cursor_value
         );
         let bucket_index_i64 = bucket_index as i64;
         let bucket_count_i64 = bucket_count as i64;
+        let feed_highwater_updates_json = if feed_highwater_updates.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(feed_highwater_updates)?)
+        };
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR IGNORE INTO usage_events (
@@ -319,11 +354,12 @@ impl UsageStore {
                 applied_at,
                 feedable,
                 provider_cursor_key,
-                provider_cursor_value
+                provider_cursor_value,
+                feed_highwater_updates_json
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                ?19, ?20, ?21, ?22, ?23, NULL, ?24, ?25, ?26
+                ?19, ?20, ?21, ?22, ?23, NULL, ?24, ?25, ?26, ?27
             )",
             params![
                 event.provider_surface,
@@ -352,6 +388,7 @@ impl UsageStore {
                 1_i64,
                 cursor_update.cursor_key,
                 cursor_update.cursor_value,
+                feed_highwater_updates_json,
             ],
         )?;
         let id: i64 = tx.query_row(
@@ -627,6 +664,12 @@ impl UsageStore {
                 "SELECT EXISTS(
                     SELECT 1 FROM provider_source_contacts
                     WHERE token_contract = ?1 AND accounting_source = ?2
+                    UNION ALL
+                    SELECT 1 FROM provider_feed_highwaters
+                    WHERE token_contract = ?1 AND accounting_source = ?2
+                    UNION ALL
+                    SELECT 1 FROM provider_cursors
+                    WHERE provider_surface = ?2 AND cursor_key LIKE '{%'
                 )",
                 params![token_contract, accounting_source],
                 |row| row.get::<_, i64>(0),
@@ -724,43 +767,49 @@ impl UsageStore {
                 self.source_day_highwater(&token_contract, &accounting_source, provider_day)?;
             let aggregate_excess = aggregate_total - aggregate_highwater;
             if aggregate_excess <= 0.0 {
+                if self.can_resync_exact_baselines(&group_rows)? {
+                    self.advance_exact_highwaters(&group_rows, aggregate_total, now)?;
+                }
                 continue;
             }
 
             let exact_candidates = self.exact_feed_candidates(&group_rows)?;
-            let exact_sum = exact_candidates
-                .iter()
-                .map(|candidate| candidate.delta_total)
-                .sum::<f64>();
-            if exact_candidates.len() == group_rows.len()
-                && (exact_sum - aggregate_excess).abs() <= 0.000_001
-            {
-                plan.deltas.extend(
-                    exact_candidates
-                        .into_iter()
-                        .map(|candidate| candidate.into_usage_delta(now)),
-                );
-                self.advance_exact_highwaters(&group_rows, aggregate_total, now)?;
-            } else {
-                let delta = self.total_only_usage_delta(
-                    &token_contract,
-                    &accounting_source,
-                    provider_day,
-                    aggregate_excess,
-                    group_rows.first().expect("group_rows is non-empty"),
-                    now,
-                );
-                plan.diagnostics.push(ProviderDiagnostic {
-                    provider_surface: accounting_source.clone(),
-                    code: "mixed_bucket_correction".into(),
-                    message: format!(
-                        "{accounting_source} emitted {aggregate_excess:.0} corrected-total-only tokens"
-                    ),
-                    recorded_at: now,
-                });
-                plan.deltas.push(delta);
-                self.advance_total_only_highwaters(&group_rows, aggregate_total, now)?;
+            if let Some(exact_candidates) = exact_candidates {
+                let exact_sum = exact_candidates
+                    .iter()
+                    .map(|candidate| candidate.delta_total)
+                    .sum::<f64>();
+                if (exact_sum - aggregate_excess).abs() <= 0.000_001 {
+                    let feed_highwater_updates =
+                        self.exact_highwater_updates(&group_rows, aggregate_total);
+                    plan.deltas
+                        .extend(exact_candidates.into_iter().map(|candidate| {
+                            candidate.into_usage_delta(now, feed_highwater_updates.clone())
+                        }));
+                    continue;
+                }
             }
+
+            let feed_highwater_updates =
+                self.total_only_highwater_updates(&group_rows, aggregate_total)?;
+            let delta = Self::total_only_usage_delta(
+                &token_contract,
+                &accounting_source,
+                provider_day,
+                aggregate_excess,
+                group_rows.first().expect("group_rows is non-empty"),
+                now,
+                feed_highwater_updates,
+            );
+            plan.diagnostics.push(ProviderDiagnostic {
+                provider_surface: accounting_source.clone(),
+                code: "mixed_bucket_correction".into(),
+                message: format!(
+                    "{accounting_source} emitted {aggregate_excess:.0} corrected-total-only tokens"
+                ),
+                recorded_at: now,
+            });
+            plan.deltas.push(delta);
         }
 
         Ok(plan)
@@ -944,15 +993,53 @@ impl UsageStore {
         }))
     }
 
+    fn can_resync_exact_baselines(
+        &self,
+        rows: &[&ProviderSnapshotRowInput],
+    ) -> crate::error::Result<bool> {
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        for row in rows {
+            let Some(current_buckets) = row.raw_token_buckets else {
+                return Ok(false);
+            };
+            if !row_has_exact_baseline_shape(row, current_buckets) {
+                return Ok(false);
+            }
+            let highwater = self.row_highwater(
+                &row.token_contract,
+                &row.accounting_source,
+                row.provider_day,
+                row.model.as_deref(),
+            )?;
+            if row.total_tokens.max(0.0) + 0.000_001 < highwater.total_high_water {
+                return Ok(false);
+            }
+            if let Some(previous_buckets) = highwater.exact_raw_buckets {
+                if current_buckets
+                    .positive_delta_since(previous_buckets)
+                    .is_none()
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     fn exact_feed_candidates<'a>(
         &self,
         rows: &[&'a ProviderSnapshotRowInput],
-    ) -> crate::error::Result<Vec<ExactFeedCandidate<'a>>> {
+    ) -> crate::error::Result<Option<Vec<ExactFeedCandidate<'a>>>> {
         let mut candidates = Vec::new();
         for row in rows {
             let Some(current_buckets) = row.raw_token_buckets else {
-                continue;
+                return Ok(None);
             };
+            if !row_has_exact_baseline_shape(row, current_buckets) {
+                return Ok(None);
+            }
             let highwater = self.row_highwater(
                 &row.token_contract,
                 &row.accounting_source,
@@ -960,31 +1047,30 @@ impl UsageStore {
                 row.model.as_deref(),
             )?;
             if highwater.bucket_confidence != BUCKET_CONFIDENCE_EXACT {
-                continue;
+                return Ok(None);
             }
             let Some(previous_buckets) = highwater.exact_raw_buckets else {
-                continue;
+                return Ok(None);
             };
             let Some(delta_buckets) = current_buckets.positive_delta_since(previous_buckets) else {
-                continue;
+                return Ok(None);
             };
             let delta_total = delta_buckets.total_tokens();
-            if delta_total <= 0.0 && row.total_tokens <= highwater.total_high_water {
-                continue;
+            if delta_total > 0.0 {
+                candidates.push(ExactFeedCandidate { row, delta_total, delta_buckets });
             }
-            candidates.push(ExactFeedCandidate { row, delta_total, delta_buckets });
         }
-        Ok(candidates)
+        Ok(Some(candidates))
     }
 
     fn total_only_usage_delta(
-        &self,
         token_contract: &str,
         accounting_source: &str,
         provider_day: Date,
         aggregate_excess: f64,
         representative_row: &ProviderSnapshotRowInput,
         now: OffsetDateTime,
+        feed_highwater_updates: Vec<FeedHighWaterUpdate>,
     ) -> UsageDelta {
         UsageDelta {
             provider_surface: accounting_source.to_string(),
@@ -999,7 +1085,87 @@ impl UsageStore {
             model: representative_row.model.clone(),
             cursor_update: representative_row.cursor_update.clone(),
             token_totals: None,
+            feed_highwater_updates,
         }
+    }
+
+    fn exact_highwater_updates(
+        &self,
+        rows: &[&ProviderSnapshotRowInput],
+        aggregate_total: f64,
+    ) -> Vec<FeedHighWaterUpdate> {
+        let Some(first) = rows.first() else {
+            return Vec::new();
+        };
+        let mut updates = vec![FeedHighWaterUpdate::SourceDay(
+            FeedSourceDayHighWaterUpdate {
+                token_contract: first.token_contract.clone(),
+                accounting_source: first.accounting_source.clone(),
+                provider_day: first.provider_day.to_string(),
+                total_high_water: aggregate_total,
+            },
+        )];
+        for row in rows {
+            let Some(raw_buckets) = row.raw_token_buckets else {
+                continue;
+            };
+            updates.push(FeedHighWaterUpdate::Row(FeedRowHighWaterUpdate {
+                token_contract: row.token_contract.clone(),
+                accounting_source: row.accounting_source.clone(),
+                provider_day: row.provider_day.to_string(),
+                model: row.model.clone(),
+                total_high_water: row.total_tokens.max(0.0),
+                latest_raw_buckets: Some(raw_buckets),
+                exact_raw_buckets: Some(raw_buckets),
+                bucket_confidence: BUCKET_CONFIDENCE_EXACT.to_string(),
+                unshaped_total_only_tokens: 0.0,
+            }));
+        }
+        updates
+    }
+
+    fn total_only_highwater_updates(
+        &self,
+        rows: &[&ProviderSnapshotRowInput],
+        aggregate_total: f64,
+    ) -> crate::error::Result<Vec<FeedHighWaterUpdate>> {
+        let Some(first) = rows.first() else {
+            return Ok(Vec::new());
+        };
+        let mut updates = vec![FeedHighWaterUpdate::SourceDay(
+            FeedSourceDayHighWaterUpdate {
+                token_contract: first.token_contract.clone(),
+                accounting_source: first.accounting_source.clone(),
+                provider_day: first.provider_day.to_string(),
+                total_high_water: aggregate_total,
+            },
+        )];
+        for row in rows {
+            let highwater = self.row_highwater(
+                &row.token_contract,
+                &row.accounting_source,
+                row.provider_day,
+                row.model.as_deref(),
+            )?;
+            let row_total = row.total_tokens.max(0.0).max(highwater.total_high_water);
+            let added_unshaped = (row_total - highwater.total_high_water).max(0.0);
+            updates.push(FeedHighWaterUpdate::Row(FeedRowHighWaterUpdate {
+                token_contract: row.token_contract.clone(),
+                accounting_source: row.accounting_source.clone(),
+                provider_day: row.provider_day.to_string(),
+                model: row.model.clone(),
+                total_high_water: row_total,
+                latest_raw_buckets: row.raw_token_buckets,
+                exact_raw_buckets: if highwater.exists {
+                    highwater.exact_raw_buckets
+                } else {
+                    None
+                },
+                bucket_confidence: BUCKET_CONFIDENCE_CORRECTED_TOTAL_ONLY.to_string(),
+                unshaped_total_only_tokens: highwater.unshaped_total_only_tokens + added_unshaped,
+            }));
+        }
+        Ok(updates)
     }
 
     fn advance_exact_highwaters(
@@ -1919,6 +2085,7 @@ impl UsageStore {
         // Load only rows that are currently unapplied; advancing cursors and
         // counters for already-applied rows would double-count.
         let mut pending_updates: Vec<ProviderCursorUpdate> = Vec::new();
+        let mut pending_feed_highwater_updates: Vec<FeedHighWaterUpdate> = Vec::new();
         let mut pending_effective_tokens: Vec<f64> = Vec::new();
         {
             let select_sql = format!(
@@ -1928,7 +2095,8 @@ impl UsageStore {
                     parser_version,
                     provider_cursor_key,
                     provider_cursor_value,
-                    effective_tokens
+                    effective_tokens,
+                    feed_highwater_updates_json
                  FROM usage_events
                  WHERE id IN ({placeholders})
                    AND applied_at IS NULL
@@ -1947,12 +2115,20 @@ impl UsageStore {
                         cursor_key,
                         cursor_value,
                         row.get::<_, f64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 },
             )?;
             for row in rows {
-                let (provider_surface, provider_version, parser_version, key, value, effective) =
-                    row?;
+                let (
+                    provider_surface,
+                    provider_version,
+                    parser_version,
+                    key,
+                    value,
+                    effective,
+                    feed_highwater_updates_json,
+                ) = row?;
                 pending_effective_tokens.push(effective);
                 if let (Some(cursor_key), Some(cursor_value)) = (key, value) {
                     pending_updates.push(ProviderCursorUpdate {
@@ -1962,6 +2138,14 @@ impl UsageStore {
                         provider_version,
                         parser_version,
                     });
+                }
+                if let Some(updates_json) = feed_highwater_updates_json
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    pending_feed_highwater_updates.extend(serde_json::from_str::<
+                        Vec<FeedHighWaterUpdate>,
+                    >(updates_json)?);
                 }
             }
         }
@@ -1983,6 +2167,9 @@ impl UsageStore {
         )?;
         for update in &pending_updates {
             upsert_provider_cursor(&tx, update, &applied_at_text)?;
+        }
+        for update in &pending_feed_highwater_updates {
+            apply_feed_highwater_update_tx(&tx, update, &applied_at_text)?;
         }
         for effective in pending_effective_tokens {
             if effective != 0.0 {
@@ -2413,7 +2600,8 @@ impl UsageStore {
                 applied_at TEXT,
                 feedable INTEGER NOT NULL DEFAULT 1,
                 provider_cursor_key TEXT,
-                provider_cursor_value TEXT
+                provider_cursor_value TEXT,
+                feed_highwater_updates_json TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_usage_events_period_start
@@ -2641,6 +2829,12 @@ impl UsageStore {
             &self.conn,
             "provider_cursor_value",
             "ALTER TABLE usage_events ADD COLUMN provider_cursor_value TEXT;",
+            "",
+        )?;
+        ensure_usage_event_column(
+            &self.conn,
+            "feed_highwater_updates_json",
+            "ALTER TABLE usage_events ADD COLUMN feed_highwater_updates_json TEXT;",
             "",
         )?;
         ensure_usage_event_column(
@@ -3230,6 +3424,126 @@ fn provider_day_from_cursor_period(period: &str) -> crate::error::Result<Date> {
     }
     let (day, _) = crate::usage::day_axis::parse_agentsview_period_date(period)?;
     Ok(day)
+}
+
+fn apply_feed_highwater_update_tx(
+    tx: &rusqlite::Transaction<'_>,
+    update: &FeedHighWaterUpdate,
+    updated_at: &str,
+) -> crate::error::Result<()> {
+    match update {
+        FeedHighWaterUpdate::SourceDay(update) => {
+            tx.execute(
+                "INSERT INTO provider_feed_highwaters (
+                    highwater_kind, token_contract, accounting_source, provider_day,
+                    provider_day_key, model, model_key, provider_surface,
+                    provider_surface_key, cursor_key_hash, cursor_key_hash_key,
+                    total_high_water, latest_raw_buckets_json, exact_raw_buckets_json,
+                    bucket_confidence, unshaped_total_only_tokens, updated_at
+                ) VALUES (
+                    'source_day', ?1, ?2, ?3, ?3, NULL, '', NULL, '',
+                    NULL, '', ?4, NULL, NULL, 'exact', 0.0, ?5
+                )
+                ON CONFLICT(
+                    highwater_kind, token_contract, accounting_source, provider_day_key,
+                    model_key, provider_surface_key, cursor_key_hash_key
+                ) DO UPDATE SET
+                    total_high_water = MAX(
+                        provider_feed_highwaters.total_high_water,
+                        excluded.total_high_water
+                    ),
+                    updated_at = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.updated_at
+                        ELSE provider_feed_highwaters.updated_at
+                    END",
+                params![
+                    update.token_contract,
+                    update.accounting_source,
+                    update.provider_day,
+                    update.total_high_water,
+                    updated_at,
+                ],
+            )?;
+        }
+        FeedHighWaterUpdate::Row(update) => {
+            let model = update.model.as_deref();
+            let model_key = model.unwrap_or("");
+            let latest_raw_buckets_json = update
+                .latest_raw_buckets
+                .map(|buckets| serde_json::to_string(&buckets))
+                .transpose()?;
+            let exact_raw_buckets_json = update
+                .exact_raw_buckets
+                .map(|buckets| serde_json::to_string(&buckets))
+                .transpose()?;
+            tx.execute(
+                "INSERT INTO provider_feed_highwaters (
+                    highwater_kind, token_contract, accounting_source, provider_day,
+                    provider_day_key, model, model_key, provider_surface,
+                    provider_surface_key, cursor_key_hash, cursor_key_hash_key,
+                    total_high_water, latest_raw_buckets_json, exact_raw_buckets_json,
+                    bucket_confidence, unshaped_total_only_tokens, updated_at
+                ) VALUES (
+                    'row', ?1, ?2, ?3, ?3, ?4, ?5, NULL, '',
+                    NULL, '', ?6, ?7, ?8, ?9, ?10, ?11
+                )
+                ON CONFLICT(
+                    highwater_kind, token_contract, accounting_source, provider_day_key,
+                    model_key, provider_surface_key, cursor_key_hash_key
+                ) DO UPDATE SET
+                    model = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.model
+                        ELSE provider_feed_highwaters.model
+                    END,
+                    total_high_water = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.total_high_water
+                        ELSE provider_feed_highwaters.total_high_water
+                    END,
+                    latest_raw_buckets_json = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.latest_raw_buckets_json
+                        ELSE provider_feed_highwaters.latest_raw_buckets_json
+                    END,
+                    exact_raw_buckets_json = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.exact_raw_buckets_json
+                        ELSE provider_feed_highwaters.exact_raw_buckets_json
+                    END,
+                    bucket_confidence = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.bucket_confidence
+                        ELSE provider_feed_highwaters.bucket_confidence
+                    END,
+                    unshaped_total_only_tokens = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.unshaped_total_only_tokens
+                        ELSE provider_feed_highwaters.unshaped_total_only_tokens
+                    END,
+                    updated_at = CASE
+                        WHEN excluded.total_high_water >= provider_feed_highwaters.total_high_water
+                        THEN excluded.updated_at
+                        ELSE provider_feed_highwaters.updated_at
+                    END",
+                params![
+                    update.token_contract,
+                    update.accounting_source,
+                    update.provider_day,
+                    model,
+                    model_key,
+                    update.total_high_water,
+                    latest_raw_buckets_json,
+                    exact_raw_buckets_json,
+                    update.bucket_confidence,
+                    update.unshaped_total_only_tokens,
+                    updated_at,
+                ],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Upsert one provider cursor inside an existing transaction. Shared by

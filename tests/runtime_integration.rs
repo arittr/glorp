@@ -274,6 +274,7 @@ fn runtime_feeds_cached_tokens_at_full_value_for_tokenmaxxing_deltas() {
                 cache_read: 699_994_000,
                 reasoning_output: 123_456,
             }),
+            feed_highwater_updates: Vec::new(),
         }],
         diagnostics: Vec::new(),
         total_effective_tokens: 21_006_000.0,
@@ -522,6 +523,7 @@ fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePol
                 parser_version: "test-parser".to_string(),
             },
             token_totals: None,
+            feed_highwater_updates: Vec::new(),
         }],
         diagnostics: Vec::new(),
         total_effective_tokens: effective_tokens,
@@ -562,6 +564,7 @@ fn usage_delta_with_cursor(
             cache_read: 0,
             reasoning_output: 0,
         }),
+        feed_highwater_updates: Vec::new(),
     }
 }
 

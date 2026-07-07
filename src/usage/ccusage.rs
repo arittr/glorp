@@ -358,6 +358,7 @@ impl CcusageCommandProvider {
                 model: record.model,
                 cursor_update,
                 token_totals: Some(delta_totals),
+                feed_highwater_updates: Vec::new(),
             });
         }
 
