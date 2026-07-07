@@ -13,12 +13,15 @@ use glorp::{
     usage::{
         identity::SourceIdentity,
         normalize::RawTokenTotals,
-        provider::{UsageDelta, UsagePollResult, UsageProvider},
+        provider::{UsageDelta, UsagePollResult, UsageProvider, UsageSnapshot},
     },
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
-use time::{macros::datetime, Duration};
+use time::{
+    macros::{date, datetime},
+    Duration,
+};
 
 static POLL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -448,6 +451,50 @@ fn tokenmaxxing_cutover_advances_cursors_when_snapshot_has_benign_diagnostic() {
     assert_eq!(state.vitals.fed, 44.0);
 }
 
+#[test]
+fn tokenmaxxing_cutover_seeds_source_contact_and_source_day_highwater() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    let provider = provider_with_calibration_cursor(
+        "claude-code",
+        datetime!(2026 - 07 - 06 12:00 UTC),
+        RawTokenTotals {
+            uncached_input: 531,
+            output: 0,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        },
+    );
+
+    glorp::usage::cutover::ensure_tokenmaxxing_contract_active(
+        &mut state,
+        &mut usage_store,
+        &provider,
+        now,
+    )
+    .unwrap();
+
+    assert!(usage_store
+        .source_has_feed_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+        )
+        .unwrap());
+    assert_eq!(
+        usage_store
+            .source_day_highwater_for_test(
+                glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 06),
+            )
+            .unwrap(),
+        531.0
+    );
+}
+
 fn poll_with_delta(effective_tokens: f64, now: time::OffsetDateTime) -> UsagePollResult {
     // Each call yields a distinct cursor_value so the unapplied ledger's idempotency
     // (keyed on provider_surface|cursor_key|cursor_value) treats each call as a new poll.
@@ -545,6 +592,56 @@ fn poll_with_surface(
     poll
 }
 
+struct CalibrationCursorProvider {
+    provider_surface: String,
+    period_start: time::OffsetDateTime,
+    buckets: RawTokenTotals,
+}
+
+fn provider_with_calibration_cursor(
+    provider_surface: &str,
+    period_start: time::OffsetDateTime,
+    buckets: RawTokenTotals,
+) -> CalibrationCursorProvider {
+    CalibrationCursorProvider {
+        provider_surface: provider_surface.to_string(),
+        period_start,
+        buckets,
+    }
+}
+
+impl UsageProvider for CalibrationCursorProvider {
+    fn poll(&self, _store: &mut UsageStore) -> glorp::error::Result<UsagePollResult> {
+        Ok(empty_poll())
+    }
+
+    fn snapshot_for_calibration(
+        &self,
+        _store: &mut UsageStore,
+    ) -> glorp::error::Result<UsageSnapshot> {
+        let cursor_key = glorp::usage::provider::ProviderCursorKey {
+            provider_surface: self.provider_surface.clone(),
+            token_contract: Some(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.into()),
+            command: "ccusage daily --json --offline".into(),
+            source_surface: "daily".into(),
+            period_start: self.period_start.date().to_string(),
+            model: Some("claude-fable-5".into()),
+            raw_source_id: None,
+        };
+        Ok(UsageSnapshot {
+            daily_usage: Vec::new(),
+            cursor_updates: vec![ProviderCursorUpdate {
+                provider_surface: self.provider_surface.clone(),
+                cursor_key: serde_json::to_string(&cursor_key).unwrap(),
+                cursor_value: serde_json::to_string(&self.buckets).unwrap(),
+                provider_version: "test-provider".into(),
+                parser_version: "test-parser".into(),
+            }],
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
 fn empty_poll() -> UsagePollResult {
     UsagePollResult {
         deltas: Vec::new(),
@@ -571,6 +668,19 @@ fn establish_provider_contact(
             now,
         )
         .unwrap();
+    for token_contract in [
+        glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1,
+        glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+    ] {
+        usage_store
+            .record_source_contact(
+                token_contract,
+                surface,
+                glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+                now,
+            )
+            .unwrap();
+    }
 }
 
 fn is_eating_narration(text: &str, pet_name: &str) -> bool {
@@ -1090,6 +1200,39 @@ fn first_contact_provider_seeds_history_without_staging_history() {
     )
     .unwrap();
     assert!(!staged_ids.is_empty());
+}
+
+#[test]
+fn known_source_new_provider_day_is_not_seeded_as_first_contact() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let day_one = datetime!(2026 - 07 - 06 12:00 UTC);
+    let day_two = datetime!(2026 - 07 - 07 12:00 UTC);
+    usage_store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            day_one,
+        )
+        .unwrap();
+
+    let mut poll = poll_with_surface("claude-code", 100.0, day_two);
+    for delta in &mut poll.deltas {
+        delta.token_contract = glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.into();
+        delta.token_totals = Some(RawTokenTotals {
+            uncached_input: 100,
+            output: 0,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        });
+    }
+    let update = apply_usage_poll(&mut state, &mut usage_store, &poll, day_two).unwrap();
+
+    assert_eq!(update.recent_effective_tokens, 100.0);
+    assert_eq!(state.lifetime_effective_tokens, 100.0);
 }
 
 #[test]

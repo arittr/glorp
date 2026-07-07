@@ -178,12 +178,17 @@ fn handle_first_contact_and_discontinuity(
                 continue;
             }
             None => {
-                first_contact_deltas
-                    .entry(delta.cursor_update.provider_surface.clone())
-                    .or_default()
-                    .push(delta);
-                skip_cursors.insert(cursor_skip_key(delta));
-                continue;
+                if !usage_store.source_has_feed_contact(
+                    &delta.token_contract,
+                    &delta.cursor_update.provider_surface,
+                )? {
+                    first_contact_deltas
+                        .entry(delta.cursor_update.provider_surface.clone())
+                        .or_default()
+                        .push(delta);
+                    skip_cursors.insert(cursor_skip_key(delta));
+                    continue;
+                }
             }
             Some(_) => {}
         }
@@ -293,7 +298,20 @@ fn seed_first_contact_surface(
         recorded_at: now,
     };
 
-    usage_store.seed_source_history(&events, Some(&diagnostic), now)
+    usage_store.seed_source_history(&events, Some(&diagnostic), now)?;
+    let token_contracts = deltas
+        .iter()
+        .map(|delta| delta.token_contract.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for token_contract in token_contracts {
+        usage_store.record_source_contact(
+            &token_contract,
+            surface,
+            SOURCE_FIRST_CONTACT_CODE,
+            now,
+        )?;
+    }
+    Ok(())
 }
 
 fn scaled_token_bucket(total: u64, effective_share: f64, total_effective: f64) -> f64 {

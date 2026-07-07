@@ -26,7 +26,12 @@ pub fn ensure_tokenmaxxing_contract_active(
     // populated with the current totals; skipping advance_cursors here would
     // leave cursors at zero so the next clean poll applies the full usage history
     // as a bolus. Cursor advancement is bolus-prevention and must always run.
-    usage_store.advance_cursors(snapshot.cursor_updates, now)?;
+    usage_store.advance_cursors(snapshot.cursor_updates.clone(), now)?;
+    usage_store.seed_cutover_highwaters_from_cursor_updates(
+        TOKENMAXXING_TOTAL_V1,
+        &snapshot.cursor_updates,
+        now,
+    )?;
     if !snapshot.diagnostics.is_empty() {
         // Cannot compute a reliable baseline with a degraded snapshot. Leave the
         // contract inactive so a later clean poll computes the baseline and activates.
