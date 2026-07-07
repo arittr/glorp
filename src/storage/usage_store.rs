@@ -1496,8 +1496,8 @@ impl UsageStore {
                 model_key TEXT NOT NULL DEFAULT '',
                 provider_surface TEXT,
                 provider_surface_key TEXT NOT NULL DEFAULT '',
-                cursor_key TEXT,
-                cursor_key_key TEXT NOT NULL DEFAULT '',
+                cursor_key_hash TEXT,
+                cursor_key_hash_key TEXT NOT NULL DEFAULT '',
                 total_high_water REAL NOT NULL,
                 latest_raw_buckets_json TEXT,
                 exact_raw_buckets_json TEXT,
@@ -1511,7 +1511,7 @@ impl UsageStore {
                     provider_day_key,
                     model_key,
                     provider_surface_key,
-                    cursor_key_key
+                    cursor_key_hash_key
                 )
             );
 

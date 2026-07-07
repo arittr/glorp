@@ -166,6 +166,12 @@ fn snapshot_tables_exist_without_raw_transcript_columns() {
                 "sanitized raw source identity hash column must exist: {names:?}"
             );
         }
+        if table == "provider_feed_highwaters" {
+            assert!(
+                !names.iter().any(|name| name == "cursor_key"),
+                "{table} contains raw cursor_key column: {names:?}"
+            );
+        }
     }
 }
 

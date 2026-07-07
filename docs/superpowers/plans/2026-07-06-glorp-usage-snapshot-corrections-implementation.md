@@ -453,8 +453,8 @@ CREATE TABLE IF NOT EXISTS provider_feed_highwaters (
     model_key TEXT NOT NULL DEFAULT '',
     provider_surface TEXT,
     provider_surface_key TEXT NOT NULL DEFAULT '',
-    cursor_key TEXT,
-    cursor_key_key TEXT NOT NULL DEFAULT '',
+    cursor_key_hash TEXT,
+    cursor_key_hash_key TEXT NOT NULL DEFAULT '',
     total_high_water REAL NOT NULL,
     latest_raw_buckets_json TEXT,
     exact_raw_buckets_json TEXT,
@@ -468,7 +468,7 @@ CREATE TABLE IF NOT EXISTS provider_feed_highwaters (
         provider_day_key,
         model_key,
         provider_surface_key,
-        cursor_key_key
+        cursor_key_hash_key
     )
 );
 ```
@@ -1168,7 +1168,7 @@ pub fn record_source_contact(
 ```
 
 Add doc-hidden high-water seed helpers in the same file using `INSERT OR REPLACE INTO provider_feed_highwaters`. They are public test support because integration tests compile Glorp as a normal library dependency.
-When inserting high-water rows, set `provider_day_key`, `model_key`, `provider_surface_key`, and `cursor_key_key` to the corresponding nullable value or `""`. SQLite primary keys cannot use expression keys directly, so these key columns are the stable uniqueness surface.
+When inserting high-water rows, set `provider_day_key`, `model_key`, `provider_surface_key`, and `cursor_key_hash_key` to the corresponding nullable value or `""`. SQLite primary keys cannot use expression keys directly, so these key columns are the stable uniqueness surface.
 
 ```rust
 #[doc(hidden)]
@@ -1184,7 +1184,7 @@ pub fn seed_source_day_highwater_for_test(
         "INSERT OR REPLACE INTO provider_feed_highwaters (
             highwater_kind, token_contract, accounting_source, provider_day,
             provider_day_key, model, model_key, provider_surface,
-            provider_surface_key, cursor_key, cursor_key_key, total_high_water,
+            provider_surface_key, cursor_key_hash, cursor_key_hash_key, total_high_water,
             latest_raw_buckets_json, exact_raw_buckets_json, bucket_confidence,
             unshaped_total_only_tokens, updated_at
         ) VALUES (
@@ -1225,7 +1225,7 @@ pub fn seed_exact_row_highwater_for_test(
         "INSERT OR REPLACE INTO provider_feed_highwaters (
             highwater_kind, token_contract, accounting_source, provider_day,
             provider_day_key, model, model_key, provider_surface,
-            provider_surface_key, cursor_key, cursor_key_key, total_high_water,
+            provider_surface_key, cursor_key_hash, cursor_key_hash_key, total_high_water,
             latest_raw_buckets_json, exact_raw_buckets_json, bucket_confidence,
             unshaped_total_only_tokens, updated_at
         ) VALUES (
