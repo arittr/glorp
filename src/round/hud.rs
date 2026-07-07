@@ -68,6 +68,14 @@ pub fn mood_aura_color(mood: Mood) -> RoundColor {
     }
 }
 
+pub fn rate_direction_color(direction: crate::tui::view_model::RateDirection) -> RoundColor {
+    match direction {
+        crate::tui::view_model::RateDirection::Up => RoundColor(0.45, 0.84, 0.51, 1.0),
+        crate::tui::view_model::RateDirection::Down => RoundColor(0.95, 0.38, 0.36, 1.0),
+        crate::tui::view_model::RateDirection::Neutral => RoundColor(0.62, 0.63, 0.77, 1.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +144,20 @@ mod tests {
     #[test]
     fn sad_and_sleepy_are_distinct() {
         assert_ne!(mood_aura_color(Mood::Sad), mood_aura_color(Mood::Sleepy));
+    }
+
+    #[test]
+    fn rate_direction_colors_are_distinct() {
+        use crate::tui::view_model::RateDirection;
+
+        assert_ne!(
+            rate_direction_color(RateDirection::Up),
+            rate_direction_color(RateDirection::Down)
+        );
+        assert_ne!(
+            rate_direction_color(RateDirection::Neutral),
+            rate_direction_color(RateDirection::Up)
+        );
     }
 
     #[test]

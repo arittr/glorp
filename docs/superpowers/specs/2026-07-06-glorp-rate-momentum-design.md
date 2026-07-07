@@ -31,15 +31,15 @@ The product surface has two windows:
 - `hour`: current 60 minutes compared with the previous 60 minutes
 
 The watch TUI shows both windows with explicit direction. The companion shows
-the same two current values, but uses a color-only overall state so the round
-HUD stays compact.
+the same two current values in a neutral grey stack so the round HUD stays
+compact and legible.
 
 ## Goals
 
 - Show short-term and hourly momentum, not just a single rate-per-hour number.
 - Use green/up, red/down, and neutral states in the TUI.
-- Use color-only up/down/neutral treatment in the companion; no arrow, labels,
-  or prose captions in the ring gap.
+- Use neutral grey treatment in the companion; no arrow, labels, or prose
+  captions in the ring gap.
 - Keep all values based on canonical Tokenmaxxing totals, matching the existing
   watch token contract.
 - Keep the model shared so TUI, companion, preview, and tests read the same
@@ -59,7 +59,7 @@ HUD stays compact.
 
 ## Momentum Model
 
-Add a renderer-neutral momentum model under `ProgressView`:
+Add a renderer-neutral momentum model as a top-level `WatchViewModel` field:
 
 ```rust
 pub struct RateMomentum {
@@ -91,6 +91,12 @@ pub enum RateDirection {
 - `pulse.previous_tokens`: canonical tokens in `[now - 20m, now - 10m)`
 - `hour.previous_tokens`: canonical tokens in `[now - 120m, now - 60m)`
 
+All query bounds must be normalized before hitting `UsageStore`. The current
+store compares RFC3339 strings and already warns that mixed fractional and
+whole-second bounds can misorder `bucket_at` rows. Implementation should use a
+single helper that truncates `now` to whole-second precision before deriving all
+four half-open windows, and tests must cover boundary rows.
+
 Direction is derived by comparing current and previous:
 
 ```text
@@ -105,8 +111,8 @@ This gives real movement without twitching on rounding noise. A transition from
 zero to less than 1,000 tokens is neutral; a transition from zero to at least
 1,000 tokens is up.
 
-The companion needs one color for the whole rate block. Its overall direction
-is:
+The shared model still derives an overall companion direction for future use.
+Its overall direction is:
 
 ```text
 if pulse.direction is Up or Down:
@@ -147,6 +153,9 @@ contract is:
 - Color-capable terminals color the direction glyph and value green, red, or
   neutral/subtle.
 - Non-color or limited-color terminals keep the glyphs as the non-color cue.
+- The `today` panel's intrinsic height and compact degradation rules must be
+  updated so the momentum block does not clip source rows, overflow rows, or the
+  seven-day sparkline.
 
 Once this block exists, the progress bar stops rendering the inline rate
 segment. Progress remains focused on stage progress; rate momentum lives in the
@@ -178,10 +187,10 @@ The final companion contract:
 - No captions.
 - Align the two lines at the slash so `/10m` and `/hr` act as labels.
 - Keep the large token total white.
-- Color the whole two-line rate block by `companion_direction`:
-  - up: green
-  - down: red
-  - neutral: current cool/subtle rate color
+- Render the whole two-line rate block in the current cool/subtle neutral grey.
+- The companion should not encode direction by color in normal rendering. The
+  watch TUI remains the directional surface for exact up/down/neutral glyphs and
+  colors.
 
 The companion should fit the block inside `stat_gap_box` the same way the
 current `today` number and `/hr` line are fit. The implementation must measure

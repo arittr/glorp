@@ -113,6 +113,63 @@ fn normalized_usage_storage_never_persists_transcript_payloads() {
 }
 
 #[test]
+fn snapshot_tables_exist_without_raw_transcript_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let conn = store.raw_connection_for_test();
+
+    let tables = [
+        "provider_snapshot_batches",
+        "provider_snapshot_runs",
+        "provider_snapshot_rows",
+        "provider_corrections",
+        "provider_snapshot_diagnostics",
+        "provider_canonical_collectors",
+        "provider_source_contacts",
+        "provider_feed_highwaters",
+    ];
+
+    for table in tables {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "missing table {table}");
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for forbidden in [
+            "prompt",
+            "response",
+            "raw_prompt",
+            "raw_response",
+            "file_path",
+            "project_path",
+        ] {
+            assert!(
+                !names.iter().any(|name| name.contains(forbidden)),
+                "{table} contains forbidden column {forbidden}: {names:?}"
+            );
+        }
+        if table == "provider_snapshot_rows" {
+            assert!(
+                names.iter().any(|name| name == "raw_source_id_hash"),
+                "sanitized raw source identity hash column must exist: {names:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn usage_events_store_observed_and_bucket_times_separately_from_period_start() {
     let dir = tempdir().unwrap();
     let paths = AppPaths::from_config_dir(dir.path().to_path_buf());

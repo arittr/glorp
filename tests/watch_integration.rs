@@ -471,6 +471,92 @@ fn rate_per_hour_uses_only_canonical_tokenmaxxing_totals() {
 }
 
 #[test]
+fn rate_momentum_uses_canonical_windows_and_directions() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let mut store = UsageStore::open(&db_path).unwrap();
+    let now = datetime!(2026-06-19 18:00:00 UTC);
+
+    for (at, tokens) in [
+        (now - Duration::minutes(5), 12_000.0),
+        (now - Duration::minutes(15), 2_000.0),
+        (now - Duration::minutes(30), 20_000.0),
+        (now - Duration::minutes(90), 80_000.0),
+    ] {
+        store
+            .insert_event(&NormalizedUsageEvent {
+                provider_surface: "codex".to_string(),
+                observed_at: at,
+                bucket_at: at,
+                total_tokens: tokens,
+                effective_tokens: 1.0,
+                token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+                ..NormalizedUsageEvent::for_test_at(at, 1.0)
+            })
+            .unwrap();
+    }
+    store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "legacy".to_string(),
+            observed_at: now - Duration::minutes(4),
+            bucket_at: now - Duration::minutes(4),
+            total_tokens: 999_999.0,
+            effective_tokens: 999_999.0,
+            token_contract: glorp::usage::token_contract::WEIGHTED_EFFECTIVE_V1.to_string(),
+            ..NormalizedUsageEvent::for_test_at(now - Duration::minutes(4), 999_999.0)
+        })
+        .unwrap();
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &db_path, now).unwrap();
+
+    assert_eq!(vm.rate_momentum.pulse.current_tokens, 12_000.0);
+    assert_eq!(vm.rate_momentum.pulse.previous_tokens, 2_000.0);
+    assert_eq!(
+        vm.rate_momentum.pulse.direction,
+        glorp::tui::view_model::RateDirection::Up
+    );
+    assert_eq!(vm.rate_momentum.hour.current_tokens, 34_000.0);
+    assert_eq!(vm.rate_momentum.hour.previous_tokens, 80_000.0);
+    assert_eq!(
+        vm.rate_momentum.hour.direction,
+        glorp::tui::view_model::RateDirection::Down
+    );
+    assert_eq!(
+        vm.rate_momentum.companion_direction,
+        glorp::tui::view_model::RateDirection::Up
+    );
+}
+
+#[test]
+fn rate_momentum_normalizes_fractional_now_before_window_queries() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let mut store = UsageStore::open(&db_path).unwrap();
+    let now = datetime!(2026-06-19 18:00:00.5 UTC);
+    let event_at = datetime!(2026-06-19 17:59:59 UTC);
+
+    store
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "codex".to_string(),
+            observed_at: event_at,
+            bucket_at: event_at,
+            total_tokens: 1_500.0,
+            effective_tokens: 1.0,
+            token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string(),
+            ..NormalizedUsageEvent::for_test_at(event_at, 1.0)
+        })
+        .unwrap();
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &db_path, now).unwrap();
+
+    assert_eq!(vm.rate_momentum.pulse.current_tokens, 1_500.0);
+    assert_eq!(
+        vm.rate_momentum.pulse.direction,
+        glorp::tui::view_model::RateDirection::Up
+    );
+}
+
+#[test]
 fn tokenmaxxing_day_axis_interprets_date_as_los_angeles_midnight() {
     use glorp::usage::day_axis::{parse_agentsview_period_date, tokenmaxxing_day_start};
     use time::{Date, Month};

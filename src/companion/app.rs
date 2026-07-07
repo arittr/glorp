@@ -46,6 +46,7 @@ const MIN_WINDOW_SIZE: f64 = 260.0;
 /// geometry is coupled to this angle — a single source keeps the stat seated
 /// inside the ring's gap.
 const COMPANION_RING_GAP_DEG: f64 = 70.0;
+const COMPANION_RATE_STACK_FONT_SCALE: f64 = 0.9;
 
 /// The companion's drift config (tuned on device). Starts at the legacy default;
 /// diverge here WITHOUT touching the shared menubar popover.
@@ -692,6 +693,14 @@ fn cell_to_point(
     (px, py)
 }
 
+fn companion_rate_stack_start_size(font_size: f64) -> f64 {
+    font_size * COMPANION_RATE_STACK_FONT_SCALE
+}
+
+fn companion_rate_stack_color(_direction: crate::tui::view_model::RateDirection) -> RoundColor {
+    crate::round::hud::rate_direction_color(crate::tui::view_model::RateDirection::Neutral)
+}
+
 /// Blit a [`crate::presentation::SceneDrawList`] to the current AppKit
 /// graphics context. The caller is responsible for installing the aperture
 /// clip before calling (as `draw_scene` already does).
@@ -779,9 +788,8 @@ fn draw_hud(
     );
 
     let today = crate::format::format_tokens(vm.today_effective_tokens);
-    let rate = crate::format::format_tokens(vm.progress.rate_per_hour);
     let big_color = RoundColor(0.93, 0.93, 0.97, 1.0);
-    let sub_color = RoundColor(0.62, 0.63, 0.77, 1.0);
+    let rate_color = companion_rate_stack_color(vm.rate_momentum.companion_direction);
 
     unsafe {
         // Big "today" number, centered in the gap; shrink to fit the gap chord.
@@ -797,12 +805,27 @@ fn draw_hud(
         let top = bounds.size.height - gap.baseline_y;
         big.drawAtPoint(NSPoint::new(gap.center_x - big_w / 2.0, top));
 
-        // Small rate sub-line just below the big today number.
-        let sub_text = format!("{rate}/hr");
-        let sub_size = font_size * 0.9;
-        let sub = attributed_pet_glyph(&sub_text, sub_size, &sub_color);
-        let sub_w = sub.size().width;
-        sub.drawAtPoint(NSPoint::new(gap.center_x - sub_w / 2.0, top - big_h * 0.9));
+        // Compact pulse-first rate stack. Numeric prefixes are padded so the
+        // slash column is stable without adding labels or arrows.
+        let pulse_value = crate::format::format_tokens(vm.rate_momentum.pulse.current_tokens);
+        let hour_value = crate::format::format_tokens(vm.rate_momentum.hour.current_tokens);
+        let value_width = pulse_value.chars().count().max(hour_value.chars().count());
+        let pulse_text = format!("{pulse_value:>value_width$}/10m");
+        let hour_text = format!("{hour_value:>value_width$}/hr");
+        let mut rate_size = companion_rate_stack_start_size(font_size);
+        let mut pulse = attributed_pet_glyph(&pulse_text, rate_size, &rate_color);
+        let mut hour = attributed_pet_glyph(&hour_text, rate_size, &rate_color);
+        while pulse.size().width.max(hour.size().width) > gap.max_width && rate_size > 6.0 {
+            rate_size -= 1.0;
+            pulse = attributed_pet_glyph(&pulse_text, rate_size, &rate_color);
+            hour = attributed_pet_glyph(&hour_text, rate_size, &rate_color);
+        }
+        let rate_w = pulse.size().width.max(hour.size().width);
+        let rate_x = gap.center_x - rate_w / 2.0;
+        let pulse_y = top - big_h * 0.86;
+        let hour_y = pulse_y - pulse.size().height * 0.82;
+        pulse.drawAtPoint(NSPoint::new(rate_x, pulse_y));
+        hour.drawAtPoint(NSPoint::new(rate_x, hour_y));
     }
 }
 
@@ -838,6 +861,21 @@ mod tests {
                 fullscreen_key: "f",
             }
         );
+    }
+
+    #[test]
+    fn companion_rate_stack_starts_at_legacy_subline_scale() {
+        assert_eq!(companion_rate_stack_start_size(20.0), 18.0);
+    }
+
+    #[test]
+    fn companion_rate_stack_color_ignores_direction() {
+        use crate::tui::view_model::RateDirection;
+
+        let neutral = crate::round::hud::rate_direction_color(RateDirection::Neutral);
+        assert_eq!(companion_rate_stack_color(RateDirection::Up), neutral);
+        assert_eq!(companion_rate_stack_color(RateDirection::Down), neutral);
+        assert_eq!(companion_rate_stack_color(RateDirection::Neutral), neutral);
     }
 
     #[test]

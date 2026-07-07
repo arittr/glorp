@@ -43,6 +43,18 @@ pub fn tokenmaxxing_day_start(date: Date) -> OffsetDateTime {
         .to_offset(UtcOffset::UTC)
 }
 
+pub fn tokenmaxxing_provider_day(now: OffsetDateTime) -> Date {
+    tokenmaxxing_date(now)
+}
+
+pub fn tokenmaxxing_days_back(now: OffsetDateTime, count: usize) -> Vec<Date> {
+    let today = tokenmaxxing_provider_day(now);
+    let start = count.saturating_sub(1) as i64;
+    (0..count)
+        .map(|index| today - time::Duration::days(start - index as i64))
+        .collect()
+}
+
 fn tokenmaxxing_date(now: OffsetDateTime) -> Date {
     now.to_offset(los_angeles_offset_for_instant(now)).date()
 }
@@ -87,5 +99,38 @@ fn nth_weekday_of_month(year: i32, month: Month, weekday: Weekday, nth: u8) -> D
             }
         }
         date += time::Duration::days(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_day_uses_los_angeles_date() {
+        let before_la_midnight = time::macros::datetime!(2026 - 07 - 06 06:59:00 UTC);
+        let after_la_midnight = time::macros::datetime!(2026 - 07 - 06 07:00:00 UTC);
+
+        assert_eq!(
+            tokenmaxxing_provider_day(before_la_midnight),
+            time::macros::date!(2026 - 07 - 05)
+        );
+        assert_eq!(
+            tokenmaxxing_provider_day(after_la_midnight),
+            time::macros::date!(2026 - 07 - 06)
+        );
+    }
+
+    #[test]
+    fn days_back_returns_oldest_to_newest_provider_days() {
+        let now = time::macros::datetime!(2026 - 07 - 06 20:00 UTC);
+        assert_eq!(
+            tokenmaxxing_days_back(now, 3),
+            vec![
+                time::macros::date!(2026 - 07 - 04),
+                time::macros::date!(2026 - 07 - 05),
+                time::macros::date!(2026 - 07 - 06),
+            ]
+        );
     }
 }

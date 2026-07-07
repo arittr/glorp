@@ -5,7 +5,7 @@ use crate::tui::component::{ComponentPanel, InlineSparkline, MetricRow};
 use crate::tui::panels::LegacyPanel;
 use crate::tui::render_context::RenderContext;
 use crate::tui::style::{source_color, tokenpet_palette};
-use crate::tui::view_model::{SourceStatus, WatchViewModel};
+use crate::tui::view_model::{RateDirection, SourceStatus, WatchViewModel};
 
 /// Number of individual source rows the fixed-height panel can show before
 /// collapsing the rest into an "other" row.
@@ -17,14 +17,14 @@ impl LegacyPanel for TodayPanel {
     fn preferred_constraint(&self, vm: &WatchViewModel) -> Constraint {
         // Dynamic height: 1 row for the TOP border/title + content rows.
         // Content rows are: tokens, up to MAX_VISIBLE_SOURCE_ROWS source rows,
-        // an optional "other" overflow row, last 10m, and the 7-day sparkline.
+        // an optional "other" overflow row, two rate momentum rows, and the
+        // 7-day sparkline.
         // When there are more than MAX_VISIBLE_SOURCE_ROWS sources, the overflow
         // row appears and we need one extra row to avoid clipping the footer.
-        if vm.source_breakdown.len() > MAX_VISIBLE_SOURCE_ROWS {
-            Constraint::Length(7)
-        } else {
-            Constraint::Length(6)
-        }
+        let source_rows = vm.source_breakdown.len().min(MAX_VISIBLE_SOURCE_ROWS);
+        let overflow_rows = usize::from(vm.source_breakdown.len() > MAX_VISIBLE_SOURCE_ROWS);
+        let content_rows = 1 + source_rows + overflow_rows + 2 + 1;
+        Constraint::Length((content_rows as u16).saturating_add(1))
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &RenderContext) {
@@ -76,12 +76,36 @@ fn render_today_rows(area: Rect, buf: &mut Buffer, vm: &WatchViewModel, ctx: &Re
         next_row += 1;
     }
 
+    let pulse_tokens = crate::format::format_tokens(vm.rate_momentum.pulse.current_tokens);
+    let hour_tokens = crate::format::format_tokens(vm.rate_momentum.hour.current_tokens);
+    let rate_token_width = pulse_tokens
+        .chars()
+        .count()
+        .max(hour_tokens.chars().count());
+    let rate_suffix_width = "/10m".chars().count().max("/hr".chars().count());
+
     if area.height > next_row {
-        MetricRow::new(
-            "last 10m",
-            format_signed_tokens_short(vm.current_bucket_effective_tokens),
+        rate_row(
+            "rate",
+            vm.rate_momentum.pulse.direction,
+            &pulse_tokens,
+            "/10m",
+            rate_token_width,
+            rate_suffix_width,
         )
-        .annotation("this 10m")
+        .render(row_rect(area, next_row), buf, ctx);
+        next_row += 1;
+    }
+
+    if area.height > next_row {
+        rate_row(
+            "",
+            vm.rate_momentum.hour.direction,
+            &hour_tokens,
+            "/hr",
+            rate_token_width,
+            rate_suffix_width,
+        )
         .render(row_rect(area, next_row), buf, ctx);
         next_row += 1;
     }
@@ -141,6 +165,45 @@ fn other_row(tokens: f64, total: f64) -> MetricRow<'static> {
         .label_color(tokenpet_palette().dim.rgb)
 }
 
+fn rate_row(
+    label: &'static str,
+    direction: RateDirection,
+    tokens: &str,
+    suffix: &'static str,
+    token_width: usize,
+    suffix_width: usize,
+) -> MetricRow<'static> {
+    MetricRow::new(
+        label,
+        format!(
+            "{} {:>token_width$}{:<suffix_width$}",
+            direction_glyph(direction),
+            tokens,
+            suffix,
+            token_width = token_width,
+            suffix_width = suffix_width
+        ),
+    )
+    .value_color(direction_color(direction))
+}
+
+fn direction_glyph(direction: RateDirection) -> &'static str {
+    match direction {
+        RateDirection::Up => "↑",
+        RateDirection::Down => "↓",
+        RateDirection::Neutral => "→",
+    }
+}
+
+fn direction_color(direction: RateDirection) -> ratatui::style::Color {
+    let p = tokenpet_palette();
+    match direction {
+        RateDirection::Up => p.good.rgb,
+        RateDirection::Down => p.bad.rgb,
+        RateDirection::Neutral => p.dim.rgb,
+    }
+}
+
 fn compact_label(text: &str, max_len: usize) -> String {
     if text.chars().count() <= max_len {
         text.to_string()
@@ -175,23 +238,6 @@ fn format_tokens_full(n: f64) -> String {
         s
     } else {
         n.to_string()
-    }
-}
-
-fn format_signed_tokens_short(n: f64) -> String {
-    let abs = n.abs();
-    let unit = if abs >= 1_000_000.0 {
-        format!("{:.1}m", abs / 1_000_000.0)
-    } else if abs >= 1_000.0 {
-        format!("{:.1}k", abs / 1_000.0)
-    } else {
-        format!("{}", abs.round() as i64)
-    };
-    // Avoid rendering "-0" when the rounded absolute value is zero.
-    if n < 0.0 && unit != "0" {
-        format!("-{unit}")
-    } else {
-        format!("+{unit}")
     }
 }
 
@@ -236,6 +282,17 @@ mod tests {
     }
 
     #[test]
+    fn today_panel_renders_rate_momentum_rows() {
+        let vm = WatchViewModel::fixture();
+        let s = render_to_string(70, 8, &vm);
+        assert!(s.contains("rate"), "expected rate label");
+        assert!(s.contains("/10m"), "expected pulse row");
+        assert!(s.contains("/hr"), "expected hour row");
+        assert!(s.contains("↑"), "expected up glyph");
+        assert!(s.contains("↓"), "expected down glyph");
+    }
+
+    #[test]
     fn today_panel_renders_source_labels() {
         let vm = WatchViewModel::fixture();
         let s = render_to_string(50, 6, &vm);
@@ -244,12 +301,12 @@ mod tests {
     }
 
     #[test]
-    fn today_panel_renders_last_10m_row() {
+    fn today_panel_replaces_last_10m_with_rate_rows() {
         let vm = WatchViewModel::fixture();
-        let s = render_to_string(50, 6, &vm);
-        assert!(s.contains("last 10m"), "expected 'last 10m' label");
-        // fixture has 2,300 bucket tokens → "+2.3k"
-        assert!(s.contains("+2.3k"), "expected formatted bucket tokens");
+        let s = render_to_string(70, 8, &vm);
+        assert!(!s.contains("last 10m"), "old bucket row should not render");
+        assert!(s.contains("2.3k/10m"), "expected pulse rate row");
+        assert!(s.contains("109.0k/hr"), "expected hour rate row");
     }
 
     #[test]
@@ -362,23 +419,6 @@ mod tests {
         assert_eq!(format_tokens_full(999.0), "999");
     }
 
-    #[test]
-    fn format_signed_tokens_short_positive_uses_plus() {
-        assert_eq!(format_signed_tokens_short(2_300.0), "+2.3k");
-        assert_eq!(format_signed_tokens_short(500.0), "+500");
-        assert_eq!(format_signed_tokens_short(1_500_000.0), "+1.5m");
-    }
-
-    #[test]
-    fn format_signed_tokens_short_negative_uses_minus() {
-        assert_eq!(format_signed_tokens_short(-2_300.0), "-2.3k");
-    }
-
-    #[test]
-    fn format_signed_tokens_short_zero_renders_plus_zero() {
-        assert_eq!(format_signed_tokens_short(0.0), "+0");
-    }
-
     fn test_context() -> RenderContext {
         RenderContext::new(crate::tui::style::ColorCapability::Truecolor)
     }
@@ -403,15 +443,10 @@ mod tests {
     }
 
     #[test]
-    fn today_panel_seven_day_arrow_aligns_with_annotation_column() {
-        // The `←` legend tip must land at the same column as the `t` in
-        // "this 10m" on the row above so the spark line visually anchors
-        // to the data labels rather than drifting right.
-        //
-        // Note: we compare TERMINAL CELLS, not byte indexes — spark glyphs
-        // (`·`, `▁`..`█`) are 3-byte UTF-8 per cell, so `str::find` on the
-        // joined row would return a byte offset that disagrees with the
-        // column the user sees.
+    fn today_panel_rate_suffixes_align_at_slash() {
+        // Compare terminal cells, not byte indexes. The rate rows contain
+        // arrows and the footer contains spark glyphs, so joined string byte
+        // offsets do not match the columns the user sees.
         let vm = WatchViewModel::fixture();
         let panel = TodayPanel;
         let ctx = test_context();
@@ -421,33 +456,23 @@ mod tests {
             .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
+        let row_text =
+            |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
         let find_col = |y: u16, needle: &str| -> Option<u16> {
             (0..buf.area.width).find(|&x| buf[(x, y)].symbol() == needle)
         };
         let height = buf.area.height;
-        let last_10m_y = (0..height)
-            .find(|&y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-                    .contains("this 10m")
-            })
-            .expect("expected to find the 'this 10m' row");
-        let footer_y = (0..height)
-            .find(|&y| find_col(y, "←").is_some())
-            .expect("expected to find the '←' footer row");
-        // The `t` of "this 10m" sits one cell after the column whose only
-        // earlier `t` neighbor is also part of the same word; the simplest
-        // reliable anchor is the column of the LITERAL `t` followed by `h`.
-        let this_t_col = (0..buf.area.width - 1)
-            .find(|&x| {
-                buf[(x, last_10m_y)].symbol() == "t" && buf[(x + 1, last_10m_y)].symbol() == "h"
-            })
-            .expect("expected `th` in 'this 10m'");
-        let arrow_col = find_col(footer_y, "←").unwrap();
+        let pulse_y = (0..height)
+            .find(|&y| row_text(y).contains("/10m"))
+            .expect("expected to find the '/10m' rate row");
+        let hour_y = (0..height)
+            .find(|&y| row_text(y).contains("/hr"))
+            .expect("expected to find the '/hr' rate row");
+        let pulse_slash_col = find_col(pulse_y, "/").unwrap();
+        let hour_slash_col = find_col(hour_y, "/").unwrap();
         assert_eq!(
-            this_t_col, arrow_col,
-            "← (col {arrow_col}) must align with the 't' of 'this 10m' (col {this_t_col})"
+            pulse_slash_col, hour_slash_col,
+            "rate rows must align at slash: /10m col {pulse_slash_col}, /hr col {hour_slash_col}"
         );
     }
 
@@ -514,8 +539,8 @@ mod tests {
         let vm = WatchViewModel::fixture();
         assert_eq!(
             panel.preferred_constraint(&vm),
-            Constraint::Length(6),
-            "<=2 sources fit in 1 border + tokens + sources + last_10m + 7-day footer"
+            Constraint::Length(7),
+            "<=2 sources fit in 1 border + tokens + sources + two rate rows + 7-day footer"
         );
 
         let mut vm = WatchViewModel::fixture();
@@ -526,8 +551,8 @@ mod tests {
         });
         assert_eq!(
             panel.preferred_constraint(&vm),
-            Constraint::Length(7),
-            "3+ sources add an overflow 'other' row and need 7 rows total"
+            Constraint::Length(8),
+            "3+ sources add an overflow 'other' row and need 8 rows total"
         );
     }
 
@@ -559,8 +584,8 @@ mod tests {
             .node(WatchComponentId::Today.path())
             .expect("today node");
         assert_eq!(
-            today.bounds.height, 7,
-            "today panel should grow to 7 rows when overflow row is present"
+            today.bounds.height, 8,
+            "today panel should grow to 8 rows when overflow row is present"
         );
 
         let backend = TestBackend::new(120, 32);
@@ -591,7 +616,12 @@ mod tests {
             !text.contains("gemini"),
             "gemini should be hidden behind 'other': {text}"
         );
-        assert!(text.contains("last 10m"), "expected last 10m row: {text}");
+        assert!(
+            !text.contains("last 10m"),
+            "old bucket row should not render: {text}"
+        );
+        assert!(text.contains("/10m"), "expected pulse rate row: {text}");
+        assert!(text.contains("/hr"), "expected hour rate row: {text}");
         assert!(text.contains("7-day"), "expected 7-day footer row: {text}");
     }
 
