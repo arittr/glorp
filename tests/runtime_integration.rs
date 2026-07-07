@@ -14,6 +14,8 @@ use glorp::{
         identity::SourceIdentity,
         normalize::RawTokenTotals,
         provider::{UsageDelta, UsagePollResult, UsageProvider, UsageSnapshot},
+        snapshot::{ProviderSnapshotBatchInput, ProviderSnapshotRowInput},
+        token_contract::TOKENMAXXING_TOTAL_V1,
     },
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1446,4 +1448,72 @@ fn unknown_source_feeds_neutrally_without_milestone() {
         !habitat_prop_ids(&state).contains(&glorp::game::habitat::CODEX_SIGNAL_LAMP),
         "unknown source should feed but keep legacy codex milestone isolated"
     );
+}
+
+#[test]
+fn provider_correction_updates_visible_truth_without_rolling_back_pet_progress() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage_store = UsageStore::open(&usage_db).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.lifetime_effective_tokens = 1_060_000_000.0;
+    state.xp = 5.0;
+    state.stage = Stage::S5;
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    let day = date!(2026 - 07 - 06);
+
+    seed_snapshot_for_runtime_test(&mut usage_store, day, "claude-code", 531_000_000.0, now);
+
+    let visible = usage_store.snapshot_totals_for_provider_day(day).unwrap();
+    assert_eq!(visible.value.unwrap().total_tokens, 531_000_000.0);
+    assert_eq!(state.lifetime_effective_tokens, 1_060_000_000.0);
+    assert_eq!(state.stage, Stage::S5);
+}
+
+fn seed_snapshot_for_runtime_test(
+    usage: &mut UsageStore,
+    day: time::Date,
+    source: &str,
+    total: f64,
+    observed_at: time::OffsetDateTime,
+) {
+    let batch = ProviderSnapshotBatchInput {
+        collector_scope_id: format!("{source}:local-usage"),
+        collector_surface: format!("ccusage:{source}"),
+        command: "test snapshot".into(),
+        token_contract: TOKENMAXXING_TOTAL_V1.into(),
+        requested_provider_days: vec![day],
+        covered_accounting_sources: None,
+        provider_version: "test".into(),
+        parser_version: "test".into(),
+        observed_at,
+    };
+    let row = ProviderSnapshotRowInput {
+        replacement_scope_id: format!("{source}:local-usage"),
+        collector_scope_id: format!("{source}:local-usage"),
+        collector_surface: format!("ccusage:{source}"),
+        command: "test snapshot".into(),
+        token_contract: TOKENMAXXING_TOTAL_V1.into(),
+        accounting_source: source.into(),
+        provider_day: day,
+        model: Some("test-model".into()),
+        source_surface: "daily".into(),
+        provider_period: day.to_string(),
+        raw_source_id_hash: Some("hash:test".into()),
+        cursor_key_hash: "hash:cursor".into(),
+        cursor_update: ProviderCursorUpdate {
+            provider_surface: source.into(),
+            cursor_key: "cursor".into(),
+            cursor_value: "value".into(),
+            provider_version: "test".into(),
+            parser_version: "test".into(),
+        },
+        raw_token_buckets: None,
+        total_tokens: total,
+        cost_usd: None,
+        confidence: "local-log-derived".into(),
+    };
+    usage
+        .write_provider_snapshot_batch(&batch, &[row], &[])
+        .unwrap();
 }

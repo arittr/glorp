@@ -176,6 +176,37 @@ fn snapshot_tables_exist_without_raw_transcript_columns() {
 }
 
 #[test]
+fn snapshot_corrections_and_diagnostics_do_not_store_raw_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let day = time::macros::date!(2026 - 07 - 06);
+    store
+        .record_snapshot_failure(&glorp::usage::snapshot::ProviderSnapshotDiagnosticInput {
+            diagnostic_kind: "helper_exit".into(),
+            collector_scope_id: "claude-code:local-usage".into(),
+            replacement_scope_id: None,
+            requested_provider_days: vec![day],
+            provider_day: Some(day),
+            reason_code: "helper_exit".into(),
+            message: "helper_exit sanitized".into(),
+            observed_at: time::macros::datetime!(2026 - 07 - 06 20:00 UTC),
+        })
+        .unwrap();
+
+    let rendered: String = store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT IFNULL(group_concat(message, '\n'), '') FROM provider_snapshot_diagnostics",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!rendered.contains("secret prompt"));
+    assert!(!rendered.contains("secret response"));
+    assert!(!rendered.contains("/Users/drew/private"));
+}
+
+#[test]
 fn usage_events_store_observed_and_bucket_times_separately_from_period_start() {
     let dir = tempdir().unwrap();
     let paths = AppPaths::from_config_dir(dir.path().to_path_buf());

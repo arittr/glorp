@@ -1,7 +1,8 @@
 # Glorp Usage Snapshot Corrections - design
 
 - Date: 2026-07-06
-- Status: proposed, revised after adversarial review
+- Status: implemented
+- Implementation plan: `docs/superpowers/plans/2026-07-06-glorp-usage-snapshot-corrections-implementation.md`
 - Builds on:
   - `docs/superpowers/specs/2026-06-19-glorp-tokenmaxxing-token-contract-design.md`
   - `docs/superpowers/specs/2026-06-11-glorp-activity-identity-design.md`
