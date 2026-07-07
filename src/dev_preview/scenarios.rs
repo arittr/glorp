@@ -165,6 +165,9 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         if let Some(scene) = &frame.contract.scene {
             write_json_artifact(&staging_dir.join(scene_path(frame)), scene)?;
         }
+        if let Some(hud) = &frame.contract.hud {
+            write_json_artifact(&staging_dir.join(hud_path(frame)), hud)?;
+        }
     }
 
     for strip in &strips {
@@ -617,6 +620,7 @@ fn scenario_from_parts(
                 }
             }),
             scene: frame.contract.scene.as_ref().map(|_| scene_path(frame)),
+            hud: frame.contract.hud.as_ref().map(|_| hud_path(frame)),
         },
         inputs,
         round,
@@ -688,6 +692,16 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 title: format!("{} Scene", frame.title),
                 artifact_type: ArtifactType::Scene,
                 path: scene_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.hud.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-hud", frame.id),
+                title: format!("{} HUD", frame.title),
+                artifact_type: ArtifactType::Hud,
+                path: hud_path(frame),
                 width: None,
                 height: None,
             });
@@ -1678,6 +1692,10 @@ fn layout_path(frame: &PreviewFrame) -> PathBuf {
 
 fn scene_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.scene.json", frame.id))
+}
+
+fn hud_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.hud.json", frame.id))
 }
 
 fn room_text_path(frame: &PreviewFrame) -> PathBuf {

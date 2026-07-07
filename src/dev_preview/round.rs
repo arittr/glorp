@@ -25,6 +25,90 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
+    let mut missing_yesterday = WatchViewModel::fixture_with_habitat_props();
+    set_daily_comparison(
+        &mut missing_yesterday,
+        842_000_000.0,
+        None,
+        crate::usage::snapshot::SnapshotState::Missing,
+        Some("yesterday-missing"),
+    );
+    frames.push(frame(
+        "round-hud-missing-yesterday",
+        "Round HUD Missing Yesterday",
+        &missing_yesterday,
+        ctx,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let mut stale_yesterday = WatchViewModel::fixture_with_habitat_props();
+    set_daily_comparison(
+        &mut stale_yesterday,
+        842_000_000.0,
+        Some(900_000_000.0),
+        crate::usage::snapshot::SnapshotState::Stale,
+        Some("yesterday-stale"),
+    );
+    frames.push(frame(
+        "round-hud-stale-yesterday",
+        "Round HUD Stale Yesterday",
+        &stale_yesterday,
+        ctx,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let mut zero_yesterday = WatchViewModel::fixture_with_habitat_props();
+    set_daily_comparison(
+        &mut zero_yesterday,
+        842_000_000.0,
+        Some(0.0),
+        crate::usage::snapshot::SnapshotState::Current,
+        Some("yesterday-zero"),
+    );
+    frames.push(frame(
+        "round-hud-zero-yesterday",
+        "Round HUD Zero Yesterday",
+        &zero_yesterday,
+        ctx,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let mut over_yesterday = WatchViewModel::fixture_with_habitat_props();
+    set_daily_comparison(
+        &mut over_yesterday,
+        842_000_000.0,
+        Some(678_000_000.0),
+        crate::usage::snapshot::SnapshotState::Current,
+        None,
+    );
+    frames.push(frame(
+        "round-hud-over-yesterday",
+        "Round HUD Over Yesterday",
+        &over_yesterday,
+        ctx,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let mut idle_pace = WatchViewModel::fixture_with_habitat_props();
+    idle_pace.rate_momentum.pulse.current_tokens = 0.0;
+    frames.push(frame(
+        "round-hud-idle-pace",
+        "Round HUD Idle Pace",
+        &idle_pace,
+        ctx,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let mut burst_pace = WatchViewModel::fixture_with_habitat_props();
+    burst_pace.rate_momentum.pulse.current_tokens = 100_000_000.0;
+    frames.push(frame(
+        "round-hud-burst-pace",
+        "Round HUD Burst Pace",
+        &burst_pace,
+        ctx,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
     let mut active = WatchViewModel::fixture_with_habitat_props();
     active.activity_identity.source_diversity = SourceDiversity::DualLane;
     active.last_feed_pulse_at = Some(ctx.fixed_now - Duration::milliseconds(400));
@@ -243,7 +327,40 @@ fn frame(
     ctx: &PreviewRenderContext,
     capabilities: RoundRenderCapabilities,
 ) -> PreviewFrame {
-    render_round_preview_frame_from_vm(id, title, vm, ctx.fixed_now, 52, 52, capabilities)
+    let mut frame =
+        render_round_preview_frame_from_vm(id, title, vm, ctx.fixed_now, 52, 52, capabilities);
+    let aperture = RoundAperture::new(frame.width, frame.height);
+    frame.contract.hud = Some(
+        crate::dev_preview::contract::PreviewHudArtifact::from_companion_view_model(
+            &frame.id, vm, aperture,
+        ),
+    );
+    frame
+}
+
+fn set_daily_comparison(
+    vm: &mut WatchViewModel,
+    today_tokens: f64,
+    yesterday_tokens: Option<f64>,
+    yesterday_state: crate::usage::snapshot::SnapshotState,
+    reason: Option<&str>,
+) {
+    vm.today_effective_tokens = today_tokens;
+    vm.daily_comparison = crate::tui::view_model::DailyComparison {
+        today_provider_day: time::macros::date!(2026 - 07 - 06),
+        yesterday_provider_day: time::macros::date!(2026 - 07 - 05),
+        today_tokens,
+        yesterday_tokens,
+        today_snapshot_state: crate::usage::snapshot::SnapshotState::Current,
+        yesterday_snapshot_state: yesterday_state,
+        today_observed_at: Some(time::macros::datetime!(2026 - 07 - 06 20:00 UTC)),
+        yesterday_observed_at: Some(time::macros::datetime!(2026 - 07 - 05 20:00 UTC)),
+        unavailable_reason: reason.map(str::to_string),
+        fraction_of_yesterday: match (yesterday_tokens, reason) {
+            (Some(yesterday), None) if yesterday > 0.0 => Some(today_tokens / yesterday),
+            _ => None,
+        },
+    };
 }
 
 #[cfg(test)]

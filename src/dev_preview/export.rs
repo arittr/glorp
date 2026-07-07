@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const PRODUCER: &str = "glorp-dev-preview";
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -89,6 +89,8 @@ pub struct PreviewScenarioFiles {
     pub room_masked_text: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scene: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hud: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,6 +151,7 @@ pub enum ArtifactType {
     Cells,
     Layout,
     Scene,
+    Hud,
     Html,
     Review,
     Asset,
@@ -300,6 +303,9 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             }
             if let Some(scene) = &scenario.files.scene {
                 markdown.push_str(&format!("- Scene: `{}`\n", scene.display()));
+            }
+            if let Some(hud) = &scenario.files.hud {
+                markdown.push_str(&format!("- HUD: `{}`\n", hud.display()));
             }
             markdown.push('\n');
             markdown.push_str("Review prompts:\n");
@@ -692,6 +698,7 @@ mod tests {
                     room_text: None,
                     room_masked_text: None,
                     scene: None,
+                    hud: None,
                 },
                 inputs: BTreeMap::from([(
                     "fixed_now".to_string(),
@@ -887,7 +894,7 @@ mod tests {
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 5);
+        assert_eq!(json["schema_version"], 6);
         assert_eq!(json["producer"], "glorp-dev-preview");
         assert_eq!(json["scenarios"][0]["kind"], "watch");
         assert_eq!(json["scenarios"][0]["dimensions"]["width"], 2);

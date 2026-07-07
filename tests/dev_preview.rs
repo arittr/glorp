@@ -302,7 +302,7 @@ fn dev_preview_watch_writes_expected_artifacts() {
     );
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 5);
+    assert_eq!(manifest["schema_version"], 6);
     assert_eq!(manifest["producer"], "glorp-dev-preview");
     assert!(!manifest["glorp_version"].as_str().unwrap().is_empty());
     assert!(manifest["generated_at"].as_str().unwrap().ends_with('Z'));
@@ -711,7 +711,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         .is_file());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 5);
+    assert_eq!(manifest["schema_version"], 6);
     let wide = scenario(&manifest, "watch-wide-normal");
     assert_eq!(
         wide["files"]["layout"],
@@ -1249,6 +1249,12 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "pet-glitch-live-states".to_string(),
             "pet-glitch-persistence-states".to_string(),
             "round-normal".to_string(),
+            "round-hud-missing-yesterday".to_string(),
+            "round-hud-stale-yesterday".to_string(),
+            "round-hud-zero-yesterday".to_string(),
+            "round-hud-over-yesterday".to_string(),
+            "round-hud-idle-pace".to_string(),
+            "round-hud-burst-pace".to_string(),
             "round-active-pulse".to_string(),
             "round-asleep-night".to_string(),
             "round-helper-trouble".to_string(),
@@ -1580,7 +1586,7 @@ fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
     assert!(!run.out.join("frames/watch-wide-normal.txt").exists());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 5);
+    assert_eq!(manifest["schema_version"], 6);
     assert!(
         manifest["scenarios"].as_array().unwrap().is_empty(),
         "animation-only bundles should not write static scenarios"
@@ -1737,8 +1743,14 @@ fn dev_preview_watch_daycontext_heavy_day_evening_frame_snapshot() {
     insta::assert_snapshot!("watch_daycontext_heavy_day_evening_frame", frame);
 }
 
-const ROUND_IDS: [&str; 8] = [
+const ROUND_IDS: [&str; 14] = [
     "round-normal",
+    "round-hud-missing-yesterday",
+    "round-hud-stale-yesterday",
+    "round-hud-zero-yesterday",
+    "round-hud-over-yesterday",
+    "round-hud-idle-pace",
+    "round-hud-burst-pace",
     "round-active-pulse",
     "round-asleep-night",
     "round-helper-trouble",
@@ -1755,7 +1767,7 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
     run.run_success("round");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 5);
+    assert_eq!(manifest["schema_version"], 6);
     for id in ROUND_IDS {
         assert!(
             run.out.join(format!("frames/{id}.txt")).is_file(),
@@ -1780,6 +1792,109 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
         assert_eq!(
             scenario["round"]["privacy"]["diagnostic_text_visible"],
             false
+        );
+    }
+}
+
+#[test]
+fn dev_preview_round_writes_companion_hud_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let manifest = run.manifest();
+    assert_eq!(manifest["schema_version"], 6);
+    let expected = [
+        "round-normal",
+        "round-hud-missing-yesterday",
+        "round-hud-stale-yesterday",
+        "round-hud-zero-yesterday",
+        "round-hud-over-yesterday",
+        "round-hud-idle-pace",
+        "round-hud-burst-pace",
+    ];
+
+    for id in expected {
+        assert!(
+            run.out.join(format!("frames/{id}.hud.json")).is_file(),
+            "missing {id}.hud.json"
+        );
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["files"]["hud"], format!("frames/{id}.hud.json"));
+        assert_artifact_type(&manifest, &format!("{id}-hud"), "hud");
+
+        let hud = read_hud(&run, id);
+        assert_eq!(hud["schema_version"], 1);
+        assert_eq!(hud["frame_id"], id);
+        assert_eq!(hud["gap_deg"], 70.0);
+        assert_eq!(hud["lanes"]["xp"]["cap"], "round");
+        assert_eq!(hud["lanes"]["daily"]["cap"], "round");
+        assert_eq!(hud["lanes"]["pace"]["cap"], "round");
+        assert!(
+            hud["lanes"]["xp"]["stroke_width"].as_f64().unwrap()
+                > hud["lanes"]["daily"]["stroke_width"].as_f64().unwrap()
+        );
+        assert!(
+            hud["lanes"]["daily"]["stroke_width"].as_f64().unwrap()
+                > hud["lanes"]["pace"]["stroke_width"].as_f64().unwrap()
+        );
+        assert!(hud["text"]["today_total"].is_string());
+        assert!(hud["text"]["daily_percent"]
+            .as_str()
+            .unwrap()
+            .ends_with(" yday"));
+        assert!(hud["text"]["pace"].as_str().unwrap().ends_with("/10m"));
+    }
+}
+
+#[test]
+fn dev_preview_hud_artifacts_cover_daily_and_pace_states() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let missing = read_hud(&run, "round-hud-missing-yesterday");
+    assert_eq!(missing["lanes"]["daily"]["fill_fraction"], 0.0);
+    assert_eq!(missing["text"]["daily_percent"], "--% yday");
+
+    let zero = read_hud(&run, "round-hud-zero-yesterday");
+    assert_eq!(zero["lanes"]["daily"]["fill_fraction"], 0.0);
+    assert_eq!(zero["text"]["daily_percent"], "--% yday");
+
+    let over = read_hud(&run, "round-hud-over-yesterday");
+    assert_eq!(over["lanes"]["daily"]["fill_fraction"], 1.0);
+    assert_eq!(over["text"]["daily_percent"], "124% yday");
+
+    let idle = read_hud(&run, "round-hud-idle-pace");
+    assert_eq!(idle["lanes"]["pace"]["fill_fraction"], 0.0);
+    assert_eq!(idle["text"]["pace"], "0/10m");
+
+    let burst = read_hud(&run, "round-hud-burst-pace");
+    assert!(
+        burst["lanes"]["pace"]["fill_fraction"].as_f64().unwrap() > 0.80,
+        "burst pace should visibly fill the amber lane"
+    );
+}
+
+#[test]
+fn dev_preview_scene_artifacts_do_not_gain_companion_hud_metrics() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let scene_text =
+        std::fs::read_to_string(run.out.join("frames/round-hud-over-yesterday.scene.json"))
+            .unwrap();
+    for forbidden in [
+        "daily_comparison",
+        "fraction_of_yesterday",
+        "124% yday",
+        "/10m",
+        "842M",
+    ] {
+        assert!(
+            !scene_text.contains(forbidden),
+            "scene artifact leaked companion HUD metric {forbidden}: {scene_text}"
         );
     }
 }
@@ -1943,6 +2058,10 @@ fn read_layout(run: &PreviewRun, id: &str) -> Value {
 
 fn read_scene(run: &PreviewRun, id: &str) -> Value {
     read_json(run.out.join(format!("frames/{id}.scene.json")))
+}
+
+fn read_hud(run: &PreviewRun, id: &str) -> Value {
+    read_json(run.out.join(format!("frames/{id}.hud.json")))
 }
 
 fn preview_scenarios_with_contract_scene(manifest: &Value) -> Vec<String> {

@@ -10,11 +10,13 @@ use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 pub const CONTRACT_SCHEMA_VERSION: u32 = 1;
+pub const HUD_CONTRACT_SCHEMA_VERSION: u32 = 1;
 const REDACTED_RUNTIME_ID: &str = "redacted";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PreviewFrameContract {
     pub scene: Option<PreviewSceneArtifact>,
+    pub hud: Option<PreviewHudArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -89,6 +91,44 @@ pub struct PreviewTargetArtifact {
     pub y: u16,
     pub width: u16,
     pub height: u16,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewHudArtifact {
+    pub schema_version: u32,
+    pub frame_id: String,
+    pub gap_deg: f64,
+    pub aperture_radius: f64,
+    pub lanes: BTreeMap<String, PreviewHudLaneArtifact>,
+    pub text: PreviewHudTextArtifact,
+    pub privacy_projection: PreviewPrivacyProjection,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewHudLaneArtifact {
+    pub radius: f64,
+    pub stroke_width: f64,
+    pub track_start_deg: f64,
+    pub track_sweep_deg: f64,
+    pub fill_fraction: f64,
+    pub cap: String,
+    pub track_color: PreviewHudColorArtifact,
+    pub fill_color: PreviewHudColorArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewHudTextArtifact {
+    pub today_total: String,
+    pub daily_percent: String,
+    pub pace: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct PreviewHudColorArtifact {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub a: f64,
 }
 
 impl PreviewSceneArtifact {
@@ -181,6 +221,105 @@ impl PreviewSceneArtifact {
             },
             activity: PreviewActivityArtifact::from_round(scene),
             targets: BTreeMap::new(),
+        }
+    }
+}
+
+impl PreviewHudArtifact {
+    pub fn from_companion_view_model(
+        frame_id: &str,
+        vm: &WatchViewModel,
+        aperture: crate::round::layout::RoundAperture,
+    ) -> Self {
+        let gap_deg = crate::round::hud::COMPANION_GAUGE_GAP_DEG;
+        let layout = crate::round::hud::perimeter_gauge_layout(
+            aperture.center_x as f64,
+            aperture.center_y as f64,
+            aperture.radius as f64,
+            gap_deg,
+        );
+        let colors = crate::round::hud::perimeter_gauge_colors();
+        let xp_fraction = if vm.progress.is_max_stage {
+            1.0
+        } else {
+            vm.progress.fraction as f64
+        };
+        let daily_fraction =
+            crate::round::hud::daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday);
+        let pace_fraction =
+            crate::round::hud::companion_pace_fraction(vm.rate_momentum.pulse.current_tokens);
+        let text = crate::round::hud::companion_hud_text(
+            vm.today_effective_tokens,
+            vm.daily_comparison.fraction_of_yesterday,
+            vm.rate_momentum.pulse.current_tokens,
+        );
+
+        Self {
+            schema_version: HUD_CONTRACT_SCHEMA_VERSION,
+            frame_id: frame_id.to_string(),
+            gap_deg,
+            aperture_radius: aperture.radius as f64,
+            lanes: BTreeMap::from([
+                (
+                    "xp".to_string(),
+                    PreviewHudLaneArtifact::from_lane(&layout.xp, &colors.xp, xp_fraction),
+                ),
+                (
+                    "daily".to_string(),
+                    PreviewHudLaneArtifact::from_lane(&layout.daily, &colors.daily, daily_fraction),
+                ),
+                (
+                    "pace".to_string(),
+                    PreviewHudLaneArtifact::from_lane(&layout.pace, &colors.pace, pace_fraction),
+                ),
+            ]),
+            text: PreviewHudTextArtifact {
+                today_total: text.today_total,
+                daily_percent: text.daily_percent,
+                pace: text.pace,
+            },
+            privacy_projection: PreviewPrivacyProjection {
+                surface: "companion-hud".to_string(),
+                source_names_visible: false,
+                exact_counts_visible: true,
+                diagnostic_text_visible: false,
+                feed_rows_visible: false,
+                file_paths_visible: false,
+                project_names_visible: false,
+            },
+        }
+    }
+}
+
+impl PreviewHudLaneArtifact {
+    fn from_lane(
+        lane: &crate::round::hud::GaugeLane,
+        colors: &crate::round::hud::GaugeLaneColors,
+        fill_fraction: f64,
+    ) -> Self {
+        Self {
+            radius: lane.ring.radius,
+            stroke_width: lane.stroke_width,
+            track_start_deg: lane.ring.track_start_deg,
+            track_sweep_deg: lane.ring.track_sweep_deg,
+            fill_fraction: fill_fraction.clamp(0.0, 1.0),
+            cap: match lane.cap {
+                crate::round::hud::LineCap::Butt => "butt".to_string(),
+                crate::round::hud::LineCap::Round => "round".to_string(),
+            },
+            track_color: PreviewHudColorArtifact::from_round_color(colors.track),
+            fill_color: PreviewHudColorArtifact::from_round_color(colors.fill),
+        }
+    }
+}
+
+impl PreviewHudColorArtifact {
+    fn from_round_color(color: crate::round::draw::RoundColor) -> Self {
+        Self {
+            r: color.0 as f64,
+            g: color.1 as f64,
+            b: color.2 as f64,
+            a: color.3 as f64,
         }
     }
 }
