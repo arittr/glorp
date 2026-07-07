@@ -618,6 +618,13 @@ impl UsageProvider for CalibrationCursorProvider {
         Ok(empty_poll())
     }
 
+    fn refresh_snapshots_only(
+        &self,
+        _store: &mut UsageStore,
+    ) -> glorp::error::Result<Vec<glorp::usage::provider::ProviderDiagnostic>> {
+        Ok(Vec::new())
+    }
+
     fn snapshot_for_calibration(
         &self,
         _store: &mut UsageStore,

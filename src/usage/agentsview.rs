@@ -2,22 +2,30 @@ use crate::error::{GlorpError, Result};
 use crate::storage::usage_store::{
     ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
 };
-use crate::usage::ccusage::{run_command_with_timeout, HelperCommand, HELPER_SUBPROCESS_TIMEOUT};
+use crate::usage::ccusage::{
+    requested_provider_days_for_poll, run_command_with_timeout, stable_hash, HelperCommand,
+    HELPER_SUBPROCESS_TIMEOUT,
+};
 use crate::usage::day_axis::{
     parse_agentsview_period_date, tokenmaxxing_day_start, tokenmaxxing_provider_day,
     TOKENMAXXING_TIMEZONE,
 };
-use crate::usage::normalize::{normalize_agentsview_json, RawTokenTotals};
+use crate::usage::normalize::{normalize_agentsview_json, NormalizedUsageRecord};
 use crate::usage::provider::{
-    ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
-    UsageSnapshot,
+    ProviderCursorKey, ProviderDiagnostic, ProviderSnapshotScope, UsageDelta, UsagePollResult,
+    UsageProvider, UsageSnapshot,
+};
+use crate::usage::snapshot::{
+    ProviderSnapshotBatchInput, ProviderSnapshotDiagnosticInput, ProviderSnapshotRowInput,
 };
 use crate::usage::token_contract::TOKENMAXXING_TOTAL_V1;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 
 pub const AGENTSVIEW_COMMAND: &str = "agentsview usage daily";
 
@@ -31,14 +39,40 @@ pub struct AgentsviewDiscovery {
     pub agentsview: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentsviewCommandProvider {
     paths: AgentsviewPaths,
+    clock: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
+}
+
+#[derive(Debug)]
+struct AgentSnapshotFlow {
+    result: UsagePollResult,
+}
+
+impl fmt::Debug for AgentsviewCommandProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentsviewCommandProvider")
+            .field("paths", &self.paths)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentsviewCommandProvider {
     pub fn new(paths: AgentsviewPaths) -> Self {
-        Self { paths }
+        Self::new_with_clock(paths, OffsetDateTime::now_utc)
+    }
+
+    fn new_with_clock<F>(paths: AgentsviewPaths, clock: F) -> Self
+    where
+        F: Fn() -> OffsetDateTime + Send + Sync + 'static,
+    {
+        Self { paths, clock: Arc::new(clock) }
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_now_for_test(paths: AgentsviewPaths, now: OffsetDateTime) -> Self {
+        Self::new_with_clock(paths, move || now)
     }
 
     pub fn from_environment() -> Self {
@@ -54,24 +88,24 @@ impl AgentsviewCommandProvider {
     }
 
     pub fn poll_current_day(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
-        let now = OffsetDateTime::now_utc();
+        let now = (self.clock)();
         let claude = self.poll_agent_current_day(store, "claude", false, now)?;
         let codex = self.poll_agent_current_day(store, "codex", true, now)?;
 
-        let mut deltas = claude.deltas;
-        deltas.extend(codex.deltas);
-        let mut diagnostics = claude.diagnostics;
-        diagnostics.extend(codex.diagnostics);
+        let mut deltas = claude.result.deltas;
+        deltas.extend(codex.result.deltas);
+        let mut diagnostics = claude.result.diagnostics;
+        diagnostics.extend(codex.result.diagnostics);
         Ok(result_from_parts(deltas, diagnostics))
     }
 
     pub fn poll_full_history(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
         let claude = self.poll_agent_full_history(store, "claude", false)?;
         let codex = self.poll_agent_full_history(store, "codex", true)?;
-        let mut deltas = claude.deltas;
-        deltas.extend(codex.deltas);
-        let mut diagnostics = claude.diagnostics;
-        diagnostics.extend(codex.diagnostics);
+        let mut deltas = claude.result.deltas;
+        deltas.extend(codex.result.deltas);
+        let mut diagnostics = claude.result.diagnostics;
+        diagnostics.extend(codex.result.diagnostics);
         Ok(result_from_parts(deltas, diagnostics))
     }
 
@@ -81,14 +115,15 @@ impl AgentsviewCommandProvider {
         agent: &str,
         no_sync: bool,
         now: OffsetDateTime,
-    ) -> Result<UsagePollResult> {
+    ) -> Result<AgentSnapshotFlow> {
         let date = tokenmaxxing_provider_day(now).to_string();
-        self.poll_agent_with_timeout(
+        self.poll_agent_flow_with_timeout(
             store,
             agent,
             no_sync,
             UsageRange::CurrentDay { since: date.clone(), until: date },
             HELPER_SUBPROCESS_TIMEOUT,
+            true,
         )
     }
 
@@ -97,16 +132,18 @@ impl AgentsviewCommandProvider {
         store: &mut UsageStore,
         agent: &str,
         no_sync: bool,
-    ) -> Result<UsagePollResult> {
-        self.poll_agent_with_timeout(
+    ) -> Result<AgentSnapshotFlow> {
+        self.poll_agent_flow_with_timeout(
             store,
             agent,
             no_sync,
             UsageRange::FullHistory,
             HELPER_SUBPROCESS_TIMEOUT,
+            true,
         )
     }
 
+    #[cfg(test)]
     fn poll_agent_with_timeout(
         &self,
         store: &mut UsageStore,
@@ -115,15 +152,64 @@ impl AgentsviewCommandProvider {
         range: UsageRange,
         timeout: Duration,
     ) -> Result<UsagePollResult> {
+        Ok(self
+            .poll_agent_flow_with_timeout(store, agent, no_sync, range, timeout, true)?
+            .result)
+    }
+
+    fn refresh_agent_snapshots_only(
+        &self,
+        store: &mut UsageStore,
+        agent: &str,
+        no_sync: bool,
+    ) -> Result<AgentSnapshotFlow> {
+        let now = (self.clock)();
+        let date = tokenmaxxing_provider_day(now).to_string();
+        self.poll_agent_flow_with_timeout(
+            store,
+            agent,
+            no_sync,
+            UsageRange::CurrentDay { since: date.clone(), until: date },
+            HELPER_SUBPROCESS_TIMEOUT,
+            false,
+        )
+    }
+
+    fn poll_agent_flow_with_timeout(
+        &self,
+        store: &mut UsageStore,
+        agent: &str,
+        no_sync: bool,
+        range: UsageRange,
+        timeout: Duration,
+        feed: bool,
+    ) -> Result<AgentSnapshotFlow> {
+        let requested_provider_days = requested_provider_days_for_poll((self.clock)());
+        let scope = snapshot_scope(agent, requested_provider_days);
+        let observed_at = OffsetDateTime::now_utc();
         let Some(helper) = self.paths.agentsview.as_deref() else {
             let diagnostic = diagnostic(agent, "missing_helper", "agentsview helper was not found");
             persist_diagnostic(store, &diagnostic)?;
-            return Ok(empty_poll(vec![diagnostic]));
+            record_snapshot_failures(
+                store,
+                &scope,
+                agent,
+                std::slice::from_ref(&diagnostic),
+                observed_at,
+            )?;
+            return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
         };
         if !helper.exists() {
             let diagnostic = diagnostic(agent, "missing_helper", "agentsview helper was not found");
             persist_diagnostic(store, &diagnostic)?;
-            return Ok(empty_poll(vec![diagnostic]));
+            record_snapshot_failures(
+                store,
+                &scope,
+                agent,
+                std::slice::from_ref(&diagnostic),
+                observed_at,
+            )?;
+            return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
         }
 
         let version = self
@@ -141,7 +227,14 @@ impl AgentsviewCommandProvider {
                     ),
                 );
                 persist_diagnostic(store, &diagnostic)?;
-                return Ok(empty_poll(vec![diagnostic]));
+                record_snapshot_failures(
+                    store,
+                    &scope,
+                    agent,
+                    std::slice::from_ref(&diagnostic),
+                    observed_at,
+                )?;
+                return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
             }
             Err(err) => return Err(err),
         };
@@ -153,7 +246,14 @@ impl AgentsviewCommandProvider {
                 &format!("agentsview exited with status {code}"),
             );
             persist_diagnostic(store, &diagnostic)?;
-            return Ok(empty_poll(vec![diagnostic]));
+            record_snapshot_failures(
+                store,
+                &scope,
+                agent,
+                std::slice::from_ref(&diagnostic),
+                observed_at,
+            )?;
+            return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -161,16 +261,26 @@ impl AgentsviewCommandProvider {
             Ok(batch) => batch,
             Err(diagnostic) => {
                 persist_diagnostic(store, &diagnostic)?;
-                return Ok(empty_poll(vec![diagnostic]));
+                record_snapshot_failures(
+                    store,
+                    &scope,
+                    agent,
+                    std::slice::from_ref(&diagnostic),
+                    observed_at,
+                )?;
+                return Ok(AgentSnapshotFlow { result: empty_poll(vec![diagnostic]) });
             }
         };
         for diagnostic in &batch.diagnostics {
             persist_diagnostic(store, diagnostic)?;
         }
 
-        let mut deltas = Vec::new();
-        let mut diagnostics = Vec::new();
-        let observed_at = OffsetDateTime::now_utc();
+        let mut rows = Vec::new();
+        let mut diagnostics = batch.diagnostics.clone();
+        let blocking_parse_failure = batch
+            .diagnostics
+            .iter()
+            .any(|diagnostic| blocks_requested_snapshot(diagnostic.code.as_str()));
         for record in batch.records {
             let Ok((_date, period_start)) = parse_agentsview_period_date(&record.period_start)
             else {
@@ -183,90 +293,198 @@ impl AgentsviewCommandProvider {
                 diagnostics.push(diagnostic);
                 continue;
             };
+            let provider_day = period_start.date();
 
-            let key = ProviderCursorKey {
-                provider_surface: record.source_identity.provider_surface.clone(),
-                token_contract: Some(TOKENMAXXING_TOTAL_V1.to_string()),
-                command: AGENTSVIEW_COMMAND.to_string(),
-                source_surface: "daily".to_string(),
-                period_start: record.period_start.clone(),
-                model: record.model.clone(),
-                raw_source_id: Some(record.source_identity.display_name.clone()),
-            };
-            let cursor_key = serde_json::to_string(&key)?;
-            let cursor_partition = record.source_identity.provider_surface.clone();
-            let previous_raw = match store.provider_cursor(&cursor_partition, &cursor_key) {
-                Ok(value) => value,
-                Err(_) => {
-                    let diagnostic =
-                        diagnostic(agent, "cursor_corruption", "agentsview cursor_corruption");
-                    persist_diagnostic(store, &diagnostic)?;
-                    diagnostics.push(diagnostic);
-                    None
-                }
-            };
-            let previous = match previous_raw {
-                Some(value) => match serde_json::from_str::<RawTokenTotals>(&value) {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        let diagnostic =
-                            diagnostic(agent, "cursor_corruption", "agentsview cursor_corruption");
-                        persist_diagnostic(store, &diagnostic)?;
-                        diagnostics.push(diagnostic);
-                        RawTokenTotals::default()
-                    }
-                },
-                None => RawTokenTotals::default(),
-            };
-
-            let Some(delta_totals) = record.raw_totals.positive_delta_since(previous) else {
+            if !scope.requested_provider_days.contains(&provider_day) {
                 let diagnostic = diagnostic(
                     agent,
-                    "cursor_total_decreased",
-                    "agentsview cursor_total_decreased",
+                    "unexpected_provider_day",
+                    &format!("agentsview returned unrequested provider day {provider_day}"),
                 );
                 persist_diagnostic(store, &diagnostic)?;
-                diagnostics.push(diagnostic);
-                write_cursor(
+                record_snapshot_diagnostic(
                     store,
-                    &cursor_partition,
-                    &cursor_key,
-                    record.raw_totals,
-                    &version,
+                    &scope,
+                    None,
+                    Some(provider_day),
+                    "unexpected_provider_day",
+                    "unexpected_provider_day",
+                    &diagnostic.message,
+                    observed_at,
                 )?;
-                continue;
-            };
-            if !delta_totals.has_positive_effective_bucket() {
+                diagnostics.push(diagnostic);
                 continue;
             }
 
-            let total_tokens = delta_totals.total_tokens();
-            let cursor_value = serde_json::to_string(&record.raw_totals)?;
-            deltas.push(UsageDelta {
-                provider_surface: record.source_identity.provider_surface.clone(),
-                source_identity: record.source_identity,
-                command: AGENTSVIEW_COMMAND.to_string(),
-                effective_tokens: total_tokens,
-                total_tokens,
-                token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
-                confidence: record.confidence,
-                period_start,
+            rows.push(snapshot_row_for_record(
+                &scope,
+                agent,
+                &version,
+                record,
+                provider_day,
+            )?);
+        }
+
+        if rows.is_empty() && blocking_parse_failure {
+            let diagnostic = diagnostic(
+                agent,
+                "malformed_required_fields",
+                "agentsview malformed_required_fields",
+            );
+            persist_diagnostic(store, &diagnostic)?;
+            record_snapshot_failures(
+                store,
+                &scope,
+                agent,
+                std::slice::from_ref(&diagnostic),
                 observed_at,
-                model: record.model,
-                cursor_update: ProviderCursorUpdate {
-                    provider_surface: cursor_partition,
-                    cursor_key,
-                    cursor_value,
-                    provider_version: version.clone(),
-                    parser_version: version.clone(),
-                },
-                token_totals: Some(delta_totals),
-                feed_highwater_updates: Vec::new(),
+            )?;
+            diagnostics.push(diagnostic);
+            return Ok(AgentSnapshotFlow { result: empty_poll(diagnostics) });
+        }
+
+        let plan = if feed {
+            Some(store.feed_deltas_for_snapshot_rows(&rows, observed_at)?)
+        } else {
+            None
+        };
+
+        let batch = ProviderSnapshotBatchInput {
+            collector_scope_id: scope.collector_scope_id.clone(),
+            collector_surface: collector_surface(agent),
+            command: AGENTSVIEW_COMMAND.to_string(),
+            token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
+            requested_provider_days: scope.requested_provider_days.clone(),
+            provider_version: version.clone(),
+            parser_version: version,
+            observed_at,
+        };
+        store.write_provider_snapshot_batch(&batch, &rows, &[])?;
+
+        if !feed {
+            return Ok(AgentSnapshotFlow { result: empty_poll(diagnostics) });
+        }
+
+        let plan = plan.expect("feed plan should exist for feed mode");
+        if !plan.cursor_seeds.is_empty() {
+            store.advance_cursors(plan.cursor_seeds.clone(), observed_at)?;
+        }
+        diagnostics.extend(
+            plan.diagnostics
+                .into_iter()
+                .map(provider_diagnostic_from_stored),
+        );
+        Ok(AgentSnapshotFlow {
+            result: result_from_parts(plan.deltas, diagnostics),
+        })
+    }
+
+    fn snapshot_agent_for_calibration(
+        &self,
+        store: &mut UsageStore,
+        agent: &str,
+        no_sync: bool,
+    ) -> Result<UsageSnapshot> {
+        let Some(helper) = self.paths.agentsview.as_deref() else {
+            let diagnostic = diagnostic(agent, "missing_helper", "agentsview helper was not found");
+            persist_diagnostic(store, &diagnostic)?;
+            return Ok(UsageSnapshot {
+                daily_usage: Vec::new(),
+                cursor_updates: Vec::new(),
+                diagnostics: vec![diagnostic],
+            });
+        };
+        if !helper.exists() {
+            let diagnostic = diagnostic(agent, "missing_helper", "agentsview helper was not found");
+            persist_diagnostic(store, &diagnostic)?;
+            return Ok(UsageSnapshot {
+                daily_usage: Vec::new(),
+                cursor_updates: Vec::new(),
+                diagnostics: vec![diagnostic],
             });
         }
 
+        let version = self
+            .version(helper)
+            .unwrap_or_else(|| "unknown".to_string());
+        let output =
+            match self.run_usage_with_timeout(helper, agent, no_sync, UsageRange::FullHistory, HELPER_SUBPROCESS_TIMEOUT) {
+                Ok(output) => output,
+                Err(GlorpError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
+                    let diagnostic = diagnostic(
+                        agent,
+                        "helper_timeout",
+                        &format!(
+                            "agentsview did not return within {}s",
+                            HELPER_SUBPROCESS_TIMEOUT.as_secs()
+                        ),
+                    );
+                    persist_diagnostic(store, &diagnostic)?;
+                    return Ok(UsageSnapshot {
+                        daily_usage: Vec::new(),
+                        cursor_updates: Vec::new(),
+                        diagnostics: vec![diagnostic],
+                    });
+                }
+                Err(err) => return Err(err),
+            };
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            let diagnostic = diagnostic(
+                agent,
+                "helper_exit",
+                &format!("agentsview exited with status {code}"),
+            );
+            persist_diagnostic(store, &diagnostic)?;
+            return Ok(UsageSnapshot {
+                daily_usage: Vec::new(),
+                cursor_updates: Vec::new(),
+                diagnostics: vec![diagnostic],
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let batch = match normalize_agentsview_json(agent, &stdout) {
+            Ok(batch) => batch,
+            Err(diagnostic) => {
+                persist_diagnostic(store, &diagnostic)?;
+                return Ok(UsageSnapshot {
+                    daily_usage: Vec::new(),
+                    cursor_updates: Vec::new(),
+                    diagnostics: vec![diagnostic],
+                });
+            }
+        };
+        for diagnostic in &batch.diagnostics {
+            persist_diagnostic(store, diagnostic)?;
+        }
+
+        let mut daily_usage = Vec::new();
+        let mut cursor_updates = Vec::new();
+        let mut diagnostics = Vec::new();
+        for record in batch.records {
+            let Ok((_date, period_start)) = parse_agentsview_period_date(&record.period_start)
+            else {
+                let diagnostic = diagnostic(
+                    agent,
+                    "invalid_period_start",
+                    "agentsview invalid_period_start",
+                );
+                persist_diagnostic(store, &diagnostic)?;
+                diagnostics.push(diagnostic);
+                continue;
+            };
+            daily_usage.push(
+                crate::game::calibration::DailyUsage::with_activity_timestamp(
+                    period_start,
+                    record.raw_totals.total_tokens(),
+                ),
+            );
+            cursor_updates.push(cursor_update_for_record(&record, &version)?);
+        }
+
         diagnostics.extend(batch.diagnostics);
-        Ok(result_from_parts(deltas, diagnostics))
+        Ok(UsageSnapshot { daily_usage, cursor_updates, diagnostics })
     }
 
     fn version(&self, helper: &Path) -> Option<String> {
@@ -326,28 +544,25 @@ impl UsageProvider for AgentsviewCommandProvider {
         self.poll_current_day(store)
     }
 
+    fn refresh_snapshots_only(&self, store: &mut UsageStore) -> Result<Vec<ProviderDiagnostic>> {
+        let claude = self.refresh_agent_snapshots_only(store, "claude", false)?;
+        let codex = self.refresh_agent_snapshots_only(store, "codex", true)?;
+
+        let mut diagnostics = claude.result.diagnostics;
+        diagnostics.extend(codex.result.diagnostics);
+        Ok(diagnostics)
+    }
+
     fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot> {
-        let poll = self.poll_full_history(store)?;
-        let daily_usage = poll
-            .deltas
-            .iter()
-            .map(|delta| {
-                crate::game::calibration::DailyUsage::with_activity_timestamp(
-                    delta.period_start,
-                    delta.total_tokens,
-                )
-            })
-            .collect();
-        let cursor_updates = poll
-            .deltas
-            .iter()
-            .map(|delta| delta.cursor_update.clone())
-            .collect();
-        Ok(UsageSnapshot {
-            daily_usage,
-            cursor_updates,
-            diagnostics: poll.diagnostics,
-        })
+        let claude = self.snapshot_agent_for_calibration(store, "claude", false)?;
+        let codex = self.snapshot_agent_for_calibration(store, "codex", true)?;
+        let mut daily_usage = claude.daily_usage;
+        daily_usage.extend(codex.daily_usage);
+        let mut cursor_updates = claude.cursor_updates;
+        cursor_updates.extend(codex.cursor_updates);
+        let mut diagnostics = claude.diagnostics;
+        diagnostics.extend(codex.diagnostics);
+        Ok(UsageSnapshot { daily_usage, cursor_updates, diagnostics })
     }
 }
 
@@ -421,6 +636,18 @@ fn empty_poll(diagnostics: Vec<ProviderDiagnostic>) -> UsagePollResult {
     }
 }
 
+fn snapshot_scope(agent: &str, requested_provider_days: Vec<Date>) -> ProviderSnapshotScope {
+    ProviderSnapshotScope {
+        collector_scope_id: format!("agentsview:{agent}:local-usage"),
+        replacement_scope_id: format!("agentsview:{agent}:local-usage"),
+        requested_provider_days,
+    }
+}
+
+fn collector_surface(agent: &str) -> String {
+    format!("agentsview:{agent}")
+}
+
 fn diagnostic(provider_surface: &str, code: &str, message: &str) -> ProviderDiagnostic {
     ProviderDiagnostic {
         provider_surface: provider_surface.to_string(),
@@ -438,20 +665,132 @@ fn persist_diagnostic(store: &UsageStore, diagnostic: &ProviderDiagnostic) -> Re
     })
 }
 
-fn write_cursor(
+fn provider_diagnostic_from_stored(diagnostic: StoredProviderDiagnostic) -> ProviderDiagnostic {
+    ProviderDiagnostic {
+        provider_surface: diagnostic.provider_surface,
+        code: diagnostic.code,
+        message: diagnostic.message,
+    }
+}
+
+fn record_snapshot_failures(
     store: &mut UsageStore,
-    provider_surface: &str,
-    cursor_key: &str,
-    raw_totals: RawTokenTotals,
-    version: &str,
+    scope: &ProviderSnapshotScope,
+    _agent: &str,
+    diagnostics: &[ProviderDiagnostic],
+    observed_at: OffsetDateTime,
 ) -> Result<()> {
-    store.set_provider_cursor(
-        provider_surface,
-        cursor_key,
-        &serde_json::to_string(&raw_totals)?,
-        version,
-        version,
-    )
+    for diagnostic in diagnostics {
+        if !should_record_snapshot_failure(diagnostic.code.as_str()) {
+            continue;
+        }
+        for day in &scope.requested_provider_days {
+            record_snapshot_diagnostic(
+                store,
+                scope,
+                Some(scope.replacement_scope_id.clone()),
+                Some(*day),
+                "run_blocked",
+                &diagnostic.code,
+                &diagnostic.message,
+                observed_at,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn should_record_snapshot_failure(code: &str) -> bool {
+    code != "missing_helper"
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_snapshot_diagnostic(
+    store: &mut UsageStore,
+    scope: &ProviderSnapshotScope,
+    replacement_scope_id: Option<String>,
+    provider_day: Option<Date>,
+    diagnostic_kind: &str,
+    reason_code: &str,
+    message: &str,
+    observed_at: OffsetDateTime,
+) -> Result<()> {
+    store.record_snapshot_failure(&ProviderSnapshotDiagnosticInput {
+        diagnostic_kind: diagnostic_kind.to_string(),
+        collector_scope_id: scope.collector_scope_id.clone(),
+        replacement_scope_id,
+        requested_provider_days: scope.requested_provider_days.clone(),
+        provider_day,
+        reason_code: reason_code.to_string(),
+        message: message.to_string(),
+        observed_at,
+    })
+}
+
+fn blocks_requested_snapshot(code: &str) -> bool {
+    matches!(code, "malformed_token_field")
+}
+
+fn cursor_key_for_record(record: &NormalizedUsageRecord) -> Result<String> {
+    let key = ProviderCursorKey {
+        provider_surface: record.source_identity.provider_surface.clone(),
+        token_contract: Some(TOKENMAXXING_TOTAL_V1.to_string()),
+        command: AGENTSVIEW_COMMAND.to_string(),
+        source_surface: "daily".to_string(),
+        period_start: record.period_start.clone(),
+        model: record.model.clone(),
+        raw_source_id: Some(record.source_identity.display_name.clone()),
+    };
+    serde_json::to_string(&key).map_err(GlorpError::from)
+}
+
+fn cursor_update_for_record(
+    record: &NormalizedUsageRecord,
+    version: &str,
+) -> Result<ProviderCursorUpdate> {
+    Ok(ProviderCursorUpdate {
+        provider_surface: record.source_identity.provider_surface.clone(),
+        cursor_key: cursor_key_for_record(record)?,
+        cursor_value: serde_json::to_string(&record.raw_totals)?,
+        provider_version: version.to_string(),
+        parser_version: version.to_string(),
+    })
+}
+
+fn snapshot_row_for_record(
+    scope: &ProviderSnapshotScope,
+    agent: &str,
+    version: &str,
+    record: NormalizedUsageRecord,
+    provider_day: Date,
+) -> Result<ProviderSnapshotRowInput> {
+    let cursor_key = cursor_key_for_record(&record)?;
+    let cursor_update = ProviderCursorUpdate {
+        provider_surface: record.source_identity.provider_surface.clone(),
+        cursor_key: cursor_key.clone(),
+        cursor_value: serde_json::to_string(&record.raw_totals)?,
+        provider_version: version.to_string(),
+        parser_version: version.to_string(),
+    };
+    Ok(ProviderSnapshotRowInput {
+        replacement_scope_id: scope.replacement_scope_id.clone(),
+        collector_scope_id: scope.collector_scope_id.clone(),
+        collector_surface: collector_surface(agent),
+        command: AGENTSVIEW_COMMAND.to_string(),
+        token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
+        accounting_source: record.source_identity.provider_surface,
+        provider_day,
+        model: record.model,
+        source_surface: "daily".to_string(),
+        provider_period: record.period_start,
+        raw_source_id_hash: Some(stable_hash(&record.source_identity.display_name)),
+        cursor_key_hash: stable_hash(&cursor_key),
+        cursor_update,
+        raw_token_buckets: Some(record.raw_totals),
+        total_tokens: record.raw_totals.total_tokens(),
+        cost_usd: record.display_cost_usd,
+        confidence: record.confidence,
+    })
 }
 
 fn is_node_helper(path: &Path) -> bool {

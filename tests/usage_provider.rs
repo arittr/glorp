@@ -9,7 +9,10 @@ use glorp::usage::provider::{ProviderCursorKey, UsagePollResult, UsageProvider};
 use serde::Serialize;
 use serde_json::Value;
 use tempfile::tempdir;
-use time::OffsetDateTime;
+use time::{
+    macros::{date, datetime},
+    OffsetDateTime,
+};
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -30,21 +33,44 @@ fn fixture_json(name: &str) -> std::path::PathBuf {
 }
 
 fn provider(claude: Option<&str>, codex: Option<&str>) -> CcusageCommandProvider {
-    CcusageCommandProvider::new(HelperPaths {
-        unified: None,
-        claude: claude.map(fixture),
-        codex: codex.map(fixture),
-        node: None,
-    })
+    provider_at(claude, codex, datetime!(2026 - 05 - 09 12:00 UTC))
+}
+
+fn provider_at(
+    claude: Option<&str>,
+    codex: Option<&str>,
+    now: OffsetDateTime,
+) -> CcusageCommandProvider {
+    CcusageCommandProvider::new_with_now_for_test(
+        HelperPaths {
+            unified: None,
+            claude: claude.map(fixture),
+            codex: codex.map(fixture),
+            node: None,
+        },
+        now,
+    )
 }
 
 fn unified_provider(name: &str) -> CcusageCommandProvider {
-    CcusageCommandProvider::new(HelperPaths {
-        unified: Some(fixture(name)),
-        claude: None,
-        codex: None,
-        node: None,
-    })
+    CcusageCommandProvider::new_with_now_for_test(
+        HelperPaths {
+            unified: Some(fixture(name)),
+            claude: None,
+            codex: None,
+            node: None,
+        },
+        datetime!(2026 - 06 - 11 12:00 UTC),
+    )
+}
+
+fn agentsview_provider(name: &str) -> glorp::usage::agentsview::AgentsviewCommandProvider {
+    glorp::usage::agentsview::AgentsviewCommandProvider::new_with_now_for_test(
+        glorp::usage::agentsview::AgentsviewPaths {
+            agentsview: Some(agentsview_fixture(name)),
+        },
+        datetime!(2026 - 06 - 18 20:00 UTC),
+    )
 }
 
 // Run a full poll/stage/apply/mark lifecycle so the provider cursor advances,
@@ -55,6 +81,7 @@ fn complete_poll_lifecycle(
     provider: &CcusageCommandProvider,
     store: &mut UsageStore,
 ) -> UsagePollResult {
+    record_common_fixture_sources(store);
     let result = provider.poll(store).unwrap();
     let mut state = PetState::new_for_test("test-seed", "test");
     state.calibration.daily_effective_tokens = 100_000.0;
@@ -71,10 +98,38 @@ fn cursor_key_values(
         .collect()
 }
 
+fn record_known_sources(store: &mut UsageStore, sources: &[&str]) {
+    for source in sources {
+        store
+            .record_source_contact(
+                glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+                source,
+                glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+                OffsetDateTime::now_utc(),
+            )
+            .unwrap();
+    }
+}
+
+fn record_common_fixture_sources(store: &mut UsageStore) {
+    record_known_sources(
+        store,
+        &[
+            "claude-code",
+            "codex",
+            "gemini",
+            "kimi",
+            "opencode",
+            "claude",
+        ],
+    );
+}
+
 #[test]
 fn provider_normalizes_claude_and_codex_records() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude-code", "codex"]);
     let provider = provider(Some("ccusage-ok.mjs"), Some("ccusage-codex-ok.mjs"));
     let result = provider.poll(&mut store).unwrap();
     assert!(result
@@ -108,6 +163,7 @@ fn provider_normalizes_claude_and_codex_records() {
 fn provider_deltas_carry_raw_token_bucket_detail() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude-code"]);
     let provider = provider(Some("ccusage-ok.mjs"), None);
 
     let poll = provider.poll(&mut store).unwrap();
@@ -173,7 +229,15 @@ fn decreasing_totals_emit_sanitized_diagnostic_without_negative_delta() {
         .join("\n");
 
     assert_eq!(second.total_effective_tokens, 0.0);
-    assert!(rendered.contains("cursor_total_decreased"));
+    assert!(second.deltas.is_empty());
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 05 - 09))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(snapshot.value.unwrap().total_tokens, 84_500.0);
     assert!(!rendered.contains("secret prompt"));
     assert!(!rendered.contains("secret response"));
     assert!(!rendered.contains("inputTokens"));
@@ -235,6 +299,7 @@ fn helper_failure_returns_diagnostic_without_delta() {
 fn transcript_like_fields_are_ignored() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude-code", "codex"]);
     let provider = provider(Some("ccusage-prompts.mjs"), Some("ccusage-codex-ok.mjs"));
     let result = provider.poll(&mut store).unwrap();
     assert!(
@@ -311,21 +376,27 @@ fn helper_discovery_prefers_env_then_path_without_reading_real_logs() {
 fn provider_ignores_legacy_cache_read_weight_for_canonical_deltas() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = CcusageCommandProvider::new(HelperPaths {
-        unified: None,
-        claude: Some(fixture("ccusage-ok.mjs")),
-        codex: None,
-        node: None,
-    })
+    let provider = CcusageCommandProvider::new_with_now_for_test(
+        HelperPaths {
+            unified: None,
+            claude: Some(fixture("ccusage-ok.mjs")),
+            codex: None,
+            node: None,
+        },
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    )
     .with_weights(EffectiveTokenWeights { cache_read_weight: 0.05 });
 
     complete_poll_lifecycle(&provider, &mut store);
-    let next_provider = CcusageCommandProvider::new(HelperPaths {
-        unified: None,
-        claude: Some(fixture("ccusage-next.mjs")),
-        codex: None,
-        node: None,
-    })
+    let next_provider = CcusageCommandProvider::new_with_now_for_test(
+        HelperPaths {
+            unified: None,
+            claude: Some(fixture("ccusage-next.mjs")),
+            codex: None,
+            node: None,
+        },
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    )
     .with_weights(EffectiveTokenWeights { cache_read_weight: 0.05 });
 
     let second = next_provider.poll(&mut store).unwrap();
@@ -345,9 +416,20 @@ fn snapshot_and_poll_serialize_byte_identical_cursor_keys() {
     let snapshot = provider
         .snapshot_for_calibration(&mut snapshot_store)
         .unwrap();
-    let snapshot_keys = cursor_key_values(&snapshot.cursor_updates);
+    let snapshot_keys = cursor_key_values(
+        &snapshot
+            .cursor_updates
+            .into_iter()
+            .filter(|update| {
+                serde_json::from_str::<ProviderCursorKey>(&update.cursor_key)
+                    .map(|key| key.period_start == "2026-05-09")
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>(),
+    );
 
     let mut poll_store = UsageStore::open(&dir.path().join("poll.sqlite")).unwrap();
+    record_known_sources(&mut poll_store, &["claude-code", "codex"]);
     let poll = provider.poll(&mut poll_store).unwrap();
     let poll_keys = poll
         .deltas
@@ -474,6 +556,9 @@ fn legacy_cursor_with_parser_version_migrates_without_double_feeding() {
     assert_eq!(result.total_effective_tokens, 0.0);
 
     for (period_start, model, value) in &seeded {
+        if *period_start != "2026-05-09" {
+            continue;
+        }
         let migrated = store
             .provider_cursor("claude-code", &new_key_json(period_start, *model))
             .unwrap();
@@ -541,9 +626,11 @@ fn ccusage_v20_uses_the_claude_scoped_subcommand() {
     // as new cursor keys and feed the pet (observed live 2026-06-10).
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = provider(
+    record_known_sources(&mut store, &["claude-code"]);
+    let provider = provider_at(
         Some("ccusage-v20-multiagent.mjs"),
         Some("ccusage-codex-ok.mjs"),
+        datetime!(2026 - 06 - 10 12:00 UTC),
     );
     let result = provider.poll(&mut store).unwrap();
     let claude: Vec<_> = result
@@ -703,14 +790,132 @@ fn tokenmaxxing_comparison_fixture_preserves_captured_public_totals() {
 }
 
 #[test]
+fn provider_writes_snapshot_before_emitting_feed_deltas() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result.total_tokens > 0.0);
+    let today = time::Date::from_calendar_date(2026, time::Month::May, 9).unwrap();
+    let snapshot = store.snapshot_totals_for_provider_day(today).unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert!(snapshot.value.unwrap().total_tokens > 0.0);
+}
+
+#[test]
+fn unexpected_extra_provider_day_does_not_write_snapshot_or_feed() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-extra-day.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result.total_tokens < 1_000.0);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
+    let extra_day = time::Date::from_calendar_date(2026, time::Month::July, 5).unwrap();
+    let snapshot = store.snapshot_totals_for_provider_day(extra_day).unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Missing
+    );
+}
+
+#[test]
+fn disappeared_requested_provider_day_writes_current_zero_without_negative_food() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let first_provider = provider_at(
+        Some("ccusage-extra-day.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+    first_provider.refresh_snapshots_only(&mut store).unwrap();
+    let second_provider = provider_at(
+        Some("ccusage-drop-day.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = second_provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    let requested_day = date!(2026 - 07 - 06);
+    let snapshot = store
+        .snapshot_totals_for_provider_day(requested_day)
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
+}
+
+#[test]
+fn malformed_requested_row_blocks_snapshot_and_does_not_feed_valid_looking_rows() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = provider_at(
+        Some("ccusage-malformed-row.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+}
+
+#[test]
 fn live_local_agentsview_fixture_normalizes_its_own_full_cache_totals() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
-        glorp::usage::agentsview::AgentsviewPaths {
-            agentsview: Some(agentsview_fixture("agentsview-ok.mjs")),
-        },
-    );
+    record_known_sources(&mut store, &["claude", "codex"]);
+    let provider = agentsview_provider("agentsview-ok.mjs");
 
     let result = provider.poll(&mut store).unwrap();
     let codex = result
@@ -773,11 +978,7 @@ fn live_local_agentsview_fixture_normalizes_its_own_full_cache_totals() {
 fn agentsview_provider_requires_los_angeles_timezone_arg() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
-        glorp::usage::agentsview::AgentsviewPaths {
-            agentsview: Some(agentsview_fixture("agentsview-ok.mjs")),
-        },
-    );
+    let provider = agentsview_provider("agentsview-ok.mjs");
 
     let result = provider.poll(&mut store).unwrap();
 
@@ -854,11 +1055,8 @@ fn agentsview_omitted_token_bucket_fields_still_default_to_zero() {
 fn agentsview_cursor_key_carries_token_contract_for_cutover_replay_protection() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = glorp::usage::agentsview::AgentsviewCommandProvider::new(
-        glorp::usage::agentsview::AgentsviewPaths {
-            agentsview: Some(agentsview_fixture("agentsview-ok.mjs")),
-        },
-    );
+    record_known_sources(&mut store, &["claude", "codex"]);
+    let provider = agentsview_provider("agentsview-ok.mjs");
 
     let result = provider.poll(&mut store).unwrap();
     let codex = result

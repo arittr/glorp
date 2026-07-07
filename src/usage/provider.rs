@@ -48,6 +48,13 @@ pub struct ProviderDiagnostic {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSnapshotScope {
+    pub collector_scope_id: String,
+    pub replacement_scope_id: String,
+    pub requested_provider_days: Vec<time::Date>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCursorKey {
     pub provider_surface: String,
@@ -63,6 +70,7 @@ pub struct ProviderCursorKey {
 
 pub trait UsageProvider {
     fn poll(&self, store: &mut UsageStore) -> Result<UsagePollResult>;
+    fn refresh_snapshots_only(&self, store: &mut UsageStore) -> Result<Vec<ProviderDiagnostic>>;
     fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot>;
 }
 
