@@ -106,7 +106,7 @@ pub fn run() -> Result<()> {
             }
         }
 
-        let status_now = OffsetDateTime::now_utc();
+        let status_now = crate::time::usage_now_utc();
         let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(status_now);
         let snapshot = usage_store.snapshot_totals_for_provider_day(provider_day)?;
         today_effective = snapshot
@@ -115,7 +115,7 @@ pub fn run() -> Result<()> {
             .map(|totals| totals.total_tokens)
             .unwrap_or(0.0);
         usage_confidence = match snapshot.state {
-            crate::usage::snapshot::SnapshotState::Current => "provider snapshot".into(),
+            crate::usage::snapshot::SnapshotState::Current => "current provider snapshot".into(),
             crate::usage::snapshot::SnapshotState::Stale => "stale provider snapshot".into(),
             crate::usage::snapshot::SnapshotState::Missing => "snapshot pending".into(),
             crate::usage::snapshot::SnapshotState::Blocked => "snapshot blocked".into(),

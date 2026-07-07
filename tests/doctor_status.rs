@@ -64,6 +64,9 @@ fn status_labels_provider_today_recent_food_and_pet_lifetime_separately() {
         .assert()
         .success()
         .stdout(predicate::str::contains("provider today"))
+        .stdout(predicate::str::contains(
+            "provider today (current provider snapshot): 1300",
+        ))
         .stdout(predicate::str::contains("accepted recent food"))
         .stdout(predicate::str::contains("pet lifetime food"));
 }
@@ -91,6 +94,7 @@ fn doctor_refresh_usage_snapshots_reports_before_after_without_feeding_pet() {
         .stdout(predicate::str::contains("refresh usage snapshots"))
         .stdout(predicate::str::contains("before provider today"))
         .stdout(predicate::str::contains("after provider today"))
+        .stdout(predicate::str::contains("after provider today: 1300"))
         .stdout(predicate::str::contains("pet state unchanged"));
 }
 

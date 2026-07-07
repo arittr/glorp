@@ -131,7 +131,7 @@ impl fmt::Debug for CcusageCommandProvider {
 
 impl CcusageCommandProvider {
     pub fn new(helpers: HelperPaths) -> Self {
-        Self::new_with_clock(helpers, OffsetDateTime::now_utc)
+        Self::new_with_clock(helpers, crate::time::usage_now_utc)
     }
 
     fn new_with_clock<F>(helpers: HelperPaths, clock: F) -> Self
@@ -153,11 +153,7 @@ impl CcusageCommandProvider {
 
     pub fn from_environment() -> Self {
         let paths = HelperDiscovery::discover().into();
-        if let Some(now) = usage_now_from_environment_for_test() {
-            Self::new_with_clock(paths, move || now)
-        } else {
-            Self::new(paths)
-        }
+        Self::new(paths)
     }
 
     pub fn from_environment_with_weights(weights: EffectiveTokenWeights) -> Self {
@@ -1066,11 +1062,6 @@ fn find_on_path(command: &str) -> Option<PathBuf> {
 
 pub(crate) fn requested_provider_days_for_poll(now: OffsetDateTime) -> Vec<Date> {
     vec![tokenmaxxing_provider_day(now)]
-}
-
-fn usage_now_from_environment_for_test() -> Option<OffsetDateTime> {
-    let raw = std::env::var("GLORP_USAGE_NOW_FOR_TEST").ok()?;
-    OffsetDateTime::parse(&raw, &time::format_description::well_known::Rfc3339).ok()
 }
 
 fn snapshot_scope(
