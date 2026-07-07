@@ -154,7 +154,7 @@ fn wrapper_wires_bundled_helpers_without_disabling_path_fallback() {
 }
 
 #[test]
-fn default_usage_provider_is_bundled_ccusage() {
+fn default_usage_provider_is_required_agentsview() {
     for command in [
         "src/commands/init.rs",
         "src/commands/watch.rs",
@@ -163,27 +163,27 @@ fn default_usage_provider_is_bundled_ccusage() {
     ] {
         let source = read(command);
         assert!(
-            source.contains("CcusageCommandProvider::from_environment"),
-            "{command} should use the bundled ccusage provider by default"
+            source.contains("AgentsviewCommandProvider::from_environment"),
+            "{command} should use AgentsView as the default usage provider"
         );
         assert!(
-            !source.contains("AgentsviewCommandProvider::from_environment"),
-            "{command} should not require agentsview for normal npm installs"
+            !source.contains("CcusageCommandProvider::from_environment"),
+            "{command} should not use ccusage as the default usage provider"
         );
     }
 
     let readme = read("README.md");
-    assert!(readme.contains("The npm package bundles the native binary and usage helpers"));
-    assert!(readme.contains("Glorp polls bundled `ccusage`"));
-    assert!(!readme.contains("install it separately"));
+    assert!(readme.contains("The npm package bundles the native binary for your platform"));
+    assert!(readme.contains("Glorp requires\nAgentsView for live usage accounting"));
+    assert!(readme.contains("Glorp polls AgentsView every ten seconds"));
 
     let npm_readme = read("npm/glorp/README.md");
-    assert!(npm_readme.contains("bundles the native binary and usage helpers"));
-    assert!(!npm_readme.contains("install it separately"));
+    assert!(npm_readme.contains("The npm package bundles the native binary for your platform"));
+    assert!(npm_readme.contains("Glorp requires\nAgentsView for live usage accounting"));
 }
 
 #[test]
-fn optional_agentsview_provider_contract_remains_available() {
+fn required_agentsview_provider_contract_remains_available() {
     let provider = read("src/usage/agentsview.rs");
     assert!(provider.contains("GLORP_AGENTSVIEW_BIN"));
     assert!(provider.contains("which::which(\"agentsview\")"));
