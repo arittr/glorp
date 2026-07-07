@@ -277,7 +277,7 @@ impl AgentsviewCommandProvider {
 
         let mut rows = Vec::new();
         let mut diagnostics = batch.diagnostics.clone();
-        let blocking_parse_failure = batch
+        let mut blocking_parse_failure = batch
             .diagnostics
             .iter()
             .any(|diagnostic| blocks_requested_snapshot(diagnostic.code.as_str()));
@@ -291,6 +291,7 @@ impl AgentsviewCommandProvider {
                 );
                 persist_diagnostic(store, &diagnostic)?;
                 diagnostics.push(diagnostic);
+                blocking_parse_failure = true;
                 continue;
             };
             let provider_day = period_start.date();
@@ -326,20 +327,25 @@ impl AgentsviewCommandProvider {
         }
 
         if blocking_parse_failure {
-            let diagnostic = diagnostic(
-                agent,
-                "malformed_required_fields",
-                "agentsview malformed_required_fields",
-            );
-            persist_diagnostic(store, &diagnostic)?;
-            record_snapshot_failures(
-                store,
-                &scope,
-                agent,
-                std::slice::from_ref(&diagnostic),
-                observed_at,
-            )?;
-            diagnostics.push(diagnostic);
+            let mut failure_diagnostics = diagnostics
+                .iter()
+                .filter(|diagnostic| blocks_requested_snapshot(diagnostic.code.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let has_invalid_period = failure_diagnostics
+                .iter()
+                .any(|failure| failure.code == "invalid_period_start");
+            if !has_invalid_period {
+                let diagnostic = diagnostic(
+                    agent,
+                    "malformed_required_fields",
+                    "agentsview malformed_required_fields",
+                );
+                persist_diagnostic(store, &diagnostic)?;
+                failure_diagnostics.push(diagnostic.clone());
+                diagnostics.push(diagnostic);
+            }
+            record_snapshot_failures(store, &scope, agent, &failure_diagnostics, observed_at)?;
             return Ok(AgentSnapshotFlow { result: empty_poll(diagnostics) });
         }
 
@@ -722,7 +728,10 @@ fn record_snapshot_diagnostic(
 }
 
 fn blocks_requested_snapshot(code: &str) -> bool {
-    matches!(code, "malformed_token_field")
+    matches!(
+        code,
+        "missing_token_fields" | "malformed_token_field" | "invalid_period_start"
+    )
 }
 
 fn cursor_key_for_record(record: &NormalizedUsageRecord) -> Result<String> {

@@ -71,7 +71,24 @@ enum HelperInvocation {
 #[derive(Debug)]
 struct HelperSnapshotFlow {
     result: UsagePollResult,
-    completed_snapshot: bool,
+    outcome: HelperSnapshotOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperSnapshotOutcome {
+    Completed,
+    FallbackAllowed,
+    Blocked,
+}
+
+impl HelperSnapshotFlow {
+    fn completed_snapshot(&self) -> bool {
+        self.outcome == HelperSnapshotOutcome::Completed
+    }
+
+    fn fallback_allowed(&self) -> bool {
+        self.outcome == HelperSnapshotOutcome::FallbackAllowed
+    }
 }
 
 impl fmt::Debug for CcusageCommandProvider {
@@ -279,10 +296,8 @@ impl CcusageCommandProvider {
                         &diagnostics,
                         observed_at,
                     )?;
-                    return Ok(HelperSnapshotFlow {
-                        result: empty_poll(diagnostics),
-                        completed_snapshot: false,
-                    });
+                    let outcome = helper_early_exit_outcome(provider_surface, &diagnostics);
+                    return Ok(HelperSnapshotFlow { result: empty_poll(diagnostics), outcome });
                 }
             };
 
@@ -296,8 +311,9 @@ impl CcusageCommandProvider {
         store.set_provider_cursor(provider_surface, &metadata_key, "{}", &version, &version)?;
 
         let mut rows = Vec::new();
+        let mut legacy_cursor_migrations = Vec::new();
         let mut diagnostics = invoke_diagnostics.clone();
-        let blocking_parse_failure = invoke_diagnostics
+        let mut blocking_parse_failure = invoke_diagnostics
             .iter()
             .any(|diagnostic| blocks_requested_snapshot(diagnostic.code.as_str()));
 
@@ -316,6 +332,7 @@ impl CcusageCommandProvider {
                     );
                     persist_diagnostic(store, &diagnostic)?;
                     diagnostics.push(diagnostic);
+                    blocking_parse_failure = true;
                     continue;
                 }
             };
@@ -351,29 +368,40 @@ impl CcusageCommandProvider {
                 provider_day,
             )?;
             if feed {
-                migrate_legacy_cursor_for_record(store, &row, &record, command_name, &version)?;
+                legacy_cursor_migrations.push((row.clone(), record));
             }
             rows.push(row);
         }
 
         if blocking_parse_failure {
-            let diagnostic = diagnostic(
-                provider_surface,
-                "malformed_required_fields",
-                &format!("{provider_surface} malformed_required_fields"),
-            );
-            persist_diagnostic(store, &diagnostic)?;
+            let mut failure_diagnostics = diagnostics
+                .iter()
+                .filter(|diagnostic| blocks_requested_snapshot(diagnostic.code.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let has_invalid_period = failure_diagnostics
+                .iter()
+                .any(|failure| failure.code == "invalid_period_start");
+            if !has_invalid_period {
+                let diagnostic = diagnostic(
+                    provider_surface,
+                    "malformed_required_fields",
+                    &format!("{provider_surface} malformed_required_fields"),
+                );
+                persist_diagnostic(store, &diagnostic)?;
+                failure_diagnostics.push(diagnostic.clone());
+                diagnostics.push(diagnostic);
+            }
             record_snapshot_failures(
                 store,
                 &scope,
                 provider_surface,
-                std::slice::from_ref(&diagnostic),
+                &failure_diagnostics,
                 observed_at,
             )?;
-            diagnostics.push(diagnostic);
             return Ok(HelperSnapshotFlow {
                 result: empty_poll(diagnostics),
-                completed_snapshot: false,
+                outcome: HelperSnapshotOutcome::Blocked,
             });
         }
 
@@ -381,7 +409,7 @@ impl CcusageCommandProvider {
             record_snapshot_failures(store, &scope, provider_surface, &diagnostics, observed_at)?;
             return Ok(HelperSnapshotFlow {
                 result: empty_poll(diagnostics),
-                completed_snapshot: false,
+                outcome: HelperSnapshotOutcome::FallbackAllowed,
             });
         }
 
@@ -392,15 +420,21 @@ impl CcusageCommandProvider {
             token_contract: TOKENMAXXING_TOTAL_V1.to_string(),
             requested_provider_days: scope.requested_provider_days.clone(),
             provider_version: version.clone(),
-            parser_version: version,
+            parser_version: version.clone(),
             observed_at,
         };
         store.write_provider_snapshot_batch(&batch, &rows, &[])?;
 
+        if feed {
+            for (row, record) in legacy_cursor_migrations {
+                migrate_legacy_cursor_for_record(store, &row, &record, command_name, &version)?;
+            }
+        }
+
         if !feed {
             return Ok(HelperSnapshotFlow {
                 result: empty_poll(diagnostics),
-                completed_snapshot: true,
+                outcome: HelperSnapshotOutcome::Completed,
             });
         }
 
@@ -415,7 +449,7 @@ impl CcusageCommandProvider {
         );
         Ok(HelperSnapshotFlow {
             result: result_from_parts(plan.deltas, diagnostics),
-            completed_snapshot: true,
+            outcome: HelperSnapshotOutcome::Completed,
         })
     }
 
@@ -558,7 +592,10 @@ impl UsageProvider for CcusageCommandProvider {
         )?;
         // Unified is the preferred path. Only fall back to the legacy per-surface
         // helpers when it could not complete a requested-day snapshot.
-        if unified.completed_snapshot {
+        if unified.completed_snapshot() {
+            return Ok(unified.result);
+        }
+        if !unified.fallback_allowed() {
             return Ok(unified.result);
         }
 
@@ -609,7 +646,10 @@ impl UsageProvider for CcusageCommandProvider {
             self.helpers.unified.as_deref(),
             &["daily", "--json", "--offline", "--order", "asc"],
         )?;
-        if unified.completed_snapshot {
+        if unified.completed_snapshot() {
+            return Ok(unified.result.diagnostics);
+        }
+        if !unified.fallback_allowed() {
             return Ok(unified.result.diagnostics);
         }
 
@@ -959,6 +999,21 @@ fn should_record_snapshot_failure(code: &str) -> bool {
     code != "missing_helper"
 }
 
+fn helper_early_exit_outcome(
+    provider_surface: &str,
+    diagnostics: &[ProviderDiagnostic],
+) -> HelperSnapshotOutcome {
+    if provider_surface == "unified"
+        && diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code == "missing_helper")
+    {
+        HelperSnapshotOutcome::FallbackAllowed
+    } else {
+        HelperSnapshotOutcome::Blocked
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_snapshot_diagnostic(
     store: &mut UsageStore,
@@ -987,7 +1042,10 @@ fn record_snapshot_diagnostic(
 fn blocks_requested_snapshot(code: &str) -> bool {
     matches!(
         code,
-        "missing_token_fields" | "malformed_token_field" | "ambiguous_token_shape"
+        "missing_token_fields"
+            | "malformed_token_field"
+            | "ambiguous_token_shape"
+            | "invalid_period_start"
     )
 }
 

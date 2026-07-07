@@ -1124,6 +1124,210 @@ fn mixed_malformed_and_valid_requested_rows_block_without_feeding() {
 }
 
 #[test]
+fn malformed_ccusage_period_blocks_zero_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let provider = provider_at(
+        Some("ccusage-malformed-period-only.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "invalid_period_start"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 07 - 06))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Blocked
+    );
+}
+
+#[test]
+fn malformed_ccusage_period_blocks_valid_sibling_rows() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-malformed-period-with-valid-sibling.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "invalid_period_start"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 07 - 06))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Blocked
+    );
+}
+
+#[test]
+fn malformed_unified_ccusage_blocks_scoped_fallback() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_with_unified_at(
+        Some("ccusage-unified-malformed-required-requested.mjs"),
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 05 - 09))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Blocked
+    );
+}
+
+#[test]
+fn malformed_agentsview_period_blocks_valid_sibling_rows() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    record_known_sources(&mut store, &["claude", "codex"]);
+    let provider = agentsview_provider("agentsview-malformed-period-with-valid-sibling.mjs");
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "invalid_period_start"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 06 - 18))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Blocked
+    );
+}
+
+#[test]
+fn ccusage_poll_does_not_migrate_legacy_cursor_before_durable_snapshot_write() {
+    #[derive(Serialize)]
+    struct LegacyKey {
+        provider_surface: String,
+        command: String,
+        parser_version: String,
+        period_start: String,
+        model: Option<String>,
+    }
+
+    fn legacy_key_json(period_start: &str, model: Option<&str>) -> String {
+        serde_json::to_string(&LegacyKey {
+            provider_surface: "claude-code".to_string(),
+            command: "ccusage".to_string(),
+            parser_version: "ccusage 18.0.11".to_string(),
+            period_start: period_start.to_string(),
+            model: model.map(str::to_string),
+        })
+        .unwrap()
+    }
+
+    fn new_key_json(period_start: &str, model: Option<&str>) -> String {
+        serde_json::to_string(&ProviderCursorKey {
+            provider_surface: "claude-code".to_string(),
+            token_contract: Some(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string()),
+            command: "ccusage".to_string(),
+            source_surface: "daily".to_string(),
+            period_start: period_start.to_string(),
+            model: model.map(str::to_string),
+            raw_source_id: None,
+        })
+        .unwrap()
+    }
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("usage.sqlite");
+    let mut store = UsageStore::open(&db_path).unwrap();
+    let legacy_value = serde_json::to_string(&RawTokenTotals {
+        uncached_input: 1000,
+        output: 1500,
+        cache_creation: 300,
+        cache_read: 50000,
+        reasoning_output: 0,
+    })
+    .unwrap();
+    store
+        .set_provider_cursor(
+            "claude-code",
+            &legacy_key_json("2026-05-09", Some("claude-opus-4")),
+            &legacy_value,
+            "ccusage 18.0.11",
+            "ccusage 18.0.11",
+        )
+        .unwrap();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_provider_snapshot_batch
+             BEFORE INSERT ON provider_snapshot_batches
+             BEGIN
+               SELECT RAISE(FAIL, 'test snapshot write failure');
+             END;",
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    let err = provider.poll(&mut store).unwrap_err();
+
+    assert!(err.to_string().contains("test snapshot write failure"));
+    let migrated = store
+        .provider_cursor(
+            "claude-code",
+            &new_key_json("2026-05-09", Some("claude-opus-4")),
+        )
+        .unwrap();
+    assert_eq!(migrated, None);
+}
+
+#[test]
 fn live_local_agentsview_fixture_normalizes_its_own_full_cache_totals() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
