@@ -12,7 +12,11 @@ use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model
 use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
-use crate::round::hud::{growth_ring_fill_end_deg, growth_ring_layout};
+use crate::round::hud::{
+    companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
+    growth_ring_fill_end_deg, perimeter_gauge_colors, perimeter_gauge_layout, CompanionHudText,
+    GaugeLane, GaugeLaneColors, LineCap, COMPANION_GAUGE_GAP_DEG,
+};
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::storage::state::StateStore;
@@ -26,10 +30,10 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
-    NSBackingStoreType, NSBezierPath, NSColor, NSCommandKeyMask, NSControlKeyMask,
-    NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightBold,
-    NSForegroundColorAttributeName, NSMenu, NSMenuItem, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSBackingStoreType, NSBezierPath, NSButtLineCapStyle, NSColor, NSCommandKeyMask,
+    NSControlKeyMask, NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightBold,
+    NSForegroundColorAttributeName, NSLineCapStyle, NSMenu, NSMenuItem, NSRoundLineCapStyle,
+    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -41,12 +45,6 @@ const DEFAULT_WINDOW_SIZE: f64 = 360.0;
 const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
 const MIN_WINDOW_SIZE: f64 = 260.0;
-
-/// Open-bottom gap of the growth ring, in degrees. The HUD `stat_gap_box`
-/// geometry is coupled to this angle — a single source keeps the stat seated
-/// inside the ring's gap.
-const COMPANION_RING_GAP_DEG: f64 = 70.0;
-const COMPANION_RATE_STACK_FONT_SCALE: f64 = 0.9;
 
 /// The companion's drift config (tuned on device). Starts at the legacy default;
 /// diverge here WITHOUT touching the shared menubar popover.
@@ -462,45 +460,25 @@ fn draw_scene(bounds: NSRect) {
             );
         }
 
-        // Growth ring (open-bottom arc).
+        // Companion perimeter gauges: XP, today vs yesterday, and live 10m pace.
         {
             let cx = aperture.center_x as f64;
             let cy = aperture.center_y as f64;
-            let r = aperture.radius as f64 - 3.0; // inside the rim
-            let ring = growth_ring_layout(cx, cy, r, COMPANION_RING_GAP_DEG);
-            let frac = if vm.progress.is_max_stage {
+            let layout =
+                perimeter_gauge_layout(cx, cy, aperture.radius as f64, COMPANION_GAUGE_GAP_DEG);
+            let colors = perimeter_gauge_colors();
+            let xp_fraction = if vm.progress.is_max_stage {
                 1.0
             } else {
                 vm.progress.fraction as f64
             };
-            let fill_end = growth_ring_fill_end_deg(&ring, frac);
-            let line_w = (aperture.radius as f64 * 0.012).max(2.0);
+            let daily_fraction =
+                daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday);
+            let pace_fraction = companion_pace_fraction(vm.rate_momentum.pulse.current_tokens);
 
-            // Track (dim) — full open arc.
-            let track = NSBezierPath::new();
-            track.setLineWidth(line_w);
-            track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
-                NSPoint::new(cx, cy),
-                r,
-                ring.track_start_deg,
-                ring.track_start_deg + ring.track_sweep_deg,
-            );
-            ns_color(&RoundColor(0.71, 0.71, 0.78, 0.16)).setStroke();
-            track.stroke();
-
-            // Fill (violet) — start → fraction.
-            if fill_end > ring.track_start_deg {
-                let fill = NSBezierPath::new();
-                fill.setLineWidth(line_w);
-                fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
-                    NSPoint::new(cx, cy),
-                    r,
-                    ring.track_start_deg,
-                    fill_end,
-                );
-                ns_color(&RoundColor(0.61, 0.48, 0.88, 0.85)).setStroke();
-                fill.stroke();
-            }
+            draw_gauge_lane(&layout.xp, &colors.xp, xp_fraction);
+            draw_gauge_lane(&layout.daily, &colors.daily, daily_fraction);
+            draw_gauge_lane(&layout.pace, &colors.pace, pace_fraction);
         }
 
         // Halo and trouble indicators drawn on top of the scene blit.
@@ -568,6 +546,50 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
             color.2 as f64,
             color.3 as f64,
         )
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct CompanionAttributedLine {
+    text: Retained<NSMutableAttributedString>,
+}
+
+#[cfg(target_os = "macos")]
+struct CompanionAttributedStack {
+    lines: Vec<CompanionAttributedLine>,
+    max_width: f64,
+    total_height: f64,
+}
+
+#[cfg(target_os = "macos")]
+fn companion_hud_attributed_lines(
+    text: &CompanionHudText,
+    size: f64,
+    big_color: &RoundColor,
+    sub_color: &RoundColor,
+) -> CompanionAttributedStack {
+    let big = attributed_pet_glyph(&text.today_total, size * 1.08, big_color);
+    let daily = attributed_pet_glyph(&text.daily_percent, size * 0.68, sub_color);
+    let pace = attributed_pet_glyph(&text.pace, size * 0.68, sub_color);
+    let (max_width, total_height) = unsafe {
+        let max_width = big
+            .size()
+            .width
+            .max(daily.size().width)
+            .max(pace.size().width);
+        let total_height =
+            big.size().height + daily.size().height * 0.82 + pace.size().height * 0.82;
+        (max_width, total_height)
+    };
+
+    CompanionAttributedStack {
+        lines: vec![
+            CompanionAttributedLine { text: big },
+            CompanionAttributedLine { text: daily },
+            CompanionAttributedLine { text: pace },
+        ],
+        max_width,
+        total_height,
     }
 }
 
@@ -693,14 +715,6 @@ fn cell_to_point(
     (px, py)
 }
 
-fn companion_rate_stack_start_size(font_size: f64) -> f64 {
-    font_size * COMPANION_RATE_STACK_FONT_SCALE
-}
-
-fn companion_rate_stack_color(_direction: crate::tui::view_model::RateDirection) -> RoundColor {
-    crate::round::hud::rate_direction_color(crate::tui::view_model::RateDirection::Neutral)
-}
-
 /// Blit a [`crate::presentation::SceneDrawList`] to the current AppKit
 /// graphics context. The caller is responsible for installing the aperture
 /// clip before calling (as `draw_scene` already does).
@@ -773,59 +787,99 @@ fn appkit_blit_draw_list(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
+fn ns_line_cap(cap: LineCap) -> NSLineCapStyle {
+    match cap {
+        LineCap::Butt => NSButtLineCapStyle,
+        LineCap::Round => NSRoundLineCapStyle,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn draw_gauge_lane(lane: &GaugeLane, colors: &GaugeLaneColors, fraction: f64) {
+    let start = lane.ring.track_start_deg;
+    let end = lane.ring.track_start_deg + lane.ring.track_sweep_deg;
+
+    unsafe {
+        let track = NSBezierPath::new();
+        track.setLineWidth(lane.stroke_width);
+        track.setLineCapStyle(ns_line_cap(lane.cap));
+        track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+            NSPoint::new(lane.ring.cx, lane.ring.cy),
+            lane.ring.radius,
+            start,
+            end,
+        );
+        ns_color(&colors.track).setStroke();
+        track.stroke();
+
+        let clamped = fraction.clamp(0.0, 1.0);
+        if clamped > 0.0 {
+            let fill_end = growth_ring_fill_end_deg(&lane.ring, clamped);
+            let fill = NSBezierPath::new();
+            fill.setLineWidth(lane.stroke_width);
+            fill.setLineCapStyle(ns_line_cap(lane.cap));
+            fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+                NSPoint::new(lane.ring.cx, lane.ring.cy),
+                lane.ring.radius,
+                start,
+                fill_end,
+            );
+            ns_color(&colors.fill).setStroke();
+            fill.stroke();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn draw_hud(
     bounds: NSRect,
     aperture: &RoundAperture,
     vm: &crate::tui::view_model::WatchViewModel,
     font_size: f64,
 ) {
-    let _ = bounds;
+    let gauge_layout = perimeter_gauge_layout(
+        aperture.center_x as f64,
+        aperture.center_y as f64,
+        aperture.radius as f64,
+        COMPANION_GAUGE_GAP_DEG,
+    );
     let gap = crate::round::hud::stat_gap_box(
         aperture.center_x as f64,
         aperture.center_y as f64,
-        aperture.radius as f64 - 3.0,
-        COMPANION_RING_GAP_DEG,
+        gauge_layout.pace.ring.radius - gauge_layout.pace.stroke_width / 2.0,
+        COMPANION_GAUGE_GAP_DEG,
+    );
+    let hud_text = companion_hud_text(
+        vm.today_effective_tokens,
+        vm.daily_comparison.fraction_of_yesterday,
+        vm.rate_momentum.pulse.current_tokens,
     );
 
-    let today = crate::format::format_tokens(vm.today_effective_tokens);
-    let big_color = RoundColor(0.93, 0.93, 0.97, 1.0);
-    let rate_color = companion_rate_stack_color(vm.rate_momentum.companion_direction);
-
     unsafe {
-        // Big "today" number, centered in the gap; shrink to fit the gap chord.
-        let mut big_size = font_size * 1.7;
-        let mut big = attributed_pet_glyph(&today, big_size, &big_color);
-        while big.size().width > gap.max_width && big_size > 6.0 {
-            big_size -= 1.0;
-            big = attributed_pet_glyph(&today, big_size, &big_color);
-        }
-        let big_w = big.size().width;
-        let big_h = big.size().height;
-        // baseline_y is measured DOWN from top; AppKit draws Y-up, so flip.
-        let top = bounds.size.height - gap.baseline_y;
-        big.drawAtPoint(NSPoint::new(gap.center_x - big_w / 2.0, top));
+        let big_color = RoundColor(0.93, 0.93, 0.97, 1.0);
+        let sub_color =
+            crate::round::hud::rate_direction_color(crate::tui::view_model::RateDirection::Neutral);
+        let mut stack_size = font_size * 1.45;
+        let mut rendered =
+            companion_hud_attributed_lines(&hud_text, stack_size, &big_color, &sub_color);
 
-        // Compact pulse-first rate stack. Numeric prefixes are padded so the
-        // slash column is stable without adding labels or arrows.
-        let pulse_value = crate::format::format_tokens(vm.rate_momentum.pulse.current_tokens);
-        let hour_value = crate::format::format_tokens(vm.rate_momentum.hour.current_tokens);
-        let value_width = pulse_value.chars().count().max(hour_value.chars().count());
-        let pulse_text = format!("{pulse_value:>value_width$}/10m");
-        let hour_text = format!("{hour_value:>value_width$}/hr");
-        let mut rate_size = companion_rate_stack_start_size(font_size);
-        let mut pulse = attributed_pet_glyph(&pulse_text, rate_size, &rate_color);
-        let mut hour = attributed_pet_glyph(&hour_text, rate_size, &rate_color);
-        while pulse.size().width.max(hour.size().width) > gap.max_width && rate_size > 6.0 {
-            rate_size -= 1.0;
-            pulse = attributed_pet_glyph(&pulse_text, rate_size, &rate_color);
-            hour = attributed_pet_glyph(&hour_text, rate_size, &rate_color);
+        while (rendered.max_width > gap.max_width
+            || rendered.total_height > aperture.radius as f64 * 0.34)
+            && stack_size > 6.0
+        {
+            stack_size -= 1.0;
+            rendered =
+                companion_hud_attributed_lines(&hud_text, stack_size, &big_color, &sub_color);
         }
-        let rate_w = pulse.size().width.max(hour.size().width);
-        let rate_x = gap.center_x - rate_w / 2.0;
-        let pulse_y = top - big_h * 0.86;
-        let hour_y = pulse_y - pulse.size().height * 0.82;
-        pulse.drawAtPoint(NSPoint::new(rate_x, pulse_y));
-        hour.drawAtPoint(NSPoint::new(rate_x, hour_y));
+
+        let top = bounds.size.height - gap.baseline_y;
+        let mut y = top + rendered.total_height * 0.38;
+        for line in rendered.lines {
+            let width = line.text.size().width;
+            line.text
+                .drawAtPoint(NSPoint::new(gap.center_x - width / 2.0, y));
+            y -= line.text.size().height * 0.82;
+        }
     }
 }
 
@@ -864,18 +918,13 @@ mod tests {
     }
 
     #[test]
-    fn companion_rate_stack_starts_at_legacy_subline_scale() {
-        assert_eq!(companion_rate_stack_start_size(20.0), 18.0);
-    }
+    fn companion_hud_stack_uses_daily_percent_and_drops_hour_rate() {
+        let text = crate::round::hud::companion_hud_text(842_000_000.0, Some(0.94), 31_000_000.0);
 
-    #[test]
-    fn companion_rate_stack_color_ignores_direction() {
-        use crate::tui::view_model::RateDirection;
-
-        let neutral = crate::round::hud::rate_direction_color(RateDirection::Neutral);
-        assert_eq!(companion_rate_stack_color(RateDirection::Up), neutral);
-        assert_eq!(companion_rate_stack_color(RateDirection::Down), neutral);
-        assert_eq!(companion_rate_stack_color(RateDirection::Neutral), neutral);
+        assert_eq!(text.today_total, "842M");
+        assert_eq!(text.daily_percent, "94% yday");
+        assert_eq!(text.pace, "31M/10m");
+        assert!(!text.pace.contains("/hr"));
     }
 
     #[test]
