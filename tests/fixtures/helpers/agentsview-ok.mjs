@@ -21,6 +21,17 @@ if (!args.includes("--timezone") || args[args.indexOf("--timezone") + 1] !== "Am
   console.error("missing timezone");
   process.exit(2);
 }
+if (!args.includes("--since")) {
+  console.error("missing since");
+  process.exit(2);
+}
+const since = args[args.indexOf("--since") + 1];
+if (since !== "1970-01-01") {
+  if (!args.includes("--until") || args[args.indexOf("--until") + 1] !== since) {
+    console.error("missing current-day until");
+    process.exit(2);
+  }
+}
 
 const file = agent === "claude" ? "agentsview-claude-daily.json" : "agentsview-codex-daily.json";
 process.stdout.write(fs.readFileSync(path.join(fixtures, file), "utf8"));

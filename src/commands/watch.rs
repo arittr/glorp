@@ -30,7 +30,10 @@ use crate::{
             SourceUsageView, WatchViewModel,
         },
     },
-    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
+    usage::{
+        agentsview::{needs_full_history_poll, AgentsviewCommandProvider},
+        provider::UsageProvider,
+    },
 };
 use std::path::Path;
 use time::{Duration, OffsetDateTime};
@@ -488,7 +491,7 @@ pub(crate) fn poll_usage_and_apply(
     let mut usage_store = UsageStore::open(usage_db)?;
     let config = crate::config::AppConfig::load_or_default(config_file)?;
     let now = OffsetDateTime::now_utc();
-    let provider = CcusageCommandProvider::from_environment();
+    let provider = AgentsviewCommandProvider::from_environment();
     let cutover = crate::usage::cutover::ensure_tokenmaxxing_contract_active(
         &mut state,
         &mut usage_store,
@@ -498,7 +501,11 @@ pub(crate) fn poll_usage_and_apply(
     if cutover.activated {
         state_store.save(&state)?;
     }
-    let result = provider.poll(&mut usage_store)?;
+    let result = if !cutover.activated && needs_full_history_poll(state.last_usage_poll_at, now) {
+        provider.poll_full_history(&mut usage_store)?
+    } else {
+        provider.poll(&mut usage_store)?
+    };
     if !result.deltas.is_empty() || result.diagnostics.is_empty() {
         // Stage smeared ledger rows for new provider deltas before applying.
         stage_usage_poll_deltas(

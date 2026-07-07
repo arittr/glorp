@@ -3,7 +3,10 @@ use crate::storage::usage_store::{
     ProviderCursorUpdate, ProviderDiagnostic as StoredProviderDiagnostic, UsageStore,
 };
 use crate::usage::ccusage::{run_command_with_timeout, HelperCommand, HELPER_SUBPROCESS_TIMEOUT};
-use crate::usage::day_axis::{parse_agentsview_period_date, TOKENMAXXING_TIMEZONE};
+use crate::usage::day_axis::{
+    parse_agentsview_period_date, tokenmaxxing_day_start, tokenmaxxing_provider_day,
+    TOKENMAXXING_TIMEZONE,
+};
 use crate::usage::normalize::{normalize_agentsview_json, RawTokenTotals};
 use crate::usage::provider::{
     ProviderCursorKey, ProviderDiagnostic, UsageDelta, UsagePollResult, UsageProvider,
@@ -50,13 +53,58 @@ impl AgentsviewCommandProvider {
         self.version(helper)
     }
 
-    fn poll_agent(
+    pub fn poll_current_day(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
+        let now = OffsetDateTime::now_utc();
+        let claude = self.poll_agent_current_day(store, "claude", false, now)?;
+        let codex = self.poll_agent_current_day(store, "codex", true, now)?;
+
+        let mut deltas = claude.deltas;
+        deltas.extend(codex.deltas);
+        let mut diagnostics = claude.diagnostics;
+        diagnostics.extend(codex.diagnostics);
+        Ok(result_from_parts(deltas, diagnostics))
+    }
+
+    pub fn poll_full_history(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
+        let claude = self.poll_agent_full_history(store, "claude", false)?;
+        let codex = self.poll_agent_full_history(store, "codex", true)?;
+        let mut deltas = claude.deltas;
+        deltas.extend(codex.deltas);
+        let mut diagnostics = claude.diagnostics;
+        diagnostics.extend(codex.diagnostics);
+        Ok(result_from_parts(deltas, diagnostics))
+    }
+
+    fn poll_agent_current_day(
+        &self,
+        store: &mut UsageStore,
+        agent: &str,
+        no_sync: bool,
+        now: OffsetDateTime,
+    ) -> Result<UsagePollResult> {
+        let date = tokenmaxxing_provider_day(now).to_string();
+        self.poll_agent_with_timeout(
+            store,
+            agent,
+            no_sync,
+            UsageRange::CurrentDay { since: date.clone(), until: date },
+            HELPER_SUBPROCESS_TIMEOUT,
+        )
+    }
+
+    fn poll_agent_full_history(
         &self,
         store: &mut UsageStore,
         agent: &str,
         no_sync: bool,
     ) -> Result<UsagePollResult> {
-        self.poll_agent_with_timeout(store, agent, no_sync, HELPER_SUBPROCESS_TIMEOUT)
+        self.poll_agent_with_timeout(
+            store,
+            agent,
+            no_sync,
+            UsageRange::FullHistory,
+            HELPER_SUBPROCESS_TIMEOUT,
+        )
     }
 
     fn poll_agent_with_timeout(
@@ -64,6 +112,7 @@ impl AgentsviewCommandProvider {
         store: &mut UsageStore,
         agent: &str,
         no_sync: bool,
+        range: UsageRange,
         timeout: Duration,
     ) -> Result<UsagePollResult> {
         let Some(helper) = self.paths.agentsview.as_deref() else {
@@ -80,7 +129,7 @@ impl AgentsviewCommandProvider {
         let version = self
             .version_with_timeout(helper, timeout)
             .unwrap_or_else(|| "unknown".to_string());
-        let output = match self.run_usage_with_timeout(helper, agent, no_sync, timeout) {
+        let output = match self.run_usage_with_timeout(helper, agent, no_sync, range, timeout) {
             Ok(output) => output,
             Err(GlorpError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
                 let diagnostic = diagnostic(
@@ -232,6 +281,7 @@ impl AgentsviewCommandProvider {
         helper: &Path,
         agent: &str,
         no_sync: bool,
+        range: UsageRange,
         timeout: Duration,
     ) -> Result<std::process::Output> {
         let hcmd = agentsview_helper_command(agent, helper, None).map_err(|d| {
@@ -246,11 +296,17 @@ impl AgentsviewCommandProvider {
             "--breakdown",
             "--agent",
             agent,
-            "--since",
-            "1970-01-01",
             "--timezone",
             TOKENMAXXING_TIMEZONE,
         ]);
+        match range {
+            UsageRange::CurrentDay { since, until } => {
+                command.args(["--since", &since, "--until", &until]);
+            }
+            UsageRange::FullHistory => {
+                command.args(["--since", "1970-01-01"]);
+            }
+        }
         if no_sync {
             command.arg("--no-sync");
         }
@@ -266,18 +322,11 @@ impl AgentsviewCommandProvider {
 
 impl UsageProvider for AgentsviewCommandProvider {
     fn poll(&self, store: &mut UsageStore) -> Result<UsagePollResult> {
-        let claude = self.poll_agent(store, "claude", false)?;
-        let codex = self.poll_agent(store, "codex", true)?;
-
-        let mut deltas = claude.deltas;
-        deltas.extend(codex.deltas);
-        let mut diagnostics = claude.diagnostics;
-        diagnostics.extend(codex.diagnostics);
-        Ok(result_from_parts(deltas, diagnostics))
+        self.poll_current_day(store)
     }
 
     fn snapshot_for_calibration(&self, store: &mut UsageStore) -> Result<UsageSnapshot> {
-        let poll = self.poll(store)?;
+        let poll = self.poll_full_history(store)?;
         let daily_usage = poll
             .deltas
             .iter()
@@ -299,6 +348,20 @@ impl UsageProvider for AgentsviewCommandProvider {
             diagnostics: poll.diagnostics,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+enum UsageRange {
+    CurrentDay { since: String, until: String },
+    FullHistory,
+}
+
+pub fn needs_full_history_poll(
+    last_usage_poll_at: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> bool {
+    let today_start = tokenmaxxing_day_start(tokenmaxxing_provider_day(now));
+    last_usage_poll_at.is_none_or(|last_poll| last_poll < today_start)
 }
 
 impl AgentsviewDiscovery {
@@ -586,7 +649,13 @@ mod tests {
 
         let started = Instant::now();
         let result = provider
-            .poll_agent_with_timeout(&mut store, "claude", false, Duration::from_millis(25))
+            .poll_agent_with_timeout(
+                &mut store,
+                "claude",
+                false,
+                UsageRange::FullHistory,
+                Duration::from_millis(25),
+            )
             .unwrap();
 
         assert!(result.deltas.is_empty());
@@ -603,5 +672,22 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.provider_surface == "claude"
                 && diagnostic.code == "helper_timeout"));
+    }
+
+    #[test]
+    fn full_history_poll_is_only_needed_before_current_tokenmaxxing_day() {
+        let current_day = time::macros::datetime!(2026 - 07 - 07 20:00 UTC);
+        let before_la_midnight = time::macros::datetime!(2026 - 07 - 07 06:59 UTC);
+        let after_la_midnight = time::macros::datetime!(2026 - 07 - 07 07:01 UTC);
+
+        assert!(needs_full_history_poll(None, current_day));
+        assert!(needs_full_history_poll(
+            Some(before_la_midnight),
+            current_day
+        ));
+        assert!(!needs_full_history_poll(
+            Some(after_la_midnight),
+            current_day
+        ));
     }
 }

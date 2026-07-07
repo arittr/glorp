@@ -12,17 +12,15 @@ glorp init
 glorp watch
 ```
 
-The npm package bundles the native binary and usage helpers for your platform.
-Glorp's default provider is bundled `ccusage`, so a normal npm install is
-enough to hatch and watch the pet. Glorp counts cached input fully for
+The npm package bundles the native binary for your platform. Glorp requires
+AgentsView for live usage accounting; make sure `agentsview` is on `PATH`, or
+set `GLORP_AGENTSVIEW_BIN`. Glorp counts cached input fully for
 Tokenmaxxing-style token totals.
 Stages grow from calibrated Tokenmaxxing `total_tokens`: Glorp compares new work against your recent active-day baseline. Early stages are active-hour equivalents, not real-time locks, and historical usage calibrates a newborn pet without feeding it.
 
 | Var | Purpose |
 |---|---|
-| `GLORP_CCUSAGE_BIN` | Pin a specific `ccusage` binary. |
-| `GLORP_CCUSAGE_CODEX_BIN` | Pin a specific `ccusage-codex` binary. |
-| `GLORP_AGENTSVIEW_BIN` | Pin an optional `agentsview` binary for Tokenmaxxing parity checks. |
+| `GLORP_AGENTSVIEW_BIN` | Pin the required `agentsview` binary. |
 
 ### Native macOS companion
 
