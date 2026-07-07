@@ -25,9 +25,9 @@ use crate::{
         },
         style::{source_display_name, LogKind},
         view_model::{
-            BioView, EarnedHabitatPropView, EventView, HabitatView, PetRenderModel, ProgressView,
-            RateDirection, RateMomentum, RateWindow, SourceHealthView, SourceStatus,
-            SourceUsageView, WatchViewModel,
+            BioView, DailyComparison, EarnedHabitatPropView, EventView, HabitatView,
+            PetRenderModel, ProgressView, RateDirection, RateMomentum, RateWindow,
+            SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel,
         },
     },
     usage::{
@@ -140,6 +140,10 @@ pub(crate) fn build_watch_view_model_at(
     // mixing fractional and whole-second RFC3339 bounds.
 
     let today_snapshot = usage_store.snapshot_totals_for_provider_day(provider_day)?;
+    let yesterday_provider_day = provider_day.previous_day().unwrap_or(provider_day);
+    let yesterday_snapshot =
+        usage_store.snapshot_totals_for_provider_day(yesterday_provider_day)?;
+    let daily_comparison = DailyComparison::from_snapshots(&today_snapshot, &yesterday_snapshot);
     let source_snapshot = usage_store.snapshot_totals_by_source_for_provider_day(provider_day)?;
     let today_total_tokens = today_snapshot
         .value
@@ -270,6 +274,7 @@ pub(crate) fn build_watch_view_model_at(
         today_effective_tokens: today_total_tokens,
         today_snapshot_state: today_snapshot.state,
         today_snapshot_reason: today_snapshot.reason.clone(),
+        daily_comparison,
         recent_daily_effective_tokens,
         recent_daily_snapshot_states,
         source_breakdown,

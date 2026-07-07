@@ -31,6 +31,7 @@ pub struct WatchViewModel {
     pub today_effective_tokens: f64,
     pub today_snapshot_state: crate::usage::snapshot::SnapshotState,
     pub today_snapshot_reason: Option<String>,
+    pub daily_comparison: DailyComparison,
     pub recent_daily_effective_tokens: Vec<f64>,
     pub recent_daily_snapshot_states: Vec<crate::usage::snapshot::SnapshotState>,
     pub source_breakdown: Vec<SourceUsageView>,
@@ -74,6 +75,100 @@ pub struct WatchViewModel {
     pub progress: ProgressView,
     /// Birth / age metadata for the bio card panel.
     pub bio: BioView,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyComparison {
+    pub today_provider_day: time::Date,
+    pub yesterday_provider_day: time::Date,
+    pub today_tokens: f64,
+    pub yesterday_tokens: Option<f64>,
+    pub today_snapshot_state: crate::usage::snapshot::SnapshotState,
+    pub yesterday_snapshot_state: crate::usage::snapshot::SnapshotState,
+    pub today_observed_at: Option<time::OffsetDateTime>,
+    pub yesterday_observed_at: Option<time::OffsetDateTime>,
+    pub unavailable_reason: Option<String>,
+    pub fraction_of_yesterday: Option<f64>,
+}
+
+impl DailyComparison {
+    pub fn from_snapshots(
+        today: &crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>,
+        yesterday: &crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>,
+    ) -> Self {
+        let today_tokens = snapshot_total_tokens(today).unwrap_or(0.0);
+        let yesterday_tokens = snapshot_total_tokens(yesterday);
+        let unavailable_reason = daily_unavailable_reason(today, yesterday);
+        let fraction_of_yesterday = unavailable_reason
+            .as_ref()
+            .is_none()
+            .then(|| today_tokens / yesterday_tokens.expect("validated yesterday total"));
+
+        Self {
+            today_provider_day: today.provider_day,
+            yesterday_provider_day: yesterday.provider_day,
+            today_tokens,
+            yesterday_tokens,
+            today_snapshot_state: today.state,
+            yesterday_snapshot_state: yesterday.state,
+            today_observed_at: today.observed_at,
+            yesterday_observed_at: yesterday.observed_at,
+            unavailable_reason,
+            fraction_of_yesterday,
+        }
+    }
+}
+
+fn snapshot_total_tokens(
+    result: &crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>,
+) -> Option<f64> {
+    result.value.as_ref().map(|totals| totals.total_tokens)
+}
+
+fn daily_unavailable_reason(
+    today: &crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>,
+    yesterday: &crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>,
+) -> Option<String> {
+    use crate::usage::snapshot::SnapshotState;
+
+    if today.state != SnapshotState::Current {
+        return Some(format!("today-{}", snapshot_state_slug(today.state)));
+    }
+    if yesterday.state != SnapshotState::Current {
+        return Some(format!(
+            "yesterday-{}",
+            snapshot_state_slug(yesterday.state)
+        ));
+    }
+
+    let Some(today_tokens) = snapshot_total_tokens(today) else {
+        return Some("today-missing".to_string());
+    };
+    let Some(yesterday_tokens) = snapshot_total_tokens(yesterday) else {
+        return Some("yesterday-missing".to_string());
+    };
+
+    if !today_tokens.is_finite()
+        || !yesterday_tokens.is_finite()
+        || today_tokens < 0.0
+        || yesterday_tokens < 0.0
+    {
+        return Some("non-finite-total".to_string());
+    }
+    if yesterday_tokens == 0.0 {
+        return Some("yesterday-zero".to_string());
+    }
+
+    None
+}
+
+fn snapshot_state_slug(state: crate::usage::snapshot::SnapshotState) -> &'static str {
+    match state {
+        crate::usage::snapshot::SnapshotState::Current => "current",
+        crate::usage::snapshot::SnapshotState::Stale => "stale",
+        crate::usage::snapshot::SnapshotState::Missing => "missing",
+        crate::usage::snapshot::SnapshotState::Blocked => "blocked",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +320,18 @@ impl WatchViewModel {
             today_effective_tokens: 18_420.0,
             today_snapshot_state: crate::usage::snapshot::SnapshotState::Current,
             today_snapshot_reason: None,
+            daily_comparison: DailyComparison {
+                today_provider_day: time::macros::date!(2026 - 07 - 06),
+                yesterday_provider_day: time::macros::date!(2026 - 07 - 05),
+                today_tokens: 18_420.0,
+                yesterday_tokens: Some(16_000.0),
+                today_snapshot_state: crate::usage::snapshot::SnapshotState::Current,
+                yesterday_snapshot_state: crate::usage::snapshot::SnapshotState::Current,
+                today_observed_at: None,
+                yesterday_observed_at: None,
+                unavailable_reason: None,
+                fraction_of_yesterday: Some(18_420.0 / 16_000.0),
+            },
             recent_daily_effective_tokens: vec![
                 1_000.0, 8_000.0, 4_000.0, 13_000.0, 9_500.0, 16_000.0, 18_420.0,
             ],

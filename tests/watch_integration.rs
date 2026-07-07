@@ -212,6 +212,116 @@ fn seven_day_history_uses_snapshot_days_and_degrades_missing_days() {
 }
 
 #[test]
+fn daily_comparison_uses_current_tokenmaxxing_provider_day_snapshots() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    let today = time::macros::date!(2026 - 07 - 06);
+    let yesterday = time::macros::date!(2026 - 07 - 05);
+
+    seed_snapshot_for_test(&mut usage, today, "claude-code", 125_000.0, now);
+    seed_snapshot_for_test(
+        &mut usage,
+        yesterday,
+        "claude-code",
+        100_000.0,
+        now - Duration::days(1),
+    );
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(vm.daily_comparison.today_provider_day, today);
+    assert_eq!(vm.daily_comparison.yesterday_provider_day, yesterday);
+    assert_eq!(vm.daily_comparison.today_tokens, 125_000.0);
+    assert_eq!(vm.daily_comparison.yesterday_tokens, Some(100_000.0));
+    assert_eq!(
+        vm.daily_comparison.today_snapshot_state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(
+        vm.daily_comparison.yesterday_snapshot_state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert_eq!(vm.daily_comparison.unavailable_reason, None);
+    assert!((vm.daily_comparison.fraction_of_yesterday.unwrap() - 1.25).abs() < 1e-9);
+}
+
+#[test]
+fn daily_comparison_degrades_missing_and_zero_yesterday_without_fill() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    let today = time::macros::date!(2026 - 07 - 06);
+    let yesterday = time::macros::date!(2026 - 07 - 05);
+
+    seed_snapshot_for_test(&mut usage, today, "claude-code", 42_000.0, now);
+    let missing = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(missing.daily_comparison.yesterday_provider_day, yesterday);
+    assert_eq!(missing.daily_comparison.yesterday_tokens, None);
+    assert_eq!(
+        missing.daily_comparison.yesterday_snapshot_state,
+        glorp::usage::snapshot::SnapshotState::Missing
+    );
+    assert_eq!(
+        missing.daily_comparison.unavailable_reason.as_deref(),
+        Some("yesterday-missing")
+    );
+    assert_eq!(missing.daily_comparison.fraction_of_yesterday, None);
+
+    seed_snapshot_for_test(
+        &mut usage,
+        yesterday,
+        "claude-code",
+        0.0,
+        now - Duration::days(1),
+    );
+    let zero = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(zero.daily_comparison.yesterday_tokens, Some(0.0));
+    assert_eq!(
+        zero.daily_comparison.unavailable_reason.as_deref(),
+        Some("yesterday-zero")
+    );
+    assert_eq!(zero.daily_comparison.fraction_of_yesterday, None);
+}
+
+#[test]
+fn daily_comparison_rejects_stale_yesterday_snapshot() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    let today = time::macros::date!(2026 - 07 - 06);
+    let yesterday = time::macros::date!(2026 - 07 - 05);
+
+    seed_snapshot_for_test(&mut usage, today, "claude-code", 42_000.0, now);
+    seed_snapshot_for_test(
+        &mut usage,
+        yesterday,
+        "claude-code",
+        21_000.0,
+        now - Duration::days(1),
+    );
+    seed_blocked_snapshot_failure_for_test(&mut usage, yesterday, now);
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(
+        vm.daily_comparison.yesterday_snapshot_state,
+        glorp::usage::snapshot::SnapshotState::Stale
+    );
+    assert_eq!(vm.daily_comparison.yesterday_tokens, Some(21_000.0));
+    assert_eq!(
+        vm.daily_comparison.unavailable_reason.as_deref(),
+        Some("yesterday-stale")
+    );
+    assert_eq!(vm.daily_comparison.fraction_of_yesterday, None);
+}
+
+#[test]
 fn watch_totals_use_observed_and_bucket_time_not_source_period_midnight() {
     let dir = tempdir().unwrap();
     let usage_db = dir.path().join("usage.sqlite");
@@ -538,6 +648,25 @@ fn seed_snapshot_for_test(
     };
     usage
         .write_provider_snapshot_batch(&batch, &[row], &[])
+        .unwrap();
+}
+
+fn seed_blocked_snapshot_failure_for_test(
+    usage: &mut UsageStore,
+    day: time::Date,
+    observed_at: OffsetDateTime,
+) {
+    usage
+        .record_snapshot_failure(&glorp::usage::snapshot::ProviderSnapshotDiagnosticInput {
+            diagnostic_kind: "run_blocked".into(),
+            collector_scope_id: "claude-code:local-usage".into(),
+            replacement_scope_id: Some("claude-code:local-usage".into()),
+            requested_provider_days: vec![day],
+            provider_day: Some(day),
+            reason_code: "helper_exit".into(),
+            message: "ccusage helper exited while refreshing snapshot".into(),
+            observed_at,
+        })
         .unwrap();
 }
 
