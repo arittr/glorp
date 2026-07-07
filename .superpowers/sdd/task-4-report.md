@@ -191,8 +191,6 @@ status: DONE
 
 - None.
 
----
-
 # Task 4 Second Review Fix Report
 
 status: DONE
@@ -240,8 +238,6 @@ status: DONE
 
 - None.
 
----
-
 # Task 4 Fourth Review Fix Report
 
 status: DONE
@@ -281,6 +277,43 @@ status: DONE
 
 - Commit hash: recorded in final handoff after commit creation.
 - Commit message: `fix: sanitize provider diagnostics and snapshot coverage`
+
+## Concerns
+
+- None.
+
+---
+
+# Task 4 Unsupported Token Shape Fix Report
+
+status: DONE
+
+## Files Changed
+
+- `src/usage/ccusage.rs`
+- `tests/usage_provider.rs`
+- `tests/fixtures/helpers/ccusage-unsupported-token-shape-with-valid-sibling.mjs`
+- `tests/fixtures/ccusage-unified-multi.json`
+- `tests/fixtures/ccusage-unified-multi-next.json`
+
+## Red Test Summary
+
+- `cargo test --test usage_provider unsupported_token_shape_requested_row_blocks_valid_sibling_rows -- --exact`
+  - Failed before the fix as expected: the valid sibling row fed `100.0` tokens, failing `left: 100.0` vs `right: 0.0`.
+
+## Green Verification Summary
+
+- `cargo test --test usage_provider unsupported_token_shape_requested_row_blocks_valid_sibling_rows -- --exact`
+  - Passed: 1 passed, 0 failed.
+- `cargo test --test usage_provider`
+  - Passed: 49 passed, 0 failed.
+- `cargo fmt --check`
+  - Passed.
+
+## Commit
+
+- Commit hash: recorded in final handoff after commit creation.
+- Commit message: `fix: block unsupported ccusage token shape`
 
 ## Concerns
 

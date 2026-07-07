@@ -714,10 +714,6 @@ fn unified_multi_source_emits_deltas_after_seeded_cursors() {
         .diagnostics
         .iter()
         .any(|d| d.code == "aggregate_all_source_ignored"));
-    assert!(result
-        .diagnostics
-        .iter()
-        .any(|d| d.code == "unsupported_token_shape"));
 }
 
 #[test]
@@ -1110,6 +1106,45 @@ fn mixed_malformed_and_valid_requested_rows_block_without_feeding() {
 
     assert_eq!(result.total_tokens, 0.0);
     assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 07 - 06))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Blocked
+    );
+}
+
+#[test]
+fn unsupported_token_shape_requested_row_blocks_valid_sibling_rows() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-unsupported-token-shape-with-valid-sibling.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "unsupported_token_shape"));
     assert!(result
         .diagnostics
         .iter()

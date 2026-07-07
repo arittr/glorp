@@ -1223,6 +1223,7 @@ fn blocks_requested_snapshot(code: &str) -> bool {
         "missing_token_fields"
             | "malformed_token_field"
             | "ambiguous_token_shape"
+            | "unsupported_token_shape"
             | "invalid_period_start"
     )
 }

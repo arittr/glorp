@@ -88,12 +88,6 @@
       "cacheCreationTokens": 1000024,
       "cacheReadTokens": 1000999,
       "totalCost": 100.0
-    },
-    {
-      "date": "2026-06-11",
-      "agent": "unknown-bad",
-      "inputTokens": 200,
-      "outputTokens": 100
     }
   ]
 }
