@@ -84,6 +84,13 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
             recorded_at: now,
         })
         .unwrap();
+    seed_snapshot_for_test(
+        &mut usage_store,
+        glorp::usage::day_axis::tokenmaxxing_provider_day(now),
+        "claude-code",
+        5_000.0,
+        now,
+    );
 
     let state = mech_state();
     let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
@@ -113,6 +120,59 @@ fn watch_view_model_uses_usage_store_totals_and_diagnostics_instead_of_fixture_a
 }
 
 #[test]
+fn legacy_applied_tokenmaxxing_rows_do_not_inflate_snapshot_today() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    usage
+        .insert_event(&NormalizedUsageEvent {
+            provider_surface: "claude-code".into(),
+            observed_at: now,
+            bucket_at: now,
+            total_tokens: 1_060.0,
+            effective_tokens: 1_060.0,
+            ..NormalizedUsageEvent::for_test_at(now, 1_060.0)
+        })
+        .unwrap();
+    seed_snapshot_for_test(
+        &mut usage,
+        time::macros::date!(2026 - 07 - 06),
+        "claude-code",
+        531.0,
+        now,
+    );
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(
+        vm.today_effective_tokens, 531.0,
+        "legacy applied tokenmaxxing rows must not inflate snapshot-backed provider truth"
+    );
+    assert_eq!(vm.current_bucket_effective_tokens, 1_060.0);
+}
+
+#[test]
+fn missing_snapshot_does_not_render_zero_provider_truth() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let _usage = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(
+        vm.today_snapshot_state,
+        glorp::usage::snapshot::SnapshotState::Missing
+    );
+    assert_eq!(vm.today_effective_tokens, 0.0);
+    assert!(vm
+        .source_health
+        .iter()
+        .all(|source| source.snapshot_state != glorp::usage::snapshot::SnapshotState::Current));
+}
+
+#[test]
 fn watch_totals_use_observed_and_bucket_time_not_source_period_midnight() {
     let dir = tempdir().unwrap();
     let usage_db = dir.path().join("usage.sqlite");
@@ -131,6 +191,13 @@ fn watch_totals_use_observed_and_bucket_time_not_source_period_midnight() {
             ..NormalizedUsageEvent::for_test_at(period_start, 1_300.0)
         })
         .unwrap();
+    seed_snapshot_for_test(
+        &mut usage_store,
+        glorp::usage::day_axis::tokenmaxxing_provider_day(observed_at),
+        "claude-code",
+        1_300.0,
+        observed_at,
+    );
 
     let vm = build_watch_view_model_for_test(&mech_state(), &usage_db).unwrap();
     assert!(vm.today_effective_tokens >= 1_300.0);
@@ -387,6 +454,54 @@ fn mech_state() -> PetState {
     state
 }
 
+fn seed_snapshot_for_test(
+    usage: &mut UsageStore,
+    day: time::Date,
+    source: &str,
+    total: f64,
+    observed_at: OffsetDateTime,
+) {
+    let batch = glorp::usage::snapshot::ProviderSnapshotBatchInput {
+        collector_scope_id: format!("{source}:local-usage"),
+        collector_surface: format!("ccusage:{source}"),
+        command: "test snapshot".into(),
+        token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+        requested_provider_days: vec![day],
+        covered_accounting_sources: None,
+        provider_version: "test".into(),
+        parser_version: "test".into(),
+        observed_at,
+    };
+    let row = glorp::usage::snapshot::ProviderSnapshotRowInput {
+        replacement_scope_id: format!("{source}:local-usage"),
+        collector_scope_id: format!("{source}:local-usage"),
+        collector_surface: format!("ccusage:{source}"),
+        command: "test snapshot".into(),
+        token_contract: glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+        accounting_source: source.into(),
+        provider_day: day,
+        model: Some("test-model".into()),
+        source_surface: "daily".into(),
+        provider_period: day.to_string(),
+        raw_source_id_hash: Some("hash:test".into()),
+        cursor_key_hash: "hash:cursor".into(),
+        cursor_update: ProviderCursorUpdate {
+            provider_surface: source.into(),
+            cursor_key: "cursor".into(),
+            cursor_value: "value".into(),
+            provider_version: "test".into(),
+            parser_version: "test".into(),
+        },
+        raw_token_buckets: None,
+        total_tokens: total,
+        cost_usd: None,
+        confidence: "local-log-derived".into(),
+    };
+    usage
+        .write_provider_snapshot_batch(&batch, &[row], &[])
+        .unwrap();
+}
+
 #[test]
 fn rate_per_hour_grows_with_more_recent_events() {
     let dir = tempdir().unwrap();
@@ -618,6 +733,13 @@ fn watch_token_totals_use_tokenmaxxing_day_axis_and_external_source_labels() {
             ..NormalizedUsageEvent::for_test_at(now, 12.0)
         })
         .unwrap();
+    seed_snapshot_for_test(
+        &mut usage_store,
+        glorp::usage::day_axis::tokenmaxxing_provider_day(now),
+        "codex",
+        669_369_020.0,
+        now,
+    );
 
     let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
 

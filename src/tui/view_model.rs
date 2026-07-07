@@ -29,6 +29,8 @@ pub struct WatchViewModel {
     /// Transitional field name. Values are canonical Tokenmaxxing total tokens
     /// for tokenmaxxing_total_v1 rows.
     pub today_effective_tokens: f64,
+    pub today_snapshot_state: crate::usage::snapshot::SnapshotState,
+    pub today_snapshot_reason: Option<String>,
     pub recent_daily_effective_tokens: Vec<f64>,
     pub source_breakdown: Vec<SourceUsageView>,
     pub source_health: Vec<SourceHealthView>,
@@ -116,6 +118,8 @@ pub struct SourceHealthView {
     pub name: String,
     pub display_name: String,
     pub status: SourceStatus,
+    pub snapshot_state: crate::usage::snapshot::SnapshotState,
+    pub snapshot_reason: Option<String>,
     /// Transitional field name. Values are canonical Tokenmaxxing total tokens
     /// for tokenmaxxing_total_v1 rows.
     pub today_effective_tokens: f64,
@@ -218,6 +222,8 @@ impl WatchViewModel {
             happiness: 0.64,
             energy: 0.81,
             today_effective_tokens: 18_420.0,
+            today_snapshot_state: crate::usage::snapshot::SnapshotState::Current,
+            today_snapshot_reason: None,
             recent_daily_effective_tokens: vec![
                 1_000.0, 8_000.0, 4_000.0, 13_000.0, 9_500.0, 16_000.0, 18_420.0,
             ],
@@ -238,6 +244,8 @@ impl WatchViewModel {
                     name: "claude-code".into(),
                     display_name: "claude".into(),
                     status: SourceStatus::Ready,
+                    snapshot_state: crate::usage::snapshot::SnapshotState::Current,
+                    snapshot_reason: None,
                     today_effective_tokens: 12_900.0,
                     bucket_effective_tokens: 1_300.0,
                     diagnostic_code: None,
@@ -247,6 +255,8 @@ impl WatchViewModel {
                     name: "codex".into(),
                     display_name: "codex".into(),
                     status: SourceStatus::Ready,
+                    snapshot_state: crate::usage::snapshot::SnapshotState::Current,
+                    snapshot_reason: None,
                     today_effective_tokens: 5_520.0,
                     bucket_effective_tokens: 1_000.0,
                     diagnostic_code: None,

@@ -130,7 +130,8 @@ pub(crate) fn build_watch_view_model_at(
     // Keep local time for presentation and pet behavior; visible token totals
     // below use the Tokenmaxxing Los Angeles accounting day.
     let local_offset = mapper.offset_at(now);
-    let (today_start, today_end) = crate::usage::day_axis::tokenmaxxing_today_window(now);
+    let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(now);
+    let (today_start, _today_end) = crate::usage::day_axis::tokenmaxxing_today_window(now);
     let rate_anchor = normalized_window_anchor(now);
     let window_end = rate_anchor + Duration::seconds(1);
     let last_10m_start = rate_anchor - Duration::minutes(10);
@@ -138,13 +139,29 @@ pub(crate) fn build_watch_view_model_at(
     // whole second so rows stamped exactly at `now` remain visible without
     // mixing fractional and whole-second RFC3339 bounds.
 
-    let today_totals = usage_store
-        .canonical_total_tokens_by_source_between(today_start, today_end)
+    let today_snapshot = usage_store.snapshot_totals_for_provider_day(provider_day)?;
+    let source_snapshot = usage_store.snapshot_totals_by_source_for_provider_day(provider_day)?;
+    let today_total_tokens = today_snapshot
+        .value
+        .as_ref()
+        .map(|totals| totals.total_tokens)
+        .unwrap_or(0.0);
+    let today_totals = source_snapshot
+        .value
+        .as_ref()
+        .map(|totals| {
+            totals
+                .sources
+                .iter()
+                .map(|source| (source.accounting_source.clone(), source.total_tokens))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let last_10m_totals = usage_store
         .canonical_total_tokens_by_source_between(last_10m_start, window_end)
         .unwrap_or_default();
-    let today_total_tokens: f64 = today_totals.iter().map(|(_, v)| *v).sum();
+    let snapshot_health =
+        usage_store.snapshot_health_for_provider_day(provider_day, &last_10m_totals)?;
     let pulse_window = build_rate_window(&usage_store, rate_anchor, Duration::minutes(10));
     let hour_window = build_rate_window(&usage_store, rate_anchor, Duration::hours(1));
     let rate_momentum = RateMomentum {
@@ -187,7 +204,7 @@ pub(crate) fn build_watch_view_model_at(
         .into_iter()
         .filter(|d| d.recorded_at >= cutoff)
         .collect();
-    let source_health = source_health(&today_totals, &last_10m_totals, &all_diagnostics);
+    let source_health = source_health(&snapshot_health, &all_diagnostics);
     let diagnostics = active_diagnostics(&source_breakdown, all_diagnostics);
     let helper_status = helper_status(&usage_store, &source_breakdown, &diagnostics)?;
     let pet_activities = crate::pet::activity::derive_pet_activities(
@@ -236,8 +253,23 @@ pub(crate) fn build_watch_view_model_at(
         happiness: state.vitals.happiness / 100.0,
         energy: state.vitals.energy / 100.0,
         today_effective_tokens: today_total_tokens,
+        today_snapshot_state: today_snapshot.state,
+        today_snapshot_reason: today_snapshot.reason.clone(),
         recent_daily_effective_tokens: usage_store
-            .seven_day_token_history(now, mapper)
+            .snapshot_token_history_for_provider_days(
+                &crate::usage::day_axis::tokenmaxxing_days_back(now, 7),
+            )
+            .map(|history| {
+                history
+                    .into_iter()
+                    .map(|snapshot| {
+                        snapshot
+                            .value
+                            .map(|totals| totals.total_tokens)
+                            .unwrap_or(0.0)
+                    })
+                    .collect()
+            })
             .unwrap_or_else(|_| vec![0.0; 7]),
         source_breakdown,
         source_health,
@@ -646,16 +678,12 @@ fn apply_dev_pet_species_override(
 }
 
 fn source_health(
-    today_totals: &[(String, f64)],
-    last_10m_totals: &[(String, f64)],
+    snapshot_health: &[crate::usage::snapshot::SourceSnapshotHealth],
     diagnostics: &[crate::storage::usage_store::ProviderDiagnostic],
 ) -> Vec<SourceHealthView> {
     let mut names = std::collections::BTreeSet::new();
-    for (name, _) in today_totals {
-        names.insert(name.clone());
-    }
-    for (name, _) in last_10m_totals {
-        names.insert(name.clone());
+    for source in snapshot_health {
+        names.insert(source.accounting_source.clone());
     }
     for diagnostic in diagnostics {
         if diagnostic.code == crate::game::runtime::USAGE_DISCONTINUITY_CODE {
@@ -664,19 +692,22 @@ fn source_health(
         names.insert(diagnostic.provider_surface.clone());
     }
 
-    let lookup = |totals: &[(String, f64)], target: &str| -> f64 {
-        totals
+    let lookup = |target: &str| -> Option<&crate::usage::snapshot::SourceSnapshotHealth> {
+        snapshot_health
             .iter()
-            .find(|(name, _)| name == target)
-            .map(|(_, v)| *v)
-            .unwrap_or(0.0)
+            .find(|source| source.accounting_source == target)
     };
 
     names
         .into_iter()
         .map(|name| {
-            let today_for_source = lookup(today_totals, &name);
-            let bucket_effective_tokens = lookup(last_10m_totals, &name);
+            let snapshot = lookup(&name);
+            let today_for_source = snapshot
+                .and_then(|source| source.snapshot_total_tokens)
+                .unwrap_or(0.0);
+            let bucket_effective_tokens = snapshot
+                .map(|source| source.recent_accepted_tokens)
+                .unwrap_or(0.0);
             let diagnostic = diagnostics.iter().find(|diagnostic| {
                 diagnostic.provider_surface == name
                     && diagnostic.code != crate::game::runtime::USAGE_DISCONTINUITY_CODE
@@ -692,6 +723,10 @@ fn source_health(
                 name: name.clone(),
                 display_name: source_display_name(&name).to_string(),
                 status,
+                snapshot_state: snapshot
+                    .map(|source| source.snapshot_state)
+                    .unwrap_or(crate::usage::snapshot::SnapshotState::Missing),
+                snapshot_reason: snapshot.and_then(|source| source.reason.clone()),
                 today_effective_tokens: today_for_source,
                 bucket_effective_tokens,
                 diagnostic_code: diagnostic.map(|diagnostic| diagnostic.code.clone()),
@@ -1480,14 +1515,21 @@ mod tests {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let diagnostics = vec![discontinuity_diagnostic_for_test("claude-code", now)];
 
-        let today = vec![("claude-code".to_string(), 12_000.0)];
-        let health = source_health(&today, &[], &diagnostics);
+        let today = vec![crate::usage::snapshot::SourceSnapshotHealth {
+            accounting_source: "claude-code".to_string(),
+            display_name: "claude".to_string(),
+            snapshot_state: crate::usage::snapshot::SnapshotState::Current,
+            snapshot_total_tokens: Some(12_000.0),
+            recent_accepted_tokens: 0.0,
+            reason: None,
+        }];
+        let health = source_health(&today, &diagnostics);
         assert_eq!(health.len(), 1);
         assert_eq!(health[0].status, SourceStatus::Ready);
         assert_eq!(health[0].diagnostic_code, None);
         assert_eq!(health[0].diagnostic_message, None);
 
-        let health = source_health(&[], &[], &diagnostics);
+        let health = source_health(&[], &diagnostics);
         assert!(
             health.is_empty(),
             "a discontinuity-only surface must not appear broken: {health:?}"
