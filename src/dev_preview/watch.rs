@@ -8,7 +8,7 @@ use crate::storage::{
     state::{
         EarnedHabitatProp, HabitatPropId, HabitatPropSource, NarrativeEvent, PetState, Vitals,
     },
-    usage_store::{NormalizedUsageEvent, UsageStore},
+    usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, UsageStore},
 };
 use crate::tui::day::{DayContext, DayPhase, DaySummary, WakeResume};
 use crate::tui::layout::render_watch_frame_with_layout;
@@ -1826,6 +1826,8 @@ fn midnight_mid_session_day_context(now: OffsetDateTime) -> DayContext {
 
 fn seed_usage_store(path: &Path, now: OffsetDateTime) -> Result<()> {
     let mut usage = UsageStore::open(path)?;
+    let today = crate::usage::day_axis::tokenmaxxing_provider_day(now);
+    let yesterday = crate::usage::day_axis::tokenmaxxing_provider_day(now - Duration::days(1));
     for (surface, observed_at, effective_tokens, model) in [
         (
             "claude-code",
@@ -1848,6 +1850,21 @@ fn seed_usage_store(path: &Path, now: OffsetDateTime) -> Result<()> {
             ..NormalizedUsageEvent::for_test_at(observed_at, effective_tokens)
         })?;
     }
+    write_preview_snapshot(
+        &mut usage,
+        today,
+        &[
+            ("claude-code", "claude-sonnet", 12_500.0),
+            ("codex", "gpt-5-codex", 4_200.0),
+        ],
+        now,
+    )?;
+    write_preview_snapshot(
+        &mut usage,
+        yesterday,
+        &[("claude-code", "claude-sonnet", 8_800.0)],
+        now,
+    )?;
     Ok(())
 }
 
@@ -1876,6 +1893,17 @@ fn seed_usage_store_ensemble(path: &Path, now: OffsetDateTime) -> Result<()> {
             ..NormalizedUsageEvent::for_test_at(observed_at, effective_tokens)
         })?;
     }
+    write_preview_snapshot(
+        &mut usage,
+        crate::usage::day_axis::tokenmaxxing_provider_day(now),
+        &[
+            ("claude-code", "claude-sonnet", 12_000.0),
+            ("codex", "gpt-5-codex", 8_000.0),
+            ("gemini", "gemini-2.5-pro", 7_500.0),
+            ("opencode", "unknown", 4_500.0),
+        ],
+        now,
+    )?;
     Ok(())
 }
 
@@ -1887,6 +1915,65 @@ fn seed_usage_store_unknown_source(path: &Path, now: OffsetDateTime) -> Result<(
         provider_delta_id: Some("preview-unknown-6000".to_string()),
         ..NormalizedUsageEvent::for_test_at(now - Duration::minutes(6), 6_000.0)
     })?;
+    write_preview_snapshot(
+        &mut usage,
+        crate::usage::day_axis::tokenmaxxing_provider_day(now),
+        &[("unknown", "unrecognized-agent", 6_000.0)],
+        now,
+    )?;
+    Ok(())
+}
+
+fn write_preview_snapshot(
+    usage: &mut UsageStore,
+    day: time::Date,
+    rows: &[(&str, &str, f64)],
+    observed_at: OffsetDateTime,
+) -> Result<()> {
+    let batch = crate::usage::snapshot::ProviderSnapshotBatchInput {
+        collector_scope_id: "preview:local-usage".into(),
+        collector_surface: "dev-preview".into(),
+        command: "glorp dev-preview usage snapshot".into(),
+        token_contract: crate::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+        requested_provider_days: vec![day],
+        covered_accounting_sources: Some(
+            rows.iter().map(|(source, _, _)| (*source).into()).collect(),
+        ),
+        provider_version: "dev-preview".into(),
+        parser_version: "dev-preview".into(),
+        observed_at,
+    };
+    let snapshot_rows = rows
+        .iter()
+        .map(
+            |(source, model, total_tokens)| crate::usage::snapshot::ProviderSnapshotRowInput {
+                replacement_scope_id: "preview:local-usage".into(),
+                collector_scope_id: "preview:local-usage".into(),
+                collector_surface: "dev-preview".into(),
+                command: "glorp dev-preview usage snapshot".into(),
+                token_contract: crate::usage::token_contract::TOKENMAXXING_TOTAL_V1.into(),
+                accounting_source: (*source).into(),
+                provider_day: day,
+                model: Some((*model).into()),
+                source_surface: "daily".into(),
+                provider_period: day.to_string(),
+                raw_source_id_hash: Some(format!("preview:{source}:{day}")),
+                cursor_key_hash: format!("preview-cursor:{source}:{day}"),
+                cursor_update: ProviderCursorUpdate {
+                    provider_surface: (*source).into(),
+                    cursor_key: format!("preview:{source}:{day}"),
+                    cursor_value: format!("{total_tokens:.0}"),
+                    provider_version: "dev-preview".into(),
+                    parser_version: "dev-preview".into(),
+                },
+                raw_token_buckets: None,
+                total_tokens: *total_tokens,
+                cost_usd: None,
+                confidence: "local-log-derived".into(),
+            },
+        )
+        .collect::<Vec<_>>();
+    usage.write_provider_snapshot_batch(&batch, &snapshot_rows, &[])?;
     Ok(())
 }
 

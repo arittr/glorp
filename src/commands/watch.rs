@@ -229,6 +229,21 @@ pub(crate) fn build_watch_view_model_at(
         .collect::<Vec<_>>();
 
     let pet_palette = crate::pet::palette::resolve_pet_palette(species, &generated.traits);
+    let provider_days = crate::usage::day_axis::tokenmaxxing_days_back(now, 7);
+    let history = usage_store
+        .snapshot_token_history_for_provider_days(&provider_days)
+        .unwrap_or_default();
+    let recent_daily_effective_tokens = history
+        .iter()
+        .map(|result| {
+            result
+                .value
+                .as_ref()
+                .map(|day| day.total_tokens)
+                .unwrap_or(0.0)
+        })
+        .collect();
+    let recent_daily_snapshot_states = history.iter().map(|result| result.state).collect();
 
     let mut vm = WatchViewModel {
         pet_art: Vec::new(),
@@ -255,22 +270,8 @@ pub(crate) fn build_watch_view_model_at(
         today_effective_tokens: today_total_tokens,
         today_snapshot_state: today_snapshot.state,
         today_snapshot_reason: today_snapshot.reason.clone(),
-        recent_daily_effective_tokens: usage_store
-            .snapshot_token_history_for_provider_days(
-                &crate::usage::day_axis::tokenmaxxing_days_back(now, 7),
-            )
-            .map(|history| {
-                history
-                    .into_iter()
-                    .map(|snapshot| {
-                        snapshot
-                            .value
-                            .map(|totals| totals.total_tokens)
-                            .unwrap_or(0.0)
-                    })
-                    .collect()
-            })
-            .unwrap_or_else(|_| vec![0.0; 7]),
+        recent_daily_effective_tokens,
+        recent_daily_snapshot_states,
         source_breakdown,
         source_health,
         current_bucket_effective_tokens: pulse_window.current_tokens,

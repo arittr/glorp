@@ -32,6 +32,7 @@ pub struct WatchViewModel {
     pub today_snapshot_state: crate::usage::snapshot::SnapshotState,
     pub today_snapshot_reason: Option<String>,
     pub recent_daily_effective_tokens: Vec<f64>,
+    pub recent_daily_snapshot_states: Vec<crate::usage::snapshot::SnapshotState>,
     pub source_breakdown: Vec<SourceUsageView>,
     pub source_health: Vec<SourceHealthView>,
     pub current_bucket_effective_tokens: f64,
@@ -227,6 +228,7 @@ impl WatchViewModel {
             recent_daily_effective_tokens: vec![
                 1_000.0, 8_000.0, 4_000.0, 13_000.0, 9_500.0, 16_000.0, 18_420.0,
             ],
+            recent_daily_snapshot_states: vec![crate::usage::snapshot::SnapshotState::Current; 7],
             source_breakdown: vec![
                 SourceUsageView {
                     name: "claude-code".into(),

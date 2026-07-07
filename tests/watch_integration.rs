@@ -173,6 +173,31 @@ fn missing_snapshot_does_not_render_zero_provider_truth() {
 }
 
 #[test]
+fn seven_day_history_uses_snapshot_days_and_degrades_missing_days() {
+    let dir = tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let mut usage = UsageStore::open(&usage_db).unwrap();
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    seed_snapshot_for_test(
+        &mut usage,
+        time::macros::date!(2026 - 07 - 06),
+        "claude-code",
+        531.0,
+        now,
+    );
+
+    let vm = build_watch_view_model_for_test_at(&mech_state(), &usage_db, now).unwrap();
+
+    assert_eq!(
+        vm.recent_daily_effective_tokens.last().copied(),
+        Some(531.0)
+    );
+    assert!(vm
+        .recent_daily_snapshot_states
+        .contains(&glorp::usage::snapshot::SnapshotState::Missing));
+}
+
+#[test]
 fn watch_totals_use_observed_and_bucket_time_not_source_period_midnight() {
     let dir = tempdir().unwrap();
     let usage_db = dir.path().join("usage.sqlite");
