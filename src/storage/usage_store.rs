@@ -792,12 +792,13 @@ impl UsageStore {
 
             let feed_highwater_updates =
                 self.total_only_highwater_updates(&group_rows, aggregate_total)?;
+            let representative_row = self.total_only_representative_row(&group_rows)?;
             let delta = Self::total_only_usage_delta(
                 &token_contract,
                 &accounting_source,
                 provider_day,
                 aggregate_excess,
-                group_rows.first().expect("group_rows is non-empty"),
+                representative_row,
                 now,
                 feed_highwater_updates,
             );
@@ -1087,6 +1088,29 @@ impl UsageStore {
             token_totals: None,
             feed_highwater_updates,
         }
+    }
+
+    fn total_only_representative_row<'a>(
+        &self,
+        rows: &[&'a ProviderSnapshotRowInput],
+    ) -> crate::error::Result<&'a ProviderSnapshotRowInput> {
+        let Some(first) = rows.first().copied() else {
+            return Err(crate::error::GlorpError::Message(
+                "total-only usage delta requires at least one snapshot row".into(),
+            ));
+        };
+
+        for row in rows {
+            let current_cursor = self.provider_cursor(
+                &row.cursor_update.provider_surface,
+                &row.cursor_update.cursor_key,
+            )?;
+            if current_cursor.as_deref() != Some(row.cursor_update.cursor_value.as_str()) {
+                return Ok(*row);
+            }
+        }
+
+        Ok(first)
     }
 
     fn exact_highwater_updates(

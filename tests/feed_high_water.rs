@@ -1,5 +1,7 @@
 use glorp::{
-    game::runtime::apply_usage_poll,
+    game::runtime::{
+        apply_unapplied_usage, apply_usage_poll, stage_usage_poll_deltas, DISCONTINUITY_GUARD_RATIO,
+    },
     storage::state::PetState,
     storage::usage_store::{ProviderCursorUpdate, UsageStore},
     usage::{
@@ -683,4 +685,142 @@ fn mixed_bucket_rebound_feeds_total_only_without_token_shape() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "mixed_bucket_correction"));
+}
+
+#[test]
+fn total_only_aggregate_uses_stageable_row_when_first_cursor_is_current() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    state.calibration.daily_effective_tokens = 1_000_000.0;
+    let seed = datetime!(2026 - 07 - 06 20:00 UTC);
+    let now = datetime!(2026 - 07 - 06 20:10 UTC);
+
+    store
+        .seed_exact_row_highwater_for_test(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            date!(2026 - 07 - 06),
+            Some("unchanged-model"),
+            RawTokenTotals {
+                uncached_input: 100,
+                output: 0,
+                cache_creation: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            seed,
+        )
+        .unwrap();
+    store
+        .seed_exact_row_highwater_for_test(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            date!(2026 - 07 - 06),
+            Some("mixed-model"),
+            RawTokenTotals {
+                uncached_input: 50,
+                output: 0,
+                cache_creation: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            seed,
+        )
+        .unwrap();
+    store
+        .seed_source_day_highwater_for_test(
+            TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            date!(2026 - 07 - 06),
+            150.0,
+            seed,
+        )
+        .unwrap();
+
+    let unchanged = row(
+        date!(2026 - 07 - 06),
+        "unchanged-model",
+        100,
+        RawTokenTotals {
+            uncached_input: 100,
+            output: 0,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        },
+    );
+    store
+        .advance_cursors(vec![unchanged.cursor_update.clone()], seed)
+        .unwrap();
+    let mixed = row(
+        date!(2026 - 07 - 06),
+        "mixed-model",
+        70,
+        RawTokenTotals {
+            uncached_input: 40,
+            output: 30,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        },
+    );
+
+    let plan = store
+        .feed_deltas_for_snapshot_rows(&[unchanged, mixed], now)
+        .unwrap();
+    assert_eq!(plan.deltas.len(), 1);
+    assert_eq!(plan.deltas[0].total_tokens, 20.0);
+    assert_eq!(plan.deltas[0].confidence, "corrected-total-only");
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 06),
+            )
+            .unwrap(),
+        150.0
+    );
+
+    let total_tokens = plan
+        .deltas
+        .iter()
+        .map(|delta| delta.total_tokens)
+        .sum::<f64>();
+    let poll = UsagePollResult {
+        deltas: plan.deltas,
+        diagnostics: Vec::new(),
+        total_effective_tokens: total_tokens,
+        total_tokens,
+    };
+    let staged_ids = stage_usage_poll_deltas(
+        &mut store,
+        &poll,
+        &mut state,
+        DISCONTINUITY_GUARD_RATIO,
+        now,
+    )
+    .unwrap();
+    assert!(
+        !staged_ids.is_empty(),
+        "aggregate delta should not be skipped by the first row's current cursor"
+    );
+
+    let update = apply_unapplied_usage(&mut state, &mut store, now, false).unwrap();
+    assert_eq!(update.recent_effective_tokens, 20.0);
+    store
+        .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)
+        .unwrap();
+    assert_eq!(state.lifetime_effective_tokens, 20.0);
+    assert_eq!(
+        store
+            .source_day_highwater_for_test(
+                TOKENMAXXING_TOTAL_V1,
+                "claude-code",
+                date!(2026 - 07 - 06),
+            )
+            .unwrap(),
+        170.0
+    );
 }
