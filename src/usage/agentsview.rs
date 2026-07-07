@@ -325,7 +325,7 @@ impl AgentsviewCommandProvider {
             )?);
         }
 
-        if rows.is_empty() && blocking_parse_failure {
+        if blocking_parse_failure {
             let diagnostic = diagnostic(
                 agent,
                 "malformed_required_fields",

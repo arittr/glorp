@@ -64,6 +64,23 @@ fn unified_provider(name: &str) -> CcusageCommandProvider {
     )
 }
 
+fn provider_with_unified_at(
+    unified: Option<&str>,
+    claude: Option<&str>,
+    codex: Option<&str>,
+    now: OffsetDateTime,
+) -> CcusageCommandProvider {
+    CcusageCommandProvider::new_with_now_for_test(
+        HelperPaths {
+            unified: unified.map(fixture),
+            claude: claude.map(fixture),
+            codex: codex.map(fixture),
+            node: None,
+        },
+        now,
+    )
+}
+
 fn agentsview_provider(name: &str) -> glorp::usage::agentsview::AgentsviewCommandProvider {
     glorp::usage::agentsview::AgentsviewCommandProvider::new_with_now_for_test(
         glorp::usage::agentsview::AgentsviewPaths {
@@ -755,6 +772,42 @@ fn unified_aggregate_model_breakdowns_without_source_do_not_feed() {
 }
 
 #[test]
+fn unusable_unified_rows_fall_back_without_writing_zero_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_with_unified_at(
+        Some("ccusage-unified-aggregate-requested.mjs"),
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert!(result.total_tokens > 0.0);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.provider_surface == "unified"
+            && diagnostic.code == "aggregate_unidentified_source_ignored"
+    }));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 05 - 09))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Current
+    );
+    assert!(snapshot.value.unwrap().total_tokens > 0.0);
+}
+
+#[test]
 fn tokenmaxxing_comparison_fixture_preserves_captured_public_totals() {
     let comparison: Value = serde_json::from_str(
         &std::fs::read_to_string(fixture_json("agentsview-drew-2026-06-18-tokenmaxxing.json"))
@@ -841,6 +894,107 @@ fn snapshot_only_refresh_does_not_seed_cursor_before_feed_poll() {
     let result = provider.poll(&mut store).unwrap();
 
     assert!(result.total_tokens > 0.0);
+}
+
+#[test]
+fn snapshot_only_refresh_does_not_migrate_legacy_cursor_before_feed_poll() {
+    #[derive(Serialize)]
+    struct LegacyKey {
+        provider_surface: String,
+        command: String,
+        parser_version: String,
+        period_start: String,
+        model: Option<String>,
+    }
+
+    fn legacy_key_json(period_start: &str, model: Option<&str>) -> String {
+        serde_json::to_string(&LegacyKey {
+            provider_surface: "claude-code".to_string(),
+            command: "ccusage".to_string(),
+            parser_version: "ccusage 18.0.11".to_string(),
+            period_start: period_start.to_string(),
+            model: model.map(str::to_string),
+        })
+        .unwrap()
+    }
+
+    fn new_key_json(period_start: &str, model: Option<&str>) -> String {
+        serde_json::to_string(&ProviderCursorKey {
+            provider_surface: "claude-code".to_string(),
+            token_contract: Some(glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1.to_string()),
+            command: "ccusage".to_string(),
+            source_surface: "daily".to_string(),
+            period_start: period_start.to_string(),
+            model: model.map(str::to_string),
+            raw_source_id: None,
+        })
+        .unwrap()
+    }
+
+    fn totals_json(
+        uncached_input: u64,
+        output: u64,
+        cache_creation: u64,
+        cache_read: u64,
+    ) -> String {
+        serde_json::to_string(&RawTokenTotals {
+            uncached_input,
+            output,
+            cache_creation,
+            cache_read,
+            reasoning_output: 0,
+        })
+        .unwrap()
+    }
+
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let seeded = [
+        (
+            "2026-05-09",
+            Some("claude-opus-4"),
+            totals_json(1000, 1500, 300, 50000),
+        ),
+        (
+            "2026-05-09",
+            Some("claude-sonnet-4"),
+            totals_json(500, 1000, 200, 30000),
+        ),
+    ];
+    for (period_start, model, value) in &seeded {
+        store
+            .set_provider_cursor(
+                "claude-code",
+                &legacy_key_json(period_start, *model),
+                value,
+                "ccusage 18.0.11",
+                "ccusage 18.0.11",
+            )
+            .unwrap();
+    }
+    let provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
+
+    provider.refresh_snapshots_only(&mut store).unwrap();
+
+    for (period_start, model, _) in &seeded {
+        let migrated = store
+            .provider_cursor("claude-code", &new_key_json(period_start, *model))
+            .unwrap();
+        assert_eq!(migrated, None);
+    }
+
+    let result = provider.poll(&mut store).unwrap();
+    assert_eq!(result.total_effective_tokens, 0.0);
+    for (period_start, model, value) in &seeded {
+        let migrated = store
+            .provider_cursor("claude-code", &new_key_json(period_start, *model))
+            .unwrap();
+        assert_eq!(migrated.as_deref(), Some(value.as_str()));
+    }
 }
 
 #[test]
@@ -932,6 +1086,41 @@ fn malformed_requested_row_blocks_snapshot_and_does_not_feed_valid_looking_rows(
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+}
+
+#[test]
+fn mixed_malformed_and_valid_requested_rows_block_without_feeding() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let provider = provider_at(
+        Some("ccusage-mixed-malformed-row.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "malformed_required_fields"));
+    let snapshot = store
+        .snapshot_totals_for_provider_day(date!(2026 - 07 - 06))
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        glorp::usage::snapshot::SnapshotState::Blocked
+    );
 }
 
 #[test]

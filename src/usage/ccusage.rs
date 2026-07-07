@@ -350,11 +350,13 @@ impl CcusageCommandProvider {
                 record.clone(),
                 provider_day,
             )?;
-            migrate_legacy_cursor_for_record(store, &row, &record, command_name, &version)?;
+            if feed {
+                migrate_legacy_cursor_for_record(store, &row, &record, command_name, &version)?;
+            }
             rows.push(row);
         }
 
-        if rows.is_empty() && blocking_parse_failure {
+        if blocking_parse_failure {
             let diagnostic = diagnostic(
                 provider_surface,
                 "malformed_required_fields",
@@ -369,6 +371,14 @@ impl CcusageCommandProvider {
                 observed_at,
             )?;
             diagnostics.push(diagnostic);
+            return Ok(HelperSnapshotFlow {
+                result: empty_poll(diagnostics),
+                completed_snapshot: false,
+            });
+        }
+
+        if unusable_unified_response(provider_surface, &rows, &diagnostics) {
+            record_snapshot_failures(store, &scope, provider_surface, &diagnostics, observed_at)?;
             return Ok(HelperSnapshotFlow {
                 result: empty_poll(diagnostics),
                 completed_snapshot: false,
@@ -979,6 +989,21 @@ fn blocks_requested_snapshot(code: &str) -> bool {
         code,
         "missing_token_fields" | "malformed_token_field" | "ambiguous_token_shape"
     )
+}
+
+fn unusable_unified_response(
+    provider_surface: &str,
+    rows: &[ProviderSnapshotRowInput],
+    diagnostics: &[ProviderDiagnostic],
+) -> bool {
+    provider_surface == "unified"
+        && rows.is_empty()
+        && diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_str(),
+                "aggregate_all_source_ignored" | "aggregate_unidentified_source_ignored"
+            )
+        })
 }
 
 fn cursor_key(key: &ProviderCursorKey) -> Result<String> {
