@@ -1,0 +1,34 @@
+{
+  "daily": [
+    {
+      "date": "2026-05-09",
+      "inputTokens": 1700,
+      "outputTokens": 3100,
+      "cacheCreationTokens": 700,
+      "cacheReadTokens": 90000,
+      "totalTokens": 95500,
+      "totalCost": 2.95,
+      "modelsUsed": ["claude-opus-4", "claude-sonnet-4"],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4",
+          "inputTokens": 1200,
+          "outputTokens": 2100,
+          "cacheCreationTokens": 500,
+          "cacheReadTokens": 60000,
+          "totalTokens": 63800,
+          "cost": 1.90
+        },
+        {
+          "modelName": "claude-sonnet-4",
+          "inputTokens": 500,
+          "outputTokens": 1000,
+          "cacheCreationTokens": 200,
+          "cacheReadTokens": 30000,
+          "totalTokens": 31700,
+          "cost": 1.05
+        }
+      ]
+    }
+  ]
+}

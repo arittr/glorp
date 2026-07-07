@@ -152,11 +152,16 @@ impl CcusageCommandProvider {
     }
 
     pub fn from_environment() -> Self {
-        Self::new(HelperDiscovery::discover().into())
+        let paths = HelperDiscovery::discover().into();
+        if let Some(now) = usage_now_from_environment_for_test() {
+            Self::new_with_clock(paths, move || now)
+        } else {
+            Self::new(paths)
+        }
     }
 
     pub fn from_environment_with_weights(weights: EffectiveTokenWeights) -> Self {
-        Self::new(HelperDiscovery::discover().into()).with_weights(weights)
+        Self::from_environment().with_weights(weights)
     }
 
     fn invoke_helper(
@@ -1061,6 +1066,11 @@ fn find_on_path(command: &str) -> Option<PathBuf> {
 
 pub(crate) fn requested_provider_days_for_poll(now: OffsetDateTime) -> Vec<Date> {
     vec![tokenmaxxing_provider_day(now)]
+}
+
+fn usage_now_from_environment_for_test() -> Option<OffsetDateTime> {
+    let raw = std::env::var("GLORP_USAGE_NOW_FOR_TEST").ok()?;
+    OffsetDateTime::parse(&raw, &time::format_description::well_known::Rfc3339).ok()
 }
 
 fn snapshot_scope(

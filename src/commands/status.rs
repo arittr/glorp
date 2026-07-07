@@ -22,7 +22,7 @@ pub fn run() -> Result<()> {
 
     let mut provider_line = "provider: blocked".to_string();
     let mut provider_health_line = "provider health: blocked".to_string();
-    let mut usage_confidence = "estimated".to_string();
+    let mut usage_confidence = "snapshot pending".to_string();
     let mut recent_effective = 0.0;
     let mut today_effective = 0.0;
     let mut today_sources: Vec<(String, f64)> = Vec::new();
@@ -70,15 +70,6 @@ pub fn run() -> Result<()> {
                         .mark_events_applied_and_advance_cursors(&update.applied_event_ids, now)?;
                     recent_effective = update.recent_effective_tokens;
                 }
-                let status_now = OffsetDateTime::now_utc();
-                let (today_start, today_end) =
-                    crate::usage::day_axis::tokenmaxxing_today_window(status_now);
-                today_effective = usage_store
-                    .canonical_total_tokens_between(today_start, today_end)
-                    .unwrap_or(0.0);
-                today_sources = usage_store
-                    .canonical_total_tokens_by_source_between(today_start, today_end)
-                    .unwrap_or_default();
                 if let Some(diagnostic) = result.diagnostics.first() {
                     provider_line = format!("provider: blocked ({})", diagnostic.code);
                     provider_health_line =
@@ -87,7 +78,6 @@ pub fn run() -> Result<()> {
                 } else {
                     provider_line = "provider: local-log-derived".into();
                     provider_health_line = "provider health: ok".into();
-                    usage_confidence = "local-log-derived".into();
                 }
                 // A refused poll or first-contact seeding persists its
                 // diagnostic in the store (the guard writes it during staging);
@@ -115,6 +105,26 @@ pub fn run() -> Result<()> {
                 diagnostic_line = Some(format!("diagnostic: {err}"));
             }
         }
+
+        let status_now = OffsetDateTime::now_utc();
+        let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(status_now);
+        let snapshot = usage_store.snapshot_totals_for_provider_day(provider_day)?;
+        today_effective = snapshot
+            .value
+            .as_ref()
+            .map(|totals| totals.total_tokens)
+            .unwrap_or(0.0);
+        usage_confidence = match snapshot.state {
+            crate::usage::snapshot::SnapshotState::Current => "provider snapshot".into(),
+            crate::usage::snapshot::SnapshotState::Stale => "stale provider snapshot".into(),
+            crate::usage::snapshot::SnapshotState::Missing => "snapshot pending".into(),
+            crate::usage::snapshot::SnapshotState::Blocked => "snapshot blocked".into(),
+        };
+        let (today_start, today_end) =
+            crate::usage::day_axis::tokenmaxxing_today_window(status_now);
+        today_sources = usage_store
+            .canonical_total_tokens_by_source_between(today_start, today_end)
+            .unwrap_or_default();
     }
 
     println!(
@@ -128,9 +138,15 @@ pub fn run() -> Result<()> {
         state.vitals.fed, state.vitals.happiness, state.vitals.energy
     );
     println!(
-        "tokens ({usage_confidence}): today {:.0} recent {:.0} lifetime {:.0}",
-        display_tokens(today_effective),
-        display_tokens(recent_effective),
+        "provider today ({usage_confidence}): {:.0}",
+        display_tokens(today_effective)
+    );
+    println!(
+        "accepted recent food: {:.0}",
+        display_tokens(recent_effective)
+    );
+    println!(
+        "pet lifetime food: {:.0}",
         display_tokens(state.lifetime_effective_tokens)
     );
     if !today_sources.is_empty() {

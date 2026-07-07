@@ -86,7 +86,7 @@ impl fmt::Debug for AgentsviewCommandProvider {
 
 impl AgentsviewCommandProvider {
     pub fn new(paths: AgentsviewPaths) -> Self {
-        Self::new_with_clock(paths, OffsetDateTime::now_utc)
+        Self::new_with_clock(paths, crate::time::usage_now_utc)
     }
 
     fn new_with_clock<F>(paths: AgentsviewPaths, clock: F) -> Self

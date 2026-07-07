@@ -4,9 +4,8 @@ use crate::{
     storage::{state::StateStore, usage_store::UsageStore},
     usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
 };
-use time::OffsetDateTime;
 
-pub fn run() -> Result<()> {
+pub fn run(refresh_usage_snapshots: bool) -> Result<()> {
     let paths = AppPaths::resolve()?;
     paths.ensure()?;
     println!("config_dir: {}", paths.config_dir.display());
@@ -21,9 +20,13 @@ pub fn run() -> Result<()> {
 
     let mut usage_store = UsageStore::open(&paths.usage_db)?;
     let provider = AgentsviewCommandProvider::from_environment();
-    let result = provider.poll(&mut usage_store)?;
+    let diagnostics = if refresh_usage_snapshots {
+        refresh_usage_snapshots_for_doctor(&mut usage_store, &provider)?
+    } else {
+        provider.poll(&mut usage_store)?.diagnostics
+    };
     println!("provider: agentsview");
-    if result.diagnostics.is_empty() {
+    if diagnostics.is_empty() {
         println!("helpers: found");
         println!("provider command health: ok");
         println!("required usage helper: found");
@@ -33,14 +36,13 @@ pub fn run() -> Result<()> {
     } else {
         println!("helpers: not found or blocked");
         println!("required usage helper: blocked");
-        for diagnostic in &result.diagnostics {
+        for diagnostic in &diagnostics {
             println!(
                 "{}: {} - {}",
                 diagnostic.provider_surface, diagnostic.code, diagnostic.message
             );
         }
-        if result
-            .diagnostics
+        if diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "missing_helper")
         {
@@ -59,12 +61,37 @@ pub fn run() -> Result<()> {
         );
     }
 
-    let now = OffsetDateTime::now_utc();
+    let now = crate::time::usage_now_utc();
+    let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(now);
+    if let Some(source_totals) = usage_store
+        .snapshot_totals_by_source_for_provider_day(provider_day)?
+        .value
+    {
+        for source in source_totals.sources {
+            println!(
+                "provider source: {} today={:.0}",
+                source.accounting_source,
+                source.total_tokens.max(0.0)
+            );
+        }
+    }
+
     let recent_sources = usage_store
         .canonical_total_tokens_by_source_between(now - time::Duration::hours(24), now)
         .unwrap_or_default();
     for (source, total) in recent_sources {
         println!("source: {} recent_24h={:.0}", source, total.max(0.0));
+    }
+
+    for correction in usage_store.recent_provider_corrections(5)? {
+        println!(
+            "recent correction: {} {} previous={:.0} current={:.0} decreased={:.0}",
+            correction.accounting_source,
+            correction.provider_day,
+            correction.previous_total_tokens.max(0.0),
+            correction.current_total_tokens.max(0.0),
+            correction.decrease_tokens.max(0.0)
+        );
     }
 
     for diagnostic in usage_store.recent_diagnostics(5)? {
@@ -74,4 +101,41 @@ pub fn run() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn refresh_usage_snapshots_for_doctor(
+    usage_store: &mut UsageStore,
+    provider: &AgentsviewCommandProvider,
+) -> Result<Vec<crate::usage::provider::ProviderDiagnostic>> {
+    let now = crate::time::usage_now_utc();
+    let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(now);
+    let before = usage_store.snapshot_totals_for_provider_day(provider_day)?;
+    let diagnostics = provider.refresh_snapshots_only(usage_store)?;
+    let after = usage_store.snapshot_totals_for_provider_day(provider_day)?;
+
+    println!("refresh usage snapshots: requested {provider_day}");
+    println!("before provider today: {}", format_snapshot_total(&before));
+    println!("after provider today: {}", format_snapshot_total(&after));
+    if diagnostics.is_empty() {
+        println!("blocked provider scopes: none");
+    } else {
+        for diagnostic in &diagnostics {
+            println!(
+                "blocked provider scope: {} {}",
+                diagnostic.provider_surface, diagnostic.code
+            );
+        }
+    }
+    println!("pet state unchanged");
+    Ok(diagnostics)
+}
+
+fn format_snapshot_total(
+    snapshot: &crate::usage::snapshot::SnapshotResult<crate::usage::snapshot::DayTotals>,
+) -> String {
+    snapshot
+        .value
+        .as_ref()
+        .map(|totals| format!("{:.0}", totals.total_tokens))
+        .unwrap_or_else(|| format!("{:?}", snapshot.state))
 }

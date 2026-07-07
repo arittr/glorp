@@ -10,6 +10,7 @@ const AGENTSVIEW_NEXT: &str = "tests/fixtures/helpers/agentsview-next.mjs";
 const AGENTSVIEW_FAILS: &str = "tests/fixtures/helpers/agentsview-fails.mjs";
 const AGENTSVIEW_INVALID_JSON: &str = "tests/fixtures/helpers/agentsview-invalid-json.mjs";
 const AGENTSVIEW_SECRET_STDERR: &str = "tests/fixtures/helpers/agentsview-secret-stderr.mjs";
+const USAGE_NOW_AGENTSVIEW_FIXTURE: &str = "2026-06-18T20:00:00Z";
 
 #[test]
 fn status_is_pipe_friendly_when_pet_exists() {
@@ -18,6 +19,7 @@ fn status_is_pipe_friendly_when_pet_exists() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
         .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
         .assert()
         .success();
@@ -26,16 +28,70 @@ fn status_is_pipe_friendly_when_pet_exists() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
         .arg("status")
         .assert()
         .success()
         .stdout(predicate::str::contains("mochi"))
         .stdout(predicate::str::contains("stage progress:"))
-        .stdout(predicate::str::contains("tokens"))
+        .stdout(predicate::str::contains("provider today"))
+        .stdout(predicate::str::contains("accepted recent food"))
+        .stdout(predicate::str::contains("pet lifetime food"))
         .stdout(predicate::str::contains("effective tokens").not())
         .stdout(predicate::str::contains("local-log-derived"))
         .stdout(predicate::str::contains("provider health:"))
         .stdout(predicate::str::contains("billing").not());
+}
+
+#[test]
+fn status_labels_provider_today_recent_food_and_pet_lifetime_separately() {
+    let dir = tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
+        .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
+        .assert()
+        .success();
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider today"))
+        .stdout(predicate::str::contains("accepted recent food"))
+        .stdout(predicate::str::contains("pet lifetime food"));
+}
+
+#[test]
+fn doctor_refresh_usage_snapshots_reports_before_after_without_feeding_pet() {
+    let dir = tempdir().unwrap();
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
+        .args(["init", "--seed", "mochi-7f3a", "--name", "mochi"])
+        .assert()
+        .success();
+
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .env("GLORP_CONFIG_DIR", dir.path())
+        .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
+        .args(["doctor", "--refresh-usage-snapshots"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("refresh usage snapshots"))
+        .stdout(predicate::str::contains("before provider today"))
+        .stdout(predicate::str::contains("after provider today"))
+        .stdout(predicate::str::contains("pet state unchanged"));
 }
 
 #[test]
@@ -64,6 +120,7 @@ fn doctor_reports_agentsview_provider_as_required_default() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
         .arg("doctor")
         .assert()
         .success()
@@ -116,6 +173,7 @@ fn doctor_reports_helper_versions_when_available() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
         .arg("doctor")
         .assert()
         .success()
@@ -236,8 +294,10 @@ fn status_clamps_zero_usage_display() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "tokens (estimated): today 0 recent 0 lifetime 0",
+            "provider today (snapshot pending): 0",
         ))
+        .stdout(predicate::str::contains("accepted recent food: 0"))
+        .stdout(predicate::str::contains("pet lifetime food: 0"))
         .stdout(predicate::str::contains("effective tokens").not())
         .stdout(predicate::str::contains("provider health: blocked"))
         .stdout(predicate::str::contains("-0").not());
@@ -284,8 +344,11 @@ fn status_uses_tokenmaxxing_day_axis_under_non_los_angeles_tz() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "tokens (estimated): today 123456 recent 0 lifetime 0",
+            "provider today (snapshot blocked): 0",
         ))
+        .stdout(predicate::str::contains("accepted recent food: 0"))
+        .stdout(predicate::str::contains("pet lifetime food: 0"))
+        .stdout(predicate::str::contains("codex: 123456"))
         .stdout(predicate::str::contains("effective tokens").not());
 }
 
@@ -303,22 +366,28 @@ fn status_persists_real_usage_delta_into_pet_state() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
         .arg("status")
         .assert()
         .success()
         .stdout(predicate::str::contains("provider: local-log-derived"))
-        .stdout(predicate::str::contains("tokens"))
+        .stdout(predicate::str::contains("provider today"))
+        .stdout(predicate::str::contains("accepted recent food"))
+        .stdout(predicate::str::contains("pet lifetime food"))
         .stdout(predicate::str::contains("effective tokens").not());
 
     Command::cargo_bin("glorp")
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_NEXT)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
         .arg("status")
         .assert()
         .success()
         .stdout(predicate::str::contains("provider: local-log-derived"))
-        .stdout(predicate::str::contains("tokens"))
+        .stdout(predicate::str::contains("provider today"))
+        .stdout(predicate::str::contains("accepted recent food"))
+        .stdout(predicate::str::contains("pet lifetime food"))
         .stdout(predicate::str::contains("effective tokens").not());
 
     let state: PetState =
@@ -382,6 +451,7 @@ fn status_surfaces_first_contact_without_claiming_blocked() {
         .unwrap()
         .env("GLORP_CONFIG_DIR", dir.path())
         .env("GLORP_AGENTSVIEW_BIN", AGENTSVIEW_OK)
+        .env("GLORP_USAGE_NOW_FOR_TEST", USAGE_NOW_AGENTSVIEW_FIXTURE)
         .arg("status")
         .assert()
         .success()

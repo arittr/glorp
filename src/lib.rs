@@ -36,7 +36,9 @@ pub fn run() -> Result<()> {
         Command::Status => commands::status::run()?,
         Command::Rename { name } => commands::rename::run(name)?,
         Command::Reset { yes } => commands::reset::run(yes)?,
-        Command::Doctor => commands::doctor::run()?,
+        Command::Doctor { refresh_usage_snapshots } => {
+            commands::doctor::run(refresh_usage_snapshots)?
+        }
         Command::Companion => commands::companion::run()?,
         Command::CompanionApp => commands::companion_app::run()?,
         #[cfg(feature = "dev-preview")]

@@ -53,7 +53,10 @@ pub enum Command {
         yes: bool,
     },
     /// Inspect helper availability, config paths, parser health, and diagnostics.
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        refresh_usage_snapshots: bool,
+    },
     /// Show command help.
     Help,
     #[cfg(feature = "dev-preview")]
