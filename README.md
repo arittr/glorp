@@ -23,9 +23,9 @@ glorp init
 glorp watch
 ```
 
-The npm package bundles the native binary and usage helpers for your platform.
-Glorp's default provider is bundled `ccusage`, so a normal npm install is
-enough to hatch and watch the pet. Glorp counts cached input fully for
+The npm package bundles the native binary for your platform. Glorp requires
+AgentsView for live usage accounting; make sure `agentsview` is on `PATH`, or
+set `GLORP_AGENTSVIEW_BIN`. Glorp counts cached input fully for
 Tokenmaxxing-style token totals.
 
 ### From source
@@ -35,8 +35,8 @@ cargo install --path .
 glorp doctor
 ```
 
-When installing from source, make sure `ccusage` is on `PATH` or set
-`GLORP_CCUSAGE_BIN`. `glorp doctor` will tell you what's missing.
+When installing from source, make sure `agentsview` is on `PATH` or set
+`GLORP_AGENTSVIEW_BIN`. `glorp doctor` will tell you what's missing.
 
 ### Development tasks
 
@@ -91,8 +91,11 @@ bundle also writes `manifest.json`, `review.md`, local assets, and
 
 ## How it works
 
-Glorp polls bundled `ccusage` every ten seconds, diffs running totals against a
-saved cursor, and turns positive deltas into pet food.
+Glorp polls AgentsView every ten seconds for the current Tokenmaxxing day,
+diffs running totals against a saved cursor, and turns positive deltas into pet
+food. Calibration and first poll after a Tokenmaxxing-day gap use a full-history
+snapshot so missed usage is caught without putting historical scans in the hot
+loop.
 Each delta is smeared across 6–12 ten-minute buckets so a heavy hour of coding
 doesn't crush a single tick.
 
@@ -123,9 +126,7 @@ cache_read_weight = 0.03
 | Var | Purpose |
 |---|---|
 | `GLORP_CONFIG_DIR` | Override `~/.config/glorp/` (handy for sandboxing). |
-| `GLORP_CCUSAGE_BIN` | Pin a specific `ccusage` binary. |
-| `GLORP_CCUSAGE_CODEX_BIN` | Pin a specific `ccusage-codex` binary. |
-| `GLORP_AGENTSVIEW_BIN` | Pin an optional `agentsview` binary for Tokenmaxxing parity checks. |
+| `GLORP_AGENTSVIEW_BIN` | Pin the required `agentsview` binary. |
 | `GLORP_NODE_BIN` | Pin a specific `node` binary for JS helpers. |
 
 ### Cost display

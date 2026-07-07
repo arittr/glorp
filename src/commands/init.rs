@@ -7,7 +7,7 @@ use crate::{
         state::{HabitatState, NarrativeEvent, PetIdentity, PetState, StateStore, Vitals},
         usage_store::UsageStore,
     },
-    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
+    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
 };
 use std::io::{self, IsTerminal, Write};
 use time::OffsetDateTime;
@@ -46,7 +46,7 @@ pub fn run(seed: Option<String>, name: Option<String>, yes: bool) -> Result<()> 
     };
     if let Some(mut usage_store) = usage_store {
         if let Ok(snapshot) =
-            CcusageCommandProvider::from_environment().snapshot_for_calibration(&mut usage_store)
+            AgentsviewCommandProvider::from_environment().snapshot_for_calibration(&mut usage_store)
         {
             let now = OffsetDateTime::now_utc();
             // Advance cursors unconditionally to prevent a bolus on the next poll.

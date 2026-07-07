@@ -2,7 +2,7 @@ use crate::{
     error::Result,
     paths::AppPaths,
     storage::{state::StateStore, usage_store::UsageStore},
-    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
+    usage::{agentsview::AgentsviewCommandProvider, provider::UsageProvider},
 };
 use time::OffsetDateTime;
 
@@ -20,16 +20,19 @@ pub fn run() -> Result<()> {
     }
 
     let mut usage_store = UsageStore::open(&paths.usage_db)?;
-    let provider = CcusageCommandProvider::from_environment();
+    let provider = AgentsviewCommandProvider::from_environment();
     let result = provider.poll(&mut usage_store)?;
-    println!("provider: ccusage");
+    println!("provider: agentsview");
     if result.diagnostics.is_empty() {
         println!("helpers: found");
         println!("provider command health: ok");
-        println!("bundled usage helpers: yes");
+        println!("required usage helper: found");
+        if let Some(version) = provider.discovered_version() {
+            println!("helper version: agentsview provider={version} parser={version}");
+        }
     } else {
         println!("helpers: not found or blocked");
-        println!("bundled usage helpers: blocked");
+        println!("required usage helper: blocked");
         for diagnostic in &result.diagnostics {
             println!(
                 "{}: {} - {}",
@@ -42,7 +45,9 @@ pub fn run() -> Result<()> {
             .any(|diagnostic| diagnostic.code == "missing_helper")
         {
             println!("Default provider blocked.");
-            println!("Install with npm so ccusage is bundled, or set GLORP_CCUSAGE_BIN.");
+            println!(
+                "Install agentsview and make it available on PATH, or set GLORP_AGENTSVIEW_BIN."
+            );
         }
     }
 

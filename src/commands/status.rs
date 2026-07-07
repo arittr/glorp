@@ -4,7 +4,10 @@ use crate::{
     game::runtime::{apply_unapplied_usage, stage_usage_poll_deltas},
     paths::AppPaths,
     storage::{day_axis::LocalDayMapper, state::StateStore, usage_store::UsageStore},
-    usage::{ccusage::CcusageCommandProvider, provider::UsageProvider},
+    usage::{
+        agentsview::{needs_full_history_poll, AgentsviewCommandProvider},
+        provider::UsageProvider,
+    },
 };
 use time::OffsetDateTime;
 
@@ -26,7 +29,7 @@ pub fn run() -> Result<()> {
     let mut diagnostic_line = None;
     if let Ok(mut usage_store) = UsageStore::open(&paths.usage_db) {
         let config = crate::config::AppConfig::load_or_default(&paths.config_file)?;
-        let provider = CcusageCommandProvider::from_environment();
+        let provider = AgentsviewCommandProvider::from_environment();
         let cutover = crate::usage::cutover::ensure_tokenmaxxing_contract_active(
             &mut state,
             &mut usage_store,
@@ -36,7 +39,14 @@ pub fn run() -> Result<()> {
         if cutover.activated {
             store.save(&state)?;
         }
-        match provider.poll(&mut usage_store) {
+        let poll_result = if !cutover.activated
+            && needs_full_history_poll(state.last_usage_poll_at, OffsetDateTime::now_utc())
+        {
+            provider.poll_full_history(&mut usage_store)
+        } else {
+            provider.poll(&mut usage_store)
+        };
+        match poll_result {
             Ok(result) => {
                 if !result.deltas.is_empty() || result.diagnostics.is_empty() {
                     let now = OffsetDateTime::now_utc();

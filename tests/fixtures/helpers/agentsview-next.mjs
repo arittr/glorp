@@ -12,6 +12,18 @@ if (args.includes("--version")) {
   process.exit(0);
 }
 
+if (!args.includes("--since")) {
+  console.error("missing since");
+  process.exit(2);
+}
+const since = args[args.indexOf("--since") + 1];
+if (since !== "1970-01-01") {
+  if (!args.includes("--until") || args[args.indexOf("--until") + 1] !== since) {
+    console.error("missing current-day until");
+    process.exit(2);
+  }
+}
+
 const agent = args[args.indexOf("--agent") + 1];
 const file = agent === "claude" ? "agentsview-claude-daily.json" : "agentsview-codex-daily.json";
 const payload = JSON.parse(fs.readFileSync(path.join(fixtures, file), "utf8"));

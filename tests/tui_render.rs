@@ -364,7 +364,8 @@ fn wide_layout_uses_tokenpet_metadata_today_grid_and_log_rhythm() {
         .unwrap();
     let text = buffer_text(terminal.backend().buffer());
     assert!(text.contains("today"));
-    assert!(text.contains("last 10m"));
+    assert!(text.contains("/10m"));
+    assert!(text.contains("/hr"));
     assert!(text.contains("progress"));
     assert!(text.contains("feed"));
     assert!(text.contains("─"));

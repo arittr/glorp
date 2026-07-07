@@ -119,11 +119,16 @@ fn snapshot_tables_exist_without_raw_transcript_columns() {
             "raw_response",
             "file_path",
             "project_path",
-            "raw_source_id",
         ] {
             assert!(
                 !names.iter().any(|name| name.contains(forbidden)),
                 "{table} contains forbidden column {forbidden}: {names:?}"
+            );
+        }
+        if table == "provider_snapshot_rows" {
+            assert!(
+                names.iter().any(|name| name == "raw_source_id_hash"),
+                "sanitized raw source identity hash column must exist: {names:?}"
             );
         }
     }
@@ -263,7 +268,6 @@ pub mod agentsview;
 pub mod ccusage;
 pub mod cutover;
 pub mod day_axis;
-pub mod feed_high_water;
 pub mod helper_locator;
 pub mod identity;
 pub mod normalize;
@@ -908,6 +912,7 @@ git commit -m "feat: store provider usage snapshots"
 - Modify: `src/usage/mod.rs`
 - Modify: `src/storage/usage_store.rs`
 - Modify: `src/game/runtime.rs`
+- Modify: `src/usage/cutover.rs`
 - Create: `tests/feed_high_water.rs`
 - Modify: `tests/runtime_integration.rs`
 
@@ -918,6 +923,7 @@ git commit -m "feat: store provider usage snapshots"
 - Produces: `UsageStore::feed_deltas_for_snapshot_rows(rows, now) -> Result<FeedHighWaterPlan>`
 - Produces: `FeedHighWaterPlan { deltas, diagnostics, cursor_seeds }`
 - Updates runtime staging so source first contact is source-level and provider-day high-waters start at zero for known sources.
+- Updates Tokenmaxxing collector cutover so calibration cursor updates seed source contacts and source-day high-waters before the contract is activated.
 
 - [ ] **Step 1: Write failing feed-high-water tests**
 
@@ -1312,7 +1318,7 @@ pub fn feed_deltas_for_snapshot_rows(
 
 Implement the private helpers named above. Keep the source-day aggregate high-water as the guard. Exact row deltas are allowed only when every feeding row has complete raw buckets, row confidence is `exact`, raw buckets do not decrease below exact bucket high-water, and exact candidate sum equals aggregate excess.
 
-- [ ] **Step 6: Update runtime first-contact handling**
+- [ ] **Step 6: Update runtime first-contact handling and cutover seeding**
 
 Modify `handle_first_contact_and_discontinuity` in `src/game/runtime.rs` so it uses `UsageStore::source_has_feed_contact` before treating a missing cursor as first contact. Existing `provider_cursor(None)` for a known source and a new provider day must not enter `first_contact_deltas`.
 
@@ -1343,6 +1349,91 @@ fn known_source_new_provider_day_is_not_seeded_as_first_contact() {
 }
 ```
 
+Add to `src/storage/usage_store.rs`:
+
+```rust
+pub fn seed_cutover_highwaters_from_cursor_updates(
+    &mut self,
+    token_contract: &str,
+    cursor_updates: &[ProviderCursorUpdate],
+    now: OffsetDateTime,
+) -> crate::error::Result<()> {
+    for update in cursor_updates {
+        let key: crate::usage::provider::ProviderCursorKey = serde_json::from_str(&update.cursor_key)?;
+        let buckets: RawTokenTotals = serde_json::from_str(&update.cursor_value)?;
+        let provider_day = provider_day_from_cursor_period(&key.period_start)?;
+        self.seed_source_day_highwater_for_cutover(
+            token_contract,
+            &update.provider_surface,
+            provider_day,
+            buckets.total_tokens(),
+            now,
+        )?;
+    }
+    Ok(())
+}
+```
+
+Implement `provider_day_from_cursor_period` so it accepts both RFC3339 timestamps and plain `YYYY-MM-DD` provider-day strings:
+
+```rust
+fn provider_day_from_cursor_period(period: &str) -> crate::error::Result<Date> {
+    if let Ok(timestamp) = period.parse::<OffsetDateTime>() {
+        return Ok(crate::usage::day_axis::tokenmaxxing_provider_day(timestamp));
+    }
+    let (day, _) = crate::usage::day_axis::parse_agentsview_period_date(period)?;
+    Ok(day)
+}
+```
+
+Implement `seed_source_day_highwater_for_cutover` with the same uniqueness keys as `seed_source_day_highwater_for_test`, but keep it private and record source contact with `contact_kind = "cutover_calibration"`.
+
+Modify `src/usage/cutover.rs` after cursor advancement:
+
+```rust
+usage_store.advance_cursors(snapshot.cursor_updates.clone(), now)?;
+usage_store.seed_cutover_highwaters_from_cursor_updates(
+    TOKENMAXXING_TOTAL_V1,
+    &snapshot.cursor_updates,
+    now,
+)?;
+```
+
+Add to `tests/runtime_integration.rs`:
+
+```rust
+#[test]
+fn tokenmaxxing_cutover_seeds_source_contact_and_source_day_highwater() {
+    let dir = tempdir().unwrap();
+    let mut usage_store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let mut state = PetState::new_for_test("mochi-7f3a", "mochi");
+    let now = datetime!(2026 - 07 - 06 20:00 UTC);
+    let provider = provider_with_calibration_cursor(
+        "claude-code",
+        datetime!(2026 - 07 - 06 12:00 UTC),
+        RawTokenTotals {
+            uncached_input: 531,
+            output: 0,
+            cache_creation: 0,
+            cache_read: 0,
+            reasoning_output: 0,
+        },
+    );
+
+    ensure_tokenmaxxing_contract_active(&mut state, &mut usage_store, &provider, now).unwrap();
+
+    assert!(usage_store
+        .source_has_feed_contact(TOKENMAXXING_TOTAL_V1, "claude-code")
+        .unwrap());
+    assert_eq!(
+        usage_store
+            .source_day_highwater_for_test(TOKENMAXXING_TOTAL_V1, "claude-code", date!(2026 - 07 - 06))
+            .unwrap(),
+        531.0
+    );
+}
+```
+
 - [ ] **Step 7: Run feed and runtime tests**
 
 Run:
@@ -1350,6 +1441,7 @@ Run:
 ```bash
 cargo test --test feed_high_water
 cargo test --test runtime_integration known_source_new_provider_day_is_not_seeded_as_first_contact
+cargo test --test runtime_integration tokenmaxxing_cutover_seeds_source_contact_and_source_day_highwater
 ```
 
 Expected: PASS.
@@ -1357,7 +1449,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/usage/feed_high_water.rs src/usage/mod.rs src/storage/usage_store.rs src/game/runtime.rs tests/feed_high_water.rs tests/runtime_integration.rs
+git add src/usage/feed_high_water.rs src/usage/mod.rs src/storage/usage_store.rs src/game/runtime.rs src/usage/cutover.rs tests/feed_high_water.rs tests/runtime_integration.rs
 git commit -m "feat: add usage feed high-water accounting"
 ```
 
@@ -1379,6 +1471,7 @@ git commit -m "feat: add usage feed high-water accounting"
 **Interfaces:**
 - Consumes: `UsageStore::write_provider_snapshot_batch`, `UsageStore::record_snapshot_failure`, and `UsageStore::feed_deltas_for_snapshot_rows`.
 - Produces provider behavior: helper invocation -> requested-day snapshot write -> high-water feed plan -> `UsagePollResult`.
+- Produces snapshot-only repair behavior: helper invocation -> requested-day snapshot write -> diagnostics, without feed high-water advancement.
 
 - [ ] **Step 1: Add provider fixture helpers**
 
@@ -1476,6 +1569,18 @@ Create `tests/fixtures/helpers/agentsview-drop-day.mjs` with the same `daily: []
 Append to `tests/usage_provider.rs`:
 
 ```rust
+fn provider_at(claude: Option<&str>, codex: Option<&str>, now: OffsetDateTime) -> CcusageCommandProvider {
+    CcusageCommandProvider::new_with_now_for_test(
+        HelperPaths {
+            unified: None,
+            claude: claude.map(fixture),
+            codex: codex.map(fixture),
+            node: None,
+        },
+        now,
+    )
+}
+
 #[test]
 fn provider_writes_snapshot_before_emitting_feed_deltas() {
     let dir = tempdir().unwrap();
@@ -1488,7 +1593,11 @@ fn provider_writes_snapshot_before_emitting_feed_deltas() {
             OffsetDateTime::now_utc(),
         )
         .unwrap();
-    let provider = provider(Some("ccusage-ok.mjs"), None);
+    let provider = provider_at(
+        Some("ccusage-ok.mjs"),
+        None,
+        datetime!(2026 - 05 - 09 12:00 UTC),
+    );
 
     let result = provider.poll(&mut store).unwrap();
 
@@ -1511,7 +1620,11 @@ fn unexpected_extra_provider_day_does_not_write_snapshot_or_feed() {
             OffsetDateTime::now_utc(),
         )
         .unwrap();
-    let provider = provider(Some("ccusage-extra-day.mjs"), None);
+    let provider = provider_at(
+        Some("ccusage-extra-day.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
 
     let result = provider.poll(&mut store).unwrap();
 
@@ -1520,13 +1633,54 @@ fn unexpected_extra_provider_day_does_not_write_snapshot_or_feed() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "unexpected_provider_day"));
+    let extra_day = time::Date::from_calendar_date(2026, time::Month::July, 5).unwrap();
+    let snapshot = store.snapshot_totals_for_provider_day(extra_day).unwrap();
+    assert_eq!(snapshot.state, glorp::usage::snapshot::SnapshotState::Missing);
+}
+
+#[test]
+fn disappeared_requested_provider_day_writes_current_zero_without_negative_food() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    store
+        .record_source_contact(
+            glorp::usage::token_contract::TOKENMAXXING_TOTAL_V1,
+            "claude-code",
+            glorp::game::runtime::SOURCE_FIRST_CONTACT_CODE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let first_provider = provider_at(
+        Some("ccusage-extra-day.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+    first_provider.refresh_snapshots_only(&mut store).unwrap();
+    let second_provider = provider_at(
+        Some("ccusage-drop-day.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
+
+    let result = second_provider.poll(&mut store).unwrap();
+
+    assert_eq!(result.total_tokens, 0.0);
+    assert!(result.deltas.is_empty());
+    let requested_day = date!(2026 - 07 - 06);
+    let snapshot = store.snapshot_totals_for_provider_day(requested_day).unwrap();
+    assert_eq!(snapshot.state, glorp::usage::snapshot::SnapshotState::Current);
+    assert_eq!(snapshot.value.unwrap().total_tokens, 0.0);
 }
 
 #[test]
 fn malformed_requested_row_blocks_snapshot_and_does_not_feed_valid_looking_rows() {
     let dir = tempdir().unwrap();
     let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
-    let provider = provider(Some("ccusage-malformed-row.mjs"), None);
+    let provider = provider_at(
+        Some("ccusage-malformed-row.mjs"),
+        None,
+        datetime!(2026 - 07 - 06 12:00 UTC),
+    );
 
     let result = provider.poll(&mut store).unwrap();
 
@@ -1545,6 +1699,7 @@ Run:
 ```bash
 cargo test --test usage_provider provider_writes_snapshot_before_emitting_feed_deltas
 cargo test --test usage_provider unexpected_extra_provider_day_does_not_write_snapshot_or_feed
+cargo test --test usage_provider disappeared_requested_provider_day_writes_current_zero_without_negative_food
 cargo test --test usage_provider malformed_requested_row_blocks_snapshot_and_does_not_feed_valid_looking_rows
 ```
 
@@ -1562,6 +1717,23 @@ pub struct ProviderSnapshotScope {
     pub requested_provider_days: Vec<time::Date>,
 }
 ```
+
+Add to `UsageProvider`:
+
+```rust
+fn refresh_snapshots_only(&self, store: &mut UsageStore) -> Result<Vec<ProviderDiagnostic>>;
+```
+
+Add a doc-hidden test constructor to `CcusageCommandProvider`:
+
+```rust
+#[doc(hidden)]
+pub fn new_with_now_for_test(paths: HelperPaths, now: OffsetDateTime) -> Self {
+    Self::new_with_clock(paths, move || now)
+}
+```
+
+Keep the production constructor on `OffsetDateTime::now_utc`. Use the injected clock only to compute requested provider days; do not use it for helper subprocess timeouts or filesystem behavior.
 
 In `src/usage/ccusage.rs`, compute requested days for normal polling:
 
@@ -1585,6 +1757,8 @@ In both providers:
 6. Return `UsagePollResult` from the feed plan deltas and diagnostics.
 
 Keep helper version metadata cursor writes for doctor output, but do not let metadata cursors feed.
+
+Implement `refresh_snapshots_only` in both providers with the same requested-day scoping, parsing, diagnostics, and snapshot writes as `poll`, but do not call `feed_deltas_for_snapshot_rows` and do not advance provider feed high-waters. A successful helper response with no row for the requested day is a complete zero-row snapshot. A row for an unrequested day is an `unexpected_provider_day` diagnostic and must not write a snapshot for that unrequested day.
 
 - [ ] **Step 6: Run provider tests**
 
@@ -1970,7 +2144,7 @@ fn refresh_usage_snapshots_for_doctor(usage_store: &mut UsageStore) -> Result<()
     let provider_day = crate::usage::day_axis::tokenmaxxing_provider_day(now);
     let before = usage_store.snapshot_totals_for_provider_day(provider_day)?;
     let provider = CcusageCommandProvider::from_environment();
-    let poll = provider.poll(usage_store)?;
+    let diagnostics = provider.refresh_snapshots_only(usage_store)?;
     let after = usage_store.snapshot_totals_for_provider_day(provider_day)?;
 
     println!("refresh usage snapshots: requested {provider_day}");
@@ -1990,10 +2164,10 @@ fn refresh_usage_snapshots_for_doctor(usage_store: &mut UsageStore) -> Result<()
             .map(|totals| format!("{:.0}", totals.total_tokens))
             .unwrap_or_else(|| format!("{:?}", after.state))
     );
-    if poll.diagnostics.is_empty() {
+    if diagnostics.is_empty() {
         println!("blocked provider scopes: none");
     } else {
-        for diagnostic in poll.diagnostics {
+        for diagnostic in diagnostics {
             println!("blocked provider scope: {} {}", diagnostic.provider_surface, diagnostic.code);
         }
     }

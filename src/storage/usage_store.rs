@@ -129,6 +129,11 @@ impl UsageStore {
         Ok(store)
     }
 
+    #[doc(hidden)]
+    pub fn raw_connection_for_test(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
     pub fn insert_event(&mut self, event: &NormalizedUsageEvent) -> crate::error::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -1371,6 +1376,145 @@ impl UsageStore {
                 recorded_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS provider_snapshot_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collector_scope_id TEXT NOT NULL,
+                collector_surface TEXT NOT NULL,
+                command TEXT NOT NULL,
+                token_contract TEXT NOT NULL,
+                requested_provider_days_json TEXT NOT NULL,
+                provider_version TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                completion_status TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_snapshot_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id INTEGER,
+                replacement_scope_id TEXT NOT NULL,
+                collector_scope_id TEXT NOT NULL,
+                collector_surface TEXT NOT NULL,
+                command TEXT NOT NULL,
+                token_contract TEXT NOT NULL,
+                provider_day TEXT NOT NULL,
+                provider_version TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                completion_status TEXT NOT NULL,
+                reason_code TEXT,
+                FOREIGN KEY(batch_id) REFERENCES provider_snapshot_batches(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_snapshot_rows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                replacement_scope_id TEXT NOT NULL,
+                collector_scope_id TEXT NOT NULL,
+                collector_surface TEXT NOT NULL,
+                command TEXT NOT NULL,
+                token_contract TEXT NOT NULL,
+                accounting_source TEXT NOT NULL,
+                provider_day TEXT NOT NULL,
+                model TEXT,
+                source_surface TEXT NOT NULL,
+                provider_period TEXT NOT NULL,
+                raw_source_id_hash TEXT,
+                cursor_key_hash TEXT NOT NULL,
+                input_tokens REAL,
+                output_tokens REAL,
+                cache_creation_tokens REAL,
+                cache_read_tokens REAL,
+                reasoning_output_tokens REAL,
+                total_tokens REAL NOT NULL,
+                cost_usd REAL,
+                confidence TEXT NOT NULL,
+                status TEXT NOT NULL,
+                first_observed_at TEXT NOT NULL,
+                last_observed_at TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES provider_snapshot_runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                correction_kind TEXT NOT NULL,
+                token_contract TEXT NOT NULL,
+                accounting_source TEXT NOT NULL,
+                provider_day TEXT NOT NULL,
+                model TEXT,
+                previous_total_tokens REAL NOT NULL,
+                current_total_tokens REAL NOT NULL,
+                decrease_tokens REAL NOT NULL,
+                previous_raw_buckets_json TEXT,
+                current_raw_buckets_json TEXT,
+                collector_surface TEXT NOT NULL,
+                cursor_key_hash TEXT,
+                batch_id INTEGER,
+                run_id INTEGER,
+                recorded_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_snapshot_diagnostics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                diagnostic_kind TEXT NOT NULL,
+                collector_scope_id TEXT NOT NULL,
+                replacement_scope_id TEXT,
+                requested_provider_days_json TEXT NOT NULL,
+                provider_day TEXT,
+                reason_code TEXT NOT NULL,
+                message TEXT NOT NULL,
+                batch_id INTEGER,
+                run_id INTEGER,
+                recorded_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_canonical_collectors (
+                token_contract TEXT NOT NULL,
+                accounting_source TEXT NOT NULL,
+                provider_day TEXT NOT NULL,
+                collector_scope_id TEXT NOT NULL,
+                replacement_scope_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (token_contract, accounting_source, provider_day)
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_source_contacts (
+                token_contract TEXT NOT NULL,
+                accounting_source TEXT NOT NULL,
+                contact_kind TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (token_contract, accounting_source)
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_feed_highwaters (
+                highwater_kind TEXT NOT NULL,
+                token_contract TEXT NOT NULL,
+                accounting_source TEXT NOT NULL,
+                provider_day TEXT,
+                provider_day_key TEXT NOT NULL DEFAULT '',
+                model TEXT,
+                model_key TEXT NOT NULL DEFAULT '',
+                provider_surface TEXT,
+                provider_surface_key TEXT NOT NULL DEFAULT '',
+                cursor_key TEXT,
+                cursor_key_key TEXT NOT NULL DEFAULT '',
+                total_high_water REAL NOT NULL,
+                latest_raw_buckets_json TEXT,
+                exact_raw_buckets_json TEXT,
+                bucket_confidence TEXT NOT NULL,
+                unshaped_total_only_tokens REAL NOT NULL DEFAULT 0.0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (
+                    highwater_kind,
+                    token_contract,
+                    accounting_source,
+                    provider_day_key,
+                    model_key,
+                    provider_surface_key,
+                    cursor_key_key
+                )
+            );
+
             CREATE TABLE IF NOT EXISTS lifetime_counters (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 effective_tokens REAL NOT NULL DEFAULT 0.0,
@@ -1458,6 +1602,14 @@ impl UsageStore {
                 ON usage_events(applied_at);
             CREATE INDEX IF NOT EXISTS idx_usage_events_bucket_at
                 ON usage_events(bucket_at);
+            CREATE INDEX IF NOT EXISTS idx_provider_snapshot_rows_visible
+                ON provider_snapshot_rows(token_contract, accounting_source, provider_day, status);
+            CREATE INDEX IF NOT EXISTS idx_provider_snapshot_runs_scope
+                ON provider_snapshot_runs(replacement_scope_id, token_contract, provider_day, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_provider_snapshot_diagnostics_scope
+                ON provider_snapshot_diagnostics(collector_scope_id, provider_day, recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_provider_corrections_day
+                ON provider_corrections(token_contract, accounting_source, provider_day, recorded_at);
             ",
         )?;
         migrate_provider_cursors_to_source_label(&self.conn)?;
