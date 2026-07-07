@@ -14,8 +14,16 @@ use tempfile::tempdir;
 use time::{macros::date, macros::datetime, Date, OffsetDateTime};
 
 fn batch(day: Date, observed_at: OffsetDateTime) -> ProviderSnapshotBatchInput {
+    batch_in_scope(day, observed_at, "claude-code:local-usage")
+}
+
+fn batch_in_scope(
+    day: Date,
+    observed_at: OffsetDateTime,
+    collector_scope_id: &str,
+) -> ProviderSnapshotBatchInput {
     ProviderSnapshotBatchInput {
-        collector_scope_id: "claude-code:local-usage".into(),
+        collector_scope_id: collector_scope_id.into(),
         collector_surface: "ccusage:claude-code".into(),
         command: "ccusage claude daily --json --offline".into(),
         token_contract: TOKENMAXXING_TOTAL_V1.into(),
@@ -32,9 +40,27 @@ fn row(
     total: f64,
     _observed_at: OffsetDateTime,
 ) -> ProviderSnapshotRowInput {
+    row_in_scope(
+        day,
+        model,
+        total,
+        _observed_at,
+        "claude-code:local-usage",
+        "claude-code:local-usage",
+    )
+}
+
+fn row_in_scope(
+    day: Date,
+    model: &str,
+    total: f64,
+    _observed_at: OffsetDateTime,
+    replacement_scope_id: &str,
+    collector_scope_id: &str,
+) -> ProviderSnapshotRowInput {
     ProviderSnapshotRowInput {
-        replacement_scope_id: "claude-code:local-usage".into(),
-        collector_scope_id: "claude-code:local-usage".into(),
+        replacement_scope_id: replacement_scope_id.into(),
+        collector_scope_id: collector_scope_id.into(),
         collector_surface: "ccusage:claude-code".into(),
         command: "ccusage claude daily --json --offline".into(),
         token_contract: TOKENMAXXING_TOTAL_V1.into(),
@@ -65,6 +91,22 @@ fn row(
     }
 }
 
+fn non_blocking_diagnostic(
+    day: Date,
+    observed_at: OffsetDateTime,
+) -> ProviderSnapshotDiagnosticInput {
+    ProviderSnapshotDiagnosticInput {
+        diagnostic_kind: "optional_parse_warning".into(),
+        collector_scope_id: "claude-code:local-usage".into(),
+        replacement_scope_id: Some("claude-code:local-usage".into()),
+        requested_provider_days: vec![day],
+        provider_day: Some(day),
+        reason_code: "optional_field_ignored".into(),
+        message: "optional field ignored while parsing ccusage".into(),
+        observed_at,
+    }
+}
+
 fn blocked(day: Date, observed_at: OffsetDateTime) -> ProviderSnapshotDiagnosticInput {
     ProviderSnapshotDiagnosticInput {
         diagnostic_kind: "run_blocked".into(),
@@ -76,6 +118,111 @@ fn blocked(day: Date, observed_at: OffsetDateTime) -> ProviderSnapshotDiagnostic
         message: "ccusage malformed_required_fields".into(),
         observed_at,
     }
+}
+
+#[test]
+fn canonical_replacement_scope_cutover_uses_new_scope_total_and_records_decrease() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let day = date!(2026 - 07 - 06);
+    let first_at = datetime!(2026 - 07 - 06 20:00 UTC);
+    let second_at = datetime!(2026 - 07 - 06 21:00 UTC);
+
+    store
+        .write_provider_snapshot_batch(
+            &batch_in_scope(day, first_at, "collector:scope-a"),
+            &[row_in_scope(
+                day,
+                "claude-fable-5",
+                100.0,
+                first_at,
+                "replacement:scope-a",
+                "collector:scope-a",
+            )],
+            &[],
+        )
+        .unwrap();
+    store
+        .write_provider_snapshot_batch(
+            &batch_in_scope(day, second_at, "collector:scope-b"),
+            &[row_in_scope(
+                day,
+                "claude-fable-5",
+                60.0,
+                second_at,
+                "replacement:scope-b",
+                "collector:scope-b",
+            )],
+            &[],
+        )
+        .unwrap();
+
+    let result = store.snapshot_totals_for_provider_day(day).unwrap();
+    assert_eq!(result.state, SnapshotState::Current);
+    assert_eq!(result.value, Some(DayTotals { total_tokens: 60.0 }));
+
+    let correction = store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT previous_total_tokens, current_total_tokens, decrease_tokens
+             FROM provider_corrections
+             WHERE token_contract = ?1 AND accounting_source = ?2 AND provider_day = ?3",
+            params![TOKENMAXXING_TOTAL_V1, "claude-code", day.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(correction, (100.0, 60.0, 40.0));
+}
+
+#[test]
+fn complete_run_persists_non_blocking_diagnostic_and_returns_current_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut store = UsageStore::open(&dir.path().join("usage.sqlite")).unwrap();
+    let day = date!(2026 - 07 - 06);
+    let observed_at = datetime!(2026 - 07 - 06 20:00 UTC);
+
+    store
+        .write_provider_snapshot_batch(
+            &batch(day, observed_at),
+            &[row(day, "claude-fable-5", 531.0, observed_at)],
+            &[non_blocking_diagnostic(day, observed_at)],
+        )
+        .unwrap();
+
+    let result = store.snapshot_totals_for_provider_day(day).unwrap();
+    assert_eq!(result.state, SnapshotState::Current);
+    assert_eq!(result.value, Some(DayTotals { total_tokens: 531.0 }));
+
+    let diagnostic = store
+        .raw_connection_for_test()
+        .query_row(
+            "SELECT diagnostic_kind, reason_code, run_id IS NOT NULL
+             FROM provider_snapshot_diagnostics
+             WHERE provider_day = ?1",
+            params![day.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        diagnostic,
+        (
+            "optional_parse_warning".to_string(),
+            "optional_field_ignored".to_string(),
+            true
+        )
+    );
 }
 
 #[test]

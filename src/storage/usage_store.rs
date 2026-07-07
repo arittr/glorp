@@ -86,6 +86,11 @@ struct SourceDaySnapshot {
     identity_fingerprints: BTreeSet<String>,
 }
 
+struct SourceDaySnapshotComparison<'a> {
+    previous: &'a BTreeMap<String, SourceDaySnapshot>,
+    current: &'a BTreeMap<String, SourceDaySnapshot>,
+}
+
 enum SnapshotAttemptState {
     Complete {
         observed_at: OffsetDateTime,
@@ -637,12 +642,8 @@ impl UsageStore {
                 continue;
             }
 
-            let previous = active_source_day_snapshots(
-                &tx,
-                replacement_scope_id,
-                &batch.token_contract,
-                *day,
-            )?;
+            let previous =
+                canonical_visible_source_day_snapshots(&tx, &batch.token_contract, *day)?;
             complete_run_ids.push(run_id);
             supersede_previous_snapshot_rows(
                 &tx,
@@ -659,7 +660,10 @@ impl UsageStore {
                 &day_rows,
                 batch.observed_at,
             )?;
-            record_snapshot_corrections(&tx, batch_id, run_id, batch, *day, &day_rows, &previous)?;
+            insert_snapshot_diagnostics(&tx, batch_id, Some(run_id), &day_diagnostics)?;
+            let current = canonical_visible_source_day_snapshots(&tx, &batch.token_contract, *day)?;
+            let comparison = SourceDaySnapshotComparison { previous: &previous, current: &current };
+            record_snapshot_corrections(&tx, batch_id, run_id, batch, *day, &day_rows, comparison)?;
         }
 
         tx.commit()?;
@@ -888,11 +892,16 @@ impl UsageStore {
     fn active_snapshot_total_for_day(&self, day: Date) -> crate::error::Result<f64> {
         self.conn
             .query_row(
-                "SELECT COALESCE(SUM(total_tokens), 0.0)
-                 FROM provider_snapshot_rows
-                 WHERE token_contract = ?1
-                   AND provider_day = ?2
-                   AND status = 'active'",
+                "SELECT COALESCE(SUM(r.total_tokens), 0.0)
+                 FROM provider_snapshot_rows AS r
+                 JOIN provider_canonical_collectors AS c
+                   ON c.token_contract = r.token_contract
+                  AND c.accounting_source = r.accounting_source
+                  AND c.provider_day = r.provider_day
+                  AND c.replacement_scope_id = r.replacement_scope_id
+                 WHERE r.token_contract = ?1
+                   AND r.provider_day = ?2
+                   AND r.status = 'active'",
                 params![
                     crate::usage::token_contract::TOKENMAXXING_TOTAL_V1,
                     day.to_string()
@@ -907,13 +916,18 @@ impl UsageStore {
         day: Date,
     ) -> crate::error::Result<Vec<crate::usage::snapshot::SourceTotal>> {
         let mut stmt = self.conn.prepare(
-            "SELECT accounting_source, COALESCE(SUM(total_tokens), 0.0) AS total_tokens
-             FROM provider_snapshot_rows
-             WHERE token_contract = ?1
-               AND provider_day = ?2
-               AND status = 'active'
-             GROUP BY accounting_source
-             ORDER BY accounting_source",
+            "SELECT r.accounting_source, COALESCE(SUM(r.total_tokens), 0.0) AS total_tokens
+             FROM provider_snapshot_rows AS r
+             JOIN provider_canonical_collectors AS c
+               ON c.token_contract = r.token_contract
+              AND c.accounting_source = r.accounting_source
+              AND c.provider_day = r.provider_day
+              AND c.replacement_scope_id = r.replacement_scope_id
+             WHERE r.token_contract = ?1
+               AND r.provider_day = ?2
+               AND r.status = 'active'
+             GROUP BY r.accounting_source
+             ORDER BY r.accounting_source",
         )?;
         let rows = stmt
             .query_map(
@@ -2170,36 +2184,36 @@ fn provider_days_json(days: &[Date]) -> crate::error::Result<String> {
     )?)
 }
 
-fn active_source_day_snapshots(
+fn canonical_visible_source_day_snapshots(
     tx: &rusqlite::Transaction<'_>,
-    replacement_scope_id: &str,
     token_contract: &str,
     day: Date,
 ) -> crate::error::Result<BTreeMap<String, SourceDaySnapshot>> {
     let mut stmt = tx.prepare(
-        "SELECT accounting_source, total_tokens, model, source_surface, provider_period,
-                raw_source_id_hash, cursor_key_hash
-         FROM provider_snapshot_rows
-         WHERE replacement_scope_id = ?1
-           AND token_contract = ?2
-           AND provider_day = ?3
-           AND status = 'active'",
+        "SELECT r.accounting_source, r.total_tokens, r.model, r.source_surface,
+                r.provider_period, r.raw_source_id_hash, r.cursor_key_hash
+         FROM provider_snapshot_rows AS r
+         JOIN provider_canonical_collectors AS c
+           ON c.token_contract = r.token_contract
+          AND c.accounting_source = r.accounting_source
+          AND c.provider_day = r.provider_day
+          AND c.replacement_scope_id = r.replacement_scope_id
+         WHERE r.token_contract = ?1
+           AND r.provider_day = ?2
+           AND r.status = 'active'",
     )?;
     let mut snapshots = BTreeMap::new();
-    let rows = stmt.query_map(
-        params![replacement_scope_id, token_contract, day.to_string()],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        },
-    )?;
+    let rows = stmt.query_map(params![token_contract, day.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, f64>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
     for row in rows {
         let (
             accounting_source,
@@ -2226,29 +2240,6 @@ fn active_source_day_snapshots(
         ));
     }
     Ok(snapshots)
-}
-
-fn current_source_day_snapshots(
-    rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
-) -> BTreeMap<String, SourceDaySnapshot> {
-    let mut snapshots = BTreeMap::new();
-    for row in rows {
-        let entry = snapshots
-            .entry(row.accounting_source.clone())
-            .or_insert_with(|| SourceDaySnapshot {
-                total_tokens: 0.0,
-                identity_fingerprints: BTreeSet::new(),
-            });
-        entry.total_tokens += row.total_tokens;
-        entry.identity_fingerprints.insert(snapshot_row_fingerprint(
-            row.model.as_deref(),
-            &row.source_surface,
-            &row.provider_period,
-            row.raw_source_id_hash.as_deref(),
-            &row.cursor_key_hash,
-        ));
-    }
-    snapshots
 }
 
 fn snapshot_row_fingerprint(
@@ -2384,13 +2375,12 @@ fn record_snapshot_corrections(
     batch: &crate::usage::snapshot::ProviderSnapshotBatchInput,
     day: Date,
     rows: &[&crate::usage::snapshot::ProviderSnapshotRowInput],
-    previous: &BTreeMap<String, SourceDaySnapshot>,
+    comparison: SourceDaySnapshotComparison<'_>,
 ) -> crate::error::Result<()> {
-    let current = current_source_day_snapshots(rows);
     let requested_days_json = provider_days_json(&[day])?;
     let recorded_at = format_time(batch.observed_at)?;
-    for (source, previous_snapshot) in previous {
-        let current_snapshot = current.get(source);
+    for (source, previous_snapshot) in comparison.previous {
+        let current_snapshot = comparison.current.get(source);
         let current_total = current_snapshot
             .map(|snapshot| snapshot.total_tokens)
             .unwrap_or(0.0);
