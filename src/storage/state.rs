@@ -37,11 +37,37 @@ impl From<&'static str> for HabitatPropId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TankInhabitantId(String);
+
+impl TankInhabitantId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&'static str> for TankInhabitantId {
+    fn from(value: &'static str) -> Self {
+        Self::new(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EarnedHabitatProp {
     pub id: HabitatPropId,
     pub earned_at: OffsetDateTime,
     pub source: HabitatPropSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EarnedTankInhabitant {
+    pub id: TankInhabitantId,
+    pub earned_at: OffsetDateTime,
+    pub source: TankInhabitantSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,10 +80,18 @@ pub enum HabitatPropSource {
     ActivityMilestone { milestone: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TankInhabitantSource {
+    PetAgeThreshold { threshold_days: i64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct HabitatState {
     pub earned_props: Vec<EarnedHabitatProp>,
     pub reconciled_lifetime_tokens_at: Option<f64>,
+    #[serde(default)]
+    pub earned_inhabitants: Vec<EarnedTankInhabitant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -513,5 +547,18 @@ mod tests {
             matches!(err, crate::error::GlorpError::Message(ref msg) if msg.contains("malformed state.json")),
             "expected malformed-json error, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn habitat_state_deserializes_without_earned_inhabitants() {
+        let json = r#"{
+      "earned_props": [],
+      "reconciled_lifetime_tokens_at": null
+    }"#;
+
+        let habitat: HabitatState = serde_json::from_str(json).unwrap();
+
+        assert!(habitat.earned_props.is_empty());
+        assert!(habitat.earned_inhabitants.is_empty());
     }
 }
