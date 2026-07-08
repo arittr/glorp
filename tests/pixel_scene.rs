@@ -4,7 +4,25 @@ use glorp::presentation::pixel::{
     PixelBounds, PixelFrame, PixelPetInput, PixelVariationKey, PixelViewport, Rgba8,
 };
 use glorp::tui::view_model::{SourceUsageView, WatchViewModel};
+use std::sync::{Mutex, OnceLock};
 use time::macros::datetime;
+
+fn catch_unwind_silently<F, T>(f: F) -> Result<T, Box<dyn std::any::Any + Send>>
+where
+    F: FnOnce() -> T + std::panic::UnwindSafe,
+{
+    static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _lock = PANIC_HOOK_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let result = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev_hook);
+    result
+}
 
 #[test]
 fn pixel_input_redacts_raw_seed_and_private_runtime_fields() {
@@ -93,17 +111,17 @@ fn pixel_frame_helper_methods_reject_malformed_storage() {
     };
     let other = PixelFrame::transparent(PixelViewport { logical_width: 2, logical_height: 2 });
 
-    let opaque_count = std::panic::catch_unwind(|| malformed.opaque_pixel_count());
+    let opaque_count = catch_unwind_silently(|| malformed.opaque_pixel_count());
     assert!(opaque_count.is_err());
 
-    let opaque_bounds = std::panic::catch_unwind(|| malformed.opaque_bounds());
+    let opaque_bounds = catch_unwind_silently(|| malformed.opaque_bounds());
     assert!(opaque_bounds.is_err());
 
-    let changed_count = std::panic::catch_unwind(|| malformed.changed_pixel_count(&other));
+    let changed_count = catch_unwind_silently(|| malformed.changed_pixel_count(&other));
     assert!(changed_count.is_err());
 
     let mut malformed_for_set = malformed.clone();
-    let set_pixel = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let set_pixel = catch_unwind_silently(std::panic::AssertUnwindSafe(|| {
         malformed_for_set.set_pixel(1, 1, Rgba8::opaque(0xff, 0x00, 0x00));
     }));
     assert!(set_pixel.is_err());
