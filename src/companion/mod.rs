@@ -6,6 +6,7 @@ pub mod render;
 
 pub fn run(
     mode: crate::commands::companion_mode::CompanionRendererMode,
+    review: crate::commands::companion_mode::CompanionReviewOptions,
 ) -> crate::error::Result<()> {
-    app::run(mode)
+    app::run(mode, review)
 }

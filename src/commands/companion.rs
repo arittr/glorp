@@ -1,8 +1,8 @@
-use crate::commands::companion_mode::CompanionRendererMode;
+use crate::commands::companion_mode::{CompanionRendererMode, CompanionReviewOptions};
 use crate::error::{GlorpError, Result};
 
 #[cfg(target_os = "macos")]
-pub fn run(mode: CompanionRendererMode) -> Result<()> {
+pub fn run(mode: CompanionRendererMode, review: CompanionReviewOptions) -> Result<()> {
     let paths = crate::paths::AppPaths::resolve()?;
     paths.ensure()?;
     let locator = crate::usage::helper_locator::HelperLocator::from_current_environment();
@@ -20,8 +20,18 @@ pub fn run(mode: CompanionRendererMode) -> Result<()> {
         command.arg("-n");
     }
     command.arg(&app);
+    if mode.is_pixel() || review.initial_size.is_some() || review.active_pulse {
+        command.arg("--args");
+    }
     if mode.is_pixel() {
-        command.arg("--args").arg("--renderer").arg(mode.as_str());
+        command.arg("--renderer").arg(mode.as_str());
+    }
+    if let Some(size) = review.initial_size {
+        let size = format!("{}x{}", size.width, size.height);
+        command.args(["--review-size", &size]);
+    }
+    if review.active_pulse {
+        command.arg("--review-active-pulse");
     }
     let status = command.status()?;
     if !status.success() {
@@ -34,7 +44,7 @@ pub fn run(mode: CompanionRendererMode) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run(_mode: CompanionRendererMode) -> Result<()> {
+pub fn run(_mode: CompanionRendererMode, _review: CompanionReviewOptions) -> Result<()> {
     Err(GlorpError::Message(
         "glorp companion is only available on macOS".into(),
     ))
