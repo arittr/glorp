@@ -640,12 +640,13 @@ fn state_load_reconciliation_persists_before_provider_success_is_required() {
     let store = glorp::storage::state::StateStore::new(state_path.clone());
     let mut state = glorp::storage::state::PetState::new_for_test("age-seed", "Glorp");
     state.created_at = datetime!(2026-07-01 00:00 UTC);
+    let now = datetime!(2026-07-08 00:00 UTC);
     store.save(&state).unwrap();
 
     let result = poll_usage_and_apply_for_test_with_failing_provider(
         &store,
         &usage_path,
-        datetime!(2026-07-08 00:00 UTC),
+        now,
         LocalDayMapper::Fixed(UtcOffset::UTC),
     );
 
@@ -662,6 +663,7 @@ fn state_load_reconciliation_persists_before_provider_success_is_required() {
             .any(|earned| earned.id.as_str() == "glass_shrimp"),
         "age reconciliation must persist before provider success is required",
     );
+    assert_eq!(saved.last_updated_at, now);
 }
 
 fn mech_state() -> PetState {

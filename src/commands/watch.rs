@@ -477,6 +477,7 @@ pub fn reconcile_state_after_load(
 ) -> Result<bool> {
     let changed = crate::game::habitat::reconcile_age_earned_inhabitants(state, now, &mapper);
     if changed {
+        state.last_updated_at = now;
         state_store.save(state)?;
     }
     Ok(changed)
