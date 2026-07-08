@@ -23,9 +23,11 @@ pub use preview::{
 pub use sizing::{AxisSize, ComponentSizing, DegradeRule};
 pub use style::{BorderTone, ComponentStyle, GradientToken, Insets, Surface, TextTone};
 pub use tank_life::{
-    anemone_morph_for_day, canonical_daily_cast, project_tank_life_cast, AnemoneMorph,
-    RenderedTankLifeCast, RoundApertureMask, TankLifeSkip, TankLifeSkipReason, TankLifeSurface,
-    TankLifeSurfaceGeometry,
+    anemone_anchor_sprite, anemone_morph_for_day, canonical_daily_cast, host_fish_sprite,
+    layer_segment_summaries, project_tank_life_cast, rect_contains, tank_life_placements_for,
+    validate_tank_life_catalog, AnemoneMorph, RenderedTankLifeCast, RoundApertureMask, SpriteCell,
+    TankLifeCell, TankLifeLayerSegmentSummary, TankLifePlacement, TankLifeRenderInput,
+    TankLifeSkip, TankLifeSkipReason, TankLifeSurface, TankLifeSurfaceGeometry,
 };
 pub use watch_screen::{layout_watch, layout_watch_with_context, render_watch_layout};
 pub use widgets::{
