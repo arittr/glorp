@@ -27,7 +27,6 @@
 - `target/glorp-preview-pixel-cast-identity/frames/pixel-glitch-s4-repair.pixel-art.json`
 - `target/glorp-preview-pixel-cast-identity/frames/pixel-crystal-s5-facets.pixel-art.json`
 - `target/glorp-preview-pixel-cast-identity/frames/pixel-mech-s5-hardbody.pixel-art.json`
-- `target/glorp-preview-pixel-cast-identity/frames/pixel-cast-identity-matrix.txt`
 - `target/glorp-preview-pixel-cast-identity/frames/pixel-tank-composition.pixel-composition.json`
 
 ## Manual Review
