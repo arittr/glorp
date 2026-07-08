@@ -1781,6 +1781,21 @@ fn dev_preview_pixel_manifest_dimensions_match_pixel_artifact() {
 }
 
 #[test]
+fn dev_preview_pixel_manifest_inputs_include_production_fit_producer() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    let scenario = scenario(&manifest, "pixel-fuzz-s3-content-idle");
+
+    assert_eq!(
+        scenario["inputs"]["fit"]["producer"],
+        "round::pixel_fit::pixel_companion_fit"
+    );
+}
+
+#[test]
 fn dev_preview_pixel_html_uses_pixel_dimensions_not_placeholder_cells() {
     let run = PreviewRun::new();
 

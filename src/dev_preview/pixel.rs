@@ -12,6 +12,8 @@ use crate::presentation::pixel::{
     render_pixel_frame, PixelFrame, PixelPetInput, PixelPetScene, PixelRendererState,
     PixelRendererTick, PixelViewport,
 };
+use crate::round::hud::companion_hud_text;
+use crate::round::pixel_fit::{pixel_companion_fit, PixelFitRect, PixelTargetGeometry};
 use crate::tui::view_model::WatchViewModel;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use serde_json::{json, Value};
@@ -24,6 +26,7 @@ pub type PreviewPixelStripBundle = PreviewStripBundle;
 const FRAME_DURATION_MS: u16 = 34;
 const STRIP_FRAME_COUNT: usize = 48;
 const STRIP_SPAN_MS: u16 = 1_600;
+const PREVIEW_FIT_TARGET_SIZE: u16 = 360;
 
 pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
     vec![
@@ -155,6 +158,7 @@ fn render_pixel_bundle(
     intent: &'static str,
 ) -> PreviewPixelBundle {
     let (artifact, input) = render_pixel_artifact(ctx, fixture, fixture.elapsed_ms);
+    let vm = fixture_view_model(fixture, ctx.fixed_now);
     let dimensions = PreviewDimensions {
         width: artifact.width,
         height: artifact.height,
@@ -167,7 +171,7 @@ fn render_pixel_bundle(
         PreviewScenarioKind::Pixel,
         intent,
         dimensions,
-        scenario_inputs(&input, fixture.elapsed_ms),
+        scenario_inputs(&input, &vm, fixture.elapsed_ms),
         None,
         Vec::new(),
     )
@@ -212,7 +216,11 @@ fn render_pixel_strip(
                 starts_paused: true,
                 frame_duration_ms: FRAME_DURATION_MS,
             },
-            inputs: scenario_inputs(&fixture_input(fixture, ctx.fixed_now), STRIP_SPAN_MS),
+            inputs: scenario_inputs(
+                &fixture_input(fixture, ctx.fixed_now),
+                &fixture_view_model(fixture, ctx.fixed_now),
+                STRIP_SPAN_MS,
+            ),
             frames: manifest_frames,
             review_prompts: Vec::new(),
         },
@@ -272,7 +280,11 @@ fn fixture_input(fixture: PixelFixture, now: time::OffsetDateTime) -> PixelPetIn
     PixelPetInput::from_watch_view_model(&vm, now)
 }
 
-fn scenario_inputs(input: &PixelPetInput, elapsed_ms: u16) -> BTreeMap<String, Value> {
+fn scenario_inputs(
+    input: &PixelPetInput,
+    vm: &WatchViewModel,
+    elapsed_ms: u16,
+) -> BTreeMap<String, Value> {
     BTreeMap::from([
         (
             "renderer".to_string(),
@@ -294,7 +306,49 @@ fn scenario_inputs(input: &PixelPetInput, elapsed_ms: u16) -> BTreeMap<String, V
         ("asleep".to_string(), json!(input.sleep.asleep)),
         ("calm".to_string(), json!(input.sleep.calm)),
         ("pulse_active".to_string(), json!(input.pulse.active)),
+        ("fit".to_string(), preview_fit_input(vm)),
     ])
+}
+
+fn preview_fit_input(vm: &WatchViewModel) -> Value {
+    let viewport = PixelViewport::companion_default();
+    let hud = companion_hud_text(
+        vm.today_effective_tokens,
+        vm.daily_comparison.fraction_of_yesterday,
+        vm.rate_momentum.pulse.current_tokens,
+    );
+    let fit = pixel_companion_fit(
+        PixelTargetGeometry {
+            width: PREVIEW_FIT_TARGET_SIZE,
+            height: PREVIEW_FIT_TARGET_SIZE,
+        },
+        viewport,
+        &hud,
+    );
+
+    json!({
+        "producer": fit.producer,
+        "geometry": {
+            "width": fit.geometry.width,
+            "height": fit.geometry.height,
+        },
+        "viewport": {
+            "logical_width": viewport.logical_width,
+            "logical_height": viewport.logical_height,
+        },
+        "scale": fit.scale,
+        "image_rect": preview_fit_rect_json(fit.image_rect),
+        "hud_safe_zone": preview_fit_rect_json(fit.hud_safe_zone),
+    })
+}
+
+fn preview_fit_rect_json(rect: PixelFitRect) -> Value {
+    json!({
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+    })
 }
 
 fn summary_frame(id: &str, title: &str, lines: &[&str]) -> PreviewFrame {
