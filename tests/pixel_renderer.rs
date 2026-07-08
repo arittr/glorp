@@ -76,6 +76,8 @@ fn frame_for_procedural_fallback(
         occupied_cells: Vec::new(),
         body_bounds: PixelCellBounds { min_x: 0, min_y: 0, max_x: 0, max_y: 0 },
         foot_contact: PixelFootContact { cells: Vec::new() },
+        protected_regions: Vec::new(),
+        cue_coverage: std::collections::BTreeMap::new(),
         reference_checksum: PixelReferenceChecksum(0),
         role_counts: std::collections::BTreeMap::new(),
     };

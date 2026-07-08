@@ -221,3 +221,105 @@ fn serialized_reference_does_not_leak_raw_seed_or_terminal_art() {
     assert!(!json.contains("/\\\\_/\\\\"));
     assert!(!json.contains("( o.o )"));
 }
+
+#[test]
+fn fuzz_s3_promotes_locket_cells_into_visible_roles() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Fuzz;
+    vm.pet_render.stage = Stage::S3;
+    vm.pet_render.mood = Mood::Content;
+
+    let reference = reference_for(&vm, 0);
+    let locket_cells = reference.cells_for_roles([PixelArtRole::Locket]);
+    let coverage = reference.cue_coverage("locket").expect("locket coverage");
+
+    assert!(!locket_cells.is_empty(), "locket cells must be promoted");
+    assert_eq!(coverage.expected, coverage.present);
+    assert!(coverage.present >= 1);
+    assert!(reference.protected_region("signature-locket").is_some());
+}
+
+#[test]
+fn crystal_s5_promotes_facet_cells_into_visible_roles() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Crystal;
+    vm.pet_render.stage = Stage::S5;
+    vm.pet_render.mood = Mood::Happy;
+
+    let reference = reference_for(&vm, 0);
+    let facet_cells = reference.cells_for_roles([PixelArtRole::Facet]);
+    let coverage = reference.cue_coverage("facet").expect("facet coverage");
+
+    assert!(!facet_cells.is_empty(), "facet cells must be promoted");
+    assert_eq!(coverage.expected, coverage.present);
+    assert!(coverage.present >= 1);
+    assert!(reference.protected_region("signature-facet").is_some());
+}
+
+#[test]
+fn glitch_s4_promotes_repair_cells_without_stealing_face_cells() {
+    let now = datetime!(2026-07-08 12:00 UTC);
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Glitch;
+    vm.pet_render.stage = Stage::S4;
+    vm.pet_render.mood = Mood::Content;
+    vm.life_profile.burst_level = 0.9;
+    vm.last_feed_pulse_at = Some(now - time::Duration::milliseconds(300));
+
+    let reference = reference_for(&vm, 300);
+    let repair_cells = reference.cells_for_roles([PixelArtRole::RepairMark]);
+    let face_cells = reference.cells_for_roles([PixelArtRole::Eye, PixelArtRole::Mouth]);
+    let coverage = reference
+        .cue_coverage("repair_mark")
+        .expect("repair coverage");
+
+    assert!(!repair_cells.is_empty(), "repair cells must be promoted");
+    assert_eq!(coverage.expected, coverage.present);
+    assert!(face_cells.iter().all(|cell| !repair_cells.contains(cell)));
+    assert!(reference.protected_region("face").is_some());
+    assert!(reference
+        .protected_region("signature-repair-mark")
+        .is_some());
+}
+
+#[test]
+fn outline_appendage_and_foot_contact_are_promoted_cells_not_counts_only() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Mech;
+    vm.pet_render.stage = Stage::S5;
+    vm.pet_render.mood = Mood::Content;
+
+    let reference = reference_for(&vm, 0);
+
+    assert!(!reference
+        .cells_for_roles([PixelArtRole::Outline])
+        .is_empty());
+    assert!(!reference
+        .cells_for_roles([PixelArtRole::Appendage])
+        .is_empty());
+    assert!(!reference
+        .cells_for_roles([PixelArtRole::FootContact])
+        .is_empty());
+    assert_eq!(
+        reference.role_count(PixelArtRole::FootContact),
+        reference.foot_contact.cells.len()
+    );
+}
+
+#[test]
+fn serialized_reference_exports_sanitized_protected_regions_and_cue_coverage() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.seed = "very-secret-seed".to_string();
+    vm.pet_render.generated_species = Species::Fuzz;
+    vm.pet_render.stage = Stage::S3;
+
+    let reference = reference_for(&vm, 0);
+    let json = serde_json::to_string(&reference).unwrap();
+
+    assert!(json.contains("\"protected_regions\""));
+    assert!(json.contains("\"cue_coverage\""));
+    assert!(json.contains("signature-locket"));
+    assert!(!json.contains("very-secret-seed"));
+    assert!(!json.contains("terminal"));
+    assert!(!json.contains("art_text"));
+}
