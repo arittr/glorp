@@ -1,7 +1,7 @@
 use crate::dev_preview::frame::{escape_html, PreviewCell, PreviewFrame};
 use crate::dev_preview::strips::PreviewStripBundle;
 use crate::error::Result;
-use crate::presentation::pixel::{PixelCellBounds, PixelFootContact};
+use crate::presentation::pixel::{PixelCellBounds, PixelCueCoverage, PixelFootContact};
 use crate::round::pixel_fit::{PixelFitRect, PixelTargetGeometry};
 use crate::tui::component::PreviewLayout;
 use serde::Serialize;
@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 pub const PRODUCER: &str = "glorp-dev-preview";
 pub const SCHEMA_VERSION: u32 = 8;
 pub const PIXEL_FRAME_SCHEMA_VERSION: u32 = 1;
-pub const PIXEL_ART_SCHEMA_VERSION: u32 = 1;
+pub const PIXEL_ART_SCHEMA_VERSION: u32 = 2;
+pub const PIXEL_COMPOSITION_SCHEMA_VERSION: u32 = 1;
 pub const PIXEL_FIT_SCHEMA_VERSION: u32 = 2;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
@@ -93,6 +94,8 @@ pub struct PreviewScenarioFiles {
     pub pixel: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pixel_art: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_composition: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pixel_fit: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,6 +180,51 @@ pub struct PreviewPixelArtArtifact {
     pub body_bounds: PixelCellBounds,
     pub foot_contact: PixelFootContact,
     pub role_counts: BTreeMap<&'static str, usize>,
+    pub role_cells: Vec<PreviewPixelArtCellArtifact>,
+    pub protected_bounds: Vec<PreviewPixelProtectedRegionArtifact>,
+    pub signature_regions: Vec<PreviewPixelProtectedRegionArtifact>,
+    pub cue_coverage: BTreeMap<&'static str, PixelCueCoverage>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelArtCellArtifact {
+    pub x: u8,
+    pub y: u8,
+    pub role: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelProtectedRegionArtifact {
+    pub id: &'static str,
+    pub role: &'static str,
+    pub bounds: PixelCellBounds,
+    pub cell_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelCompositionArtifact {
+    pub schema_version: u32,
+    pub frame_id: String,
+    pub context: PreviewPixelCompositionContextArtifact,
+    pub protected_regions: Vec<PreviewPixelProtectedRegionArtifact>,
+    pub comparison: PreviewPixelCompositionComparisonArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelCompositionContextArtifact {
+    pub surface: String,
+    pub props_available: bool,
+    pub tank_life_available: bool,
+    pub evidence_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelCompositionComparisonArtifact {
+    pub protected_region_count: usize,
+    pub prop_cells_near_protected_regions: usize,
+    pub tank_life_cells_near_protected_regions: usize,
+    pub occlusion_conflicts: Vec<String>,
+    pub deferred_contexts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -224,6 +272,7 @@ pub enum ArtifactType {
     Cells,
     PixelFrame,
     PixelArt,
+    PixelComposition,
     PixelFit,
     Layout,
     Scene,
@@ -571,6 +620,12 @@ fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
             escape_html(&format!("frames/{}.pixel-art.json", frame.id))
         ));
     }
+    if frame.contract.pixel_composition.is_some() {
+        links.push(format!(
+            r#"<a href="{}">pixel composition</a>"#,
+            escape_html(&format!("frames/{}.pixel-composition.json", frame.id))
+        ));
+    }
     if frame.contract.pixel_fit.is_some() {
         links.push(format!(
             r#"<a href="{}">pixel fit</a>"#,
@@ -858,6 +913,7 @@ mod tests {
                     cells: PathBuf::from("frames/frame-one.cells.json"),
                     pixel: None,
                     pixel_art: None,
+                    pixel_composition: None,
                     pixel_fit: None,
                     layout: None,
                     room_text: None,

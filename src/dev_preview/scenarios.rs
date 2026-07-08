@@ -215,6 +215,12 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         if let Some(pixel_art) = &frame.contract.pixel_art {
             write_json_artifact(&staging_dir.join(pixel_art_path(frame)), pixel_art)?;
         }
+        if let Some(pixel_composition) = &frame.contract.pixel_composition {
+            write_json_artifact(
+                &staging_dir.join(pixel_composition_path(frame)),
+                pixel_composition,
+            )?;
+        }
         if let Some(pixel_fit) = &frame.contract.pixel_fit {
             write_json_artifact(&staging_dir.join(pixel_fit_path(frame)), pixel_fit)?;
         }
@@ -691,6 +697,11 @@ fn scenario_from_parts(
                 .pixel_art
                 .as_ref()
                 .map(|_| pixel_art_path(frame)),
+            pixel_composition: frame
+                .contract
+                .pixel_composition
+                .as_ref()
+                .map(|_| pixel_composition_path(frame)),
             pixel_fit: frame
                 .contract
                 .pixel_fit
@@ -801,6 +812,16 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 title: format!("{} Pixel Art", frame.title),
                 artifact_type: ArtifactType::PixelArt,
                 path: pixel_art_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.pixel_composition.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-pixel-composition", frame.id),
+                title: format!("{} Pixel Composition", frame.title),
+                artifact_type: ArtifactType::PixelComposition,
+                path: pixel_composition_path(frame),
                 width: None,
                 height: None,
             });
@@ -1854,6 +1875,10 @@ fn pixel_path(frame: &PreviewFrame) -> PathBuf {
 
 fn pixel_art_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.pixel-art.json", frame.id))
+}
+
+fn pixel_composition_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.pixel-composition.json", frame.id))
 }
 
 fn pixel_fit_path(frame: &PreviewFrame) -> PathBuf {

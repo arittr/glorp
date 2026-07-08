@@ -1,20 +1,21 @@
 use crate::dev_preview::export::{
-    PreviewDimensions, PreviewPixelArtArtifact, PreviewPixelFitArtifact,
+    PreviewDimensions, PreviewPixelArtArtifact, PreviewPixelArtCellArtifact,
+    PreviewPixelCompositionArtifact, PreviewPixelCompositionComparisonArtifact,
+    PreviewPixelCompositionContextArtifact, PreviewPixelFitArtifact,
     PreviewPixelFitGeometryEvidence, PreviewPixelFrameArtifact, PreviewPixelHudOverlap,
-    PreviewPlayback, PreviewScenarioKind, PreviewStrip, PreviewStripFrame, PreviewStripFrameFiles,
-    PreviewStripKind, PIXEL_ART_SCHEMA_VERSION, PIXEL_FIT_SCHEMA_VERSION,
-    PIXEL_FRAME_SCHEMA_VERSION,
+    PreviewPixelProtectedRegionArtifact, PreviewPlayback, PreviewScenarioKind, PreviewStrip,
+    PreviewStripFrame, PreviewStripFrameFiles, PreviewStripKind, PIXEL_ART_SCHEMA_VERSION,
+    PIXEL_COMPOSITION_SCHEMA_VERSION, PIXEL_FIT_SCHEMA_VERSION, PIXEL_FRAME_SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::{frame_from_buffer, PreviewFrame};
 use crate::dev_preview::scenarios::{PreviewRenderContext, PreviewScenarioBundle};
 use crate::dev_preview::strips::PreviewStripBundle;
 use crate::game::{evolution::Stage, metabolism::Mood};
-use crate::pet::{
-    art::stage_label, generation::generate_pet, generation::Species, render::render_pet,
-};
+use crate::pet::{art::stage_label, generation::Species};
 use crate::presentation::pixel::{
     render_pixel_frame, PixelArtReferenceProvider, PixelBounds, PixelFrame, PixelPetArtReference,
-    PixelPetInput, PixelPetScene, PixelRendererState, PixelRendererTick, PixelViewport,
+    PixelPetInput, PixelPetScene, PixelProtectedRegion, PixelRendererState, PixelRendererTick,
+    PixelViewport,
 };
 use crate::round::hud::companion_hud_text;
 use crate::round::pixel_fit::{pixel_companion_fit, PixelCompanionFit, PixelTargetGeometry};
@@ -171,7 +172,7 @@ fn render_pixel_bundle(
     lines: &[&str],
     intent: &'static str,
 ) -> PreviewPixelBundle {
-    let (artifacts, input, request) = render_pixel_artifact(ctx, fixture, fixture.elapsed_ms);
+    let (artifacts, input, _request) = render_pixel_artifact(ctx, fixture, fixture.elapsed_ms);
     let vm = fixture_view_model(fixture, ctx.fixed_now);
     let dimensions = PreviewDimensions {
         width: artifacts.frame.width,
@@ -182,8 +183,6 @@ fn render_pixel_bundle(
         .map(|line| (*line).to_string())
         .collect::<Vec<_>>();
     summary_lines.extend(artifacts.fit_status_lines.clone());
-    summary_lines.push("terminal reference".to_string());
-    summary_lines.extend(render_terminal_reference_lines(&request));
     let mut frame = summary_frame(fixture.id, fixture.title, &summary_lines);
     frame.contract.pixel = Some(artifacts.frame);
     frame.contract.pixel_art = Some(artifacts.art);
@@ -470,20 +469,6 @@ fn render_fit_status_lines(frame: &PixelFrame, vm: &WatchViewModel) -> Vec<Strin
         .collect()
 }
 
-fn render_terminal_reference_lines(
-    request: &crate::presentation::pixel::PixelArtReferenceRequest,
-) -> Vec<String> {
-    render_pet(
-        &generate_pet(&request.seed).with_species(request.species),
-        request.stage,
-        request.mood,
-        request.animation_frame,
-    )
-    .lines
-    .into_iter()
-    .collect()
-}
-
 fn summary_frame(id: &str, title: &str, lines: &[String]) -> PreviewFrame {
     let width = lines
         .iter()
@@ -561,6 +546,17 @@ fn pixel_art_sidecar(
     input: &PixelPetInput,
     reference: &PixelPetArtReference,
 ) -> PreviewPixelArtArtifact {
+    let protected_bounds = reference
+        .protected_regions
+        .iter()
+        .map(protected_region_artifact)
+        .collect::<Vec<_>>();
+    let signature_regions = protected_bounds
+        .iter()
+        .filter(|region| region.role == "signature")
+        .cloned()
+        .collect();
+
     PreviewPixelArtArtifact {
         schema_version: PIXEL_ART_SCHEMA_VERSION,
         species: input.identity.species.as_str().to_string(),
@@ -572,6 +568,64 @@ fn pixel_art_sidecar(
         body_bounds: reference.body_bounds,
         foot_contact: reference.foot_contact.clone(),
         role_counts: reference.role_counts.clone(),
+        role_cells: reference
+            .occupied_cells
+            .iter()
+            .map(|cell| PreviewPixelArtCellArtifact {
+                x: cell.x,
+                y: cell.y,
+                role: cell.role.as_str(),
+            })
+            .collect(),
+        protected_bounds,
+        signature_regions,
+        cue_coverage: reference.cue_coverage.clone(),
+    }
+}
+
+fn protected_region_artifact(region: &PixelProtectedRegion) -> PreviewPixelProtectedRegionArtifact {
+    PreviewPixelProtectedRegionArtifact {
+        id: region.id,
+        role: region.role,
+        bounds: region.bounds,
+        cell_count: region.cell_count,
+    }
+}
+
+#[allow(dead_code)]
+fn pixel_composition_sidecar(
+    frame_id: &str,
+    reference: &PixelPetArtReference,
+    tank_life_available: bool,
+) -> PreviewPixelCompositionArtifact {
+    let deferred_contexts = if tank_life_available {
+        Vec::new()
+    } else {
+        vec!["tank-life-unavailable-for-pixel-runtime".to_string()]
+    };
+    let protected_regions = reference
+        .protected_regions
+        .iter()
+        .map(protected_region_artifact)
+        .collect::<Vec<_>>();
+
+    PreviewPixelCompositionArtifact {
+        schema_version: PIXEL_COMPOSITION_SCHEMA_VERSION,
+        frame_id: frame_id.to_string(),
+        context: PreviewPixelCompositionContextArtifact {
+            surface: "companion-round-preview".to_string(),
+            props_available: false,
+            tank_life_available,
+            evidence_mode: "read-only-comparison".to_string(),
+        },
+        comparison: PreviewPixelCompositionComparisonArtifact {
+            protected_region_count: protected_regions.len(),
+            prop_cells_near_protected_regions: 0,
+            tank_life_cells_near_protected_regions: 0,
+            occlusion_conflicts: Vec::new(),
+            deferred_contexts,
+        },
+        protected_regions,
     }
 }
 
