@@ -1,7 +1,9 @@
 #![cfg(target_os = "macos")]
 
 use crate::presentation::pixel::PixelFrame;
+use crate::round::hud::CompanionHudText;
 use crate::round::layout::RoundAperture;
+use crate::round::pixel_fit::{pixel_companion_fit, PixelFitRect, PixelTargetGeometry};
 use objc2::rc::Retained;
 use objc2::ClassType;
 use objc2_app_kit::{
@@ -11,26 +13,34 @@ use objc2_app_kit::{
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::ptr;
 
-pub fn draw_pixel_frame(frame: &PixelFrame, _bounds: NSRect, aperture: RoundAperture) {
+pub fn draw_pixel_frame(
+    frame: &PixelFrame,
+    bounds: NSRect,
+    aperture: RoundAperture,
+    hud_text: &CompanionHudText,
+) {
     let Some(bitmap) = bitmap_image_rep_for_frame(frame) else {
         return;
     };
+    let fit = pixel_companion_fit(
+        PixelTargetGeometry {
+            width: bounds.size.width.round() as u16,
+            height: bounds.size.height.round() as u16,
+        },
+        crate::presentation::pixel::PixelViewport {
+            logical_width: frame.width,
+            logical_height: frame.height,
+        },
+        hud_text,
+    );
+    debug_assert_eq!(fit.aperture, aperture);
     let image = ns_image_for_bitmap(frame, &bitmap);
     let Some(context) = (unsafe { NSGraphicsContext::currentContext() }) else {
         return;
     };
     let previous_interpolation = unsafe { context.imageInterpolation() };
     let previous_antialias = unsafe { context.shouldAntialias() };
-    let aperture_rect = NSRect::new(
-        NSPoint::new(
-            f64::from(aperture.center_x - aperture.radius),
-            f64::from(aperture.center_y - aperture.radius),
-        ),
-        NSSize::new(
-            f64::from(aperture.radius * 2.0),
-            f64::from(aperture.radius * 2.0),
-        ),
-    );
+    let image_rect = appkit_rect_for_fit(bounds.size.height as f32, fit.image_rect);
     let source_rect = NSRect::new(
         NSPoint::new(0.0, 0.0),
         NSSize::new(f64::from(frame.width), f64::from(frame.height)),
@@ -40,7 +50,7 @@ pub fn draw_pixel_frame(frame: &PixelFrame, _bounds: NSRect, aperture: RoundAper
         context.setImageInterpolation(NSImageInterpolation::None);
         context.setShouldAntialias(false);
         image.drawInRect_fromRect_operation_fraction(
-            aperture_rect,
+            image_rect,
             source_rect,
             NSCompositingOperation::SourceOver,
             1.0,
@@ -48,6 +58,16 @@ pub fn draw_pixel_frame(frame: &PixelFrame, _bounds: NSRect, aperture: RoundAper
         context.setImageInterpolation(previous_interpolation);
         context.setShouldAntialias(previous_antialias);
     }
+}
+
+fn appkit_rect_for_fit(bounds_height: f32, rect: PixelFitRect) -> NSRect {
+    NSRect::new(
+        NSPoint::new(
+            f64::from(rect.x),
+            f64::from(bounds_height - rect.y - rect.height),
+        ),
+        NSSize::new(f64::from(rect.width), f64::from(rect.height)),
+    )
 }
 
 fn bitmap_image_rep_for_frame(frame: &PixelFrame) -> Option<Retained<NSBitmapImageRep>> {
@@ -148,6 +168,24 @@ mod tests {
         assert_color_eq(unsafe { bitmap.colorAtX_y(1, 1) }.as_deref(), top_right);
         assert_color_eq(unsafe { bitmap.colorAtX_y(0, 0) }.as_deref(), bottom_left);
         assert_color_eq(unsafe { bitmap.colorAtX_y(1, 0) }.as_deref(), bottom_right);
+    }
+
+    #[test]
+    fn appkit_rect_for_fit_converts_top_down_fit_to_bottom_origin_rect() {
+        let rect = appkit_rect_for_fit(
+            360.0,
+            PixelFitRect {
+                x: 40.0,
+                y: 24.0,
+                width: 180.0,
+                height: 180.0,
+            },
+        );
+
+        assert_eq!(rect.origin.x, 40.0);
+        assert_eq!(rect.origin.y, 156.0);
+        assert_eq!(rect.size.width, 180.0);
+        assert_eq!(rect.size.height, 180.0);
     }
 
     fn assert_color_eq(color: Option<&objc2_app_kit::NSColor>, expected: Rgba8) {
