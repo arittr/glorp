@@ -15,6 +15,46 @@ fn reference_for(vm: &WatchViewModel, ms: i64) -> PixelPetArtReference {
     provider.reference_for(&request)
 }
 
+fn orthogonal_neighbor_count(reference: &PixelPetArtReference, x: u8, y: u8) -> usize {
+    let footprint = reference
+        .occupied_cells
+        .iter()
+        .map(|cell| (i16::from(cell.x), i16::from(cell.y)))
+        .collect::<std::collections::BTreeSet<_>>();
+    let x = i16::from(x);
+    let y = i16::from(y);
+    [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        .into_iter()
+        .filter(|(dx, dy)| footprint.contains(&(x + dx, y + dy)))
+        .count()
+}
+
+fn assert_region_matches_role_cells(
+    reference: &PixelPetArtReference,
+    region_id: &str,
+    expected_role: &str,
+    cells: &[glorp::presentation::pixel::PixelArtCell],
+) {
+    let region = reference
+        .protected_region(region_id)
+        .unwrap_or_else(|| panic!("missing protected region: {region_id}"));
+    assert_eq!(region.role, expected_role);
+    assert!(
+        !cells.is_empty(),
+        "{region_id} must cover at least one promoted cell"
+    );
+    assert_eq!(region.cell_count, cells.len(), "{region_id} cell count");
+    for cell in cells {
+        assert!(
+            cell.x >= region.bounds.min_x
+                && cell.x <= region.bounds.max_x
+                && cell.y >= region.bounds.min_y
+                && cell.y <= region.bounds.max_y,
+            "{region_id} bounds must cover promoted cell {cell:?}"
+        );
+    }
+}
+
 #[test]
 fn fuzz_s3_reference_preserves_real_cast_cues() {
     let mut vm = WatchViewModel::fixture();
@@ -236,7 +276,7 @@ fn fuzz_s3_promotes_locket_cells_into_visible_roles() {
     assert!(!locket_cells.is_empty(), "locket cells must be promoted");
     assert_eq!(coverage.expected, coverage.present);
     assert!(coverage.present >= 1);
-    assert!(reference.protected_region("signature-locket").is_some());
+    assert_region_matches_role_cells(&reference, "signature-locket", "signature", &locket_cells);
 }
 
 #[test]
@@ -253,7 +293,7 @@ fn crystal_s5_promotes_facet_cells_into_visible_roles() {
     assert!(!facet_cells.is_empty(), "facet cells must be promoted");
     assert_eq!(coverage.expected, coverage.present);
     assert!(coverage.present >= 1);
-    assert!(reference.protected_region("signature-facet").is_some());
+    assert_region_matches_role_cells(&reference, "signature-facet", "signature", &facet_cells);
 }
 
 #[test]
@@ -276,17 +316,20 @@ fn glitch_s4_promotes_repair_cells_without_stealing_face_cells() {
     assert!(!repair_cells.is_empty(), "repair cells must be promoted");
     assert_eq!(coverage.expected, coverage.present);
     assert!(face_cells.iter().all(|cell| !repair_cells.contains(cell)));
-    assert!(reference.protected_region("face").is_some());
-    assert!(reference
-        .protected_region("signature-repair-mark")
-        .is_some());
+    assert_region_matches_role_cells(&reference, "face", "face", &face_cells);
+    assert_region_matches_role_cells(
+        &reference,
+        "signature-repair-mark",
+        "signature",
+        &repair_cells,
+    );
 }
 
 #[test]
-fn outline_appendage_and_foot_contact_are_promoted_cells_not_counts_only() {
+fn mech_s3_promotes_outline_appendage_and_foot_contact_as_real_cells() {
     let mut vm = WatchViewModel::fixture();
     vm.pet_render.generated_species = Species::Mech;
-    vm.pet_render.stage = Stage::S5;
+    vm.pet_render.stage = Stage::S3;
     vm.pet_render.mood = Mood::Content;
 
     let reference = reference_for(&vm, 0);
@@ -303,6 +346,24 @@ fn outline_appendage_and_foot_contact_are_promoted_cells_not_counts_only() {
     assert_eq!(
         reference.role_count(PixelArtRole::FootContact),
         reference.foot_contact.cells.len()
+    );
+}
+
+#[test]
+fn mech_s5_does_not_classify_two_neighbor_chassis_cells_as_appendages() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Mech;
+    vm.pet_render.stage = Stage::S5;
+    vm.pet_render.mood = Mood::Content;
+
+    let reference = reference_for(&vm, 0);
+    let appendage_cells = reference.cells_for_roles([PixelArtRole::Appendage]);
+
+    assert!(
+        appendage_cells
+            .iter()
+            .all(|cell| orthogonal_neighbor_count(&reference, cell.x, cell.y) <= 1),
+        "appendage cells must use the narrow <=1 orthogonal-neighbor heuristic: {appendage_cells:?}"
     );
 }
 

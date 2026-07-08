@@ -623,7 +623,7 @@ fn is_appendage_cell(cell: &PixelArtCell, footprint: &BTreeSet<(u8, u8)>) -> boo
         .into_iter()
         .filter(|(dx, dy)| footprint.contains(&((x + dx) as u8, (y + dy) as u8)))
         .count();
-    horizontal_neighbors + vertical_neighbors <= 2
+    horizontal_neighbors + vertical_neighbors <= 1
 }
 
 fn reference_checksum(
