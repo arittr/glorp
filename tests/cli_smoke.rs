@@ -276,6 +276,24 @@ fn companion_app_accepts_hidden_pixel_renderer_before_macos_gate() {
         ));
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn companion_app_accepts_hidden_review_flags_before_macos_gate() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args([
+            "companion-app",
+            "--review-size",
+            "260x260",
+            "--review-active-pulse",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "glorp companion-app is only available on macOS",
+        ));
+}
+
 #[test]
 fn companion_rejects_unknown_renderer() {
     Command::cargo_bin("glorp")

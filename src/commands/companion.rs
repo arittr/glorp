@@ -15,11 +15,28 @@ pub fn run(mode: CompanionRendererMode, review: CompanionReviewOptions) -> Resul
         )?;
     }
     let app = companion_app_path()?;
+    let mut command = build_open_command(&app, mode, review);
+    let status = command.status()?;
+    if !status.success() {
+        return Err(GlorpError::Message(format!(
+            "failed to open Glorp.app at {}",
+            app.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn build_open_command(
+    app: &std::path::Path,
+    mode: CompanionRendererMode,
+    review: CompanionReviewOptions,
+) -> std::process::Command {
     let mut command = std::process::Command::new("open");
-    if mode.is_pixel() {
+    if mode.is_pixel() || review.initial_size.is_some() || review.active_pulse {
         command.arg("-n");
     }
-    command.arg(&app);
+    command.arg(app);
     if mode.is_pixel() || review.initial_size.is_some() || review.active_pulse {
         command.arg("--args");
     }
@@ -33,14 +50,7 @@ pub fn run(mode: CompanionRendererMode, review: CompanionReviewOptions) -> Resul
     if review.active_pulse {
         command.arg("--review-active-pulse");
     }
-    let status = command.status()?;
-    if !status.success() {
-        return Err(GlorpError::Message(format!(
-            "failed to open Glorp.app at {}",
-            app.display()
-        )));
-    }
-    Ok(())
+    command
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -69,4 +79,40 @@ fn companion_app_path() -> Result<std::path::PathBuf> {
     Err(GlorpError::Message(
         "Glorp.app was not found; run `node scripts/build-macos-companion-app.mjs --profile debug` in development".into(),
     ))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::build_open_command;
+    use crate::commands::companion_mode::{
+        CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
+    };
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    #[test]
+    fn review_options_force_fresh_open_for_classic_renderer() {
+        let command = build_open_command(
+            Path::new("/Applications/Glorp.app"),
+            CompanionRendererMode::Classic,
+            CompanionReviewOptions {
+                initial_size: Some(CompanionReviewSize { width: 360, height: 360 }),
+                active_pulse: true,
+            },
+        );
+
+        assert_eq!(command.get_program(), "open");
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-n"),
+                OsString::from("/Applications/Glorp.app"),
+                OsString::from("--args"),
+                OsString::from("--review-size"),
+                OsString::from("360x360"),
+                OsString::from("--review-active-pulse"),
+            ]
+        );
+    }
 }
