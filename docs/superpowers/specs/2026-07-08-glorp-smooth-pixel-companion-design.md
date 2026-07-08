@@ -92,9 +92,9 @@ To avoid spreading the first pass across six generic blobs, V1 has two hero
 fixtures that must look intentionally species-specific before Pixel can be
 considered a product win:
 
-1. **Fuzz S3 happy/content, idle.** Round/fluffy silhouette, separate face layer,
-   soft breath, warm aura, and a clearly readable blink.
-2. **Glitch S4 content/active, feed pulse.** Blockier silhouette, sparse
+1. **Fuzz S3 content, idle.** Round/fluffy silhouette, separate face layer, soft
+   breath, warm aura, and a clearly readable blink.
+2. **Glitch S4 content, active feed pulse.** Blockier silhouette, sparse
    corruption/noise, scan-like particle or accent, and a visibly bounded pulse.
 
 All species must render without panics or empty frames, but non-hero species can
@@ -140,6 +140,12 @@ companion AppKit adapter
 consume a sanitized pixel input, not raw terminal-renderer output:
 
 ```rust
+PixelPetIdentity {
+    species: Species,
+    stage: Stage,
+    variation_key: PixelVariationKey,
+}
+
 PixelPetInput {
     identity: PixelPetIdentity,
     mood: Mood,
@@ -147,7 +153,6 @@ PixelPetInput {
     activity: PixelActivity,
     sleep: PixelSleepState,
     pulse: PixelPulseState,
-    viewport: PixelViewport,
 }
 ```
 
@@ -157,9 +162,15 @@ diagnostics, prompt/response text, or seed values that the round companion would
 otherwise redact. Pixel preview metadata uses the same sanitized privacy stance
 as `PresentationSurface::RoundCompanion` / `PreviewLabArtifact`.
 
+`PixelVariationKey` is stable and deterministic, but not a raw pet seed. Derive
+it from the pet seed through a one-way projection or small variation bucket so
+blink cadence, idle timing, and silhouette accents remain per-pet without
+leaking the underlying seed into `PixelPetInput`, `PixelPetScene`, `PixelFrame`,
+or preview metadata.
+
 It produces a `PixelPetScene` with semantic data:
 
-- pet identity: species, stage, mood, seed-derived variation
+- pet identity: species, stage, mood, `PixelVariationKey`-derived variation
 - palette roles resolved from the existing pet palette
 - animation phases: wander, breath, blink, idle gesture, particle, pulse
 - activity/sleep/calm modifiers
@@ -183,6 +194,7 @@ pub struct PixelRendererState {
 
 pub struct PixelRendererTick<'a> {
     pub input: &'a PixelPetInput,
+    pub viewport: PixelViewport,
     pub now: OffsetDateTime,
     pub state: &'a mut PixelRendererState,
 }
@@ -239,9 +251,9 @@ Frame invariants:
 - Animation state can use continuous positions, but rasterization snaps hard
   pixel-art layers to logical pixels unless a deliberate soft aura/shadow layer
   says otherwise.
-- Platform hosts scale the logical frame to the window using nearest-neighbor
-  interpolation for body/face/accent layers. Soft aura/shadow may be rendered
-  inside the logical frame, not by host-side blur.
+- Platform hosts scale the entire logical frame to the window using
+  nearest-neighbor interpolation. Soft aura/shadow must be pre-rendered inside
+  the logical frame; hosts must not need layer semantics or host-side effects.
 
 ### AppKit companion adapter
 
@@ -253,8 +265,9 @@ The macOS companion adapter owns:
 - viewport measurement
 - scale-to-fit into the current round companion window
 - converting the portable frame into an AppKit image or direct draw
-- preserving the existing companion perimeter HUD/gauge overlay above the Pixel
-  interior unless a later spec explicitly replaces it
+- preserving existing companion overlays above the Pixel interior, including the
+  top-layer halo/trouble overlay, perimeter gauges, and bottom HUD, unless a
+  later spec explicitly replaces them
 
 It should not own:
 
@@ -265,9 +278,9 @@ It should not own:
 - state reaction rules
 
 Pixel mode replaces the current terminal-cell tank/pet interior. It does not
-replace the perimeter gauges or bottom HUD in the first implementation. Those
-remain AppKit/HUD-owned overlays, which keeps the first pixel pass focused on
-the living pet.
+replace the halo/trouble overlay, perimeter gauges, or bottom HUD in the first
+implementation. Those remain AppKit/HUD-owned overlays, which keeps the first
+pixel pass focused on the living pet.
 
 ## Renderer Selection And Rollout
 
@@ -348,6 +361,11 @@ Animation must be time-based, not frame-count based.
   visible snap when possible.
 - Before flipping Pixel to default, measure Classic and Pixel CPU over the same
   60-second idle and active-review windows at the default companion size.
+- Default flip budget: Pixel's average process CPU at default size must stay
+  within 2 percentage points of Classic during the idle window and within 5
+  percentage points of Classic during the active-review window. If either budget
+  fails, Classic remains default until a follow-up tuning pass records a new
+  measured rationale and budget.
 
 ## Visual Model V1
 
@@ -398,6 +416,8 @@ implementation plan must add:
 - a pixel scenario or scenario selection entry
 - `ArtifactType::PixelFrame`
 - pixel frame file slots in the manifest contract
+- a Preview Lab `SCHEMA_VERSION` bump
+- a `schema_version` field in `frames/*.pixel.json`
 - strip metadata for pixel animation frames
 - a `write_pixel_json` export path
 - canvas rendering in `index.html` with image smoothing disabled
@@ -437,9 +457,14 @@ Pure tests:
 - asleep/calm reduces motion amplitude
 - feed/activity pulse changes brightness or pose for a bounded time
 - all frame writes stay within the viewport
+- all species render non-empty, in-bounds frames through the shared pixel grammar
+- changes to species, stage, mood, asleep/calm, and feed/activity pulse affect
+  the sanitized `PixelPetInput` and at least one controlled `PixelFrame` fixture
 - `PixelPetInput` / pixel preview metadata contains no source names, exact
   counts, file paths, project names, raw diagnostics, prompt/response text, or
   raw seed values
+- `PixelVariationKey` is stable for the same pet identity and does not expose
+  the raw seed value in public structs or artifacts
 - Pixel code does not depend on `vm.pet_art`, `vm.pet_spans`, or
   `rerender_pet_for_view_model`
 
@@ -507,10 +532,13 @@ The first implementation is acceptable when:
    has no AppKit dependency.
 6. Pixel V1 includes the Fuzz S3 and Glitch S4 hero fixtures with side-by-side
    Classic vs Pixel preview review artifacts.
-7. Preview Lab includes deterministic pixel artifacts for review.
-8. Existing watch and classic companion tests remain green.
-9. CPU measurement and manual macOS review are recorded before Pixel becomes
-   the default companion renderer.
+7. All species render non-empty, in-bounds Pixel frames through the shared pixel
+   grammar, and live species/stage/mood/asleep/pulse identity changes are visible
+   in sanitized input and controlled Pixel output.
+8. Preview Lab includes deterministic pixel artifacts for review.
+9. Existing watch and classic companion tests remain green.
+10. CPU measurement and manual macOS review are recorded. Pixel remains opt-in
+    unless the default-flip CPU budget passes.
 
 ## Risks
 
