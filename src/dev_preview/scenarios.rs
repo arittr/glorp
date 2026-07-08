@@ -2135,7 +2135,15 @@ mod tests {
                 "tank-life-anemone-morphs",
                 "pixel-fuzz-s3-content-idle",
                 "pixel-glitch-s4-feed-pulse",
-                "pixel-species-matrix"
+                "pixel-species-matrix",
+                "pixel-fuzz-s3-locket",
+                "pixel-blob-s3-body",
+                "pixel-ghost-s3-wisp",
+                "pixel-glitch-s4-repair",
+                "pixel-crystal-s5-facets",
+                "pixel-mech-s5-hardbody",
+                "pixel-cast-identity-matrix",
+                "pixel-tank-composition",
             ]
         );
     }

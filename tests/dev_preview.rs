@@ -65,6 +65,15 @@ const TANK_LIFE_IDS: [&str; 8] = [
     "tank-life-anemone-morphs",
 ];
 
+const PIXEL_CAST_IDS: [&str; 6] = [
+    "pixel-fuzz-s3-locket",
+    "pixel-blob-s3-body",
+    "pixel-ghost-s3-wisp",
+    "pixel-glitch-s4-repair",
+    "pixel-crystal-s5-facets",
+    "pixel-mech-s5-hardbody",
+];
+
 const HABITAT_PROPS_ORBIT_ID: &str = "watch-habitat-props-orbit";
 
 const GLITCH_PERSISTENCE_PET_ID: &str = "pet-glitch-persistence-states";
@@ -1260,6 +1269,25 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/pixel-fuzz-s3-content-idle.pixel.json",
         "frames/pixel-glitch-s4-feed-pulse.pixel.json",
         "frames/pixel-species-matrix.pixel.json",
+        "frames/pixel-fuzz-s3-locket.pixel.json",
+        "frames/pixel-fuzz-s3-locket.pixel-art.json",
+        "frames/pixel-fuzz-s3-locket.pixel-fit.json",
+        "frames/pixel-blob-s3-body.pixel.json",
+        "frames/pixel-blob-s3-body.pixel-art.json",
+        "frames/pixel-blob-s3-body.pixel-fit.json",
+        "frames/pixel-ghost-s3-wisp.pixel.json",
+        "frames/pixel-ghost-s3-wisp.pixel-art.json",
+        "frames/pixel-ghost-s3-wisp.pixel-fit.json",
+        "frames/pixel-glitch-s4-repair.pixel.json",
+        "frames/pixel-glitch-s4-repair.pixel-art.json",
+        "frames/pixel-glitch-s4-repair.pixel-fit.json",
+        "frames/pixel-crystal-s5-facets.pixel.json",
+        "frames/pixel-crystal-s5-facets.pixel-art.json",
+        "frames/pixel-crystal-s5-facets.pixel-fit.json",
+        "frames/pixel-mech-s5-hardbody.pixel.json",
+        "frames/pixel-mech-s5-hardbody.pixel-art.json",
+        "frames/pixel-mech-s5-hardbody.pixel-fit.json",
+        "frames/pixel-tank-composition.pixel-composition.json",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1357,6 +1385,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "pixel-fuzz-s3-content-idle".to_string(),
             "pixel-glitch-s4-feed-pulse".to_string(),
             "pixel-species-matrix".to_string(),
+            "pixel-fuzz-s3-locket".to_string(),
+            "pixel-blob-s3-body".to_string(),
+            "pixel-ghost-s3-wisp".to_string(),
+            "pixel-glitch-s4-repair".to_string(),
+            "pixel-crystal-s5-facets".to_string(),
+            "pixel-mech-s5-hardbody".to_string(),
+            "pixel-cast-identity-matrix".to_string(),
+            "pixel-tank-composition".to_string(),
         ]
     );
 }
@@ -1877,6 +1913,100 @@ fn dev_preview_pixel_writes_art_and_fit_sidecars() {
         "round::pixel_fit::pixel_companion_fit"
     );
     assert_eq!(fit_json["hud_overlap"]["body_eye_mouth_pixels"], 0);
+}
+
+#[test]
+fn dev_preview_pixel_cast_identity_writes_six_real_frame_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    for id in PIXEL_CAST_IDS {
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["kind"], "pixel");
+        assert_eq!(
+            scenario["files"]["pixel"],
+            format!("frames/{id}.pixel.json")
+        );
+        assert_eq!(
+            scenario["files"]["pixel_art"],
+            format!("frames/{id}.pixel-art.json")
+        );
+        assert_eq!(
+            scenario["files"]["pixel_fit"],
+            format!("frames/{id}.pixel-fit.json")
+        );
+        assert!(run.out.join(format!("frames/{id}.pixel.json")).is_file());
+        assert!(run
+            .out
+            .join(format!("frames/{id}.pixel-art.json"))
+            .is_file());
+        assert!(run
+            .out
+            .join(format!("frames/{id}.pixel-fit.json"))
+            .is_file());
+
+        let art = run.read_json(&format!("frames/{id}.pixel-art.json"));
+        assert_eq!(art["schema_version"], 2);
+        assert!(art["role_cells"].as_array().unwrap().len() > 20);
+        assert!(art["protected_bounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|region| { region["id"] == "face" }));
+    }
+}
+
+#[test]
+fn dev_preview_pixel_cast_matrix_references_real_cast_frames() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    let matrix = scenario(&manifest, "pixel-cast-identity-matrix");
+    let referenced = matrix["inputs"]["cast_frame_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(referenced, PIXEL_CAST_IDS);
+    assert!(matrix["files"].get("pixel").is_none());
+
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+    for id in PIXEL_CAST_IDS {
+        assert!(
+            html.contains(&format!("data-pixel-frame=\"frames/{id}.pixel.json\"")),
+            "matrix review must expose canvas for {id}"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_pixel_hero_cues_have_expected_coverage() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    for (id, cue) in [
+        ("pixel-fuzz-s3-locket", "locket"),
+        ("pixel-glitch-s4-repair", "repair_mark"),
+        ("pixel-crystal-s5-facets", "facet"),
+    ] {
+        let art = run.read_json(&format!("frames/{id}.pixel-art.json"));
+        let coverage = &art["cue_coverage"][cue];
+        assert!(
+            coverage["expected"].as_u64().unwrap() > 0,
+            "{id} missing expected {cue}"
+        );
+        assert_eq!(
+            coverage["expected"], coverage["present"],
+            "{id} did not promote {cue}"
+        );
+    }
 }
 
 #[test]

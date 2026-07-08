@@ -35,6 +35,14 @@ const PREVIEW_FIT_MIN_TARGET_SIZE: u16 = 260;
 const PREVIEW_FIT_TARGET_SIZE: u16 = 360;
 const PREVIEW_FIT_LARGE_TARGET_SIZE: u16 = 480;
 const PREVIEW_FIT_FULLSCREEN_TARGET_SIZE: u16 = 900;
+const PIXEL_CAST_IDS: [&str; 6] = [
+    "pixel-fuzz-s3-locket",
+    "pixel-blob-s3-body",
+    "pixel-ghost-s3-wisp",
+    "pixel-glitch-s4-repair",
+    "pixel-crystal-s5-facets",
+    "pixel-mech-s5-hardbody",
+];
 
 struct PixelPreviewArtifacts {
     frame: PreviewPixelFrameArtifact,
@@ -44,7 +52,7 @@ struct PixelPreviewArtifacts {
 }
 
 pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
-    vec![
+    let mut bundles = vec![
         render_pixel_bundle(
             ctx,
             PixelFixture {
@@ -59,7 +67,12 @@ pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
                 pulse_age_ms: None,
                 elapsed_ms: 480,
             },
-            &["species fuzz", "stage s3 pup", "mood content", "pose idle"],
+            vec![
+                "species fuzz".to_string(),
+                "stage s3 pup".to_string(),
+                "mood content".to_string(),
+                "pose idle".to_string(),
+            ],
             "Review the companion pixel renderer in a stable awake idle pose.",
         ),
         render_pixel_bundle(
@@ -76,7 +89,12 @@ pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
                 pulse_age_ms: Some(300),
                 elapsed_ms: 300,
             },
-            &["species glitch", "stage s4 shardglitch", "mood content", "pulse feed"],
+            vec![
+                "species glitch".to_string(),
+                "stage s4 shardglitch".to_string(),
+                "mood content".to_string(),
+                "pulse feed".to_string(),
+            ],
             "Review the companion pixel renderer with a live feed pulse and glitch accents.",
         ),
         render_pixel_bundle(
@@ -93,10 +111,116 @@ pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
                 pulse_age_ms: None,
                 elapsed_ms: 720,
             },
-            &["fuzz blob ghost", "glitch crystal mech", "anchor crystal s5", "palette survey"],
+            vec![
+                "fuzz blob ghost".to_string(),
+                "glitch crystal mech".to_string(),
+                "anchor crystal s5".to_string(),
+                "palette survey".to_string(),
+            ],
             "Review a representative pixel companion frame alongside the species roster used for pixel fixture coverage.",
         ),
-    ]
+    ];
+    let cast_fixtures = [
+        PixelFixture {
+            id: "pixel-fuzz-s3-locket",
+            title: "Pixel Fuzz S3 Locket",
+            species: Species::Fuzz,
+            stage: Stage::S3,
+            mood: Mood::Content,
+            asleep: false,
+            calm: false,
+            burst_level: 0.0,
+            pulse_age_ms: None,
+            elapsed_ms: 480,
+        },
+        PixelFixture {
+            id: "pixel-blob-s3-body",
+            title: "Pixel Blob S3 Body",
+            species: Species::Blob,
+            stage: Stage::S3,
+            mood: Mood::Content,
+            asleep: false,
+            calm: false,
+            burst_level: 0.25,
+            pulse_age_ms: None,
+            elapsed_ms: 520,
+        },
+        PixelFixture {
+            id: "pixel-ghost-s3-wisp",
+            title: "Pixel Ghost S3 Wisp",
+            species: Species::Ghost,
+            stage: Stage::S3,
+            mood: Mood::Content,
+            asleep: false,
+            calm: true,
+            burst_level: 0.15,
+            pulse_age_ms: None,
+            elapsed_ms: 560,
+        },
+        PixelFixture {
+            id: "pixel-glitch-s4-repair",
+            title: "Pixel Glitch S4 Repair",
+            species: Species::Glitch,
+            stage: Stage::S4,
+            mood: Mood::Content,
+            asleep: false,
+            calm: false,
+            burst_level: 0.9,
+            pulse_age_ms: Some(300),
+            elapsed_ms: 300,
+        },
+        PixelFixture {
+            id: "pixel-crystal-s5-facets",
+            title: "Pixel Crystal S5 Facets",
+            species: Species::Crystal,
+            stage: Stage::S5,
+            mood: Mood::Happy,
+            asleep: false,
+            calm: false,
+            burst_level: 0.35,
+            pulse_age_ms: None,
+            elapsed_ms: 720,
+        },
+        PixelFixture {
+            id: "pixel-mech-s5-hardbody",
+            title: "Pixel Mech S5 Hardbody",
+            species: Species::Mech,
+            stage: Stage::S5,
+            mood: Mood::Content,
+            asleep: false,
+            calm: false,
+            burst_level: 0.45,
+            pulse_age_ms: None,
+            elapsed_ms: 640,
+        },
+    ];
+    for fixture in cast_fixtures {
+        let glitch_ctx;
+        let bundle_ctx = if fixture.id == "pixel-glitch-s4-repair" {
+            // Keep the repair-mark cast fixture on the same deterministic art-request
+            // timestamp as the cue-coverage reference tests so the promoted mark is present.
+            glitch_ctx = PreviewRenderContext {
+                fixed_now: time::macros::datetime!(2026-07-08 12:00 UTC),
+                render: ctx.render,
+            };
+            &glitch_ctx
+        } else {
+            ctx
+        };
+        bundles.push(render_pixel_bundle(
+            bundle_ctx,
+            fixture,
+            vec![
+                format!("species {}", fixture.species.as_str()),
+                format!("stage {}", fixture.stage.as_str()),
+                "cast identity review".to_string(),
+            ],
+            "Review a rendered Pixel cast identity frame with promoted cue roles.",
+        ));
+    }
+    bundles.push(pixel_cast_identity_matrix_bundle());
+    bundles.push(pixel_tank_composition_bundle(ctx));
+    bundles
 }
 
 pub fn pixel_strips(ctx: &PreviewRenderContext) -> Vec<PreviewPixelStripBundle> {
@@ -169,7 +293,7 @@ struct PixelFixture {
 fn render_pixel_bundle(
     ctx: &PreviewRenderContext,
     fixture: PixelFixture,
-    lines: &[&str],
+    lines: Vec<String>,
     intent: &'static str,
 ) -> PreviewPixelBundle {
     let (artifacts, input, _request) = render_pixel_artifact(ctx, fixture, fixture.elapsed_ms);
@@ -178,10 +302,7 @@ fn render_pixel_bundle(
         width: artifacts.frame.width,
         height: artifacts.frame.height,
     };
-    let mut summary_lines = lines
-        .iter()
-        .map(|line| (*line).to_string())
-        .collect::<Vec<_>>();
+    let mut summary_lines = lines;
     summary_lines.extend(artifacts.fit_status_lines.clone());
     let mut frame = summary_frame(fixture.id, fixture.title, &summary_lines);
     frame.contract.pixel = Some(artifacts.frame);
@@ -267,6 +388,44 @@ fn render_pixel_artifact(
 ) {
     let now = ctx.fixed_now + time::Duration::milliseconds(i64::from(elapsed_ms));
     render_pixel_artifact_with_pulse_anchor(ctx, fixture, elapsed_ms, now)
+}
+
+fn render_pixel_artifact_with_reference(
+    ctx: &PreviewRenderContext,
+    fixture: PixelFixture,
+    elapsed_ms: u16,
+) -> (
+    PixelPreviewArtifacts,
+    PixelPetInput,
+    crate::presentation::pixel::PixelArtReferenceRequest,
+    PixelPetArtReference,
+) {
+    let base = ctx.fixed_now;
+    let now = base + time::Duration::milliseconds(i64::from(elapsed_ms));
+    let pulse_anchor = now;
+    let vm = fixture_view_model(fixture, pulse_anchor);
+    let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(&vm, now);
+    let mut reference_provider = PixelArtReferenceProvider::default();
+    let art_reference = reference_provider.reference_for(&request);
+    let mut state = PixelRendererState::new(&input, base);
+    let frame = render_pixel_frame(PixelRendererTick {
+        input: &input,
+        art_reference: &art_reference,
+        viewport: PixelViewport::companion_default(),
+        now,
+        state: &mut state,
+    });
+    (
+        PixelPreviewArtifacts {
+            frame: pixel_artifact(&frame, &input, elapsed_ms),
+            art: pixel_art_sidecar(&input, &art_reference),
+            fit: pixel_fit_sidecar(&frame, &vm),
+            fit_status_lines: render_fit_status_lines(&frame, &vm),
+        },
+        input,
+        request,
+        art_reference,
+    )
 }
 
 fn render_pixel_artifact_with_pulse_anchor(
@@ -592,7 +751,6 @@ fn protected_region_artifact(region: &PixelProtectedRegion) -> PreviewPixelProte
     }
 }
 
-#[allow(dead_code)]
 fn pixel_composition_sidecar(
     frame_id: &str,
     reference: &PixelPetArtReference,
@@ -627,6 +785,80 @@ fn pixel_composition_sidecar(
         },
         protected_regions,
     }
+}
+
+fn pixel_cast_identity_matrix_bundle() -> PreviewPixelBundle {
+    let lines = vec![
+        "pixel cast identity matrix".to_string(),
+        "fuzz blob ghost".to_string(),
+        "glitch crystal mech".to_string(),
+        "see linked pixel frame canvases".to_string(),
+    ];
+    let mut frame = summary_frame(
+        "pixel-cast-identity-matrix",
+        "Pixel Cast Identity Matrix",
+        &lines,
+    );
+    frame
+        .extra_inputs
+        .insert("cast_frame_ids".to_string(), json!(PIXEL_CAST_IDS));
+    PreviewScenarioBundle::from_parts_with_dimensions(
+        frame,
+        PreviewScenarioKind::Pixel,
+        "Review the six real Pixel cast frames together; this grouping is not a stand-in for the frame artifacts.",
+        PreviewDimensions {
+            width: 36,
+            height: 4,
+        },
+        BTreeMap::from([("cast_frame_ids".to_string(), json!(PIXEL_CAST_IDS))]),
+        None,
+        Vec::new(),
+    )
+}
+
+fn pixel_tank_composition_bundle(ctx: &PreviewRenderContext) -> PreviewPixelBundle {
+    let fixture = PixelFixture {
+        id: "pixel-tank-composition",
+        title: "Pixel Tank Composition",
+        species: Species::Fuzz,
+        stage: Stage::S3,
+        mood: Mood::Content,
+        asleep: false,
+        calm: false,
+        burst_level: 0.2,
+        pulse_age_ms: None,
+        elapsed_ms: 480,
+    };
+    let (artifacts, input, _request, reference) =
+        render_pixel_artifact_with_reference(ctx, fixture, fixture.elapsed_ms);
+    let vm = fixture_view_model(fixture, ctx.fixed_now);
+    let mut frame = summary_frame(
+        fixture.id,
+        fixture.title,
+        &[
+            "pixel tank composition".to_string(),
+            "existing context evidence".to_string(),
+            "no runtime placement mutation".to_string(),
+        ],
+    );
+    frame.contract.pixel = Some(artifacts.frame);
+    frame.contract.pixel_art = Some(artifacts.art);
+    frame.contract.pixel_fit = Some(artifacts.fit);
+    frame.contract.pixel_composition =
+        Some(pixel_composition_sidecar(fixture.id, &reference, false));
+
+    PreviewScenarioBundle::from_parts_with_dimensions(
+        frame,
+        PreviewScenarioKind::Pixel,
+        "Record Pixel protected regions against current companion context without adding live prop or tank-life behavior.",
+        PreviewDimensions {
+            width: 96,
+            height: 96,
+        },
+        scenario_inputs(&input, &vm, fixture.elapsed_ms),
+        None,
+        Vec::new(),
+    )
 }
 
 fn pixel_fit_sidecar(frame: &PixelFrame, vm: &WatchViewModel) -> PreviewPixelFitArtifact {
