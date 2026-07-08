@@ -4,6 +4,7 @@ pub mod effect;
 pub mod pet;
 pub mod pet_scene;
 pub mod pixel;
+mod pixel_input;
 pub mod privacy;
 pub mod props;
 pub mod rasterize;
