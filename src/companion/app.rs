@@ -8,10 +8,15 @@ use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::commands::companion_mode::CompanionRendererMode;
 use crate::commands::watch::{build_watch_view_model_at, rerender_pet_for_view_model};
 use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
+use crate::presentation::pixel::{
+    render_pixel_frame, PixelFrame, PixelPetInput, PixelRendererState, PixelRendererTick,
+    PixelViewport,
+};
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge, daily_overage_color,
     daily_overage_marker_arc, daily_overage_marker_fraction, growth_ring_fill_end_deg,
@@ -71,6 +76,10 @@ struct AppState {
     presentation_state: WatchPresentationState,
     vm: WatchViewModel,
     scene: RoundSceneModel,
+    renderer_mode: CompanionRendererMode,
+    pixel_input: Option<PixelPetInput>,
+    pixel_state: Option<PixelRendererState>,
+    pixel_frame: Option<PixelFrame>,
     animation_frame: u64,
 }
 
@@ -116,7 +125,7 @@ declare_class!(
     }
 );
 
-pub fn run(_mode: crate::commands::companion_mode::CompanionRendererMode) -> Result<()> {
+pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| GlorpError::Message("glorp companion must run on the main thread".into()))?;
     let paths = AppPaths::resolve()?;
@@ -141,6 +150,13 @@ pub fn run(_mode: crate::commands::companion_mode::CompanionRendererMode) -> Res
         crate::storage::day_axis::LocalDayMapper::System,
     )?;
     let scene = derive_round_scene_model(&initial_vm, now);
+    let pixel_input = renderer_mode
+        .is_pixel()
+        .then(|| PixelPetInput::from_watch_view_model(&initial_vm, now));
+    let pixel_state = pixel_input
+        .as_ref()
+        .map(|input| PixelRendererState::new(input, now));
+    let pixel_frame = None;
 
     let app: Retained<NSApplication> = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -159,13 +175,22 @@ pub fn run(_mode: crate::commands::companion_mode::CompanionRendererMode) -> Res
             presentation_state: WatchPresentationState::default(),
             vm: initial_vm,
             scene,
+            renderer_mode,
+            pixel_input,
+            pixel_state,
+            pixel_frame,
             animation_frame: 0,
         });
     });
 
+    let tick_interval = if renderer_mode.is_pixel() {
+        1.0 / 30.0
+    } else {
+        UI_TICK_INTERVAL_SECS
+    };
     let _timer: Retained<NSTimer> = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-            UI_TICK_INTERVAL_SECS,
+            tick_interval,
             &controller,
             sel!(uiTick:),
             None,
@@ -310,6 +335,9 @@ fn drain_poll_results() {
                 update.applied_signal,
                 now,
             );
+            if state.renderer_mode.is_pixel() {
+                state.pixel_input = Some(PixelPetInput::from_watch_view_model(&vm, now));
+            }
             state.scene = derive_round_scene_model(&vm, now);
             state.vm = vm;
             unsafe { state.view.setNeedsDisplay(true) };
@@ -321,6 +349,20 @@ fn animate_pet() {
     let view = APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
+        if state.renderer_mode.is_pixel() {
+            let now = time::OffsetDateTime::now_utc();
+            if let (Some(input), Some(pixel_state)) =
+                (&state.pixel_input, state.pixel_state.as_mut())
+            {
+                state.pixel_frame = Some(render_pixel_frame(PixelRendererTick {
+                    input,
+                    viewport: PixelViewport::companion_default(),
+                    now,
+                    state: pixel_state,
+                }));
+            }
+            return Some(state.view.clone());
+        }
         let next_frame = state.animation_frame.wrapping_add(1);
         let now = time::OffsetDateTime::now_utc();
         let _ = advance_companion_animation(&mut state.vm, next_frame, now);
@@ -357,11 +399,16 @@ fn advance_companion_animation(
 fn draw_scene(bounds: NSRect) {
     let _mtm = MainThreadMarker::new().expect("companion draw_scene on non-main thread");
     let state_snapshot = APP_STATE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|s| (s.scene.clone(), s.vm.clone()))
+        cell.borrow().as_ref().map(|s| {
+            (
+                s.scene.clone(),
+                s.vm.clone(),
+                s.renderer_mode,
+                s.pixel_frame.clone(),
+            )
+        })
     });
-    let Some((scene, vm)) = state_snapshot else {
+    let Some((scene, vm, renderer_mode, pixel_frame)) = state_snapshot else {
         return;
     };
 
@@ -430,7 +477,11 @@ fn draw_scene(bounds: NSRect) {
         }
 
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
-        if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
+        if renderer_mode.is_pixel() {
+            if let Some(frame) = pixel_frame.as_ref() {
+                crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture);
+            }
+        } else if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
                 &vm,
                 now,

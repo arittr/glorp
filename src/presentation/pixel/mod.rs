@@ -5,7 +5,7 @@ pub mod raster;
 pub mod scene;
 
 pub use animator::{render_pixel_frame, PixelRendererState, PixelRendererTick};
-pub use frame::{PixelBounds, PixelFrame, PixelViewport, Rgba8};
+pub use frame::{pixel_runs, PixelBounds, PixelFrame, PixelRun, PixelViewport, Rgba8};
 pub use input::{
     PixelActivity, PixelPetIdentity, PixelPetInput, PixelPulseState, PixelSleepState,
     PixelVariationKey,

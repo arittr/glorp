@@ -22,6 +22,29 @@ fn frame_for(vm: &WatchViewModel, ms: i64) -> glorp::presentation::pixel::PixelF
 }
 
 #[test]
+fn pixel_row_runs_coalesce_adjacent_equal_colors() {
+    use glorp::presentation::pixel::{PixelFrame, PixelViewport, Rgba8};
+
+    let mut frame = PixelFrame::transparent(PixelViewport { logical_width: 5, logical_height: 2 });
+    let red = Rgba8::opaque(255, 0, 0);
+    frame.set_pixel(1, 0, red);
+    frame.set_pixel(2, 0, red);
+    frame.set_pixel(4, 0, red);
+
+    let runs = glorp::presentation::pixel::pixel_runs(&frame);
+
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        (runs[0].x, runs[0].y, runs[0].width, runs[0].color),
+        (1, 0, 2, red)
+    );
+    assert_eq!(
+        (runs[1].x, runs[1].y, runs[1].width, runs[1].color),
+        (4, 0, 1, red)
+    );
+}
+
+#[test]
 fn pixel_renderer_is_deterministic_for_same_input_sequence() {
     let vm = WatchViewModel::fixture();
     let base = datetime!(2026-07-08 12:00 UTC);

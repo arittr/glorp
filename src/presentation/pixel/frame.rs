@@ -41,6 +41,14 @@ pub struct PixelBounds {
     pub max_y: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelRun {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub color: Rgba8,
+}
+
 impl PixelFrame {
     fn assert_storage_invariant(&self) {
         let expected_len = usize::from(self.width) * usize::from(self.height);
@@ -114,4 +122,31 @@ impl PixelFrame {
 
         found.then_some(PixelBounds { min_x, min_y, max_x, max_y })
     }
+}
+
+pub fn pixel_runs(frame: &PixelFrame) -> Vec<PixelRun> {
+    frame.assert_storage_invariant();
+    let mut runs = Vec::new();
+    for y in 0..frame.height {
+        let mut x = 0;
+        while x < frame.width {
+            let idx = usize::from(y) * usize::from(frame.width) + usize::from(x);
+            let color = frame.pixels[idx];
+            if color.a == 0 {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            x += 1;
+            while x < frame.width {
+                let next_idx = usize::from(y) * usize::from(frame.width) + usize::from(x);
+                if frame.pixels[next_idx] != color {
+                    break;
+                }
+                x += 1;
+            }
+            runs.push(PixelRun { x: start, y, width: x - start, color });
+        }
+    }
+    runs
 }
