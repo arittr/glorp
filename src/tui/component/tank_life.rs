@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
 };
 
 use crate::game::habitat::{HabitatPetLayer, TankLifeRouteFamily};
@@ -388,19 +388,22 @@ fn sprite_for(id: &str, phase: u64, morph: Option<AnemoneMorph>) -> Vec<SpriteCe
         crate::game::habitat::GLASS_SHRIMP => {
             if phase.is_multiple_of(2) {
                 vec![
-                    SpriteCell { row: 0, col: 0, glyph: ',' },
+                    SpriteCell { row: 0, col: 0, glyph: '╭' },
                     SpriteCell { row: 0, col: 1, glyph: '~' },
+                    SpriteCell { row: 0, col: 2, glyph: '╯' },
                 ]
             } else {
                 vec![
-                    SpriteCell { row: 0, col: 0, glyph: ',' },
+                    SpriteCell { row: 0, col: 0, glyph: '╭' },
                     SpriteCell { row: 0, col: 1, glyph: '≈' },
+                    SpriteCell { row: 0, col: 2, glyph: '╯' },
                 ]
             }
         }
         crate::game::habitat::NEEDLEFISH => vec![
             SpriteCell { row: 0, col: 0, glyph: '‹' },
-            SpriteCell { row: 0, col: 1, glyph: '·' },
+            SpriteCell { row: 0, col: 1, glyph: '─' },
+            SpriteCell { row: 0, col: 2, glyph: '•' },
         ],
         crate::game::habitat::GLASS_SNAIL => {
             vec![SpriteCell { row: 0, col: 0, glyph: '◔' }]
@@ -811,7 +814,7 @@ fn sprite_height(sprite: &[SpriteCell]) -> u16 {
 
 fn route_phase(id: &str, input: &TankLifeRenderInput<'_>) -> u64 {
     let timing_scalar = if input.life_profile.calm_mode { 2 } else { 1 };
-    let tick = input.now.unix_timestamp().max(0) as u64 / (30 * timing_scalar);
+    let tick = input.now.unix_timestamp().max(0) as u64 / (4 * timing_scalar);
     stable_hash(&format!(
         "tank-life-route-v1|{}|{}|{}",
         input.pet_seed, input.local_date, id
@@ -827,15 +830,15 @@ fn tank_life_style(
         return Style::default();
     }
     let color = match low_color_key {
-        "shrimp" => Color::Rgb(0xf0, 0xb0, 0x8a),
-        "fish" | "school" => Color::Rgb(0x9c, 0xd8, 0xe8),
+        "shrimp" => Color::Rgb(0xff, 0xc4, 0x92),
+        "fish" | "school" => Color::Rgb(0x7e, 0xee, 0xff),
         "snail" => Color::Rgb(0xd8, 0xc0, 0x90),
         "burrower" | "ray" => Color::Rgb(0xc8, 0xb0, 0x88),
         "rim" => Color::Rgb(0xb8, 0xd8, 0xf0),
         "host" => Color::Rgb(0xe8, 0xb0, 0xd0),
         _ => crate::tui::style::tokenpet_palette().dim.rgb,
     };
-    Style::default().fg(color)
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
 fn stable_hash(input: &str) -> u64 {
@@ -1100,6 +1103,51 @@ mod tests {
                     .any(|region| rect_contains(*region, cell.col, cell.row)));
                 assert!(input.geometry.cell_inside_aperture(cell.col, cell.row));
             }
+        }
+    }
+
+    #[test]
+    fn round_routes_advance_within_a_few_seconds() {
+        let geometry = TankLifeSurfaceGeometry::round_for_test(52, 52, 2);
+        let rendered_ids = vec![TankInhabitantId::new(crate::game::habitat::NEEDLEFISH)];
+        let first = tank_life_placements_for(&TankLifeRenderInput::for_test(
+            rendered_ids.clone(),
+            &geometry,
+            time::macros::date!(2026 - 07 - 07),
+            0,
+        ));
+        let later = tank_life_placements_for(&TankLifeRenderInput::for_test(
+            rendered_ids,
+            &geometry,
+            time::macros::date!(2026 - 07 - 07),
+            4,
+        ));
+
+        assert_ne!(
+            first[0].bounds, later[0].bounds,
+            "round inhabitants should visibly move within a few seconds, not sit for a 30s tick"
+        );
+    }
+
+    #[test]
+    fn first_round_inhabitants_use_legible_multi_cell_silhouettes() {
+        let geometry = TankLifeSurfaceGeometry::round_for_test(52, 52, 2);
+        let placements = tank_life_placements_for(&TankLifeRenderInput::for_test(
+            vec![
+                TankInhabitantId::new(crate::game::habitat::GLASS_SHRIMP),
+                TankInhabitantId::new(crate::game::habitat::NEEDLEFISH),
+            ],
+            &geometry,
+            time::macros::date!(2026 - 07 - 07),
+            0,
+        ));
+
+        for placement in placements {
+            assert!(
+                placement.cells.len() >= 3,
+                "{} should render as a readable creature silhouette, not punctuation",
+                placement.inhabitant_id.as_str()
+            );
         }
     }
 }
