@@ -17,7 +17,7 @@ pub struct GrowthRing {
 }
 
 pub const COMPANION_GAUGE_GAP_DEG: f64 = 70.0;
-pub const PACE_SOFT_CAP_10M_TOKENS: f64 = 50_000_000.0;
+pub const PACE_SOFT_CAP_10M_TOKENS: f64 = 15_000_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineCap {
@@ -185,6 +185,18 @@ pub fn daily_fraction_for_gauge(fraction_of_yesterday: Option<f64>) -> f64 {
         .unwrap_or(0.0)
 }
 
+pub fn daily_gauge_colors_for_fraction(fraction_of_yesterday: Option<f64>) -> GaugeLaneColors {
+    let base = perimeter_gauge_colors().daily;
+    if fraction_of_yesterday.is_some_and(|value| value.is_finite() && value >= 1.0) {
+        GaugeLaneColors {
+            fill: RoundColor(0.30, 0.70, 0.40, 0.90),
+            ..base
+        }
+    } else {
+        base
+    }
+}
+
 pub fn format_daily_percent(fraction_of_yesterday: Option<f64>) -> String {
     let Some(fraction) = fraction_of_yesterday else {
         return "--% yday".to_string();
@@ -340,6 +352,16 @@ mod tests {
     }
 
     #[test]
+    fn daily_gauge_uses_deep_leaf_when_today_beats_yesterday() {
+        let base = daily_gauge_colors_for_fraction(Some(0.99));
+        let over = daily_gauge_colors_for_fraction(Some(1.0));
+
+        assert_eq!(base, perimeter_gauge_colors().daily);
+        assert_eq!(over.track, base.track);
+        assert_eq!(over.fill, RoundColor(0.30, 0.70, 0.40, 0.90));
+    }
+
+    #[test]
     fn stat_gap_box_sits_below_center_and_within_the_chord() {
         let gap = stat_gap_box(100.0, 100.0, 90.0, 70.0);
         assert!((gap.center_x - 100.0).abs() < 1e-6, "centered horizontally");
@@ -395,7 +417,9 @@ mod tests {
 
     #[test]
     fn pace_fraction_uses_named_soft_cap_and_clamps_bad_inputs() {
+        assert_eq!(PACE_SOFT_CAP_10M_TOKENS, 15_000_000.0);
         assert_eq!(companion_pace_fraction(0.0), 0.0);
+        assert!((companion_pace_fraction(4_000_000.0) - 0.234).abs() < 0.002);
         assert!((companion_pace_fraction(PACE_SOFT_CAP_10M_TOKENS) - 0.632).abs() < 0.002);
         assert!((companion_pace_fraction(PACE_SOFT_CAP_10M_TOKENS * 2.0) - 0.865).abs() < 0.002);
         assert!(companion_pace_fraction(PACE_SOFT_CAP_10M_TOKENS * 100.0) <= 1.0);

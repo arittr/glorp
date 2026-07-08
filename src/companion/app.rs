@@ -14,8 +14,9 @@ use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
-    growth_ring_fill_end_deg, perimeter_gauge_colors, perimeter_gauge_layout, CompanionHudText,
-    GaugeLane, GaugeLaneColors, LineCap, COMPANION_GAUGE_GAP_DEG,
+    daily_gauge_colors_for_fraction, growth_ring_fill_end_deg, perimeter_gauge_colors,
+    perimeter_gauge_layout, CompanionHudText, GaugeLane, GaugeLaneColors, LineCap,
+    COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
@@ -474,10 +475,12 @@ fn draw_scene(bounds: NSRect) {
             };
             let daily_fraction =
                 daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday);
+            let daily_colors =
+                daily_gauge_colors_for_fraction(vm.daily_comparison.fraction_of_yesterday);
             let pace_fraction = companion_pace_fraction(vm.rate_momentum.pulse.current_tokens);
 
             draw_gauge_lane(&layout.xp, &colors.xp, xp_fraction);
-            draw_gauge_lane(&layout.daily, &colors.daily, daily_fraction);
+            draw_gauge_lane(&layout.daily, &daily_colors, daily_fraction);
             draw_gauge_lane(&layout.pace, &colors.pace, pace_fraction);
         }
 
