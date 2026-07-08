@@ -29,6 +29,11 @@ Manifest path: `target/glorp-preview-pixel-readiness/manifest.json`
   - `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.pixel-fit.json`
   - `target/glorp-preview-pixel-readiness/frames/pixel-species-matrix.pixel-art.json`
   - `target/glorp-preview-pixel-readiness/frames/pixel-species-matrix.pixel-fit.json`
+- Fullscreen-equivalent fit evidence:
+  - `target/glorp-preview-pixel-readiness/frames/pixel-fuzz-s3-content-idle.txt`
+  - `target/glorp-preview-pixel-readiness/frames/pixel-fuzz-s3-content-idle.pixel-fit.json`
+  - `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.txt`
+  - `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.pixel-fit.json`
 - Result: pass. The bundle wrote schema version `8`, listed Pixel frame, art, and fit artifacts, recorded `round::pixel_fit::pixel_companion_fit` in Pixel fit metadata, and the preview text fixtures marked min/default/large/fullscreen fit as ready. This is bundle-contract evidence, not a recorded human art signoff.
 
 ## AppKit Review
@@ -74,7 +79,7 @@ CPU notes:
 
 | Gate | Artifact path | Result | Notes |
 | --- | --- | --- | --- |
-| Runtime fit authority | `target/glorp-preview-pixel-readiness/frames/pixel-fuzz-s3-content-idle.pixel-fit.json`; `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.pixel-fit.json` | pass | Both sidecars record `producer = round::pixel_fit::pixel_companion_fit`. |
+| Runtime fit authority | `target/glorp-preview-pixel-readiness/frames/pixel-fuzz-s3-content-idle.txt`; `target/glorp-preview-pixel-readiness/frames/pixel-fuzz-s3-content-idle.pixel-fit.json`; `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.txt`; `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.pixel-fit.json` | pass | The preview text fixtures contain `fit fullscreen ready`, and both sidecars record `producer = round::pixel_fit::pixel_companion_fit`. |
 | HUD body overlap | `target/glorp-preview-pixel-readiness/frames/pixel-fuzz-s3-content-idle.pixel-fit.json`; `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.pixel-fit.json`; `target/task6-artifacts/pixel-260-window.png`; `target/task6-artifacts/pixel-480-window.png` | pass | Preview fit sidecars report `body_eye_mouth_pixels = 0` and `translucent_effect_pixels = 0`; captured windows keep the body above the HUD block. |
 | Cast identity | `target/glorp-preview-pixel-readiness/frames/pixel-fuzz-s3-content-idle.pixel-art.json`; `target/glorp-preview-pixel-readiness/frames/pixel-glitch-s4-feed-pulse.pixel-art.json`; `target/glorp-preview-pixel-readiness/frames/pixel-species-matrix.txt`; `target/task6-artifacts/pixel-260-window.png`; `target/task6-artifacts/pixel-360-window.png` | blocked | Structural artifacts show identity cues exist in the Pixel reference data and the species matrix lists all six species, but this review did not record a reviewer-approved visual judgment that those cues stay legible enough in the Preview or AppKit surfaces. |
 | All species/stages smoke | `target/task6-logs/cargo-test.log`; `target/task6-logs/dev-preview-test.log`; `target/glorp-preview-pixel-readiness/frames/pixel-species-matrix.pixel.json` | pass | `cargo test` passed `all_species_all_stages_render_reference_driven_frames`; dev-preview passed Pixel bundle contract coverage; species matrix artifact was generated. |
