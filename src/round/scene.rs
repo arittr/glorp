@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn round_hud_reserve_does_not_prune_non_tank_life_scene_glyphs() {
         let mut vm = WatchViewModel::fixture_with_habitat_props();
-        vm.pet_art = vec!["XXXXXXXXXXXXX".into(); PET_H as usize];
+        vm.pet_art = vec!["#############".into(); PET_H as usize];
         let motion = CompanionMotion {
             drift_y_frac: 0.0,
             upward_bias: -1.0,

@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn flowering_plants_are_foreground_layer() {
-        // The flowering plants render in FRONT of the pet at a FIXED anchor, so
+        // The flowering plants render in FRONT of the pet at a stable anchor, so
         // the player can watch them grow and bloom. Foreground (unlike Background)
         // does not dodge the pet's silhouette, so the plants stay put instead of
         // chasing the free-floating pet around the tank.
