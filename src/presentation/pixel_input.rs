@@ -1,6 +1,6 @@
 use crate::presentation::pixel::{
-    PixelActivity, PixelArtPoseKey, PixelArtReferenceRequest, PixelPetIdentity, PixelPetInput,
-    PixelPulseState, PixelSleepState, PixelVariationKey,
+    PixelActivity, PixelArtPoseKey, PixelArtReferenceRequest, PixelCanonicalAnimationInputs,
+    PixelPetIdentity, PixelPetInput, PixelPulseState, PixelSleepState, PixelVariationKey,
 };
 use crate::presentation::surface::{resolve_pet_colors, LiveColorInputs, PIXEL_STYLE};
 use crate::tui::view_model::WatchViewModel;
@@ -43,11 +43,27 @@ impl PixelPetInput {
         vm: &WatchViewModel,
         now: time::OffsetDateTime,
     ) -> (Self, PixelArtReferenceRequest) {
-        let input = Self::from_watch_view_model(vm, now);
         let pose_tick = (now - time::OffsetDateTime::UNIX_EPOCH)
             .whole_milliseconds()
             .max(0) as u64
             / 250;
+        Self::from_watch_view_model_with_canonical_art_request(
+            vm,
+            now,
+            PixelCanonicalAnimationInputs {
+                tick: pose_tick,
+                hold_eyes_closed: vm.day_context.asleep,
+                blink_suppression_ticks: 0,
+            },
+        )
+    }
+
+    pub fn from_watch_view_model_with_canonical_art_request(
+        vm: &WatchViewModel,
+        now: time::OffsetDateTime,
+        animation_inputs: PixelCanonicalAnimationInputs,
+    ) -> (Self, PixelArtReferenceRequest) {
+        let input = Self::from_watch_view_model(vm, now);
         let feed_reaction =
             crate::pet::animator::compute_token_pop(vm.last_feed_pulse_at, now).is_some();
         let pet_performance = crate::tui::room::pet_performance_from_day_context(&vm.day_context);
@@ -64,8 +80,9 @@ impl PixelPetInput {
                 None
             };
         let animation_frame = crate::pet::render::AnimationFrame {
-            tick: pose_tick,
-            hold_eyes_closed: vm.day_context.asleep,
+            tick: animation_inputs.tick,
+            blink_suppression_ticks: animation_inputs.blink_suppression_ticks,
+            hold_eyes_closed: animation_inputs.hold_eyes_closed,
             blink_slowdown: crate::pet::render::blink_slowdown_for_tiredness(
                 vm.day_context.tiredness,
             ),
@@ -77,7 +94,6 @@ impl PixelPetInput {
             work_accent: crate::pet::render::work_accent_for_profile(&vm.life_profile),
             feed_reaction,
             glitch_corruption,
-            ..crate::pet::render::AnimationFrame::default()
         };
         let request = PixelArtReferenceRequest {
             seed: vm.pet_render.seed.clone(),

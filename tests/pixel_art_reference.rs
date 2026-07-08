@@ -1,7 +1,8 @@
 use glorp::game::{evolution::Stage, metabolism::Mood};
 use glorp::pet::generation::Species;
 use glorp::presentation::pixel::{
-    PixelArtReferenceProvider, PixelArtRole, PixelPetArtReference, PixelPetInput,
+    PixelArtReferenceProvider, PixelArtRole, PixelCanonicalAnimationInputs, PixelPetArtReference,
+    PixelPetInput,
 };
 use glorp::tui::view_model::WatchViewModel;
 use time::macros::datetime;
@@ -86,6 +87,73 @@ fn reference_provider_caches_same_pose_request() {
 
     assert_eq!(first, second);
     assert_eq!(provider.render_count_for_test(), 1);
+}
+
+#[test]
+fn canonical_art_request_preserves_explicit_animation_inputs() {
+    let now = datetime!(2026-07-08 12:00 UTC);
+    let mut vm = WatchViewModel::fixture();
+    vm.day_context.asleep = true;
+    let explicit = PixelCanonicalAnimationInputs {
+        tick: 17,
+        hold_eyes_closed: false,
+        blink_suppression_ticks: 3,
+    };
+
+    let (_input, request) =
+        PixelPetInput::from_watch_view_model_with_canonical_art_request(&vm, now, explicit);
+    let mut provider = PixelArtReferenceProvider::default();
+    let reference = provider.reference_for(&request);
+
+    assert_eq!(request.animation_frame.tick, explicit.tick);
+    assert_eq!(
+        request.animation_frame.hold_eyes_closed,
+        explicit.hold_eyes_closed
+    );
+    assert_eq!(
+        request.animation_frame.blink_suppression_ticks,
+        explicit.blink_suppression_ticks
+    );
+    assert_eq!(reference.pose.tick, explicit.tick);
+    assert_eq!(reference.pose.hold_eyes_closed, explicit.hold_eyes_closed);
+    assert_eq!(
+        reference.pose.blink_suppression_ticks,
+        explicit.blink_suppression_ticks
+    );
+    assert!(
+        !reference
+            .reference_checksum
+            .eq(&reference_for(&vm, 0).reference_checksum),
+        "explicit canonical animation inputs should affect the reference checksum"
+    );
+}
+
+#[test]
+fn blink_suppression_ticks_get_distinct_cached_references() {
+    let now = datetime!(2026-07-08 12:00 UTC);
+    let vm = WatchViewModel::fixture();
+    let mut provider = PixelArtReferenceProvider::default();
+    let base = PixelCanonicalAnimationInputs {
+        tick: 1,
+        hold_eyes_closed: false,
+        blink_suppression_ticks: 0,
+    };
+    let suppressed = PixelCanonicalAnimationInputs { blink_suppression_ticks: 1, ..base };
+
+    let (_input, base_request) =
+        PixelPetInput::from_watch_view_model_with_canonical_art_request(&vm, now, base);
+    let (_input, suppressed_request) =
+        PixelPetInput::from_watch_view_model_with_canonical_art_request(&vm, now, suppressed);
+
+    let first = provider.reference_for(&base_request);
+    let second = provider.reference_for(&suppressed_request);
+
+    assert_ne!(
+        first.reference_checksum, second.reference_checksum,
+        "blink suppression changes render-affecting animation state and must not alias"
+    );
+    assert_ne!(first.pose, second.pose);
+    assert_eq!(provider.render_count_for_test(), 2);
 }
 
 #[test]
