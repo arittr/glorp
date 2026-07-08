@@ -980,6 +980,36 @@ mod tests {
     }
 
     #[test]
+    fn manifest_omits_empty_review_prompts_for_schema_8_optional_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        let mut manifest = sample_manifest();
+        manifest.scenarios[0].review_prompts.clear();
+        manifest.strips.push(PreviewStrip {
+            id: "strip-one".to_string(),
+            kind: PreviewStripKind::PixelAnimation,
+            title: "Strip One".to_string(),
+            intent: "Exercise strip serialization.".to_string(),
+            dimensions: PreviewDimensions { width: 96, height: 96 },
+            target_id: "companion.pixel.pet".to_string(),
+            playback: PreviewPlayback {
+                starts_paused: true,
+                frame_duration_ms: 34,
+            },
+            inputs: BTreeMap::new(),
+            frames: vec![],
+            review_prompts: vec![],
+        });
+
+        write_manifest(&path, &manifest).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert!(json["scenarios"][0].get("review_prompts").is_none());
+        assert!(json["strips"][0].get("review_prompts").is_none());
+    }
+
+    #[test]
     fn review_markdown_lists_scenario_prompts_from_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("review.md");

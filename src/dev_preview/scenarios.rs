@@ -60,7 +60,36 @@ impl PreviewScenarioBundle {
         round: Option<PreviewRoundMetadata>,
         review_prompts: Vec<String>,
     ) -> Self {
-        let scenario = scenario_from_parts(&frame, kind, intent, inputs, round, review_prompts);
+        let scenario = scenario_from_parts(
+            &frame,
+            kind,
+            intent,
+            PreviewDimensions { width: frame.width, height: frame.height },
+            inputs,
+            round,
+            review_prompts,
+        );
+        Self { frame, scenario }
+    }
+
+    pub fn from_parts_with_dimensions(
+        frame: PreviewFrame,
+        kind: PreviewScenarioKind,
+        intent: &str,
+        dimensions: PreviewDimensions,
+        inputs: BTreeMap<String, Value>,
+        round: Option<PreviewRoundMetadata>,
+        review_prompts: Vec<String>,
+    ) -> Self {
+        let scenario = scenario_from_parts(
+            &frame,
+            kind,
+            intent,
+            dimensions,
+            inputs,
+            round,
+            review_prompts,
+        );
         Self { frame, scenario }
     }
 }
@@ -621,13 +650,22 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
         ),
     };
 
-    scenario_from_parts(frame, kind, intent, inputs, None, review_prompts)
+    scenario_from_parts(
+        frame,
+        kind,
+        intent,
+        PreviewDimensions { width: frame.width, height: frame.height },
+        inputs,
+        None,
+        review_prompts,
+    )
 }
 
 fn scenario_from_parts(
     frame: &PreviewFrame,
     kind: PreviewScenarioKind,
     intent: &str,
+    dimensions: PreviewDimensions,
     inputs: BTreeMap<String, Value>,
     round: Option<PreviewRoundMetadata>,
     review_prompts: Vec<String>,
@@ -637,7 +675,7 @@ fn scenario_from_parts(
         kind,
         title: frame.title.clone(),
         intent: intent.to_string(),
-        dimensions: PreviewDimensions { width: frame.width, height: frame.height },
+        dimensions,
         files: PreviewScenarioFiles {
             text: text_path(frame),
             cells: cells_path(frame),

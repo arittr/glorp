@@ -155,13 +155,18 @@ fn render_pixel_bundle(
     intent: &'static str,
 ) -> PreviewPixelBundle {
     let (artifact, input) = render_pixel_artifact(ctx, fixture, fixture.elapsed_ms);
+    let dimensions = PreviewDimensions {
+        width: artifact.width,
+        height: artifact.height,
+    };
     let mut frame = summary_frame(fixture.id, fixture.title, lines);
     frame.contract.pixel = Some(artifact);
 
-    PreviewScenarioBundle::from_parts(
+    PreviewScenarioBundle::from_parts_with_dimensions(
         frame,
         PreviewScenarioKind::Pixel,
         intent,
+        dimensions,
         scenario_inputs(&input, fixture.elapsed_ms),
         None,
         Vec::new(),

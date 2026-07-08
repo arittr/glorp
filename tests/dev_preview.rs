@@ -1732,6 +1732,22 @@ fn dev_preview_pixel_writes_schema_manifest_frames_and_canvas_links() {
 }
 
 #[test]
+fn dev_preview_pixel_manifest_dimensions_match_pixel_artifact() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    let scenario = scenario(&manifest, "pixel-fuzz-s3-content-idle");
+    let pixel = run.read_json("frames/pixel-fuzz-s3-content-idle.pixel.json");
+
+    assert_eq!(scenario["dimensions"]["width"], 96);
+    assert_eq!(scenario["dimensions"]["height"], 96);
+    assert_eq!(scenario["dimensions"]["width"], pixel["width"]);
+    assert_eq!(scenario["dimensions"]["height"], pixel["height"]);
+}
+
+#[test]
 fn dev_preview_pixel_strips_meet_animation_contract() {
     let run = PreviewRun::new();
 
