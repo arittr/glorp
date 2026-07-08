@@ -1957,13 +1957,27 @@ mod tests {
                 "pet-glitch-live-states",
                 "pet-glitch-persistence-states",
                 "round-normal",
+                "round-hud-missing-yesterday",
+                "round-hud-stale-yesterday",
+                "round-hud-zero-yesterday",
+                "round-hud-over-yesterday",
+                "round-hud-idle-pace",
+                "round-hud-burst-pace",
                 "round-active-pulse",
                 "round-asleep-night",
                 "round-helper-trouble",
                 "round-flat-color",
                 "round-glitch-dialect",
                 "round-crystal-dialect",
-                "round-glitch-patched-s6"
+                "round-glitch-patched-s6",
+                "tank-life-age-empty",
+                "tank-life-age-first",
+                "tank-life-age-early",
+                "tank-life-age-full",
+                "tank-life-date-2026-07-07",
+                "tank-life-date-2026-07-08",
+                "tank-life-round-projection",
+                "tank-life-anemone-morphs"
             ]
         );
     }
