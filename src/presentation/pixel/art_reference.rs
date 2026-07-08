@@ -19,6 +19,8 @@ pub struct PixelArtPoseKey {
     pub feed_reaction: bool,
     pub glitch_patch_tier: Option<&'static str>,
     pub glitch_burst_level: Option<&'static str>,
+    #[serde(skip)]
+    pub glitch_day_key: Option<u64>,
     pub glitch_calm_mode: bool,
     pub glitch_feed_reaction: bool,
 }
@@ -39,6 +41,9 @@ impl PixelArtPoseKey {
             glitch_burst_level: frame
                 .glitch_corruption
                 .map(|glitch| glitch.burst_level.as_str()),
+            glitch_day_key: frame
+                .glitch_corruption
+                .map(|glitch| projected_glitch_day_key(glitch.day_seed)),
             glitch_calm_mode: frame
                 .glitch_corruption
                 .is_some_and(|glitch| glitch.calm_mode),
@@ -480,6 +485,7 @@ fn reference_checksum(
     hash = hash_u8(hash, request.pose.feed_reaction as u8);
     hash = hash_optional_str(hash, request.pose.glitch_patch_tier);
     hash = hash_optional_str(hash, request.pose.glitch_burst_level);
+    hash = hash_optional_u64(hash, request.pose.glitch_day_key);
     hash = hash_u8(hash, request.pose.glitch_calm_mode as u8);
     hash = hash_u8(hash, request.pose.glitch_feed_reaction as u8);
     for cell in occupied_cells {
@@ -497,6 +503,20 @@ fn reference_checksum(
 fn hash_optional_str(hash: u64, value: Option<&'static str>) -> u64 {
     match value {
         Some(value) => hash_bytes(hash_u8(hash, 1), value.as_bytes()),
+        None => hash_u8(hash, 0),
+    }
+}
+
+fn projected_glitch_day_key(day_seed: u64) -> u64 {
+    hash_u64(
+        hash_bytes(0xcbf2_9ce4_8422_2325_u64, b"glitch-day"),
+        day_seed,
+    )
+}
+
+fn hash_optional_u64(hash: u64, value: Option<u64>) -> u64 {
+    match value {
+        Some(value) => hash_u64(hash_u8(hash, 1), value),
         None => hash_u8(hash, 0),
     }
 }

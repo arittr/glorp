@@ -1,7 +1,8 @@
 use crate::dev_preview::export::{
-    PreviewDimensions, PreviewPixelArtArtifact, PreviewPixelFitArtifact, PreviewPixelFrameArtifact,
-    PreviewPixelHudOverlap, PreviewPlayback, PreviewScenarioKind, PreviewStrip, PreviewStripFrame,
-    PreviewStripFrameFiles, PreviewStripKind, PIXEL_ART_SCHEMA_VERSION, PIXEL_FIT_SCHEMA_VERSION,
+    PreviewDimensions, PreviewPixelArtArtifact, PreviewPixelFitArtifact,
+    PreviewPixelFitGeometryEvidence, PreviewPixelFrameArtifact, PreviewPixelHudOverlap,
+    PreviewPlayback, PreviewScenarioKind, PreviewStrip, PreviewStripFrame, PreviewStripFrameFiles,
+    PreviewStripKind, PIXEL_ART_SCHEMA_VERSION, PIXEL_FIT_SCHEMA_VERSION,
     PIXEL_FRAME_SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::{frame_from_buffer, PreviewFrame};
@@ -582,6 +583,7 @@ fn pixel_fit_sidecar(frame: &PixelFrame, vm: &WatchViewModel) -> PreviewPixelFit
         vm.rate_momentum.pulse.current_tokens,
     );
     let fit = pixel_companion_fit(default_preview_fit_geometry(), viewport, &hud);
+    let geometry_evidence = fit_geometry_evidence(frame, viewport, &hud);
 
     PreviewPixelFitArtifact {
         schema_version: PIXEL_FIT_SCHEMA_VERSION,
@@ -595,7 +597,34 @@ fn pixel_fit_sidecar(frame: &PixelFrame, vm: &WatchViewModel) -> PreviewPixelFit
                 alpha > 0 && alpha < 200
             }),
         },
+        geometry_evidence,
     }
+}
+
+fn fit_geometry_evidence(
+    frame: &PixelFrame,
+    viewport: PixelViewport,
+    hud: &crate::round::hud::CompanionHudText,
+) -> Vec<PreviewPixelFitGeometryEvidence> {
+    fit_geometries()
+        .into_iter()
+        .map(|(label, geometry)| {
+            let fit = pixel_companion_fit(geometry, viewport, hud);
+            PreviewPixelFitGeometryEvidence {
+                label,
+                producer: fit.producer,
+                geometry: fit.geometry,
+                image_rect: fit.image_rect,
+                hud_safe_zone: fit.hud_safe_zone,
+                hud_overlap: PreviewPixelHudOverlap {
+                    body_eye_mouth_pixels: hud_overlap_pixels(frame, &fit, |alpha| alpha >= 200),
+                    translucent_effect_pixels: hud_overlap_pixels(frame, &fit, |alpha| {
+                        alpha > 0 && alpha < 200
+                    }),
+                },
+            }
+        })
+        .collect()
 }
 
 fn hud_overlap_pixels(
