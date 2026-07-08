@@ -19,6 +19,7 @@ mod draw;
 mod grounding;
 mod performance;
 mod props;
+mod tank_life;
 
 pub use ambient::{ambient_glyphs_for, ambient_glyphs_for_phase};
 pub(crate) use ambient::{effective_weekend_softening, pet_silhouette_halo_rects};
@@ -26,7 +27,7 @@ pub(crate) use art_lines::pet_role_spans_for_line;
 use art_lines::render_speech_bubble;
 use blit::blit_draw_list;
 pub(crate) use colors::pet_role_style;
-pub(crate) use draw::render_pet_to_draw_list;
+pub(crate) use draw::{render_pet_to_draw_list, render_pet_to_draw_list_with_tank_geometry};
 
 #[cfg(test)]
 use crate::game::evolution::Stage;

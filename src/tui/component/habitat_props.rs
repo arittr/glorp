@@ -1099,14 +1099,22 @@ mod tests {
         }
     }
 
+    fn habitat_view(earned_props: Vec<EarnedHabitatPropView>) -> HabitatView {
+        HabitatView {
+            earned_props,
+            earned_inhabitants: Vec::new(),
+            tank_life_local_date: time::Date::from_calendar_date(1970, time::Month::January, 1)
+                .unwrap(),
+            tank_life_calendar_age_days: 0,
+        }
+    }
+
     #[test]
     fn habitat_props_attach_pet_layer_from_catalog() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned(TOKEN_FRIENDLY_CLOUD_750K, HabitatPropKind::Trophy, 45, 0),
-                earned(TOKEN_SHARD_1M, HabitatPropKind::Accent, 40, 1),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned(TOKEN_FRIENDLY_CLOUD_750K, HabitatPropKind::Trophy, 45, 0),
+            earned(TOKEN_SHARD_1M, HabitatPropKind::Accent, 40, 1),
+        ]);
         let mut scene = scene();
         scene.exclusions.clear();
 
@@ -1133,9 +1141,12 @@ mod tests {
     }
 
     fn spark_pos(scene: &PetSceneLayout, halo: &[Rect]) -> (u16, u16) {
-        let habitat = HabitatView {
-            earned_props: vec![earned(TOKEN_SPARK_500K, HabitatPropKind::Accent, 30, 0)],
-        };
+        let habitat = habitat_view(vec![earned(
+            TOKEN_SPARK_500K,
+            HabitatPropKind::Accent,
+            30,
+            0,
+        )]);
         habitat_prop_placements_for(
             &habitat,
             scene,
@@ -1177,9 +1188,12 @@ mod tests {
         // The sun (Ceiling accent) must place toward the top of the tank for ANY
         // seed, not at a seed-random height across the whole habitat. Sweep seeds
         // so a single lucky-high seed can't mask a regression.
-        let habitat = HabitatView {
-            earned_props: vec![earned(TOKEN_LANTERN_10M, HabitatPropKind::Accent, 60, 0)],
-        };
+        let habitat = habitat_view(vec![earned(
+            TOKEN_LANTERN_10M,
+            HabitatPropKind::Accent,
+            60,
+            0,
+        )]);
         let mut scene = scene();
         scene.exclusions.clear();
         let top_band = scene.habitat.y + scene.habitat.height / 4;
@@ -1210,14 +1224,12 @@ mod tests {
         // Even if the silhouette halo covers a Behind prop's anchor zone,
         // the prop must still render — it renders before the pet pass and
         // gets visually layered behind the pet's silhouette.
-        let habitat_view = HabitatView {
-            earned_props: vec![earned(
-                TOKEN_FRIENDLY_CLOUD_750K,
-                HabitatPropKind::Trophy,
-                45,
-                0,
-            )],
-        };
+        let habitat_view = habitat_view(vec![earned(
+            TOKEN_FRIENDLY_CLOUD_750K,
+            HabitatPropKind::Trophy,
+            45,
+            0,
+        )]);
         let mut scene = scene();
         scene.exclusions.clear();
         // Block the entire habitat at the cell level. A Background prop
@@ -1243,12 +1255,10 @@ mod tests {
 
     #[test]
     fn prop_cells_stay_inside_habitat_and_outside_exclusions() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
-                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 1),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
+            earned("token_pebble_25k", HabitatPropKind::Accent, 10, 1),
+        ]);
 
         let cells = habitat_props_for(
             &habitat,
@@ -1273,17 +1283,15 @@ mod tests {
 
     #[test]
     fn trophy_selection_caps_at_six_by_priority_then_age() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
-                earned("heavy_session_planter", HabitatPropKind::Trophy, 80, 1),
-                earned("wilt_recovery_sprout", HabitatPropKind::Trophy, 90, 2),
-                earned("extra_trophy_for_cap_test", HabitatPropKind::Trophy, 95, 3),
-                earned("token_treasure_chest_2m", HabitatPropKind::Trophy, 100, 4),
-                earned("token_friendly_cloud_750k", HabitatPropKind::Trophy, 110, 5),
-                earned("token_hanging_vine_25m", HabitatPropKind::Trophy, 120, 6),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
+            earned("heavy_session_planter", HabitatPropKind::Trophy, 80, 1),
+            earned("wilt_recovery_sprout", HabitatPropKind::Trophy, 90, 2),
+            earned("extra_trophy_for_cap_test", HabitatPropKind::Trophy, 95, 3),
+            earned("token_treasure_chest_2m", HabitatPropKind::Trophy, 100, 4),
+            earned("token_friendly_cloud_750k", HabitatPropKind::Trophy, 110, 5),
+            earned("token_hanging_vine_25m", HabitatPropKind::Trophy, 120, 6),
+        ]);
 
         let selected = visible_trophy_ids(&habitat);
 
@@ -1302,13 +1310,11 @@ mod tests {
 
     #[test]
     fn trophy_zones_place_objects_in_floor_air_and_center_areas() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("token_treasure_chest_2m", HabitatPropKind::Trophy, 100, 0),
-                earned("token_friendly_cloud_750k", HabitatPropKind::Trophy, 110, 1),
-                earned("token_hanging_vine_25m", HabitatPropKind::Trophy, 120, 2),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("token_treasure_chest_2m", HabitatPropKind::Trophy, 100, 0),
+            earned("token_friendly_cloud_750k", HabitatPropKind::Trophy, 110, 1),
+            earned("token_hanging_vine_25m", HabitatPropKind::Trophy, 120, 2),
+        ]);
         let mut scene = scene();
         scene.exclusions.clear();
 
@@ -1345,15 +1351,13 @@ mod tests {
 
     #[test]
     fn accent_rotation_is_stable_within_ten_minute_window() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
-                earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
-                earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
-                earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
-                earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
+            earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
+            earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
+            earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
+            earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
+        ]);
 
         let a = visible_accent_ids(&habitat, datetime!(2026-05-11 12:01 UTC));
         let b = visible_accent_ids(&habitat, datetime!(2026-05-11 12:09 UTC));
@@ -1366,12 +1370,10 @@ mod tests {
 
     #[test]
     fn flat_color_omits_accents_but_keeps_trophy_shapes() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
-                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 1),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0),
+            earned("token_pebble_25k", HabitatPropKind::Accent, 10, 1),
+        ]);
         let flat_ctx = RenderContext::with_clock(
             ColorCapability::Flat,
             WatchClock::fixed(datetime!(2026-05-11 12:10 UTC)),
@@ -1393,9 +1395,12 @@ mod tests {
 
     #[test]
     fn accent_motion_never_jumps_more_than_one_cell() {
-        let habitat = HabitatView {
-            earned_props: vec![earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0)],
-        };
+        let habitat = habitat_view(vec![earned(
+            "token_pebble_25k",
+            HabitatPropKind::Accent,
+            10,
+            0,
+        )]);
         let mut scene = scene();
         scene.exclusions.clear();
         let first_time = datetime!(2026-05-11 12:00:00 UTC);
@@ -1430,15 +1435,13 @@ mod tests {
 
     #[test]
     fn accent_anchor_stays_with_prop_across_rotation_windows() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
-                earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
-                earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
-                earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
-                earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
+            earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
+            earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
+            earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
+            earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
+        ]);
         let mut scene = scene();
         scene.exclusions.clear();
 
@@ -1473,15 +1476,13 @@ mod tests {
 
     #[test]
     fn accent_collision_retry_is_stable_across_rotation_windows() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
-                earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
-                earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
-                earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
-                earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
+            earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
+            earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
+            earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
+            earned("token_orbit_5m", HabitatPropKind::Accent, 50, 4),
+        ]);
         let mut scene = scene();
         scene.habitat = Rect::new(0, 0, 5, 4);
         scene.exclusions.clear();
@@ -1517,14 +1518,12 @@ mod tests {
 
     #[test]
     fn accent_collision_retry_does_not_change_with_motion_phase() {
-        let habitat = HabitatView {
-            earned_props: vec![
-                earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
-                earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
-                earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
-                earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
-            ],
-        };
+        let habitat = habitat_view(vec![
+            earned("token_pebble_25k", HabitatPropKind::Accent, 10, 0),
+            earned("token_shell_100k", HabitatPropKind::Accent, 20, 1),
+            earned("token_spark_500k", HabitatPropKind::Accent, 30, 2),
+            earned("token_shard_1m", HabitatPropKind::Accent, 40, 3),
+        ]);
         let mut scene = scene();
         scene.habitat = Rect::new(0, 0, 4, 7);
         scene.exclusions.clear();
@@ -1568,9 +1567,7 @@ mod tests {
             ("token_orbit_5m", '°', "fixture-seed"),
             ("token_lantern_10m", '○', "fixture-seed"),
         ] {
-            let habitat = HabitatView {
-                earned_props: vec![earned(id, HabitatPropKind::Accent, 10, 0)],
-            };
+            let habitat = habitat_view(vec![earned(id, HabitatPropKind::Accent, 10, 0)]);
             let mut scene = scene();
             scene.exclusions.clear();
             let before = habitat_props_for(
@@ -1612,9 +1609,12 @@ mod tests {
         // The habitat is a place; the pet is a creature in it. Props should
         // look like themselves (signal lamps are red, moss is green) and
         // stay the same color across every species.
-        let habitat = HabitatView {
-            earned_props: vec![earned("codex_signal_lamp", HabitatPropKind::Trophy, 70, 0)],
-        };
+        let habitat = habitat_view(vec![earned(
+            "codex_signal_lamp",
+            HabitatPropKind::Trophy,
+            70,
+            0,
+        )]);
         let mut scene = scene();
         scene.exclusions.clear();
         let fuzz = habitat_props_for(
@@ -1776,12 +1776,11 @@ mod tests {
     }
 
     fn habitat_with_props(ids: &[&str]) -> HabitatView {
-        HabitatView {
-            earned_props: ids
-                .iter()
+        habitat_view(
+            ids.iter()
                 .map(|id| earned(id, HabitatPropKind::Trophy, 50, 0))
                 .collect(),
-        }
+        )
     }
 
     #[test]
@@ -1872,9 +1871,12 @@ mod tests {
             prop_effect_target_path("token_reeds_5m").unwrap().as_str(),
             "watch.prop.token_reeds_5m.effect"
         );
-        let habitat = HabitatView {
-            earned_props: vec![earned("token_reeds_5m", HabitatPropKind::Trophy, 151, 0)],
-        };
+        let habitat = habitat_view(vec![earned(
+            "token_reeds_5m",
+            HabitatPropKind::Trophy,
+            151,
+            0,
+        )]);
         assert!(
             prop_bloomed(&habitat, "token_reeds_5m", now + time::Duration::days(3)),
             "reeds bloom with age like the other plants"
@@ -1884,14 +1886,12 @@ mod tests {
     #[test]
     fn plants_bloom_only_after_three_days() {
         let planted = datetime!(2026-05-11 12:00 UTC);
-        let moss = HabitatView {
-            earned_props: vec![earned(
-                "token_moss_tuft_250k",
-                HabitatPropKind::Trophy,
-                150,
-                0,
-            )],
-        };
+        let moss = habitat_view(vec![earned(
+            "token_moss_tuft_250k",
+            HabitatPropKind::Trophy,
+            150,
+            0,
+        )]);
         assert!(
             !prop_bloomed(
                 &moss,
@@ -1908,14 +1908,12 @@ mod tests {
             ),
             "a plant blooms once it reaches 3 days"
         );
-        let chest = HabitatView {
-            earned_props: vec![earned(
-                "token_treasure_chest_2m",
-                HabitatPropKind::Trophy,
-                55,
-                0,
-            )],
-        };
+        let chest = habitat_view(vec![earned(
+            "token_treasure_chest_2m",
+            HabitatPropKind::Trophy,
+            55,
+            0,
+        )]);
         assert!(
             !prop_bloomed(
                 &chest,
@@ -1931,14 +1929,12 @@ mod tests {
         // The vine is Foreground, so its placement must NOT dodge the pet's
         // silhouette halo — it stays anchored as the free-floating pet wanders past.
         let now = datetime!(2026-05-11 12:00 UTC);
-        let habitat = HabitatView {
-            earned_props: vec![earned(
-                "token_hanging_vine_25m",
-                HabitatPropKind::Trophy,
-                152,
-                0,
-            )],
-        };
+        let habitat = habitat_view(vec![earned(
+            "token_hanging_vine_25m",
+            HabitatPropKind::Trophy,
+            152,
+            0,
+        )]);
         let vine_cells = |halo: &[Rect]| {
             let mut cells: Vec<(u16, u16, char)> = habitat_props_for(
                 &habitat,

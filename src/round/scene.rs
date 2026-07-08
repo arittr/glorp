@@ -73,6 +73,48 @@ pub fn companion_roam_motion() -> CompanionMotion {
     }
 }
 
+pub struct RoundTankLifeProtectedRegions {
+    pub pet_face: Vec<Rect>,
+    pub bottom_hud: Vec<Rect>,
+}
+
+pub fn round_tank_life_geometry(
+    grid_cols: u16,
+    grid_rows: u16,
+) -> crate::tui::component::TankLifeSurfaceGeometry {
+    let bottom_hud_rows = 5.min(grid_rows / 3);
+    crate::tui::component::TankLifeSurfaceGeometry {
+        surface: crate::tui::component::TankLifeSurface::Round,
+        habitat: Rect::new(0, 0, grid_cols, grid_rows),
+        aperture_mask: Some(crate::tui::component::RoundApertureMask {
+            center_col: (grid_cols / 2) as i16,
+            center_row: (grid_rows / 2) as i16,
+            radius_cols: grid_cols / 2,
+            radius_rows: grid_rows / 2,
+        }),
+        reserved_regions: vec![Rect::new(
+            0,
+            grid_rows.saturating_sub(bottom_hud_rows),
+            grid_cols,
+            bottom_hud_rows,
+        )],
+        max_moving_slots: 2,
+        literal_floor_allowed: false,
+    }
+}
+
+pub fn round_tank_life_protected_regions_for_test(
+    pet_rect: Rect,
+    grid_cols: u16,
+    grid_rows: u16,
+) -> RoundTankLifeProtectedRegions {
+    let geometry = round_tank_life_geometry(grid_cols, grid_rows);
+    RoundTankLifeProtectedRegions {
+        pet_face: crate::tui::component::pet_face_protected_regions(pet_rect),
+        bottom_hud: geometry.reserved_regions,
+    }
+}
+
 /// Deterministic normalized drift offsets in [-1, 1] per axis for `now`, eased
 /// (smoothstep) between per-epoch targets.
 fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
@@ -328,8 +370,15 @@ pub fn build_round_scene_draw_list(
     }
 
     let model = PetSceneModel::build(vm, now, ColorCapability::Truecolor);
-    let mut scene_list =
-        crate::tui::panels::pet::render_pet_to_draw_list(&model, vm, &layout, now, &ctx);
+    let tank_geometry = round_tank_life_geometry(grid_cols, grid_rows);
+    let mut scene_list = crate::tui::panels::pet::render_pet_to_draw_list_with_tank_geometry(
+        &model,
+        vm,
+        &layout,
+        now,
+        &ctx,
+        &tank_geometry,
+    );
 
     // Uniform porthole recolor: find the sky-wash color from the first bg-only
     // cell at a low row, then stamp it onto every bg-only cell so the floor band
@@ -347,7 +396,6 @@ pub fn build_round_scene_draw_list(
             }
         }
     }
-
     CompanionScene {
         draw_list: scene_list,
         pet_rect: new_pet_art,
@@ -431,6 +479,36 @@ mod tests {
         assert!(
             pet_cells >= 10,
             "expected at least 10 non-blank pet glyph cells, got {pet_cells}"
+        );
+    }
+
+    #[test]
+    fn round_hud_reserve_does_not_prune_non_tank_life_scene_glyphs() {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_art = vec!["#############".into(); PET_H as usize];
+        let motion = CompanionMotion {
+            drift_y_frac: 0.0,
+            upward_bias: -1.0,
+            ..CompanionMotion::default()
+        };
+
+        let scene = build_round_scene_draw_list(
+            &vm,
+            GOLDEN_NOW,
+            GOLDEN_GRID_COLS,
+            GOLDEN_GRID_ROWS,
+            &motion,
+        );
+        let reserved =
+            round_tank_life_geometry(GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS).reserved_regions;
+        assert!(
+            scene.draw_list.cells.iter().any(|cell| {
+                cell.glyph.is_some()
+                    && reserved
+                        .iter()
+                        .any(|region| crate::tui::component::rect_contains(*region, cell.col, cell.row))
+            }),
+            "round scene must not remove non-tank-life glyphs from the HUD reserve; the native HUD draws above the scene"
         );
     }
 

@@ -11,12 +11,14 @@ use time::OffsetDateTime;
 
 pub const CONTRACT_SCHEMA_VERSION: u32 = 1;
 pub const HUD_CONTRACT_SCHEMA_VERSION: u32 = 1;
+pub const TANK_LIFE_CONTRACT_SCHEMA_VERSION: u32 = 1;
 const REDACTED_RUNTIME_ID: &str = "redacted";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PreviewFrameContract {
     pub scene: Option<PreviewSceneArtifact>,
     pub hud: Option<PreviewHudArtifact>,
+    pub tank_life: Option<PreviewTankLifeArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -129,6 +131,59 @@ pub struct PreviewHudColorArtifact {
     pub g: f64,
     pub b: f64,
     pub a: f64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewTankLifeArtifact {
+    pub schema_version: u32,
+    pub frame_id: String,
+    pub local_date: String,
+    pub calendar_age_days: i64,
+    pub target_surface: String,
+    pub canonical_ids: Vec<String>,
+    pub rendered_ids: Vec<String>,
+    pub skipped: Vec<PreviewTankLifeSkipArtifact>,
+    pub anemone_morph: Option<String>,
+    pub placements: Vec<PreviewTankLifePlacementArtifact>,
+    pub layer_segments: Vec<PreviewTankLifeLayerArtifact>,
+    pub collision_status: PreviewTankLifeCollisionArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewTankLifeSkipArtifact {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewTankLifePlacementArtifact {
+    pub id: String,
+    pub route_family: String,
+    pub bounds: PreviewTargetArtifact,
+    pub cell_count: usize,
+    pub cells: Vec<PreviewTankLifeCellArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewTankLifeCellArtifact {
+    pub row: u16,
+    pub col: u16,
+    pub glyph: String,
+    pub pet_layer: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewTankLifeLayerArtifact {
+    pub id: String,
+    pub pet_layer: String,
+    pub cell_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewTankLifeCollisionArtifact {
+    pub reserved_region_clear: bool,
+    pub aperture_clear: bool,
+    pub protected_pet_face_clear: bool,
 }
 
 impl PreviewSceneArtifact {

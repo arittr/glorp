@@ -32,6 +32,7 @@ pub enum PreviewSelection {
     Props,
     Animation,
     Round,
+    TankLife,
 }
 
 pub struct PreviewRenderContext {
@@ -106,6 +107,10 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                     .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
             );
             bundles.extend(crate::dev_preview::round::round_bundles(&ctx));
+            bundles.extend(crate::dev_preview::tank_life::tank_life_bundles(
+                &ctx,
+                &scratch_dir,
+            )?);
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
@@ -129,6 +134,9 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
         PreviewSelection::Round => bundles.extend(crate::dev_preview::round::round_bundles(&ctx)),
+        PreviewSelection::TankLife => bundles.extend(
+            crate::dev_preview::tank_life::tank_life_bundles(&ctx, &scratch_dir)?,
+        ),
     }
 
     let frames = bundles
@@ -167,6 +175,9 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         }
         if let Some(hud) = &frame.contract.hud {
             write_json_artifact(&staging_dir.join(hud_path(frame)), hud)?;
+        }
+        if let Some(tank_life) = &frame.contract.tank_life {
+            write_json_artifact(&staging_dir.join(tank_life_path(frame)), tank_life)?;
         }
     }
 
@@ -327,6 +338,16 @@ fn scenario_metadata(frame: &PreviewFrame, ctx: &PreviewRenderContext) -> Previe
                 "Confirm patch marks remain legible in the pet scene.".to_string(),
                 "Check calm mode suppresses loud corruption while keeping calm repair marks.".to_string(),
                 "Verify no provider or source identity appears in Glitch behavior inputs.".to_string(),
+            ],
+        ),
+        id if id.starts_with("tank-life-") => (
+            PreviewScenarioKind::TankLife,
+            "Review calendar-age-earned tank inhabitants, daily cast projection, route depth, and round safety.",
+            frame.extra_inputs.clone(),
+            vec![
+                "Confirm each inhabitant silhouette is distinct at the target size.".to_string(),
+                "Confirm daily cast ids change across dates while remaining stable for each date.".to_string(),
+                "Confirm round projection avoids the pet face, bottom HUD, and aperture edge.".to_string(),
             ],
         ),
         "pet-species-stage" => (
@@ -621,6 +642,11 @@ fn scenario_from_parts(
             }),
             scene: frame.contract.scene.as_ref().map(|_| scene_path(frame)),
             hud: frame.contract.hud.as_ref().map(|_| hud_path(frame)),
+            tank_life: frame
+                .contract
+                .tank_life
+                .as_ref()
+                .map(|_| tank_life_path(frame)),
         },
         inputs,
         round,
@@ -702,6 +728,16 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 title: format!("{} HUD", frame.title),
                 artifact_type: ArtifactType::Hud,
                 path: hud_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.tank_life.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-tank-life", frame.id),
+                title: format!("{} Tank Life", frame.title),
+                artifact_type: ArtifactType::TankLife,
+                path: tank_life_path(frame),
                 width: None,
                 height: None,
             });
@@ -1698,6 +1734,10 @@ fn hud_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.hud.json", frame.id))
 }
 
+fn tank_life_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.tank-life.json", frame.id))
+}
+
 fn room_text_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.room.txt", frame.id))
 }
@@ -1917,13 +1957,27 @@ mod tests {
                 "pet-glitch-live-states",
                 "pet-glitch-persistence-states",
                 "round-normal",
+                "round-hud-missing-yesterday",
+                "round-hud-stale-yesterday",
+                "round-hud-zero-yesterday",
+                "round-hud-over-yesterday",
+                "round-hud-idle-pace",
+                "round-hud-burst-pace",
                 "round-active-pulse",
                 "round-asleep-night",
                 "round-helper-trouble",
                 "round-flat-color",
                 "round-glitch-dialect",
                 "round-crystal-dialect",
-                "round-glitch-patched-s6"
+                "round-glitch-patched-s6",
+                "tank-life-age-empty",
+                "tank-life-age-first",
+                "tank-life-age-early",
+                "tank-life-age-full",
+                "tank-life-date-2026-07-07",
+                "tank-life-date-2026-07-08",
+                "tank-life-round-projection",
+                "tank-life-anemone-morphs"
             ]
         );
     }

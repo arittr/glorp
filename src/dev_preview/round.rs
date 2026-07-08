@@ -17,11 +17,13 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
     let mut frames = Vec::new();
 
     let normal = WatchViewModel::fixture_with_habitat_props();
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-normal",
         "Round Normal",
         &normal,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
@@ -33,11 +35,13 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         crate::usage::snapshot::SnapshotState::Missing,
         Some("yesterday-missing"),
     );
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-hud-missing-yesterday",
         "Round HUD Missing Yesterday",
         &missing_yesterday,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
@@ -49,11 +53,13 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         crate::usage::snapshot::SnapshotState::Stale,
         Some("yesterday-stale"),
     );
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-hud-stale-yesterday",
         "Round HUD Stale Yesterday",
         &stale_yesterday,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
@@ -65,11 +71,13 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         crate::usage::snapshot::SnapshotState::Current,
         Some("yesterday-zero"),
     );
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-hud-zero-yesterday",
         "Round HUD Zero Yesterday",
         &zero_yesterday,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
@@ -81,92 +89,110 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         crate::usage::snapshot::SnapshotState::Current,
         None,
     );
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-hud-over-yesterday",
         "Round HUD Over Yesterday",
         &over_yesterday,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
     let mut idle_pace = WatchViewModel::fixture_with_habitat_props();
     idle_pace.rate_momentum.pulse.current_tokens = 0.0;
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-hud-idle-pace",
         "Round HUD Idle Pace",
         &idle_pace,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
     let mut burst_pace = WatchViewModel::fixture_with_habitat_props();
     burst_pace.rate_momentum.pulse.current_tokens = 100_000_000.0;
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-hud-burst-pace",
         "Round HUD Burst Pace",
         &burst_pace,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
     let mut active = WatchViewModel::fixture_with_habitat_props();
     active.activity_identity.source_diversity = SourceDiversity::DualLane;
     active.last_feed_pulse_at = Some(ctx.fixed_now - Duration::milliseconds(400));
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-active-pulse",
         "Round Active Pulse",
         &active,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
     let mut asleep = WatchViewModel::fixture_with_habitat_props();
     asleep.day_context.asleep = true;
     asleep.life_profile.calm_mode = true;
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-asleep-night",
         "Round Asleep Night",
         &asleep,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
     let mut trouble = WatchViewModel::fixture_with_habitat_props();
     trouble.source_health[0].status = SourceStatus::Diagnostic;
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-helper-trouble",
         "Round Helper Trouble",
         &trouble,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
     let flat = WatchViewModel::fixture_with_habitat_props();
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-flat-color",
         "Round Flat Color",
         &flat,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_flat(),
     ));
 
     let mut glitch = WatchViewModel::fixture_with_habitat_props();
     glitch.pet_render.generated_species = crate::pet::generation::Species::Glitch;
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-glitch-dialect",
         "Round Glitch Dialect",
         &glitch,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
     let mut crystal = WatchViewModel::fixture_with_habitat_props();
     crystal.pet_render.generated_species = crate::pet::generation::Species::Crystal;
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-crystal-dialect",
         "Round Crystal Dialect",
         &crystal,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
@@ -185,11 +211,13 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         ctx.fixed_now,
     )
     .expect("round preview fixture should rerender");
-    frames.push(frame(
+    frames.push(render_round_preview_frame(
         "round-glitch-patched-s6",
         "Round Glitch Patched S6",
         &patched_glitch,
-        ctx,
+        ctx.fixed_now,
+        52,
+        52,
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
@@ -320,15 +348,17 @@ fn round_metadata(frame: &PreviewFrame) -> PreviewRoundMetadata {
     }
 }
 
-fn frame(
+pub(crate) fn render_round_preview_frame(
     id: &str,
     title: &str,
     vm: &WatchViewModel,
-    ctx: &PreviewRenderContext,
+    now: time::OffsetDateTime,
+    width: u16,
+    height: u16,
     capabilities: RoundRenderCapabilities,
 ) -> PreviewFrame {
     let mut frame =
-        render_round_preview_frame_from_vm(id, title, vm, ctx.fixed_now, 52, 52, capabilities);
+        render_round_preview_frame_from_vm(id, title, vm, now, width, height, capabilities);
     let aperture = RoundAperture::new(frame.width, frame.height);
     frame.contract.hud = Some(
         crate::dev_preview::contract::PreviewHudArtifact::from_companion_view_model(

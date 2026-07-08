@@ -3,7 +3,10 @@ use time::OffsetDateTime;
 use crate::{
     game::metabolism::Mood,
     storage::{
-        state::{EarnedHabitatProp, HabitatPropSource, PetState},
+        state::{
+            EarnedHabitatProp, EarnedTankInhabitant, HabitatPropSource, PetState, TankInhabitantId,
+            TankInhabitantSource,
+        },
         usage_store::UsageLedgerRow,
     },
     tui::identity::{ActivityIdentityProfile, RecoveryPattern, ENSEMBLE_MEMBER_MIN_SHARE},
@@ -18,6 +21,36 @@ const HEAVY_SESSION_BASELINE_FRACTION: f64 = 0.5;
 pub enum HabitatPropKind {
     Trophy,
     Accent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TankInhabitantKind {
+    Swimmer,
+    LowerLane,
+    Glass,
+    Rim,
+    LowerEdge,
+    HostCombo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TankLifeRouteFamily {
+    CrossTankSwimmer,
+    LowerLaneResident,
+    GlassResident,
+    RimResident,
+    LowerEdgeResident,
+    HostCombo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TankInhabitantSpec {
+    pub id: &'static str,
+    pub unlock_age_days: i64,
+    pub kind: TankInhabitantKind,
+    pub route_family: TankLifeRouteFamily,
+    pub natural_layer: HabitatPetLayer,
+    pub low_color_key: &'static str,
 }
 
 /// Determines whether a prop renders before or after the pet. Props are placed
@@ -90,6 +123,14 @@ pub const TOKEN_BONSAI_100M: &str = "token_bonsai_100m";
 pub const TOKEN_CONSTELLATION_250M: &str = "token_constellation_250m";
 pub const TOKEN_AURORA_500M: &str = "token_aurora_500m";
 pub const TOKEN_MOON_1B: &str = "token_moon_1b";
+pub const GLASS_SHRIMP: &str = "glass_shrimp";
+pub const NEEDLEFISH: &str = "needlefish";
+pub const GLASS_SNAIL: &str = "glass_snail";
+pub const BURROWER: &str = "burrower";
+pub const RIM_SKIMMER: &str = "rim_skimmer";
+pub const SAND_RAY: &str = "sand_ray";
+pub const SCHOOLLET: &str = "schoollet";
+pub const ANEMONE_HOST: &str = "anemone_host";
 
 pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
@@ -287,6 +328,73 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     },
 ];
 
+pub const TANK_INHABITANT_CATALOG: &[TankInhabitantSpec] = &[
+    TankInhabitantSpec {
+        id: GLASS_SHRIMP,
+        unlock_age_days: 1,
+        kind: TankInhabitantKind::LowerLane,
+        route_family: TankLifeRouteFamily::LowerLaneResident,
+        natural_layer: HabitatPetLayer::Foreground,
+        low_color_key: "shrimp",
+    },
+    TankInhabitantSpec {
+        id: NEEDLEFISH,
+        unlock_age_days: 3,
+        kind: TankInhabitantKind::Swimmer,
+        route_family: TankLifeRouteFamily::CrossTankSwimmer,
+        natural_layer: HabitatPetLayer::Behind,
+        low_color_key: "fish",
+    },
+    TankInhabitantSpec {
+        id: GLASS_SNAIL,
+        unlock_age_days: 7,
+        kind: TankInhabitantKind::Glass,
+        route_family: TankLifeRouteFamily::GlassResident,
+        natural_layer: HabitatPetLayer::Foreground,
+        low_color_key: "snail",
+    },
+    TankInhabitantSpec {
+        id: BURROWER,
+        unlock_age_days: 10,
+        kind: TankInhabitantKind::LowerEdge,
+        route_family: TankLifeRouteFamily::LowerEdgeResident,
+        natural_layer: HabitatPetLayer::Foreground,
+        low_color_key: "burrower",
+    },
+    TankInhabitantSpec {
+        id: RIM_SKIMMER,
+        unlock_age_days: 14,
+        kind: TankInhabitantKind::Rim,
+        route_family: TankLifeRouteFamily::RimResident,
+        natural_layer: HabitatPetLayer::Behind,
+        low_color_key: "rim",
+    },
+    TankInhabitantSpec {
+        id: SAND_RAY,
+        unlock_age_days: 21,
+        kind: TankInhabitantKind::LowerLane,
+        route_family: TankLifeRouteFamily::LowerLaneResident,
+        natural_layer: HabitatPetLayer::Foreground,
+        low_color_key: "ray",
+    },
+    TankInhabitantSpec {
+        id: SCHOOLLET,
+        unlock_age_days: 28,
+        kind: TankInhabitantKind::Swimmer,
+        route_family: TankLifeRouteFamily::CrossTankSwimmer,
+        natural_layer: HabitatPetLayer::Behind,
+        low_color_key: "school",
+    },
+    TankInhabitantSpec {
+        id: ANEMONE_HOST,
+        unlock_age_days: 35,
+        kind: TankInhabitantKind::HostCombo,
+        route_family: TankLifeRouteFamily::HostCombo,
+        natural_layer: HabitatPetLayer::Behind,
+        low_color_key: "host",
+    },
+];
+
 pub fn catalog_prop(id: &HabitatPropId) -> Option<&'static HabitatPropSpec> {
     catalog_prop_by_str(id.as_str())
 }
@@ -299,6 +407,53 @@ pub fn ladder_props() -> impl Iterator<Item = &'static HabitatPropSpec> {
     HABITAT_PROP_CATALOG
         .iter()
         .filter(|prop| prop.lifetime_threshold.is_some())
+}
+
+pub fn tank_inhabitant_spec(id: &TankInhabitantId) -> Option<&'static TankInhabitantSpec> {
+    TANK_INHABITANT_CATALOG
+        .iter()
+        .find(|spec| spec.id == id.as_str())
+}
+
+pub fn calendar_age_days(
+    created_at: OffsetDateTime,
+    now: OffsetDateTime,
+    local_day_mapper: &crate::storage::day_axis::LocalDayMapper,
+) -> i64 {
+    let created = local_day_mapper.local_date(created_at);
+    let current = local_day_mapper.local_date(now);
+    (current - created).whole_days().max(0)
+}
+
+pub fn reconcile_age_earned_inhabitants(
+    state: &mut PetState,
+    now: OffsetDateTime,
+    local_day_mapper: &crate::storage::day_axis::LocalDayMapper,
+) -> bool {
+    let age_days = calendar_age_days(state.created_at, now, local_day_mapper);
+    let mut changed = false;
+
+    for spec in TANK_INHABITANT_CATALOG {
+        if age_days < spec.unlock_age_days {
+            continue;
+        }
+        if state
+            .habitat
+            .earned_inhabitants
+            .iter()
+            .any(|earned| earned.id.as_str() == spec.id)
+        {
+            continue;
+        }
+        state.habitat.earned_inhabitants.push(EarnedTankInhabitant {
+            id: TankInhabitantId::new(spec.id),
+            earned_at: now,
+            source: TankInhabitantSource::PetAgeThreshold { threshold_days: spec.unlock_age_days },
+        });
+        changed = true;
+    }
+
+    changed
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -473,6 +628,8 @@ fn record_prop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::day_axis::LocalDayMapper;
+    use time::{macros::datetime, UtcOffset};
 
     #[test]
     fn moss_tuft_and_planter_render_in_green() {
@@ -537,7 +694,7 @@ mod tests {
 
     #[test]
     fn flowering_plants_are_foreground_layer() {
-        // The flowering plants render in FRONT of the pet at a FIXED anchor, so
+        // The flowering plants render in FRONT of the pet at a stable anchor, so
         // the player can watch them grow and bloom. Foreground (unlike Background)
         // does not dodge the pet's silhouette, so the plants stay put instead of
         // chasing the free-floating pet around the tank.
@@ -652,5 +809,62 @@ mod tests {
         );
         // The maturity gate (100k default baseline) is unrelated and untouched —
         // a pet at 10k lifetime tokens is still immature and renders zero motes.
+    }
+
+    #[test]
+    fn calendar_age_days_uses_local_dates_not_elapsed_hours() {
+        let mapper = LocalDayMapper::Fixed(UtcOffset::from_hms(-8, 0, 0).unwrap());
+        let created = datetime!(2026-07-07 07:30 UTC);
+        let now = datetime!(2026-07-08 07:00 UTC);
+
+        assert_eq!(calendar_age_days(created, now, &mapper), 1);
+    }
+
+    #[test]
+    fn calendar_age_days_clamps_future_created_at_to_zero() {
+        let mapper = LocalDayMapper::Fixed(UtcOffset::UTC);
+
+        assert_eq!(
+            calendar_age_days(
+                datetime!(2026-07-09 00:00 UTC),
+                datetime!(2026-07-08 00:00 UTC),
+                &mapper,
+            ),
+            0,
+        );
+    }
+
+    #[test]
+    fn age_reconciliation_backfills_catalog_order_and_is_idempotent() {
+        let mapper = LocalDayMapper::Fixed(UtcOffset::UTC);
+        let mut state = PetState::new_for_test("tank-life-seed", "Glorp");
+        state.created_at = datetime!(2026-06-01 00:00 UTC);
+        let now = datetime!(2026-07-02 00:00 UTC);
+
+        assert!(reconcile_age_earned_inhabitants(&mut state, now, &mapper));
+        assert_eq!(
+            state
+                .habitat
+                .earned_inhabitants
+                .iter()
+                .map(|earned| earned.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "glass_shrimp",
+                "needlefish",
+                "glass_snail",
+                "burrower",
+                "rim_skimmer",
+                "sand_ray",
+                "schoollet",
+            ],
+        );
+        assert_eq!(
+            state.habitat.earned_inhabitants[0].source,
+            crate::storage::state::TankInhabitantSource::PetAgeThreshold { threshold_days: 1 },
+        );
+
+        assert!(!reconcile_age_earned_inhabitants(&mut state, now, &mapper));
+        assert_eq!(state.habitat.earned_inhabitants.len(), 7);
     }
 }

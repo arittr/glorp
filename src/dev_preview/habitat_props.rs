@@ -132,6 +132,9 @@ fn render_single_prop(
 ) {
     let habitat_view = HabitatView {
         earned_props: vec![earned_view(prop, now)],
+        earned_inhabitants: Vec::new(),
+        tank_life_local_date: ctx.render.clock.now_utc().date(),
+        tank_life_calendar_age_days: 0,
     };
     let render_ctx = RenderContext::with_clock(ctx.render.color_capability, WatchClock::fixed(now));
     let scene = PetSceneLayout {

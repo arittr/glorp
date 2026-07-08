@@ -54,6 +54,17 @@ const ACTIVITY_IDENTITY_WATCH_IDS: [&str; 2] = [
     "watch-activity-identity-unknown",
 ];
 
+const TANK_LIFE_IDS: [&str; 8] = [
+    "tank-life-age-empty",
+    "tank-life-age-first",
+    "tank-life-age-early",
+    "tank-life-age-full",
+    "tank-life-date-2026-07-07",
+    "tank-life-date-2026-07-08",
+    "tank-life-round-projection",
+    "tank-life-anemone-morphs",
+];
+
 const HABITAT_PROPS_ORBIT_ID: &str = "watch-habitat-props-orbit";
 
 const GLITCH_PERSISTENCE_PET_ID: &str = "pet-glitch-persistence-states";
@@ -302,7 +313,7 @@ fn dev_preview_watch_writes_expected_artifacts() {
     );
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 6);
+    assert_eq!(manifest["schema_version"], 7);
     assert_eq!(manifest["producer"], "glorp-dev-preview");
     assert!(!manifest["glorp_version"].as_str().unwrap().is_empty());
     assert!(manifest["generated_at"].as_str().unwrap().ends_with('Z'));
@@ -711,7 +722,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         .is_file());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 6);
+    assert_eq!(manifest["schema_version"], 7);
     let wide = scenario(&manifest, "watch-wide-normal");
     assert_eq!(
         wide["files"]["layout"],
@@ -1176,6 +1187,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/round-glitch-dialect.txt",
         "frames/round-crystal-dialect.txt",
         "frames/round-glitch-patched-s6.txt",
+        "frames/tank-life-age-empty.txt",
+        "frames/tank-life-age-first.txt",
+        "frames/tank-life-age-early.txt",
+        "frames/tank-life-age-full.txt",
+        "frames/tank-life-date-2026-07-07.txt",
+        "frames/tank-life-date-2026-07-08.txt",
+        "frames/tank-life-round-projection.txt",
+        "frames/tank-life-anemone-morphs.txt",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1262,6 +1281,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "round-glitch-dialect".to_string(),
             "round-crystal-dialect".to_string(),
             "round-glitch-patched-s6".to_string(),
+            "tank-life-age-empty".to_string(),
+            "tank-life-age-first".to_string(),
+            "tank-life-age-early".to_string(),
+            "tank-life-age-full".to_string(),
+            "tank-life-date-2026-07-07".to_string(),
+            "tank-life-date-2026-07-08".to_string(),
+            "tank-life-round-projection".to_string(),
+            "tank-life-anemone-morphs".to_string(),
         ]
     );
 }
@@ -1586,7 +1613,7 @@ fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
     assert!(!run.out.join("frames/watch-wide-normal.txt").exists());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 6);
+    assert_eq!(manifest["schema_version"], 7);
     assert!(
         manifest["scenarios"].as_array().unwrap().is_empty(),
         "animation-only bundles should not write static scenarios"
@@ -1767,7 +1794,7 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
     run.run_success("round");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 6);
+    assert_eq!(manifest["schema_version"], 7);
     for id in ROUND_IDS {
         assert!(
             run.out.join(format!("frames/{id}.txt")).is_file(),
@@ -1803,7 +1830,7 @@ fn dev_preview_round_writes_companion_hud_artifacts() {
     run.run_success("round");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 6);
+    assert_eq!(manifest["schema_version"], 7);
     let expected = [
         "round-normal",
         "round-hud-missing-yesterday",
@@ -1958,6 +1985,79 @@ fn dev_preview_round_aperture_corners_are_masked() {
 }
 
 #[test]
+fn dev_preview_tank_life_writes_typed_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("tank-life");
+
+    let manifest = run.manifest();
+    assert_eq!(manifest["schema_version"], 7);
+
+    for id in TANK_LIFE_IDS {
+        assert!(
+            run.out.join(format!("frames/{id}.txt")).is_file(),
+            "missing {id}.txt"
+        );
+        assert!(
+            run.out
+                .join(format!("frames/{id}.tank-life.json"))
+                .is_file(),
+            "missing {id}.tank-life.json"
+        );
+
+        let artifact = read_tank_life(&run, id);
+        assert_eq!(artifact["schema_version"], 1);
+        assert_eq!(artifact["frame_id"], id);
+        assert!(artifact["local_date"].is_string());
+        assert!(artifact["calendar_age_days"].is_i64());
+        assert!(artifact["target_surface"].is_string());
+        assert!(artifact["canonical_ids"].is_array());
+        assert!(artifact["rendered_ids"].is_array());
+        assert!(artifact["skipped"].is_array());
+        assert!(artifact["placements"].is_array());
+        assert!(artifact["collision_status"]["reserved_region_clear"].is_boolean());
+    }
+}
+
+#[test]
+fn dev_preview_all_includes_tank_life_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("all");
+
+    assert!(run
+        .out
+        .join("frames/tank-life-round-projection.tank-life.json")
+        .is_file());
+}
+
+#[test]
+fn dev_preview_tank_life_anemone_fixture_shows_all_morphs_and_host() {
+    let run = PreviewRun::new();
+
+    run.run_success("tank-life");
+
+    let text =
+        std::fs::read_to_string(run.out.join("frames/tank-life-anemone-morphs.txt")).unwrap();
+    let artifact = read_tank_life(&run, "tank-life-anemone-morphs");
+    assert_eq!(
+        artifact["anemone_morph"],
+        serde_json::Value::Null,
+        "catalog fixture shows every morph, so it should not report one selected morph"
+    );
+    for glyph in ["✺", "┬", "⌁", "⁙", "›"] {
+        assert!(
+            text.contains(glyph),
+            "anemone morph fixture should show glyph {glyph:?}; text was:\n{text}"
+        );
+        assert!(
+            tank_life_artifact_mentions_glyph(&artifact, glyph),
+            "anemone morph artifact should describe glyph {glyph:?}; artifact was:\n{artifact:#}"
+        );
+    }
+}
+
+#[test]
 fn dev_preview_round_glitch_and_crystal_differ_by_symbols() {
     let run = PreviewRun::new();
 
@@ -2062,6 +2162,19 @@ fn read_scene(run: &PreviewRun, id: &str) -> Value {
 
 fn read_hud(run: &PreviewRun, id: &str) -> Value {
     read_json(run.out.join(format!("frames/{id}.hud.json")))
+}
+
+fn read_tank_life(run: &PreviewRun, id: &str) -> Value {
+    read_json(run.out.join(format!("frames/{id}.tank-life.json")))
+}
+
+fn tank_life_artifact_mentions_glyph(artifact: &Value, glyph: &str) -> bool {
+    artifact["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|placement| placement["cells"].as_array().into_iter().flatten())
+        .any(|cell| cell["glyph"] == glyph)
 }
 
 fn preview_scenarios_with_contract_scene(manifest: &Value) -> Vec<String> {

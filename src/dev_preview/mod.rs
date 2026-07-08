@@ -7,4 +7,5 @@ pub mod pets;
 pub mod round;
 pub mod scenarios;
 pub mod strips;
+pub mod tank_life;
 pub mod watch;

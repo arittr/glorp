@@ -199,7 +199,7 @@ pub(crate) mod tests {
         let art_lines: Vec<String> = (0..10)
             .map(|i| {
                 if i == 7 {
-                    "XXXXXXXXXXXXX".to_string()
+                    "#############".to_string()
                 } else {
                     "             ".to_string()
                 }

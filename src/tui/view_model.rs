@@ -1,7 +1,12 @@
 use crate::game::metabolism::Mood;
-use crate::game::{evolution::Stage, habitat::HabitatPropKind};
+use crate::game::{
+    evolution::Stage,
+    habitat::{HabitatPropKind, TankInhabitantKind},
+};
 use crate::pet::generation::Species;
-use crate::storage::state::{HabitatPropId, HabitatPropSource};
+use crate::storage::state::{
+    HabitatPropId, HabitatPropSource, TankInhabitantId, TankInhabitantSource,
+};
 use crate::tui::identity::ActivityIdentityProfile;
 use crate::tui::life::PetLifeProfile;
 use crate::tui::style::LogKind;
@@ -182,6 +187,9 @@ pub struct PetRenderModel {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HabitatView {
     pub earned_props: Vec<EarnedHabitatPropView>,
+    pub earned_inhabitants: Vec<EarnedTankInhabitantView>,
+    pub tank_life_local_date: time::Date,
+    pub tank_life_calendar_age_days: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,6 +199,15 @@ pub struct EarnedHabitatPropView {
     pub kind: HabitatPropKind,
     pub display_priority: i16,
     pub source: HabitatPropSource,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EarnedTankInhabitantView {
+    pub id: TankInhabitantId,
+    pub earned_at: time::OffsetDateTime,
+    pub unlock_age_days: i64,
+    pub kind: TankInhabitantKind,
+    pub source: TankInhabitantSource,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -305,7 +322,13 @@ impl WatchViewModel {
                 mood: Mood::Content,
             },
             pet_palette: crate::pet::palette::default_theme_palette(),
-            habitat: HabitatView { earned_props: Vec::new() },
+            habitat: HabitatView {
+                earned_props: Vec::new(),
+                earned_inhabitants: Vec::new(),
+                tank_life_local_date: time::Date::from_calendar_date(1970, time::Month::January, 1)
+                    .unwrap(),
+                tank_life_calendar_age_days: 0,
+            },
             life_profile: PetLifeProfile::default(),
             activity_identity: ActivityIdentityProfile::default(),
             day_context: crate::tui::day::DayContext::default(),
@@ -468,6 +491,27 @@ impl WatchViewModel {
                 source: HabitatPropSource::LifetimeTokens { threshold: 25_000.0 },
             },
         ];
+        vm
+    }
+
+    #[doc(hidden)]
+    pub fn fixture_with_tank_inhabitants_for_age(age_days: i64, local_date: time::Date) -> Self {
+        let mut vm = Self::fixture_with_habitat_props();
+        vm.habitat.tank_life_local_date = local_date;
+        vm.habitat.tank_life_calendar_age_days = age_days;
+        vm.habitat.earned_inhabitants = crate::game::habitat::TANK_INHABITANT_CATALOG
+            .iter()
+            .filter(|spec| spec.unlock_age_days <= age_days)
+            .map(|spec| EarnedTankInhabitantView {
+                id: TankInhabitantId::new(spec.id),
+                earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                unlock_age_days: spec.unlock_age_days,
+                kind: spec.kind,
+                source: TankInhabitantSource::PetAgeThreshold {
+                    threshold_days: spec.unlock_age_days,
+                },
+            })
+            .collect();
         vm
     }
 
