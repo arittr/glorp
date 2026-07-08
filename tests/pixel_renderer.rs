@@ -67,6 +67,7 @@ fn frame_for_procedural_fallback(
             feed_reaction: false,
             glitch_patch_tier: None,
             glitch_burst_level: None,
+            glitch_day_key: None,
             glitch_calm_mode: false,
             glitch_feed_reaction: false,
         },

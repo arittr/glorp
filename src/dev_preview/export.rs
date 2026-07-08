@@ -14,7 +14,7 @@ pub const PRODUCER: &str = "glorp-dev-preview";
 pub const SCHEMA_VERSION: u32 = 8;
 pub const PIXEL_FRAME_SCHEMA_VERSION: u32 = 1;
 pub const PIXEL_ART_SCHEMA_VERSION: u32 = 1;
-pub const PIXEL_FIT_SCHEMA_VERSION: u32 = 1;
+pub const PIXEL_FIT_SCHEMA_VERSION: u32 = 2;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -182,6 +182,17 @@ pub struct PreviewPixelArtArtifact {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreviewPixelFitArtifact {
     pub schema_version: u32,
+    pub producer: &'static str,
+    pub geometry: PixelTargetGeometry,
+    pub image_rect: PixelFitRect,
+    pub hud_safe_zone: PixelFitRect,
+    pub hud_overlap: PreviewPixelHudOverlap,
+    pub geometry_evidence: Vec<PreviewPixelFitGeometryEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewPixelFitGeometryEvidence {
+    pub label: &'static str,
     pub producer: &'static str,
     pub geometry: PixelTargetGeometry,
     pub image_rect: PixelFitRect,

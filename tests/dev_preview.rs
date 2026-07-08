@@ -165,6 +165,36 @@ fn collect_pixel_json_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
     }
 }
 
+fn collect_pixel_review_artifact_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pixel_review_artifact_paths(&path, paths);
+            continue;
+        }
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let path_text = path.to_string_lossy();
+        let is_pixel_frame = name.starts_with("pixel-")
+            && (name.ends_with(".txt")
+                || name.ends_with(".cells.json")
+                || name.ends_with(".pixel.json")
+                || name.ends_with(".pixel-art.json")
+                || name.ends_with(".pixel-fit.json"));
+        let is_pixel_strip = path_text.contains("strips/pixel-")
+            && (name.ends_with(".txt")
+                || name.ends_with(".cells.json")
+                || name.ends_with(".pixel.json"));
+        if is_pixel_frame || is_pixel_strip {
+            paths.push(path);
+        }
+    }
+}
+
 fn pixel_alpha_sum_for_rgb(pixel: &Value, rgb: &str) -> u32 {
     pixel["pixels"]
         .as_array()
@@ -1830,6 +1860,31 @@ fn dev_preview_pixel_writes_art_and_fit_sidecars() {
 }
 
 #[test]
+fn dev_preview_pixel_fit_sidecar_records_each_review_geometry() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let fit = run.read_json("frames/pixel-fuzz-s3-content-idle.pixel-fit.json");
+    let evidence = fit["geometry_evidence"].as_array().unwrap();
+    let labels = evidence
+        .iter()
+        .map(|entry| entry["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(labels, ["min", "default", "large", "fullscreen"]);
+    assert_eq!(evidence[0]["geometry"]["width"], 260);
+    assert_eq!(evidence[1]["geometry"]["width"], 360);
+    assert_eq!(evidence[2]["geometry"]["width"], 480);
+    assert_eq!(evidence[3]["geometry"]["width"], 900);
+    for entry in evidence {
+        assert_eq!(entry["producer"], "round::pixel_fit::pixel_companion_fit");
+        assert_eq!(entry["hud_overlap"]["body_eye_mouth_pixels"], 0);
+        assert_eq!(entry["hud_overlap"]["translucent_effect_pixels"], 0);
+    }
+}
+
+#[test]
 fn dev_preview_pixel_summary_includes_fullscreen_fit_readiness() {
     let run = PreviewRun::new();
 
@@ -1919,8 +1974,25 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
         .iter()
         .any(|path| path.ends_with("strips/pixel-feed-pulse/frame-047.pixel.json")));
 
+    let mut review_artifact_paths = Vec::new();
+    collect_pixel_review_artifact_paths(&run.out, &mut review_artifact_paths);
+    assert!(review_artifact_paths.iter().any(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "pixel-fuzz-s3-content-idle.txt")
+    }));
+    assert!(review_artifact_paths.iter().any(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "pixel-fuzz-s3-content-idle.cells.json")
+    }));
+    assert!(review_artifact_paths.iter().any(|path| {
+        path.to_string_lossy()
+            .contains("strips/pixel-feed-pulse/frame-047.cells.json")
+    }));
+
     let mut text = std::fs::read_to_string(run.out.join("manifest.json")).unwrap();
-    for path in pixel_paths {
+    for path in pixel_paths.into_iter().chain(review_artifact_paths) {
         text.push_str(&std::fs::read_to_string(path).unwrap());
     }
 

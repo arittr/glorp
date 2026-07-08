@@ -157,6 +157,58 @@ fn blink_suppression_ticks_get_distinct_cached_references() {
 }
 
 #[test]
+fn glitch_day_seed_gets_distinct_cached_references() {
+    let now = datetime!(2026-07-08 12:00 UTC);
+    let mut first_vm = WatchViewModel::fixture();
+    first_vm.pet_render.generated_species = Species::Glitch;
+    first_vm.pet_render.stage = Stage::S4;
+    first_vm.pet_render.mood = Mood::Content;
+    first_vm.life_profile.burst_level = 0.9;
+    first_vm.last_feed_pulse_at = Some(now - time::Duration::milliseconds(300));
+    first_vm.day_context.date_seed = 42;
+
+    let mut second_vm = first_vm.clone();
+    second_vm.day_context.date_seed = 777;
+
+    let inputs = PixelCanonicalAnimationInputs {
+        tick: 9,
+        hold_eyes_closed: false,
+        blink_suppression_ticks: 0,
+    };
+    let (_input, first_request) =
+        PixelPetInput::from_watch_view_model_with_canonical_art_request(&first_vm, now, inputs);
+    let (_input, second_request) =
+        PixelPetInput::from_watch_view_model_with_canonical_art_request(&second_vm, now, inputs);
+    let first_uncached = PixelArtReferenceProvider::default().reference_for(&first_request);
+    let second_uncached = PixelArtReferenceProvider::default().reference_for(&second_request);
+    let serialized = serde_json::to_string(&first_uncached).unwrap();
+    assert_ne!(
+        first_uncached.reference_checksum, second_uncached.reference_checksum,
+        "glitch day seed changes canonical repair marks and must affect the reference"
+    );
+    assert!(
+        !serialized.contains("day_seed"),
+        "serialized art references must not expose raw date seeds: {serialized}"
+    );
+    assert!(
+        !serialized.contains("glitch_day_key"),
+        "serialized art references must not expose cache-only date keys: {serialized}"
+    );
+
+    let mut provider = PixelArtReferenceProvider::default();
+    let first = provider.reference_for(&first_request);
+    let second = provider.reference_for(&second_request);
+
+    assert_eq!(first.reference_checksum, first_uncached.reference_checksum);
+    assert_eq!(
+        second.reference_checksum,
+        second_uncached.reference_checksum
+    );
+    assert_ne!(first.pose, second.pose);
+    assert_eq!(provider.render_count_for_test(), 2);
+}
+
+#[test]
 fn serialized_reference_does_not_leak_raw_seed_or_terminal_art() {
     let mut vm = WatchViewModel::fixture();
     vm.pet_render.seed = "very-secret-seed".to_string();
