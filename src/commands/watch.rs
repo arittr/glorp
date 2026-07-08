@@ -25,8 +25,8 @@ use crate::{
         },
         style::{source_display_name, LogKind},
         view_model::{
-            BioView, DailyComparison, EarnedHabitatPropView, EventView, HabitatView,
-            PetRenderModel, ProgressView, RateDirection, RateMomentum, RateWindow,
+            BioView, DailyComparison, EarnedHabitatPropView, EarnedTankInhabitantView, EventView,
+            HabitatView, PetRenderModel, ProgressView, RateDirection, RateMomentum, RateWindow,
             SourceHealthView, SourceStatus, SourceUsageView, WatchViewModel,
         },
     },
@@ -51,13 +51,14 @@ pub fn run() -> Result<()> {
 fn run_against_real_state(dev_pet: Option<Species>) -> Result<()> {
     let paths = AppPaths::resolve()?;
     let state_store = StateStore::new(paths.state_file.clone());
-    let Some(state) = state_store.load()? else {
+    let Some(mut state) = state_store.load()? else {
         return Err(GlorpError::Message(
             "no glorp pet exists yet; run `glorp init` first".into(),
         ));
     };
 
     let now = OffsetDateTime::now_utc();
+    reconcile_state_after_load(&state_store, &mut state, now, LocalDayMapper::System)?;
     let mut vm = build_watch_view_model_at(&state, &paths.usage_db, now, LocalDayMapper::System)?;
     if let Some(species) = dev_pet {
         apply_dev_pet_species_override(&mut vm, species, now)?;
@@ -259,7 +260,7 @@ pub(crate) fn build_watch_view_model_at(
             mood,
         },
         pet_palette,
-        habitat: build_habitat_view(state),
+        habitat: build_habitat_view(state, now, mapper),
         life_profile,
         activity_identity,
         day_context,
@@ -419,7 +420,11 @@ fn companion_direction(pulse: RateDirection, hour: RateDirection) -> RateDirecti
     }
 }
 
-fn build_habitat_view(state: &PetState) -> HabitatView {
+fn build_habitat_view(
+    state: &PetState,
+    now: OffsetDateTime,
+    mapper: LocalDayMapper,
+) -> HabitatView {
     let earned_props = state
         .habitat
         .earned_props
@@ -436,7 +441,45 @@ fn build_habitat_view(state: &PetState) -> HabitatView {
         })
         .collect();
 
-    HabitatView { earned_props }
+    let earned_inhabitants = state
+        .habitat
+        .earned_inhabitants
+        .iter()
+        .filter_map(|earned| {
+            let spec = crate::game::habitat::tank_inhabitant_spec(&earned.id)?;
+            Some(EarnedTankInhabitantView {
+                id: earned.id.clone(),
+                earned_at: earned.earned_at,
+                unlock_age_days: spec.unlock_age_days,
+                kind: spec.kind,
+                source: earned.source.clone(),
+            })
+        })
+        .collect();
+
+    HabitatView {
+        earned_props,
+        earned_inhabitants,
+        tank_life_local_date: mapper.local_date(now),
+        tank_life_calendar_age_days: crate::game::habitat::calendar_age_days(
+            state.created_at,
+            now,
+            &mapper,
+        ),
+    }
+}
+
+pub fn reconcile_state_after_load(
+    state_store: &StateStore,
+    state: &mut PetState,
+    now: OffsetDateTime,
+    mapper: LocalDayMapper,
+) -> Result<bool> {
+    let changed = crate::game::habitat::reconcile_age_earned_inhabitants(state, now, &mapper);
+    if changed {
+        state_store.save(state)?;
+    }
+    Ok(changed)
 }
 
 #[doc(hidden)]
@@ -459,6 +502,23 @@ pub fn build_watch_view_model_for_test_at(
         now,
         LocalDayMapper::Fixed(time::UtcOffset::UTC),
     )
+}
+
+#[doc(hidden)]
+pub fn poll_usage_and_apply_for_test_with_failing_provider(
+    state_store: &crate::storage::state::StateStore,
+    usage_db: &std::path::Path,
+    now: time::OffsetDateTime,
+    mapper: crate::storage::day_axis::LocalDayMapper,
+) -> crate::error::Result<()> {
+    let Some(mut state) = state_store.load()? else {
+        return Ok(());
+    };
+    reconcile_state_after_load(state_store, &mut state, now, mapper)?;
+    let _ = crate::storage::usage_store::UsageStore::open(usage_db)?;
+    Err(crate::error::GlorpError::Message(
+        "test provider failure after age reconciliation".to_string(),
+    ))
 }
 
 struct RealWatchPoller {
@@ -526,9 +586,10 @@ pub(crate) fn poll_usage_and_apply(
     let Some(mut state) = state_store.load()? else {
         return Ok(None);
     };
+    let now = OffsetDateTime::now_utc();
+    reconcile_state_after_load(state_store, &mut state, now, LocalDayMapper::System)?;
     let mut usage_store = UsageStore::open(usage_db)?;
     let config = crate::config::AppConfig::load_or_default(config_file)?;
-    let now = OffsetDateTime::now_utc();
     let provider = AgentsviewCommandProvider::from_environment();
     let cutover = crate::usage::cutover::ensure_tokenmaxxing_contract_active(
         &mut state,

@@ -1,7 +1,12 @@
 use glorp::{
-    commands::watch::{build_watch_view_model_for_test, build_watch_view_model_for_test_at},
+    commands::watch::{
+        build_watch_view_model_for_test, build_watch_view_model_for_test_at,
+        poll_usage_and_apply_for_test_with_failing_provider,
+    },
     storage::{
-        state::{NarrativeEvent, PetState},
+        state::{
+            EarnedTankInhabitant, NarrativeEvent, PetState, TankInhabitantId, TankInhabitantSource,
+        },
         usage_store::{NormalizedUsageEvent, ProviderCursorUpdate, ProviderDiagnostic, UsageStore},
     },
     tui::{style::LogKind, view_model::SourceStatus},
@@ -583,6 +588,79 @@ fn watch_view_model_exposes_catalog_backed_habitat_props() {
     assert_eq!(
         vm.habitat.earned_props[0].kind,
         glorp::game::habitat::HabitatPropKind::Trophy
+    );
+}
+
+#[test]
+fn watch_view_model_exposes_known_earned_tank_inhabitants_and_local_date() {
+    let dir = tempfile::tempdir().unwrap();
+    let usage_db = dir.path().join("usage.sqlite");
+    let now = datetime!(2026-07-08 12:00 UTC);
+    let mut usage = glorp::storage::usage_store::UsageStore::open(&usage_db).unwrap();
+    seed_snapshot_for_test(
+        &mut usage,
+        glorp::usage::day_axis::tokenmaxxing_provider_day(now),
+        "claude-code",
+        100.0,
+        now,
+    );
+    let mut state = mech_state();
+    state.created_at = datetime!(2026-07-01 00:00 UTC);
+    state.habitat.earned_inhabitants.push(EarnedTankInhabitant {
+        id: TankInhabitantId::new("glass_shrimp"),
+        earned_at: datetime!(2026-07-02 00:00 UTC),
+        source: TankInhabitantSource::PetAgeThreshold { threshold_days: 1 },
+    });
+    state.habitat.earned_inhabitants.push(EarnedTankInhabitant {
+        id: TankInhabitantId::new("future_friend"),
+        earned_at: datetime!(2026-07-02 00:00 UTC),
+        source: TankInhabitantSource::PetAgeThreshold { threshold_days: 99 },
+    });
+
+    let vm = build_watch_view_model_for_test_at(&state, &usage_db, now).unwrap();
+
+    assert_eq!(
+        vm.habitat.tank_life_local_date,
+        time::macros::date!(2026 - 07 - 08)
+    );
+    assert_eq!(vm.habitat.tank_life_calendar_age_days, 7);
+    assert_eq!(vm.habitat.earned_inhabitants.len(), 1);
+    assert_eq!(vm.habitat.earned_inhabitants[0].id.as_str(), "glass_shrimp");
+    assert_eq!(vm.habitat.earned_inhabitants[0].unlock_age_days, 1);
+}
+
+#[test]
+fn state_load_reconciliation_persists_before_provider_success_is_required() {
+    use glorp::storage::day_axis::LocalDayMapper;
+    use time::UtcOffset;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("state.json");
+    let usage_path = dir.path().join("usage.sqlite");
+    let store = glorp::storage::state::StateStore::new(state_path.clone());
+    let mut state = glorp::storage::state::PetState::new_for_test("age-seed", "Glorp");
+    state.created_at = datetime!(2026-07-01 00:00 UTC);
+    store.save(&state).unwrap();
+
+    let result = poll_usage_and_apply_for_test_with_failing_provider(
+        &store,
+        &usage_path,
+        datetime!(2026-07-08 00:00 UTC),
+        LocalDayMapper::Fixed(UtcOffset::UTC),
+    );
+
+    assert!(
+        result.is_err(),
+        "the provider path should still fail in this fixture"
+    );
+    let saved = store.load().unwrap().unwrap();
+    assert!(
+        saved
+            .habitat
+            .earned_inhabitants
+            .iter()
+            .any(|earned| earned.id.as_str() == "glass_shrimp"),
+        "age reconciliation must persist before provider success is required",
     );
 }
 

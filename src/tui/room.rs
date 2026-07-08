@@ -1101,7 +1101,13 @@ mod tests {
 
     fn vm_with_props(props: Vec<EarnedHabitatPropView>) -> WatchViewModel {
         let mut vm = WatchViewModel::fixture();
-        vm.habitat = HabitatView { earned_props: props };
+        vm.habitat = HabitatView {
+            earned_props: props,
+            earned_inhabitants: Vec::new(),
+            tank_life_local_date: time::Date::from_calendar_date(1970, time::Month::January, 1)
+                .unwrap(),
+            tank_life_calendar_age_days: 0,
+        };
         vm.day_context = DayContext {
             day_phase: DayPhase::Day,
             mature: true,
