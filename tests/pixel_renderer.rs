@@ -7,6 +7,8 @@ use glorp::presentation::pixel::{
     PixelPetArtReference, PixelPetInput, PixelReferenceChecksum, PixelRendererState,
     PixelRendererTick, PixelViewport,
 };
+use glorp::round::hud::companion_hud_text;
+use glorp::round::pixel_fit::{pixel_companion_fit, PixelTargetGeometry};
 use glorp::tui::view_model::WatchViewModel;
 use time::macros::datetime;
 
@@ -296,6 +298,26 @@ fn high_alpha_bounds_are_available_for_fit_checks() {
 
     assert!(bounds.min_x <= bounds.max_x);
     assert!(bounds.min_y <= bounds.max_y);
+}
+
+#[test]
+fn rendered_body_bounds_stay_above_the_hud_safe_zone() {
+    let vm = WatchViewModel::fixture();
+    let (frame, _reference) = frame_for_with_reference(&vm, 0);
+    let body = frame.alpha_bounds(200).expect("high alpha body bounds");
+    let hud = companion_hud_text(205_700_000.0, Some(9.99), 9_900_000.0);
+
+    for size in [260_u16, 360, 480, 900] {
+        let fit = pixel_companion_fit(
+            PixelTargetGeometry { width: size, height: size },
+            PixelViewport::companion_default(),
+            &hud,
+        );
+        assert!(
+            !fit.logical_bounds_overlap_hud(body),
+            "rendered body overlapped HUD safe zone for {size}x{size}: {fit:?}"
+        );
+    }
 }
 
 #[test]

@@ -511,7 +511,12 @@ fn draw_scene(bounds: NSRect) {
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
         if renderer_mode.is_pixel() {
             if let Some(frame) = pixel_frame.as_ref() {
-                crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture);
+                let hud_text = companion_hud_text(
+                    vm.today_effective_tokens,
+                    vm.daily_comparison.fraction_of_yesterday,
+                    vm.rate_momentum.pulse.current_tokens,
+                );
+                crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture, &hud_text);
             }
         } else if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
