@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model};
+use crate::commands::watch::{build_watch_view_model_at, rerender_pet_for_view_model};
 use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
@@ -134,7 +134,12 @@ pub fn run() -> Result<()> {
         now,
         crate::storage::day_axis::LocalDayMapper::System,
     )?;
-    let initial_vm = build_watch_view_model(&initial_pet, &paths.usage_db)?;
+    let initial_vm = build_watch_view_model_at(
+        &initial_pet,
+        &paths.usage_db,
+        now,
+        crate::storage::day_axis::LocalDayMapper::System,
+    )?;
     let scene = derive_round_scene_model(&initial_vm, now);
 
     let app: Retained<NSApplication> = NSApplication::sharedApplication(mtm);
