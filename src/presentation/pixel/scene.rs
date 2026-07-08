@@ -1,4 +1,5 @@
 use super::animator::PixelRendererState;
+use super::art_reference::PixelPetArtReference;
 use super::input::PixelPetInput;
 use crate::pet::generation::Species;
 
@@ -13,11 +14,15 @@ pub struct PixelPetScene {
     pub breath_y: f32,
     pub blink_closed: bool,
     pub pulse_alpha: f32,
+    pub reference_scale: i16,
+    pub reference_origin_x: i16,
+    pub reference_origin_y: i16,
 }
 
 impl PixelPetScene {
-    pub fn from_input(
+    pub fn from_input_and_reference(
         input: &PixelPetInput,
+        art_reference: &PixelPetArtReference,
         state: &PixelRendererState,
         now: time::OffsetDateTime,
     ) -> Self {
@@ -28,10 +33,18 @@ impl PixelPetScene {
                 i64::MIN
             },
         );
-        Self::from_elapsed_ms(input, elapsed_ms)
+        Self::from_elapsed_ms_and_reference(input, art_reference, elapsed_ms)
     }
 
     pub(crate) fn from_elapsed_ms(input: &PixelPetInput, elapsed_ms: i64) -> Self {
+        Self::from_elapsed_ms_and_reference(input, &fallback_reference(input), elapsed_ms)
+    }
+
+    fn from_elapsed_ms_and_reference(
+        input: &PixelPetInput,
+        art_reference: &PixelPetArtReference,
+        elapsed_ms: i64,
+    ) -> Self {
         let stage_scale = 1.0 + input.identity.stage.index() as f32 * 0.075;
         let calm_mult = if input.sleep.calm { 0.28 } else { 1.0 };
         let wander_phase =
@@ -54,9 +67,14 @@ impl PixelPetScene {
             Species::Mech => (15, 12, 5, true, false),
         };
 
+        let fallback_body_rx = (base_rx as f32 * stage_scale).round() as i16;
+        let fallback_body_ry = (base_ry as f32 * stage_scale).round() as i16;
+        let (body_rx, body_ry, reference_scale, reference_origin_x, reference_origin_y) =
+            reference_geometry(art_reference, fallback_body_rx, fallback_body_ry);
+
         Self {
-            body_rx: (base_rx as f32 * stage_scale).round() as i16,
-            body_ry: (base_ry as f32 * stage_scale).round() as i16,
+            body_rx,
+            body_ry,
             accent_count,
             blocky,
             wispy,
@@ -64,6 +82,71 @@ impl PixelPetScene {
             breath_y: breath_phase.sin() * if input.sleep.asleep { 1.0 } else { 2.4 },
             blink_closed,
             pulse_alpha,
+            reference_scale,
+            reference_origin_x,
+            reference_origin_y,
         }
+    }
+}
+
+fn reference_geometry(
+    art_reference: &PixelPetArtReference,
+    fallback_body_rx: i16,
+    fallback_body_ry: i16,
+) -> (i16, i16, i16, i16, i16) {
+    if art_reference.occupied_cells.is_empty() {
+        return (fallback_body_rx, fallback_body_ry, 0, 0, 0);
+    }
+
+    let bounds = art_reference.body_bounds;
+    let reference_scale = ((fallback_body_rx * 2) / i16::from(bounds.width()).max(1)).max(1);
+    let body_width = i16::from(bounds.width()) * reference_scale;
+    let body_height = i16::from(bounds.height()) * reference_scale;
+    let body_rx = (body_width / 2).max(1);
+    let body_ry = (body_height / 2).max(1);
+    let reference_origin_x =
+        -(i16::from(bounds.min_x) * reference_scale) - ((body_width - reference_scale) / 2);
+    let reference_origin_y =
+        -(i16::from(bounds.min_y) * reference_scale) - ((body_height - reference_scale) / 2);
+
+    (
+        body_rx,
+        body_ry,
+        reference_scale,
+        reference_origin_x,
+        reference_origin_y,
+    )
+}
+
+fn fallback_reference(input: &PixelPetInput) -> PixelPetArtReference {
+    PixelPetArtReference {
+        species: input.identity.species,
+        stage: input.identity.stage,
+        mood: input.mood,
+        pose: super::art_reference::PixelArtPoseKey {
+            tick: 0,
+            hold_eyes_closed: false,
+            blink_suppression_ticks: 0,
+            blink_slowdown: 0,
+            soft_eyes: false,
+            work_accent: "none",
+            feed_reaction: false,
+            glitch_patch_tier: None,
+            glitch_burst_level: None,
+            glitch_calm_mode: false,
+            glitch_feed_reaction: false,
+        },
+        width_cells: 0,
+        height_cells: 0,
+        occupied_cells: Vec::new(),
+        body_bounds: super::art_reference::PixelCellBounds {
+            min_x: 0,
+            min_y: 0,
+            max_x: 0,
+            max_y: 0,
+        },
+        foot_contact: super::art_reference::PixelFootContact { cells: Vec::new() },
+        reference_checksum: super::art_reference::PixelReferenceChecksum(0),
+        role_counts: std::collections::BTreeMap::new(),
     }
 }

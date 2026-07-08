@@ -122,6 +122,31 @@ impl PixelFrame {
 
         found.then_some(PixelBounds { min_x, min_y, max_x, max_y })
     }
+
+    pub fn alpha_bounds(&self, min_alpha: u8) -> Option<PixelBounds> {
+        self.assert_storage_invariant();
+        let mut min_x = self.width;
+        let mut min_y = self.height;
+        let mut max_x = 0_u16;
+        let mut max_y = 0_u16;
+        let mut found = false;
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = usize::from(y) * usize::from(self.width) + usize::from(x);
+                if self.pixels[idx].a < min_alpha {
+                    continue;
+                }
+                found = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+
+        found.then_some(PixelBounds { min_x, min_y, max_x, max_y })
+    }
 }
 
 pub fn pixel_runs(frame: &PixelFrame) -> Vec<PixelRun> {

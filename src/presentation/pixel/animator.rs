@@ -1,29 +1,47 @@
+use super::art_reference::{PixelArtReferenceProvider, PixelArtRole, PixelPetArtReference};
 use super::frame::{PixelFrame, PixelViewport, Rgba8};
 use super::input::{PixelPetInput, PixelVariationKey};
 use super::raster::{alpha_blend_pixel, fill_circle, fill_ellipse, fill_rect};
 use super::scene::PixelPetScene;
 use crate::pet::generation::Species;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct PixelRendererState {
     pub(crate) start: time::OffsetDateTime,
+    art_reference_provider: PixelArtReferenceProvider,
 }
 
 impl PixelRendererState {
     pub fn new(_input: &PixelPetInput, now: time::OffsetDateTime) -> Self {
-        Self { start: now }
+        Self {
+            start: now,
+            art_reference_provider: PixelArtReferenceProvider::default(),
+        }
+    }
+
+    pub fn art_reference_for(
+        &mut self,
+        request: &super::art_reference::PixelArtReferenceRequest,
+    ) -> PixelPetArtReference {
+        self.art_reference_provider.reference_for(request)
     }
 }
 
 pub struct PixelRendererTick<'a> {
     pub input: &'a PixelPetInput,
+    pub art_reference: &'a PixelPetArtReference,
     pub viewport: PixelViewport,
     pub now: time::OffsetDateTime,
     pub state: &'a mut PixelRendererState,
 }
 
 pub fn render_pixel_frame(tick: PixelRendererTick<'_>) -> PixelFrame {
-    let scene = PixelPetScene::from_input(tick.input, tick.state, tick.now);
+    let scene = PixelPetScene::from_input_and_reference(
+        tick.input,
+        tick.art_reference,
+        tick.state,
+        tick.now,
+    );
     let mut frame = PixelFrame::transparent(tick.viewport);
     let cx =
         i16::try_from(tick.viewport.logical_width / 2).unwrap() + scene.wander_x.round() as i16;
@@ -31,9 +49,16 @@ pub fn render_pixel_frame(tick: PixelRendererTick<'_>) -> PixelFrame {
         i16::try_from(tick.viewport.logical_height / 2).unwrap() + scene.breath_y.round() as i16;
     draw_aura(&mut frame, tick.input, &scene, cx, cy);
     draw_shadow(&mut frame, cx, cy + scene.body_ry + 6, scene.body_rx);
-    draw_body(&mut frame, tick.input, &scene, cx, cy);
-    draw_face(&mut frame, tick.input, &scene, cx, cy);
-    draw_accents(&mut frame, tick.input, &scene, cx, cy);
+    if tick.art_reference.occupied_cells.is_empty() {
+        draw_fallback_body(&mut frame, tick.input, &scene, cx, cy);
+        draw_fallback_face(&mut frame, tick.input, &scene, cx, cy);
+        draw_fallback_accents(&mut frame, tick.input, &scene, cx, cy);
+    } else {
+        draw_reference_cells(&mut frame, tick.input, &scene, tick.art_reference, cx, cy);
+        if tick.art_reference.role_count(PixelArtRole::Eye) == 0 {
+            draw_fallback_face(&mut frame, tick.input, &scene, cx, cy);
+        }
+    }
     clear_outside_round_aperture(&mut frame);
     frame
 }
@@ -64,7 +89,30 @@ fn draw_shadow(frame: &mut PixelFrame, cx: i16, cy: i16, body_rx: i16) {
     blend_ellipse(frame, cx, cy, body_rx + 4, 6, shadow);
 }
 
-fn draw_body(
+fn draw_reference_cells(
+    frame: &mut PixelFrame,
+    input: &PixelPetInput,
+    scene: &PixelPetScene,
+    reference: &PixelPetArtReference,
+    cx: i16,
+    cy: i16,
+) {
+    for cell in &reference.occupied_cells {
+        let color = color_for_role(input, cell.role);
+        let x = cx + scene.reference_origin_x + i16::from(cell.x) * scene.reference_scale;
+        let y = cy + scene.reference_origin_y + i16::from(cell.y) * scene.reference_scale;
+        fill_rect(
+            frame,
+            x,
+            y,
+            scene.reference_scale,
+            scene.reference_scale,
+            color,
+        );
+    }
+}
+
+fn draw_fallback_body(
     frame: &mut PixelFrame,
     input: &PixelPetInput,
     scene: &PixelPetScene,
@@ -177,7 +225,7 @@ fn draw_body(
     }
 }
 
-fn draw_face(
+fn draw_fallback_face(
     frame: &mut PixelFrame,
     input: &PixelPetInput,
     scene: &PixelPetScene,
@@ -185,7 +233,6 @@ fn draw_face(
     cy: i16,
 ) {
     let eye = rgba_opaque(input.palette.eye);
-    let dim_eye = rgba_with_alpha(input.palette.eye, 176);
     if scene.blink_closed {
         fill_rect(frame, cx - 11, cy - 2, 5, 1, eye);
         fill_rect(frame, cx + 6, cy - 2, 5, 1, eye);
@@ -193,15 +240,15 @@ fn draw_face(
     }
     if input.sleep.asleep {
         let (left_x, right_x, width) = asleep_eye_spans(input.identity.species);
-        blend_rect(frame, cx + left_x, cy + 2, width, 1, dim_eye);
-        blend_rect(frame, cx + right_x, cy + 2, width, 1, dim_eye);
+        fill_rect(frame, cx + left_x, cy + 2, width, 1, eye);
+        fill_rect(frame, cx + right_x, cy + 2, width, 1, eye);
         return;
     }
     fill_rect(frame, cx - 10, cy - 4, 3, 4, eye);
     fill_rect(frame, cx + 7, cy - 4, 3, 4, eye);
 }
 
-fn draw_accents(
+fn draw_fallback_accents(
     frame: &mut PixelFrame,
     input: &PixelPetInput,
     scene: &PixelPetScene,
@@ -297,20 +344,31 @@ fn blend_circle(frame: &mut PixelFrame, cx: i16, cy: i16, radius: i16, color: Rg
     blend_ellipse(frame, cx, cy, radius, radius, color);
 }
 
-fn blend_rect(frame: &mut PixelFrame, x0: i16, y0: i16, width: i16, height: i16, color: Rgba8) {
-    for y in y0..y0 + height {
-        for x in x0..x0 + width {
-            alpha_blend_pixel(frame, x, y, color);
-        }
-    }
-}
-
 fn rgba_opaque(rgb: crate::pet::palette::Rgb) -> Rgba8 {
     Rgba8::opaque(rgb.r, rgb.g, rgb.b)
 }
 
 fn rgba_with_alpha(rgb: crate::pet::palette::Rgb, alpha: u8) -> Rgba8 {
     Rgba8 { r: rgb.r, g: rgb.g, b: rgb.b, a: alpha }
+}
+
+fn color_for_role(input: &PixelPetInput, role: PixelArtRole) -> Rgba8 {
+    match role {
+        PixelArtRole::Eye | PixelArtRole::Mouth => rgba_opaque(input.palette.eye),
+        PixelArtRole::Corruption => rgba_opaque(input.palette.corruption),
+        PixelArtRole::Pattern => rgba_opaque(input.palette.pattern),
+        PixelArtRole::Accent
+        | PixelArtRole::Particle
+        | PixelArtRole::Locket
+        | PixelArtRole::Facet
+        | PixelArtRole::RepairMark => rgba_opaque(input.palette.accent),
+        PixelArtRole::Body
+        | PixelArtRole::BodyGlow
+        | PixelArtRole::Outline
+        | PixelArtRole::InteriorTexture
+        | PixelArtRole::Appendage
+        | PixelArtRole::FootContact => rgba_opaque(input.palette.body),
+    }
 }
 
 fn asleep_eye_spans(species: Species) -> (i16, i16, i16) {
