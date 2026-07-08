@@ -273,6 +273,9 @@ fn render_tank_life_fixture(
         &placements,
         &projected,
     );
+    if matches!(fixture.visual, TankLifeFixtureVisual::AnemoneMorphCatalog) {
+        artifact.anemone_morph = None;
+    }
     artifact.collision_status =
         collision_status_for(&geometry, &pet_protected_regions, &placements);
 
