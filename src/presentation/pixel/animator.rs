@@ -352,22 +352,29 @@ fn rgba_with_alpha(rgb: crate::pet::palette::Rgb, alpha: u8) -> Rgba8 {
     Rgba8 { r: rgb.r, g: rgb.g, b: rgb.b, a: alpha }
 }
 
+fn rgba_scaled(rgb: crate::pet::palette::Rgb, scale: f32) -> Rgba8 {
+    let scale = scale.clamp(0.0, 1.0);
+    Rgba8::opaque(
+        (f32::from(rgb.r) * scale).round() as u8,
+        (f32::from(rgb.g) * scale).round() as u8,
+        (f32::from(rgb.b) * scale).round() as u8,
+    )
+}
+
 fn color_for_role(input: &PixelPetInput, role: PixelArtRole) -> Rgba8 {
     match role {
         PixelArtRole::Eye | PixelArtRole::Mouth => rgba_opaque(input.palette.eye),
         PixelArtRole::Corruption => rgba_opaque(input.palette.corruption),
         PixelArtRole::Pattern => rgba_opaque(input.palette.pattern),
-        PixelArtRole::Accent
-        | PixelArtRole::Particle
-        | PixelArtRole::Locket
-        | PixelArtRole::Facet
-        | PixelArtRole::RepairMark => rgba_opaque(input.palette.accent),
-        PixelArtRole::Body
-        | PixelArtRole::BodyGlow
-        | PixelArtRole::Outline
-        | PixelArtRole::InteriorTexture
-        | PixelArtRole::Appendage
-        | PixelArtRole::FootContact => rgba_opaque(input.palette.body),
+        PixelArtRole::Accent | PixelArtRole::Particle => rgba_opaque(input.palette.accent),
+        PixelArtRole::Locket | PixelArtRole::Facet | PixelArtRole::RepairMark => {
+            rgba_opaque(input.palette.accent)
+        }
+        PixelArtRole::Outline => rgba_scaled(input.palette.body, 0.62),
+        PixelArtRole::InteriorTexture => rgba_scaled(input.palette.body, 0.84),
+        PixelArtRole::Appendage => rgba_scaled(input.palette.body, 0.92),
+        PixelArtRole::FootContact => rgba_scaled(input.palette.body, 0.72),
+        PixelArtRole::Body | PixelArtRole::BodyGlow => rgba_opaque(input.palette.body),
     }
 }
 

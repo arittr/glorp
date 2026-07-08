@@ -18,6 +18,7 @@ const REDACTED_RUNTIME_ID: &str = "redacted";
 pub struct PreviewFrameContract {
     pub pixel: Option<crate::dev_preview::export::PreviewPixelFrameArtifact>,
     pub pixel_art: Option<crate::dev_preview::export::PreviewPixelArtArtifact>,
+    pub pixel_composition: Option<crate::dev_preview::export::PreviewPixelCompositionArtifact>,
     pub pixel_fit: Option<crate::dev_preview::export::PreviewPixelFitArtifact>,
     pub scene: Option<PreviewSceneArtifact>,
     pub hud: Option<PreviewHudArtifact>,

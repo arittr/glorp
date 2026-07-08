@@ -157,6 +157,20 @@ pub struct PixelFootContact {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PixelProtectedRegion {
+    pub id: &'static str,
+    pub role: &'static str,
+    pub bounds: PixelCellBounds,
+    pub cell_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PixelCueCoverage {
+    pub expected: usize,
+    pub present: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PixelReferenceChecksum(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -170,6 +184,8 @@ pub struct PixelPetArtReference {
     pub occupied_cells: Vec<PixelArtCell>,
     pub body_bounds: PixelCellBounds,
     pub foot_contact: PixelFootContact,
+    pub protected_regions: Vec<PixelProtectedRegion>,
+    pub cue_coverage: BTreeMap<&'static str, PixelCueCoverage>,
     pub reference_checksum: PixelReferenceChecksum,
     pub role_counts: BTreeMap<&'static str, usize>,
 }
@@ -185,6 +201,17 @@ impl PixelPetArtReference {
             .copied()
             .filter(|cell| roles.contains(&cell.role))
             .collect()
+    }
+
+    pub fn protected_region(&self, id: &str) -> Option<PixelProtectedRegion> {
+        self.protected_regions
+            .iter()
+            .copied()
+            .find(|region| region.id == id)
+    }
+
+    pub fn cue_coverage(&self, id: &str) -> Option<PixelCueCoverage> {
+        self.cue_coverage.get(id).copied()
     }
 }
 
@@ -298,18 +325,24 @@ fn render_reference(request: &PixelArtReferenceRequest) -> PixelPetArtReference 
     let foot_contact = PixelFootContact {
         cells: foot_contact_cells(&structural_cells),
     };
-
-    let mut role_counts = BTreeMap::new();
-    for cell in &occupied_cells {
-        *role_counts.entry(cell.role.as_str()).or_insert(0) += 1;
-    }
-    count_overlay_roles(
-        &mut role_counts,
+    let base_occupied_cells = occupied_cells.clone();
+    let mut occupied_cells = promote_reference_cells(
         request,
         &rendered.lines,
-        &occupied_cells,
+        occupied_cells,
         &footprint,
+        &foot_contact,
     );
+    occupied_cells.sort_by_key(|cell| (cell.y, cell.x, cell.role.as_str()));
+
+    let role_counts = role_counts_for(&occupied_cells);
+    let cue_coverage = cue_coverage_for(
+        request,
+        &rendered.lines,
+        &base_occupied_cells,
+        &occupied_cells,
+    );
+    let protected_regions = protected_regions_for(&occupied_cells);
 
     let reference_checksum =
         PixelReferenceChecksum(reference_checksum(request, &occupied_cells, body_bounds));
@@ -324,6 +357,8 @@ fn render_reference(request: &PixelArtReferenceRequest) -> PixelPetArtReference 
         occupied_cells,
         body_bounds,
         foot_contact,
+        protected_regions,
+        cue_coverage,
         reference_checksum,
         role_counts,
     }
@@ -369,70 +404,200 @@ fn foot_contact_cells(cells: &[PixelArtCell]) -> Vec<(u8, u8)> {
     contact
 }
 
-fn count_overlay_roles(
-    role_counts: &mut BTreeMap<&'static str, usize>,
+fn promote_reference_cells(
     request: &PixelArtReferenceRequest,
     lines: &[String],
-    occupied_cells: &[PixelArtCell],
+    cells: Vec<PixelArtCell>,
     footprint: &BTreeSet<(u8, u8)>,
-) {
-    let mut outline = 0usize;
-    let mut interior = 0usize;
-    let mut appendage = 0usize;
-    let mut locket = 0usize;
-    let mut facet = 0usize;
-    let mut repair = 0usize;
-
-    for cell in occupied_cells {
-        if cell.role == PixelArtRole::Particle {
-            continue;
-        }
-
-        let glyph = glyph_at(lines, cell.x, cell.y);
-        if request.species == Species::Fuzz && LOCKET_GLYPHS.contains(&glyph) {
-            locket += 1;
-        }
-        if request.species == Species::Crystal && FACET_GLYPHS.contains(&glyph) {
-            facet += 1;
-        }
-        if request.species == Species::Glitch
-            && matches!(request.stage, Stage::S4 | Stage::S5 | Stage::S6)
-            && matches!(cell.role, PixelArtRole::Accent | PixelArtRole::Pattern)
-            && GLITCH_REPAIR_GLYPHS.contains(&glyph)
-        {
-            repair += 1;
-        }
-
-        if matches!(cell.role, PixelArtRole::Body | PixelArtRole::BodyGlow) {
-            if is_outline_cell(cell.x, cell.y, footprint) {
-                outline += 1;
-            } else {
-                interior += 1;
+    foot_contact: &PixelFootContact,
+) -> Vec<PixelArtCell> {
+    cells
+        .into_iter()
+        .map(|mut cell| {
+            if cell.role == PixelArtRole::Particle {
+                return cell;
             }
-        }
+            if matches!(cell.role, PixelArtRole::Eye | PixelArtRole::Mouth) {
+                return cell;
+            }
 
-        if is_appendage_cell(cell, footprint) {
-            appendage += 1;
-        }
+            let glyph = glyph_at(lines, cell.x, cell.y);
+            cell.role = promoted_role_for(request, cell, glyph, footprint, foot_contact);
+            cell
+        })
+        .collect()
+}
+
+fn promoted_role_for(
+    request: &PixelArtReferenceRequest,
+    cell: PixelArtCell,
+    glyph: char,
+    footprint: &BTreeSet<(u8, u8)>,
+    foot_contact: &PixelFootContact,
+) -> PixelArtRole {
+    if request.species == Species::Fuzz && LOCKET_GLYPHS.contains(&glyph) {
+        return PixelArtRole::Locket;
     }
+    if request.species == Species::Crystal && FACET_GLYPHS.contains(&glyph) {
+        return PixelArtRole::Facet;
+    }
+    if request.species == Species::Glitch
+        && matches!(request.stage, Stage::S4 | Stage::S5 | Stage::S6)
+        && matches!(cell.role, PixelArtRole::Accent | PixelArtRole::Pattern)
+        && GLITCH_REPAIR_GLYPHS.contains(&glyph)
+    {
+        return PixelArtRole::RepairMark;
+    }
+    if matches!(
+        cell.role,
+        PixelArtRole::Corruption | PixelArtRole::Pattern | PixelArtRole::Accent
+    ) {
+        return cell.role;
+    }
+    if foot_contact.cells.contains(&(cell.x, cell.y)) {
+        return PixelArtRole::FootContact;
+    }
+    if is_appendage_cell(&cell, footprint) {
+        return PixelArtRole::Appendage;
+    }
+    if matches!(cell.role, PixelArtRole::Body | PixelArtRole::BodyGlow) {
+        if is_outline_cell(cell.x, cell.y, footprint) {
+            return PixelArtRole::Outline;
+        }
+        return PixelArtRole::InteriorTexture;
+    }
+    cell.role
+}
 
-    role_counts.insert(PixelArtRole::Outline.as_str(), outline);
-    role_counts.insert(PixelArtRole::InteriorTexture.as_str(), interior);
-    role_counts.insert(PixelArtRole::Appendage.as_str(), appendage);
-    role_counts.insert(
-        PixelArtRole::FootContact.as_str(),
-        foot_contact_cells(
-            &occupied_cells
-                .iter()
-                .copied()
-                .filter(|cell| cell.role != PixelArtRole::Particle)
-                .collect::<Vec<_>>(),
-        )
-        .len(),
+fn role_counts_for(cells: &[PixelArtCell]) -> BTreeMap<&'static str, usize> {
+    let mut role_counts = BTreeMap::new();
+    for cell in cells {
+        *role_counts.entry(cell.role.as_str()).or_insert(0) += 1;
+    }
+    role_counts
+}
+
+fn cue_coverage_for(
+    request: &PixelArtReferenceRequest,
+    lines: &[String],
+    base_cells: &[PixelArtCell],
+    promoted_cells: &[PixelArtCell],
+) -> BTreeMap<&'static str, PixelCueCoverage> {
+    let mut coverage = BTreeMap::new();
+    coverage.insert(
+        "locket",
+        coverage_for_glyph_role(
+            request,
+            lines,
+            base_cells,
+            promoted_cells,
+            Species::Fuzz,
+            &LOCKET_GLYPHS,
+            PixelArtRole::Locket,
+        ),
     );
-    role_counts.insert(PixelArtRole::Locket.as_str(), locket);
-    role_counts.insert(PixelArtRole::Facet.as_str(), facet);
-    role_counts.insert(PixelArtRole::RepairMark.as_str(), repair);
+    coverage.insert(
+        "facet",
+        coverage_for_glyph_role(
+            request,
+            lines,
+            base_cells,
+            promoted_cells,
+            Species::Crystal,
+            &FACET_GLYPHS,
+            PixelArtRole::Facet,
+        ),
+    );
+    coverage.insert(
+        "repair_mark",
+        glitch_repair_coverage(request, lines, base_cells, promoted_cells),
+    );
+    coverage
+}
+
+fn coverage_for_glyph_role(
+    request: &PixelArtReferenceRequest,
+    lines: &[String],
+    base_cells: &[PixelArtCell],
+    promoted_cells: &[PixelArtCell],
+    species: Species,
+    glyphs: &[char],
+    role: PixelArtRole,
+) -> PixelCueCoverage {
+    if request.species != species {
+        return PixelCueCoverage { expected: 0, present: 0 };
+    }
+    let expected = base_cells
+        .iter()
+        .filter(|cell| glyphs.contains(&glyph_at(lines, cell.x, cell.y)))
+        .count();
+    let present = promoted_cells
+        .iter()
+        .filter(|cell| cell.role == role)
+        .count();
+    PixelCueCoverage { expected, present }
+}
+
+fn glitch_repair_coverage(
+    request: &PixelArtReferenceRequest,
+    lines: &[String],
+    base_cells: &[PixelArtCell],
+    promoted_cells: &[PixelArtCell],
+) -> PixelCueCoverage {
+    if request.species != Species::Glitch
+        || !matches!(request.stage, Stage::S4 | Stage::S5 | Stage::S6)
+    {
+        return PixelCueCoverage { expected: 0, present: 0 };
+    }
+    let expected = base_cells
+        .iter()
+        .filter(|cell| {
+            matches!(cell.role, PixelArtRole::Accent | PixelArtRole::Pattern)
+                && GLITCH_REPAIR_GLYPHS.contains(&glyph_at(lines, cell.x, cell.y))
+        })
+        .count();
+    let present = promoted_cells
+        .iter()
+        .filter(|cell| cell.role == PixelArtRole::RepairMark)
+        .count();
+    PixelCueCoverage { expected, present }
+}
+
+fn protected_regions_for(cells: &[PixelArtCell]) -> Vec<PixelProtectedRegion> {
+    let groups: [(&str, &str, &[PixelArtRole]); 4] = [
+        ("face", "face", &[PixelArtRole::Eye, PixelArtRole::Mouth]),
+        ("signature-locket", "signature", &[PixelArtRole::Locket]),
+        ("signature-facet", "signature", &[PixelArtRole::Facet]),
+        (
+            "signature-repair-mark",
+            "signature",
+            &[PixelArtRole::RepairMark],
+        ),
+    ];
+    groups
+        .into_iter()
+        .filter_map(|(id, role, roles)| protected_region_for_roles(id, role, cells, roles))
+        .collect()
+}
+
+fn protected_region_for_roles(
+    id: &'static str,
+    role: &'static str,
+    cells: &[PixelArtCell],
+    roles: &[PixelArtRole],
+) -> Option<PixelProtectedRegion> {
+    let matching = cells
+        .iter()
+        .copied()
+        .filter(|cell| roles.contains(&cell.role))
+        .collect::<Vec<_>>();
+    let bounds = bounds_for(&matching)?;
+    Some(PixelProtectedRegion {
+        id,
+        role,
+        bounds,
+        cell_count: matching.len(),
+    })
 }
 
 fn glyph_at(lines: &[String], x: u8, y: u8) -> char {
@@ -539,4 +704,62 @@ fn hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn priority_request(species: Species) -> PixelArtReferenceRequest {
+        let animation_frame = AnimationFrame::default();
+        PixelArtReferenceRequest {
+            seed: "priority-test".to_string(),
+            species,
+            stage: Stage::S3,
+            mood: Mood::Content,
+            variation_bucket: 0,
+            pose: PixelArtPoseKey::from_animation_frame(animation_frame),
+            animation_frame,
+        }
+    }
+
+    #[test]
+    fn foot_contact_promotion_preserves_existing_species_and_accent_roles() {
+        let request = priority_request(Species::Mech);
+        let footprint = BTreeSet::from([(2, 4)]);
+        let foot_contact = PixelFootContact { cells: vec![(2, 4)] };
+
+        for role in [
+            PixelArtRole::Corruption,
+            PixelArtRole::Pattern,
+            PixelArtRole::Accent,
+        ] {
+            let promoted = promoted_role_for(
+                &request,
+                PixelArtCell { x: 2, y: 4, role },
+                '#',
+                &footprint,
+                &foot_contact,
+            );
+
+            assert_eq!(promoted, role, "{role:?} must outrank foot contact");
+        }
+    }
+
+    #[test]
+    fn signature_promotion_still_outranks_existing_accent_foot_contact() {
+        let request = priority_request(Species::Fuzz);
+        let footprint = BTreeSet::from([(2, 4)]);
+        let foot_contact = PixelFootContact { cells: vec![(2, 4)] };
+
+        let promoted = promoted_role_for(
+            &request,
+            PixelArtCell { x: 2, y: 4, role: PixelArtRole::Accent },
+            '◆',
+            &footprint,
+            &foot_contact,
+        );
+
+        assert_eq!(promoted, PixelArtRole::Locket);
+    }
 }

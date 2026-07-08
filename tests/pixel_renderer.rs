@@ -46,6 +46,68 @@ fn frame_for(vm: &WatchViewModel, ms: i64) -> glorp::presentation::pixel::PixelF
     })
 }
 
+fn frame_for_reference(
+    vm: &WatchViewModel,
+    ms: i64,
+    reference: PixelPetArtReference,
+) -> PixelFrame {
+    let base = datetime!(2026-07-08 12:00 UTC);
+    let now = base + time::Duration::milliseconds(ms);
+    let input = PixelPetInput::from_watch_view_model(vm, now);
+    let mut state = PixelRendererState::new(&input, base);
+    render_pixel_frame(PixelRendererTick {
+        input: &input,
+        art_reference: &reference,
+        viewport: PixelViewport::companion_default(),
+        now,
+        state: &mut state,
+    })
+}
+
+fn reference_with_mutated_role_cell(
+    reference: &PixelPetArtReference,
+    from: PixelArtRole,
+    to: PixelArtRole,
+) -> PixelPetArtReference {
+    let mut changed = reference.clone();
+    let cell = changed
+        .occupied_cells
+        .iter_mut()
+        .find(|cell| cell.role == from)
+        .expect("reference should contain source role");
+    cell.role = to;
+    *changed.role_counts.entry(from.as_str()).or_insert(1) -= 1;
+    *changed.role_counts.entry(to.as_str()).or_insert(0) += 1;
+    changed
+}
+
+fn assert_role_change_visible_pixels(
+    vm: &WatchViewModel,
+    ms: i64,
+    from: PixelArtRole,
+    to: PixelArtRole,
+) {
+    let (base_frame, base_reference) = frame_for_with_reference(vm, ms);
+    assert!(
+        base_reference.role_count(from) > 0,
+        "{:?} {:?} should contain {:?}",
+        vm.pet_render.generated_species,
+        vm.pet_render.stage,
+        from
+    );
+    let changed_reference = reference_with_mutated_role_cell(&base_reference, from, to);
+    let changed_frame = frame_for_reference(vm, ms, changed_reference);
+
+    assert!(
+        base_frame.changed_pixel_count(&changed_frame) > 0,
+        "{:?} {:?} {:?}->{:?} should alter rendered pixels",
+        vm.pet_render.generated_species,
+        vm.pet_render.stage,
+        from,
+        to
+    );
+}
+
 fn frame_for_procedural_fallback(
     vm: &WatchViewModel,
     ms: i64,
@@ -76,6 +138,8 @@ fn frame_for_procedural_fallback(
         occupied_cells: Vec::new(),
         body_bounds: PixelCellBounds { min_x: 0, min_y: 0, max_x: 0, max_y: 0 },
         foot_contact: PixelFootContact { cells: Vec::new() },
+        protected_regions: Vec::new(),
+        cue_coverage: std::collections::BTreeMap::new(),
         reference_checksum: PixelReferenceChecksum(0),
         role_counts: std::collections::BTreeMap::new(),
     };
@@ -287,6 +351,127 @@ fn hero_frame_uses_reference_roles_not_species_only_shape() {
     assert!(
         frame.changed_pixel_count(&frame_for_procedural_fallback(&vm, 480)) > 0,
         "reference-driven renderer should no longer match the old procedural-only helper"
+    );
+}
+
+#[test]
+fn signature_roles_change_visible_pixels() {
+    let mut fuzz = WatchViewModel::fixture();
+    fuzz.pet_render.generated_species = Species::Fuzz;
+    fuzz.pet_render.stage = Stage::S3;
+    assert_role_change_visible_pixels(&fuzz, 0, PixelArtRole::Locket, PixelArtRole::Body);
+
+    let mut glitch = WatchViewModel::fixture();
+    glitch.pet_render.generated_species = Species::Glitch;
+    glitch.pet_render.stage = Stage::S4;
+    glitch.life_profile.burst_level = 0.8;
+    glitch.last_feed_pulse_at = Some(datetime!(2026-07-08 11:59:59 UTC));
+    assert_role_change_visible_pixels(&glitch, 500, PixelArtRole::RepairMark, PixelArtRole::Body);
+
+    let mut crystal = WatchViewModel::fixture();
+    crystal.pet_render.generated_species = Species::Crystal;
+    crystal.pet_render.stage = Stage::S5;
+    assert_role_change_visible_pixels(&crystal, 0, PixelArtRole::Facet, PixelArtRole::Body);
+}
+
+#[test]
+fn structural_roles_change_visible_pixels() {
+    let mut mech = WatchViewModel::fixture();
+    mech.pet_render.generated_species = Species::Mech;
+    mech.pet_render.stage = Stage::S5;
+    assert_role_change_visible_pixels(&mech, 0, PixelArtRole::Outline, PixelArtRole::Body);
+    assert_role_change_visible_pixels(&mech, 0, PixelArtRole::InteriorTexture, PixelArtRole::Body);
+    assert_role_change_visible_pixels(&mech, 0, PixelArtRole::FootContact, PixelArtRole::Body);
+
+    let mut appendage_mech = WatchViewModel::fixture();
+    appendage_mech.pet_render.generated_species = Species::Mech;
+    appendage_mech.pet_render.stage = Stage::S3;
+    assert_role_change_visible_pixels(
+        &appendage_mech,
+        0,
+        PixelArtRole::Appendage,
+        PixelArtRole::Body,
+    );
+}
+
+#[test]
+fn promoted_reference_roles_are_visible_in_hero_frames() {
+    let mut fuzz = WatchViewModel::fixture();
+    fuzz.pet_render.generated_species = Species::Fuzz;
+    fuzz.pet_render.stage = Stage::S3;
+    let (fuzz_frame, fuzz_reference) = frame_for_with_reference(&fuzz, 480);
+    assert!(fuzz_reference.role_count(PixelArtRole::Locket) > 0);
+    assert!(fuzz_frame.opaque_pixel_count() > 120);
+    let fuzz_changed = frame_for_reference(
+        &fuzz,
+        480,
+        reference_with_mutated_role_cell(&fuzz_reference, PixelArtRole::Locket, PixelArtRole::Body),
+    );
+    assert!(
+        fuzz_frame.changed_pixel_count(&fuzz_changed) > 0,
+        "Fuzz S3 locket role should visibly affect the hero frame"
+    );
+
+    let mut glitch = WatchViewModel::fixture();
+    glitch.pet_render.generated_species = Species::Glitch;
+    glitch.pet_render.stage = Stage::S4;
+    glitch.life_profile.burst_level = 0.8;
+    glitch.last_feed_pulse_at = Some(datetime!(2026-07-08 11:59:59 UTC));
+    let (glitch_frame, glitch_reference) = frame_for_with_reference(&glitch, 500);
+    assert!(glitch_reference.role_count(PixelArtRole::RepairMark) > 0);
+    assert!(glitch_frame.opaque_pixel_count() > 120);
+    let glitch_changed = frame_for_reference(
+        &glitch,
+        500,
+        reference_with_mutated_role_cell(
+            &glitch_reference,
+            PixelArtRole::RepairMark,
+            PixelArtRole::Body,
+        ),
+    );
+    assert!(
+        glitch_frame.changed_pixel_count(&glitch_changed) > 0,
+        "Glitch S4 repair marks should visibly affect the hero frame"
+    );
+
+    let mut crystal = WatchViewModel::fixture();
+    crystal.pet_render.generated_species = Species::Crystal;
+    crystal.pet_render.stage = Stage::S5;
+    let (crystal_frame, crystal_reference) = frame_for_with_reference(&crystal, 480);
+    assert!(crystal_reference.role_count(PixelArtRole::Facet) > 0);
+    assert!(crystal_frame.opaque_pixel_count() > 120);
+    let crystal_changed = frame_for_reference(
+        &crystal,
+        480,
+        reference_with_mutated_role_cell(
+            &crystal_reference,
+            PixelArtRole::Facet,
+            PixelArtRole::Body,
+        ),
+    );
+    assert!(
+        crystal_frame.changed_pixel_count(&crystal_changed) > 0,
+        "Crystal S5 facets should visibly affect the hero frame"
+    );
+
+    let mut mech = WatchViewModel::fixture();
+    mech.pet_render.generated_species = Species::Mech;
+    mech.pet_render.stage = Stage::S5;
+    let (mech_frame, mech_reference) = frame_for_with_reference(&mech, 480);
+    assert!(mech_reference.role_count(PixelArtRole::Outline) > 0);
+    assert!(mech_frame.opaque_pixel_count() > 120);
+    let mech_changed = frame_for_reference(
+        &mech,
+        480,
+        reference_with_mutated_role_cell(
+            &mech_reference,
+            PixelArtRole::Outline,
+            PixelArtRole::Body,
+        ),
+    );
+    assert!(
+        mech_frame.changed_pixel_count(&mech_changed) > 0,
+        "Mech S5 outline should visibly affect the hero frame"
     );
 }
 

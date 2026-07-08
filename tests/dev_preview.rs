@@ -3,6 +3,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 
@@ -63,6 +64,15 @@ const TANK_LIFE_IDS: [&str; 8] = [
     "tank-life-date-2026-07-08",
     "tank-life-round-projection",
     "tank-life-anemone-morphs",
+];
+
+const PIXEL_CAST_IDS: [&str; 6] = [
+    "pixel-fuzz-s3-locket",
+    "pixel-blob-s3-body",
+    "pixel-ghost-s3-wisp",
+    "pixel-glitch-s4-repair",
+    "pixel-crystal-s5-facets",
+    "pixel-mech-s5-hardbody",
 ];
 
 const HABITAT_PROPS_ORBIT_ID: &str = "watch-habitat-props-orbit";
@@ -184,6 +194,7 @@ fn collect_pixel_review_artifact_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
                 || name.ends_with(".cells.json")
                 || name.ends_with(".pixel.json")
                 || name.ends_with(".pixel-art.json")
+                || name.ends_with(".pixel-composition.json")
                 || name.ends_with(".pixel-fit.json"));
         let is_pixel_strip = path_text.contains("strips/pixel-")
             && (name.ends_with(".txt")
@@ -1259,6 +1270,25 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/pixel-fuzz-s3-content-idle.pixel.json",
         "frames/pixel-glitch-s4-feed-pulse.pixel.json",
         "frames/pixel-species-matrix.pixel.json",
+        "frames/pixel-fuzz-s3-locket.pixel.json",
+        "frames/pixel-fuzz-s3-locket.pixel-art.json",
+        "frames/pixel-fuzz-s3-locket.pixel-fit.json",
+        "frames/pixel-blob-s3-body.pixel.json",
+        "frames/pixel-blob-s3-body.pixel-art.json",
+        "frames/pixel-blob-s3-body.pixel-fit.json",
+        "frames/pixel-ghost-s3-wisp.pixel.json",
+        "frames/pixel-ghost-s3-wisp.pixel-art.json",
+        "frames/pixel-ghost-s3-wisp.pixel-fit.json",
+        "frames/pixel-glitch-s4-repair.pixel.json",
+        "frames/pixel-glitch-s4-repair.pixel-art.json",
+        "frames/pixel-glitch-s4-repair.pixel-fit.json",
+        "frames/pixel-crystal-s5-facets.pixel.json",
+        "frames/pixel-crystal-s5-facets.pixel-art.json",
+        "frames/pixel-crystal-s5-facets.pixel-fit.json",
+        "frames/pixel-mech-s5-hardbody.pixel.json",
+        "frames/pixel-mech-s5-hardbody.pixel-art.json",
+        "frames/pixel-mech-s5-hardbody.pixel-fit.json",
+        "frames/pixel-tank-composition.pixel-composition.json",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1356,6 +1386,14 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "pixel-fuzz-s3-content-idle".to_string(),
             "pixel-glitch-s4-feed-pulse".to_string(),
             "pixel-species-matrix".to_string(),
+            "pixel-fuzz-s3-locket".to_string(),
+            "pixel-blob-s3-body".to_string(),
+            "pixel-ghost-s3-wisp".to_string(),
+            "pixel-glitch-s4-repair".to_string(),
+            "pixel-crystal-s5-facets".to_string(),
+            "pixel-mech-s5-hardbody".to_string(),
+            "pixel-cast-identity-matrix".to_string(),
+            "pixel-tank-composition".to_string(),
         ]
     );
 }
@@ -1845,8 +1883,27 @@ fn dev_preview_pixel_writes_art_and_fit_sidecars() {
     assert!(fit_path.exists());
 
     let art_json = std::fs::read_to_string(art_path).unwrap();
-    assert!(art_json.contains("\"schema_version\""));
-    assert!(art_json.contains("\"role_counts\""));
+    let art: Value = serde_json::from_str(&art_json).unwrap();
+    assert_eq!(art["schema_version"], 2);
+    assert!(art["role_cells"].as_array().unwrap().len() > 20);
+    assert!(art["protected_bounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| { region["id"] == "face" }));
+    assert!(art["cue_coverage"]
+        .as_object()
+        .unwrap()
+        .contains_key("locket"));
+    assert!(art["signature_regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| {
+            region["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("signature-"))
+        }));
     assert!(!art_json.contains("fixture-seed"));
     assert!(!art_json.contains("art_text"));
 
@@ -1857,6 +1914,133 @@ fn dev_preview_pixel_writes_art_and_fit_sidecars() {
         "round::pixel_fit::pixel_companion_fit"
     );
     assert_eq!(fit_json["hud_overlap"]["body_eye_mouth_pixels"], 0);
+}
+
+#[test]
+fn dev_preview_pixel_cast_identity_writes_six_real_frame_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    for id in PIXEL_CAST_IDS {
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["kind"], "pixel");
+        assert_eq!(
+            scenario["files"]["pixel"],
+            format!("frames/{id}.pixel.json")
+        );
+        assert_eq!(
+            scenario["files"]["pixel_art"],
+            format!("frames/{id}.pixel-art.json")
+        );
+        assert_eq!(
+            scenario["files"]["pixel_fit"],
+            format!("frames/{id}.pixel-fit.json")
+        );
+        assert!(run.out.join(format!("frames/{id}.pixel.json")).is_file());
+        assert!(run
+            .out
+            .join(format!("frames/{id}.pixel-art.json"))
+            .is_file());
+        assert!(run
+            .out
+            .join(format!("frames/{id}.pixel-fit.json"))
+            .is_file());
+
+        let art = run.read_json(&format!("frames/{id}.pixel-art.json"));
+        assert_eq!(art["schema_version"], 2);
+        assert!(art["role_cells"].as_array().unwrap().len() > 20);
+        assert!(art["protected_bounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|region| { region["id"] == "face" }));
+    }
+}
+
+#[test]
+fn dev_preview_pixel_cast_identity_frames_are_distinct() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let mut frame_payloads = BTreeSet::new();
+    for id in PIXEL_CAST_IDS {
+        let frame = run.read_json(&format!("frames/{id}.pixel.json"));
+        let pixels = frame["pixels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            frame_payloads.insert(pixels),
+            "{id} must not render the same pixel payload as another cast fixture"
+        );
+    }
+
+    assert_eq!(
+        frame_payloads.len(),
+        PIXEL_CAST_IDS.len(),
+        "all six Pixel cast frames must be visually distinct"
+    );
+}
+
+#[test]
+fn dev_preview_pixel_cast_matrix_references_real_cast_frames() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    let matrix = scenario(&manifest, "pixel-cast-identity-matrix");
+    let referenced = matrix["inputs"]["cast_frame_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(referenced, PIXEL_CAST_IDS);
+    assert!(matrix["files"].get("pixel").is_none());
+    assert!(matrix["files"].get("pixel_art").is_none());
+    assert!(matrix["files"].get("pixel_fit").is_none());
+    assert!(matrix["files"].get("pixel_composition").is_none());
+
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+    for id in PIXEL_CAST_IDS {
+        assert!(
+            html.contains(&format!("data-pixel-frame=\"frames/{id}.pixel.json\"")),
+            "matrix review must expose canvas for {id}"
+        );
+    }
+}
+
+#[test]
+fn dev_preview_pixel_hero_cues_have_expected_coverage() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    for (id, cue) in [
+        ("pixel-fuzz-s3-locket", "locket"),
+        ("pixel-glitch-s4-repair", "repair_mark"),
+        ("pixel-crystal-s5-facets", "facet"),
+    ] {
+        let art = run.read_json(&format!("frames/{id}.pixel-art.json"));
+        let coverage = &art["cue_coverage"][cue];
+        assert!(
+            coverage["expected"].as_u64().unwrap() > 0,
+            "{id} missing expected {cue}"
+        );
+        assert_eq!(
+            coverage["expected"], coverage["present"],
+            "{id} did not promote {cue}"
+        );
+    }
 }
 
 #[test]
@@ -1882,6 +2066,129 @@ fn dev_preview_pixel_fit_sidecar_records_each_review_geometry() {
         assert_eq!(entry["hud_overlap"]["body_eye_mouth_pixels"], 0);
         assert_eq!(entry["hud_overlap"]["translucent_effect_pixels"], 0);
     }
+}
+
+#[test]
+fn dev_preview_pixel_privacy_outputs_omit_terminal_reference_rows() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let text =
+        std::fs::read_to_string(run.out.join("frames/pixel-fuzz-s3-content-idle.txt")).unwrap();
+    let cells =
+        std::fs::read_to_string(run.out.join("frames/pixel-fuzz-s3-content-idle.cells.json"))
+            .unwrap();
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+
+    for content in [&text, &cells, &html] {
+        assert!(!content.contains("terminal reference"));
+        assert!(!content.contains("/\\_/\\\\"));
+        assert!(!content.contains("( o.o )"));
+        assert!(!content.contains("very-secret-seed"));
+    }
+}
+
+#[test]
+fn dev_preview_pixel_composition_artifact_has_own_manifest_slot() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    let scenario = scenario(&manifest, "pixel-tank-composition");
+
+    assert_eq!(
+        scenario["files"]["pixel"],
+        "frames/pixel-tank-composition.pixel.json"
+    );
+    assert_eq!(
+        scenario["files"]["pixel_art"],
+        "frames/pixel-tank-composition.pixel-art.json"
+    );
+    assert_eq!(
+        scenario["files"]["pixel_fit"],
+        "frames/pixel-tank-composition.pixel-fit.json"
+    );
+    assert_eq!(
+        scenario["files"]["pixel_composition"],
+        "frames/pixel-tank-composition.pixel-composition.json"
+    );
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel-art.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel-fit.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel-composition.json")
+        .is_file());
+    assert_artifact_type(
+        &manifest,
+        "pixel-tank-composition-pixel-composition",
+        "pixel-composition",
+    );
+
+    let composition = run.read_json("frames/pixel-tank-composition.pixel-composition.json");
+    let art = run.read_json("frames/pixel-tank-composition.pixel-art.json");
+    assert_eq!(composition["schema_version"], 1);
+    assert_eq!(composition["frame_id"], "pixel-tank-composition");
+    assert!(composition["protected_regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| { region["id"] == "face" }));
+    assert!(composition["context"]["surface"].is_string());
+    assert_eq!(composition["context"]["props_available"], false);
+    assert_eq!(composition["context"]["tank_life_available"], false);
+
+    let deferred_contexts = composition["comparison"]["deferred_contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        deferred_contexts.contains(&"props-unavailable-for-pixel-runtime"),
+        "unavailable prop comparison must be explicit"
+    );
+    assert!(
+        deferred_contexts.contains(&"tank-life-unavailable-for-pixel-runtime"),
+        "unavailable tank-life comparison must be explicit"
+    );
+
+    let composition_face = composition["protected_regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|region| region["id"] == "face")
+        .unwrap();
+    let art_face = art["protected_bounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|region| region["id"] == "face")
+        .unwrap();
+
+    assert_ne!(
+        composition_face["bounds"], art_face["bounds"],
+        "composition sidecar must map protected regions into preview pixel coordinates"
+    );
+    assert!(
+        composition_face["bounds"]["min_x"].as_u64().unwrap() > 10,
+        "preview face bounds should be centered/scaled, not raw reference-cell coordinates"
+    );
+    assert!(
+        composition_face["bounds"]["max_x"].as_u64().unwrap() < 96,
+        "preview face bounds must stay inside the pixel frame"
+    );
 }
 
 #[test]
@@ -2007,7 +2314,10 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !(name.ends_with(".pixel-art.json") || name.ends_with(".pixel-fit.json")) {
+        if !(name.ends_with(".pixel-art.json")
+            || name.ends_with(".pixel-composition.json")
+            || name.ends_with(".pixel-fit.json"))
+        {
             continue;
         }
         let sidecar = std::fs::read_to_string(&path).unwrap().to_lowercase();
@@ -2016,7 +2326,10 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
             "art_text",
             "claude",
             "codex",
+            "source_name",
+            "display_name",
             "/users/",
+            "/tmp/",
             "prompt",
             "response",
             "transcript",

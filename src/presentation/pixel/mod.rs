@@ -8,8 +8,8 @@ pub mod scene;
 pub use animator::{render_pixel_frame, PixelRendererState, PixelRendererTick};
 pub use art_reference::{
     PixelArtCell, PixelArtPoseKey, PixelArtReferenceProvider, PixelArtReferenceRequest,
-    PixelArtRole, PixelCanonicalAnimationInputs, PixelCellBounds, PixelFootContact,
-    PixelPetArtReference, PixelReferenceChecksum,
+    PixelArtRole, PixelCanonicalAnimationInputs, PixelCellBounds, PixelCueCoverage,
+    PixelFootContact, PixelPetArtReference, PixelProtectedRegion, PixelReferenceChecksum,
 };
 pub use frame::{pixel_runs, PixelBounds, PixelFrame, PixelRun, PixelViewport, Rgba8};
 pub use input::{

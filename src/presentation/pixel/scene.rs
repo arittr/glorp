@@ -147,6 +147,8 @@ fn fallback_reference(input: &PixelPetInput) -> PixelPetArtReference {
             max_y: 0,
         },
         foot_contact: super::art_reference::PixelFootContact { cells: Vec::new() },
+        protected_regions: Vec::new(),
+        cue_coverage: std::collections::BTreeMap::new(),
         reference_checksum: super::art_reference::PixelReferenceChecksum(0),
         role_counts: std::collections::BTreeMap::new(),
     }
