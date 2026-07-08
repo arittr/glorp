@@ -116,7 +116,7 @@ declare_class!(
     }
 );
 
-pub fn run() -> Result<()> {
+pub fn run(_mode: crate::commands::companion_mode::CompanionRendererMode) -> Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| GlorpError::Message("glorp companion must run on the main thread".into()))?;
     let paths = AppPaths::resolve()?;

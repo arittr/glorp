@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 #[cfg(feature = "dev-preview")]
 use std::path::PathBuf;
 
+use crate::commands::companion_mode::CompanionRendererMode;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "glorp",
@@ -40,9 +42,15 @@ pub enum Command {
     /// Run as a macOS menu bar app (status item + popover).
     Menubar,
     /// Open the native macOS round companion app.
-    Companion,
+    Companion {
+        #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Classic)]
+        renderer: CompanionRendererMode,
+    },
     #[command(hide = true)]
-    CompanionApp,
+    CompanionApp {
+        #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Classic)]
+        renderer: CompanionRendererMode,
+    },
     /// Print a compact non-interactive pet and usage summary.
     Status,
     /// Rename the current pet without changing its seed-derived traits.

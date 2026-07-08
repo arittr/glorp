@@ -1,7 +1,8 @@
+use crate::commands::companion_mode::CompanionRendererMode;
 use crate::error::{GlorpError, Result};
 
 #[cfg(target_os = "macos")]
-pub fn run() -> Result<()> {
+pub fn run(mode: CompanionRendererMode) -> Result<()> {
     let paths = crate::paths::AppPaths::resolve()?;
     paths.ensure()?;
     let locator = crate::usage::helper_locator::HelperLocator::from_current_environment();
@@ -14,7 +15,15 @@ pub fn run() -> Result<()> {
         )?;
     }
     let app = companion_app_path()?;
-    let status = std::process::Command::new("open").arg(&app).status()?;
+    let mut command = std::process::Command::new("open");
+    if mode.is_pixel() {
+        command.arg("-n");
+    }
+    command.arg(&app);
+    if mode.is_pixel() {
+        command.arg("--args").arg("--renderer").arg(mode.as_str());
+    }
+    let status = command.status()?;
     if !status.success() {
         return Err(GlorpError::Message(format!(
             "failed to open Glorp.app at {}",
@@ -25,7 +34,7 @@ pub fn run() -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run() -> Result<()> {
+pub fn run(_mode: CompanionRendererMode) -> Result<()> {
     Err(GlorpError::Message(
         "glorp companion is only available on macOS".into(),
     ))

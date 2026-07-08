@@ -194,6 +194,18 @@ fn help_lists_companion_but_hides_companion_app() {
         .stdout(predicate::str::contains("companion-app").not());
 }
 
+#[test]
+fn help_hides_companion_renderer_switch() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--renderer").not())
+        .stdout(predicate::str::contains("classic").not())
+        .stdout(predicate::str::contains("pixel").not());
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn companion_reports_macos_only_on_other_platforms() {
@@ -204,6 +216,42 @@ fn companion_reports_macos_only_on_other_platforms() {
         .stderr(predicate::str::contains(
             "glorp companion is only available on macOS",
         ));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn companion_accepts_hidden_pixel_renderer_before_macos_gate() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--renderer", "pixel"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "glorp companion is only available on macOS",
+        ));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn companion_app_accepts_hidden_pixel_renderer_before_macos_gate() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion-app", "--renderer", "pixel"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "glorp companion-app is only available on macOS",
+        ));
+}
+
+#[test]
+fn companion_rejects_unknown_renderer() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--renderer", "sprite-cloud"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
 }
 
 #[test]

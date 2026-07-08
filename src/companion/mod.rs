@@ -3,6 +3,8 @@
 pub mod app;
 pub mod render;
 
-pub fn run() -> crate::error::Result<()> {
-    app::run()
+pub fn run(
+    mode: crate::commands::companion_mode::CompanionRendererMode,
+) -> crate::error::Result<()> {
+    app::run(mode)
 }
