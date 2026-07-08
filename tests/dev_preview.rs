@@ -1851,7 +1851,7 @@ fn dev_preview_round_writes_companion_hud_artifacts() {
         assert_artifact_type(&manifest, &format!("{id}-hud"), "hud");
 
         let hud = read_hud(&run, id);
-        assert_eq!(hud["schema_version"], 1);
+        assert_eq!(hud["schema_version"], 2);
         assert_eq!(hud["frame_id"], id);
         assert_eq!(hud["gap_deg"], 70.0);
         assert_eq!(hud["lanes"]["xp"]["cap"], "round");
@@ -1890,6 +1890,16 @@ fn dev_preview_hud_artifacts_cover_daily_and_pace_states() {
 
     let over = read_hud(&run, "round-hud-over-yesterday");
     assert_eq!(over["lanes"]["daily"]["fill_fraction"], 1.0);
+    let expected_overfill = 842_000_000.0 / 678_000_000.0 - 1.0;
+    assert!(
+        (over["lanes"]["daily"]["overfill_fraction"]
+            .as_f64()
+            .unwrap()
+            - expected_overfill)
+            .abs()
+            < 1e-9,
+        "over-yesterday HUD lane should show only the extra fraction as bright fill"
+    );
     assert_eq!(over["text"]["daily_percent"], "124% yday");
 
     let idle = read_hud(&run, "round-hud-idle-pace");

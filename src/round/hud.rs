@@ -185,16 +185,29 @@ pub fn daily_fraction_for_gauge(fraction_of_yesterday: Option<f64>) -> f64 {
         .unwrap_or(0.0)
 }
 
-pub fn daily_gauge_colors_for_fraction(fraction_of_yesterday: Option<f64>) -> GaugeLaneColors {
-    let base = perimeter_gauge_colors().daily;
-    if fraction_of_yesterday.is_some_and(|value| value.is_finite() && value >= 1.0) {
-        GaugeLaneColors {
-            fill: RoundColor(0.30, 0.70, 0.40, 0.90),
-            ..base
-        }
-    } else {
-        base
+pub fn daily_overage_marker_fraction(fraction_of_yesterday: Option<f64>) -> f64 {
+    const MIN_VISIBLE_OVERAGE_FRACTION: f64 = 0.16;
+
+    fraction_of_yesterday
+        .filter(|value| value.is_finite() && *value > 1.0)
+        .map(|value| (value - 1.0).clamp(MIN_VISIBLE_OVERAGE_FRACTION, 1.0))
+        .unwrap_or(0.0)
+}
+
+pub fn daily_overage_color() -> RoundColor {
+    RoundColor(0.72, 0.95, 0.34, 0.95)
+}
+
+pub fn daily_overage_marker_arc(ring: &GrowthRing, marker_fraction: f64) -> Option<(f64, f64)> {
+    let clamped = marker_fraction.clamp(0.0, 1.0);
+    if clamped <= 0.0 {
+        return None;
     }
+
+    Some((
+        ring.track_start_deg,
+        growth_ring_fill_end_deg(ring, clamped),
+    ))
 }
 
 pub fn format_daily_percent(fraction_of_yesterday: Option<f64>) -> String {
@@ -352,13 +365,25 @@ mod tests {
     }
 
     #[test]
-    fn daily_gauge_uses_deep_leaf_when_today_beats_yesterday() {
-        let base = daily_gauge_colors_for_fraction(Some(0.99));
-        let over = daily_gauge_colors_for_fraction(Some(1.0));
+    fn daily_gauge_overage_marker_is_visible_without_recoloring_the_base_lane() {
+        assert_eq!(daily_overage_marker_fraction(Some(0.99)), 0.0);
+        assert!((daily_overage_marker_fraction(Some(1.07)) - 0.16).abs() < 0.001);
+        assert!((daily_overage_marker_fraction(Some(1.25)) - 0.25).abs() < 0.001);
+        assert_eq!(daily_overage_marker_fraction(Some(2.5)), 1.0);
+        assert_eq!(daily_overage_marker_fraction(None), 0.0);
+        assert_eq!(daily_overage_marker_fraction(Some(f64::NAN)), 0.0);
+        assert_eq!(daily_overage_color(), RoundColor(0.72, 0.95, 0.34, 0.95));
+    }
 
-        assert_eq!(base, perimeter_gauge_colors().daily);
-        assert_eq!(over.track, base.track);
-        assert_eq!(over.fill, RoundColor(0.30, 0.70, 0.40, 0.90));
+    #[test]
+    fn daily_gauge_overage_marker_wraps_to_the_right_edge() {
+        let ring = growth_ring_layout(100.0, 100.0, 90.0, COMPANION_GAUGE_GAP_DEG);
+        let Some((start, end)) = daily_overage_marker_arc(&ring, 0.16) else {
+            panic!("expected visible overage marker arc");
+        };
+
+        assert_eq!(start, ring.track_start_deg);
+        assert!((end - (ring.track_start_deg + ring.track_sweep_deg * 0.16)).abs() < 1e-6);
     }
 
     #[test]

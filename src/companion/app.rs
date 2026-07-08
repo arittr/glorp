@@ -13,10 +13,10 @@ use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
 use crate::round::hud::{
-    companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
-    daily_gauge_colors_for_fraction, growth_ring_fill_end_deg, perimeter_gauge_colors,
-    perimeter_gauge_layout, CompanionHudText, GaugeLane, GaugeLaneColors, LineCap,
-    COMPANION_GAUGE_GAP_DEG,
+    companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge, daily_overage_color,
+    daily_overage_marker_arc, daily_overage_marker_fraction, growth_ring_fill_end_deg,
+    perimeter_gauge_colors, perimeter_gauge_layout, CompanionHudText, GaugeLane, GaugeLaneColors,
+    LineCap, COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
@@ -485,14 +485,18 @@ fn draw_scene(bounds: NSRect) {
             } else {
                 vm.progress.fraction as f64
             };
-            let daily_fraction =
-                daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday);
-            let daily_colors =
-                daily_gauge_colors_for_fraction(vm.daily_comparison.fraction_of_yesterday);
+            let daily_ratio = vm.daily_comparison.fraction_of_yesterday;
+            let daily_fraction = daily_fraction_for_gauge(daily_ratio);
+            let daily_overage_fraction = daily_overage_marker_fraction(daily_ratio);
             let pace_fraction = companion_pace_fraction(vm.rate_momentum.pulse.current_tokens);
 
             draw_gauge_lane(&layout.xp, &colors.xp, xp_fraction);
-            draw_gauge_lane(&layout.daily, &daily_colors, daily_fraction);
+            draw_gauge_lane(&layout.daily, &colors.daily, daily_fraction);
+            draw_gauge_tail(
+                &layout.daily,
+                &daily_overage_color(),
+                daily_overage_fraction,
+            );
             draw_gauge_lane(&layout.pace, &colors.pace, pace_fraction);
         }
 
@@ -826,22 +830,57 @@ fn draw_gauge_lane(lane: &GaugeLane, colors: &GaugeLaneColors, fraction: f64) {
         );
         ns_color(&colors.track).setStroke();
         track.stroke();
+    }
 
-        let clamped = fraction.clamp(0.0, 1.0);
-        if clamped > 0.0 {
-            let fill_end = growth_ring_fill_end_deg(&lane.ring, clamped);
-            let fill = NSBezierPath::new();
-            fill.setLineWidth(lane.stroke_width);
-            fill.setLineCapStyle(ns_line_cap(lane.cap));
-            fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
-                NSPoint::new(lane.ring.cx, lane.ring.cy),
-                lane.ring.radius,
-                start,
-                fill_end,
-            );
-            ns_color(&colors.fill).setStroke();
-            fill.stroke();
-        }
+    draw_gauge_fill(lane, &colors.fill, fraction);
+}
+
+fn draw_gauge_fill(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
+    let clamped = fraction.clamp(0.0, 1.0);
+    if clamped <= 0.0 {
+        return;
+    }
+
+    let start = lane.ring.track_start_deg;
+    let fill_end = growth_ring_fill_end_deg(&lane.ring, clamped);
+
+    unsafe {
+        let fill = NSBezierPath::new();
+        fill.setLineWidth(lane.stroke_width);
+        fill.setLineCapStyle(ns_line_cap(lane.cap));
+        fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+            NSPoint::new(lane.ring.cx, lane.ring.cy),
+            lane.ring.radius,
+            start,
+            fill_end,
+        );
+        ns_color(color).setStroke();
+        fill.stroke();
+    }
+}
+
+fn draw_gauge_tail(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
+    let clamped = fraction.clamp(0.0, 1.0);
+    if clamped <= 0.0 {
+        return;
+    }
+
+    let Some((start, end)) = daily_overage_marker_arc(&lane.ring, clamped) else {
+        return;
+    };
+
+    unsafe {
+        let fill = NSBezierPath::new();
+        fill.setLineWidth(lane.stroke_width);
+        fill.setLineCapStyle(ns_line_cap(lane.cap));
+        fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+            NSPoint::new(lane.ring.cx, lane.ring.cy),
+            lane.ring.radius,
+            start,
+            end,
+        );
+        ns_color(color).setStroke();
+        fill.stroke();
     }
 }
 
