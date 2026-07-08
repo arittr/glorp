@@ -3,6 +3,10 @@
     const response = await fetch(canvas.dataset.pixelFrame);
     const artifact = await response.json();
     const ctx = canvas.getContext("2d");
+    canvas.setAttribute(
+      "aria-label",
+      `${artifact.species} ${artifact.stage} ${artifact.mood} pixel preview`,
+    );
     const image = ctx.createImageData(artifact.width, artifact.height);
     artifact.pixels.forEach((hex, index) => {
       const offset = index * 4;

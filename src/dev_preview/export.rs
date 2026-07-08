@@ -1,6 +1,8 @@
 use crate::dev_preview::frame::{escape_html, PreviewCell, PreviewFrame};
 use crate::dev_preview::strips::PreviewStripBundle;
 use crate::error::Result;
+use crate::presentation::pixel::{PixelCellBounds, PixelFootContact};
+use crate::round::pixel_fit::{PixelFitRect, PixelTargetGeometry};
 use crate::tui::component::PreviewLayout;
 use serde::Serialize;
 use serde_json::Value;
@@ -11,6 +13,8 @@ use std::path::{Path, PathBuf};
 pub const PRODUCER: &str = "glorp-dev-preview";
 pub const SCHEMA_VERSION: u32 = 8;
 pub const PIXEL_FRAME_SCHEMA_VERSION: u32 = 1;
+pub const PIXEL_ART_SCHEMA_VERSION: u32 = 1;
+pub const PIXEL_FIT_SCHEMA_VERSION: u32 = 1;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -88,6 +92,10 @@ pub struct PreviewScenarioFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pixel: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_art: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_fit: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub room_text: Option<PathBuf>,
@@ -157,6 +165,36 @@ pub struct PreviewPixelFrameArtifact {
     pub pixels: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelArtArtifact {
+    pub schema_version: u32,
+    pub species: String,
+    pub stage: String,
+    pub mood: String,
+    pub reference_checksum: String,
+    pub width_cells: u8,
+    pub height_cells: u8,
+    pub body_bounds: PixelCellBounds,
+    pub foot_contact: PixelFootContact,
+    pub role_counts: BTreeMap<&'static str, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewPixelFitArtifact {
+    pub schema_version: u32,
+    pub producer: &'static str,
+    pub geometry: PixelTargetGeometry,
+    pub image_rect: PixelFitRect,
+    pub hud_safe_zone: PixelFitRect,
+    pub hud_overlap: PreviewPixelHudOverlap,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelHudOverlap {
+    pub body_eye_mouth_pixels: u16,
+    pub translucent_effect_pixels: u16,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviewArtifact {
     pub id: String,
@@ -174,6 +212,8 @@ pub enum ArtifactType {
     Text,
     Cells,
     PixelFrame,
+    PixelArt,
+    PixelFit,
     Layout,
     Scene,
     Hud,
@@ -328,6 +368,12 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             }
             if let Some(pixel) = &scenario.files.pixel {
                 markdown.push_str(&format!("- Pixel: `{}`\n", pixel.display()));
+            }
+            if let Some(pixel_art) = &scenario.files.pixel_art {
+                markdown.push_str(&format!("- Pixel art: `{}`\n", pixel_art.display()));
+            }
+            if let Some(pixel_fit) = &scenario.files.pixel_fit {
+                markdown.push_str(&format!("- Pixel fit: `{}`\n", pixel_fit.display()));
             }
             if let Some(room_text) = &scenario.files.room_text {
                 markdown.push_str(&format!("- Room: `{}`\n", room_text.display()));
@@ -506,6 +552,18 @@ fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
         links.push(format!(
             r#"<a href="{}">pixel</a>"#,
             escape_html(&format!("frames/{}.pixel.json", frame.id))
+        ));
+    }
+    if frame.contract.pixel_art.is_some() {
+        links.push(format!(
+            r#"<a href="{}">pixel art</a>"#,
+            escape_html(&format!("frames/{}.pixel-art.json", frame.id))
+        ));
+    }
+    if frame.contract.pixel_fit.is_some() {
+        links.push(format!(
+            r#"<a href="{}">pixel fit</a>"#,
+            escape_html(&format!("frames/{}.pixel-fit.json", frame.id))
         ));
     }
     if frame.contract.hud.is_some() {
@@ -788,6 +846,8 @@ mod tests {
                     text: PathBuf::from("frames/frame-one.txt"),
                     cells: PathBuf::from("frames/frame-one.cells.json"),
                     pixel: None,
+                    pixel_art: None,
+                    pixel_fit: None,
                     layout: None,
                     room_text: None,
                     room_masked_text: None,

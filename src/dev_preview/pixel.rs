@@ -1,19 +1,22 @@
 use crate::dev_preview::export::{
-    PreviewDimensions, PreviewPixelFrameArtifact, PreviewPlayback, PreviewScenarioKind,
-    PreviewStrip, PreviewStripFrame, PreviewStripFrameFiles, PreviewStripKind,
+    PreviewDimensions, PreviewPixelArtArtifact, PreviewPixelFitArtifact, PreviewPixelFrameArtifact,
+    PreviewPixelHudOverlap, PreviewPlayback, PreviewScenarioKind, PreviewStrip, PreviewStripFrame,
+    PreviewStripFrameFiles, PreviewStripKind, PIXEL_ART_SCHEMA_VERSION, PIXEL_FIT_SCHEMA_VERSION,
     PIXEL_FRAME_SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::{frame_from_buffer, PreviewFrame};
 use crate::dev_preview::scenarios::{PreviewRenderContext, PreviewScenarioBundle};
 use crate::dev_preview::strips::PreviewStripBundle;
 use crate::game::{evolution::Stage, metabolism::Mood};
-use crate::pet::{art::stage_label, generation::Species};
+use crate::pet::{
+    art::stage_label, generation::generate_pet, generation::Species, render::render_pet,
+};
 use crate::presentation::pixel::{
-    render_pixel_frame, PixelFrame, PixelPetInput, PixelPetScene, PixelRendererState,
-    PixelRendererTick, PixelViewport,
+    render_pixel_frame, PixelArtReferenceProvider, PixelBounds, PixelFrame, PixelPetArtReference,
+    PixelPetInput, PixelPetScene, PixelRendererState, PixelRendererTick, PixelViewport,
 };
 use crate::round::hud::companion_hud_text;
-use crate::round::pixel_fit::{pixel_companion_fit, PixelFitRect, PixelTargetGeometry};
+use crate::round::pixel_fit::{pixel_companion_fit, PixelCompanionFit, PixelTargetGeometry};
 use crate::tui::view_model::WatchViewModel;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use serde_json::{json, Value};
@@ -26,7 +29,16 @@ pub type PreviewPixelStripBundle = PreviewStripBundle;
 const FRAME_DURATION_MS: u16 = 34;
 const STRIP_FRAME_COUNT: usize = 48;
 const STRIP_SPAN_MS: u16 = 1_600;
+const PREVIEW_FIT_MIN_TARGET_SIZE: u16 = 260;
 const PREVIEW_FIT_TARGET_SIZE: u16 = 360;
+const PREVIEW_FIT_LARGE_TARGET_SIZE: u16 = 480;
+
+struct PixelPreviewArtifacts {
+    frame: PreviewPixelFrameArtifact,
+    art: PreviewPixelArtArtifact,
+    fit: PreviewPixelFitArtifact,
+    fit_status_lines: Vec<String>,
+}
 
 pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
     vec![
@@ -44,7 +56,7 @@ pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
                 pulse_age_ms: None,
                 elapsed_ms: 480,
             },
-            &["species fuzz", "stage s3 archfuzz", "mood content", "pose idle"],
+            &["species fuzz", "stage s3 pup", "mood content", "pose idle"],
             "Review the companion pixel renderer in a stable awake idle pose.",
         ),
         render_pixel_bundle(
@@ -157,14 +169,23 @@ fn render_pixel_bundle(
     lines: &[&str],
     intent: &'static str,
 ) -> PreviewPixelBundle {
-    let (artifact, input) = render_pixel_artifact(ctx, fixture, fixture.elapsed_ms);
+    let (artifacts, input, request) = render_pixel_artifact(ctx, fixture, fixture.elapsed_ms);
     let vm = fixture_view_model(fixture, ctx.fixed_now);
     let dimensions = PreviewDimensions {
-        width: artifact.width,
-        height: artifact.height,
+        width: artifacts.frame.width,
+        height: artifacts.frame.height,
     };
-    let mut frame = summary_frame(fixture.id, fixture.title, lines);
-    frame.contract.pixel = Some(artifact);
+    let mut summary_lines = lines
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect::<Vec<_>>();
+    summary_lines.extend(artifacts.fit_status_lines.clone());
+    summary_lines.push("terminal reference".to_string());
+    summary_lines.extend(render_terminal_reference_lines(&request));
+    let mut frame = summary_frame(fixture.id, fixture.title, &summary_lines);
+    frame.contract.pixel = Some(artifacts.frame);
+    frame.contract.pixel_art = Some(artifacts.art);
+    frame.contract.pixel_fit = Some(artifacts.fit);
 
     PreviewScenarioBundle::from_parts_with_dimensions(
         frame,
@@ -187,14 +208,14 @@ fn render_pixel_strip(
 
     for index in 0..STRIP_FRAME_COUNT {
         let elapsed_ms = elapsed_for_index(index);
-        let (artifact, input) =
+        let (artifacts, input, _) =
             render_pixel_artifact_with_pulse_anchor(ctx, fixture, elapsed_ms, ctx.fixed_now);
         let scene = pixel_scene_for_elapsed(&input, elapsed_ms);
         let mut frame = strip_placeholder_frame(
             &format!("{}-frame-{index:03}", fixture.id),
             &phase_for_scene(&input, scene),
         );
-        frame.contract.pixel = Some(artifact);
+        frame.contract.pixel = Some(artifacts.frame);
         frames.push(frame);
         manifest_frames.push(PreviewStripFrame {
             index: index as u16,
@@ -232,7 +253,11 @@ fn render_pixel_artifact(
     ctx: &PreviewRenderContext,
     fixture: PixelFixture,
     elapsed_ms: u16,
-) -> (PreviewPixelFrameArtifact, PixelPetInput) {
+) -> (
+    PixelPreviewArtifacts,
+    PixelPetInput,
+    crate::presentation::pixel::PixelArtReferenceRequest,
+) {
     let now = ctx.fixed_now + time::Duration::milliseconds(i64::from(elapsed_ms));
     render_pixel_artifact_with_pulse_anchor(ctx, fixture, elapsed_ms, now)
 }
@@ -242,13 +267,18 @@ fn render_pixel_artifact_with_pulse_anchor(
     fixture: PixelFixture,
     elapsed_ms: u16,
     pulse_anchor: time::OffsetDateTime,
-) -> (PreviewPixelFrameArtifact, PixelPetInput) {
+) -> (
+    PixelPreviewArtifacts,
+    PixelPetInput,
+    crate::presentation::pixel::PixelArtReferenceRequest,
+) {
     let base = ctx.fixed_now;
     let now = base + time::Duration::milliseconds(i64::from(elapsed_ms));
     let vm = fixture_view_model(fixture, pulse_anchor);
     let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(&vm, now);
+    let mut reference_provider = PixelArtReferenceProvider::default();
+    let art_reference = reference_provider.reference_for(&request);
     let mut state = PixelRendererState::new(&input, base);
-    let art_reference = state.art_reference_for(&request);
     let frame = render_pixel_frame(PixelRendererTick {
         input: &input,
         art_reference: &art_reference,
@@ -256,7 +286,16 @@ fn render_pixel_artifact_with_pulse_anchor(
         now,
         state: &mut state,
     });
-    (pixel_artifact(&frame, &input, elapsed_ms), input)
+    (
+        PixelPreviewArtifacts {
+            frame: pixel_artifact(&frame, &input, elapsed_ms),
+            art: pixel_art_sidecar(&input, &art_reference),
+            fit: pixel_fit_sidecar(&frame, &vm),
+            fit_status_lines: render_fit_status_lines(&frame, &vm),
+        },
+        input,
+        request,
+    )
 }
 
 fn fixture_view_model(fixture: PixelFixture, pulse_anchor: time::OffsetDateTime) -> WatchViewModel {
@@ -317,14 +356,7 @@ fn preview_fit_input(vm: &WatchViewModel) -> Value {
         vm.daily_comparison.fraction_of_yesterday,
         vm.rate_momentum.pulse.current_tokens,
     );
-    let fit = pixel_companion_fit(
-        PixelTargetGeometry {
-            width: PREVIEW_FIT_TARGET_SIZE,
-            height: PREVIEW_FIT_TARGET_SIZE,
-        },
-        viewport,
-        &hud,
-    );
+    let fit = pixel_companion_fit(default_preview_fit_geometry(), viewport, &hud);
 
     json!({
         "producer": fit.producer,
@@ -342,7 +374,7 @@ fn preview_fit_input(vm: &WatchViewModel) -> Value {
     })
 }
 
-fn preview_fit_rect_json(rect: PixelFitRect) -> Value {
+fn preview_fit_rect_json(rect: crate::round::pixel_fit::PixelFitRect) -> Value {
     json!({
         "x": rect.x,
         "y": rect.y,
@@ -351,12 +383,83 @@ fn preview_fit_rect_json(rect: PixelFitRect) -> Value {
     })
 }
 
-fn summary_frame(id: &str, title: &str, lines: &[&str]) -> PreviewFrame {
-    let width = 24;
+fn default_preview_fit_geometry() -> PixelTargetGeometry {
+    PixelTargetGeometry {
+        width: PREVIEW_FIT_TARGET_SIZE,
+        height: PREVIEW_FIT_TARGET_SIZE,
+    }
+}
+
+fn fit_geometries() -> [(&'static str, PixelTargetGeometry); 3] {
+    [
+        (
+            "min",
+            PixelTargetGeometry {
+                width: PREVIEW_FIT_MIN_TARGET_SIZE,
+                height: PREVIEW_FIT_MIN_TARGET_SIZE,
+            },
+        ),
+        ("default", default_preview_fit_geometry()),
+        (
+            "large",
+            PixelTargetGeometry {
+                width: PREVIEW_FIT_LARGE_TARGET_SIZE,
+                height: PREVIEW_FIT_LARGE_TARGET_SIZE,
+            },
+        ),
+    ]
+}
+
+fn render_fit_status_lines(frame: &PixelFrame, vm: &WatchViewModel) -> Vec<String> {
+    let viewport = PixelViewport::companion_default();
+    let hud = companion_hud_text(
+        vm.today_effective_tokens,
+        vm.daily_comparison.fraction_of_yesterday,
+        vm.rate_momentum.pulse.current_tokens,
+    );
+    fit_geometries()
+        .into_iter()
+        .map(|(label, geometry)| {
+            let fit = pixel_companion_fit(geometry, viewport, &hud);
+            let body_overlap = hud_overlap_pixels(frame, &fit, |alpha| alpha >= 200);
+            let effect_overlap = hud_overlap_pixels(frame, &fit, |alpha| alpha > 0 && alpha < 200);
+            format!(
+                "fit {label} {}",
+                if body_overlap == 0 && effect_overlap == 0 {
+                    "ready"
+                } else {
+                    "check"
+                }
+            )
+        })
+        .collect()
+}
+
+fn render_terminal_reference_lines(
+    request: &crate::presentation::pixel::PixelArtReferenceRequest,
+) -> Vec<String> {
+    render_pet(
+        &generate_pet(&request.seed).with_species(request.species),
+        request.stage,
+        request.mood,
+        request.animation_frame,
+    )
+    .lines
+    .into_iter()
+    .collect()
+}
+
+fn summary_frame(id: &str, title: &str, lines: &[String]) -> PreviewFrame {
+    let width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(24)
+        .max(24) as u16;
     let height = lines.len().max(1) as u16;
     let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
     for (row, line) in lines.iter().enumerate() {
-        buffer.set_string(0, row as u16, *line, Style::default());
+        buffer.set_string(0, row as u16, line, Style::default());
     }
     frame_from_buffer(id, title, &buffer)
 }
@@ -417,4 +520,68 @@ fn pixel_artifact(
             .map(|p| format!("#{:02x}{:02x}{:02x}{:02x}", p.r, p.g, p.b, p.a))
             .collect(),
     }
+}
+
+fn pixel_art_sidecar(
+    input: &PixelPetInput,
+    reference: &PixelPetArtReference,
+) -> PreviewPixelArtArtifact {
+    PreviewPixelArtArtifact {
+        schema_version: PIXEL_ART_SCHEMA_VERSION,
+        species: input.identity.species.as_str().to_string(),
+        stage: input.identity.stage.as_str().to_string(),
+        mood: input.mood.as_str().to_string(),
+        reference_checksum: format!("{:016x}", reference.reference_checksum.0),
+        width_cells: reference.width_cells,
+        height_cells: reference.height_cells,
+        body_bounds: reference.body_bounds,
+        foot_contact: reference.foot_contact.clone(),
+        role_counts: reference.role_counts.clone(),
+    }
+}
+
+fn pixel_fit_sidecar(frame: &PixelFrame, vm: &WatchViewModel) -> PreviewPixelFitArtifact {
+    let viewport = PixelViewport::companion_default();
+    let hud = companion_hud_text(
+        vm.today_effective_tokens,
+        vm.daily_comparison.fraction_of_yesterday,
+        vm.rate_momentum.pulse.current_tokens,
+    );
+    let fit = pixel_companion_fit(default_preview_fit_geometry(), viewport, &hud);
+
+    PreviewPixelFitArtifact {
+        schema_version: PIXEL_FIT_SCHEMA_VERSION,
+        producer: fit.producer,
+        geometry: fit.geometry,
+        image_rect: fit.image_rect,
+        hud_safe_zone: fit.hud_safe_zone,
+        hud_overlap: PreviewPixelHudOverlap {
+            body_eye_mouth_pixels: hud_overlap_pixels(frame, &fit, |alpha| alpha >= 200),
+            translucent_effect_pixels: hud_overlap_pixels(frame, &fit, |alpha| {
+                alpha > 0 && alpha < 200
+            }),
+        },
+    }
+}
+
+fn hud_overlap_pixels(
+    frame: &PixelFrame,
+    fit: &PixelCompanionFit,
+    include_alpha: impl Fn(u8) -> bool,
+) -> u16 {
+    let mut count = 0_u16;
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let idx = usize::from(y) * usize::from(frame.width) + usize::from(x);
+            let alpha = frame.pixels[idx].a;
+            if !include_alpha(alpha) {
+                continue;
+            }
+            let bounds = PixelBounds { min_x: x, min_y: y, max_x: x, max_y: y };
+            if fit.map_logical_bounds(bounds).overlaps(fit.hud_safe_zone) {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+    count
 }

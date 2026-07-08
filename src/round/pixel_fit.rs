@@ -3,6 +3,7 @@ use crate::round::hud::{
     perimeter_gauge_layout, stat_gap_box, CompanionHudText, COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::RoundAperture;
+use serde::Serialize;
 
 const APERTURE_MARGIN_RATIO: f32 = 0.08;
 const HUD_ZONE_PADDING_RATIO: f32 = 0.035;
@@ -10,13 +11,13 @@ const BODY_BOTTOM_RATIO: f32 = 0.71;
 const BODY_CLEARANCE_PX: f32 = 6.0;
 const MAX_HUD_HEIGHT_RATIO: f32 = 0.34;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PixelTargetGeometry {
     pub width: u16,
     pub height: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PixelFitRect {
     pub x: f32,
     pub y: f32,
