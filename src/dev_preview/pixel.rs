@@ -32,6 +32,7 @@ const STRIP_SPAN_MS: u16 = 1_600;
 const PREVIEW_FIT_MIN_TARGET_SIZE: u16 = 260;
 const PREVIEW_FIT_TARGET_SIZE: u16 = 360;
 const PREVIEW_FIT_LARGE_TARGET_SIZE: u16 = 480;
+const PREVIEW_FIT_FULLSCREEN_TARGET_SIZE: u16 = 900;
 
 struct PixelPreviewArtifacts {
     frame: PreviewPixelFrameArtifact,
@@ -205,11 +206,17 @@ fn render_pixel_strip(
 ) -> PreviewPixelStripBundle {
     let mut frames = Vec::with_capacity(STRIP_FRAME_COUNT);
     let mut manifest_frames = Vec::with_capacity(STRIP_FRAME_COUNT);
+    let mut reference_provider = PixelArtReferenceProvider::default();
 
     for index in 0..STRIP_FRAME_COUNT {
         let elapsed_ms = elapsed_for_index(index);
-        let (artifacts, input, _) =
-            render_pixel_artifact_with_pulse_anchor(ctx, fixture, elapsed_ms, ctx.fixed_now);
+        let (artifacts, input, _) = render_pixel_artifact_with_provider(
+            ctx,
+            fixture,
+            elapsed_ms,
+            ctx.fixed_now,
+            &mut reference_provider,
+        );
         let scene = pixel_scene_for_elapsed(&input, elapsed_ms);
         let mut frame = strip_placeholder_frame(
             &format!("{}-frame-{index:03}", fixture.id),
@@ -272,11 +279,31 @@ fn render_pixel_artifact_with_pulse_anchor(
     PixelPetInput,
     crate::presentation::pixel::PixelArtReferenceRequest,
 ) {
+    let mut reference_provider = PixelArtReferenceProvider::default();
+    render_pixel_artifact_with_provider(
+        ctx,
+        fixture,
+        elapsed_ms,
+        pulse_anchor,
+        &mut reference_provider,
+    )
+}
+
+fn render_pixel_artifact_with_provider(
+    ctx: &PreviewRenderContext,
+    fixture: PixelFixture,
+    elapsed_ms: u16,
+    pulse_anchor: time::OffsetDateTime,
+    reference_provider: &mut PixelArtReferenceProvider,
+) -> (
+    PixelPreviewArtifacts,
+    PixelPetInput,
+    crate::presentation::pixel::PixelArtReferenceRequest,
+) {
     let base = ctx.fixed_now;
     let now = base + time::Duration::milliseconds(i64::from(elapsed_ms));
     let vm = fixture_view_model(fixture, pulse_anchor);
     let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(&vm, now);
-    let mut reference_provider = PixelArtReferenceProvider::default();
     let art_reference = reference_provider.reference_for(&request);
     let mut state = PixelRendererState::new(&input, base);
     let frame = render_pixel_frame(PixelRendererTick {
@@ -390,7 +417,7 @@ fn default_preview_fit_geometry() -> PixelTargetGeometry {
     }
 }
 
-fn fit_geometries() -> [(&'static str, PixelTargetGeometry); 3] {
+fn fit_geometries() -> [(&'static str, PixelTargetGeometry); 4] {
     [
         (
             "min",
@@ -405,6 +432,13 @@ fn fit_geometries() -> [(&'static str, PixelTargetGeometry); 3] {
             PixelTargetGeometry {
                 width: PREVIEW_FIT_LARGE_TARGET_SIZE,
                 height: PREVIEW_FIT_LARGE_TARGET_SIZE,
+            },
+        ),
+        (
+            "fullscreen",
+            PixelTargetGeometry {
+                width: PREVIEW_FIT_FULLSCREEN_TARGET_SIZE,
+                height: PREVIEW_FIT_FULLSCREEN_TARGET_SIZE,
             },
         ),
     ]
@@ -584,4 +618,52 @@ fn hud_overlap_pixels(
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dev_preview::scenarios::PreviewRenderContext;
+
+    #[test]
+    fn pixel_strip_reference_provider_reuses_cached_pose_during_sequence() {
+        let ctx = PreviewRenderContext::deterministic();
+        let fixture = PixelFixture {
+            id: "pixel-idle",
+            title: "Pixel Idle",
+            species: Species::Fuzz,
+            stage: Stage::S3,
+            mood: Mood::Content,
+            asleep: false,
+            calm: false,
+            burst_level: 0.0,
+            pulse_age_ms: None,
+            elapsed_ms: 0,
+        };
+
+        let render_count = strip_reference_render_count_for_test(&ctx, fixture);
+
+        assert!(
+            render_count < STRIP_FRAME_COUNT,
+            "expected strip rendering to reuse cached art references, got {render_count} renders for {STRIP_FRAME_COUNT} frames"
+        );
+    }
+
+    fn strip_reference_render_count_for_test(
+        ctx: &PreviewRenderContext,
+        fixture: PixelFixture,
+    ) -> usize {
+        let mut provider = PixelArtReferenceProvider::default();
+        for index in 0..STRIP_FRAME_COUNT {
+            let elapsed_ms = elapsed_for_index(index);
+            let _ = render_pixel_artifact_with_provider(
+                ctx,
+                fixture,
+                elapsed_ms,
+                ctx.fixed_now,
+                &mut provider,
+            );
+        }
+        provider.render_count_for_test()
+    }
 }

@@ -1830,6 +1830,17 @@ fn dev_preview_pixel_writes_art_and_fit_sidecars() {
 }
 
 #[test]
+fn dev_preview_pixel_summary_includes_fullscreen_fit_readiness() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let text =
+        std::fs::read_to_string(run.out.join("frames/pixel-fuzz-s3-content-idle.txt")).unwrap();
+    assert!(text.contains("fit fullscreen ready"));
+}
+
+#[test]
 fn pixel_preview_uses_correct_fuzz_s3_label() {
     let run = PreviewRun::new();
 
