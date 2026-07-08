@@ -24,8 +24,8 @@ pub fn draw_pixel_frame(
     };
     let fit = pixel_companion_fit(
         PixelTargetGeometry {
-            width: bounds.size.width.round() as u16,
-            height: bounds.size.height.round() as u16,
+            width: aperture.width,
+            height: aperture.height,
         },
         crate::presentation::pixel::PixelViewport {
             logical_width: frame.width,
@@ -186,6 +186,22 @@ mod tests {
         assert_eq!(rect.origin.y, 156.0);
         assert_eq!(rect.size.width, 180.0);
         assert_eq!(rect.size.height, 180.0);
+    }
+
+    #[test]
+    fn draw_pixel_frame_accepts_fractional_bounds_with_caller_aperture() {
+        let mut frame =
+            PixelFrame::transparent(PixelViewport { logical_width: 96, logical_height: 96 });
+        frame.set_pixel(48, 24, Rgba8::opaque(255, 0, 255));
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.6, 360.6));
+        let aperture = RoundAperture::new(360, 360);
+        let hud = CompanionHudText {
+            today_total: "1.2B".to_string(),
+            daily_percent: "52% yday".to_string(),
+            pace: "25.4M/10m".to_string(),
+        };
+
+        draw_pixel_frame(&frame, bounds, aperture, &hud);
     }
 
     fn assert_color_eq(color: Option<&objc2_app_kit::NSColor>, expected: Rgba8) {
