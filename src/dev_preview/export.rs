@@ -433,8 +433,8 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
     ));
     html.push_str(&format!("<h2>{}</h2>", escape_html(&frame.title)));
     html.push_str(&format!(
-        r#"<p class="frame-meta">{} x {} cells</p>"#,
-        frame.width, frame.height
+        r#"<p class="frame-meta">{}</p>"#,
+        render_frame_meta(frame)
     ));
     html.push_str(&render_frame_artifact_links(frame));
     html.push_str(r#"<div class="preview-grid-shell">"#);
@@ -453,6 +453,14 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
     }
     html.push_str("</div></article>");
     html
+}
+
+fn render_frame_meta(frame: &PreviewFrame) -> String {
+    if let Some(pixel) = &frame.contract.pixel {
+        format!("{} x {} logical pixels", pixel.width, pixel.height)
+    } else {
+        format!("{} x {} cells", frame.width, frame.height)
+    }
 }
 
 fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
@@ -749,6 +757,21 @@ mod tests {
         }
     }
 
+    fn pixel_frame() -> PreviewFrame {
+        let mut frame = sample_frame();
+        frame.contract.pixel = Some(PreviewPixelFrameArtifact {
+            schema_version: PIXEL_FRAME_SCHEMA_VERSION,
+            width: 96,
+            height: 96,
+            elapsed_ms: 480,
+            species: "fuzz".to_string(),
+            stage: "s3".to_string(),
+            mood: "content".to_string(),
+            pixels: vec!["#00000000".to_string(); 96 * 96],
+        });
+        frame
+    }
+
     fn sample_manifest() -> PreviewManifest {
         PreviewManifest {
             schema_version: SCHEMA_VERSION,
@@ -840,6 +863,18 @@ mod tests {
         assert!(html.contains(r#"class="preview-grid" style="--cols: 2; --rows: 2""#));
         assert!(html.contains("grid-column: 1; grid-row: 1; color: #ffeeaa"));
         assert!(html.contains("grid-column: 2; grid-row: 2"));
+    }
+
+    #[test]
+    fn html_export_uses_pixel_dimensions_for_pixel_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.html");
+
+        write_index_html(&path, &[pixel_frame()], &[], "2026-05-12T00:00:00Z").unwrap();
+
+        let html = fs::read_to_string(path).unwrap();
+        assert!(html.contains("96 x 96 logical pixels"));
+        assert!(!html.contains("2 x 2 cells"));
     }
 
     #[test]

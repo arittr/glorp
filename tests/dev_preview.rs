@@ -1748,6 +1748,17 @@ fn dev_preview_pixel_manifest_dimensions_match_pixel_artifact() {
 }
 
 #[test]
+fn dev_preview_pixel_html_uses_pixel_dimensions_not_placeholder_cells() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+    assert!(html.contains("96 x 96 logical pixels"));
+    assert!(!html.contains("24 x 4 cells"));
+}
+
+#[test]
 fn dev_preview_pixel_strips_meet_animation_contract() {
     let run = PreviewRun::new();
 
