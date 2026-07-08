@@ -1,10 +1,11 @@
-use ratatui::style::Color;
+use ratatui::{layout::Rect, style::Color};
 
 use crate::game::habitat::HabitatPetLayer;
 use crate::presentation::{PetSceneModel, SceneDrawList};
 use crate::tui::component::{habitat_props_for, PetSceneLayout, TankLifeSurfaceGeometry};
 use crate::tui::life::build_prop_reactions;
 use crate::tui::render_context::RenderContext;
+use crate::tui::room::PetPerformance;
 use crate::tui::view_model::WatchViewModel;
 
 use super::ambient::{
@@ -26,8 +27,8 @@ use super::{apply_resonance_reaction, color_to_rgb, pet_silhouette_halo_rects};
 ///
 /// Callers blit the result once via `blit_draw_list`. Z-order (back to front):
 /// biome-wash → room-glyphs → ambient → motes → activity →
-/// props(Background, Behind) → contact-shadow → pet-body →
-/// performance-cue → props(Foreground).
+/// props/tank-life(Background, Behind) → contact-shadow → pet-body →
+/// performance-cue → props/tank-life(Foreground).
 ///
 /// Speech is NOT in the draw list: it occupies the top rows of the habitat
 /// (an entry in `ambient_exclusions`) and is painted separately AFTER the
@@ -99,6 +100,7 @@ pub(crate) fn render_pet_to_draw_list_with_tank_geometry(
         .collect::<Vec<_>>();
     let life_profile = build_prop_reactions(vm.life_profile.clone(), &earned_prop_ids, compact);
     let life_profile = apply_resonance_reaction(life_profile, resonant_prop.as_ref());
+    let pet_rect = rendered_pet_rect_for_performance(scene, room_profile.pet_performance);
 
     // ── Pass 1: biome-wash ────────────────────────────────────────────────────
     list.extend(grounding::biome_wash_cells(
@@ -225,7 +227,7 @@ pub(crate) fn render_pet_to_draw_list_with_tank_geometry(
     );
     let projected_tank_life =
         crate::tui::component::project_tank_life_cast(&canonical_tank_life, tank_geometry);
-    let pet_protected = crate::tui::component::pet_face_protected_regions(scene.pet_art);
+    let pet_protected = crate::tui::component::pet_face_protected_regions(pet_rect);
     let tank_life_placements = crate::tui::component::tank_life_placements_for(
         &crate::tui::component::TankLifeRenderInput {
             rendered_ids: projected_tank_life.rendered_ids.clone(),
@@ -309,13 +311,6 @@ pub(crate) fn render_pet_to_draw_list_with_tank_geometry(
     };
 
     let cursor_norm_x = cursor_normalized_x_within(vm, scene.hit_area);
-    let posture = performance_posture_offset(room_profile.pet_performance);
-    let pet_rect = {
-        let mut r = scene.pet_art;
-        let max_y = scene.habitat.y + scene.habitat.height.saturating_sub(r.height);
-        r.y = (r.y + posture).min(max_y);
-        r
-    };
     let lines = build_pet_lines(
         vm,
         pet_rect.width as usize,
@@ -347,4 +342,45 @@ pub(crate) fn render_pet_to_draw_list_with_tank_geometry(
     ));
 
     list
+}
+
+fn rendered_pet_rect_for_performance(scene: &PetSceneLayout, performance: PetPerformance) -> Rect {
+    let posture = performance_posture_offset(performance);
+    let mut rect = scene.pet_art;
+    let max_y = scene.habitat.y + scene.habitat.height.saturating_sub(rect.height);
+    rect.y = (rect.y + posture).min(max_y);
+    rect
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    fn scene_with_pet_art(pet_art: Rect) -> PetSceneLayout {
+        let area = Rect::new(0, 0, 80, 14);
+        PetSceneLayout {
+            id: crate::tui::component::WatchComponentId::Pet.path(),
+            panel: area,
+            speech: None,
+            content: area,
+            pet_art,
+            hit_area: area,
+            habitat: area,
+            exclusions: Vec::new(),
+            targets: std::collections::BTreeMap::new(),
+            effect_targets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rendered_pet_rect_applies_performance_posture_before_tank_life_protection() {
+        let scene = scene_with_pet_art(Rect::new(30, 3, 13, 10));
+
+        let pet_rect = rendered_pet_rect_for_performance(&scene, PetPerformance::TiredAwake);
+        let protected = crate::tui::component::pet_face_protected_regions(pet_rect);
+
+        assert_eq!(pet_rect, Rect::new(30, 4, 13, 10));
+        assert_eq!(protected, vec![Rect::new(33, 5, 6, 4)]);
+    }
 }
