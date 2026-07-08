@@ -3,6 +3,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 
@@ -1959,6 +1960,36 @@ fn dev_preview_pixel_cast_identity_writes_six_real_frame_artifacts() {
 }
 
 #[test]
+fn dev_preview_pixel_cast_identity_frames_are_distinct() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let mut frame_payloads = BTreeSet::new();
+    for id in PIXEL_CAST_IDS {
+        let frame = run.read_json(&format!("frames/{id}.pixel.json"));
+        let pixels = frame["pixels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            frame_payloads.insert(pixels),
+            "{id} must not render the same pixel payload as another cast fixture"
+        );
+    }
+
+    assert_eq!(
+        frame_payloads.len(),
+        PIXEL_CAST_IDS.len(),
+        "all six Pixel cast frames must be visually distinct"
+    );
+}
+
+#[test]
 fn dev_preview_pixel_cast_matrix_references_real_cast_frames() {
     let run = PreviewRun::new();
 
@@ -2106,6 +2137,7 @@ fn dev_preview_pixel_composition_artifact_has_own_manifest_slot() {
     );
 
     let composition = run.read_json("frames/pixel-tank-composition.pixel-composition.json");
+    let art = run.read_json("frames/pixel-tank-composition.pixel-art.json");
     assert_eq!(composition["schema_version"], 1);
     assert_eq!(composition["frame_id"], "pixel-tank-composition");
     assert!(composition["protected_regions"]
@@ -2114,6 +2146,49 @@ fn dev_preview_pixel_composition_artifact_has_own_manifest_slot() {
         .iter()
         .any(|region| { region["id"] == "face" }));
     assert!(composition["context"]["surface"].is_string());
+    assert_eq!(composition["context"]["props_available"], false);
+    assert_eq!(composition["context"]["tank_life_available"], false);
+
+    let deferred_contexts = composition["comparison"]["deferred_contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        deferred_contexts.contains(&"props-unavailable-for-pixel-runtime"),
+        "unavailable prop comparison must be explicit"
+    );
+    assert!(
+        deferred_contexts.contains(&"tank-life-unavailable-for-pixel-runtime"),
+        "unavailable tank-life comparison must be explicit"
+    );
+
+    let composition_face = composition["protected_regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|region| region["id"] == "face")
+        .unwrap();
+    let art_face = art["protected_bounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|region| region["id"] == "face")
+        .unwrap();
+
+    assert_ne!(
+        composition_face["bounds"], art_face["bounds"],
+        "composition sidecar must map protected regions into preview pixel coordinates"
+    );
+    assert!(
+        composition_face["bounds"]["min_x"].as_u64().unwrap() > 10,
+        "preview face bounds should be centered/scaled, not raw reference-cell coordinates"
+    );
+    assert!(
+        composition_face["bounds"]["max_x"].as_u64().unwrap() < 96,
+        "preview face bounds must stay inside the pixel frame"
+    );
 }
 
 #[test]

@@ -340,12 +340,17 @@ fn mech_s3_promotes_outline_appendage_and_foot_contact_as_real_cells() {
     assert!(!reference
         .cells_for_roles([PixelArtRole::Appendage])
         .is_empty());
-    assert!(!reference
-        .cells_for_roles([PixelArtRole::FootContact])
-        .is_empty());
-    assert_eq!(
-        reference.role_count(PixelArtRole::FootContact),
-        reference.foot_contact.cells.len()
+    let visible_foot_contact = reference.cells_for_roles([PixelArtRole::FootContact]);
+    assert!(!visible_foot_contact.is_empty());
+    assert!(
+        visible_foot_contact
+            .iter()
+            .all(|cell| reference.foot_contact.cells.contains(&(cell.x, cell.y))),
+        "visible foot-contact cells must come from foot-contact evidence"
+    );
+    assert!(
+        reference.foot_contact.cells.len() >= visible_foot_contact.len(),
+        "foot-contact evidence may include cells whose visible role has higher priority"
     );
 }
 

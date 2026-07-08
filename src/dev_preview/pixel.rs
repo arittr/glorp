@@ -767,18 +767,19 @@ fn protected_region_artifact(region: &PixelProtectedRegion) -> PreviewPixelProte
 
 fn pixel_composition_sidecar(
     frame_id: &str,
+    input: &PixelPetInput,
     reference: &PixelPetArtReference,
+    elapsed_ms: u16,
     tank_life_available: bool,
 ) -> PreviewPixelCompositionArtifact {
-    let deferred_contexts = if tank_life_available {
-        Vec::new()
-    } else {
-        vec!["tank-life-unavailable-for-pixel-runtime".to_string()]
-    };
+    let mut deferred_contexts = vec!["props-unavailable-for-pixel-runtime".to_string()];
+    if !tank_life_available {
+        deferred_contexts.push("tank-life-unavailable-for-pixel-runtime".to_string());
+    }
     let protected_regions = reference
         .protected_regions
         .iter()
-        .map(protected_region_artifact)
+        .map(|region| protected_region_preview_artifact(input, reference, elapsed_ms, region))
         .collect::<Vec<_>>();
 
     PreviewPixelCompositionArtifact {
@@ -799,6 +800,54 @@ fn pixel_composition_sidecar(
         },
         protected_regions,
     }
+}
+
+fn protected_region_preview_artifact(
+    input: &PixelPetInput,
+    reference: &PixelPetArtReference,
+    elapsed_ms: u16,
+    region: &PixelProtectedRegion,
+) -> PreviewPixelProtectedRegionArtifact {
+    let base = time::OffsetDateTime::UNIX_EPOCH;
+    let now = base + time::Duration::milliseconds(i64::from(elapsed_ms));
+    let state = PixelRendererState::new(input, base);
+    let scene = PixelPetScene::from_input_and_reference(input, reference, &state, now);
+    let viewport = PixelViewport::companion_default();
+    let cx = i16::try_from(viewport.logical_width / 2).unwrap() + scene.wander_x.round() as i16;
+    let cy = i16::try_from(viewport.logical_height / 2).unwrap() + scene.breath_y.round() as i16;
+
+    PreviewPixelProtectedRegionArtifact {
+        id: region.id,
+        role: region.role,
+        bounds: reference_bounds_to_preview_bounds(region.bounds, &scene, viewport, cx, cy),
+        cell_count: region.cell_count,
+    }
+}
+
+fn reference_bounds_to_preview_bounds(
+    bounds: crate::presentation::pixel::PixelCellBounds,
+    scene: &PixelPetScene,
+    viewport: PixelViewport,
+    cx: i16,
+    cy: i16,
+) -> crate::presentation::pixel::PixelCellBounds {
+    let scale = scene.reference_scale.max(1);
+    let min_x = cx + scene.reference_origin_x + i16::from(bounds.min_x) * scale;
+    let min_y = cy + scene.reference_origin_y + i16::from(bounds.min_y) * scale;
+    let max_x = cx + scene.reference_origin_x + i16::from(bounds.max_x) * scale + scale - 1;
+    let max_y = cy + scene.reference_origin_y + i16::from(bounds.max_y) * scale + scale - 1;
+
+    crate::presentation::pixel::PixelCellBounds {
+        min_x: clamp_preview_coord(min_x, viewport.logical_width),
+        min_y: clamp_preview_coord(min_y, viewport.logical_height),
+        max_x: clamp_preview_coord(max_x, viewport.logical_width),
+        max_y: clamp_preview_coord(max_y, viewport.logical_height),
+    }
+}
+
+fn clamp_preview_coord(value: i16, extent: u16) -> u8 {
+    let max = i16::try_from(extent.saturating_sub(1)).unwrap_or(i16::MAX);
+    value.clamp(0, max) as u8
 }
 
 fn pixel_cast_identity_matrix_bundle() -> PreviewPixelBundle {
@@ -858,8 +907,13 @@ fn pixel_tank_composition_bundle(ctx: &PreviewRenderContext) -> PreviewPixelBund
     frame.contract.pixel = Some(artifacts.frame);
     frame.contract.pixel_art = Some(artifacts.art);
     frame.contract.pixel_fit = Some(artifacts.fit);
-    frame.contract.pixel_composition =
-        Some(pixel_composition_sidecar(fixture.id, &reference, false));
+    frame.contract.pixel_composition = Some(pixel_composition_sidecar(
+        fixture.id,
+        &input,
+        &reference,
+        fixture.elapsed_ms,
+        false,
+    ));
 
     PreviewScenarioBundle::from_parts_with_dimensions(
         frame,

@@ -29,6 +29,14 @@
 - `target/glorp-preview-pixel-cast-identity/frames/pixel-mech-s5-hardbody.pixel-art.json`
 - `target/glorp-preview-pixel-cast-identity/frames/pixel-tank-composition.pixel-composition.json`
 
+## Final Review Fix Note
+
+The `pixel-tank-composition.pixel-composition.json` sidecar records protected
+regions in the 96x96 Pixel preview frame coordinate space, using the same
+center/origin/scale geometry as `render_pixel_frame`. It does not compare
+against live prop or tank-life cells when that context is unavailable in the
+Pixel runtime; those contexts are explicitly listed in `deferred_contexts`.
+
 ## Manual Review
 
 | Gate | Status | Reviewer Notes |

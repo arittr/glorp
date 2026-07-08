@@ -448,6 +448,12 @@ fn promoted_role_for(
     {
         return PixelArtRole::RepairMark;
     }
+    if matches!(
+        cell.role,
+        PixelArtRole::Corruption | PixelArtRole::Pattern | PixelArtRole::Accent
+    ) {
+        return cell.role;
+    }
     if foot_contact.cells.contains(&(cell.x, cell.y)) {
         return PixelArtRole::FootContact;
     }
@@ -698,4 +704,62 @@ fn hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn priority_request(species: Species) -> PixelArtReferenceRequest {
+        let animation_frame = AnimationFrame::default();
+        PixelArtReferenceRequest {
+            seed: "priority-test".to_string(),
+            species,
+            stage: Stage::S3,
+            mood: Mood::Content,
+            variation_bucket: 0,
+            pose: PixelArtPoseKey::from_animation_frame(animation_frame),
+            animation_frame,
+        }
+    }
+
+    #[test]
+    fn foot_contact_promotion_preserves_existing_species_and_accent_roles() {
+        let request = priority_request(Species::Mech);
+        let footprint = BTreeSet::from([(2, 4)]);
+        let foot_contact = PixelFootContact { cells: vec![(2, 4)] };
+
+        for role in [
+            PixelArtRole::Corruption,
+            PixelArtRole::Pattern,
+            PixelArtRole::Accent,
+        ] {
+            let promoted = promoted_role_for(
+                &request,
+                PixelArtCell { x: 2, y: 4, role },
+                '#',
+                &footprint,
+                &foot_contact,
+            );
+
+            assert_eq!(promoted, role, "{role:?} must outrank foot contact");
+        }
+    }
+
+    #[test]
+    fn signature_promotion_still_outranks_existing_accent_foot_contact() {
+        let request = priority_request(Species::Fuzz);
+        let footprint = BTreeSet::from([(2, 4)]);
+        let foot_contact = PixelFootContact { cells: vec![(2, 4)] };
+
+        let promoted = promoted_role_for(
+            &request,
+            PixelArtCell { x: 2, y: 4, role: PixelArtRole::Accent },
+            '◆',
+            &footprint,
+            &foot_contact,
+        );
+
+        assert_eq!(promoted, PixelArtRole::Locket);
+    }
 }
