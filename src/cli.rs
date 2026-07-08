@@ -4,7 +4,9 @@ use clap::{Parser, Subcommand};
 #[cfg(feature = "dev-preview")]
 use std::path::PathBuf;
 
-use crate::commands::companion_mode::CompanionRendererMode;
+use crate::commands::companion_mode::{
+    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,11 +47,19 @@ pub enum Command {
     Companion {
         #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Classic)]
         renderer: CompanionRendererMode,
+        #[arg(long, hide = true)]
+        review_size: Option<CompanionReviewSize>,
+        #[arg(long, hide = true)]
+        review_active_pulse: bool,
     },
     #[command(hide = true)]
     CompanionApp {
         #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Classic)]
         renderer: CompanionRendererMode,
+        #[arg(long, hide = true)]
+        review_size: Option<CompanionReviewSize>,
+        #[arg(long, hide = true)]
+        review_active_pulse: bool,
     },
     /// Print a compact non-interactive pet and usage summary.
     Status,
@@ -112,6 +122,18 @@ impl From<DevPetSpecies> for crate::pet::generation::Species {
             DevPetSpecies::Glitch => Self::Glitch,
             DevPetSpecies::Crystal => Self::Crystal,
             DevPetSpecies::Mech => Self::Mech,
+        }
+    }
+}
+
+impl Cli {
+    pub(crate) const fn companion_review_options(
+        review_size: Option<CompanionReviewSize>,
+        review_active_pulse: bool,
+    ) -> CompanionReviewOptions {
+        CompanionReviewOptions {
+            initial_size: review_size,
+            active_pulse: review_active_pulse,
         }
     }
 }

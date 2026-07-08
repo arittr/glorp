@@ -46,6 +46,20 @@ pub fn stamp_live_presentation(
     vm.last_feed_pulse_at = applied_signal.can_burst().then_some(now);
 }
 
+/// Hidden review/debug-only helper that exercises the live presentation burst
+/// path without waiting for a real provider poll.
+pub fn bursting_review_signal(now: OffsetDateTime) -> AppliedUsageSignal {
+    AppliedUsageSignal {
+        applied_effective_tokens: 42_000.0,
+        raw_effective_tokens: Some(42_000.0),
+        source_mix: None,
+        token_shape: None,
+        observed_at: now,
+        elapsed_since_successful_poll: time::Duration::seconds(10),
+        freshness: crate::tui::life::UsageSignalFreshness::Live,
+    }
+}
+
 /// Spawns a background thread that polls usage and emits `LiveWatchUpdate`s.
 /// Silently skips poll/build failures so the facade keeps showing the last good
 /// state; this matches the existing menubar behavior and the V1 spec.
@@ -155,5 +169,25 @@ mod tests {
         );
 
         assert_eq!(vm.last_feed_pulse_at, None);
+    }
+
+    #[test]
+    fn review_burst_signal_uses_live_burst_path() {
+        let now = datetime!(2026-07-08 12:00 UTC);
+        let signal = bursting_review_signal(now);
+        assert!(signal.can_burst());
+
+        let mut state = WatchPresentationState::default();
+        let mut vm = WatchViewModel::fixture();
+        stamp_live_presentation(
+            &mut state,
+            &mut vm,
+            AppliedUsageSignal::diagnostics_only(now, time::Duration::seconds(10)),
+            now,
+        );
+        stamp_live_presentation(&mut state, &mut vm, signal, now);
+
+        assert_eq!(vm.last_feed_pulse_at, Some(now));
+        assert!(vm.life_profile.burst_level > 0.0);
     }
 }

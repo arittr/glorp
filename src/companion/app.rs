@@ -8,7 +8,9 @@ use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::commands::companion_mode::CompanionRendererMode;
+use crate::commands::companion_mode::{
+    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
+};
 use crate::commands::watch::{
     build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
 };
@@ -127,7 +129,7 @@ declare_class!(
     }
 );
 
-pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
+pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions) -> Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| GlorpError::Message("glorp companion must run on the main thread".into()))?;
     let paths = AppPaths::resolve()?;
@@ -145,7 +147,7 @@ pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
         now,
         crate::storage::day_axis::LocalDayMapper::System,
     )?;
-    let initial_vm = if renderer_mode.is_pixel() {
+    let mut initial_vm = if renderer_mode.is_pixel() {
         build_watch_view_model_semantic_at(
             &initial_pet,
             &paths.usage_db,
@@ -160,6 +162,24 @@ pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
             crate::storage::day_axis::LocalDayMapper::System,
         )?
     };
+    let mut presentation_state = WatchPresentationState::default();
+    if review.active_pulse {
+        crate::watch_live::stamp_live_presentation(
+            &mut presentation_state,
+            &mut initial_vm,
+            crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+            now,
+        );
+        crate::watch_live::stamp_live_presentation(
+            &mut presentation_state,
+            &mut initial_vm,
+            crate::watch_live::bursting_review_signal(now),
+            now,
+        );
+    }
     let scene = derive_round_scene_model(&initial_vm, now);
     let pixel_input = renderer_mode
         .is_pixel()
@@ -174,7 +194,7 @@ pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
     install_app_menu(&app, mtm);
 
     let controller: Retained<Controller> = unsafe { msg_send_id![Controller::class(), new] };
-    let (window, view) = build_window(mtm);
+    let (window, view) = build_window(mtm, review.initial_size);
     let poll_rx = crate::watch_live::spawn_live_watch_worker(
         paths,
         POLL_INTERVAL,
@@ -191,7 +211,7 @@ pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
             window,
             view,
             poll_rx,
-            presentation_state: WatchPresentationState::default(),
+            presentation_state,
             vm: initial_vm,
             scene,
             renderer_mode,
@@ -284,10 +304,15 @@ fn install_app_menu(app: &NSApplication, mtm: MainThreadMarker) {
     }
 }
 
-fn build_window(mtm: MainThreadMarker) -> (Retained<NSWindow>, Retained<RoundView>) {
+fn build_window(
+    mtm: MainThreadMarker,
+    review_size: Option<CompanionReviewSize>,
+) -> (Retained<NSWindow>, Retained<RoundView>) {
+    let initial_size = review_size.map_or(DEFAULT_WINDOW_SIZE, |size| f64::from(size.width));
+    let initial_height = review_size.map_or(DEFAULT_WINDOW_SIZE, |size| f64::from(size.height));
     let frame = NSRect::new(
         NSPoint::new(WINDOW_ORIGIN_X, WINDOW_ORIGIN_Y),
-        NSSize::new(DEFAULT_WINDOW_SIZE, DEFAULT_WINDOW_SIZE),
+        NSSize::new(initial_size, initial_height),
     );
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable

@@ -39,8 +39,22 @@ pub fn run() -> Result<()> {
         Command::Doctor { refresh_usage_snapshots } => {
             commands::doctor::run(refresh_usage_snapshots)?
         }
-        Command::Companion { renderer } => commands::companion::run(renderer)?,
-        Command::CompanionApp { renderer } => commands::companion_app::run(renderer)?,
+        Command::Companion {
+            renderer,
+            review_size,
+            review_active_pulse,
+        } => commands::companion::run(
+            renderer,
+            Cli::companion_review_options(review_size, review_active_pulse),
+        )?,
+        Command::CompanionApp {
+            renderer,
+            review_size,
+            review_active_pulse,
+        } => commands::companion_app::run(
+            renderer,
+            Cli::companion_review_options(review_size, review_active_pulse),
+        )?,
         #[cfg(feature = "dev-preview")]
         Command::DevPreview { out, scenario } => commands::dev_preview::run(out, scenario)?,
         Command::Help => {

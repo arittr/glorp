@@ -206,6 +206,18 @@ fn help_hides_companion_renderer_switch() {
         .stdout(predicate::str::contains("pixel").not());
 }
 
+#[test]
+fn companion_help_hides_review_options_and_renderer_default() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--review-size").not())
+        .stdout(predicate::str::contains("--review-active-pulse").not())
+        .stdout(predicate::str::contains("--renderer").not());
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn companion_reports_macos_only_on_other_platforms() {
@@ -224,6 +236,26 @@ fn companion_accepts_hidden_pixel_renderer_before_macos_gate() {
     Command::cargo_bin("glorp")
         .unwrap()
         .args(["companion", "--renderer", "pixel"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "glorp companion is only available on macOS",
+        ));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn companion_accepts_hidden_review_flags_before_macos_gate() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args([
+            "companion",
+            "--renderer",
+            "pixel",
+            "--review-size",
+            "260x260",
+            "--review-active-pulse",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
