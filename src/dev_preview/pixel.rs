@@ -183,7 +183,8 @@ fn render_pixel_strip(
 
     for index in 0..STRIP_FRAME_COUNT {
         let elapsed_ms = elapsed_for_index(index);
-        let (artifact, input) = render_pixel_artifact(ctx, fixture, elapsed_ms);
+        let (artifact, input) =
+            render_pixel_artifact_with_pulse_anchor(ctx, fixture, elapsed_ms, ctx.fixed_now);
         let scene = pixel_scene_for_elapsed(&input, elapsed_ms);
         let mut frame = strip_placeholder_frame(
             &format!("{}-frame-{index:03}", fixture.id),
@@ -212,7 +213,11 @@ fn render_pixel_strip(
                 frame_duration_ms: FRAME_DURATION_MS,
             },
             inputs: scenario_inputs(
-                &fixture_input(fixture, ctx.fixed_now + time::Duration::milliseconds(0)),
+                &fixture_input(
+                    fixture,
+                    ctx.fixed_now + time::Duration::milliseconds(0),
+                    ctx.fixed_now,
+                ),
                 STRIP_SPAN_MS,
             ),
             frames: manifest_frames,
@@ -227,9 +232,19 @@ fn render_pixel_artifact(
     fixture: PixelFixture,
     elapsed_ms: u16,
 ) -> (PreviewPixelFrameArtifact, PixelPetInput) {
+    let now = ctx.fixed_now + time::Duration::milliseconds(i64::from(elapsed_ms));
+    render_pixel_artifact_with_pulse_anchor(ctx, fixture, elapsed_ms, now)
+}
+
+fn render_pixel_artifact_with_pulse_anchor(
+    ctx: &PreviewRenderContext,
+    fixture: PixelFixture,
+    elapsed_ms: u16,
+    pulse_anchor: time::OffsetDateTime,
+) -> (PreviewPixelFrameArtifact, PixelPetInput) {
     let base = ctx.fixed_now;
     let now = base + time::Duration::milliseconds(i64::from(elapsed_ms));
-    let input = fixture_input(fixture, now);
+    let input = fixture_input(fixture, now, pulse_anchor);
     let mut state = PixelRendererState::new(&input, base);
     let frame = render_pixel_frame(PixelRendererTick {
         input: &input,
@@ -240,7 +255,11 @@ fn render_pixel_artifact(
     (pixel_artifact(&frame, &input, elapsed_ms), input)
 }
 
-fn fixture_input(fixture: PixelFixture, now: time::OffsetDateTime) -> PixelPetInput {
+fn fixture_input(
+    fixture: PixelFixture,
+    now: time::OffsetDateTime,
+    pulse_anchor: time::OffsetDateTime,
+) -> PixelPetInput {
     let mut vm = WatchViewModel::fixture();
     vm.pet_render.generated_species = fixture.species;
     vm.pet_render.stage = fixture.stage;
@@ -252,7 +271,7 @@ fn fixture_input(fixture: PixelFixture, now: time::OffsetDateTime) -> PixelPetIn
     vm.life_profile.burst_level = fixture.burst_level;
     vm.last_feed_pulse_at = fixture
         .pulse_age_ms
-        .map(|age_ms| now - time::Duration::milliseconds(i64::from(age_ms)));
+        .map(|age_ms| pulse_anchor - time::Duration::milliseconds(i64::from(age_ms)));
     PixelPetInput::from_watch_view_model(&vm, now)
 }
 

@@ -15,8 +15,9 @@ impl PixelPetInput {
                 .whole_milliseconds()
                 .clamp(0, i128::from(u16::MAX)) as u16
         });
-        let pulse_active =
-            pulse_age_ms.is_some_and(|age| age <= 2_000) && vm.life_profile.burst_level > 0.0;
+        let pulse_active = !vm.day_context.asleep
+            && pulse_age_ms.is_some_and(|age| age <= 2_000)
+            && vm.life_profile.burst_level > 0.0;
 
         Self {
             identity: PixelPetIdentity {

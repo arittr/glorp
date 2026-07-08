@@ -84,7 +84,8 @@ fn pixel_input_changes_for_live_identity_and_state_signals() {
     assert!(!base_input.sleep.asleep);
     assert!(other_input.sleep.asleep);
     assert!(!base_input.pulse.active);
-    assert!(other_input.pulse.active);
+    assert!(!other_input.pulse.active);
+    assert_eq!(other_input.pulse.age_ms, 250);
 }
 
 #[test]

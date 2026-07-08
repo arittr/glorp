@@ -3,7 +3,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 
 const LIVELINESS_WATCH_IDS: [&str; 7] = [
@@ -147,6 +147,33 @@ impl PreviewRun {
     fn read_json(&self, path: &str) -> Value {
         serde_json::from_str(&std::fs::read_to_string(self.out.join(path)).unwrap()).unwrap()
     }
+}
+
+fn collect_pixel_json_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pixel_json_paths(&path, paths);
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".pixel.json"))
+        {
+            paths.push(path);
+        }
+    }
+}
+
+fn pixel_alpha_sum_for_rgb(pixel: &Value, rgb: &str) -> u32 {
+    pixel["pixels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter(|hex| hex.starts_with(rgb))
+        .map(|hex| u32::from_str_radix(&hex[7..9], 16).unwrap())
+        .sum()
 }
 
 #[test]
@@ -1791,14 +1818,40 @@ fn dev_preview_pixel_strips_meet_animation_contract() {
 }
 
 #[test]
+fn dev_preview_pixel_feed_pulse_strip_decays_accent_aura() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let first = run.read_json("strips/pixel-feed-pulse/frame-000.pixel.json");
+    let late = run.read_json("strips/pixel-feed-pulse/frame-047.pixel.json");
+    let first_accent_alpha = pixel_alpha_sum_for_rgb(&first, "#f0a646");
+    let late_accent_alpha = pixel_alpha_sum_for_rgb(&late, "#f0a646");
+
+    assert!(first_accent_alpha > 0);
+    assert!(
+        late_accent_alpha < first_accent_alpha,
+        "feed-pulse accent aura should decay across the exported strip: first={first_accent_alpha}, late={late_accent_alpha}"
+    );
+}
+
+#[test]
 fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
     let run = PreviewRun::new();
 
     run.run_success("pixel");
 
-    let text = std::fs::read_to_string(run.out.join("manifest.json")).unwrap()
-        + &std::fs::read_to_string(run.out.join("frames/pixel-fuzz-s3-content-idle.pixel.json"))
-            .unwrap();
+    let mut pixel_paths = Vec::new();
+    collect_pixel_json_paths(&run.out, &mut pixel_paths);
+    assert!(pixel_paths
+        .iter()
+        .any(|path| path.ends_with("strips/pixel-feed-pulse/frame-047.pixel.json")));
+
+    let mut text = std::fs::read_to_string(run.out.join("manifest.json")).unwrap();
+    for path in pixel_paths {
+        text.push_str(&std::fs::read_to_string(path).unwrap());
+    }
+
     assert!(!text.contains("fixture-seed"));
     assert!(!text.contains("/Users/drew"));
     assert!(!text.contains("prompt"));
