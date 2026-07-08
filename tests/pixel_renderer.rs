@@ -3,18 +3,83 @@ use glorp::pet::generation::Species;
 use glorp::presentation::pixel::{
     frame::{PixelFrame, Rgba8},
     raster::alpha_blend_pixel,
-    render_pixel_frame, PixelPetInput, PixelRendererState, PixelRendererTick, PixelViewport,
+    render_pixel_frame, PixelArtPoseKey, PixelArtRole, PixelCellBounds, PixelFootContact,
+    PixelPetArtReference, PixelPetInput, PixelReferenceChecksum, PixelRendererState,
+    PixelRendererTick, PixelViewport,
 };
 use glorp::tui::view_model::WatchViewModel;
 use time::macros::datetime;
 
+fn frame_for_with_reference(
+    vm: &WatchViewModel,
+    ms: i64,
+) -> (glorp::presentation::pixel::PixelFrame, PixelPetArtReference) {
+    let base = datetime!(2026-07-08 12:00 UTC);
+    let now = base + time::Duration::milliseconds(ms);
+    let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(vm, now);
+    let mut state = PixelRendererState::new(&input, base);
+    let reference = state.art_reference_for(&request);
+    let frame = render_pixel_frame(PixelRendererTick {
+        input: &input,
+        art_reference: &reference,
+        viewport: PixelViewport::companion_default(),
+        now,
+        state: &mut state,
+    });
+    (frame, reference)
+}
+
 fn frame_for(vm: &WatchViewModel, ms: i64) -> glorp::presentation::pixel::PixelFrame {
     let base = datetime!(2026-07-08 12:00 UTC);
     let now = base + time::Duration::milliseconds(ms);
+    let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(vm, now);
+    let mut state = PixelRendererState::new(&input, base);
+    let reference = state.art_reference_for(&request);
+    render_pixel_frame(PixelRendererTick {
+        input: &input,
+        art_reference: &reference,
+        viewport: PixelViewport::companion_default(),
+        now,
+        state: &mut state,
+    })
+}
+
+fn frame_for_procedural_fallback(
+    vm: &WatchViewModel,
+    ms: i64,
+) -> glorp::presentation::pixel::PixelFrame {
+    let base = datetime!(2026-07-08 12:00 UTC);
+    let now = base + time::Duration::milliseconds(ms);
     let input = PixelPetInput::from_watch_view_model(vm, now);
+    let reference = PixelPetArtReference {
+        species: input.identity.species,
+        stage: input.identity.stage,
+        mood: input.mood,
+        pose: PixelArtPoseKey {
+            tick: 0,
+            hold_eyes_closed: false,
+            blink_suppression_ticks: 0,
+            blink_slowdown: 0,
+            soft_eyes: false,
+            work_accent: "none",
+            feed_reaction: false,
+            glitch_patch_tier: None,
+            glitch_burst_level: None,
+            glitch_calm_mode: false,
+            glitch_feed_reaction: false,
+        },
+        width_cells: 0,
+        height_cells: 0,
+        occupied_cells: Vec::new(),
+        body_bounds: PixelCellBounds { min_x: 0, min_y: 0, max_x: 0, max_y: 0 },
+        foot_contact: PixelFootContact { cells: Vec::new() },
+        reference_checksum: PixelReferenceChecksum(0),
+        role_counts: std::collections::BTreeMap::new(),
+    };
     let mut state = PixelRendererState::new(&input, base);
     render_pixel_frame(PixelRendererTick {
         input: &input,
+        art_reference: &reference,
         viewport: PixelViewport::companion_default(),
         now,
         state: &mut state,
@@ -128,15 +193,19 @@ fn pixel_renderer_is_deterministic_for_same_input_sequence() {
 
     for ms in [0, 160, 320, 480, 640, 800, 960, 1_120] {
         let now = base + time::Duration::milliseconds(ms);
-        let input = PixelPetInput::from_watch_view_model(&vm, now);
+        let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(&vm, now);
+        let reference_a = state_a.art_reference_for(&request);
+        let reference_b = state_b.art_reference_for(&request);
         let frame_a = render_pixel_frame(PixelRendererTick {
             input: &input,
+            art_reference: &reference_a,
             viewport: PixelViewport::companion_default(),
             now,
             state: &mut state_a,
         });
         let frame_b = render_pixel_frame(PixelRendererTick {
             input: &input,
+            art_reference: &reference_b,
             viewport: PixelViewport::companion_default(),
             now,
             state: &mut state_b,
@@ -164,6 +233,69 @@ fn every_species_renders_non_empty_inside_the_frame() {
         assert!(bounds.max_x < frame.width);
         assert!(bounds.max_y < frame.height);
     }
+}
+
+#[test]
+fn all_species_all_stages_render_reference_driven_frames() {
+    const STAGES: [Stage; 7] = [
+        Stage::S0,
+        Stage::S1,
+        Stage::S2,
+        Stage::S3,
+        Stage::S4,
+        Stage::S5,
+        Stage::S6,
+    ];
+
+    for species in Species::all() {
+        for stage in STAGES {
+            let mut vm = WatchViewModel::fixture();
+            vm.pet_render.generated_species = species;
+            vm.pet_render.stage = stage;
+            vm.pet_render.mood = Mood::Content;
+
+            let (frame, reference) = frame_for_with_reference(&vm, 500);
+
+            assert!(
+                !reference.occupied_cells.is_empty(),
+                "{species:?} {stage:?} reference empty"
+            );
+            assert!(
+                frame.opaque_pixel_count() > 40,
+                "{species:?} {stage:?} frame empty"
+            );
+            let bounds = frame.opaque_bounds().expect("visible frame");
+            assert!(bounds.max_x < frame.width);
+            assert!(bounds.max_y < frame.height);
+        }
+    }
+}
+
+#[test]
+fn hero_frame_uses_reference_roles_not_species_only_shape() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Fuzz;
+    vm.pet_render.stage = Stage::S3;
+    vm.pet_render.mood = Mood::Content;
+
+    let (frame, reference) = frame_for_with_reference(&vm, 480);
+
+    assert!(reference.role_count(PixelArtRole::Locket) > 0);
+    assert!(
+        frame.changed_pixel_count(&frame_for_procedural_fallback(&vm, 480)) > 0,
+        "reference-driven renderer should no longer match the old procedural-only helper"
+    );
+}
+
+#[test]
+fn high_alpha_bounds_are_available_for_fit_checks() {
+    let vm = WatchViewModel::fixture();
+    let (frame, _reference) = frame_for_with_reference(&vm, 0);
+
+    let bounds = frame.alpha_bounds(200).expect("high alpha body bounds");
+
+    assert!(bounds.min_x <= bounds.max_x);
+    assert!(bounds.min_y <= bounds.max_y);
 }
 
 #[test]

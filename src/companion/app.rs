@@ -416,9 +416,11 @@ fn render_live_pixel_frame(
     pixel_state: &mut PixelRendererState,
     now: time::OffsetDateTime,
 ) -> (PixelFrame, PixelPetInput) {
-    let input = PixelPetInput::from_watch_view_model(vm, now);
+    let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(vm, now);
+    let art_reference = pixel_state.art_reference_for(&request);
     let frame = render_pixel_frame(PixelRendererTick {
         input: &input,
+        art_reference: &art_reference,
         viewport: PixelViewport::companion_default(),
         now,
         state: pixel_state,
