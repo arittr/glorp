@@ -447,14 +447,10 @@ fn cross_tank_placement(
         .habitat
         .y
         .saturating_add((input.geometry.habitat.height / 3).max(1));
-    let col = oscillating_col(input, id.as_str(), row, sprite, 3);
-    build_placement(id, input, sprite, col, row, style, |cell| {
-        if cell.col == 0 {
-            HabitatPetLayer::Behind
-        } else {
-            HabitatPetLayer::Foreground
-        }
-    })
+    let (start, end) = oscillating_bounds(input, row, sprite, 3);
+    let col = oscillating_col_between(input, id.as_str(), start, end);
+    let layer = cross_tank_layer_for_col(start, end, col);
+    build_placement(id, input, sprite, col, row, style, move |_| layer)
 }
 
 fn lower_lane_placement(
@@ -702,6 +698,16 @@ fn oscillating_col(
     sprite: &[SpriteCell],
     padding: u16,
 ) -> u16 {
+    let (start, end) = oscillating_bounds(input, row, sprite, padding);
+    oscillating_col_between(input, id, start, end)
+}
+
+fn oscillating_bounds(
+    input: &TankLifeRenderInput<'_>,
+    row: u16,
+    sprite: &[SpriteCell],
+    padding: u16,
+) -> (u16, u16) {
     let habitat = input.geometry.habitat;
     let sprite_width = sprite_width(sprite).max(1);
     let mut start = habitat.x.saturating_add(padding);
@@ -717,6 +723,10 @@ fn oscillating_col(
         end = end.saturating_sub(1);
     }
 
+    (start, end)
+}
+
+fn oscillating_col_between(input: &TankLifeRenderInput<'_>, id: &str, start: u16, end: u16) -> u16 {
     let span = end.saturating_sub(start);
     if span == 0 {
         return start;
@@ -727,6 +737,19 @@ fn oscillating_col(
         start.saturating_add(step as u16)
     } else {
         end.saturating_sub((step - u64::from(span)) as u16)
+    }
+}
+
+fn cross_tank_layer_for_col(start: u16, end: u16, col: u16) -> HabitatPetLayer {
+    let span = u32::from(end.saturating_sub(start));
+    if span == 0 {
+        return HabitatPetLayer::Behind;
+    }
+    let progress = u32::from(col.saturating_sub(start)).min(span);
+    if progress * 3 >= span && progress * 3 <= span * 2 {
+        HabitatPetLayer::Foreground
+    } else {
+        HabitatPetLayer::Behind
     }
 }
 
@@ -802,26 +825,6 @@ fn stable_hash(input: &str) -> u64 {
         hash = hash.wrapping_mul(PRIME);
         hash
     })
-}
-
-impl PartialOrd for HabitatPetLayer {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for HabitatPetLayer {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        habitat_pet_layer_rank(*self).cmp(&habitat_pet_layer_rank(*other))
-    }
-}
-
-fn habitat_pet_layer_rank(layer: HabitatPetLayer) -> u8 {
-    match layer {
-        HabitatPetLayer::Background => 0,
-        HabitatPetLayer::Behind => 1,
-        HabitatPetLayer::Foreground => 2,
-    }
 }
 
 #[cfg(test)]
@@ -1028,19 +1031,26 @@ mod tests {
     }
 
     #[test]
-    fn route_dependent_swimmer_has_behind_and_foreground_segments() {
+    fn route_dependent_swimmer_changes_whole_sprite_depth_over_route() {
         let geometry = TankLifeSurfaceGeometry::round_for_test(44, 18, 3);
-        let placements = tank_life_placements_for(&TankLifeRenderInput::for_test(
-            vec![TankInhabitantId::new(crate::game::habitat::NEEDLEFISH)],
-            &geometry,
-            time::macros::date!(2026 - 07 - 08),
-            1_800,
-        ));
+        let mut layers = Vec::new();
 
-        let layers = placements
-            .iter()
-            .flat_map(|placement| placement.cells.iter().map(|cell| cell.pet_layer))
-            .collect::<std::collections::BTreeSet<_>>();
+        for elapsed_seconds in [0, 900, 1_800, 2_700, 3_600] {
+            let placements = tank_life_placements_for(&TankLifeRenderInput::for_test(
+                vec![TankInhabitantId::new(crate::game::habitat::NEEDLEFISH)],
+                &geometry,
+                time::macros::date!(2026 - 07 - 08),
+                elapsed_seconds,
+            ));
+            let placement = placements.first().expect("needlefish should be visible");
+            let layer = placement.cells[0].pet_layer;
+            assert!(
+                placement.cells.iter().all(|cell| cell.pet_layer == layer),
+                "a swimmer should occupy one depth layer per route segment"
+            );
+            layers.push(layer);
+        }
+
         assert!(layers.contains(&crate::game::habitat::HabitatPetLayer::Behind));
         assert!(layers.contains(&crate::game::habitat::HabitatPetLayer::Foreground));
     }
