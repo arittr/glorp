@@ -12,6 +12,7 @@ const GLITCH_REPAIR_GLYPHS: [char; 4] = ['+', '=', ':', '.'];
 pub struct PixelArtPoseKey {
     pub tick: u64,
     pub hold_eyes_closed: bool,
+    pub blink_suppression_ticks: u8,
     pub blink_slowdown: u8,
     pub soft_eyes: bool,
     pub work_accent: &'static str,
@@ -27,6 +28,7 @@ impl PixelArtPoseKey {
         Self {
             tick: frame.tick,
             hold_eyes_closed: frame.hold_eyes_closed,
+            blink_suppression_ticks: frame.blink_suppression_ticks,
             blink_slowdown: frame.blink_slowdown,
             soft_eyes: frame.soft_eyes,
             work_accent: work_accent_label(frame.work_accent),
@@ -54,6 +56,13 @@ fn work_accent_label(accent: WorkAccent) -> &'static str {
         WorkAccent::Focused => "focused",
         WorkAccent::Dreamy => "dreamy",
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelCanonicalAnimationInputs {
+    pub tick: u64,
+    pub hold_eyes_closed: bool,
+    pub blink_suppression_ticks: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -464,6 +473,7 @@ fn reference_checksum(
     hash = hash_bytes(hash, request.mood.as_str().as_bytes());
     hash = hash_u64(hash, request.pose.tick);
     hash = hash_u8(hash, request.pose.hold_eyes_closed as u8);
+    hash = hash_u8(hash, request.pose.blink_suppression_ticks);
     hash = hash_u8(hash, request.pose.blink_slowdown);
     hash = hash_u8(hash, request.pose.soft_eyes as u8);
     hash = hash_bytes(hash, request.pose.work_accent.as_bytes());
