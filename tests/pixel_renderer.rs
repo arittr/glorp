@@ -158,3 +158,46 @@ fn asleep_eye_pixels_stay_opaque_inside_the_body() {
         );
     }
 }
+
+#[test]
+fn crystal_s0_asleep_eye_footprint_is_opaque_and_fully_drawn() {
+    let base = datetime!(2026-07-08 12:00 UTC);
+    let mut awake = WatchViewModel::fixture();
+    awake.pet_render.generated_species = Species::Crystal;
+    awake.pet_render.stage = Stage::S0;
+    awake.day_context.asleep = false;
+    awake.life_profile.calm_mode = false;
+
+    let mut asleep = awake.clone();
+    asleep.day_context.asleep = true;
+    asleep.life_profile.calm_mode = true;
+
+    let input = PixelPetInput::from_watch_view_model(&asleep, base);
+    let wander_phase = f32::from(input.identity.variation_key.bucket(19)) * 0.17;
+    let cx = 48_i16 + (wander_phase.sin() * 7.0 * 0.28).round() as i16;
+    let cy = 48_i16;
+    let awake_frame = frame_for(&awake, 0);
+    let asleep_frame = frame_for(&asleep, 0);
+
+    for x in [
+        cx - 9,
+        cx - 8,
+        cx - 7,
+        cx - 6,
+        cx + 5,
+        cx + 6,
+        cx + 7,
+        cx + 8,
+    ] {
+        let y = cy + 2;
+        let idx = usize::from(y as u16) * usize::from(asleep_frame.width) + usize::from(x as u16);
+        assert_eq!(
+            asleep_frame.pixels[idx].a, 255,
+            "crystal asleep eye pixel at ({x}, {y}) should stay opaque"
+        );
+        assert_ne!(
+            asleep_frame.pixels[idx], awake_frame.pixels[idx],
+            "crystal asleep eye pixel at ({x}, {y}) should be visibly drawn"
+        );
+    }
+}

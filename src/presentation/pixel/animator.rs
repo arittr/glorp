@@ -192,8 +192,9 @@ fn draw_face(
         return;
     }
     if input.sleep.asleep {
-        blend_rect(frame, cx - 10, cy + 2, 4, 1, dim_eye);
-        blend_rect(frame, cx + 6, cy + 2, 4, 1, dim_eye);
+        let (left_x, right_x, width) = asleep_eye_spans(input.identity.species);
+        blend_rect(frame, cx + left_x, cy + 2, width, 1, dim_eye);
+        blend_rect(frame, cx + right_x, cy + 2, width, 1, dim_eye);
         return;
     }
     fill_rect(frame, cx - 10, cy - 4, 3, 4, eye);
@@ -310,4 +311,11 @@ fn rgba_opaque(rgb: crate::pet::palette::Rgb) -> Rgba8 {
 
 fn rgba_with_alpha(rgb: crate::pet::palette::Rgb, alpha: u8) -> Rgba8 {
     Rgba8 { r: rgb.r, g: rgb.g, b: rgb.b, a: alpha }
+}
+
+fn asleep_eye_spans(species: Species) -> (i16, i16, i16) {
+    match species {
+        Species::Crystal => (-9, 5, 4),
+        _ => (-10, 6, 4),
+    }
 }
