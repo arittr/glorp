@@ -370,15 +370,11 @@ fn animate_pet() {
         let state = state.as_mut()?;
         if state.renderer_mode.is_pixel() {
             let now = time::OffsetDateTime::now_utc();
-            if let (Some(input), Some(pixel_state)) =
-                (&state.pixel_input, state.pixel_state.as_mut())
-            {
-                state.pixel_frame = Some(render_pixel_frame(PixelRendererTick {
-                    input,
-                    viewport: PixelViewport::companion_default(),
-                    now,
-                    state: pixel_state,
-                }));
+            if let Some(pixel_state) = state.pixel_state.as_mut() {
+                let (pixel_frame, pixel_input) =
+                    render_live_pixel_frame(&state.vm, pixel_state, now);
+                state.pixel_input = Some(pixel_input);
+                state.pixel_frame = Some(pixel_frame);
             }
             return Some(state.view.clone());
         }
@@ -413,6 +409,21 @@ fn advance_companion_animation(
     Ok(vm.pet_art != prev_pet_art
         || vm.pet_spans != prev_pet_spans
         || vm.breath_offset_y != prev_breath_offset_y)
+}
+
+fn render_live_pixel_frame(
+    vm: &WatchViewModel,
+    pixel_state: &mut PixelRendererState,
+    now: time::OffsetDateTime,
+) -> (PixelFrame, PixelPetInput) {
+    let input = PixelPetInput::from_watch_view_model(vm, now);
+    let frame = render_pixel_frame(PixelRendererTick {
+        input: &input,
+        viewport: PixelViewport::companion_default(),
+        now,
+        state: pixel_state,
+    });
+    (frame, input)
 }
 
 fn draw_scene(bounds: NSRect) {
@@ -1063,5 +1074,45 @@ mod tests {
 
         assert!(changed);
         assert_ne!(vm.pet_art, before);
+    }
+
+    #[test]
+    fn companion_pixel_tick_recomputes_pulse_age_between_polls() {
+        let base = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut vm = WatchViewModel::fixture();
+        vm.pet_render.generated_species = crate::pet::generation::Species::Glitch;
+        vm.pet_render.stage = crate::game::evolution::Stage::S4;
+        vm.life_profile.burst_level = 0.95;
+        vm.last_feed_pulse_at = Some(base);
+
+        let initial_input = PixelPetInput::from_watch_view_model(&vm, base);
+        let mut pixel_state = PixelRendererState::new(&initial_input, base);
+
+        let (first_frame, first_input) = render_live_pixel_frame(&vm, &mut pixel_state, base);
+        let (late_frame, late_input) = render_live_pixel_frame(
+            &vm,
+            &mut pixel_state,
+            base + time::Duration::milliseconds(1_600),
+        );
+
+        let first_accent_alpha = accent_alpha_sum(&first_frame, &first_input);
+        let late_accent_alpha = accent_alpha_sum(&late_frame, &late_input);
+        assert!(
+            late_accent_alpha < first_accent_alpha,
+            "live Pixel tick should decay feed-pulse aura without waiting for the next poll: first={first_accent_alpha}, late={late_accent_alpha}"
+        );
+    }
+
+    fn accent_alpha_sum(frame: &PixelFrame, input: &PixelPetInput) -> u32 {
+        frame
+            .pixels
+            .iter()
+            .filter(|pixel| {
+                pixel.r == input.palette.accent.r
+                    && pixel.g == input.palette.accent.g
+                    && pixel.b == input.palette.accent.b
+            })
+            .map(|pixel| u32::from(pixel.a))
+            .sum()
     }
 }
