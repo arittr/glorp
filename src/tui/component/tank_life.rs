@@ -1,5 +1,9 @@
-use ratatui::layout::Rect;
+use ratatui::{
+    layout::Rect,
+    style::{Color, Style},
+};
 
+use crate::game::habitat::{HabitatPetLayer, TankLifeRouteFamily};
 use crate::storage::state::TankInhabitantId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +61,49 @@ pub enum AnemoneMorph {
     DotColony,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpriteCell {
+    pub row: i16,
+    pub col: i16,
+    pub glyph: char,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TankLifeCell {
+    pub inhabitant_id: TankInhabitantId,
+    pub row: u16,
+    pub col: u16,
+    pub glyph: char,
+    pub style: Style,
+    pub pet_layer: HabitatPetLayer,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TankLifePlacement {
+    pub inhabitant_id: TankInhabitantId,
+    pub cells: Vec<TankLifeCell>,
+    pub bounds: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TankLifeLayerSegmentSummary {
+    pub inhabitant_id: TankInhabitantId,
+    pub pet_layer: HabitatPetLayer,
+    pub cell_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TankLifeRenderInput<'a> {
+    pub rendered_ids: Vec<TankInhabitantId>,
+    pub pet_seed: &'a str,
+    pub local_date: time::Date,
+    pub now: time::OffsetDateTime,
+    pub geometry: &'a TankLifeSurfaceGeometry,
+    pub pet_protected_regions: &'a [Rect],
+    pub color_capability: crate::tui::style::ColorCapability,
+    pub life_profile: crate::tui::life::PetLifeProfile,
+}
+
 impl TankLifeSurfaceGeometry {
     #[cfg(test)]
     pub fn round_for_test(cols: u16, rows: u16, max_moving_slots: usize) -> Self {
@@ -73,6 +120,17 @@ impl TankLifeSurfaceGeometry {
             max_moving_slots,
             literal_floor_allowed: false,
         }
+    }
+
+    pub fn cell_inside_aperture(&self, col: u16, row: u16) -> bool {
+        let Some(mask) = self.aperture_mask else {
+            return true;
+        };
+        let dx = i32::from(col) - i32::from(mask.center_col);
+        let dy = i32::from(row) - i32::from(mask.center_row);
+        let rx = i32::from(mask.radius_cols.max(1));
+        let ry = i32::from(mask.radius_rows.max(1));
+        (dx * dx * ry * ry + dy * dy * rx * rx) <= rx * rx * ry * ry
     }
 }
 
@@ -142,6 +200,119 @@ pub fn anemone_morph_for_day(pet_seed: &str, local_date: time::Date) -> AnemoneM
     }
 }
 
+pub fn anemone_anchor_sprite(morph: AnemoneMorph) -> Vec<SpriteCell> {
+    match morph {
+        AnemoneMorph::Flower => vec![
+            SpriteCell { row: 0, col: 1, glyph: '✺' },
+            SpriteCell { row: 1, col: 0, glyph: '╰' },
+            SpriteCell { row: 1, col: 1, glyph: '╯' },
+        ],
+        AnemoneMorph::Comb => vec![
+            SpriteCell { row: 0, col: 0, glyph: '╵' },
+            SpriteCell { row: 0, col: 1, glyph: '╷' },
+            SpriteCell { row: 0, col: 2, glyph: '╵' },
+            SpriteCell { row: 1, col: 0, glyph: '╰' },
+            SpriteCell { row: 1, col: 1, glyph: '┬' },
+            SpriteCell { row: 1, col: 2, glyph: '╯' },
+        ],
+        AnemoneMorph::Crown => vec![
+            SpriteCell { row: 0, col: 0, glyph: '⌁' },
+            SpriteCell { row: 0, col: 1, glyph: '⌁' },
+            SpriteCell { row: 1, col: 0, glyph: '╰' },
+            SpriteCell { row: 1, col: 1, glyph: '╮' },
+            SpriteCell { row: 2, col: 0, glyph: '╱' },
+            SpriteCell { row: 2, col: 1, glyph: '╲' },
+        ],
+        AnemoneMorph::DotColony => vec![
+            SpriteCell { row: 0, col: 0, glyph: '⁙' },
+            SpriteCell { row: 0, col: 1, glyph: '⁙' },
+            SpriteCell { row: 1, col: 0, glyph: '╰' },
+            SpriteCell { row: 1, col: 1, glyph: '╯' },
+        ],
+    }
+}
+
+pub fn host_fish_sprite() -> Vec<SpriteCell> {
+    vec![
+        SpriteCell { row: 0, col: 0, glyph: '›' },
+        SpriteCell { row: 0, col: 1, glyph: '·' },
+    ]
+}
+
+pub fn validate_tank_life_catalog() -> std::result::Result<(), String> {
+    use unicode_width::UnicodeWidthChar;
+
+    let samples = [
+        sprite_for(crate::game::habitat::GLASS_SHRIMP, 0, None),
+        sprite_for(crate::game::habitat::GLASS_SHRIMP, 1, None),
+        sprite_for(crate::game::habitat::NEEDLEFISH, 0, None),
+        sprite_for(crate::game::habitat::GLASS_SNAIL, 0, None),
+        sprite_for(crate::game::habitat::BURROWER, 0, None),
+        sprite_for(crate::game::habitat::RIM_SKIMMER, 0, None),
+        sprite_for(crate::game::habitat::SAND_RAY, 0, None),
+        sprite_for(crate::game::habitat::SCHOOLLET, 0, None),
+        anemone_anchor_sprite(AnemoneMorph::Flower),
+        anemone_anchor_sprite(AnemoneMorph::Comb),
+        anemone_anchor_sprite(AnemoneMorph::Crown),
+        anemone_anchor_sprite(AnemoneMorph::DotColony),
+        host_fish_sprite(),
+    ];
+
+    for sprite in samples {
+        for cell in sprite {
+            if UnicodeWidthChar::width(cell.glyph) != Some(1) {
+                return Err(format!(
+                    "tank-life glyph {:?} is not terminal width 1",
+                    cell.glyph
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn tank_life_placements_for(input: &TankLifeRenderInput<'_>) -> Vec<TankLifePlacement> {
+    input
+        .rendered_ids
+        .iter()
+        .filter_map(|id| placement_for_id(id, input))
+        .collect()
+}
+
+pub fn layer_segment_summaries(
+    placements: &[TankLifePlacement],
+) -> Vec<TankLifeLayerSegmentSummary> {
+    let mut summaries = Vec::new();
+    for placement in placements {
+        for layer in [
+            HabitatPetLayer::Background,
+            HabitatPetLayer::Behind,
+            HabitatPetLayer::Foreground,
+        ] {
+            let cell_count = placement
+                .cells
+                .iter()
+                .filter(|cell| cell.pet_layer == layer)
+                .count();
+            if cell_count > 0 {
+                summaries.push(TankLifeLayerSegmentSummary {
+                    inhabitant_id: placement.inhabitant_id.clone(),
+                    pet_layer: layer,
+                    cell_count,
+                });
+            }
+        }
+    }
+    summaries
+}
+
+pub fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
 pub fn project_tank_life_cast(
     canonical_ids: &[TankInhabitantId],
     geometry: &TankLifeSurfaceGeometry,
@@ -190,6 +361,438 @@ fn footprint_can_fit(id: &str, geometry: &TankLifeSurfaceGeometry) -> bool {
     geometry.habitat.width >= min.0 && geometry.habitat.height >= min.1
 }
 
+fn sprite_for(id: &str, phase: u64, morph: Option<AnemoneMorph>) -> Vec<SpriteCell> {
+    match id {
+        crate::game::habitat::GLASS_SHRIMP => {
+            if phase.is_multiple_of(2) {
+                vec![
+                    SpriteCell { row: 0, col: 0, glyph: ',' },
+                    SpriteCell { row: 0, col: 1, glyph: '~' },
+                ]
+            } else {
+                vec![
+                    SpriteCell { row: 0, col: 0, glyph: ',' },
+                    SpriteCell { row: 0, col: 1, glyph: '≈' },
+                ]
+            }
+        }
+        crate::game::habitat::NEEDLEFISH => vec![
+            SpriteCell { row: 0, col: 0, glyph: '‹' },
+            SpriteCell { row: 0, col: 1, glyph: '·' },
+        ],
+        crate::game::habitat::GLASS_SNAIL => {
+            vec![SpriteCell { row: 0, col: 0, glyph: '◔' }]
+        }
+        crate::game::habitat::BURROWER => {
+            vec![SpriteCell { row: 0, col: 0, glyph: '▴' }]
+        }
+        crate::game::habitat::RIM_SKIMMER => {
+            vec![SpriteCell { row: 0, col: 0, glyph: '◜' }]
+        }
+        crate::game::habitat::SAND_RAY => {
+            vec![SpriteCell { row: 0, col: 0, glyph: '▱' }]
+        }
+        crate::game::habitat::SCHOOLLET => vec![
+            SpriteCell { row: 0, col: 0, glyph: '‹' },
+            SpriteCell { row: 0, col: 2, glyph: '‹' },
+        ],
+        crate::game::habitat::ANEMONE_HOST => {
+            anemone_anchor_sprite(morph.unwrap_or(AnemoneMorph::Flower))
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn placement_for_id(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+) -> Option<TankLifePlacement> {
+    let spec = crate::game::habitat::tank_inhabitant_spec(id)?;
+    let phase = route_phase(id.as_str(), input);
+    let morph = if id.as_str() == crate::game::habitat::ANEMONE_HOST {
+        Some(anemone_morph_for_day(input.pet_seed, input.local_date))
+    } else {
+        None
+    };
+    let sprite = sprite_for(id.as_str(), phase, morph);
+    if sprite.is_empty() {
+        return None;
+    }
+    let style = tank_life_style(spec.low_color_key, input.color_capability);
+
+    match spec.route_family {
+        TankLifeRouteFamily::CrossTankSwimmer => cross_tank_placement(id, input, &sprite, style),
+        TankLifeRouteFamily::LowerLaneResident => lower_lane_placement(
+            id,
+            input,
+            &sprite,
+            style,
+            spec.id == crate::game::habitat::SAND_RAY,
+        ),
+        TankLifeRouteFamily::GlassResident => glass_placement(id, input, &sprite, style),
+        TankLifeRouteFamily::RimResident => rim_placement(id, input, &sprite, style),
+        TankLifeRouteFamily::LowerEdgeResident => lower_edge_placement(id, input, &sprite, style),
+        TankLifeRouteFamily::HostCombo => host_combo_placement(id, input, &sprite, style),
+    }
+}
+
+fn cross_tank_placement(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    sprite: &[SpriteCell],
+    style: Style,
+) -> Option<TankLifePlacement> {
+    let row = input
+        .geometry
+        .habitat
+        .y
+        .saturating_add((input.geometry.habitat.height / 3).max(1));
+    let col = oscillating_col(input, id.as_str(), row, sprite, 3);
+    build_placement(id, input, sprite, col, row, style, |cell| {
+        if cell.col == 0 {
+            HabitatPetLayer::Behind
+        } else {
+            HabitatPetLayer::Foreground
+        }
+    })
+}
+
+fn lower_lane_placement(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    sprite: &[SpriteCell],
+    style: Style,
+    extra_pet_gap: bool,
+) -> Option<TankLifePlacement> {
+    let row = lower_lane_row(input.geometry).saturating_sub(u16::from(extra_pet_gap));
+    let col = oscillating_col(input, id.as_str(), row, sprite, 4);
+    build_placement(id, input, sprite, col, row, style, |_| {
+        HabitatPetLayer::Foreground
+    })
+}
+
+fn glass_placement(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    sprite: &[SpriteCell],
+    style: Style,
+) -> Option<TankLifePlacement> {
+    let habitat = input.geometry.habitat;
+    let phase = route_phase(id.as_str(), input);
+    let right_side = phase.is_multiple_of(2);
+    let col = if right_side {
+        habitat.x.saturating_add(habitat.width.saturating_sub(2))
+    } else {
+        habitat.x.saturating_add(1)
+    };
+    let height_span = habitat.height.saturating_sub(4).max(1);
+    let row = habitat
+        .y
+        .saturating_add(2)
+        .saturating_add((phase % u64::from(height_span)) as u16);
+    build_placement(id, input, sprite, col, row, style, |_| {
+        HabitatPetLayer::Foreground
+    })
+}
+
+fn rim_placement(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    sprite: &[SpriteCell],
+    style: Style,
+) -> Option<TankLifePlacement> {
+    let habitat = input.geometry.habitat;
+    let phase = route_phase(id.as_str(), input);
+    let rear_arc = phase.is_multiple_of(2);
+    let row = if rear_arc {
+        habitat.y.saturating_add(2)
+    } else {
+        lower_lane_row(input.geometry).saturating_sub(1)
+    };
+    let col = oscillating_col(input, id.as_str(), row, sprite, 5);
+    build_placement(id, input, sprite, col, row, style, move |_| {
+        if rear_arc {
+            HabitatPetLayer::Behind
+        } else {
+            HabitatPetLayer::Foreground
+        }
+    })
+}
+
+fn lower_edge_placement(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    sprite: &[SpriteCell],
+    style: Style,
+) -> Option<TankLifePlacement> {
+    let visible_rows = (route_phase(id.as_str(), input) % 3) as u16;
+    if visible_rows == 0 {
+        return None;
+    }
+    let mut burrow_sprite = Vec::new();
+    for row in 0..visible_rows {
+        burrow_sprite.extend(sprite.iter().map(|cell| SpriteCell {
+            row: cell.row - row as i16,
+            col: cell.col,
+            glyph: cell.glyph,
+        }));
+    }
+    let row = lower_lane_row(input.geometry);
+    let col = oscillating_col(input, id.as_str(), row, &burrow_sprite, 5);
+    build_placement(id, input, &burrow_sprite, col, row, style, |_| {
+        HabitatPetLayer::Foreground
+    })
+}
+
+fn host_combo_placement(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    anchor_sprite: &[SpriteCell],
+    style: Style,
+) -> Option<TankLifePlacement> {
+    let habitat = input.geometry.habitat;
+    let anchor_width = sprite_width(anchor_sprite).max(1);
+    let anchor_height = sprite_height(anchor_sprite).max(1);
+    let anchor_col = habitat
+        .x
+        .saturating_add(habitat.width.saturating_sub(anchor_width) / 2);
+    let anchor_row = lower_lane_row(input.geometry)
+        .saturating_sub(anchor_height.saturating_sub(1))
+        .saturating_sub(1);
+    let mut cells = placement_cells(
+        id,
+        input,
+        anchor_sprite,
+        anchor_col,
+        anchor_row,
+        style,
+        |_| HabitatPetLayer::Behind,
+    );
+
+    let host_sprite = host_fish_sprite();
+    let host_on_right = route_phase(id.as_str(), input).is_multiple_of(2);
+    let host_col = if host_on_right {
+        anchor_col.saturating_add(anchor_width).saturating_add(1)
+    } else {
+        anchor_col.saturating_sub(3)
+    };
+    let host_row = anchor_row.saturating_sub(1);
+    cells.extend(placement_cells(
+        id,
+        input,
+        &host_sprite,
+        host_col,
+        host_row,
+        style,
+        |_| HabitatPetLayer::Foreground,
+    ));
+    placement_from_cells(id, cells)
+}
+
+fn build_placement<F>(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    sprite: &[SpriteCell],
+    base_col: u16,
+    base_row: u16,
+    style: Style,
+    layer_for: F,
+) -> Option<TankLifePlacement>
+where
+    F: Fn(SpriteCell) -> HabitatPetLayer,
+{
+    let cells = placement_cells(id, input, sprite, base_col, base_row, style, layer_for);
+    placement_from_cells(id, cells)
+}
+
+fn placement_cells<F>(
+    id: &TankInhabitantId,
+    input: &TankLifeRenderInput<'_>,
+    sprite: &[SpriteCell],
+    base_col: u16,
+    base_row: u16,
+    style: Style,
+    layer_for: F,
+) -> Vec<TankLifeCell>
+where
+    F: Fn(SpriteCell) -> HabitatPetLayer,
+{
+    sprite
+        .iter()
+        .filter_map(|cell| {
+            let col = i32::from(base_col) + i32::from(cell.col);
+            let row = i32::from(base_row) + i32::from(cell.row);
+            if col < 0 || row < 0 {
+                return None;
+            }
+            let col = u16::try_from(col).ok()?;
+            let row = u16::try_from(row).ok()?;
+            let pet_layer = layer_for(*cell);
+            if !cell_allowed(input, col, row, pet_layer) {
+                return None;
+            }
+            Some(TankLifeCell {
+                inhabitant_id: id.clone(),
+                row,
+                col,
+                glyph: cell.glyph,
+                style,
+                pet_layer,
+            })
+        })
+        .collect()
+}
+
+fn placement_from_cells(
+    id: &TankInhabitantId,
+    cells: Vec<TankLifeCell>,
+) -> Option<TankLifePlacement> {
+    if cells.is_empty() {
+        return None;
+    }
+    let min_col = cells.iter().map(|cell| cell.col).min()?;
+    let max_col = cells.iter().map(|cell| cell.col).max()?;
+    let min_row = cells.iter().map(|cell| cell.row).min()?;
+    let max_row = cells.iter().map(|cell| cell.row).max()?;
+    Some(TankLifePlacement {
+        inhabitant_id: id.clone(),
+        bounds: Rect::new(
+            min_col,
+            min_row,
+            max_col.saturating_sub(min_col).saturating_add(1),
+            max_row.saturating_sub(min_row).saturating_add(1),
+        ),
+        cells,
+    })
+}
+
+fn cell_allowed(
+    input: &TankLifeRenderInput<'_>,
+    col: u16,
+    row: u16,
+    layer: HabitatPetLayer,
+) -> bool {
+    rect_contains(input.geometry.habitat, col, row)
+        && input.geometry.cell_inside_aperture(col, row)
+        && !input
+            .geometry
+            .reserved_regions
+            .iter()
+            .any(|region| rect_contains(*region, col, row))
+        && !(layer == HabitatPetLayer::Foreground
+            && input
+                .pet_protected_regions
+                .iter()
+                .any(|region| rect_contains(*region, col, row)))
+}
+
+fn lower_lane_row(geometry: &TankLifeSurfaceGeometry) -> u16 {
+    let floor_gap = if geometry.literal_floor_allowed { 1 } else { 4 };
+    geometry
+        .habitat
+        .y
+        .saturating_add(geometry.habitat.height.saturating_sub(floor_gap + 1))
+        .max(geometry.habitat.y)
+}
+
+fn oscillating_col(
+    input: &TankLifeRenderInput<'_>,
+    id: &str,
+    row: u16,
+    sprite: &[SpriteCell],
+    padding: u16,
+) -> u16 {
+    let habitat = input.geometry.habitat;
+    let sprite_width = sprite_width(sprite).max(1);
+    let mut start = habitat.x.saturating_add(padding);
+    let mut end = habitat
+        .x
+        .saturating_add(habitat.width.saturating_sub(sprite_width))
+        .saturating_sub(padding);
+
+    while start < end && !origin_cells_inside_aperture(input.geometry, sprite, start, row) {
+        start = start.saturating_add(1);
+    }
+    while end > start && !origin_cells_inside_aperture(input.geometry, sprite, end, row) {
+        end = end.saturating_sub(1);
+    }
+
+    let span = end.saturating_sub(start);
+    if span == 0 {
+        return start;
+    }
+    let period = u64::from(span) * 2;
+    let step = route_phase(id, input) % period;
+    if step <= u64::from(span) {
+        start.saturating_add(step as u16)
+    } else {
+        end.saturating_sub((step - u64::from(span)) as u16)
+    }
+}
+
+fn origin_cells_inside_aperture(
+    geometry: &TankLifeSurfaceGeometry,
+    sprite: &[SpriteCell],
+    base_col: u16,
+    base_row: u16,
+) -> bool {
+    sprite.iter().all(|cell| {
+        let col = i32::from(base_col) + i32::from(cell.col);
+        let row = i32::from(base_row) + i32::from(cell.row);
+        col >= 0
+            && row >= 0
+            && u16::try_from(col)
+                .ok()
+                .zip(u16::try_from(row).ok())
+                .is_some_and(|(col, row)| geometry.cell_inside_aperture(col, row))
+    })
+}
+
+fn sprite_width(sprite: &[SpriteCell]) -> u16 {
+    sprite
+        .iter()
+        .filter_map(|cell| u16::try_from(i32::from(cell.col) + 1).ok())
+        .max()
+        .unwrap_or(0)
+}
+
+fn sprite_height(sprite: &[SpriteCell]) -> u16 {
+    sprite
+        .iter()
+        .filter_map(|cell| u16::try_from(i32::from(cell.row) + 1).ok())
+        .max()
+        .unwrap_or(0)
+}
+
+fn route_phase(id: &str, input: &TankLifeRenderInput<'_>) -> u64 {
+    let timing_scalar = if input.life_profile.calm_mode { 2 } else { 1 };
+    let tick = input.now.unix_timestamp().max(0) as u64 / (30 * timing_scalar);
+    stable_hash(&format!(
+        "tank-life-route-v1|{}|{}|{}",
+        input.pet_seed, input.local_date, id
+    ))
+    .wrapping_add(tick)
+}
+
+fn tank_life_style(
+    low_color_key: &str,
+    color_capability: crate::tui::style::ColorCapability,
+) -> Style {
+    if matches!(color_capability, crate::tui::style::ColorCapability::Flat) {
+        return Style::default();
+    }
+    let color = match low_color_key {
+        "shrimp" => Color::Rgb(0xf0, 0xb0, 0x8a),
+        "fish" | "school" => Color::Rgb(0x9c, 0xd8, 0xe8),
+        "snail" => Color::Rgb(0xd8, 0xc0, 0x90),
+        "burrower" | "ray" => Color::Rgb(0xc8, 0xb0, 0x88),
+        "rim" => Color::Rgb(0xb8, 0xd8, 0xf0),
+        "host" => Color::Rgb(0xe8, 0xb0, 0xd0),
+        _ => crate::tui::style::tokenpet_palette().dim.rgb,
+    };
+    Style::default().fg(color)
+}
+
 fn stable_hash(input: &str) -> u64 {
     const OFFSET: u64 = 1_469_598_103_934_665_603;
     const PRIME: u64 = 1_099_511_628_211;
@@ -199,6 +802,26 @@ fn stable_hash(input: &str) -> u64 {
         hash = hash.wrapping_mul(PRIME);
         hash
     })
+}
+
+impl PartialOrd for HabitatPetLayer {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HabitatPetLayer {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        habitat_pet_layer_rank(*self).cmp(&habitat_pet_layer_rank(*other))
+    }
+}
+
+fn habitat_pet_layer_rank(layer: HabitatPetLayer) -> u8 {
+    match layer {
+        HabitatPetLayer::Background => 0,
+        HabitatPetLayer::Behind => 1,
+        HabitatPetLayer::Foreground => 2,
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +851,26 @@ mod tests {
 
     fn ids(ids: &[TankInhabitantId]) -> Vec<&str> {
         ids.iter().map(|id| id.as_str()).collect()
+    }
+
+    impl<'a> TankLifeRenderInput<'a> {
+        fn for_test(
+            rendered_ids: Vec<TankInhabitantId>,
+            geometry: &'a TankLifeSurfaceGeometry,
+            local_date: time::Date,
+            elapsed_seconds: i64,
+        ) -> Self {
+            Self {
+                rendered_ids,
+                pet_seed: "glorp-tank-life-fixture",
+                local_date,
+                now: time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(elapsed_seconds),
+                geometry,
+                pet_protected_regions: &[],
+                color_capability: crate::tui::style::ColorCapability::Truecolor,
+                life_profile: crate::tui::life::PetLifeProfile::default(),
+            }
+        }
     }
 
     #[test]
@@ -354,5 +997,77 @@ mod tests {
             .skipped
             .iter()
             .all(|skip| skip.reason == TankLifeSkipReason::SurfaceBudget));
+    }
+
+    #[test]
+    fn catalog_glyphs_are_single_width_cells() {
+        validate_tank_life_catalog().unwrap();
+    }
+
+    #[test]
+    fn anemone_host_morphs_share_host_behavior_but_unique_anchor_cells() {
+        let morphs = [
+            AnemoneMorph::Flower,
+            AnemoneMorph::Comb,
+            AnemoneMorph::Crown,
+            AnemoneMorph::DotColony,
+        ];
+        let anchors = morphs
+            .into_iter()
+            .map(anemone_anchor_sprite)
+            .collect::<Vec<_>>();
+
+        assert!(anchors.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(
+            host_fish_sprite(),
+            vec![
+                SpriteCell { row: 0, col: 0, glyph: '›' },
+                SpriteCell { row: 0, col: 1, glyph: '·' },
+            ]
+        );
+    }
+
+    #[test]
+    fn route_dependent_swimmer_has_behind_and_foreground_segments() {
+        let geometry = TankLifeSurfaceGeometry::round_for_test(44, 18, 3);
+        let placements = tank_life_placements_for(&TankLifeRenderInput::for_test(
+            vec![TankInhabitantId::new(crate::game::habitat::NEEDLEFISH)],
+            &geometry,
+            time::macros::date!(2026 - 07 - 08),
+            1_800,
+        ));
+
+        let layers = placements
+            .iter()
+            .flat_map(|placement| placement.cells.iter().map(|cell| cell.pet_layer))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(layers.contains(&crate::game::habitat::HabitatPetLayer::Behind));
+        assert!(layers.contains(&crate::game::habitat::HabitatPetLayer::Foreground));
+    }
+
+    #[test]
+    fn round_routes_avoid_reserved_regions() {
+        let geometry = TankLifeSurfaceGeometry::round_for_test(44, 18, 3);
+        let input = TankLifeRenderInput::for_test(
+            vec![
+                TankInhabitantId::new(crate::game::habitat::GLASS_SHRIMP),
+                TankInhabitantId::new(crate::game::habitat::RIM_SKIMMER),
+                TankInhabitantId::new(crate::game::habitat::ANEMONE_HOST),
+            ],
+            &geometry,
+            time::macros::date!(2026 - 07 - 08),
+            2_400,
+        );
+
+        for placement in tank_life_placements_for(&input) {
+            for cell in placement.cells {
+                assert!(!input
+                    .geometry
+                    .reserved_regions
+                    .iter()
+                    .any(|region| rect_contains(*region, cell.col, cell.row)));
+                assert!(input.geometry.cell_inside_aperture(cell.col, cell.row));
+            }
+        }
     }
 }
