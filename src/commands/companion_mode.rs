@@ -25,10 +25,44 @@ impl std::str::FromStr for CompanionReviewSize {
         let height = height
             .parse::<u16>()
             .map_err(|_| "height must be an integer".to_string())?;
-        if width < 120 || height < 120 {
-            return Err("review size must be at least 120x120".to_string());
+        if width < 260 || height < 260 {
+            return Err("review size must be at least 260x260".to_string());
         }
         Ok(Self { width, height })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompanionReviewSize;
+    use std::str::FromStr;
+
+    #[test]
+    fn review_size_rejects_malformed_values() {
+        assert_eq!(
+            CompanionReviewSize::from_str("260").unwrap_err(),
+            "expected WIDTHxHEIGHT, for example 260x260"
+        );
+        assert_eq!(
+            CompanionReviewSize::from_str("wide x tall").unwrap_err(),
+            "width must be an integer"
+        );
+    }
+
+    #[test]
+    fn review_size_rejects_dimensions_below_window_minimum() {
+        assert_eq!(
+            CompanionReviewSize::from_str("120x120").unwrap_err(),
+            "review size must be at least 260x260"
+        );
+        assert_eq!(
+            CompanionReviewSize::from_str("259x400").unwrap_err(),
+            "review size must be at least 260x260"
+        );
+        assert_eq!(
+            CompanionReviewSize::from_str("400x259").unwrap_err(),
+            "review size must be at least 260x260"
+        );
     }
 }
 
