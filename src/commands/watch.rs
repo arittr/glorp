@@ -105,11 +105,12 @@ pub fn build_dev_pet_view_model_at(
 }
 
 pub fn build_watch_view_model(state: &PetState, usage_db: &Path) -> Result<WatchViewModel> {
-    build_watch_view_model_at(
+    build_watch_view_model_with_mode_at(
         state,
         usage_db,
         OffsetDateTime::now_utc(),
         LocalDayMapper::System,
+        WatchViewModelRenderMode::Rendered,
     )
 }
 
@@ -118,6 +119,55 @@ pub(crate) fn build_watch_view_model_at(
     usage_db: &Path,
     now: OffsetDateTime,
     mapper: LocalDayMapper,
+) -> Result<WatchViewModel> {
+    build_watch_view_model_with_mode_at(
+        state,
+        usage_db,
+        now,
+        mapper,
+        WatchViewModelRenderMode::Rendered,
+    )
+}
+
+pub(crate) fn build_watch_view_model_semantic_at(
+    state: &PetState,
+    usage_db: &Path,
+    now: OffsetDateTime,
+    mapper: LocalDayMapper,
+) -> Result<WatchViewModel> {
+    build_watch_view_model_with_mode_at(
+        state,
+        usage_db,
+        now,
+        mapper,
+        WatchViewModelRenderMode::SemanticOnly,
+    )
+}
+
+pub(crate) fn build_watch_view_model_semantic(
+    state: &PetState,
+    usage_db: &Path,
+) -> Result<WatchViewModel> {
+    build_watch_view_model_semantic_at(
+        state,
+        usage_db,
+        OffsetDateTime::now_utc(),
+        LocalDayMapper::System,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchViewModelRenderMode {
+    Rendered,
+    SemanticOnly,
+}
+
+fn build_watch_view_model_with_mode_at(
+    state: &PetState,
+    usage_db: &Path,
+    now: OffsetDateTime,
+    mapper: LocalDayMapper,
+    render_mode: WatchViewModelRenderMode,
 ) -> Result<WatchViewModel> {
     let usage_store = UsageStore::open(usage_db)?;
     let day_context = crate::tui::day::build_day_context(&usage_store, state, now, mapper);
@@ -368,12 +418,14 @@ pub(crate) fn build_watch_view_model_at(
             BioView { hatched_label, age_label }
         },
     };
-    rerender_pet_for_view_model(
-        &mut vm,
-        now.unix_timestamp().max(0) as u64,
-        day_context.asleep,
-        now,
-    )?;
+    if matches!(render_mode, WatchViewModelRenderMode::Rendered) {
+        rerender_pet_for_view_model(
+            &mut vm,
+            now.unix_timestamp().max(0) as u64,
+            day_context.asleep,
+            now,
+        )?;
+    }
     Ok(vm)
 }
 
@@ -1228,6 +1280,47 @@ mod tests {
             vm.bio.hatched_label.contains("24"),
             "got {}",
             vm.bio.hatched_label
+        );
+    }
+
+    #[test]
+    fn semantic_watch_view_model_skips_terminal_pet_art_while_rendered_builder_keeps_it() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite");
+        UsageStore::open(&db_path).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let state = PetState::new_for_test("semantic-test", "buddy");
+
+        let rendered = build_watch_view_model_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
+        let semantic = build_watch_view_model_semantic_at(
+            &state,
+            &db_path,
+            now,
+            LocalDayMapper::Fixed(time::UtcOffset::UTC),
+        )
+        .unwrap();
+
+        assert!(
+            !rendered.pet_art.is_empty(),
+            "rendered builder should still populate terminal pet art"
+        );
+        assert!(
+            !rendered.pet_spans.is_empty(),
+            "rendered builder should still populate terminal pet spans"
+        );
+        assert!(
+            semantic.pet_art.is_empty(),
+            "semantic builder should leave terminal pet art empty"
+        );
+        assert!(
+            semantic.pet_spans.is_empty(),
+            "semantic builder should leave terminal pet spans empty"
         );
     }
 

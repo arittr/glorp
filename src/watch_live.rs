@@ -1,4 +1,6 @@
-use crate::commands::watch::{build_watch_view_model, poll_usage_and_apply};
+use crate::commands::watch::{
+    build_watch_view_model, build_watch_view_model_semantic, poll_usage_and_apply,
+};
 use crate::paths::AppPaths;
 use crate::storage::state::{PetState, StateStore};
 use crate::tui::life::{AppliedUsageSignal, LifeSignalState};
@@ -19,6 +21,12 @@ pub struct LiveWatchUpdate {
     pub pet_state: PetState,
     pub vm: WatchViewModel,
     pub applied_signal: AppliedUsageSignal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveWatchRenderMode {
+    Rendered,
+    Semantic,
 }
 
 /// Applies a usage signal to the shared presentation state and stamps the
@@ -45,6 +53,7 @@ pub fn spawn_live_watch_worker(
     paths: AppPaths,
     interval: StdDuration,
     name: &str,
+    render_mode: LiveWatchRenderMode,
 ) -> mpsc::Receiver<LiveWatchUpdate> {
     let (tx, rx) = mpsc::channel::<LiveWatchUpdate>();
     let thread_name = name.to_string();
@@ -64,7 +73,14 @@ pub fn spawn_live_watch_worker(
                         // behavior and the V1 spec.
                         Ok(None) | Err(_) => continue,
                     };
-                let vm = match build_watch_view_model(&outcome.state, &paths.usage_db) {
+                let vm = match match render_mode {
+                    LiveWatchRenderMode::Rendered => {
+                        build_watch_view_model(&outcome.state, &paths.usage_db)
+                    }
+                    LiveWatchRenderMode::Semantic => {
+                        build_watch_view_model_semantic(&outcome.state, &paths.usage_db)
+                    }
+                } {
                     Ok(vm) => vm,
                     // Silently skip poll/build failures: the facade keeps showing the last good
                     // state until the next successful poll. This matches the existing menubar

@@ -31,7 +31,8 @@ use crate::storage::day_axis::LocalDayMapper;
 use crate::storage::state::{PetState, StateStore};
 use crate::tui::view_model::WatchViewModel;
 use crate::watch_live::{
-    spawn_live_watch_worker, stamp_live_presentation, LiveWatchUpdate, WatchPresentationState,
+    spawn_live_watch_worker, stamp_live_presentation, LiveWatchRenderMode, LiveWatchUpdate,
+    WatchPresentationState,
 };
 
 use super::render;
@@ -124,7 +125,12 @@ pub fn run() -> Result<()> {
 
     let status_item = build_status_item(mtm, &controller, &initial_pet)?;
 
-    let poll_rx = spawn_live_watch_worker(paths, POLL_INTERVAL, "glorp-menubar-poll");
+    let poll_rx = spawn_live_watch_worker(
+        paths,
+        POLL_INTERVAL,
+        "glorp-menubar-poll",
+        LiveWatchRenderMode::Rendered,
+    );
 
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {

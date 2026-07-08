@@ -9,7 +9,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::commands::companion_mode::CompanionRendererMode;
-use crate::commands::watch::{build_watch_view_model_at, rerender_pet_for_view_model};
+use crate::commands::watch::{
+    build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
+};
 use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
@@ -27,7 +29,7 @@ use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabil
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::storage::state::StateStore;
 use crate::tui::view_model::WatchViewModel;
-use crate::watch_live::{LiveWatchUpdate, WatchPresentationState};
+use crate::watch_live::{LiveWatchRenderMode, LiveWatchUpdate, WatchPresentationState};
 use objc2::declare_class;
 use objc2::msg_send_id;
 use objc2::mutability;
@@ -143,12 +145,21 @@ pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
         now,
         crate::storage::day_axis::LocalDayMapper::System,
     )?;
-    let initial_vm = build_watch_view_model_at(
-        &initial_pet,
-        &paths.usage_db,
-        now,
-        crate::storage::day_axis::LocalDayMapper::System,
-    )?;
+    let initial_vm = if renderer_mode.is_pixel() {
+        build_watch_view_model_semantic_at(
+            &initial_pet,
+            &paths.usage_db,
+            now,
+            crate::storage::day_axis::LocalDayMapper::System,
+        )?
+    } else {
+        build_watch_view_model_at(
+            &initial_pet,
+            &paths.usage_db,
+            now,
+            crate::storage::day_axis::LocalDayMapper::System,
+        )?
+    };
     let scene = derive_round_scene_model(&initial_vm, now);
     let pixel_input = renderer_mode
         .is_pixel()
@@ -164,8 +175,16 @@ pub fn run(renderer_mode: CompanionRendererMode) -> Result<()> {
 
     let controller: Retained<Controller> = unsafe { msg_send_id![Controller::class(), new] };
     let (window, view) = build_window(mtm);
-    let poll_rx =
-        crate::watch_live::spawn_live_watch_worker(paths, POLL_INTERVAL, "glorp-companion-poll");
+    let poll_rx = crate::watch_live::spawn_live_watch_worker(
+        paths,
+        POLL_INTERVAL,
+        "glorp-companion-poll",
+        if renderer_mode.is_pixel() {
+            LiveWatchRenderMode::Semantic
+        } else {
+            LiveWatchRenderMode::Rendered
+        },
+    );
 
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {

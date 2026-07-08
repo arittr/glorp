@@ -45,6 +45,79 @@ fn pixel_row_runs_coalesce_adjacent_equal_colors() {
 }
 
 #[test]
+fn pixel_row_runs_break_across_transparent_gaps() {
+    use glorp::presentation::pixel::{PixelFrame, PixelViewport, Rgba8};
+
+    let mut frame = PixelFrame::transparent(PixelViewport { logical_width: 5, logical_height: 1 });
+    let red = Rgba8::opaque(255, 0, 0);
+    frame.set_pixel(0, 0, red);
+    frame.set_pixel(1, 0, red);
+    frame.set_pixel(3, 0, red);
+    frame.set_pixel(4, 0, red);
+
+    let runs = glorp::presentation::pixel::pixel_runs(&frame);
+
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        (runs[0].x, runs[0].y, runs[0].width, runs[0].color),
+        (0, 0, 2, red)
+    );
+    assert_eq!(
+        (runs[1].x, runs[1].y, runs[1].width, runs[1].color),
+        (3, 0, 2, red)
+    );
+}
+
+#[test]
+fn pixel_row_runs_reset_at_row_boundaries() {
+    use glorp::presentation::pixel::{PixelFrame, PixelViewport, Rgba8};
+
+    let mut frame = PixelFrame::transparent(PixelViewport { logical_width: 2, logical_height: 2 });
+    let red = Rgba8::opaque(255, 0, 0);
+    frame.set_pixel(0, 0, red);
+    frame.set_pixel(1, 0, red);
+    frame.set_pixel(0, 1, red);
+    frame.set_pixel(1, 1, red);
+
+    let runs = glorp::presentation::pixel::pixel_runs(&frame);
+
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        (runs[0].x, runs[0].y, runs[0].width, runs[0].color),
+        (0, 0, 2, red)
+    );
+    assert_eq!(
+        (runs[1].x, runs[1].y, runs[1].width, runs[1].color),
+        (0, 1, 2, red)
+    );
+}
+
+#[test]
+fn pixel_row_runs_keep_adjacent_mixed_colors_separate() {
+    use glorp::presentation::pixel::{PixelFrame, PixelViewport, Rgba8};
+
+    let mut frame = PixelFrame::transparent(PixelViewport { logical_width: 4, logical_height: 1 });
+    let red = Rgba8::opaque(255, 0, 0);
+    let blue = Rgba8::opaque(0, 0, 255);
+    frame.set_pixel(0, 0, red);
+    frame.set_pixel(1, 0, red);
+    frame.set_pixel(2, 0, blue);
+    frame.set_pixel(3, 0, blue);
+
+    let runs = glorp::presentation::pixel::pixel_runs(&frame);
+
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        (runs[0].x, runs[0].y, runs[0].width, runs[0].color),
+        (0, 0, 2, red)
+    );
+    assert_eq!(
+        (runs[1].x, runs[1].y, runs[1].width, runs[1].color),
+        (2, 0, 2, blue)
+    );
+}
+
+#[test]
 fn pixel_renderer_is_deterministic_for_same_input_sequence() {
     let vm = WatchViewModel::fixture();
     let base = datetime!(2026-07-08 12:00 UTC);
