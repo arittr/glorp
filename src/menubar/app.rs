@@ -6,6 +6,7 @@
 #![cfg(target_os = "macos")]
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -23,9 +24,10 @@ use objc2_foundation::{
     MainThreadMarker, NSPoint, NSRange, NSRect, NSRectEdge, NSSize, NSString, NSTimer,
 };
 
-use crate::commands::watch::{build_watch_view_model, rerender_pet_for_view_model};
+use crate::commands::watch::{build_watch_view_model_at, rerender_pet_for_view_model};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
+use crate::storage::day_axis::LocalDayMapper;
 use crate::storage::state::{PetState, StateStore};
 use crate::tui::view_model::WatchViewModel;
 use crate::watch_live::{
@@ -104,10 +106,9 @@ pub fn run() -> Result<()> {
     let paths = AppPaths::resolve()?;
     paths.ensure()?;
     let state_store = StateStore::new(paths.state_file.clone());
-    let initial_pet = state_store.load()?.ok_or_else(|| {
-        GlorpError::Message("no glorp pet exists yet; run `glorp init` first".into())
-    })?;
-    let initial_vm = build_watch_view_model(&initial_pet, &paths.usage_db)?;
+    let now = time::OffsetDateTime::now_utc();
+    let (initial_pet, initial_vm) =
+        prepare_initial_watch_state(&state_store, &paths.usage_db, now)?;
 
     let app: Retained<NSApplication> = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -150,6 +151,27 @@ pub fn run() -> Result<()> {
 
     unsafe { app.run() };
     Ok(())
+}
+
+fn prepare_initial_watch_state(
+    state_store: &StateStore,
+    usage_db: &Path,
+    now: time::OffsetDateTime,
+) -> Result<(PetState, WatchViewModel)> {
+    let Some(mut initial_pet) = state_store.load()? else {
+        return Err(GlorpError::Message(
+            "no glorp pet exists yet; run `glorp init` first".into(),
+        ));
+    };
+    crate::commands::watch::reconcile_state_after_load(
+        state_store,
+        &mut initial_pet,
+        now,
+        LocalDayMapper::System,
+    )?;
+    let initial_vm =
+        build_watch_view_model_at(&initial_pet, usage_db, now, LocalDayMapper::System)?;
+    Ok((initial_pet, initial_vm))
 }
 
 fn build_popover(
@@ -426,5 +448,42 @@ fn dark_surface_color() -> Retained<NSColor> {
             f64::from(0x18_u8) / 255.0,
             1.0,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_watch_state_reconciles_before_first_menubar_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let usage_db = dir.path().join("usage.sqlite");
+        let state_store = StateStore::new(state_path);
+        let mut state = PetState::new_for_test("menubar-age-seed", "blip");
+        state.created_at = time::macros::datetime!(2026-07-01 12:00 UTC);
+        state.last_updated_at = state.created_at;
+        state_store.save(&state).unwrap();
+
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let (initial_pet, initial_vm) =
+            prepare_initial_watch_state(&state_store, &usage_db, now).unwrap();
+
+        assert!(initial_pet
+            .habitat
+            .earned_inhabitants
+            .iter()
+            .any(|earned| earned.id.as_str() == "glass_shrimp"));
+        assert!(
+            initial_vm
+                .habitat
+                .earned_inhabitants
+                .iter()
+                .any(|earned| earned.id.as_str() == "glass_shrimp"),
+            "the first rendered menubar VM must include age-earned tank life"
+        );
+        let saved = state_store.load().unwrap().unwrap();
+        assert_eq!(saved.last_updated_at, now);
     }
 }
