@@ -396,14 +396,6 @@ pub fn build_round_scene_draw_list(
             }
         }
     }
-    scene_list.cells.retain(|cell| {
-        cell.glyph.is_none()
-            || !tank_geometry
-                .reserved_regions
-                .iter()
-                .any(|region| crate::tui::component::rect_contains(*region, cell.col, cell.row))
-    });
-
     CompanionScene {
         draw_list: scene_list,
         pet_rect: new_pet_art,
@@ -487,6 +479,36 @@ mod tests {
         assert!(
             pet_cells >= 10,
             "expected at least 10 non-blank pet glyph cells, got {pet_cells}"
+        );
+    }
+
+    #[test]
+    fn round_hud_reserve_does_not_prune_non_tank_life_scene_glyphs() {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_art = vec!["XXXXXXXXXXXXX".into(); PET_H as usize];
+        let motion = CompanionMotion {
+            drift_y_frac: 0.0,
+            upward_bias: -1.0,
+            ..CompanionMotion::default()
+        };
+
+        let scene = build_round_scene_draw_list(
+            &vm,
+            GOLDEN_NOW,
+            GOLDEN_GRID_COLS,
+            GOLDEN_GRID_ROWS,
+            &motion,
+        );
+        let reserved =
+            round_tank_life_geometry(GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS).reserved_regions;
+        assert!(
+            scene.draw_list.cells.iter().any(|cell| {
+                cell.glyph.is_some()
+                    && reserved
+                        .iter()
+                        .any(|region| crate::tui::component::rect_contains(*region, cell.col, cell.row))
+            }),
+            "round scene must not remove non-tank-life glyphs from the HUD reserve; the native HUD draws above the scene"
         );
     }
 

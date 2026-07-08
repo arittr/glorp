@@ -1,4 +1,5 @@
 use glorp::game::evolution::Stage;
+use glorp::game::habitat::HabitatPetLayer;
 use glorp::game::metabolism::Mood;
 use glorp::pet::generation::Species;
 use glorp::round::model::{
@@ -211,22 +212,50 @@ fn round_scene_tank_life_foreground_avoids_pet_face_and_bottom_hud() {
 
     let protected =
         glorp::round::scene::round_tank_life_protected_regions_for_test(scene.pet_rect, 44, 18);
-    for cell in scene
-        .draw_list
-        .cells
-        .iter()
-        .filter(|cell| cell.glyph.is_some())
-    {
+    let geometry = glorp::round::scene::round_tank_life_geometry(44, 18);
+    let canonical = glorp::tui::component::canonical_daily_cast(
+        &vm.habitat.earned_inhabitants,
+        &vm.pet_render.seed,
+        vm.habitat.tank_life_local_date,
+        vm.habitat.tank_life_calendar_age_days,
+    );
+    let projected = glorp::tui::component::project_tank_life_cast(&canonical, &geometry);
+    let placements = glorp::tui::component::tank_life_placements_for(
+        &glorp::tui::component::TankLifeRenderInput {
+            rendered_ids: projected.rendered_ids,
+            pet_seed: &vm.pet_render.seed,
+            local_date: vm.habitat.tank_life_local_date,
+            now,
+            geometry: &geometry,
+            pet_protected_regions: &protected.pet_face,
+            color_capability: glorp::tui::style::ColorCapability::Truecolor,
+            life_profile: vm.life_profile.clone(),
+        },
+    );
+
+    for cell in placements.iter().flat_map(|placement| &placement.cells) {
         assert!(
             !protected
                 .bottom_hud
                 .iter()
                 .any(|region| glorp::tui::component::rect_contains(*region, cell.col, cell.row)),
-            "tank life and pet glyph cells must stay clear of bottom HUD reserve; got {:?} at ({}, {})",
+            "tank life cells must stay clear of bottom HUD reserve; got {:?} at ({}, {})",
             cell.glyph,
             cell.col,
             cell.row
         );
+        if cell.pet_layer == HabitatPetLayer::Foreground {
+            assert!(
+                !protected
+                    .pet_face
+                    .iter()
+                    .any(|region| glorp::tui::component::rect_contains(*region, cell.col, cell.row)),
+                "foreground tank life cells must stay clear of protected pet face; got {:?} at ({}, {})",
+                cell.glyph,
+                cell.col,
+                cell.row
+            );
+        }
     }
 }
 
