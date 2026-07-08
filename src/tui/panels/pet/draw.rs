@@ -2,7 +2,7 @@ use ratatui::style::Color;
 
 use crate::game::habitat::HabitatPetLayer;
 use crate::presentation::{PetSceneModel, SceneDrawList};
-use crate::tui::component::{habitat_props_for, PetSceneLayout};
+use crate::tui::component::{habitat_props_for, PetSceneLayout, TankLifeSurfaceGeometry};
 use crate::tui::life::build_prop_reactions;
 use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
@@ -19,6 +19,7 @@ use super::colors::{
 use super::grounding;
 use super::performance::performance_cue_cells;
 use super::props::prop_layer_cells;
+use super::tank_life::tank_life_layer_cells;
 use super::{apply_resonance_reaction, color_to_rgb, pet_silhouette_halo_rects};
 
 /// Produce a fully-ordered [`SceneDrawList`] for the pet scene.
@@ -37,6 +38,18 @@ pub(crate) fn render_pet_to_draw_list(
     scene: &PetSceneLayout,
     now: time::OffsetDateTime,
     ctx: &RenderContext,
+) -> SceneDrawList {
+    let tank_geometry = crate::tui::component::watch_tank_life_geometry(scene);
+    render_pet_to_draw_list_with_tank_geometry(scene_model, vm, scene, now, ctx, &tank_geometry)
+}
+
+pub(crate) fn render_pet_to_draw_list_with_tank_geometry(
+    scene_model: &PetSceneModel,
+    vm: &WatchViewModel,
+    scene: &PetSceneLayout,
+    now: time::OffsetDateTime,
+    ctx: &RenderContext,
+    tank_geometry: &TankLifeSurfaceGeometry,
 ) -> SceneDrawList {
     let mut list = SceneDrawList::default();
 
@@ -204,11 +217,41 @@ pub(crate) fn render_pet_to_draw_list(
         &vm.pet_render.seed,
         ctx,
     );
+    let canonical_tank_life = crate::tui::component::canonical_daily_cast(
+        &vm.habitat.earned_inhabitants,
+        &vm.pet_render.seed,
+        vm.habitat.tank_life_local_date,
+        vm.habitat.tank_life_calendar_age_days,
+    );
+    let projected_tank_life =
+        crate::tui::component::project_tank_life_cast(&canonical_tank_life, tank_geometry);
+    let pet_protected = crate::tui::component::pet_face_protected_regions(scene.pet_art);
+    let tank_life_placements = crate::tui::component::tank_life_placements_for(
+        &crate::tui::component::TankLifeRenderInput {
+            rendered_ids: projected_tank_life.rendered_ids.clone(),
+            pet_seed: &vm.pet_render.seed,
+            local_date: vm.habitat.tank_life_local_date,
+            now,
+            geometry: tank_geometry,
+            pet_protected_regions: &pet_protected,
+            color_capability: ctx.color_capability,
+            life_profile: life_profile.clone(),
+        },
+    );
+    let tank_life_cells = tank_life_placements
+        .iter()
+        .flat_map(|placement| placement.cells.clone())
+        .collect::<Vec<_>>();
     list.extend(prop_layer_cells(
         &prop_cells,
         scene,
         &life_profile.prop_reactions,
         ctx.color_capability,
+        &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
+    ));
+    list.extend(tank_life_layer_cells(
+        &tank_life_cells,
+        scene,
         &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
     ));
 
@@ -295,6 +338,11 @@ pub(crate) fn render_pet_to_draw_list(
         scene,
         &life_profile.prop_reactions,
         ctx.color_capability,
+        &[HabitatPetLayer::Foreground],
+    ));
+    list.extend(tank_life_layer_cells(
+        &tank_life_cells,
+        scene,
         &[HabitatPetLayer::Foreground],
     ));
 

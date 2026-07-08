@@ -24,10 +24,11 @@ pub use sizing::{AxisSize, ComponentSizing, DegradeRule};
 pub use style::{BorderTone, ComponentStyle, GradientToken, Insets, Surface, TextTone};
 pub use tank_life::{
     anemone_anchor_sprite, anemone_morph_for_day, canonical_daily_cast, host_fish_sprite,
-    layer_segment_summaries, project_tank_life_cast, rect_contains, tank_life_placements_for,
-    validate_tank_life_catalog, AnemoneMorph, RenderedTankLifeCast, RoundApertureMask, SpriteCell,
-    TankLifeCell, TankLifeLayerSegmentSummary, TankLifePlacement, TankLifeRenderInput,
-    TankLifeSkip, TankLifeSkipReason, TankLifeSurface, TankLifeSurfaceGeometry,
+    layer_segment_summaries, pet_face_protected_regions, project_tank_life_cast, rect_contains,
+    tank_life_placements_for, validate_tank_life_catalog, watch_tank_life_geometry, AnemoneMorph,
+    RenderedTankLifeCast, RoundApertureMask, SpriteCell, TankLifeCell, TankLifeLayerSegmentSummary,
+    TankLifePlacement, TankLifeRenderInput, TankLifeSkip, TankLifeSkipReason, TankLifeSurface,
+    TankLifeSurfaceGeometry,
 };
 pub use watch_screen::{layout_watch, layout_watch_with_context, render_watch_layout};
 pub use widgets::{

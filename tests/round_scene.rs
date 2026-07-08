@@ -194,6 +194,42 @@ fn round_scene_uses_night_calm_for_asleep_state() {
     assert!(scene.halo.activity_pulse.is_quiet());
 }
 
+#[test]
+fn round_scene_tank_life_foreground_avoids_pet_face_and_bottom_hud() {
+    let now = time::macros::datetime!(2026-07-08 18:00 UTC);
+    let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(60, now.date());
+    vm.habitat.tank_life_local_date = time::macros::date!(2026 - 07 - 08);
+    vm.habitat.tank_life_calendar_age_days = 60;
+
+    let scene = glorp::round::scene::build_round_scene_draw_list(
+        &vm,
+        now,
+        44,
+        18,
+        &glorp::round::scene::companion_roam_motion(),
+    );
+
+    let protected =
+        glorp::round::scene::round_tank_life_protected_regions_for_test(scene.pet_rect, 44, 18);
+    for cell in scene
+        .draw_list
+        .cells
+        .iter()
+        .filter(|cell| cell.glyph.is_some())
+    {
+        assert!(
+            !protected
+                .bottom_hud
+                .iter()
+                .any(|region| glorp::tui::component::rect_contains(*region, cell.col, cell.row)),
+            "tank life and pet glyph cells must stay clear of bottom HUD reserve; got {:?} at ({}, {})",
+            cell.glyph,
+            cell.col,
+            cell.row
+        );
+    }
+}
+
 /// The round companion renders `WatchViewModel.pet_art` into a circular
 /// aperture; a Heavy-tier Glitch S6 day earns up to three persistent repair
 /// marks (one-cell `Pattern`/`Accent` spans carrying a `+ = : .` glyph — see

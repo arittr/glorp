@@ -134,6 +134,28 @@ impl TankLifeSurfaceGeometry {
     }
 }
 
+pub fn watch_tank_life_geometry(
+    scene: &crate::tui::component::PetSceneLayout,
+) -> TankLifeSurfaceGeometry {
+    TankLifeSurfaceGeometry {
+        surface: TankLifeSurface::Watch,
+        habitat: scene.habitat,
+        aperture_mask: None,
+        reserved_regions: scene.speech.into_iter().collect(),
+        max_moving_slots: 5,
+        literal_floor_allowed: true,
+    }
+}
+
+pub fn pet_face_protected_regions(pet_art: Rect) -> Vec<Rect> {
+    vec![Rect::new(
+        pet_art.x + pet_art.width / 4,
+        pet_art.y + 1,
+        pet_art.width / 2,
+        4.min(pet_art.height),
+    )]
+}
+
 pub fn canonical_daily_cast(
     unlocked: &[crate::tui::view_model::EarnedTankInhabitantView],
     pet_seed: &str,
