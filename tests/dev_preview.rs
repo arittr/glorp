@@ -143,6 +143,10 @@ impl PreviewRun {
         serde_json::from_str(&std::fs::read_to_string(self.out.join("manifest.json")).unwrap())
             .unwrap()
     }
+
+    fn read_json(&self, path: &str) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(self.out.join(path)).unwrap()).unwrap()
+    }
 }
 
 #[test]
@@ -313,7 +317,7 @@ fn dev_preview_watch_writes_expected_artifacts() {
     );
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 7);
+    assert_eq!(manifest["schema_version"], 8);
     assert_eq!(manifest["producer"], "glorp-dev-preview");
     assert!(!manifest["glorp_version"].as_str().unwrap().is_empty());
     assert!(manifest["generated_at"].as_str().unwrap().ends_with('Z'));
@@ -722,7 +726,7 @@ fn dev_preview_watch_writes_layout_artifacts_and_manifest_entries() {
         .is_file());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 7);
+    assert_eq!(manifest["schema_version"], 8);
     let wide = scenario(&manifest, "watch-wide-normal");
     assert_eq!(
         wide["files"]["layout"],
@@ -1613,7 +1617,7 @@ fn dev_preview_animation_writes_scene_strip_manifest_and_frames() {
     assert!(!run.out.join("frames/watch-wide-normal.txt").exists());
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 7);
+    assert_eq!(manifest["schema_version"], 8);
     assert!(
         manifest["scenarios"].as_array().unwrap().is_empty(),
         "animation-only bundles should not write static scenarios"
@@ -1682,6 +1686,91 @@ fn dev_preview_all_includes_scene_strips() {
         .out
         .join("strips/scene-dawn-wake-wipe/frame-000.txt")
         .is_file());
+}
+
+#[test]
+fn dev_preview_pixel_writes_schema_manifest_frames_and_canvas_links() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    assert!(run.out.join("manifest.json").is_file());
+    assert!(run.out.join("index.html").is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-fuzz-s3-content-idle.pixel.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-glitch-s4-feed-pulse.pixel.json")
+        .is_file());
+
+    let manifest = run.manifest();
+    assert_eq!(manifest["schema_version"], 8);
+    let scenarios = manifest["scenarios"].as_array().unwrap();
+    assert!(scenarios.iter().any(|scenario| {
+        scenario["id"] == "pixel-fuzz-s3-content-idle"
+            && scenario["kind"] == "pixel"
+            && scenario["files"]["pixel"] == "frames/pixel-fuzz-s3-content-idle.pixel.json"
+    }));
+    assert_artifact_type(&manifest, "pixel-fuzz-s3-content-idle-pixel", "pixel-frame");
+
+    let pixel = run.read_json("frames/pixel-fuzz-s3-content-idle.pixel.json");
+    assert_eq!(pixel["schema_version"], 1);
+    assert_eq!(pixel["width"], 96);
+    assert_eq!(pixel["height"], 96);
+    assert_eq!(pixel["pixels"].as_array().unwrap().len(), 96 * 96);
+    assert!(pixel["pixels"].as_array().unwrap().iter().any(|value| {
+        value
+            .as_str()
+            .is_some_and(|hex| hex.len() == 9 && hex.ends_with("ff"))
+    }));
+
+    let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
+    assert!(html.contains("data-pixel-frame=\"frames/pixel-fuzz-s3-content-idle.pixel.json\""));
+    assert!(html.contains("<canvas"));
+}
+
+#[test]
+fn dev_preview_pixel_strips_meet_animation_contract() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    let strips = manifest["strips"].as_array().unwrap();
+    let idle = strips
+        .iter()
+        .find(|strip| strip["id"] == "pixel-idle")
+        .expect("pixel idle strip");
+    assert_eq!(idle["kind"], "pixel-animation");
+    assert!(idle["frames"].as_array().unwrap().len() >= 48);
+    assert_eq!(idle["frames"][0]["elapsed_ms"], 0);
+    assert!(idle["frames"].as_array().unwrap().iter().any(|frame| {
+        frame["phase"]
+            .as_str()
+            .is_some_and(|phase| phase.contains("blink"))
+    }));
+    assert!(run
+        .out
+        .join("strips/pixel-idle/frame-000.pixel.json")
+        .is_file());
+}
+
+#[test]
+fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let text = std::fs::read_to_string(run.out.join("manifest.json")).unwrap()
+        + &std::fs::read_to_string(run.out.join("frames/pixel-fuzz-s3-content-idle.pixel.json"))
+            .unwrap();
+    assert!(!text.contains("fixture-seed"));
+    assert!(!text.contains("/Users/drew"));
+    assert!(!text.contains("prompt"));
+    assert!(!text.contains("response"));
+    assert!(!text.contains("source_breakdown"));
 }
 
 #[test]
@@ -1794,7 +1883,7 @@ fn dev_preview_round_writes_manifest_cells_and_round_metadata() {
     run.run_success("round");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 7);
+    assert_eq!(manifest["schema_version"], 8);
     for id in ROUND_IDS {
         assert!(
             run.out.join(format!("frames/{id}.txt")).is_file(),
@@ -1830,7 +1919,7 @@ fn dev_preview_round_writes_companion_hud_artifacts() {
     run.run_success("round");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 7);
+    assert_eq!(manifest["schema_version"], 8);
     let expected = [
         "round-normal",
         "round-hud-missing-yesterday",
@@ -2001,7 +2090,7 @@ fn dev_preview_tank_life_writes_typed_artifacts() {
     run.run_success("tank-life");
 
     let manifest = run.manifest();
-    assert_eq!(manifest["schema_version"], 7);
+    assert_eq!(manifest["schema_version"], 8);
 
     for id in TANK_LIFE_IDS {
         assert!(

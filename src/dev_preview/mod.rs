@@ -4,6 +4,7 @@ pub mod frame;
 pub mod habitat_props;
 pub mod output;
 pub mod pets;
+pub mod pixel;
 pub mod round;
 pub mod scenarios;
 pub mod strips;

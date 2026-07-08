@@ -12,6 +12,7 @@ pub fn run(out: PathBuf, scenario: PreviewScenarioArg) -> Result<()> {
         PreviewScenarioArg::Animation => PreviewSelection::Animation,
         PreviewScenarioArg::Round => PreviewSelection::Round,
         PreviewScenarioArg::TankLife => PreviewSelection::TankLife,
+        PreviewScenarioArg::Pixel => PreviewSelection::Pixel,
     };
 
     generate_preview_bundle(&out, selection)?;

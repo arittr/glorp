@@ -88,6 +88,7 @@ pub enum PreviewScenarioArg {
     Animation,
     Round,
     TankLife,
+    Pixel,
 }
 
 #[cfg(feature = "dev-preview")]

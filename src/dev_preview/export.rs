@@ -9,7 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const PRODUCER: &str = "glorp-dev-preview";
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
+pub const PIXEL_FRAME_SCHEMA_VERSION: u32 = 1;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -35,6 +36,7 @@ pub struct PreviewScenario {
     pub inputs: BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub round: Option<PreviewRoundMetadata>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review_prompts: Vec<String>,
 }
 
@@ -70,6 +72,7 @@ pub enum PreviewScenarioKind {
     HabitatProps,
     Round,
     TankLife,
+    Pixel,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +85,8 @@ pub struct PreviewDimensions {
 pub struct PreviewScenarioFiles {
     pub text: PathBuf,
     pub cells: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,6 +112,7 @@ pub struct PreviewStrip {
     pub playback: PreviewPlayback,
     pub inputs: BTreeMap<String, Value>,
     pub frames: Vec<PreviewStripFrame>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review_prompts: Vec<String>,
 }
 
@@ -114,6 +120,7 @@ pub struct PreviewStrip {
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewStripKind {
     SceneMoment,
+    PixelAnimation,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +141,20 @@ pub struct PreviewStripFrame {
 pub struct PreviewStripFrameFiles {
     pub text: PathBuf,
     pub cells: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewPixelFrameArtifact {
+    pub schema_version: u32,
+    pub width: u16,
+    pub height: u16,
+    pub elapsed_ms: u16,
+    pub species: String,
+    pub stage: String,
+    pub mood: String,
+    pub pixels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +173,7 @@ pub struct PreviewArtifact {
 pub enum ArtifactType {
     Text,
     Cells,
+    PixelFrame,
     Layout,
     Scene,
     Hud,
@@ -266,6 +288,11 @@ pub fn write_json_artifact<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
+pub fn write_pixel_json(path: &Path, artifact: &PreviewPixelFrameArtifact) -> Result<()> {
+    fs::write(path, serde_json::to_string_pretty(artifact)?)?;
+    Ok(())
+}
+
 pub fn write_manifest(path: &Path, manifest: &PreviewManifest) -> Result<()> {
     fs::write(path, serde_json::to_string_pretty(manifest)?)?;
     Ok(())
@@ -298,6 +325,9 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             ));
             if let Some(layout) = &scenario.files.layout {
                 markdown.push_str(&format!("- Layout: `{}`\n", layout.display()));
+            }
+            if let Some(pixel) = &scenario.files.pixel {
+                markdown.push_str(&format!("- Pixel: `{}`\n", pixel.display()));
             }
             if let Some(room_text) = &scenario.files.room_text {
                 markdown.push_str(&format!("- Room: `{}`\n", room_text.display()));
@@ -354,12 +384,14 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
         PreviewScenarioKind::HabitatProps => "habitat-props",
         PreviewScenarioKind::Round => "round",
         PreviewScenarioKind::TankLife => "tank-life",
+        PreviewScenarioKind::Pixel => "pixel",
     }
 }
 
 fn strip_kind_label(kind: PreviewStripKind) -> &'static str {
     match kind {
         PreviewStripKind::SceneMoment => "scene-moment",
+        PreviewStripKind::PixelAnimation => "pixel-animation",
     }
 }
 
@@ -407,6 +439,12 @@ fn render_frame_html(frame: &PreviewFrame) -> String {
     html.push_str(&render_frame_artifact_links(frame));
     html.push_str(r#"<div class="preview-grid-shell">"#);
     html.push_str(&render_grid_html(frame));
+    if frame.contract.pixel.is_some() {
+        html.push_str(&format!(
+            r#"<canvas class="pixel-frame-canvas" width="96" height="96" data-pixel-frame="frames/{}.pixel.json"></canvas>"#,
+            escape_html(&frame.id)
+        ));
+    }
     if frame.layout.is_some() {
         html.push_str(&format!(
             r#"<div class="layout-overlay" data-layout-for="{}" hidden></div>"#,
@@ -454,6 +492,12 @@ fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
         links.push(format!(
             r#"<a href="{}">scene</a>"#,
             escape_html(&format!("frames/{}.scene.json", frame.id))
+        ));
+    }
+    if frame.contract.pixel.is_some() {
+        links.push(format!(
+            r#"<a href="{}">pixel</a>"#,
+            escape_html(&format!("frames/{}.pixel.json", frame.id))
         ));
     }
     if frame.contract.hud.is_some() {
@@ -518,6 +562,12 @@ fn render_strip_html(strip: &PreviewStripBundle) -> String {
             if index == 0 { "" } else { " hidden" }
         ));
         html.push_str(&render_grid_html(frame));
+        if let Some(pixel_path) = strip.manifest.frames[index].files.pixel.as_ref() {
+            html.push_str(&format!(
+                r#"<canvas class="pixel-frame-canvas" width="96" height="96" data-pixel-frame="{}"></canvas>"#,
+                escape_html(&pixel_path.display().to_string())
+            ));
+        }
         html.push_str("</div>");
     }
     html.push_str("</article>");
@@ -714,6 +764,7 @@ mod tests {
                 files: PreviewScenarioFiles {
                     text: PathBuf::from("frames/frame-one.txt"),
                     cells: PathBuf::from("frames/frame-one.cells.json"),
+                    pixel: None,
                     layout: None,
                     room_text: None,
                     room_masked_text: None,
@@ -915,7 +966,7 @@ mod tests {
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 7);
+        assert_eq!(json["schema_version"], 8);
         assert_eq!(json["producer"], "glorp-dev-preview");
         assert_eq!(json["scenarios"][0]["kind"], "watch");
         assert_eq!(json["scenarios"][0]["dimensions"]["width"], 2);

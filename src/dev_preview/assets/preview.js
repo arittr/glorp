@@ -1,4 +1,20 @@
 (() => {
+  const drawPixelCanvas = async (canvas) => {
+    const response = await fetch(canvas.dataset.pixelFrame);
+    const artifact = await response.json();
+    const ctx = canvas.getContext("2d");
+    const image = ctx.createImageData(artifact.width, artifact.height);
+    artifact.pixels.forEach((hex, index) => {
+      const offset = index * 4;
+      image.data[offset] = Number.parseInt(hex.slice(1, 3), 16);
+      image.data[offset + 1] = Number.parseInt(hex.slice(3, 5), 16);
+      image.data[offset + 2] = Number.parseInt(hex.slice(5, 7), 16);
+      image.data[offset + 3] = Number.parseInt(hex.slice(7, 9), 16);
+    });
+    ctx.imageSmoothingEnabled = false;
+    ctx.putImageData(image, 0, 0);
+  };
+
   const hash = window.location.hash.slice(1);
   if (hash) {
     for (const frame of document.querySelectorAll("[data-frame-id]")) {
@@ -88,5 +104,9 @@
       pauseStrip(strip);
       showStripFrame(strip, Number(strip.dataset.frameIndex || "0") + 1);
     });
+  }
+
+  for (const canvas of document.querySelectorAll("[data-pixel-frame]")) {
+    drawPixelCanvas(canvas);
   }
 })();

@@ -134,3 +134,12 @@
   gap: 8px;
   margin: 8px 0;
 }
+
+.pixel-frame-canvas {
+  width: 192px;
+  height: 192px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #0d1117;
+  border: 1px solid #5a5148;
+}

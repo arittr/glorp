@@ -1,9 +1,9 @@
 use crate::dev_preview::export::{
     copy_assets, has_masked_room_artifact, write_cells_json, write_index_html, write_json_artifact,
-    write_layout_json, write_manifest, write_review_markdown, write_room_text_frame,
-    write_room_text_frame_masked, write_text_frame, ArtifactType, PreviewArtifact,
-    PreviewDimensions, PreviewManifest, PreviewMaskRect, PreviewRoundMetadata, PreviewScenario,
-    PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
+    write_layout_json, write_manifest, write_pixel_json, write_review_markdown,
+    write_room_text_frame, write_room_text_frame_masked, write_text_frame, ArtifactType,
+    PreviewArtifact, PreviewDimensions, PreviewManifest, PreviewMaskRect, PreviewRoundMetadata,
+    PreviewScenario, PreviewScenarioFiles, PreviewScenarioKind, PRODUCER, SCHEMA_VERSION,
 };
 use crate::dev_preview::frame::PreviewFrame;
 use crate::dev_preview::habitat_props::{
@@ -33,6 +33,7 @@ pub enum PreviewSelection {
     Animation,
     Round,
     TankLife,
+    Pixel,
 }
 
 pub struct PreviewRenderContext {
@@ -111,8 +112,10 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                 &ctx,
                 &scratch_dir,
             )?);
+            bundles.extend(crate::dev_preview::pixel::pixel_bundles(&ctx));
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
+            strips.extend(crate::dev_preview::pixel::pixel_strips(&ctx));
         }
         PreviewSelection::Watch => bundles.extend(
             watch_frames(&ctx, &scratch_dir)?
@@ -137,6 +140,10 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         PreviewSelection::TankLife => bundles.extend(
             crate::dev_preview::tank_life::tank_life_bundles(&ctx, &scratch_dir)?,
         ),
+        PreviewSelection::Pixel => {
+            bundles.extend(crate::dev_preview::pixel::pixel_bundles(&ctx));
+            strips.extend(crate::dev_preview::pixel::pixel_strips(&ctx));
+        }
     }
 
     let frames = bundles
@@ -173,6 +180,9 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         if let Some(scene) = &frame.contract.scene {
             write_json_artifact(&staging_dir.join(scene_path(frame)), scene)?;
         }
+        if let Some(pixel) = &frame.contract.pixel {
+            write_pixel_json(&staging_dir.join(pixel_path(frame)), pixel)?;
+        }
         if let Some(hud) = &frame.contract.hud {
             write_json_artifact(&staging_dir.join(hud_path(frame)), hud)?;
         }
@@ -186,6 +196,14 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         for (frame, manifest_frame) in strip.frames.iter().zip(&strip.manifest.frames) {
             write_text_frame(&staging_dir.join(&manifest_frame.files.text), frame)?;
             write_cells_json(&staging_dir.join(&manifest_frame.files.cells), frame)?;
+            if let Some(pixel) = &frame.contract.pixel {
+                let path = manifest_frame
+                    .files
+                    .pixel
+                    .as_ref()
+                    .expect("pixel frame should declare a pixel artifact path");
+                write_pixel_json(&staging_dir.join(path), pixel)?;
+            }
         }
     }
 
@@ -623,6 +641,7 @@ fn scenario_from_parts(
         files: PreviewScenarioFiles {
             text: text_path(frame),
             cells: cells_path(frame),
+            pixel: frame.contract.pixel.as_ref().map(|_| pixel_path(frame)),
             layout: frame.layout.as_ref().map(|_| layout_path(frame)),
             room_text: frame.layout.as_ref().and_then(|layout| {
                 if layout.targets.contains_key("watch.room.effect") {
@@ -710,6 +729,16 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 path: room_masked_text_path(frame),
                 width: Some(frame.width),
                 height: Some(frame.height),
+            });
+        }
+        if let Some(pixel) = &frame.contract.pixel {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-pixel", frame.id),
+                title: format!("{} Pixel", frame.title),
+                artifact_type: ArtifactType::PixelFrame,
+                path: pixel_path(frame),
+                width: Some(pixel.width),
+                height: Some(pixel.height),
             });
         }
         if frame.contract.scene.is_some() {
@@ -802,6 +831,21 @@ fn artifacts_for_strips(
                 width: Some(frame.width),
                 height: Some(frame.height),
             });
+            if let Some(pixel_path) = &manifest_frame.files.pixel {
+                let pixel = frame
+                    .contract
+                    .pixel
+                    .as_ref()
+                    .expect("pixel strip frames should carry a pixel artifact");
+                artifacts.push(PreviewArtifact {
+                    id: format!("{}-frame-{index:03}-pixel", strip.manifest.id),
+                    title: format!("{} Frame {index:03} Pixel", strip.manifest.title),
+                    artifact_type: ArtifactType::PixelFrame,
+                    path: pixel_path.clone(),
+                    width: Some(pixel.width),
+                    height: Some(pixel.height),
+                });
+            }
         }
     }
     artifacts
@@ -1730,6 +1774,10 @@ fn scene_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.scene.json", frame.id))
 }
 
+fn pixel_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.pixel.json", frame.id))
+}
+
 fn hud_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.hud.json", frame.id))
 }
@@ -1977,7 +2025,10 @@ mod tests {
                 "tank-life-date-2026-07-07",
                 "tank-life-date-2026-07-08",
                 "tank-life-round-projection",
-                "tank-life-anemone-morphs"
+                "tank-life-anemone-morphs",
+                "pixel-fuzz-s3-content-idle",
+                "pixel-glitch-s4-feed-pulse",
+                "pixel-species-matrix"
             ]
         );
     }

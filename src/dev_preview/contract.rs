@@ -16,6 +16,7 @@ const REDACTED_RUNTIME_ID: &str = "redacted";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PreviewFrameContract {
+    pub pixel: Option<crate::dev_preview::export::PreviewPixelFrameArtifact>,
     pub scene: Option<PreviewSceneArtifact>,
     pub hud: Option<PreviewHudArtifact>,
     pub tank_life: Option<PreviewTankLifeArtifact>,
