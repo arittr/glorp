@@ -17,6 +17,7 @@ use crate::tui::life::{
 };
 use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
+use crate::tui::view_model::WatchViewModel;
 use crate::tui::{component::layout_watch_with_context, component::preview_layout};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -286,6 +287,36 @@ fn render_watch_frame_from_state_with_life(
         crate::dev_preview::contract::PreviewSceneArtifact::from_watch_view_model(
             id,
             &vm,
+            now,
+            frame.layout.as_ref(),
+        ),
+    );
+    Ok(frame)
+}
+
+pub(crate) fn render_watch_preview_frame_from_view_model(
+    id: &str,
+    title: &str,
+    vm: &WatchViewModel,
+    now: OffsetDateTime,
+    width: u16,
+    height: u16,
+    color_capability: ColorCapability,
+) -> Result<PreviewFrame> {
+    let render = RenderContext::with_clock(color_capability, WatchClock::fixed(now));
+    let layout = layout_watch_with_context(Rect::new(0, 0, width, height), vm, &render);
+
+    let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+    terminal.draw(|frame| {
+        render_watch_frame_with_layout(frame, vm, &render, &layout);
+    })?;
+
+    let mut frame = frame_from_buffer(id, title, terminal.backend().buffer());
+    frame.layout = Some(preview_layout(id, &layout));
+    frame.contract.scene = Some(
+        crate::dev_preview::contract::PreviewSceneArtifact::from_watch_view_model(
+            id,
+            vm,
             now,
             frame.layout.as_ref(),
         ),

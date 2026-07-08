@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const PRODUCER: &str = "glorp-dev-preview";
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 const PREVIEW_GRID_DEFAULT_FG: &str = "#e6edf3";
 const PREVIEW_GRID_DEFAULT_BG: &str = "#0d1117";
 
@@ -69,6 +69,7 @@ pub enum PreviewScenarioKind {
     PetMatrix,
     HabitatProps,
     Round,
+    TankLife,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +92,8 @@ pub struct PreviewScenarioFiles {
     pub scene: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hud: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tank_life: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +155,7 @@ pub enum ArtifactType {
     Layout,
     Scene,
     Hud,
+    TankLife,
     Html,
     Review,
     Asset,
@@ -307,6 +311,9 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             if let Some(hud) = &scenario.files.hud {
                 markdown.push_str(&format!("- HUD: `{}`\n", hud.display()));
             }
+            if let Some(tank_life) = &scenario.files.tank_life {
+                markdown.push_str(&format!("- Tank life: `{}`\n", tank_life.display()));
+            }
             markdown.push('\n');
             markdown.push_str("Review prompts:\n");
             for prompt in &scenario.review_prompts {
@@ -346,6 +353,7 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
         PreviewScenarioKind::PetMatrix => "pet-matrix",
         PreviewScenarioKind::HabitatProps => "habitat-props",
         PreviewScenarioKind::Round => "round",
+        PreviewScenarioKind::TankLife => "tank-life",
     }
 }
 
@@ -446,6 +454,18 @@ fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
         links.push(format!(
             r#"<a href="{}">scene</a>"#,
             escape_html(&format!("frames/{}.scene.json", frame.id))
+        ));
+    }
+    if frame.contract.hud.is_some() {
+        links.push(format!(
+            r#"<a href="{}">hud</a>"#,
+            escape_html(&format!("frames/{}.hud.json", frame.id))
+        ));
+    }
+    if frame.contract.tank_life.is_some() {
+        links.push(format!(
+            r#"<a href="{}">tank life</a>"#,
+            escape_html(&format!("frames/{}.tank-life.json", frame.id))
         ));
     }
 
@@ -699,6 +719,7 @@ mod tests {
                     room_masked_text: None,
                     scene: None,
                     hud: None,
+                    tank_life: None,
                 },
                 inputs: BTreeMap::from([(
                     "fixed_now".to_string(),
@@ -894,7 +915,7 @@ mod tests {
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 6);
+        assert_eq!(json["schema_version"], 7);
         assert_eq!(json["producer"], "glorp-dev-preview");
         assert_eq!(json["scenarios"][0]["kind"], "watch");
         assert_eq!(json["scenarios"][0]["dimensions"]["width"], 2);
