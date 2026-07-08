@@ -1,7 +1,7 @@
 use glorp::game::{evolution::Stage, metabolism::Mood};
 use glorp::pet::generation::Species;
 use glorp::presentation::pixel::{
-    PixelFrame, PixelPetInput, PixelVariationKey, PixelViewport, Rgba8,
+    PixelBounds, PixelFrame, PixelPetInput, PixelVariationKey, PixelViewport, Rgba8,
 };
 use glorp::tui::view_model::{SourceUsageView, WatchViewModel};
 use time::macros::datetime;
@@ -82,4 +82,48 @@ fn pixel_frame_enforces_rgba_invariants() {
     assert_eq!(frame.opaque_pixel_count(), 0);
     assert_eq!(frame.opaque_bounds(), None);
     assert_eq!(frame.pixels[0], Rgba8 { r: 0, g: 0, b: 0, a: 0 });
+}
+
+#[test]
+fn pixel_frame_helper_methods_reject_malformed_storage() {
+    let malformed = PixelFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![Rgba8::TRANSPARENT; 3],
+    };
+    let other = PixelFrame::transparent(PixelViewport { logical_width: 2, logical_height: 2 });
+
+    let opaque_count = std::panic::catch_unwind(|| malformed.opaque_pixel_count());
+    assert!(opaque_count.is_err());
+
+    let opaque_bounds = std::panic::catch_unwind(|| malformed.opaque_bounds());
+    assert!(opaque_bounds.is_err());
+
+    let changed_count = std::panic::catch_unwind(|| malformed.changed_pixel_count(&other));
+    assert!(changed_count.is_err());
+
+    let mut malformed_for_set = malformed.clone();
+    let set_pixel = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        malformed_for_set.set_pixel(1, 1, Rgba8::opaque(0xff, 0x00, 0x00));
+    }));
+    assert!(set_pixel.is_err());
+}
+
+#[test]
+fn pixel_frame_reports_bounds_and_changed_pixels_for_sparse_updates() {
+    let viewport = PixelViewport { logical_width: 4, logical_height: 3 };
+    let base = PixelFrame::transparent(viewport);
+    let mut updated = base.clone();
+
+    updated.set_pixel(1, 0, Rgba8::opaque(0x11, 0x22, 0x33));
+    updated.set_pixel(3, 2, Rgba8::opaque(0xaa, 0xbb, 0xcc));
+    updated.set_pixel(-1, 0, Rgba8::opaque(0xff, 0x00, 0x00));
+    updated.set_pixel(4, 2, Rgba8::opaque(0x00, 0xff, 0x00));
+
+    assert_eq!(base.changed_pixel_count(&updated), 2);
+    assert_eq!(updated.changed_pixel_count(&base), 2);
+    assert_eq!(
+        updated.opaque_bounds(),
+        Some(PixelBounds { min_x: 1, min_y: 0, max_x: 3, max_y: 2 })
+    );
 }

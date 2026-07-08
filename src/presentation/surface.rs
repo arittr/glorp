@@ -299,7 +299,13 @@ mod resolver_tests {
     fn surfaces_share_one_base_resolution_with_neutral_inputs() {
         let p = default_theme_palette();
         let neutral = LiveColorInputs::passthrough();
-        for style in [WATCH_STYLE, ROUND_STYLE, SCREEN_STYLE, MENU_STYLE] {
+        for style in [
+            WATCH_STYLE,
+            ROUND_STYLE,
+            PIXEL_STYLE,
+            SCREEN_STYLE,
+            MENU_STYLE,
+        ] {
             let out = resolve_pet_colors(&p, &neutral, &style);
             for role in [
                 PaletteRoleName::Body,

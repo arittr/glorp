@@ -42,6 +42,15 @@ pub struct PixelBounds {
 }
 
 impl PixelFrame {
+    fn assert_storage_invariant(&self) {
+        let expected_len = usize::from(self.width) * usize::from(self.height);
+        assert_eq!(
+            self.pixels.len(),
+            expected_len,
+            "PixelFrame invariant violated: pixels.len() must equal width * height"
+        );
+    }
+
     pub fn transparent(viewport: PixelViewport) -> Self {
         let len = usize::from(viewport.logical_width) * usize::from(viewport.logical_height);
         Self {
@@ -60,15 +69,19 @@ impl PixelFrame {
         if x >= self.width || y >= self.height {
             return;
         }
+        self.assert_storage_invariant();
         let idx = usize::from(y) * usize::from(self.width) + usize::from(x);
         self.pixels[idx] = color;
     }
 
     pub fn opaque_pixel_count(&self) -> usize {
+        self.assert_storage_invariant();
         self.pixels.iter().filter(|pixel| pixel.a > 0).count()
     }
 
     pub fn changed_pixel_count(&self, other: &Self) -> usize {
+        self.assert_storage_invariant();
+        other.assert_storage_invariant();
         assert_eq!((self.width, self.height), (other.width, other.height));
         self.pixels
             .iter()
@@ -78,6 +91,7 @@ impl PixelFrame {
     }
 
     pub fn opaque_bounds(&self) -> Option<PixelBounds> {
+        self.assert_storage_invariant();
         let mut min_x = self.width;
         let mut min_y = self.height;
         let mut max_x = 0_u16;
