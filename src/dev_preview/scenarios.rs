@@ -212,6 +212,12 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         if let Some(pixel) = &frame.contract.pixel {
             write_pixel_json(&staging_dir.join(pixel_path(frame)), pixel)?;
         }
+        if let Some(pixel_art) = &frame.contract.pixel_art {
+            write_json_artifact(&staging_dir.join(pixel_art_path(frame)), pixel_art)?;
+        }
+        if let Some(pixel_fit) = &frame.contract.pixel_fit {
+            write_json_artifact(&staging_dir.join(pixel_fit_path(frame)), pixel_fit)?;
+        }
         if let Some(hud) = &frame.contract.hud {
             write_json_artifact(&staging_dir.join(hud_path(frame)), hud)?;
         }
@@ -680,6 +686,16 @@ fn scenario_from_parts(
             text: text_path(frame),
             cells: cells_path(frame),
             pixel: frame.contract.pixel.as_ref().map(|_| pixel_path(frame)),
+            pixel_art: frame
+                .contract
+                .pixel_art
+                .as_ref()
+                .map(|_| pixel_art_path(frame)),
+            pixel_fit: frame
+                .contract
+                .pixel_fit
+                .as_ref()
+                .map(|_| pixel_fit_path(frame)),
             layout: frame.layout.as_ref().map(|_| layout_path(frame)),
             room_text: frame.layout.as_ref().and_then(|layout| {
                 if layout.targets.contains_key("watch.room.effect") {
@@ -777,6 +793,26 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
                 path: pixel_path(frame),
                 width: Some(pixel.width),
                 height: Some(pixel.height),
+            });
+        }
+        if frame.contract.pixel_art.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-pixel-art", frame.id),
+                title: format!("{} Pixel Art", frame.title),
+                artifact_type: ArtifactType::PixelArt,
+                path: pixel_art_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.pixel_fit.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-pixel-fit", frame.id),
+                title: format!("{} Pixel Fit", frame.title),
+                artifact_type: ArtifactType::PixelFit,
+                path: pixel_fit_path(frame),
+                width: None,
+                height: None,
             });
         }
         if frame.contract.scene.is_some() {
@@ -1814,6 +1850,14 @@ fn scene_path(frame: &PreviewFrame) -> PathBuf {
 
 fn pixel_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.pixel.json", frame.id))
+}
+
+fn pixel_art_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.pixel-art.json", frame.id))
+}
+
+fn pixel_fit_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.pixel-fit.json", frame.id))
 }
 
 fn hud_path(frame: &PreviewFrame) -> PathBuf {

@@ -1796,6 +1796,52 @@ fn dev_preview_pixel_manifest_inputs_include_production_fit_producer() {
 }
 
 #[test]
+fn dev_preview_pixel_writes_art_and_fit_sidecars() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let manifest = run.manifest();
+    let scenario = scenario(&manifest, "pixel-fuzz-s3-content-idle");
+
+    let art_path = run
+        .out
+        .join(scenario["files"]["pixel_art"].as_str().unwrap());
+    let fit_path = run
+        .out
+        .join(scenario["files"]["pixel_fit"].as_str().unwrap());
+
+    assert!(art_path.exists());
+    assert!(fit_path.exists());
+
+    let art_json = std::fs::read_to_string(art_path).unwrap();
+    assert!(art_json.contains("\"schema_version\""));
+    assert!(art_json.contains("\"role_counts\""));
+    assert!(!art_json.contains("fixture-seed"));
+    assert!(!art_json.contains("art_text"));
+
+    let fit_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(fit_path).unwrap()).unwrap();
+    assert_eq!(
+        fit_json["producer"],
+        "round::pixel_fit::pixel_companion_fit"
+    );
+    assert_eq!(fit_json["hud_overlap"]["body_eye_mouth_pixels"], 0);
+}
+
+#[test]
+fn pixel_preview_uses_correct_fuzz_s3_label() {
+    let run = PreviewRun::new();
+
+    run.run_success("pixel");
+
+    let text =
+        std::fs::read_to_string(run.out.join("frames/pixel-fuzz-s3-content-idle.txt")).unwrap();
+    assert!(text.contains("stage s3 pup"));
+    assert!(!text.contains("archfuzz"));
+}
+
+#[test]
 fn dev_preview_pixel_html_uses_pixel_dimensions_not_placeholder_cells() {
     let run = PreviewRun::new();
 
@@ -1872,6 +1918,33 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
     assert!(!text.contains("prompt"));
     assert!(!text.contains("response"));
     assert!(!text.contains("source_breakdown"));
+
+    for entry in std::fs::read_dir(run.out.join("frames")).unwrap() {
+        let path = entry.unwrap().path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !(name.ends_with(".pixel-art.json") || name.ends_with(".pixel-fit.json")) {
+            continue;
+        }
+        let sidecar = std::fs::read_to_string(&path).unwrap().to_lowercase();
+        for forbidden in [
+            "fixture-seed",
+            "art_text",
+            "claude",
+            "codex",
+            "/users/",
+            "prompt",
+            "response",
+            "transcript",
+            "diagnostic",
+        ] {
+            assert!(
+                !sidecar.contains(forbidden),
+                "pixel sidecar leaked {forbidden}: {sidecar}"
+            );
+        }
+    }
 }
 
 #[test]
