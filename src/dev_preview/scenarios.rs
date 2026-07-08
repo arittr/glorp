@@ -105,6 +105,16 @@ impl PreviewRenderContext {
             ),
         }
     }
+
+    pub fn with_fixed_now(&self, fixed_now: OffsetDateTime) -> Self {
+        Self {
+            fixed_now,
+            render: RenderContext::with_clock(
+                self.render.color_capability,
+                WatchClock::fixed(fixed_now),
+            ),
+        }
+    }
 }
 
 pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Result<()> {
@@ -2153,6 +2163,19 @@ mod tests {
         let ctx = PreviewRenderContext::deterministic();
 
         assert_eq!(ctx.render.clock.now_utc(), ctx.fixed_now);
+    }
+
+    #[test]
+    fn preview_render_context_with_fixed_now_keeps_watch_clock_coherent() {
+        let ctx = PreviewRenderContext::deterministic();
+        let shifted = ctx.with_fixed_now(time::macros::datetime!(2026-07-08 12:00 UTC));
+
+        assert_eq!(
+            shifted.fixed_now,
+            time::macros::datetime!(2026-07-08 12:00 UTC)
+        );
+        assert_eq!(shifted.render.clock.now_utc(), shifted.fixed_now);
+        assert_eq!(shifted.render.color_capability, ctx.render.color_capability);
     }
 
     #[test]

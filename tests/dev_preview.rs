@@ -1975,6 +1975,9 @@ fn dev_preview_pixel_cast_matrix_references_real_cast_frames() {
 
     assert_eq!(referenced, PIXEL_CAST_IDS);
     assert!(matrix["files"].get("pixel").is_none());
+    assert!(matrix["files"].get("pixel_art").is_none());
+    assert!(matrix["files"].get("pixel_fit").is_none());
+    assert!(matrix["files"].get("pixel_composition").is_none());
 
     let html = std::fs::read_to_string(run.out.join("index.html")).unwrap();
     for id in PIXEL_CAST_IDS {
@@ -2065,9 +2068,37 @@ fn dev_preview_pixel_composition_artifact_has_own_manifest_slot() {
     let scenario = scenario(&manifest, "pixel-tank-composition");
 
     assert_eq!(
+        scenario["files"]["pixel"],
+        "frames/pixel-tank-composition.pixel.json"
+    );
+    assert_eq!(
+        scenario["files"]["pixel_art"],
+        "frames/pixel-tank-composition.pixel-art.json"
+    );
+    assert_eq!(
+        scenario["files"]["pixel_fit"],
+        "frames/pixel-tank-composition.pixel-fit.json"
+    );
+    assert_eq!(
         scenario["files"]["pixel_composition"],
         "frames/pixel-tank-composition.pixel-composition.json"
     );
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel-art.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel-fit.json")
+        .is_file());
+    assert!(run
+        .out
+        .join("frames/pixel-tank-composition.pixel-composition.json")
+        .is_file());
     assert_artifact_type(
         &manifest,
         "pixel-tank-composition-pixel-composition",
@@ -2208,7 +2239,10 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !(name.ends_with(".pixel-art.json") || name.ends_with(".pixel-fit.json")) {
+        if !(name.ends_with(".pixel-art.json")
+            || name.ends_with(".pixel-composition.json")
+            || name.ends_with(".pixel-fit.json"))
+        {
             continue;
         }
         let sidecar = std::fs::read_to_string(&path).unwrap().to_lowercase();
@@ -2217,7 +2251,10 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
             "art_text",
             "claude",
             "codex",
+            "source_name",
+            "display_name",
             "/users/",
+            "/tmp/",
             "prompt",
             "response",
             "transcript",

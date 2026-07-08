@@ -195,28 +195,31 @@ pub fn pixel_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewPixelBundle> {
         },
     ];
     for fixture in cast_fixtures {
-        let glitch_ctx;
-        let bundle_ctx = if fixture.id == "pixel-glitch-s4-repair" {
+        let lines = vec![
+            format!("species {}", fixture.species.as_str()),
+            format!("stage {}", fixture.stage.as_str()),
+            "cast identity review".to_string(),
+        ];
+        let bundle = if fixture.id == "pixel-glitch-s4-repair" {
             // Keep the repair-mark cast fixture on the same deterministic art-request
-            // timestamp as the cue-coverage reference tests so the promoted mark is present.
-            glitch_ctx = PreviewRenderContext {
-                fixed_now: time::macros::datetime!(2026-07-08 12:00 UTC),
-                render: ctx.render,
-            };
-            &glitch_ctx
+            // timestamp as the cue-coverage reference tests while keeping the
+            // preview render clock coherent with the fixture timestamp.
+            render_pixel_bundle_with_fixed_now(
+                ctx,
+                fixture,
+                lines,
+                "Review a rendered Pixel cast identity frame with promoted cue roles.",
+                time::macros::datetime!(2026-07-08 12:00 UTC),
+            )
         } else {
-            ctx
+            render_pixel_bundle(
+                ctx,
+                fixture,
+                lines,
+                "Review a rendered Pixel cast identity frame with promoted cue roles.",
+            )
         };
-        bundles.push(render_pixel_bundle(
-            bundle_ctx,
-            fixture,
-            vec![
-                format!("species {}", fixture.species.as_str()),
-                format!("stage {}", fixture.stage.as_str()),
-                "cast identity review".to_string(),
-            ],
-            "Review a rendered Pixel cast identity frame with promoted cue roles.",
-        ));
+        bundles.push(bundle);
     }
     bundles.push(pixel_cast_identity_matrix_bundle());
     bundles.push(pixel_tank_composition_bundle(ctx));
@@ -318,6 +321,17 @@ fn render_pixel_bundle(
         None,
         Vec::new(),
     )
+}
+
+fn render_pixel_bundle_with_fixed_now(
+    ctx: &PreviewRenderContext,
+    fixture: PixelFixture,
+    lines: Vec<String>,
+    intent: &'static str,
+    fixed_now: time::OffsetDateTime,
+) -> PreviewPixelBundle {
+    let bundle_ctx = ctx.with_fixed_now(fixed_now);
+    render_pixel_bundle(&bundle_ctx, fixture, lines, intent)
 }
 
 fn render_pixel_strip(
