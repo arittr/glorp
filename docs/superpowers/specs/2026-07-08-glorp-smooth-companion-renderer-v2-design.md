@@ -29,6 +29,10 @@ The earlier Pixel companion work is useful as rendering research and fixture
 coverage, but it is not the product center. Pixel/3D-ish treatment can become a
 style or layer treatment inside Renderer v2 after Classic parity is preserved.
 
+Renderer v2 gets its own hidden development mode: `--renderer smooth`. It must
+not reuse `--renderer pixel`, because the current Pixel branch intentionally
+bypasses the Classic scene and would preserve the wrong product boundary.
+
 ## Problem
 
 The current macOS companion has the right product shape but the wrong rendering
@@ -148,39 +152,72 @@ pub struct SmoothCompanionScenePlan {
     pub viewport: CompanionViewport,
     pub layers: Vec<SmoothCompanionLayer>,
     pub pet: SmoothCompanionPet,
-    pub gauges: CompanionGaugeModel,
-    pub hud: CompanionHudModel,
+    pub chrome: CompanionChromeReservation,
+    pub privacy: SmoothCompanionPrivacyClaims,
 }
 
 pub struct SmoothCompanionLayer {
     pub id: SmoothLayerId,
     pub role: SmoothLayerRole,
     pub z: i16,
-    pub anchor: SmoothAnchor,
-    pub bounds: SmoothBounds,
-    pub cells: Vec<DrawCell>,
+    pub local_bounds: SmoothBounds,
+    pub anchor: SmoothPoint,
+    pub transform_origin: SmoothPoint,
+    pub transform: SmoothTransform,
+    pub opacity: f32,
+    pub clip: SmoothClip,
+    pub blend: SmoothBlendMode,
+    pub items: Vec<SmoothLayerItem>,
     pub animation: SmoothLayerAnimation,
 }
 
+pub enum SmoothLayerItem {
+    Cell(SmoothLocalCell),
+    Shape(SmoothShape),
+    Raster(SmoothRasterRef),
+}
+
+pub struct SmoothLocalCell {
+    pub local_col: u16,
+    pub local_row: u16,
+    pub glyph: String,
+    pub fg: Option<Rgb>,
+    pub bg: Option<Rgb>,
+    pub bold: bool,
+}
+
 pub enum SmoothLayerRole {
-    BackgroundWash,
+    DepthRings,
+    BiomeWash,
     RoomGlyphs,
     Ambient,
-    Activity,
+    Motes,
+    ActivityGlyphs,
     PropsBehind,
     TankLifeBehind,
+    ChestBubble,
     ContactShadow,
     PetBody,
     PerformanceCue,
     PropsForeground,
     TankLifeForeground,
-    Aura,
+    StatusHalo,
+    TroubleIndicator,
+    MoodAura,
+    DimOverlay,
 }
 ```
 
-`gauges` and `hud` may remain AppKit-drawn companion chrome in the first slice.
-They still belong in the v2 plan as reserved regions and review metadata so the
-animated scene does not collide with the lower text or perimeter rings.
+`DrawCell` is a compatibility output, not the smooth scene primitive.
+`SmoothCompanionScenePlan::flatten_classic_cells()` must produce the current
+`SceneDrawList` ordering for the Classic cell layers. Smooth renderers consume
+the local layer items and transforms directly.
+
+`chrome` records safe regions, gauge lanes, HUD bounds, and privacy claims. It
+does not carry exact token strings, source names, project context, file paths,
+or raw usage rows. AppKit may keep deriving and drawing the existing HUD and
+perimeter gauges at draw time in the first slice, but the v2 plan must reserve
+their space so animated layers do not collide with them.
 
 `SceneDrawList` may stay as the backend-agnostic low-level artifact, but
 Renderer v2 needs a higher-level plan or a role-bearing draw list before
@@ -208,9 +245,27 @@ boundaries:
 11. foreground props and tank life
 
 Renderer v2 should preserve those passes as typed layers. That can be done by
-adding a companion-oriented layered render function beside the current draw-list
-function, or by evolving the draw-list function to emit layer groups and then
-flatten for existing callers.
+adding a companion-oriented `LayeredPetScene` builder beside the current
+draw-list function, then flattening it for existing callers. The first
+implementation should not evolve `SceneDrawList` with optional metadata and
+then ask consumers to infer semantics later; parity depends on preserving roles
+before flattening.
+
+Required construction contract:
+
+```text
+render_layered_pet_scene_with_tank_geometry(...)
+  -> LayeredPetScene
+  -> flatten_classic_cells() -> SceneDrawList
+```
+
+For fixed `WatchViewModel`, `now`, grid, tank geometry, and companion motion,
+`flatten_classic_cells()` must match the current
+`build_round_scene_draw_list(...).draw_list` exactly for the Classic cell
+layers, including the existing uniform porthole recolor post-pass. Mood aura,
+depth rings, dim overlay, status halo, trouble indicator, HUD, and gauges are
+companion chrome/layers outside the existing `SceneDrawList`; they need separate
+geometry and privacy assertions.
 
 The important constraint: Classic TUI/watch rendering should not be disrupted
 while the companion v2 seam is being built.
@@ -222,6 +277,7 @@ Motion should be driven by continuous time and stable scene anchors.
 ```rust
 pub struct SmoothCompanionMotionState {
     pub started_at: OffsetDateTime,
+    pub elapsed_ms: u64,
     pub previous_pet_anchor: SmoothPoint,
     pub target_pet_anchor: SmoothPoint,
     pub blink_schedule: BlinkSchedule,
@@ -240,6 +296,15 @@ good starting inputs, but Renderer v2 should apply movement as fractional
 transforms in the renderer rather than only snapping `pet_rect` to a cell. The
 pet layer can keep a cell-art source while rendering at fractional AppKit
 coordinates.
+
+Motion state is owned by the host adapter, just like the current Pixel renderer
+state is stored in `AppState`, but the state type remains portable Rust. Preview
+Lab owns its own deterministic state while exporting strips. Live AppKit should
+drive interpolation from a monotonic elapsed time; wall-clock `OffsetDateTime`
+is still used to derive Glorp state and deterministic fixtures. On poll updates,
+the state preserves motion continuity for the same pet identity and viewport by
+rebasing the current rendered anchor as `previous_pet_anchor`; it resets on
+renderer mode changes, pet identity/stage changes, or viewport-class changes.
 
 ### AppKit v2 adapter
 
@@ -267,22 +332,50 @@ those glyph cells are in named layers with fractional transforms and separate
 animation channels. Pixel or richer raster treatment can follow by replacing the
 `PetBody` layer renderer while keeping all other layers.
 
+The existing Pixel renderer is not already a valid `PetBody` replacement: today
+it emits a full frame that includes aura, shadow, body, face, and aperture
+clearing. Slice 4 requires decomposing that work into body/style primitives that
+fit inside Renderer v2's `PetBody` and related layer roles.
+
 ### Preview Lab
 
 Preview Lab is the review contract for this work. The v2 spec needs artifacts
 that prove both parity and motion:
 
-- Classic companion baseline frame.
-- Smooth v2 parity frame with the same fixture.
-- Layer inventory sidecar listing layer ids, roles, z order, bounds, and cell
-  counts.
-- Motion strip showing fractional pet anchor/bob values across frames.
-- Acceptance sidecar proving props, tank life, ambient/activity glyphs, pet body,
-  foreground layers, HUD-safe region, and gauges are all represented.
+- `dev-preview --scenario smooth` is the owner for v2 review artifacts.
+- `frames/round-smooth-classic-baseline.*` captures the current Classic fixture.
+- `frames/round-smooth-classic-parity.*` captures v2 with the same fixture.
+- `frames/round-smooth-classic-parity.smooth-plan.json` records the layer plan:
+  schema version, target renderer, layer ids, item ids, roles, z order, local
+  bounds, transforms, opacity, blend mode, clip, item counts, chrome safe
+  regions, privacy claims, and a flatten checksum.
+- `frames/round-smooth-classic-parity.smooth-parity.json` records parity:
+  Classic draw-list checksum, v2 flatten checksum, exact-match status or named
+  allowable deltas, required-role presence, fixture id, and review status.
+- `strips/round-smooth-motion/frame-NNN.smooth-motion.json` records fractional
+  pet anchor, bob, scale, opacity, pulse, and layer-transform values. The cell
+  strip alone is not enough because fractional motion may not cross a cell
+  boundary every frame.
+- The scenario includes side-by-side review links for Classic baseline and v2
+  parity, plus deterministic fixtures for active pulse, asleep/calm, helper
+  trouble, and a tank-prop-rich habitat with an earned treasure chest.
+
+`manifest.json` must expose these as first-class preview artifacts, not only as
+loose extra files: frame entries get `files.smooth_plan` and
+`files.smooth_parity`, strip frame entries get `files.smooth_motion`, and the
+artifact inventory uses `smooth-plan`, `smooth-parity`, and `smooth-motion`
+types. Existing `.hud.json` / `PreviewHudArtifact` remains the HUD evidence
+contract; smooth-plan `chrome` is reserve geometry and privacy metadata only.
 
 The existing Pixel composition sidecar currently records props and tank life as
 unavailable for Pixel runtime. Renderer v2 should invert that contract: props
 and tank life are required for v2 parity, and absence is a failing artifact.
+
+Smooth plan, parity, and motion artifacts must participate in the same privacy
+scan pattern as existing round and Pixel artifacts. They may include semantic
+roles, safe regions, checksums, and abstract state buckets; they must not include
+source names, exact token strings, project/file paths, prompts, responses, raw
+diagnostics, or unprojected pet seed values.
 
 ## Rollout Shape
 
@@ -293,9 +386,20 @@ Motion can be minimal, but the plan must preserve layer identity.
 
 Acceptance:
 
-- v2 Preview Lab frame includes pet, props, tank life, ambient, activity, aura,
-  HUD-safe region, and foreground layers.
-- AppKit v2 can render the same plan without crashing.
+- v2 adds `--renderer smooth`; Classic remains the default; v2 does not reuse
+  the existing Pixel branch.
+- `dev-preview --scenario smooth` emits baseline, parity, smooth-plan,
+  smooth-parity, and motion sidecars.
+- The smooth plan includes required roles for biome wash, room glyphs, ambient,
+  motes, activity glyphs, props behind, tank life behind, chest bubble when the
+  fixture earns it, contact shadow, pet body, performance cue, props foreground,
+  tank life foreground, status halo, trouble indicator, mood aura, depth rings,
+  dim overlay, and chrome reservations.
+- For fixed parity fixtures, `flatten_classic_cells()` matches the existing
+  Classic companion draw-list exactly for cell layers.
+- Privacy scans pass for all smooth sidecars.
+- Drew reviews the Classic/v2 side-by-side parity artifact and explicitly
+  accepts that it still reads as the current Glorp companion.
 - Existing Classic companion path remains available.
 
 ### Slice 2: smooth pet motion
@@ -309,6 +413,15 @@ Acceptance:
   frames.
 - Live companion visibly moves smoothly.
 - Prop and tank-life layers remain present and correctly ordered.
+- Bounded native smoke captures screenshots for `--renderer smooth` and the
+  current Classic renderer at 260, 360, and 480 px review sizes. Each run exits
+  on its own after a fixed duration, writes a screenshot plus render log, renders
+  at least five frames, reports no panic, and exits 0.
+- Native smoke covers normal, active pulse, asleep/calm, and helper trouble
+  fixtures. The implementation must extend the hidden review harness beyond the
+  current size/active-pulse flags before claiming those states are covered.
+- Drew reviews the native Classic-vs-smooth screenshot set and explicitly
+  accepts that the live AppKit renderer still reads as the current companion.
 
 ### Slice 3: depth and polish
 
@@ -320,6 +433,9 @@ Acceptance:
 - Pet is larger and more hero-like without crowding gauges.
 - The tank feels inhabited, not like a blob floating above a dashboard.
 - Visual review confirms the result still reads as Glorp.
+- Machine evidence confirms the pet, props, tank life, ambient marks, activity
+  marks, aura, HUD reserve, gauges reserve, porthole mask, and privacy claims
+  remain present after depth changes.
 
 ### Slice 4: optional pixel/3D-ish pet treatment
 
@@ -334,6 +450,8 @@ Acceptance:
 - It uses the correct Glorp identity and existing pet art semantics.
 - Turning it off returns to Classic pet body rendering without changing the
   surrounding companion scene.
+- The treatment is built from decomposed body/style primitives, not the current
+  full-frame Pixel blit.
 
 ## Testing and Verification
 
@@ -341,39 +459,50 @@ Required implementation checks:
 
 - Unit tests for layer construction: each Classic pass maps to a named role and
   the flattened result can reproduce the current draw-list ordering.
+- Unit tests for local layer coordinates, transforms, opacity, clipping, and
+  flattening rules.
 - Unit tests for pet layer bounds and face-protected regions so tank life keeps
   avoiding the pet.
-- Preview Lab tests for v2 parity artifact presence and schema stability.
+- Preview Lab tests for v2 parity artifact presence, schema stability, manifest
+  links, flatten checksums, required roles, and privacy scans.
 - Motion determinism tests: fixed input, fixed initial state, fixed timestamps,
   and fixed viewport produce deterministic frame plans.
-- Existing companion crash regression stays covered by the fractional aperture
-  test added for the AppKit pixel path.
+- AppKit smoke protocol for `--renderer smooth`: direct `companion-app` review
+  runs at 260, 360, and 480 px, each with `--review-capture-dir`,
+  `--review-duration-ms`, and a forced review state. A passing run writes
+  `screenshot.png` and `render-log.json`, records at least five rendered frames,
+  exits 0 without manual quit, and has no panic/crash report for that run.
 - Existing relevant suites continue to pass:
   - `cargo test --test round_scene`
-  - `cargo test --test pixel_renderer`
-  - `cargo test --test pixel_fit`
   - `cargo test --features dev-preview --test dev_preview`
-  - `cargo test companion::pixel`
+  - focused companion renderer tests added for `smooth`
+  - Pixel tests only when Slice 4 touches the Pixel renderer or shared pixel
+    primitives
 
 Visual verification:
 
 - `cargo run -- dev-preview --scenario round --out target/glorp-preview`
-- new v2 Preview Lab scenario or round fixture once implemented
+- `cargo run -- dev-preview --scenario smooth --out target/glorp-preview`
 - `cargo xtask companion fresh` for the default Classic path
-- v2/pixel-style launch command once the implementation exposes it
+- `cargo run -- companion --renderer smooth` once the implementation exposes it
+- `cargo run -- companion-app --renderer smooth --review-size 360x360
+  --review-state active-pulse --review-duration-ms 2000
+  --review-capture-dir target/glorp-review/smooth-360-active`
 
-## Open Decisions for Implementation Planning
+## Decisions for Implementation Planning
 
-1. Whether to add `LayeredSceneDrawList` beside `SceneDrawList`, or evolve
-   `SceneDrawList` with optional layer metadata while keeping existing blitters
-   simple.
-2. Whether the first AppKit v2 adapter renders glyph cells directly with
-   fractional positions or rasterizes layers into offscreen images before
-   compositing.
-3. Whether Renderer v2 should launch behind the existing `--renderer pixel`
-   flag during development or get a new hidden flag such as `--renderer smooth`.
-4. Which Preview Lab scenario owns the v2 parity contract: extend `round`, add
-   `smooth`, or add a focused `companion-v2` scenario.
+1. Add a new layered scene plan and flattening compatibility path. Do not rely
+   on optional metadata attached to already-flattened cells.
+2. Use `--renderer smooth` for the hidden live development path.
+3. Add `dev-preview --scenario smooth` for Renderer v2 parity/motion artifacts.
+4. The first AppKit v2 adapter may render glyph cells directly with
+   fractional positions or rasterize layers into offscreen images before
+   compositing. The implementation plan should choose the smallest path that
+   satisfies the parity and smooth-motion tests.
+5. HUD and gauges remain companion chrome in the first slice. The v2 plan
+   carries safe regions and privacy claims, not exact HUD/gauge values.
+6. Status halo and helper-trouble indicators are v2 visual layers/chrome with
+   explicit roles; they are not inferred from generic overlay cells.
 
 ## Success Standard
 
