@@ -46,6 +46,48 @@ fn frame_for(vm: &WatchViewModel, ms: i64) -> glorp::presentation::pixel::PixelF
     })
 }
 
+fn frame_for_reference(vm: &WatchViewModel, reference: PixelPetArtReference) -> PixelFrame {
+    let base = datetime!(2026-07-08 12:00 UTC);
+    let input = PixelPetInput::from_watch_view_model(vm, base);
+    let mut state = PixelRendererState::new(&input, base);
+    render_pixel_frame(PixelRendererTick {
+        input: &input,
+        art_reference: &reference,
+        viewport: PixelViewport::companion_default(),
+        now: base,
+        state: &mut state,
+    })
+}
+
+fn reference_with_role_change(
+    vm: &WatchViewModel,
+    from: PixelArtRole,
+    to: PixelArtRole,
+) -> (PixelPetArtReference, PixelPetArtReference) {
+    let (_frame, base_reference) = frame_for_with_reference(vm, 0);
+    let mut changed = base_reference.clone();
+    let cell_index = changed
+        .occupied_cells
+        .iter()
+        .position(|cell| cell.role == from)
+        .or_else(|| {
+            (from == PixelArtRole::Body).then_some(())?;
+            changed.occupied_cells.iter().position(|cell| {
+                matches!(
+                    cell.role,
+                    PixelArtRole::BodyGlow
+                        | PixelArtRole::Outline
+                        | PixelArtRole::InteriorTexture
+                        | PixelArtRole::Appendage
+                        | PixelArtRole::FootContact
+                ) && cell.role != to
+            })
+        })
+        .expect("reference should contain source role");
+    changed.occupied_cells[cell_index].role = to;
+    (base_reference, changed)
+}
+
 fn frame_for_procedural_fallback(
     vm: &WatchViewModel,
     ms: i64,
@@ -290,6 +332,64 @@ fn hero_frame_uses_reference_roles_not_species_only_shape() {
         frame.changed_pixel_count(&frame_for_procedural_fallback(&vm, 480)) > 0,
         "reference-driven renderer should no longer match the old procedural-only helper"
     );
+}
+
+#[test]
+fn signature_roles_change_visible_pixels() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Fuzz;
+    vm.pet_render.stage = Stage::S3;
+
+    let (base_reference, locket_reference) =
+        reference_with_role_change(&vm, PixelArtRole::Body, PixelArtRole::Locket);
+    let base_frame = frame_for_reference(&vm, base_reference);
+    let locket_frame = frame_for_reference(&vm, locket_reference);
+
+    assert!(
+        base_frame.changed_pixel_count(&locket_frame) > 0,
+        "locket role must change visible pixels"
+    );
+}
+
+#[test]
+fn structural_roles_change_visible_pixels() {
+    let mut vm = WatchViewModel::fixture();
+    vm.pet_render.generated_species = Species::Mech;
+    vm.pet_render.stage = Stage::S5;
+
+    let (base_reference, outline_reference) =
+        reference_with_role_change(&vm, PixelArtRole::Body, PixelArtRole::Outline);
+    let base_frame = frame_for_reference(&vm, base_reference);
+    let outline_frame = frame_for_reference(&vm, outline_reference);
+
+    assert!(
+        base_frame.changed_pixel_count(&outline_frame) > 0,
+        "outline role must change visible pixels"
+    );
+}
+
+#[test]
+fn promoted_reference_roles_are_visible_in_hero_frames() {
+    for (species, stage, required_role) in [
+        (Species::Fuzz, Stage::S3, PixelArtRole::Locket),
+        (Species::Glitch, Stage::S4, PixelArtRole::RepairMark),
+        (Species::Crystal, Stage::S5, PixelArtRole::Facet),
+        (Species::Mech, Stage::S5, PixelArtRole::Outline),
+    ] {
+        let mut vm = WatchViewModel::fixture();
+        vm.pet_render.generated_species = species;
+        vm.pet_render.stage = stage;
+        let (frame, reference) = frame_for_with_reference(&vm, 480);
+
+        assert!(
+            reference.role_count(required_role) > 0,
+            "{species:?} {stage:?} missing required promoted role {required_role:?}"
+        );
+        assert!(
+            frame.opaque_pixel_count() > 120,
+            "{species:?} {stage:?} rendered too few visible pixels"
+        );
+    }
 }
 
 #[test]
