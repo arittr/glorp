@@ -1199,6 +1199,9 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/tank-life-date-2026-07-08.txt",
         "frames/tank-life-round-projection.txt",
         "frames/tank-life-anemone-morphs.txt",
+        "frames/pixel-fuzz-s3-content-idle.pixel.json",
+        "frames/pixel-glitch-s4-feed-pulse.pixel.json",
+        "frames/pixel-species-matrix.pixel.json",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1293,6 +1296,9 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "tank-life-date-2026-07-08".to_string(),
             "tank-life-round-projection".to_string(),
             "tank-life-anemone-morphs".to_string(),
+            "pixel-fuzz-s3-content-idle".to_string(),
+            "pixel-glitch-s4-feed-pulse".to_string(),
+            "pixel-species-matrix".to_string(),
         ]
     );
 }
