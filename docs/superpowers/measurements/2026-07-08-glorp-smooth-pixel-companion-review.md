@@ -1,7 +1,7 @@
 # Smooth Pixel Companion Review
 
 Date: 2026-07-08
-Commit: branch head after final-review fixes
+Commit: 32c25bd
 Reviewer: Drew Ritter
 Machine: workerbee
 
@@ -56,6 +56,12 @@ cargo test --features dev-preview dev_preview::scenarios
 cargo test --features dev-preview dev_preview::export
 cargo clippy --all-targets --all-features -- -D warnings
 cargo check --locked --no-default-features --all-targets
+```
+
+The final live-path regression also passed:
+
+```bash
+cargo test companion::app::tests::companion_pixel_tick_recomputes_pulse_age_between_polls
 ```
 
 Linux portability still requires running the same command on Ubuntu before claiming Linux coverage.
