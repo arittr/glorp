@@ -1,16 +1,17 @@
 use crate::dev_preview::contract::{
-    PreviewTankLifeArtifact, PreviewTankLifeCollisionArtifact, PreviewTankLifeLayerArtifact,
-    PreviewTankLifePlacementArtifact, PreviewTankLifeSkipArtifact, PreviewTargetArtifact,
-    TANK_LIFE_CONTRACT_SCHEMA_VERSION,
+    PreviewTankLifeArtifact, PreviewTankLifeCellArtifact, PreviewTankLifeCollisionArtifact,
+    PreviewTankLifeLayerArtifact, PreviewTankLifePlacementArtifact, PreviewTankLifeSkipArtifact,
+    PreviewTargetArtifact, TANK_LIFE_CONTRACT_SCHEMA_VERSION,
 };
 use crate::dev_preview::scenarios::{PreviewRenderContext, PreviewScenarioBundle};
 use crate::error::{GlorpError, Result};
 use crate::game::habitat::{self, HabitatPetLayer, TankLifeRouteFamily};
+use crate::storage::state::TankInhabitantId;
 use crate::tui::component::{
     anemone_anchor_sprite, anemone_morph_for_day, canonical_daily_cast, host_fish_sprite,
     layer_segment_summaries, pet_face_protected_regions, project_tank_life_cast, rect_contains,
     tank_life_placements_for, watch_tank_life_geometry, AnemoneMorph, PetScene,
-    RenderedTankLifeCast, TankLifePlacement, TankLifeRenderInput, TankLifeSkipReason,
+    RenderedTankLifeCast, TankLifeCell, TankLifePlacement, TankLifeRenderInput, TankLifeSkipReason,
     TankLifeSurface, TankLifeSurfaceGeometry, TargetPath,
 };
 use crate::tui::render_context::{RenderContext, WatchClock};
@@ -184,20 +185,30 @@ fn render_tank_life_fixture(
                 color_capability: render.color_capability,
                 life_profile: vm.life_profile.clone(),
             });
-            let frame = match fixture.visual {
+            let (frame, pet_protected_regions, placements, projected) = match fixture.visual {
                 TankLifeFixtureVisual::Scene => {
-                    crate::dev_preview::watch::render_watch_preview_frame_from_view_model(
-                        fixture.id,
-                        fixture.title,
-                        &vm,
-                        now,
-                        fixture.width,
-                        fixture.height,
-                        ColorCapability::Truecolor,
-                    )?
+                    let frame =
+                        crate::dev_preview::watch::render_watch_preview_frame_from_view_model(
+                            fixture.id,
+                            fixture.title,
+                            &vm,
+                            now,
+                            fixture.width,
+                            fixture.height,
+                            ColorCapability::Truecolor,
+                        )?;
+                    (frame, pet_protected_regions, placements, projected)
                 }
                 TankLifeFixtureVisual::AnemoneMorphCatalog => {
-                    render_anemone_morph_catalog_frame(fixture)
+                    let placements = anemone_morph_catalog_placements();
+                    let frame = render_anemone_morph_catalog_frame(fixture, &placements);
+                    let anemone = TankInhabitantId::new(habitat::ANEMONE_HOST);
+                    let projected = RenderedTankLifeCast {
+                        canonical_ids: vec![anemone.clone()],
+                        rendered_ids: vec![anemone],
+                        skipped: Vec::new(),
+                    };
+                    (frame, Vec::new(), placements, projected)
                 }
             };
             (
@@ -331,6 +342,16 @@ fn tank_life_artifact_for_frame(
                     height: placement.bounds.height,
                 },
                 cell_count: placement.cells.len(),
+                cells: placement
+                    .cells
+                    .iter()
+                    .map(|cell| PreviewTankLifeCellArtifact {
+                        row: cell.row,
+                        col: cell.col,
+                        glyph: cell.glyph.to_string(),
+                        pet_layer: pet_layer_label(cell.pet_layer).to_string(),
+                    })
+                    .collect(),
             })
             .collect(),
         layer_segments: layer_segment_summaries(placements)
@@ -351,11 +372,10 @@ fn tank_life_artifact_for_frame(
 
 fn render_anemone_morph_catalog_frame(
     fixture: &TankLifeFixture,
+    placements: &[TankLifePlacement],
 ) -> crate::dev_preview::frame::PreviewFrame {
     let mut buffer = Buffer::empty(Rect::new(0, 0, fixture.width, fixture.height));
     let label_style = Style::default().fg(Color::Rgb(0xb0, 0xa8, 0xe8));
-    let anchor_style = Style::default().fg(Color::Rgb(0xe8, 0xb0, 0xd0));
-    let fish_style = Style::default().fg(Color::Rgb(0x9c, 0xd8, 0xe8));
 
     buffer.set_string(4, 2, "anemone host morph catalog", label_style);
     buffer.set_string(4, 4, "flower", label_style);
@@ -363,43 +383,99 @@ fn render_anemone_morph_catalog_frame(
     buffer.set_string(60, 4, "crown", label_style);
     buffer.set_string(88, 4, "dot colony", label_style);
 
-    for (label_x, morph) in [
-        (4, AnemoneMorph::Flower),
-        (32, AnemoneMorph::Comb),
-        (60, AnemoneMorph::Crown),
-        (88, AnemoneMorph::DotColony),
-    ] {
-        draw_sprite(
-            &mut buffer,
-            label_x,
-            8,
-            &anemone_anchor_sprite(morph),
-            anchor_style,
-        );
-        draw_sprite(&mut buffer, label_x + 8, 7, &host_fish_sprite(), fish_style);
+    for placement in placements {
+        for cell in &placement.cells {
+            if cell.col < buffer.area.width && cell.row < buffer.area.height {
+                buffer[(cell.col, cell.row)]
+                    .set_char(cell.glyph)
+                    .set_style(cell.style);
+            }
+        }
+    }
+
+    for label_x in [4, 32, 60, 88] {
         buffer.set_string(label_x, 13, "anchor + host fish", label_style);
     }
 
     crate::dev_preview::frame::frame_from_buffer(fixture.id, fixture.title, &buffer)
 }
 
-fn draw_sprite(
-    buffer: &mut Buffer,
+fn anemone_morph_catalog_placements() -> Vec<TankLifePlacement> {
+    [
+        (4, AnemoneMorph::Flower),
+        (32, AnemoneMorph::Comb),
+        (60, AnemoneMorph::Crown),
+        (88, AnemoneMorph::DotColony),
+    ]
+    .into_iter()
+    .map(|(origin_col, morph)| {
+        let id = TankInhabitantId::new(habitat::ANEMONE_HOST);
+        let mut cells = catalog_sprite_cells(
+            &id,
+            origin_col,
+            8,
+            &anemone_anchor_sprite(morph),
+            Style::default().fg(Color::Rgb(0xe8, 0xb0, 0xd0)),
+            HabitatPetLayer::Behind,
+        );
+        cells.extend(catalog_sprite_cells(
+            &id,
+            origin_col + 8,
+            7,
+            &host_fish_sprite(),
+            Style::default().fg(Color::Rgb(0x9c, 0xd8, 0xe8)),
+            HabitatPetLayer::Foreground,
+        ));
+        tank_life_placement_from_cells(id, cells)
+    })
+    .collect()
+}
+
+fn catalog_sprite_cells(
+    id: &TankInhabitantId,
     origin_col: u16,
     origin_row: u16,
     sprite: &[crate::tui::component::SpriteCell],
     style: Style,
-) {
-    for cell in sprite {
-        let col = i32::from(origin_col) + i32::from(cell.col);
-        let row = i32::from(origin_row) + i32::from(cell.row);
-        if col < 0 || row < 0 {
-            continue;
-        }
-        let (col, row) = (col as u16, row as u16);
-        if col < buffer.area.width && row < buffer.area.height {
-            buffer[(col, row)].set_char(cell.glyph).set_style(style);
-        }
+    pet_layer: HabitatPetLayer,
+) -> Vec<TankLifeCell> {
+    sprite
+        .iter()
+        .filter_map(|cell| {
+            let col = i32::from(origin_col) + i32::from(cell.col);
+            let row = i32::from(origin_row) + i32::from(cell.row);
+            if col < 0 || row < 0 {
+                return None;
+            }
+            Some(TankLifeCell {
+                inhabitant_id: id.clone(),
+                row: row as u16,
+                col: col as u16,
+                glyph: cell.glyph,
+                style,
+                pet_layer,
+            })
+        })
+        .collect()
+}
+
+fn tank_life_placement_from_cells(
+    id: TankInhabitantId,
+    cells: Vec<TankLifeCell>,
+) -> TankLifePlacement {
+    let min_col = cells.iter().map(|cell| cell.col).min().unwrap_or(0);
+    let max_col = cells.iter().map(|cell| cell.col).max().unwrap_or(min_col);
+    let min_row = cells.iter().map(|cell| cell.row).min().unwrap_or(0);
+    let max_row = cells.iter().map(|cell| cell.row).max().unwrap_or(min_row);
+    TankLifePlacement {
+        inhabitant_id: id,
+        bounds: Rect::new(
+            min_col,
+            min_row,
+            max_col.saturating_sub(min_col).saturating_add(1),
+            max_row.saturating_sub(min_row).saturating_add(1),
+        ),
+        cells,
     }
 }
 

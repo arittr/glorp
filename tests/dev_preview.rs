@@ -2039,10 +2039,15 @@ fn dev_preview_tank_life_anemone_fixture_shows_all_morphs_and_host() {
 
     let text =
         std::fs::read_to_string(run.out.join("frames/tank-life-anemone-morphs.txt")).unwrap();
+    let artifact = read_tank_life(&run, "tank-life-anemone-morphs");
     for glyph in ["✺", "┬", "⌁", "⁙", "›"] {
         assert!(
             text.contains(glyph),
             "anemone morph fixture should show glyph {glyph:?}; text was:\n{text}"
+        );
+        assert!(
+            tank_life_artifact_mentions_glyph(&artifact, glyph),
+            "anemone morph artifact should describe glyph {glyph:?}; artifact was:\n{artifact:#}"
         );
     }
 }
@@ -2156,6 +2161,15 @@ fn read_hud(run: &PreviewRun, id: &str) -> Value {
 
 fn read_tank_life(run: &PreviewRun, id: &str) -> Value {
     read_json(run.out.join(format!("frames/{id}.tank-life.json")))
+}
+
+fn tank_life_artifact_mentions_glyph(artifact: &Value, glyph: &str) -> bool {
+    artifact["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|placement| placement["cells"].as_array().into_iter().flatten())
+        .any(|cell| cell["glyph"] == glyph)
 }
 
 fn preview_scenarios_with_contract_scene(manifest: &Value) -> Vec<String> {

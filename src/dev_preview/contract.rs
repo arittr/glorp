@@ -161,6 +161,15 @@ pub struct PreviewTankLifePlacementArtifact {
     pub route_family: String,
     pub bounds: PreviewTargetArtifact,
     pub cell_count: usize,
+    pub cells: Vec<PreviewTankLifeCellArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewTankLifeCellArtifact {
+    pub row: u16,
+    pub col: u16,
+    pub glyph: String,
+    pub pet_layer: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
