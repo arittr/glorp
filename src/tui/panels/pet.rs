@@ -23,6 +23,7 @@ mod tank_life;
 
 pub use ambient::{ambient_glyphs_for, ambient_glyphs_for_phase};
 pub(crate) use ambient::{effective_weekend_softening, pet_silhouette_halo_rects};
+#[cfg(feature = "dev-preview")]
 pub(crate) use art_lines::pet_role_spans_for_line;
 use art_lines::render_speech_bubble;
 use blit::blit_draw_list;
