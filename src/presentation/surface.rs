@@ -86,6 +86,18 @@ pub const ROUND_STYLE: SurfaceStyle = SurfaceStyle {
     eye_emphasis: EyeEmphasis::None,
 };
 
+pub const PIXEL_STYLE: SurfaceStyle = SurfaceStyle {
+    detail: Detail::Compact,
+    clip: Clip::Circle,
+    source_accent: false,
+    phase_tint: false,
+    energy_droop: false,
+    shimmer: true,
+    activity_lift: true,
+    prop_reaction: false,
+    eye_emphasis: EyeEmphasis::Brightness,
+};
+
 pub const SCREEN_STYLE: SurfaceStyle = SurfaceStyle {
     detail: Detail::Full,
     clip: Clip::None,
@@ -146,7 +158,7 @@ impl LiveColorInputs {
 // ResolvedColors — output of the resolver; one Rgb per palette role
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedColors {
     pub body: Rgb,
     pub eye: Rgb,

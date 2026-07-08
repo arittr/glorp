@@ -3,6 +3,7 @@ pub mod draw_list;
 pub mod effect;
 pub mod pet;
 pub mod pet_scene;
+pub mod pixel;
 pub mod privacy;
 pub mod props;
 pub mod rasterize;
@@ -17,5 +18,5 @@ pub use pet_scene::PetSceneModel;
 pub use rasterize::{rasterize, RasterCell};
 pub use surface::{
     Clip, Detail, EyeEmphasis, LiveColorInputs, ResolvedColors, SurfaceStyle, MENU_STYLE,
-    ROUND_STYLE, SCREEN_STYLE, WATCH_STYLE,
+    PIXEL_STYLE, ROUND_STYLE, SCREEN_STYLE, WATCH_STYLE,
 };
