@@ -186,11 +186,9 @@ pub fn daily_fraction_for_gauge(fraction_of_yesterday: Option<f64>) -> f64 {
 }
 
 pub fn daily_overage_marker_fraction(fraction_of_yesterday: Option<f64>) -> f64 {
-    const MIN_VISIBLE_OVERAGE_FRACTION: f64 = 0.16;
-
     fraction_of_yesterday
         .filter(|value| value.is_finite() && *value > 1.0)
-        .map(|value| (value - 1.0).clamp(MIN_VISIBLE_OVERAGE_FRACTION, 1.0))
+        .map(|value| (value - 1.0).clamp(0.0, 1.0))
         .unwrap_or(0.0)
 }
 
@@ -365,9 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn daily_gauge_overage_marker_is_visible_without_recoloring_the_base_lane() {
+    fn daily_gauge_overage_marker_tracks_extra_fraction_without_recoloring_base_lane() {
         assert_eq!(daily_overage_marker_fraction(Some(0.99)), 0.0);
-        assert!((daily_overage_marker_fraction(Some(1.07)) - 0.16).abs() < 0.001);
+        assert!((daily_overage_marker_fraction(Some(1.07)) - 0.07).abs() < 0.001);
         assert!((daily_overage_marker_fraction(Some(1.25)) - 0.25).abs() < 0.001);
         assert_eq!(daily_overage_marker_fraction(Some(2.5)), 1.0);
         assert_eq!(daily_overage_marker_fraction(None), 0.0);
@@ -378,12 +376,12 @@ mod tests {
     #[test]
     fn daily_gauge_overage_marker_wraps_to_the_right_edge() {
         let ring = growth_ring_layout(100.0, 100.0, 90.0, COMPANION_GAUGE_GAP_DEG);
-        let Some((start, end)) = daily_overage_marker_arc(&ring, 0.16) else {
+        let Some((start, end)) = daily_overage_marker_arc(&ring, 0.77) else {
             panic!("expected visible overage marker arc");
         };
 
         assert_eq!(start, ring.track_start_deg);
-        assert!((end - (ring.track_start_deg + ring.track_sweep_deg * 0.16)).abs() < 1e-6);
+        assert!((end - (ring.track_start_deg + ring.track_sweep_deg * 0.77)).abs() < 1e-6);
     }
 
     #[test]

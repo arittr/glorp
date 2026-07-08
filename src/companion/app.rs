@@ -492,7 +492,7 @@ fn draw_scene(bounds: NSRect) {
 
             draw_gauge_lane(&layout.xp, &colors.xp, xp_fraction);
             draw_gauge_lane(&layout.daily, &colors.daily, daily_fraction);
-            draw_gauge_tail(
+            draw_gauge_overfill(
                 &layout.daily,
                 &daily_overage_color(),
                 daily_overage_fraction,
@@ -859,7 +859,7 @@ fn draw_gauge_fill(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
     }
 }
 
-fn draw_gauge_tail(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
+fn draw_gauge_overfill(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
     let clamped = fraction.clamp(0.0, 1.0);
     if clamped <= 0.0 {
         return;
