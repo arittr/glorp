@@ -7,15 +7,20 @@ use crate::dev_preview::scenarios::{PreviewRenderContext, PreviewScenarioBundle}
 use crate::error::{GlorpError, Result};
 use crate::game::habitat::{self, HabitatPetLayer, TankLifeRouteFamily};
 use crate::tui::component::{
-    anemone_morph_for_day, canonical_daily_cast, layer_segment_summaries,
-    pet_face_protected_regions, project_tank_life_cast, rect_contains, tank_life_placements_for,
-    watch_tank_life_geometry, PetScene, RenderedTankLifeCast, TankLifePlacement,
-    TankLifeRenderInput, TankLifeSkipReason, TankLifeSurface, TankLifeSurfaceGeometry, TargetPath,
+    anemone_anchor_sprite, anemone_morph_for_day, canonical_daily_cast, host_fish_sprite,
+    layer_segment_summaries, pet_face_protected_regions, project_tank_life_cast, rect_contains,
+    tank_life_placements_for, watch_tank_life_geometry, AnemoneMorph, PetScene,
+    RenderedTankLifeCast, TankLifePlacement, TankLifeRenderInput, TankLifeSkipReason,
+    TankLifeSurface, TankLifeSurfaceGeometry, TargetPath,
 };
 use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
-use ratatui::layout::Rect;
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -38,6 +43,13 @@ struct TankLifeFixture {
     surface: TankLifeSurface,
     local_date: time::Date,
     age_days: i64,
+    visual: TankLifeFixtureVisual,
+}
+
+#[derive(Clone, Copy)]
+enum TankLifeFixtureVisual {
+    Scene,
+    AnemoneMorphCatalog,
 }
 
 fn tank_life_fixtures() -> Vec<TankLifeFixture> {
@@ -50,6 +62,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Watch,
             local_date: time::macros::date!(2026 - 07 - 07),
             age_days: 0,
+            visual: TankLifeFixtureVisual::Scene,
         },
         TankLifeFixture {
             id: "tank-life-age-first",
@@ -59,6 +72,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Watch,
             local_date: time::macros::date!(2026 - 07 - 07),
             age_days: 1,
+            visual: TankLifeFixtureVisual::Scene,
         },
         TankLifeFixture {
             id: "tank-life-age-early",
@@ -68,6 +82,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Watch,
             local_date: time::macros::date!(2026 - 07 - 07),
             age_days: 7,
+            visual: TankLifeFixtureVisual::Scene,
         },
         TankLifeFixture {
             id: "tank-life-age-full",
@@ -77,6 +92,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Watch,
             local_date: time::macros::date!(2026 - 07 - 07),
             age_days: 60,
+            visual: TankLifeFixtureVisual::Scene,
         },
         TankLifeFixture {
             id: "tank-life-date-2026-07-07",
@@ -86,6 +102,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Watch,
             local_date: time::macros::date!(2026 - 07 - 07),
             age_days: 60,
+            visual: TankLifeFixtureVisual::Scene,
         },
         TankLifeFixture {
             id: "tank-life-date-2026-07-08",
@@ -95,6 +112,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Watch,
             local_date: time::macros::date!(2026 - 07 - 08),
             age_days: 60,
+            visual: TankLifeFixtureVisual::Scene,
         },
         TankLifeFixture {
             id: "tank-life-round-projection",
@@ -104,6 +122,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Round,
             local_date: time::macros::date!(2026 - 07 - 08),
             age_days: 60,
+            visual: TankLifeFixtureVisual::Scene,
         },
         TankLifeFixture {
             id: "tank-life-anemone-morphs",
@@ -113,6 +132,7 @@ fn tank_life_fixtures() -> Vec<TankLifeFixture> {
             surface: TankLifeSurface::Watch,
             local_date: time::macros::date!(2026 - 07 - 09),
             age_days: 60,
+            visual: TankLifeFixtureVisual::AnemoneMorphCatalog,
         },
     ]
 }
@@ -164,15 +184,22 @@ fn render_tank_life_fixture(
                 color_capability: render.color_capability,
                 life_profile: vm.life_profile.clone(),
             });
-            let frame = crate::dev_preview::watch::render_watch_preview_frame_from_view_model(
-                fixture.id,
-                fixture.title,
-                &vm,
-                now,
-                fixture.width,
-                fixture.height,
-                ColorCapability::Truecolor,
-            )?;
+            let frame = match fixture.visual {
+                TankLifeFixtureVisual::Scene => {
+                    crate::dev_preview::watch::render_watch_preview_frame_from_view_model(
+                        fixture.id,
+                        fixture.title,
+                        &vm,
+                        now,
+                        fixture.width,
+                        fixture.height,
+                        ColorCapability::Truecolor,
+                    )?
+                }
+                TankLifeFixtureVisual::AnemoneMorphCatalog => {
+                    render_anemone_morph_catalog_frame(fixture)
+                }
+            };
             (
                 frame,
                 geometry,
@@ -319,6 +346,60 @@ fn tank_life_artifact_for_frame(
             aperture_clear: placements_clear_aperture(geometry, placements),
             protected_pet_face_clear: true,
         },
+    }
+}
+
+fn render_anemone_morph_catalog_frame(
+    fixture: &TankLifeFixture,
+) -> crate::dev_preview::frame::PreviewFrame {
+    let mut buffer = Buffer::empty(Rect::new(0, 0, fixture.width, fixture.height));
+    let label_style = Style::default().fg(Color::Rgb(0xb0, 0xa8, 0xe8));
+    let anchor_style = Style::default().fg(Color::Rgb(0xe8, 0xb0, 0xd0));
+    let fish_style = Style::default().fg(Color::Rgb(0x9c, 0xd8, 0xe8));
+
+    buffer.set_string(4, 2, "anemone host morph catalog", label_style);
+    buffer.set_string(4, 4, "flower", label_style);
+    buffer.set_string(32, 4, "comb", label_style);
+    buffer.set_string(60, 4, "crown", label_style);
+    buffer.set_string(88, 4, "dot colony", label_style);
+
+    for (label_x, morph) in [
+        (4, AnemoneMorph::Flower),
+        (32, AnemoneMorph::Comb),
+        (60, AnemoneMorph::Crown),
+        (88, AnemoneMorph::DotColony),
+    ] {
+        draw_sprite(
+            &mut buffer,
+            label_x,
+            8,
+            &anemone_anchor_sprite(morph),
+            anchor_style,
+        );
+        draw_sprite(&mut buffer, label_x + 8, 7, &host_fish_sprite(), fish_style);
+        buffer.set_string(label_x, 13, "anchor + host fish", label_style);
+    }
+
+    crate::dev_preview::frame::frame_from_buffer(fixture.id, fixture.title, &buffer)
+}
+
+fn draw_sprite(
+    buffer: &mut Buffer,
+    origin_col: u16,
+    origin_row: u16,
+    sprite: &[crate::tui::component::SpriteCell],
+    style: Style,
+) {
+    for cell in sprite {
+        let col = i32::from(origin_col) + i32::from(cell.col);
+        let row = i32::from(origin_row) + i32::from(cell.row);
+        if col < 0 || row < 0 {
+            continue;
+        }
+        let (col, row) = (col as u16, row as u16);
+        if col < buffer.area.width && row < buffer.area.height {
+            buffer[(col, row)].set_char(cell.glyph).set_style(style);
+        }
     }
 }
 

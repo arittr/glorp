@@ -2032,6 +2032,22 @@ fn dev_preview_all_includes_tank_life_artifacts() {
 }
 
 #[test]
+fn dev_preview_tank_life_anemone_fixture_shows_all_morphs_and_host() {
+    let run = PreviewRun::new();
+
+    run.run_success("tank-life");
+
+    let text =
+        std::fs::read_to_string(run.out.join("frames/tank-life-anemone-morphs.txt")).unwrap();
+    for glyph in ["✺", "┬", "⌁", "⁙", "›"] {
+        assert!(
+            text.contains(glyph),
+            "anemone morph fixture should show glyph {glyph:?}; text was:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn dev_preview_round_glitch_and_crystal_differ_by_symbols() {
     let run = PreviewRun::new();
 
