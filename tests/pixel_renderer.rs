@@ -1,6 +1,8 @@
 use glorp::game::{evolution::Stage, metabolism::Mood};
 use glorp::pet::generation::Species;
 use glorp::presentation::pixel::{
+    frame::{PixelFrame, Rgba8},
+    raster::alpha_blend_pixel,
     render_pixel_frame, PixelPetInput, PixelRendererState, PixelRendererTick, PixelViewport,
 };
 use glorp::tui::view_model::WatchViewModel;
@@ -122,4 +124,37 @@ fn feed_pulse_changes_bounded_pixels() {
 
     assert!(changed > 80, "pulse should be visible");
     assert!(changed < 2_000, "pulse should stay bounded");
+}
+
+#[test]
+fn alpha_blend_pixel_over_transparent_preserves_source_rgb() {
+    let mut frame = PixelFrame::transparent(PixelViewport { logical_width: 1, logical_height: 1 });
+    let source = Rgba8 { r: 180, g: 90, b: 30, a: 128 };
+
+    alpha_blend_pixel(&mut frame, 0, 0, source);
+
+    assert_eq!(frame.pixels[0], source);
+}
+
+#[test]
+fn asleep_eye_pixels_stay_opaque_inside_the_body() {
+    let base = datetime!(2026-07-08 12:00 UTC);
+    let mut vm = WatchViewModel::fixture();
+    vm.day_context.asleep = true;
+    vm.life_profile.calm_mode = true;
+
+    let input = PixelPetInput::from_watch_view_model(&vm, base);
+    let wander_phase = f32::from(input.identity.variation_key.bucket(19)) * 0.17;
+    let cx = 48_i16 + (wander_phase.sin() * 7.0 * 0.28).round() as i16;
+    let cy = 48_i16;
+    let frame = frame_for(&vm, 0);
+
+    for x in [cx - 10, cx - 7, cx + 6, cx + 9] {
+        let y = cy + 2;
+        let idx = usize::from(y as u16) * usize::from(frame.width) + usize::from(x as u16);
+        assert_eq!(
+            frame.pixels[idx].a, 255,
+            "asleep eye pixel at ({x}, {y}) should stay opaque inside the body"
+        );
+    }
 }

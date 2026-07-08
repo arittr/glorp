@@ -37,14 +37,19 @@ pub fn alpha_blend_pixel(frame: &mut PixelFrame, x: i16, y: i16, color: Rgba8) {
     }
     let idx = usize::from(y as u16) * usize::from(frame.width) + usize::from(x as u16);
     let dst = frame.pixels[idx];
-    let a = f32::from(color.a) / 255.0;
-    let inv = 1.0 - a;
+    let src_a = f32::from(color.a) / 255.0;
+    let dst_a = f32::from(dst.a) / 255.0;
+    let out_a = src_a + dst_a * (1.0 - src_a);
+    if out_a <= f32::EPSILON {
+        frame.pixels[idx] = Rgba8::TRANSPARENT;
+        return;
+    }
+    let src_w = src_a / out_a;
+    let dst_w = (dst_a * (1.0 - src_a)) / out_a;
     frame.pixels[idx] = Rgba8 {
-        r: (f32::from(color.r) * a + f32::from(dst.r) * inv).round() as u8,
-        g: (f32::from(color.g) * a + f32::from(dst.g) * inv).round() as u8,
-        b: (f32::from(color.b) * a + f32::from(dst.b) * inv).round() as u8,
-        a: color
-            .a
-            .saturating_add(((u16::from(dst.a) * u16::from(255 - color.a)) / 255) as u8),
+        r: (f32::from(color.r) * src_w + f32::from(dst.r) * dst_w).round() as u8,
+        g: (f32::from(color.g) * src_w + f32::from(dst.g) * dst_w).round() as u8,
+        b: (f32::from(color.b) * src_w + f32::from(dst.b) * dst_w).round() as u8,
+        a: (out_a * 255.0).round() as u8,
     };
 }

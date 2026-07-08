@@ -192,8 +192,8 @@ fn draw_face(
         return;
     }
     if input.sleep.asleep {
-        fill_rect(frame, cx - 10, cy + 2, 4, 1, dim_eye);
-        fill_rect(frame, cx + 6, cy + 2, 4, 1, dim_eye);
+        blend_rect(frame, cx - 10, cy + 2, 4, 1, dim_eye);
+        blend_rect(frame, cx + 6, cy + 2, 4, 1, dim_eye);
         return;
     }
     fill_rect(frame, cx - 10, cy - 4, 3, 4, eye);
@@ -294,6 +294,14 @@ fn blend_ellipse(frame: &mut PixelFrame, cx: i16, cy: i16, rx: i16, ry: i16, col
 
 fn blend_circle(frame: &mut PixelFrame, cx: i16, cy: i16, radius: i16, color: Rgba8) {
     blend_ellipse(frame, cx, cy, radius, radius, color);
+}
+
+fn blend_rect(frame: &mut PixelFrame, x0: i16, y0: i16, width: i16, height: i16, color: Rgba8) {
+    for y in y0..y0 + height {
+        for x in x0..x0 + width {
+            alpha_blend_pixel(frame, x, y, color);
+        }
+    }
 }
 
 fn rgba_opaque(rgb: crate::pet::palette::Rgb) -> Rgba8 {
