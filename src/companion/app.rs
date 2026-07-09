@@ -175,7 +175,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
     let review_state = review.resolved_state();
     apply_review_state(review_state, &mut presentation_state, &mut initial_vm, now)?;
     if renderer_mode.is_smooth() {
-        prepare_smooth_initial_view_model(&mut initial_vm, now)?;
+        prepare_smooth_view_model_for_tick(&mut initial_vm, 0, now)?;
     }
     let scene = derive_round_scene_model(&initial_vm, now);
     let pixel_input = renderer_mode
@@ -299,12 +299,13 @@ fn apply_review_state(
     Ok(())
 }
 
-fn prepare_smooth_initial_view_model(
+fn prepare_smooth_view_model_for_tick(
     vm: &mut WatchViewModel,
+    semantic_art_tick_index: u64,
     now: time::OffsetDateTime,
 ) -> Result<()> {
     if vm.pet_art.is_empty() || vm.pet_spans.is_empty() {
-        rerender_pet_for_view_model(vm, 0, vm.day_context.asleep, now)?;
+        rerender_pet_for_view_model(vm, semantic_art_tick_index, vm.day_context.asleep, now)?;
     }
     Ok(())
 }
@@ -447,6 +448,7 @@ fn drain_poll_results() {
                 state.renderer_mode,
                 update,
                 now,
+                state.smooth_semantic_art_tick_index,
             ) else {
                 return;
             };
@@ -464,6 +466,7 @@ fn apply_post_poll_update(
     renderer_mode: CompanionRendererMode,
     update: LiveWatchUpdate,
     now: time::OffsetDateTime,
+    smooth_semantic_art_tick_index: u64,
 ) -> Result<(WatchViewModel, RoundSceneModel, Option<PixelPetInput>)> {
     let mut vm = update.vm;
     crate::watch_live::stamp_live_presentation(
@@ -474,7 +477,7 @@ fn apply_post_poll_update(
     );
     apply_review_state(review_state, presentation_state, &mut vm, now)?;
     if renderer_mode.is_smooth() {
-        prepare_smooth_initial_view_model(&mut vm, now)?;
+        prepare_smooth_view_model_for_tick(&mut vm, smooth_semantic_art_tick_index, now)?;
     }
     let pixel_input = renderer_mode
         .is_pixel()
@@ -1471,7 +1474,7 @@ mod tests {
         vm.pet_spans.clear();
         vm.day_context.asleep = false;
 
-        prepare_smooth_initial_view_model(&mut vm, now).unwrap();
+        prepare_smooth_view_model_for_tick(&mut vm, 0, now).unwrap();
 
         assert!(!vm.pet_art.is_empty());
         assert!(!vm.pet_spans.is_empty());
@@ -1537,6 +1540,7 @@ mod tests {
             CompanionRendererMode::Classic,
             update,
             now,
+            0,
         )
         .unwrap();
 
@@ -1568,6 +1572,7 @@ mod tests {
             CompanionRendererMode::Classic,
             update,
             now,
+            0,
         )
         .unwrap();
 
@@ -1595,6 +1600,7 @@ mod tests {
             CompanionRendererMode::Classic,
             update,
             now,
+            0,
         )
         .unwrap();
 
@@ -1623,6 +1629,7 @@ mod tests {
             CompanionRendererMode::Classic,
             update,
             now,
+            0,
         )
         .unwrap();
 
@@ -1655,6 +1662,7 @@ mod tests {
             CompanionRendererMode::Smooth,
             update,
             now,
+            0,
         )
         .unwrap();
 
@@ -1662,6 +1670,77 @@ mod tests {
         assert!(!vm.pet_spans.is_empty());
         assert!(!scene.pet.art_lines.is_empty());
         assert!(pixel_input.is_none());
+    }
+
+    #[test]
+    fn smooth_post_poll_update_uses_current_semantic_tick_when_preparing_pet_art() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let current_tick = 7;
+        let mut presentation_state = WatchPresentationState::default();
+        let mut update_vm = WatchViewModel::fixture_with_habitat_props();
+        update_vm.pet_render.generated_species = crate::pet::generation::Species::Glitch;
+        update_vm.pet_render.stage = crate::game::evolution::Stage::S4;
+        update_vm.pet_art.clear();
+        update_vm.pet_spans.clear();
+
+        let mut expected = update_vm.clone();
+        let mut expected_presentation = WatchPresentationState::default();
+        crate::watch_live::stamp_live_presentation(
+            &mut expected_presentation,
+            &mut expected,
+            crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+            now,
+        );
+        apply_review_state(
+            CompanionReviewState::Normal,
+            &mut expected_presentation,
+            &mut expected,
+            now,
+        )
+        .unwrap();
+        rerender_pet_for_view_model(&mut expected, current_tick, false, now).unwrap();
+        let expected_checksum = crate::presentation::smooth::pet_visual_checksum(
+            &expected.pet_art,
+            &expected.pet_spans,
+        );
+
+        let mut tick_zero = expected.clone();
+        rerender_pet_for_view_model(&mut tick_zero, 0, false, now).unwrap();
+        assert_ne!(
+            expected_checksum,
+            crate::presentation::smooth::pet_visual_checksum(
+                &tick_zero.pet_art,
+                &tick_zero.pet_spans,
+            ),
+            "test fixture must distinguish the current semantic tick from tick 0"
+        );
+
+        let update = LiveWatchUpdate {
+            pet_state: crate::storage::state::PetState::new_for_test("seed", "glorp"),
+            vm: update_vm,
+            applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+        };
+
+        let (vm, _, _) = apply_post_poll_update(
+            &mut presentation_state,
+            CompanionReviewState::Normal,
+            CompanionRendererMode::Smooth,
+            update,
+            now,
+            current_tick,
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::presentation::smooth::pet_visual_checksum(&vm.pet_art, &vm.pet_spans),
+            expected_checksum
+        );
     }
 
     fn accent_alpha_sum(frame: &PixelFrame, input: &PixelPetInput) -> u32 {
