@@ -130,8 +130,8 @@ struct PreparedBounds {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CompanionMetricKey {
-    width_px: u16,
-    height_px: u16,
+    width_bits: u64,
+    height_bits: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -208,8 +208,8 @@ impl CompanionMetricCache {
         bounds: PreparedBounds,
     ) -> std::result::Result<CompanionGridMetrics, CompanionFramePreparationError> {
         let key = CompanionMetricKey {
-            width_px: bounds.width_px,
-            height_px: bounds.height_px,
+            width_bits: bounds.width_f64.to_bits(),
+            height_bits: bounds.height_f64.to_bits(),
         };
         if let Some((cached_key, metrics)) = self.last {
             if cached_key == key {
@@ -1889,6 +1889,30 @@ mod tests {
 
         assert_eq!(prepared.width_px, 360);
         assert_eq!(prepared.height_px, 360);
+    }
+
+    #[test]
+    fn companion_metric_cache_recomputes_for_fractional_resize() {
+        let first = PreparedBounds {
+            width_px: 360,
+            height_px: 360,
+            width_f64: 360.1,
+            height_f64: 360.1,
+        };
+        let second = PreparedBounds {
+            width_px: 360,
+            height_px: 360,
+            width_f64: 360.9,
+            height_f64: 360.9,
+        };
+        let mut cache = CompanionMetricCache::default();
+
+        let first_metrics = cache.metrics_for(first).unwrap();
+        let second_metrics = cache.metrics_for(second).unwrap();
+        let expected_second = companion_grid_metrics(second.width_f64, second.height_f64).unwrap();
+
+        assert_eq!(second_metrics, expected_second);
+        assert_ne!(first_metrics, second_metrics);
     }
 
     #[test]
