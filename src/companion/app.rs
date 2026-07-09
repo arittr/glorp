@@ -21,7 +21,9 @@ use crate::presentation::pixel::{
     render_pixel_frame, PixelFrame, PixelPetInput, PixelRendererState, PixelRendererTick,
     PixelViewport,
 };
-use crate::presentation::smooth::{SmoothCompanionScenePlan, SmoothLayerItem, SmoothLayerRole};
+use crate::presentation::smooth::{
+    SmoothCompanionScenePlan, SmoothLayerItem, SmoothLayerMotionBinding,
+};
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge, daily_overage_color,
     daily_overage_marker_arc, daily_overage_marker_fraction, growth_ring_fill_end_deg,
@@ -30,6 +32,7 @@ use crate::round::hud::{
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
+use crate::round::smooth::SmoothScenePlanError;
 use crate::storage::state::StateStore;
 use crate::tui::view_model::SourceStatus;
 use crate::tui::view_model::WatchViewModel;
@@ -144,6 +147,7 @@ enum CompanionFramePreparationError {
     InvalidBounds,
     MissingGridMetrics,
     SmoothMissingPetBody,
+    SmoothInvalidParallaxGeometry,
 }
 
 impl CompanionFramePreparationError {
@@ -152,6 +156,9 @@ impl CompanionFramePreparationError {
             CompanionFramePreparationError::InvalidBounds => "invalid-bounds",
             CompanionFramePreparationError::MissingGridMetrics => "missing-grid-metrics",
             CompanionFramePreparationError::SmoothMissingPetBody => "smooth-missing-pet-body",
+            CompanionFramePreparationError::SmoothInvalidParallaxGeometry => {
+                "smooth-invalid-parallax-geometry"
+            }
         }
     }
 }
@@ -279,7 +286,14 @@ fn prepare_companion_frame(
                 &companion_motion(),
                 elapsed_ms,
             )
-            .map_err(|_| CompanionFramePreparationError::SmoothMissingPetBody)?;
+            .map_err(|err| match err {
+                SmoothScenePlanError::MissingPetBody => {
+                    CompanionFramePreparationError::SmoothMissingPetBody
+                }
+                SmoothScenePlanError::InvalidParallaxGeometry => {
+                    CompanionFramePreparationError::SmoothInvalidParallaxGeometry
+                }
+            })?;
             let pet_center_col = f64::from(
                 plan.pet.fractional_bounds.min.x
                     + (plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x) / 2.0,
@@ -1455,6 +1469,13 @@ fn appkit_cell_axis(value: f32) -> u16 {
     value.round().clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
+fn motion_binding_uses_fractional_coordinates(binding: SmoothLayerMotionBinding) -> bool {
+    matches!(
+        binding,
+        SmoothLayerMotionBinding::PetAttached | SmoothLayerMotionBinding::Parallax(_)
+    )
+}
+
 fn appkit_blit_smooth_plan(
     plan: &SmoothCompanionScenePlan,
     font_size: f64,
@@ -1476,12 +1497,7 @@ fn appkit_blit_smooth_plan(
             };
             let col = layer.anchor.x + layer.transform.translation.x + f32::from(cell.col);
             let row = layer.anchor.y + layer.transform.translation.y + f32::from(cell.row);
-            let fractional = matches!(
-                layer.role,
-                SmoothLayerRole::PetBody
-                    | SmoothLayerRole::ContactShadow
-                    | SmoothLayerRole::PerformanceCue
-            );
+            let fractional = motion_binding_uses_fractional_coordinates(layer.motion_binding);
             let (px, py) = if fractional {
                 fractional_cell_to_point(
                     f64::from(col),
@@ -1928,6 +1944,48 @@ mod tests {
         assert!(should_record_frame_preparation_error(
             Some(CompanionFramePreparationError::InvalidBounds),
             CompanionFramePreparationError::SmoothMissingPetBody
+        ));
+    }
+
+    #[test]
+    fn moving_bindings_use_fractional_appkit_coordinates() {
+        use crate::presentation::smooth::{SmoothDepthPlane, SmoothLayerMotionBinding};
+
+        assert!(!motion_binding_uses_fractional_coordinates(
+            SmoothLayerMotionBinding::Fixed
+        ));
+        assert!(motion_binding_uses_fractional_coordinates(
+            SmoothLayerMotionBinding::PetAttached
+        ));
+        assert!(motion_binding_uses_fractional_coordinates(
+            SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Far)
+        ));
+        assert!(motion_binding_uses_fractional_coordinates(
+            SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Foreground)
+        ));
+
+        let fractional = fractional_cell_to_point(10.1, 4.0, 30.0, 60.0, 0.0, 960.0);
+        let snapped = cell_to_point(
+            appkit_cell_axis(10.1),
+            appkit_cell_axis(4.0),
+            30.0,
+            60.0,
+            0.0,
+            960.0,
+        );
+        assert!((fractional.0 - 303.0).abs() < 0.000_000_001);
+        assert_eq!(snapped.0, 300.0);
+    }
+
+    #[test]
+    fn parallax_geometry_failure_has_a_distinct_static_category() {
+        assert_eq!(
+            CompanionFramePreparationError::SmoothInvalidParallaxGeometry.category(),
+            "smooth-invalid-parallax-geometry"
+        );
+        assert!(should_record_frame_preparation_error(
+            Some(CompanionFramePreparationError::SmoothMissingPetBody),
+            CompanionFramePreparationError::SmoothInvalidParallaxGeometry,
         ));
     }
 

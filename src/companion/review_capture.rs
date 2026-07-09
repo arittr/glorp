@@ -387,6 +387,7 @@ mod tests {
         "drawrect",
         "uitick",
         "smooth-missing-pet-body",
+        "smooth-invalid-parallax-geometry",
     ];
 
     const RENDER_LOG_FORBIDDEN_PRIVACY_VALUE_TOKENS: &[&str] = &[
