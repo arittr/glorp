@@ -28,7 +28,6 @@ pub fn build_round_smooth_scene_plan(
 ) -> SmoothCompanionScenePlan {
     let (vm, layout, placement) =
         build_round_pet_layout_with_placement(vm, now, grid_cols, grid_rows, motion);
-    let pet_rect = placement.classic_rect;
     let vm = vm.as_ref();
     let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(now));
     let model = PetSceneModel::build(vm, now, ColorCapability::Truecolor);
@@ -44,37 +43,11 @@ pub fn build_round_smooth_scene_plan(
 
     let viewport = CompanionViewport { grid_cols, grid_rows };
     let viewport_bounds = rect_bounds(Rect::new(0, 0, grid_cols, grid_rows));
-    let pet_bounds = rect_bounds(pet_rect);
     let residual = SmoothPoint {
         x: placement.fractional_top_left.x - f32::from(placement.classic_snap_top_left.0),
         y: placement.fractional_top_left.y - f32::from(placement.classic_snap_top_left.1),
     };
     let bob_offset = SmoothPoint { x: 0.0, y: smooth_pet_bob(elapsed_ms) };
-    let base_anchor = SmoothPoint {
-        x: placement.fractional_top_left.x,
-        y: placement.fractional_top_left.y,
-    };
-    let final_anchor = SmoothPoint {
-        x: base_anchor.x + bob_offset.x,
-        y: base_anchor.y + bob_offset.y,
-    };
-    let classic_snap_anchor = SmoothPoint {
-        x: f32::from(placement.classic_snap_top_left.0),
-        y: f32::from(placement.classic_snap_top_left.1),
-    };
-    let fractional_pet_bounds = SmoothBounds {
-        min: final_anchor,
-        max: SmoothPoint {
-            x: final_anchor.x + f32::from(pet_rect.width),
-            y: final_anchor.y + f32::from(pet_rect.height),
-        },
-    };
-    let fractional_pet_center = SmoothPoint {
-        x: fractional_pet_bounds.min.x
-            + (fractional_pet_bounds.max.x - fractional_pet_bounds.min.x) / 2.0,
-        y: fractional_pet_bounds.min.y
-            + (fractional_pet_bounds.max.y - fractional_pet_bounds.min.y) / 2.0,
-    };
     let aperture_center = SmoothPoint {
         x: f32::from(grid_cols) / 2.0,
         y: f32::from(grid_rows) / 2.0,
@@ -114,6 +87,23 @@ pub fn build_round_smooth_scene_plan(
         }
         layers.push(layer);
     }
+
+    let pet_body = layers
+        .iter()
+        .find(|layer| layer.role == SmoothLayerRole::PetBody)
+        .expect("round smooth scene should include a pet body layer");
+    let classic_snap_anchor = pet_body.anchor;
+    let base_anchor = SmoothPoint {
+        x: pet_body.anchor.x + pet_body.transform.translation.x - bob_offset.x,
+        y: pet_body.anchor.y + pet_body.transform.translation.y - bob_offset.y,
+    };
+    let final_anchor = SmoothPoint {
+        x: pet_body.anchor.x + pet_body.transform.translation.x,
+        y: pet_body.anchor.y + pet_body.transform.translation.y,
+    };
+    let pet_bounds = anchored_bounds(pet_body.anchor, pet_body.local_bounds);
+    let fractional_pet_bounds = anchored_bounds(final_anchor, pet_body.local_bounds);
+    let fractional_pet_center = bounds_center(fractional_pet_bounds);
 
     let round_scene = derive_round_scene_model(vm, now);
     let round_layout = layout_round_scene(
@@ -249,6 +239,26 @@ fn rect_bounds(rect: Rect) -> SmoothBounds {
             x: f32::from(rect.x + rect.width),
             y: f32::from(rect.y + rect.height),
         },
+    }
+}
+
+fn anchored_bounds(anchor: SmoothPoint, local_bounds: SmoothBounds) -> SmoothBounds {
+    SmoothBounds {
+        min: SmoothPoint {
+            x: anchor.x + local_bounds.min.x,
+            y: anchor.y + local_bounds.min.y,
+        },
+        max: SmoothPoint {
+            x: anchor.x + local_bounds.max.x,
+            y: anchor.y + local_bounds.max.y,
+        },
+    }
+}
+
+fn bounds_center(bounds: SmoothBounds) -> SmoothPoint {
+    SmoothPoint {
+        x: bounds.min.x + (bounds.max.x - bounds.min.x) / 2.0,
+        y: bounds.min.y + (bounds.max.y - bounds.min.y) / 2.0,
     }
 }
 

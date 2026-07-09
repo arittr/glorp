@@ -22,6 +22,22 @@ fn parity_fixture() -> WatchViewModel {
     vm
 }
 
+fn anchored_bounds(
+    anchor: glorp::presentation::smooth::SmoothPoint,
+    local_bounds: glorp::presentation::smooth::SmoothBounds,
+) -> glorp::presentation::smooth::SmoothBounds {
+    glorp::presentation::smooth::SmoothBounds {
+        min: glorp::presentation::smooth::SmoothPoint {
+            x: anchor.x + local_bounds.min.x,
+            y: anchor.y + local_bounds.min.y,
+        },
+        max: glorp::presentation::smooth::SmoothPoint {
+            x: anchor.x + local_bounds.max.x,
+            y: anchor.y + local_bounds.max.y,
+        },
+    }
+}
+
 #[test]
 fn smooth_round_plan_flattens_to_classic_round_scene_for_fixed_fixture() {
     let vm = parity_fixture();
@@ -168,6 +184,48 @@ fn smooth_round_plan_moves_pet_attached_layers_but_keeps_chest_bubble_snapped() 
     );
     assert_eq!(chest_bubble.transform.translation.x, 0.0);
     assert_eq!(chest_bubble.transform.translation.y, 0.0);
+}
+
+#[test]
+fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata_and_aura() {
+    let mut vm = parity_fixture();
+    vm.day_context.asleep = true;
+    let motion = glorp::round::scene::companion_roam_motion();
+    let elapsed_ms = 250;
+    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        datetime!(2026-07-08 18:00:00.500 UTC),
+        GRID_COLS,
+        GRID_ROWS,
+        &motion,
+        elapsed_ms,
+    );
+    let pet_body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
+    let mood_aura = plan.layer_by_role(SmoothLayerRole::MoodAura).unwrap();
+    let snapped_bounds = anchored_bounds(pet_body.anchor, pet_body.local_bounds);
+    let fractional_anchor = glorp::presentation::smooth::SmoothPoint {
+        x: pet_body.anchor.x + pet_body.transform.translation.x,
+        y: pet_body.anchor.y + pet_body.transform.translation.y,
+    };
+    let fractional_bounds = anchored_bounds(fractional_anchor, pet_body.local_bounds);
+    let fractional_center = glorp::presentation::smooth::SmoothPoint {
+        x: (fractional_bounds.min.x + fractional_bounds.max.x) / 2.0,
+        y: (fractional_bounds.min.y + fractional_bounds.max.y) / 2.0,
+    };
+
+    assert_eq!(plan.pet.classic_snap_anchor, pet_body.anchor);
+    assert_eq!(plan.pet.bounds, snapped_bounds);
+    assert_eq!(
+        plan.pet.base_anchor.x,
+        pet_body.anchor.x + pet_body.transform.translation.x
+    );
+    assert_eq!(
+        plan.pet.base_anchor.y,
+        pet_body.anchor.y + pet_body.transform.translation.y - plan.pet.bob_offset.y
+    );
+    assert_eq!(plan.pet.final_anchor, fractional_anchor);
+    assert_eq!(plan.pet.fractional_bounds, fractional_bounds);
+    assert_eq!(mood_aura.transform_origin, fractional_center);
 }
 
 #[test]
