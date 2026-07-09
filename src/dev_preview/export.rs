@@ -76,6 +76,7 @@ pub enum PreviewScenarioKind {
     PetMatrix,
     HabitatProps,
     Round,
+    Smooth,
     TankLife,
     Pixel,
 }
@@ -90,6 +91,10 @@ pub struct PreviewDimensions {
 pub struct PreviewScenarioFiles {
     pub text: PathBuf,
     pub cells: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth_plan: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth_parity: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pixel: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,6 +136,7 @@ pub struct PreviewStrip {
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewStripKind {
     SceneMoment,
+    SmoothMotion,
     PixelAnimation,
 }
 
@@ -152,6 +158,8 @@ pub struct PreviewStripFrame {
 pub struct PreviewStripFrameFiles {
     pub text: PathBuf,
     pub cells: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth_motion: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pixel: Option<PathBuf>,
 }
@@ -270,6 +278,9 @@ pub struct PreviewArtifact {
 pub enum ArtifactType {
     Text,
     Cells,
+    SmoothPlan,
+    SmoothParity,
+    SmoothMotion,
     PixelFrame,
     PixelArt,
     PixelComposition,
@@ -426,6 +437,12 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
             if let Some(layout) = &scenario.files.layout {
                 markdown.push_str(&format!("- Layout: `{}`\n", layout.display()));
             }
+            if let Some(smooth_plan) = &scenario.files.smooth_plan {
+                markdown.push_str(&format!("- Smooth plan: `{}`\n", smooth_plan.display()));
+            }
+            if let Some(smooth_parity) = &scenario.files.smooth_parity {
+                markdown.push_str(&format!("- Smooth parity: `{}`\n", smooth_parity.display()));
+            }
             if let Some(pixel) = &scenario.files.pixel {
                 markdown.push_str(&format!("- Pixel: `{}`\n", pixel.display()));
             }
@@ -472,6 +489,22 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
                 strip.dimensions.height,
                 strip.frames.len()
             ));
+            markdown.push_str("Frame files:\n");
+            for frame in &strip.frames {
+                markdown.push_str(&format!(
+                    "- `{:03}` text `{}` cells `{}`\n",
+                    frame.index,
+                    frame.files.text.display(),
+                    frame.files.cells.display()
+                ));
+                if let Some(smooth_motion) = &frame.files.smooth_motion {
+                    markdown.push_str(&format!("  smooth motion `{}`\n", smooth_motion.display()));
+                }
+                if let Some(pixel) = &frame.files.pixel {
+                    markdown.push_str(&format!("  pixel `{}`\n", pixel.display()));
+                }
+            }
+            markdown.push('\n');
             markdown.push_str("Review prompts:\n");
             for prompt in &strip.review_prompts {
                 markdown.push_str(&format!("- {prompt}\n"));
@@ -489,6 +522,7 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
         PreviewScenarioKind::PetMatrix => "pet-matrix",
         PreviewScenarioKind::HabitatProps => "habitat-props",
         PreviewScenarioKind::Round => "round",
+        PreviewScenarioKind::Smooth => "smooth",
         PreviewScenarioKind::TankLife => "tank-life",
         PreviewScenarioKind::Pixel => "pixel",
     }
@@ -497,6 +531,7 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
 fn strip_kind_label(kind: PreviewStripKind) -> &'static str {
     match kind {
         PreviewStripKind::SceneMoment => "scene-moment",
+        PreviewStripKind::SmoothMotion => "smooth-motion",
         PreviewStripKind::PixelAnimation => "pixel-animation",
     }
 }
@@ -614,6 +649,18 @@ fn render_frame_artifact_links(frame: &PreviewFrame) -> String {
             escape_html(&format!("frames/{}.pixel.json", frame.id))
         ));
     }
+    if frame.contract.smooth_plan.is_some() {
+        links.push(format!(
+            r#"<a href="{}">smooth plan</a>"#,
+            escape_html(&format!("frames/{}.smooth-plan.json", frame.id))
+        ));
+    }
+    if frame.contract.smooth_parity.is_some() {
+        links.push(format!(
+            r#"<a href="{}">smooth parity</a>"#,
+            escape_html(&format!("frames/{}.smooth-parity.json", frame.id))
+        ));
+    }
     if frame.contract.pixel_art.is_some() {
         links.push(format!(
             r#"<a href="{}">pixel art</a>"#,
@@ -693,6 +740,37 @@ fn render_strip_html(strip: &PreviewStripBundle) -> String {
             escape_html(&frame.id),
             if index == 0 { "" } else { " hidden" }
         ));
+        html.push_str(r#"<p class="frame-links">"#);
+        html.push_str(&format!(
+            r#"<a href="{}">text</a> · <a href="{}">cells</a>"#,
+            escape_html(
+                &strip.manifest.frames[index]
+                    .files
+                    .text
+                    .display()
+                    .to_string()
+            ),
+            escape_html(
+                &strip.manifest.frames[index]
+                    .files
+                    .cells
+                    .display()
+                    .to_string()
+            )
+        ));
+        if let Some(smooth_motion) = &strip.manifest.frames[index].files.smooth_motion {
+            html.push_str(&format!(
+                r#" · <a href="{}">smooth motion</a>"#,
+                escape_html(&smooth_motion.display().to_string())
+            ));
+        }
+        if let Some(pixel_path) = &strip.manifest.frames[index].files.pixel {
+            html.push_str(&format!(
+                r#" · <a href="{}">pixel</a>"#,
+                escape_html(&pixel_path.display().to_string())
+            ));
+        }
+        html.push_str("</p>");
         html.push_str(&render_grid_html(frame));
         if let Some(pixel_path) = strip.manifest.frames[index].files.pixel.as_ref() {
             html.push_str(&format!(
@@ -911,6 +989,8 @@ mod tests {
                 files: PreviewScenarioFiles {
                     text: PathBuf::from("frames/frame-one.txt"),
                     cells: PathBuf::from("frames/frame-one.cells.json"),
+                    smooth_plan: None,
+                    smooth_parity: None,
                     pixel: None,
                     pixel_art: None,
                     pixel_composition: None,

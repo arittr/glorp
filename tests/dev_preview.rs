@@ -75,6 +75,10 @@ const PIXEL_CAST_IDS: [&str; 6] = [
     "pixel-mech-s5-hardbody",
 ];
 
+const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
+const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
+const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
+
 const HABITAT_PROPS_ORBIT_ID: &str = "watch-habitat-props-orbit";
 
 const GLITCH_PERSISTENCE_PET_ID: &str = "pet-glitch-persistence-states";
@@ -1259,6 +1263,12 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/round-glitch-dialect.txt",
         "frames/round-crystal-dialect.txt",
         "frames/round-glitch-patched-s6.txt",
+        "frames/round-smooth-classic-baseline.txt",
+        "frames/round-smooth-classic-baseline.cells.json",
+        "frames/round-smooth-classic-parity.txt",
+        "frames/round-smooth-classic-parity.cells.json",
+        "frames/round-smooth-classic-parity.smooth-plan.json",
+        "frames/round-smooth-classic-parity.smooth-parity.json",
         "frames/tank-life-age-empty.txt",
         "frames/tank-life-age-first.txt",
         "frames/tank-life-age-early.txt",
@@ -1289,6 +1299,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/pixel-mech-s5-hardbody.pixel-art.json",
         "frames/pixel-mech-s5-hardbody.pixel-fit.json",
         "frames/pixel-tank-composition.pixel-composition.json",
+        "strips/round-smooth-motion/frame-000.smooth-motion.json",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1375,6 +1386,8 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "round-glitch-dialect".to_string(),
             "round-crystal-dialect".to_string(),
             "round-glitch-patched-s6".to_string(),
+            "round-smooth-classic-baseline".to_string(),
+            "round-smooth-classic-parity".to_string(),
             "tank-life-age-empty".to_string(),
             "tank-life-age-first".to_string(),
             "tank-life-age-early".to_string(),
@@ -2341,6 +2354,236 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
             );
         }
     }
+}
+
+#[test]
+fn dev_preview_smooth_writes_manifest_and_review_artifacts() {
+    let run = PreviewRun::new();
+
+    run.run_success("smooth");
+
+    for file in [
+        format!("frames/{SMOOTH_BASELINE_ID}.txt"),
+        format!("frames/{SMOOTH_BASELINE_ID}.cells.json"),
+        format!("frames/{SMOOTH_PARITY_ID}.txt"),
+        format!("frames/{SMOOTH_PARITY_ID}.cells.json"),
+        format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json"),
+        format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json"),
+        format!("strips/{SMOOTH_MOTION_ID}/frame-000.txt"),
+        format!("strips/{SMOOTH_MOTION_ID}/frame-000.cells.json"),
+        format!("strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json"),
+    ] {
+        assert!(run.out.join(&file).is_file(), "missing {file}");
+    }
+
+    let manifest = run.manifest();
+    assert_eq!(manifest["schema_version"], 8);
+    assert_scenario(
+        &manifest,
+        SMOOTH_BASELINE_ID,
+        "smooth",
+        (52, 52),
+        (
+            &format!("frames/{SMOOTH_BASELINE_ID}.txt"),
+            &format!("frames/{SMOOTH_BASELINE_ID}.cells.json"),
+            None,
+        ),
+    );
+    assert_scenario(
+        &manifest,
+        SMOOTH_PARITY_ID,
+        "smooth",
+        (52, 52),
+        (
+            &format!("frames/{SMOOTH_PARITY_ID}.txt"),
+            &format!("frames/{SMOOTH_PARITY_ID}.cells.json"),
+            None,
+        ),
+    );
+    let parity = scenario(&manifest, SMOOTH_PARITY_ID);
+    assert_eq!(
+        parity["files"]["smooth_plan"],
+        format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json")
+    );
+    assert_eq!(
+        parity["files"]["smooth_parity"],
+        format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json")
+    );
+    assert_artifact_type(
+        &manifest,
+        &format!("{SMOOTH_PARITY_ID}-smooth-plan"),
+        "smooth-plan",
+    );
+    assert_artifact_type(
+        &manifest,
+        &format!("{SMOOTH_PARITY_ID}-smooth-parity"),
+        "smooth-parity",
+    );
+
+    let strips = manifest["strips"].as_array().unwrap();
+    let motion = strips
+        .iter()
+        .find(|strip| strip["id"] == SMOOTH_MOTION_ID)
+        .expect("smooth motion strip");
+    assert_eq!(motion["kind"], "smooth-motion");
+    assert_eq!(motion["target_id"], "pet-body");
+    assert!(motion["frames"].as_array().unwrap().len() >= 5);
+    assert_eq!(
+        motion["frames"][0]["files"]["smooth_motion"],
+        format!("strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json")
+    );
+    assert_artifact_type(
+        &manifest,
+        &format!("{SMOOTH_MOTION_ID}-frame-000-smooth-motion"),
+        "smooth-motion",
+    );
+
+    let review = std::fs::read_to_string(run.out.join("review.md")).unwrap();
+    for needle in [
+        format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json"),
+        format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json"),
+        format!("strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json"),
+    ] {
+        assert!(review.contains(&needle), "review.md missing {needle}");
+    }
+}
+
+#[test]
+fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
+    let run = PreviewRun::new();
+
+    run.run_success("smooth");
+
+    let plan = run.read_json(&format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json"));
+    let parity = run.read_json(&format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json"));
+    let plan_text = std::fs::read_to_string(
+        run.out
+            .join(format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json")),
+    )
+    .unwrap()
+    .to_ascii_lowercase();
+    let parity_text = std::fs::read_to_string(
+        run.out
+            .join(format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json")),
+    )
+    .unwrap()
+    .to_ascii_lowercase();
+
+    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["frame_id"], SMOOTH_PARITY_ID);
+    assert!(plan["viewport"]["grid_cols"].is_u64());
+    assert!(plan["layers"].as_array().unwrap().len() >= 10);
+    assert!(plan["chrome"]["hud_bounds"].is_array());
+    assert!(plan["chrome"]["gauge_bounds"].is_array());
+    assert_eq!(plan["privacy"]["source_names_visible"], false);
+    assert_eq!(plan["privacy"]["exact_token_strings_visible"], false);
+    assert_eq!(plan["privacy"]["project_names_visible"], false);
+    assert_eq!(plan["privacy"]["file_paths_visible"], false);
+    assert_eq!(plan["privacy"]["prompt_text_visible"], false);
+    assert_eq!(plan["privacy"]["response_text_visible"], false);
+    assert_eq!(plan["privacy"]["raw_diagnostics_visible"], false);
+    assert_eq!(plan["privacy"]["unprojected_pet_seed_visible"], false);
+    assert!(plan["layers"].as_array().unwrap().iter().any(|layer| {
+        layer["role"] == "pet-body"
+            && layer["item_count"].as_u64().unwrap() > 0
+            && layer["transform"]["translation"]["y"].is_number()
+    }));
+
+    assert_eq!(parity["schema_version"], 1);
+    assert_eq!(parity["frame_id"], SMOOTH_PARITY_ID);
+    assert_eq!(parity["fixture_id"], SMOOTH_BASELINE_ID);
+    assert_eq!(parity["exact_match"], true);
+    assert_eq!(
+        parity["classic_checksum"], parity["smooth_flatten_checksum"],
+        "smooth parity checksum must exactly match classic baseline"
+    );
+    assert!(parity["required_roles"].as_array().unwrap().len() >= 10);
+
+    for text in [&plan_text, &parity_text] {
+        for forbidden in [
+            "/users/",
+            "/tmp/",
+            "claude",
+            "codex",
+            "openai",
+            "transcript",
+            "tool payload",
+            "very-secret-seed",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "smooth sidecar leaked {forbidden}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle_includes_them() {
+    let run = PreviewRun::new();
+    run.run_success("smooth");
+
+    let manifest = run.manifest();
+    let motion = manifest["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|strip| strip["id"] == SMOOTH_MOTION_ID)
+        .expect("smooth motion strip");
+    let frames = motion["frames"].as_array().unwrap();
+    assert!(
+        frames.len() >= 5,
+        "smooth motion strip should export at least five frames"
+    );
+
+    let mut bob_values = BTreeSet::new();
+    let mut drift_values = BTreeSet::new();
+    for frame in frames {
+        let path = frame["files"]["smooth_motion"].as_str().unwrap();
+        let artifact = run.read_json(path);
+        assert_eq!(artifact["schema_version"], 1);
+        assert_eq!(artifact["strip_id"], SMOOTH_MOTION_ID);
+        assert!(artifact["layer_transforms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|layer| {
+                layer["role"] == "pet-body"
+                    && layer["translation"]["y"].is_number()
+                    && layer["item_count"].as_u64().unwrap() > 0
+            }));
+        bob_values.insert(format!(
+            "{:.4}",
+            artifact["pet_motion"]["bob_y"].as_f64().unwrap()
+        ));
+        drift_values.insert(format!(
+            "{:.4}:{:.4}",
+            artifact["pet_motion"]["anchor_x"].as_f64().unwrap(),
+            artifact["pet_motion"]["anchor_y"].as_f64().unwrap()
+        ));
+    }
+
+    assert!(
+        bob_values.len() >= 5,
+        "expected at least five distinct bob values, got {bob_values:?}"
+    );
+    assert!(
+        drift_values.len() >= 5,
+        "expected at least five distinct anchor positions, got {drift_values:?}"
+    );
+
+    let all = PreviewRun::new();
+    all.run_success("all");
+    assert!(all
+        .out
+        .join(format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json"))
+        .is_file());
+    assert!(all
+        .out
+        .join(format!(
+            "strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json"
+        ))
+        .is_file());
 }
 
 #[test]

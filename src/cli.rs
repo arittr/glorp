@@ -97,6 +97,7 @@ pub enum PreviewScenarioArg {
     Props,
     Animation,
     Round,
+    Smooth,
     TankLife,
     Pixel,
 }

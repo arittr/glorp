@@ -1,6 +1,11 @@
 use crate::pet::render::StyledSegment;
 use crate::presentation::privacy::PresentationSurface;
 use crate::presentation::scene::PresentationScene;
+use crate::presentation::smooth::{
+    CompanionChromeReservation, CompanionViewport, SmoothBounds, SmoothCompanionLayer,
+    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerRole, SmoothPoint,
+    SmoothTransform,
+};
 use crate::round::model::RoundSceneModel;
 use crate::tui::component::PreviewLayout;
 use crate::tui::room::{biome_symbols, derive_room_life_profile, RoomSpeciesDialect};
@@ -20,6 +25,9 @@ pub struct PreviewFrameContract {
     pub pixel_art: Option<crate::dev_preview::export::PreviewPixelArtArtifact>,
     pub pixel_composition: Option<crate::dev_preview::export::PreviewPixelCompositionArtifact>,
     pub pixel_fit: Option<crate::dev_preview::export::PreviewPixelFitArtifact>,
+    pub smooth_plan: Option<PreviewSmoothPlanArtifact>,
+    pub smooth_parity: Option<PreviewSmoothParityArtifact>,
+    pub smooth_motion: Option<PreviewSmoothMotionArtifact>,
     pub scene: Option<PreviewSceneArtifact>,
     pub hud: Option<PreviewHudArtifact>,
     pub tank_life: Option<PreviewTankLifeArtifact>,
@@ -192,6 +200,123 @@ pub struct PreviewTankLifeCollisionArtifact {
     pub reserved_region_clear: bool,
     pub aperture_clear: bool,
     pub protected_pet_face_clear: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothPlanArtifact {
+    pub schema_version: u32,
+    pub frame_id: String,
+    pub viewport: PreviewSmoothViewportArtifact,
+    pub flatten_checksum: u64,
+    pub layers: Vec<PreviewSmoothLayerArtifact>,
+    pub chrome: PreviewSmoothChromeArtifact,
+    pub abstract_state: BTreeMap<String, String>,
+    pub privacy: PreviewSmoothPrivacyArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothParityArtifact {
+    pub schema_version: u32,
+    pub frame_id: String,
+    pub fixture_id: String,
+    pub classic_checksum: u64,
+    pub smooth_flatten_checksum: u64,
+    pub exact_match: bool,
+    pub required_roles: Vec<String>,
+    pub missing_roles: Vec<String>,
+    pub review_status: String,
+    pub abstract_state: BTreeMap<String, String>,
+    pub privacy: PreviewSmoothPrivacyArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothMotionArtifact {
+    pub schema_version: u32,
+    pub strip_id: String,
+    pub frame_index: u16,
+    pub elapsed_ms: u64,
+    pub pet_motion: PreviewSmoothPetMotionArtifact,
+    pub layer_transforms: Vec<PreviewSmoothMotionLayerArtifact>,
+    pub chrome: PreviewSmoothChromeArtifact,
+    pub abstract_state: BTreeMap<String, String>,
+    pub privacy: PreviewSmoothPrivacyArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothViewportArtifact {
+    pub grid_cols: u16,
+    pub grid_rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothLayerArtifact {
+    pub role: String,
+    pub z: i16,
+    pub local_bounds: PreviewSmoothBoundsArtifact,
+    pub anchor: PreviewSmoothPointArtifact,
+    pub transform_origin: PreviewSmoothPointArtifact,
+    pub transform: PreviewSmoothTransformArtifact,
+    pub item_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothMotionLayerArtifact {
+    pub role: String,
+    pub z: i16,
+    pub local_bounds: PreviewSmoothBoundsArtifact,
+    pub translation: PreviewSmoothPointArtifact,
+    pub scale: PreviewSmoothPointArtifact,
+    pub rotation_degrees: f32,
+    pub opacity: f32,
+    pub item_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothPetMotionArtifact {
+    pub anchor_x: f32,
+    pub anchor_y: f32,
+    pub bob_y: f32,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub opacity: f32,
+    pub pulse: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothChromeArtifact {
+    pub hud_bounds: Vec<PreviewSmoothBoundsArtifact>,
+    pub gauge_bounds: Vec<PreviewSmoothBoundsArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewSmoothPrivacyArtifact {
+    pub source_names_visible: bool,
+    pub exact_token_strings_visible: bool,
+    pub project_names_visible: bool,
+    pub file_paths_visible: bool,
+    pub prompt_text_visible: bool,
+    pub response_text_visible: bool,
+    pub raw_diagnostics_visible: bool,
+    pub unprojected_pet_seed_visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct PreviewSmoothBoundsArtifact {
+    pub min: PreviewSmoothPointArtifact,
+    pub max: PreviewSmoothPointArtifact,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct PreviewSmoothPointArtifact {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct PreviewSmoothTransformArtifact {
+    pub translation: PreviewSmoothPointArtifact,
+    pub scale: PreviewSmoothPointArtifact,
+    pub rotation_degrees: f32,
 }
 
 impl PreviewSceneArtifact {
@@ -407,6 +532,112 @@ impl PreviewHudColorArtifact {
     }
 }
 
+impl PreviewSmoothPlanArtifact {
+    pub fn from_scene_plan(
+        frame_id: &str,
+        vm: &WatchViewModel,
+        plan: &SmoothCompanionScenePlan,
+    ) -> Self {
+        Self {
+            schema_version: CONTRACT_SCHEMA_VERSION,
+            frame_id: frame_id.to_string(),
+            viewport: PreviewSmoothViewportArtifact::from_viewport(plan.viewport),
+            flatten_checksum: plan.classic_flatten_checksum(),
+            layers: plan
+                .layers
+                .iter()
+                .map(PreviewSmoothLayerArtifact::from_layer)
+                .collect(),
+            chrome: PreviewSmoothChromeArtifact::from_chrome(&plan.chrome),
+            abstract_state: smooth_abstract_state(vm),
+            privacy: PreviewSmoothPrivacyArtifact::from_claims(&plan.privacy),
+        }
+    }
+}
+
+impl PreviewSmoothParityArtifact {
+    pub fn from_scene_plan(
+        frame_id: &str,
+        fixture_id: &str,
+        vm: &WatchViewModel,
+        classic_checksum: u64,
+        plan: &SmoothCompanionScenePlan,
+    ) -> Self {
+        let smooth_flatten_checksum = plan.classic_flatten_checksum();
+        let required_roles = plan
+            .layers
+            .iter()
+            .map(|layer| layer.role.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        Self {
+            schema_version: CONTRACT_SCHEMA_VERSION,
+            frame_id: frame_id.to_string(),
+            fixture_id: fixture_id.to_string(),
+            classic_checksum,
+            smooth_flatten_checksum,
+            exact_match: classic_checksum == smooth_flatten_checksum,
+            required_roles,
+            missing_roles: Vec::new(),
+            review_status: if classic_checksum == smooth_flatten_checksum {
+                "exact-match".to_string()
+            } else {
+                "mismatch".to_string()
+            },
+            abstract_state: smooth_abstract_state(vm),
+            privacy: PreviewSmoothPrivacyArtifact::from_claims(&plan.privacy),
+        }
+    }
+}
+
+impl PreviewSmoothMotionArtifact {
+    pub fn from_scene_plan(
+        strip_id: &str,
+        frame_index: u16,
+        elapsed_ms: u64,
+        vm: &WatchViewModel,
+        plan: &SmoothCompanionScenePlan,
+    ) -> Self {
+        let pet_layer = plan
+            .layer_by_role(SmoothLayerRole::PetBody)
+            .or_else(|| plan.layers.iter().find(|layer| !layer.items.is_empty()))
+            .expect("smooth plan should include a pet or populated layer");
+        let anchor_x = pet_layer.anchor.x + pet_layer.transform.translation.x;
+        let anchor_y = pet_layer.anchor.y + pet_layer.transform.translation.y;
+        let pulse = if vm.last_feed_pulse_at.is_some() {
+            "recent-feed"
+        } else if vm.day_context.asleep {
+            "asleep"
+        } else {
+            "steady"
+        };
+
+        Self {
+            schema_version: CONTRACT_SCHEMA_VERSION,
+            strip_id: strip_id.to_string(),
+            frame_index,
+            elapsed_ms,
+            pet_motion: PreviewSmoothPetMotionArtifact {
+                anchor_x,
+                anchor_y,
+                bob_y: pet_layer.transform.translation.y,
+                scale_x: pet_layer.transform.scale.x,
+                scale_y: pet_layer.transform.scale.y,
+                opacity: pet_layer.opacity,
+                pulse: pulse.to_string(),
+            },
+            layer_transforms: plan
+                .layers
+                .iter()
+                .map(PreviewSmoothMotionLayerArtifact::from_layer)
+                .collect(),
+            chrome: PreviewSmoothChromeArtifact::from_chrome(&plan.chrome),
+            abstract_state: smooth_abstract_state(vm),
+            privacy: PreviewSmoothPrivacyArtifact::from_claims(&plan.privacy),
+        }
+    }
+}
+
 impl PreviewPrivacyProjection {
     pub fn sanitized(surface: &str) -> Self {
         Self {
@@ -417,6 +648,103 @@ impl PreviewPrivacyProjection {
             feed_rows_visible: false,
             file_paths_visible: false,
             project_names_visible: false,
+        }
+    }
+}
+
+impl PreviewSmoothViewportArtifact {
+    fn from_viewport(viewport: CompanionViewport) -> Self {
+        Self {
+            grid_cols: viewport.grid_cols,
+            grid_rows: viewport.grid_rows,
+        }
+    }
+}
+
+impl PreviewSmoothLayerArtifact {
+    fn from_layer(layer: &SmoothCompanionLayer) -> Self {
+        Self {
+            role: layer.role.as_str().to_string(),
+            z: layer.z,
+            local_bounds: PreviewSmoothBoundsArtifact::from_bounds(layer.local_bounds),
+            anchor: PreviewSmoothPointArtifact::from_point(layer.anchor),
+            transform_origin: PreviewSmoothPointArtifact::from_point(layer.transform_origin),
+            transform: PreviewSmoothTransformArtifact::from_transform(layer.transform),
+            item_count: smooth_item_count(layer),
+        }
+    }
+}
+
+impl PreviewSmoothMotionLayerArtifact {
+    fn from_layer(layer: &SmoothCompanionLayer) -> Self {
+        Self {
+            role: layer.role.as_str().to_string(),
+            z: layer.z,
+            local_bounds: PreviewSmoothBoundsArtifact::from_bounds(layer.local_bounds),
+            translation: PreviewSmoothPointArtifact::from_point(layer.transform.translation),
+            scale: PreviewSmoothPointArtifact::from_point(layer.transform.scale),
+            rotation_degrees: layer.transform.rotation_degrees,
+            opacity: layer.opacity,
+            item_count: smooth_item_count(layer),
+        }
+    }
+}
+
+impl PreviewSmoothChromeArtifact {
+    fn from_chrome(chrome: &CompanionChromeReservation) -> Self {
+        Self {
+            hud_bounds: chrome
+                .hud_bounds
+                .iter()
+                .copied()
+                .map(PreviewSmoothBoundsArtifact::from_bounds)
+                .collect(),
+            gauge_bounds: chrome
+                .gauge_bounds
+                .iter()
+                .copied()
+                .map(PreviewSmoothBoundsArtifact::from_bounds)
+                .collect(),
+        }
+    }
+}
+
+impl PreviewSmoothPrivacyArtifact {
+    fn from_claims(claims: &SmoothCompanionPrivacyClaims) -> Self {
+        Self {
+            source_names_visible: claims.source_names_visible,
+            exact_token_strings_visible: claims.exact_token_strings_visible,
+            project_names_visible: claims.project_names_visible,
+            file_paths_visible: claims.file_paths_visible,
+            prompt_text_visible: claims.prompt_text_visible,
+            response_text_visible: claims.response_text_visible,
+            raw_diagnostics_visible: claims.raw_diagnostics_visible,
+            unprojected_pet_seed_visible: claims.unprojected_pet_seed_visible,
+        }
+    }
+}
+
+impl PreviewSmoothBoundsArtifact {
+    fn from_bounds(bounds: SmoothBounds) -> Self {
+        Self {
+            min: PreviewSmoothPointArtifact::from_point(bounds.min),
+            max: PreviewSmoothPointArtifact::from_point(bounds.max),
+        }
+    }
+}
+
+impl PreviewSmoothPointArtifact {
+    fn from_point(point: SmoothPoint) -> Self {
+        Self { x: point.x, y: point.y }
+    }
+}
+
+impl PreviewSmoothTransformArtifact {
+    fn from_transform(transform: SmoothTransform) -> Self {
+        Self {
+            translation: PreviewSmoothPointArtifact::from_point(transform.translation),
+            scale: PreviewSmoothPointArtifact::from_point(transform.scale),
+            rotation_degrees: transform.rotation_degrees,
         }
     }
 }
@@ -522,6 +850,68 @@ fn role_names(spans: &[StyledSegment]) -> Vec<String> {
     roles.sort();
     roles.dedup();
     roles
+}
+
+fn smooth_item_count(layer: &SmoothCompanionLayer) -> usize {
+    layer
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                crate::presentation::smooth::SmoothLayerItem::LocalCell(_)
+            )
+        })
+        .count()
+}
+
+fn smooth_abstract_state(vm: &WatchViewModel) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "species".to_string(),
+            vm.pet_render.generated_species.as_str().to_string(),
+        ),
+        (
+            "stage".to_string(),
+            format!("{:?}", vm.pet_render.stage).to_lowercase(),
+        ),
+        (
+            "mood".to_string(),
+            format!("{:?}", vm.pet_render.mood).to_lowercase(),
+        ),
+        (
+            "day_state".to_string(),
+            if vm.day_context.asleep {
+                "asleep"
+            } else {
+                "awake"
+            }
+            .to_string(),
+        ),
+        (
+            "activity_bucket".to_string(),
+            if vm.last_feed_pulse_at.is_some() {
+                "recent-feed"
+            } else {
+                "quiet"
+            }
+            .to_string(),
+        ),
+        (
+            "helper_health".to_string(),
+            if vm.source_health.iter().any(|health| {
+                matches!(
+                    health.status,
+                    crate::tui::view_model::SourceStatus::Diagnostic
+                )
+            }) {
+                "trouble"
+            } else {
+                "ok"
+            }
+            .to_string(),
+        ),
+    ])
 }
 
 fn vital_bucket(value: f64) -> &'static str {

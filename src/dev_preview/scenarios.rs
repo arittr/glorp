@@ -32,6 +32,7 @@ pub enum PreviewSelection {
     Props,
     Animation,
     Round,
+    Smooth,
     TankLife,
     Pixel,
 }
@@ -147,6 +148,7 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                     .map(|frame| PreviewScenarioBundle::from_frame(frame, &ctx)),
             );
             bundles.extend(crate::dev_preview::round::round_bundles(&ctx));
+            bundles.extend(crate::dev_preview::smooth::smooth_bundles(&ctx));
             bundles.extend(crate::dev_preview::tank_life::tank_life_bundles(
                 &ctx,
                 &scratch_dir,
@@ -154,6 +156,7 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
             bundles.extend(crate::dev_preview::pixel::pixel_bundles(&ctx));
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
+            strips.extend(crate::dev_preview::smooth::smooth_strips(&ctx));
             strips.extend(crate::dev_preview::pixel::pixel_strips(&ctx));
         }
         PreviewSelection::Watch => bundles.extend(
@@ -176,6 +179,10 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
         PreviewSelection::Round => bundles.extend(crate::dev_preview::round::round_bundles(&ctx)),
+        PreviewSelection::Smooth => {
+            bundles.extend(crate::dev_preview::smooth::smooth_bundles(&ctx));
+            strips.extend(crate::dev_preview::smooth::smooth_strips(&ctx));
+        }
         PreviewSelection::TankLife => bundles.extend(
             crate::dev_preview::tank_life::tank_life_bundles(&ctx, &scratch_dir)?,
         ),
@@ -222,6 +229,12 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         if let Some(pixel) = &frame.contract.pixel {
             write_pixel_json(&staging_dir.join(pixel_path(frame)), pixel)?;
         }
+        if let Some(smooth_plan) = &frame.contract.smooth_plan {
+            write_json_artifact(&staging_dir.join(smooth_plan_path(frame)), smooth_plan)?;
+        }
+        if let Some(smooth_parity) = &frame.contract.smooth_parity {
+            write_json_artifact(&staging_dir.join(smooth_parity_path(frame)), smooth_parity)?;
+        }
         if let Some(pixel_art) = &frame.contract.pixel_art {
             write_json_artifact(&staging_dir.join(pixel_art_path(frame)), pixel_art)?;
         }
@@ -254,6 +267,14 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                     .as_ref()
                     .expect("pixel frame should declare a pixel artifact path");
                 write_pixel_json(&staging_dir.join(path), pixel)?;
+            }
+            if let Some(smooth_motion) = &frame.contract.smooth_motion {
+                let path = manifest_frame
+                    .files
+                    .smooth_motion
+                    .as_ref()
+                    .expect("smooth strip frames should declare a smooth motion artifact path");
+                write_json_artifact(&staging_dir.join(path), smooth_motion)?;
             }
         }
     }
@@ -701,6 +722,16 @@ fn scenario_from_parts(
         files: PreviewScenarioFiles {
             text: text_path(frame),
             cells: cells_path(frame),
+            smooth_plan: frame
+                .contract
+                .smooth_plan
+                .as_ref()
+                .map(|_| smooth_plan_path(frame)),
+            smooth_parity: frame
+                .contract
+                .smooth_parity
+                .as_ref()
+                .map(|_| smooth_parity_path(frame)),
             pixel: frame.contract.pixel.as_ref().map(|_| pixel_path(frame)),
             pixel_art: frame
                 .contract
@@ -767,6 +798,26 @@ fn artifacts_for_frames(frames: &[PreviewFrame]) -> Vec<PreviewArtifact> {
             width: Some(frame.width),
             height: Some(frame.height),
         });
+        if frame.contract.smooth_plan.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-smooth-plan", frame.id),
+                title: format!("{} Smooth Plan", frame.title),
+                artifact_type: ArtifactType::SmoothPlan,
+                path: smooth_plan_path(frame),
+                width: None,
+                height: None,
+            });
+        }
+        if frame.contract.smooth_parity.is_some() {
+            artifacts.push(PreviewArtifact {
+                id: format!("{}-smooth-parity", frame.id),
+                title: format!("{} Smooth Parity", frame.title),
+                artifact_type: ArtifactType::SmoothParity,
+                path: smooth_parity_path(frame),
+                width: None,
+                height: None,
+            });
+        }
         if frame.layout.is_some() {
             artifacts.push(PreviewArtifact {
                 id: format!("{}-layout", frame.id),
@@ -936,6 +987,16 @@ fn artifacts_for_strips(
                 width: Some(frame.width),
                 height: Some(frame.height),
             });
+            if let Some(smooth_motion_path) = &manifest_frame.files.smooth_motion {
+                artifacts.push(PreviewArtifact {
+                    id: format!("{}-frame-{index:03}-smooth-motion", strip.manifest.id),
+                    title: format!("{} Frame {index:03} Smooth Motion", strip.manifest.title),
+                    artifact_type: ArtifactType::SmoothMotion,
+                    path: smooth_motion_path.clone(),
+                    width: None,
+                    height: None,
+                });
+            }
             if let Some(pixel_path) = &manifest_frame.files.pixel {
                 let pixel = frame
                     .contract
@@ -1877,6 +1938,14 @@ fn layout_path(frame: &PreviewFrame) -> PathBuf {
 
 fn scene_path(frame: &PreviewFrame) -> PathBuf {
     PathBuf::from(format!("frames/{}.scene.json", frame.id))
+}
+
+fn smooth_plan_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.smooth-plan.json", frame.id))
+}
+
+fn smooth_parity_path(frame: &PreviewFrame) -> PathBuf {
+    PathBuf::from(format!("frames/{}.smooth-parity.json", frame.id))
 }
 
 fn pixel_path(frame: &PreviewFrame) -> PathBuf {
