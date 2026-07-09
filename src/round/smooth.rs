@@ -11,7 +11,9 @@ use crate::round::layout::{
     layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities,
 };
 use crate::round::model::{derive_round_scene_model, RoundHelperHealth};
-use crate::round::scene::{build_round_pet_layout, round_tank_life_geometry, CompanionMotion};
+use crate::round::scene::{
+    build_round_pet_layout_with_placement, round_tank_life_geometry, CompanionMotion,
+};
 use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
@@ -24,7 +26,9 @@ pub fn build_round_smooth_scene_plan(
     motion: &CompanionMotion,
     elapsed_ms: u64,
 ) -> SmoothCompanionScenePlan {
-    let (vm, layout, pet_rect) = build_round_pet_layout(vm, now, grid_cols, grid_rows, motion);
+    let (vm, layout, placement) =
+        build_round_pet_layout_with_placement(vm, now, grid_cols, grid_rows, motion);
+    let pet_rect = placement.classic_rect;
     let vm = vm.as_ref();
     let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(now));
     let model = PetSceneModel::build(vm, now, ColorCapability::Truecolor);
@@ -41,9 +45,35 @@ pub fn build_round_smooth_scene_plan(
     let viewport = CompanionViewport { grid_cols, grid_rows };
     let viewport_bounds = rect_bounds(Rect::new(0, 0, grid_cols, grid_rows));
     let pet_bounds = rect_bounds(pet_rect);
-    let pet_center = SmoothPoint {
-        x: pet_bounds.min.x + (pet_bounds.max.x - pet_bounds.min.x) / 2.0,
-        y: pet_bounds.min.y + (pet_bounds.max.y - pet_bounds.min.y) / 2.0,
+    let residual = SmoothPoint {
+        x: placement.fractional_top_left.x - f32::from(placement.classic_snap_top_left.0),
+        y: placement.fractional_top_left.y - f32::from(placement.classic_snap_top_left.1),
+    };
+    let bob_offset = SmoothPoint { x: 0.0, y: smooth_pet_bob(elapsed_ms) };
+    let base_anchor = SmoothPoint {
+        x: placement.fractional_top_left.x,
+        y: placement.fractional_top_left.y,
+    };
+    let final_anchor = SmoothPoint {
+        x: base_anchor.x + bob_offset.x,
+        y: base_anchor.y + bob_offset.y,
+    };
+    let classic_snap_anchor = SmoothPoint {
+        x: f32::from(placement.classic_snap_top_left.0),
+        y: f32::from(placement.classic_snap_top_left.1),
+    };
+    let fractional_pet_bounds = SmoothBounds {
+        min: final_anchor,
+        max: SmoothPoint {
+            x: final_anchor.x + f32::from(pet_rect.width),
+            y: final_anchor.y + f32::from(pet_rect.height),
+        },
+    };
+    let fractional_pet_center = SmoothPoint {
+        x: fractional_pet_bounds.min.x
+            + (fractional_pet_bounds.max.x - fractional_pet_bounds.min.x) / 2.0,
+        y: fractional_pet_bounds.min.y
+            + (fractional_pet_bounds.max.y - fractional_pet_bounds.min.y) / 2.0,
     };
     let aperture_center = SmoothPoint {
         x: f32::from(grid_cols) / 2.0,
@@ -66,12 +96,21 @@ pub fn build_round_smooth_scene_plan(
     ));
 
     for mut layer in layered.layers {
+        if matches!(
+            layer.role,
+            SmoothLayerRole::PetBody
+                | SmoothLayerRole::ContactShadow
+                | SmoothLayerRole::PerformanceCue
+        ) {
+            layer.transform.translation.x += residual.x;
+            layer.transform.translation.y += residual.y;
+        }
         if layer.role == SmoothLayerRole::PetBody {
             layer.transform_origin = SmoothPoint {
                 x: (layer.local_bounds.max.x - layer.local_bounds.min.x) / 2.0,
                 y: (layer.local_bounds.max.y - layer.local_bounds.min.y) / 2.0,
             };
-            layer.transform.translation.y += smooth_pet_bob(elapsed_ms);
+            layer.transform.translation.y += bob_offset.y;
         }
         layers.push(layer);
     }
@@ -116,12 +155,12 @@ pub fn build_round_smooth_scene_plan(
         "round-mood-aura",
         SmoothLayerRole::MoodAura,
         22,
-        expand_bounds(pet_bounds, 2.0, 2.0),
-        pet_center,
+        expand_bounds(fractional_pet_bounds, 2.0, 2.0),
+        fractional_pet_center,
         SmoothClip::Circle {
-            center: pet_center,
-            radius: ((pet_bounds.max.x - pet_bounds.min.x)
-                .max(pet_bounds.max.y - pet_bounds.min.y))
+            center: fractional_pet_center,
+            radius: ((fractional_pet_bounds.max.x - fractional_pet_bounds.min.x)
+                .max(fractional_pet_bounds.max.y - fractional_pet_bounds.min.y))
                 / 2.0
                 + 2.0,
         },
@@ -157,7 +196,14 @@ pub fn build_round_smooth_scene_plan(
     SmoothCompanionScenePlan {
         viewport,
         layers,
-        pet: SmoothCompanionPet { bounds: pet_bounds },
+        pet: SmoothCompanionPet {
+            bounds: pet_bounds,
+            fractional_bounds: fractional_pet_bounds,
+            base_anchor,
+            bob_offset,
+            final_anchor,
+            classic_snap_anchor,
+        },
         chrome,
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
         classic_flatten_compat: SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows },

@@ -419,6 +419,23 @@ pub(crate) fn build_round_pet_layout<'a>(
     crate::tui::component::PetSceneLayout,
     Rect,
 ) {
+    let (vm, layout, placement) =
+        build_round_pet_layout_with_placement(vm, now, grid_cols, grid_rows, motion);
+
+    (vm, layout, placement.classic_rect)
+}
+
+pub(crate) fn build_round_pet_layout_with_placement<'a>(
+    vm: &'a WatchViewModel,
+    now: time::OffsetDateTime,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+) -> (
+    Cow<'a, WatchViewModel>,
+    crate::tui::component::PetSceneLayout,
+    CompanionPetPlacement,
+) {
     let area = Rect::new(0, 0, grid_cols, grid_rows);
     let energy = companion_motion_energy(vm);
     let wander_width = PET_W + 2 * motion.wander_half;
@@ -443,16 +460,15 @@ pub(crate) fn build_round_pet_layout<'a>(
     let mut layout = PetScene::compute_layout(area, vm.as_ref(), &ctx);
     let old_pet_art = layout.pet_art;
     let placement = companion_pet_placement(vm.as_ref(), now, grid_cols, grid_rows, motion);
-    let new_pet_art = placement.classic_rect;
-    layout.pet_art = new_pet_art;
+    layout.pet_art = placement.classic_rect;
     for excl in &mut layout.exclusions {
         if *excl == old_pet_art {
-            *excl = new_pet_art;
+            *excl = placement.classic_rect;
             break;
         }
     }
 
-    (vm, layout, new_pet_art)
+    (vm, layout, placement)
 }
 
 pub(crate) fn apply_uniform_porthole_recolor(draw_list: &mut SceneDrawList, grid_rows: u16) {

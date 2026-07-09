@@ -119,6 +119,58 @@ fn smooth_round_plan_keeps_classic_cell_art_in_pet_body() {
 }
 
 #[test]
+fn smooth_round_plan_records_fractional_pet_anchors_without_breaking_flatten_parity() {
+    let vm = parity_fixture();
+    let motion = glorp::round::scene::companion_roam_motion();
+    let now = datetime!(2026-07-08 18:00:00.500 UTC);
+
+    let classic = build_round_scene_draw_list(&vm, now, GRID_COLS, GRID_ROWS, &motion);
+    let smooth = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm, now, GRID_COLS, GRID_ROWS, &motion, 250,
+    );
+
+    assert_eq!(smooth.flatten_classic_cells(), classic.draw_list);
+    assert_eq!(smooth.pet.bounds.min.x, smooth.pet.classic_snap_anchor.x);
+    assert_eq!(smooth.pet.bounds.min.y, smooth.pet.classic_snap_anchor.y);
+    assert!(
+        (smooth.pet.base_anchor.x - smooth.pet.classic_snap_anchor.x).abs() > f32::EPSILON
+            || (smooth.pet.base_anchor.y - smooth.pet.classic_snap_anchor.y).abs() > f32::EPSILON,
+        "smooth plan should preserve fractional residual separate from Classic snap"
+    );
+    assert_ne!(smooth.pet.final_anchor, smooth.pet.base_anchor);
+}
+
+#[test]
+fn smooth_round_plan_moves_pet_attached_layers_but_keeps_chest_bubble_snapped() {
+    let vm = parity_fixture();
+    let motion = glorp::round::scene::companion_roam_motion();
+    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        datetime!(2026-07-08 18:00:00.500 UTC),
+        GRID_COLS,
+        GRID_ROWS,
+        &motion,
+        250,
+    );
+    let pet_body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
+    let contact_shadow = plan.layer_by_role(SmoothLayerRole::ContactShadow).unwrap();
+    let performance_cue = plan.layer_by_role(SmoothLayerRole::PerformanceCue).unwrap();
+    let chest_bubble = plan.layer_by_role(SmoothLayerRole::ChestBubble).unwrap();
+
+    assert!(pet_body.transform.translation.x.abs() > f32::EPSILON);
+    assert_eq!(
+        contact_shadow.transform.translation.x,
+        pet_body.transform.translation.x
+    );
+    assert_eq!(
+        performance_cue.transform.translation.x,
+        pet_body.transform.translation.x
+    );
+    assert_eq!(chest_bubble.transform.translation.x, 0.0);
+    assert_eq!(chest_bubble.transform.translation.y, 0.0);
+}
+
+#[test]
 fn smooth_round_plan_keeps_privacy_claims_external_safe() {
     let vm = parity_fixture();
     let plan = glorp::round::smooth::build_round_smooth_scene_plan(

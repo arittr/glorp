@@ -163,7 +163,7 @@ pub struct LayeredPetScene {
 
 impl LayeredPetScene {
     pub fn flatten_classic_cells(&self) -> SceneDrawList {
-        flatten_layers_to_draw_list(&self.layers)
+        flatten_layers_to_draw_list(&self.layers, FlattenTransformMode::Apply)
     }
 
     pub fn classic_flatten_checksum(&self) -> u64 {
@@ -183,7 +183,7 @@ pub struct SmoothCompanionScenePlan {
 
 impl SmoothCompanionScenePlan {
     pub fn flatten_classic_cells(&self) -> SceneDrawList {
-        let mut draw_list = flatten_layers_to_draw_list(&self.layers);
+        let mut draw_list = flatten_layers_to_draw_list(&self.layers, FlattenTransformMode::Ignore);
         match self.classic_flatten_compat {
             SmoothClassicFlattenCompat::None => {}
             SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows } => {
@@ -211,22 +211,31 @@ pub fn flatten_classic_cells(scene: &LayeredPetScene) -> SceneDrawList {
     scene.flatten_classic_cells()
 }
 
-fn flatten_layers_to_draw_list(layers: &[SmoothCompanionLayer]) -> SceneDrawList {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlattenTransformMode {
+    Apply,
+    Ignore,
+}
+
+fn flatten_layers_to_draw_list(
+    layers: &[SmoothCompanionLayer],
+    transform_mode: FlattenTransformMode,
+) -> SceneDrawList {
     let mut ordered_layers: Vec<(usize, &SmoothCompanionLayer)> =
         layers.iter().enumerate().collect();
     ordered_layers.sort_by_key(|(index, layer)| (layer.z, *index));
 
     let mut cells = Vec::new();
     for (_, layer) in ordered_layers {
+        let translation = match transform_mode {
+            FlattenTransformMode::Apply => layer.transform.translation,
+            FlattenTransformMode::Ignore => SmoothPoint { x: 0.0, y: 0.0 },
+        };
         for item in &layer.items {
             if let SmoothLayerItem::LocalCell(cell) = item {
                 cells.push(DrawCell {
-                    row: classic_cell_axis(
-                        layer.anchor.y + layer.transform.translation.y + f32::from(cell.row),
-                    ),
-                    col: classic_cell_axis(
-                        layer.anchor.x + layer.transform.translation.x + f32::from(cell.col),
-                    ),
+                    row: classic_cell_axis(layer.anchor.y + translation.y + f32::from(cell.row)),
+                    col: classic_cell_axis(layer.anchor.x + translation.x + f32::from(cell.col)),
                     glyph: cell.glyph.clone(),
                     fg: cell.fg,
                     bg: cell.bg,
@@ -256,6 +265,11 @@ pub struct CompanionViewport {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SmoothCompanionPet {
     pub bounds: SmoothBounds,
+    pub fractional_bounds: SmoothBounds,
+    pub base_anchor: SmoothPoint,
+    pub bob_offset: SmoothPoint,
+    pub final_anchor: SmoothPoint,
+    pub classic_snap_anchor: SmoothPoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -474,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_classic_cells_projects_local_cells_through_anchor_and_translation() {
+    fn smooth_scene_plan_classic_flatten_ignores_smooth_layer_transform() {
         let layer = SmoothCompanionLayer {
             id: SmoothLayerId("pet-body".to_string()),
             role: SmoothLayerRole::PetBody,
@@ -486,17 +500,14 @@ mod tests {
             anchor: SmoothPoint { x: 10.0, y: 20.0 },
             transform_origin: SmoothPoint { x: 0.0, y: 0.0 },
             transform: SmoothTransform {
-                translation: SmoothPoint { x: 3.0, y: 2.0 },
+                translation: SmoothPoint { x: 0.75, y: 0.33 },
                 scale: SmoothPoint { x: 1.0, y: 1.0 },
                 rotation_degrees: 0.0,
             },
             opacity: 1.0,
             clip: SmoothClip::None,
             blend: SmoothBlendMode::Normal,
-            items: vec![
-                local_item(cell(1, 4, "X", Some(rgb(1, 2, 3)), None, false)),
-                local_item(cell(0, 0, "Y", Some(rgb(4, 5, 6)), None, true)),
-            ],
+            items: vec![local_item(cell(1, 4, "X", Some(rgb(1, 2, 3)), None, false))],
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
         };
         let scene = LayeredPetScene { layers: vec![layer.clone()] };
@@ -508,28 +519,28 @@ mod tests {
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
             classic_flatten_compat: SmoothClassicFlattenCompat::None,
         };
+        let scene_expected = SceneDrawList {
+            cells: vec![DrawCell {
+                row: 21,
+                col: 15,
+                glyph: Some("X".to_string()),
+                fg: Some(rgb(1, 2, 3)),
+                bg: None,
+                bold: false,
+            }],
+        };
         let expected = SceneDrawList {
-            cells: vec![
-                DrawCell {
-                    row: 23,
-                    col: 17,
-                    glyph: Some("X".to_string()),
-                    fg: Some(rgb(1, 2, 3)),
-                    bg: None,
-                    bold: false,
-                },
-                DrawCell {
-                    row: 22,
-                    col: 13,
-                    glyph: Some("Y".to_string()),
-                    fg: Some(rgb(4, 5, 6)),
-                    bg: None,
-                    bold: true,
-                },
-            ],
+            cells: vec![DrawCell {
+                row: 21,
+                col: 14,
+                glyph: Some("X".to_string()),
+                fg: Some(rgb(1, 2, 3)),
+                bg: None,
+                bold: false,
+            }],
         };
 
-        assert_eq!(scene.flatten_classic_cells(), expected);
+        assert_eq!(scene.flatten_classic_cells(), scene_expected);
         assert_eq!(plan.flatten_classic_cells(), expected);
     }
 
