@@ -203,7 +203,8 @@ fn help_hides_companion_renderer_switch() {
         .success()
         .stdout(predicate::str::contains("--renderer").not())
         .stdout(predicate::str::contains("classic").not())
-        .stdout(predicate::str::contains("pixel").not());
+        .stdout(predicate::str::contains("pixel").not())
+        .stdout(predicate::str::contains("smooth").not());
 }
 
 #[test]
@@ -216,6 +217,123 @@ fn companion_help_hides_review_options_and_renderer_default() {
         .stdout(predicate::str::contains("--review-size").not())
         .stdout(predicate::str::contains("--review-active-pulse").not())
         .stdout(predicate::str::contains("--renderer").not());
+}
+
+#[test]
+fn companion_app_help_hides_review_options_and_renderer_choices() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion-app", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--review-size").not())
+        .stdout(predicate::str::contains("--review-active-pulse").not())
+        .stdout(predicate::str::contains("--renderer").not())
+        .stdout(predicate::str::contains("classic").not())
+        .stdout(predicate::str::contains("pixel").not())
+        .stdout(predicate::str::contains("smooth").not());
+}
+
+#[test]
+fn companion_help_accepts_hidden_smooth_renderer_choice() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--renderer", "smooth", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--renderer").not())
+        .stdout(predicate::str::contains("classic").not())
+        .stdout(predicate::str::contains("pixel").not())
+        .stdout(predicate::str::contains("smooth").not());
+}
+
+#[test]
+fn companion_app_help_accepts_hidden_smooth_renderer_choice() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion-app", "--renderer", "smooth", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--renderer").not())
+        .stdout(predicate::str::contains("classic").not())
+        .stdout(predicate::str::contains("pixel").not())
+        .stdout(predicate::str::contains("smooth").not());
+}
+
+#[test]
+fn companion_review_accepts_hidden_state_duration_and_capture_flags() {
+    for state in ["normal", "active-pulse", "asleep-calm", "helper-trouble"] {
+        Command::cargo_bin("glorp")
+            .unwrap()
+            .args([
+                "companion",
+                "--renderer",
+                "smooth",
+                "--review-size",
+                "360x360",
+                "--review-state",
+                state,
+                "--review-duration-ms",
+                "2000",
+                "--review-capture-dir",
+                "target/glorp-review/test",
+                "--help",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--review-state").not())
+            .stdout(predicate::str::contains("--review-duration-ms").not())
+            .stdout(predicate::str::contains("--review-capture-dir").not());
+    }
+}
+
+#[test]
+fn companion_review_accepts_hidden_companion_app_review_flags() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args([
+            "companion-app",
+            "--renderer",
+            "smooth",
+            "--review-size",
+            "360x360",
+            "--review-state",
+            "active-pulse",
+            "--review-duration-ms",
+            "2000",
+            "--review-capture-dir",
+            "target/glorp-review/test",
+            "--help",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--review-state").not())
+        .stdout(predicate::str::contains("--review-duration-ms").not())
+        .stdout(predicate::str::contains("--review-capture-dir").not());
+}
+
+#[test]
+fn companion_review_legacy_active_pulse_flag_still_parses() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args([
+            "companion",
+            "--renderer",
+            "smooth",
+            "--review-size",
+            "360x360",
+            "--review-active-pulse",
+            "--review-duration-ms",
+            "2000",
+            "--review-capture-dir",
+            "target/glorp-review/test",
+            "--help",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--review-active-pulse").not())
+        .stdout(predicate::str::contains("--review-duration-ms").not())
+        .stdout(predicate::str::contains("--review-capture-dir").not());
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -236,6 +354,19 @@ fn companion_accepts_hidden_pixel_renderer_before_macos_gate() {
     Command::cargo_bin("glorp")
         .unwrap()
         .args(["companion", "--renderer", "pixel"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "glorp companion is only available on macOS",
+        ));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn companion_accepts_hidden_smooth_renderer_before_macos_gate() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--renderer", "smooth"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -278,6 +409,19 @@ fn companion_app_accepts_hidden_pixel_renderer_before_macos_gate() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
+fn companion_app_accepts_hidden_smooth_renderer_before_macos_gate() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion-app", "--renderer", "smooth"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "glorp companion-app is only available on macOS",
+        ));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
 fn companion_app_accepts_hidden_review_flags_before_macos_gate() {
     Command::cargo_bin("glorp")
         .unwrap()
@@ -299,6 +443,16 @@ fn companion_rejects_unknown_renderer() {
     Command::cargo_bin("glorp")
         .unwrap()
         .args(["companion", "--renderer", "sprite-cloud"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn companion_app_rejects_unknown_renderer() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion-app", "--renderer", "sprite-cloud"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid value"));

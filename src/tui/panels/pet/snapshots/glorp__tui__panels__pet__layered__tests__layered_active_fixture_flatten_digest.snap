@@ -1,0 +1,261 @@
+---
+source: src/tui/panels/pet/layered.rs
+assertion_line: 720
+expression: flatten_digest(&layered.flatten_classic_cells().cells)
+---
+cell_count: 1549
+checksum: 3951855857483982885
+head:
+  - row: 0
+    col: 0
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 1
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 2
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 3
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 4
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 5
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 6
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 7
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 8
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 9
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 10
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 11
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 12
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 13
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 14
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 15
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 16
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 17
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 18
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+  - row: 0
+    col: 19
+    glyph: ~
+    fg: ~
+    bg:
+      - 29
+      - 19
+      - 13
+    bold: false
+tail:
+  - row: 3
+    col: 39
+    glyph: "*"
+    fg:
+      - 232
+      - 132
+      - 188
+    bg: ~
+    bold: false
+  - row: 3
+    col: 40
+    glyph: ╲
+    fg:
+      - 122
+      - 184
+      - 128
+    bg: ~
+    bold: false
+  - row: 16
+    col: 32
+    glyph: ╭
+    fg:
+      - 255
+      - 196
+      - 146
+    bg: ~
+    bold: true
+  - row: 16
+    col: 33
+    glyph: "~"
+    fg:
+      - 255
+      - 196
+      - 146
+    bg: ~
+    bold: true
+  - row: 16
+    col: 34
+    glyph: ╯
+    fg:
+      - 255
+      - 196
+      - 146
+    bg: ~
+    bold: true
+  - row: 15
+    col: 5
+    glyph: ▱
+    fg:
+      - 200
+      - 176
+      - 136
+    bg: ~
+    bold: true
+  - row: 16
+    col: 69
+    glyph: ▴
+    fg:
+      - 200
+      - 176
+      - 136
+    bg: ~
+    bold: true
+  - row: 15
+    col: 69
+    glyph: ▴
+    fg:
+      - 200
+      - 176
+      - 136
+    bg: ~
+    bold: true

@@ -11,6 +11,7 @@ pub fn run(out: PathBuf, scenario: PreviewScenarioArg) -> Result<()> {
         PreviewScenarioArg::Props => PreviewSelection::Props,
         PreviewScenarioArg::Animation => PreviewSelection::Animation,
         PreviewScenarioArg::Round => PreviewSelection::Round,
+        PreviewScenarioArg::Smooth => PreviewSelection::Smooth,
         PreviewScenarioArg::TankLife => PreviewSelection::TankLife,
         PreviewScenarioArg::Pixel => PreviewSelection::Pixel,
     };

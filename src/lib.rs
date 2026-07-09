@@ -43,17 +43,35 @@ pub fn run() -> Result<()> {
             renderer,
             review_size,
             review_active_pulse,
+            review_state,
+            review_duration_ms,
+            review_capture_dir,
         } => commands::companion::run(
             renderer,
-            Cli::companion_review_options(review_size, review_active_pulse),
+            Cli::companion_review_options(
+                review_size,
+                review_active_pulse,
+                review_state,
+                review_duration_ms,
+                review_capture_dir,
+            ),
         )?,
         Command::CompanionApp {
             renderer,
             review_size,
             review_active_pulse,
+            review_state,
+            review_duration_ms,
+            review_capture_dir,
         } => commands::companion_app::run(
             renderer,
-            Cli::companion_review_options(review_size, review_active_pulse),
+            Cli::companion_review_options(
+                review_size,
+                review_active_pulse,
+                review_state,
+                review_duration_ms,
+                review_capture_dir,
+            ),
         )?,
         #[cfg(feature = "dev-preview")]
         Command::DevPreview { out, scenario } => commands::dev_preview::run(out, scenario)?,

@@ -317,20 +317,42 @@ pub fn build_round_scene_draw_list(
     grid_rows: u16,
     motion: &CompanionMotion,
 ) -> CompanionScene {
-    // Full-grid area: the bg wash + ambient cover the whole porthole.
+    let (vm, layout, new_pet_art) = build_round_pet_layout(vm, now, grid_cols, grid_rows, motion);
+    let vm = vm.as_ref();
+    let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(now));
+
+    let model = PetSceneModel::build(vm, now, ColorCapability::Truecolor);
+    let tank_geometry = round_tank_life_geometry(grid_cols, grid_rows);
+    let mut scene_list = crate::tui::panels::pet::render_pet_to_draw_list_with_tank_geometry(
+        &model,
+        vm,
+        &layout,
+        now,
+        &ctx,
+        &tank_geometry,
+    );
+    apply_uniform_porthole_recolor(&mut scene_list, grid_rows);
+    CompanionScene {
+        draw_list: scene_list,
+        pet_rect: new_pet_art,
+    }
+}
+
+pub(crate) fn build_round_pet_layout<'a>(
+    vm: &'a WatchViewModel,
+    now: time::OffsetDateTime,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+) -> (
+    Cow<'a, WatchViewModel>,
+    crate::tui::component::PetSceneLayout,
+    Rect,
+) {
     let area = Rect::new(0, 0, grid_cols, grid_rows);
-
-    // Movement energy from live activity (drives both the wander amplitude and the
-    // facing deadzone). Read from vitals that the Cow rebind below does not touch.
     let energy = companion_motion_energy(vm);
-
-    // Resolve horizontal facing from the live clock and narrowed wander width,
-    // mirroring what PetPanel::render does but with companion-specific range.
     let wander_width = PET_W + 2 * motion.wander_half;
     let (wx, fc) = crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
-    // In wander mode the pet faces its ACTUAL net horizontal travel, so it turns to
-    // face where it's swimming instead of gliding sideways. Otherwise use the shared
-    // resolved facing.
     let facing = if motion.wander {
         companion_wander_facing(now, motion.drift_period_secs, energy, vm.facing)
     } else {
@@ -346,22 +368,15 @@ pub fn build_round_scene_draw_list(
     } else {
         Cow::Borrowed(vm)
     };
-    let vm = vm.as_ref();
 
-    // Fixed clock so the render context is deterministic when `now` is pinned.
     let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(now));
-
-    // Compute layout, then override pet_art with the drift position.
-    let mut layout = PetScene::compute_layout(area, vm, &ctx);
+    let mut layout = PetScene::compute_layout(area, vm.as_ref(), &ctx);
     let old_pet_art = layout.pet_art;
     let (drift_x, drift_y) = companion_drift(now, motion, energy, grid_cols, grid_rows);
-    // Add the breath bob on top of the wander so the pet visibly breathes —
-    // otherwise breath_offset_y is computed every tick and silently discarded.
-    let breathed_y = (drift_y + u16::from(vm.breath_offset_y)).min(grid_rows.saturating_sub(PET_H));
+    let breathed_y =
+        (drift_y + u16::from(vm.as_ref().breath_offset_y)).min(grid_rows.saturating_sub(PET_H));
     let new_pet_art = Rect::new(drift_x, breathed_y, PET_W, PET_H);
     layout.pet_art = new_pet_art;
-    // Update exclusions: replace the old pet_art entry with the drifted one so
-    // ambient glyphs avoid the pet's actual rendered position.
     for excl in &mut layout.exclusions {
         if *excl == old_pet_art {
             *excl = new_pet_art;
@@ -369,36 +384,21 @@ pub fn build_round_scene_draw_list(
         }
     }
 
-    let model = PetSceneModel::build(vm, now, ColorCapability::Truecolor);
-    let tank_geometry = round_tank_life_geometry(grid_cols, grid_rows);
-    let mut scene_list = crate::tui::panels::pet::render_pet_to_draw_list_with_tank_geometry(
-        &model,
-        vm,
-        &layout,
-        now,
-        &ctx,
-        &tank_geometry,
-    );
+    (vm, layout, new_pet_art)
+}
 
-    // Uniform porthole recolor: find the sky-wash color from the first bg-only
-    // cell at a low row, then stamp it onto every bg-only cell so the floor band
-    // and contact-shadow darker rows disappear — leaving a uniform porthole bg.
-    // Glyph cells (pet body, ambient, room) are never touched.
-    let sky_bg = scene_list
+pub(crate) fn apply_uniform_porthole_recolor(draw_list: &mut SceneDrawList, grid_rows: u16) {
+    let sky_bg = draw_list
         .cells
         .iter()
         .find(|c| c.glyph.is_none() && c.bg.is_some() && c.row < grid_rows / 2)
         .and_then(|c| c.bg);
     if let Some(sky) = sky_bg {
-        for cell in &mut scene_list.cells {
+        for cell in &mut draw_list.cells {
             if cell.glyph.is_none() && cell.bg.is_some() {
                 cell.bg = Some(sky);
             }
         }
-    }
-    CompanionScene {
-        draw_list: scene_list,
-        pet_rect: new_pet_art,
     }
 }
 

@@ -688,6 +688,7 @@ fn pixel_strip_frame_paths(strip_id: &str, index: usize) -> PreviewStripFrameFil
     PreviewStripFrameFiles {
         text: PathBuf::from(format!("strips/{strip_id}/frame-{index:03}.txt")),
         cells: PathBuf::from(format!("strips/{strip_id}/frame-{index:03}.cells.json")),
+        smooth_motion: None,
         pixel: Some(PathBuf::from(format!(
             "strips/{strip_id}/frame-{index:03}.pixel.json"
         ))),

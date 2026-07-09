@@ -10,6 +10,7 @@ pub mod props;
 pub mod rasterize;
 pub mod room;
 pub mod scene;
+pub mod smooth;
 pub mod surface;
 pub mod target;
 

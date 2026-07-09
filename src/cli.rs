@@ -1,11 +1,9 @@
-#[cfg(feature = "dev-preview")]
 use clap::ValueEnum;
 use clap::{Parser, Subcommand};
-#[cfg(feature = "dev-preview")]
 use std::path::PathBuf;
 
 use crate::commands::companion_mode::{
-    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
+    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
 };
 
 #[derive(Debug, Parser)]
@@ -51,6 +49,12 @@ pub enum Command {
         review_size: Option<CompanionReviewSize>,
         #[arg(long, hide = true)]
         review_active_pulse: bool,
+        #[arg(long, value_enum, hide = true)]
+        review_state: Option<CompanionReviewState>,
+        #[arg(long, hide = true)]
+        review_duration_ms: Option<u64>,
+        #[arg(long, hide = true)]
+        review_capture_dir: Option<PathBuf>,
     },
     #[command(hide = true)]
     CompanionApp {
@@ -60,6 +64,12 @@ pub enum Command {
         review_size: Option<CompanionReviewSize>,
         #[arg(long, hide = true)]
         review_active_pulse: bool,
+        #[arg(long, value_enum, hide = true)]
+        review_state: Option<CompanionReviewState>,
+        #[arg(long, hide = true)]
+        review_duration_ms: Option<u64>,
+        #[arg(long, hide = true)]
+        review_capture_dir: Option<PathBuf>,
     },
     /// Print a compact non-interactive pet and usage summary.
     Status,
@@ -97,6 +107,7 @@ pub enum PreviewScenarioArg {
     Props,
     Animation,
     Round,
+    Smooth,
     TankLife,
     Pixel,
 }
@@ -127,13 +138,19 @@ impl From<DevPetSpecies> for crate::pet::generation::Species {
 }
 
 impl Cli {
-    pub(crate) const fn companion_review_options(
+    pub(crate) fn companion_review_options(
         review_size: Option<CompanionReviewSize>,
         review_active_pulse: bool,
+        review_state: Option<CompanionReviewState>,
+        review_duration_ms: Option<u64>,
+        review_capture_dir: Option<PathBuf>,
     ) -> CompanionReviewOptions {
         CompanionReviewOptions {
             initial_size: review_size,
             active_pulse: review_active_pulse,
+            state: review_state,
+            duration_ms: review_duration_ms,
+            capture_dir: review_capture_dir,
         }
     }
 }

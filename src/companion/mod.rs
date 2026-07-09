@@ -3,6 +3,7 @@
 pub mod app;
 pub mod pixel;
 pub mod render;
+pub mod review_capture;
 
 pub fn run(
     mode: crate::commands::companion_mode::CompanionRendererMode,

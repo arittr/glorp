@@ -33,14 +33,15 @@ fn build_open_command(
     review: CompanionReviewOptions,
 ) -> std::process::Command {
     let mut command = std::process::Command::new("open");
-    if mode.is_pixel() || review.initial_size.is_some() || review.active_pulse {
+    let needs_args = mode.is_pixel() || mode.is_smooth() || review.has_review_launch_options();
+    if needs_args {
         command.arg("-n");
     }
     command.arg(app);
-    if mode.is_pixel() || review.initial_size.is_some() || review.active_pulse {
+    if needs_args {
         command.arg("--args");
     }
-    if mode.is_pixel() {
+    if mode.is_pixel() || mode.is_smooth() {
         command.arg("--renderer").arg(mode.as_str());
     }
     if let Some(size) = review.initial_size {
@@ -49,6 +50,17 @@ fn build_open_command(
     }
     if review.active_pulse {
         command.arg("--review-active-pulse");
+    }
+    if let Some(state) = review.state {
+        command.arg("--review-state").arg(state.as_str());
+    }
+    if let Some(duration_ms) = review.duration_ms {
+        command
+            .arg("--review-duration-ms")
+            .arg(duration_ms.to_string());
+    }
+    if let Some(capture_dir) = review.capture_dir {
+        command.arg("--review-capture-dir").arg(capture_dir);
     }
     command
 }
@@ -85,7 +97,7 @@ fn companion_app_path() -> Result<std::path::PathBuf> {
 mod tests {
     use super::build_open_command;
     use crate::commands::companion_mode::{
-        CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
+        CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
     };
     use std::ffi::OsString;
     use std::path::Path;
@@ -98,6 +110,7 @@ mod tests {
             CompanionReviewOptions {
                 initial_size: Some(CompanionReviewSize { width: 360, height: 360 }),
                 active_pulse: true,
+                ..CompanionReviewOptions::default()
             },
         );
 
@@ -112,6 +125,61 @@ mod tests {
                 OsString::from("--review-size"),
                 OsString::from("360x360"),
                 OsString::from("--review-active-pulse"),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_renderer_opens_in_fresh_window_with_renderer_arg() {
+        let command = build_open_command(
+            Path::new("/Applications/Glorp.app"),
+            CompanionRendererMode::Smooth,
+            CompanionReviewOptions::default(),
+        );
+
+        assert_eq!(command.get_program(), "open");
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-n"),
+                OsString::from("/Applications/Glorp.app"),
+                OsString::from("--args"),
+                OsString::from("--renderer"),
+                OsString::from("smooth"),
+            ]
+        );
+    }
+
+    #[test]
+    fn review_open_command_forwards_state_duration_and_capture_dir() {
+        let command = build_open_command(
+            Path::new("/Applications/Glorp.app"),
+            CompanionRendererMode::Smooth,
+            CompanionReviewOptions {
+                state: Some(CompanionReviewState::ActivePulse),
+                duration_ms: Some(2000),
+                capture_dir: Some("target/glorp-review/test".into()),
+                ..CompanionReviewOptions::default()
+            },
+        );
+
+        assert_eq!(command.get_program(), "open");
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-n"),
+                OsString::from("/Applications/Glorp.app"),
+                OsString::from("--args"),
+                OsString::from("--renderer"),
+                OsString::from("smooth"),
+                OsString::from("--review-state"),
+                OsString::from("active-pulse"),
+                OsString::from("--review-duration-ms"),
+                OsString::from("2000"),
+                OsString::from("--review-capture-dir"),
+                OsString::from("target/glorp-review/test"),
             ]
         );
     }
