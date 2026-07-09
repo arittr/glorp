@@ -528,4 +528,34 @@ mod tests {
 
         assert_eq!(smooth_motion_start_now(fixed_now, &vm, &motion), fixed_now);
     }
+
+    #[test]
+    fn smooth_motion_start_now_returns_first_passing_aligned_search_offset() {
+        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let reviewed_start = reviewed_motion_start_now();
+        let mut motion = crate::round::scene::companion_roam_motion();
+        motion.drift_period_secs = 4;
+        let first_passing_offset_ms = 640;
+        let expected = reviewed_start + time::Duration::milliseconds(first_passing_offset_ms);
+
+        assert!(!smooth_motion_window_satisfies_preview_contract(
+            reviewed_start,
+            &vm,
+            &motion,
+        ));
+        for offset_ms in (MOTION_FRAME_DURATION_MS..first_passing_offset_ms as u64)
+            .step_by(MOTION_FRAME_DURATION_MS as usize)
+        {
+            let candidate = reviewed_start + time::Duration::milliseconds(offset_ms as i64);
+            assert!(
+                !smooth_motion_window_satisfies_preview_contract(candidate, &vm, &motion),
+                "offset {offset_ms}ms should fail before the first passing offset"
+            );
+        }
+        assert!(smooth_motion_window_satisfies_preview_contract(
+            expected, &vm, &motion,
+        ));
+        assert_eq!(smooth_motion_start_now(fixed_now, &vm, &motion), expected);
+    }
 }

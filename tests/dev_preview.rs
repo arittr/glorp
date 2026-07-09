@@ -78,6 +78,26 @@ const PIXEL_CAST_IDS: [&str; 6] = [
 const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
 const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
+const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 18] = [
+    ("depth-rings", "fixed", None),
+    ("biome-wash", "parallax", Some("far")),
+    ("room-glyphs", "parallax", Some("far")),
+    ("ambient", "parallax", Some("mid")),
+    ("motes", "parallax", Some("mid")),
+    ("activity-glyphs", "parallax", Some("mid")),
+    ("props-behind", "parallax", Some("behind")),
+    ("tank-life-behind", "parallax", Some("behind")),
+    ("chest-bubble", "parallax", Some("behind")),
+    ("contact-shadow", "pet-attached", None),
+    ("pet-body", "pet-attached", None),
+    ("performance-cue", "pet-attached", None),
+    ("props-foreground", "parallax", Some("foreground")),
+    ("tank-life-foreground", "parallax", Some("foreground")),
+    ("status-halo", "fixed", None),
+    ("trouble-indicator", "fixed", None),
+    ("mood-aura", "pet-attached", None),
+    ("dim-overlay", "fixed", None),
+];
 
 const HABITAT_PROPS_ORBIT_ID: &str = "watch-habitat-props-orbit";
 
@@ -253,40 +273,169 @@ fn assert_sidecar_json_values_are_sanitized(sidecar: &Value, surface: &str) {
     assert_json_value_is_sanitized(sidecar, surface, "$");
 }
 
-fn assert_smooth_enum_strings_only_in_typed_fields(sidecar: &Value, surface: &str) {
-    fn walk(value: &Value, surface: &str, path: &str) {
+fn validate_smooth_enum_string_paths(sidecar: &Value, surface: &str) -> Result<(), String> {
+    fn is_canonical_layer_field(path: &str, collection_prefix: Option<&str>, field: &str) -> bool {
+        collection_prefix.is_some_and(|prefix| {
+            path.strip_prefix(prefix)
+                .and_then(|path| path.strip_suffix(&format!("].{field}")))
+                .is_some_and(|index| {
+                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+    }
+
+    fn walk(
+        value: &Value,
+        surface: &str,
+        path: &str,
+        collection_prefix: Option<&str>,
+    ) -> Result<(), String> {
         match value {
             Value::String(text)
                 if matches!(text.as_str(), "fixed" | "pet-attached" | "parallax") =>
             {
-                assert!(
-                    path.ends_with(".motion_binding"),
-                    "{surface} sidecar exposed motion binding {text} outside a typed field at {path}"
-                );
+                if !is_canonical_layer_field(path, collection_prefix, "motion_binding") {
+                    return Err(format!(
+                        "{surface} sidecar exposed motion binding {text} outside a canonical smooth layer field at {path}"
+                    ));
+                }
             }
             Value::String(text)
                 if matches!(text.as_str(), "far" | "mid" | "behind" | "foreground") =>
             {
-                assert!(
-                    path.ends_with(".depth_plane"),
-                    "{surface} sidecar exposed depth plane {text} outside a typed field at {path}"
-                );
+                if !is_canonical_layer_field(path, collection_prefix, "depth_plane") {
+                    return Err(format!(
+                        "{surface} sidecar exposed depth plane {text} outside a canonical smooth layer field at {path}"
+                    ));
+                }
             }
             Value::Array(values) => {
                 for (index, child) in values.iter().enumerate() {
-                    walk(child, surface, &format!("{path}[{index}]"));
+                    walk(
+                        child,
+                        surface,
+                        &format!("{path}[{index}]"),
+                        collection_prefix,
+                    )?;
                 }
             }
             Value::Object(map) => {
                 for (key, child) in map {
-                    walk(child, surface, &format!("{path}.{key}"));
+                    walk(child, surface, &format!("{path}.{key}"), collection_prefix)?;
                 }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
+
+        Ok(())
     }
 
-    walk(sidecar, surface, "$");
+    let collection_prefix = if sidecar.get("strip_id").is_some() {
+        Some("$.layer_transforms[")
+    } else if sidecar.get("frame_id").is_some() && sidecar.get("layers").is_some() {
+        Some("$.layers[")
+    } else {
+        None
+    };
+    walk(sidecar, surface, "$", collection_prefix)
+}
+
+fn assert_smooth_enum_strings_only_in_typed_fields(sidecar: &Value, surface: &str) {
+    if let Err(error) = validate_smooth_enum_string_paths(sidecar, surface) {
+        panic!("{error}");
+    }
+}
+
+fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
+    let layers = layers
+        .as_array()
+        .unwrap_or_else(|| panic!("{surface} layers should be an array"));
+    let actual = layers
+        .iter()
+        .map(|layer| {
+            (
+                layer["role"].as_str().unwrap(),
+                layer["motion_binding"].as_str().unwrap(),
+                layer["depth_plane"].as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actual, SMOOTH_CANONICAL_LAYER_BINDINGS,
+        "{surface} should serialize the canonical 18-role motion mapping"
+    );
+
+    for (layer, (_, expected_binding, _)) in layers.iter().zip(SMOOTH_CANONICAL_LAYER_BINDINGS) {
+        let x = layer["parallax_translation"]["x"].as_f64().unwrap();
+        let y = layer["parallax_translation"]["y"].as_f64().unwrap();
+        if expected_binding == "parallax" {
+            assert!(
+                x != 0.0 || y != 0.0,
+                "{surface} parallax role {} should export non-zero parallax",
+                layer["role"]
+            );
+        } else {
+            assert_eq!(
+                x, 0.0,
+                "{surface} role {} should have zero x",
+                layer["role"]
+            );
+            assert_eq!(
+                y, 0.0,
+                "{surface} role {} should have zero y",
+                layer["role"]
+            );
+        }
+    }
+}
+
+#[test]
+fn dev_preview_smooth_enum_path_validation_rejects_abstract_state_motion_binding() {
+    let sidecar = serde_json::json!({
+        "frame_id": "smooth-plan",
+        "layers": [],
+        "abstract_state": {
+            "motion_binding": "fixed"
+        }
+    });
+
+    let error = validate_smooth_enum_string_paths(&sidecar, "smooth-test").unwrap_err();
+    assert!(error.contains(
+        "motion binding fixed outside a canonical smooth layer field at $.abstract_state.motion_binding"
+    ));
+}
+
+#[test]
+fn dev_preview_smooth_enum_path_validation_rejects_nested_depth_plane() {
+    let sidecar = serde_json::json!({
+        "strip_id": "smooth-motion",
+        "layer_transforms": [{
+            "metadata": {
+                "depth_plane": "far"
+            }
+        }]
+    });
+
+    let error = validate_smooth_enum_string_paths(&sidecar, "smooth-test").unwrap_err();
+    assert!(error.contains(
+        "depth plane far outside a canonical smooth layer field at $.layer_transforms[0].metadata.depth_plane"
+    ));
+}
+
+#[test]
+fn dev_preview_smooth_enum_path_validation_rejects_motion_field_in_plan_artifact() {
+    let sidecar = serde_json::json!({
+        "frame_id": "smooth-plan",
+        "layer_transforms": [{
+            "motion_binding": "fixed"
+        }]
+    });
+
+    let error = validate_smooth_enum_string_paths(&sidecar, "smooth-test").unwrap_err();
+    assert!(error.contains(
+        "motion binding fixed outside a canonical smooth layer field at $.layer_transforms[0].motion_binding"
+    ));
 }
 
 fn assert_json_value_is_sanitized(value: &Value, surface: &str, path: &str) {
@@ -2570,6 +2719,7 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
         assert!(plan["parallax_planes"][plane]["y"].is_number());
     }
     assert!(plan["layers"].as_array().unwrap().len() >= 10);
+    assert_canonical_smooth_layer_mapping(&plan["layers"], "smooth-plan");
     for layer in plan["layers"].as_array().unwrap() {
         let motion_binding = layer["motion_binding"].as_str().unwrap();
         assert!(matches!(
@@ -2698,6 +2848,8 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
         ("foreground", false),
     ]);
     let mut saw_strict_resolved_ordering = false;
+    let mut parallax_plane_summaries = Vec::<[(f32, f32); 4]>::new();
+    let mut exported_parallax_aggregates = Vec::<[(f32, f32); 4]>::new();
     for frame in frames {
         let path = frame["files"]["smooth_motion"].as_str().unwrap();
         let artifact = run.read_json(path);
@@ -2717,7 +2869,11 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
         saw_nonzero_focus |= focus_x != 0.0 || focus_y != 0.0;
 
         let mut plane_points = BTreeMap::new();
-        for plane in ["far", "mid", "behind", "foreground"] {
+        let mut exported_aggregate = [(0.0_f32, 0.0_f32); 4];
+        for (plane_index, plane) in ["far", "mid", "behind", "foreground"]
+            .into_iter()
+            .enumerate()
+        {
             let x = artifact["parallax_planes"][plane]["x"].as_f64().unwrap();
             let y = artifact["parallax_planes"][plane]["y"].as_f64().unwrap();
             *saw_nonzero_plane.get_mut(plane).unwrap() |= x != 0.0 || y != 0.0;
@@ -2729,6 +2885,7 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
             let max_y = artifact["max_adjacent_parallax_delta_by_plane"][plane]["y"]
                 .as_f64()
                 .unwrap();
+            exported_aggregate[plane_index] = (max_x as f32, max_y as f32);
             assert!(
                 max_x <= 0.15,
                 "{plane} adjacent parallax x delta exceeded 0.15: {max_x}"
@@ -2738,6 +2895,11 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
                 "{plane} adjacent parallax y delta exceeded 0.10: {max_y}"
             );
         }
+        parallax_plane_summaries.push(
+            ["far", "mid", "behind", "foreground"]
+                .map(|plane| (plane_points[plane].0 as f32, plane_points[plane].1 as f32)),
+        );
+        exported_parallax_aggregates.push(exported_aggregate);
 
         let [far, mid, behind, foreground] =
             ["far", "mid", "behind", "foreground"].map(|plane| plane_points[plane]);
@@ -2777,6 +2939,7 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
             .entry(semantic_tick_index)
             .or_default()
             .insert(pet_visual_checksum);
+        assert_canonical_smooth_layer_mapping(&artifact["layer_transforms"], "smooth-motion");
         let mut saw_pet_body = false;
         for layer in artifact["layer_transforms"].as_array().unwrap() {
             let motion_binding = layer["motion_binding"].as_str().unwrap();
@@ -2803,6 +2966,29 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
                 && layer["item_count"].as_u64().unwrap() > 0;
         }
         assert!(saw_pet_body);
+    }
+
+    let recomputed_aggregate =
+        parallax_plane_summaries
+            .windows(2)
+            .fold([(0.0_f32, 0.0_f32); 4], |mut maximum, pair| {
+                for plane_index in 0..4 {
+                    let adjacent_x = (pair[1][plane_index].0 - pair[0][plane_index].0).abs();
+                    let adjacent_y = (pair[1][plane_index].1 - pair[0][plane_index].1).abs();
+                    maximum[plane_index].0 = maximum[plane_index].0.max(adjacent_x);
+                    maximum[plane_index].1 = maximum[plane_index].1.max(adjacent_y);
+                }
+                maximum
+            });
+    for (frame_index, exported_aggregate) in exported_parallax_aggregates.iter().enumerate() {
+        assert_eq!(
+            *exported_aggregate, recomputed_aggregate,
+            "frame {frame_index} should export the exact component-wise adjacent maximum"
+        );
+        assert_eq!(
+            exported_aggregate, &exported_parallax_aggregates[0],
+            "every motion sidecar should carry the same strip aggregate"
+        );
     }
 
     assert!(
