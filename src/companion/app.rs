@@ -172,8 +172,8 @@ fn prepare_bounds(
     }
 
     Ok(PreparedBounds {
-        width_px: width.round() as u16,
-        height_px: height.round() as u16,
+        width_px: width as u16,
+        height_px: height as u16,
         width_f64: width,
         height_f64: height,
     })
@@ -316,7 +316,10 @@ fn prepare_companion_frame(
     let hud_font_size = match &renderer {
         PreparedRendererFrame::Classic { metrics, .. }
         | PreparedRendererFrame::Smooth { metrics, .. } => metrics.font_size,
-        PreparedRendererFrame::Pixel { .. } => 8.5,
+        PreparedRendererFrame::Pixel { .. } => metric_cache
+            .metrics_for(prepared_bounds)
+            .map(|metrics| metrics.font_size)
+            .unwrap_or(8.5),
     };
     let review_sample = match &renderer {
         PreparedRendererFrame::Smooth { plan, .. } => {
@@ -1796,6 +1799,58 @@ mod tests {
     }
 
     #[test]
+    fn prepared_pixel_frame_uses_draw_path_hud_font_metrics_and_fallback() {
+        let vm = WatchViewModel::fixture();
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let scene = derive_round_scene_model(&vm, now);
+        let measured_bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(480.0, 360.0));
+        let expected_font_size =
+            companion_grid_metrics(measured_bounds.size.width, measured_bounds.size.height)
+                .expect("normal companion bounds should produce grid metrics")
+                .font_size;
+        assert_ne!(
+            expected_font_size, 8.5,
+            "fixture must distinguish metric parity"
+        );
+
+        let mut metric_cache = CompanionMetricCache::default();
+        let measured = prepare_companion_frame(
+            &vm,
+            &scene,
+            CompanionRendererMode::Pixel,
+            None,
+            None,
+            0,
+            false,
+            measured_bounds,
+            &mut metric_cache,
+        )
+        .unwrap();
+
+        assert_eq!(measured.hud_font_size, expected_font_size);
+
+        let fallback_bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(480.0, 1.0));
+        assert!(
+            companion_grid_metrics(fallback_bounds.size.width, fallback_bounds.size.height,)
+                .is_none()
+        );
+        let fallback = prepare_companion_frame(
+            &vm,
+            &scene,
+            CompanionRendererMode::Pixel,
+            None,
+            None,
+            0,
+            false,
+            fallback_bounds,
+            &mut metric_cache,
+        )
+        .expect("missing Pixel metrics should not fail frame preparation");
+
+        assert_eq!(fallback.hud_font_size, 8.5);
+    }
+
+    #[test]
     fn prepared_bounds_rejects_zero_negative_non_finite_and_oversized_values() {
         for size in [
             NSSize::new(0.0, 360.0),
@@ -1824,6 +1879,16 @@ mod tests {
         assert_eq!(prepared.height_px, 360);
         assert_eq!(prepared.width_f64, 360.0);
         assert_eq!(prepared.height_f64, 360.0);
+    }
+
+    #[test]
+    fn prepared_bounds_truncates_fractional_dimensions_like_draw_path() {
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.6, 360.6));
+
+        let prepared = prepare_bounds(bounds).unwrap();
+
+        assert_eq!(prepared.width_px, 360);
+        assert_eq!(prepared.height_px, 360);
     }
 
     #[test]
