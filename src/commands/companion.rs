@@ -97,7 +97,7 @@ fn companion_app_path() -> Result<std::path::PathBuf> {
 mod tests {
     use super::build_open_command;
     use crate::commands::companion_mode::{
-        CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
+        CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
     };
     use std::ffi::OsString;
     use std::path::Path;
@@ -147,6 +147,39 @@ mod tests {
                 OsString::from("--args"),
                 OsString::from("--renderer"),
                 OsString::from("smooth"),
+            ]
+        );
+    }
+
+    #[test]
+    fn review_open_command_forwards_state_duration_and_capture_dir() {
+        let command = build_open_command(
+            Path::new("/Applications/Glorp.app"),
+            CompanionRendererMode::Smooth,
+            CompanionReviewOptions {
+                state: Some(CompanionReviewState::ActivePulse),
+                duration_ms: Some(2000),
+                capture_dir: Some("target/glorp-review/test".into()),
+                ..CompanionReviewOptions::default()
+            },
+        );
+
+        assert_eq!(command.get_program(), "open");
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-n"),
+                OsString::from("/Applications/Glorp.app"),
+                OsString::from("--args"),
+                OsString::from("--renderer"),
+                OsString::from("smooth"),
+                OsString::from("--review-state"),
+                OsString::from("active-pulse"),
+                OsString::from("--review-duration-ms"),
+                OsString::from("2000"),
+                OsString::from("--review-capture-dir"),
+                OsString::from("target/glorp-review/test"),
             ]
         );
     }

@@ -90,6 +90,7 @@ struct AppState {
     smooth_started_at: Option<Instant>,
     animation_frame: u64,
     review_capture: Option<crate::companion::review_capture::ReviewCapture>,
+    redacts_live_hud: bool,
 }
 
 thread_local! {
@@ -190,6 +191,9 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
     let controller: Retained<Controller> = unsafe { msg_send_id![Controller::class(), new] };
     let review_capture =
         crate::companion::review_capture::ReviewCapture::from_options(renderer_mode, &review)?;
+    let redacts_live_hud = review_capture
+        .as_ref()
+        .is_some_and(|capture| capture.redacts_live_hud());
     let (window, view) = build_window(mtm, review.initial_size);
     let poll_rx = crate::watch_live::spawn_live_watch_worker(
         paths,
@@ -217,6 +221,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             smooth_started_at: renderer_mode.is_smooth().then(Instant::now),
             animation_frame: 0,
             review_capture,
+            redacts_live_hud,
         });
     });
 
@@ -551,10 +556,13 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
                 s.renderer_mode,
                 s.pixel_frame.clone(),
                 s.smooth_started_at,
+                s.redacts_live_hud,
             )
         })
     });
-    let Some((scene, vm, renderer_mode, pixel_frame, smooth_started_at)) = state_snapshot else {
+    let Some((scene, vm, renderer_mode, pixel_frame, smooth_started_at, redacts_live_hud)) =
+        state_snapshot
+    else {
         return;
     };
 
@@ -625,11 +633,11 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
         if renderer_mode.is_pixel() {
             if let Some(frame) = pixel_frame.as_ref() {
-                let hud_text = companion_hud_text(
-                    vm.today_effective_tokens,
-                    vm.daily_comparison.fraction_of_yesterday,
-                    vm.rate_momentum.pulse.current_tokens,
-                );
+                let hud_text = if redacts_live_hud {
+                    review_capture_hud_text()
+                } else {
+                    live_hud_text(&vm)
+                };
                 crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture, &hud_text);
             }
         } else if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
@@ -769,7 +777,12 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
         let hud_font_size = companion_grid_metrics(bounds.size.width, bounds.size.height)
             .map(|m| m.font_size)
             .unwrap_or(8.5);
-        draw_hud(bounds, &aperture, &vm, hud_font_size);
+        let hud_text = if redacts_live_hud {
+            review_capture_hud_text()
+        } else {
+            live_hud_text(&vm)
+        };
+        draw_hud(bounds, &aperture, &hud_text, hud_font_size);
 
         if dim_overlay {
             let dim = NSBezierPath::bezierPathWithRect(bounds);
@@ -1223,12 +1236,25 @@ fn draw_gauge_overfill(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
 }
 
 #[cfg(target_os = "macos")]
-fn draw_hud(
-    bounds: NSRect,
-    aperture: &RoundAperture,
-    vm: &crate::tui::view_model::WatchViewModel,
-    font_size: f64,
-) {
+fn live_hud_text(vm: &WatchViewModel) -> CompanionHudText {
+    companion_hud_text(
+        vm.today_effective_tokens,
+        vm.daily_comparison.fraction_of_yesterday,
+        vm.rate_momentum.pulse.current_tokens,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn review_capture_hud_text() -> CompanionHudText {
+    CompanionHudText {
+        today_total: "review".into(),
+        daily_percent: "privacy".into(),
+        pace: "redacted".into(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudText, font_size: f64) {
     let gauge_layout = perimeter_gauge_layout(
         aperture.center_x as f64,
         aperture.center_y as f64,
@@ -1241,27 +1267,20 @@ fn draw_hud(
         gauge_layout.pace.ring.radius - gauge_layout.pace.stroke_width / 2.0,
         COMPANION_GAUGE_GAP_DEG,
     );
-    let hud_text = companion_hud_text(
-        vm.today_effective_tokens,
-        vm.daily_comparison.fraction_of_yesterday,
-        vm.rate_momentum.pulse.current_tokens,
-    );
-
     unsafe {
         let big_color = RoundColor(0.93, 0.93, 0.97, 1.0);
         let sub_color =
             crate::round::hud::rate_direction_color(crate::tui::view_model::RateDirection::Neutral);
         let mut stack_size = font_size * 1.45;
         let mut rendered =
-            companion_hud_attributed_lines(&hud_text, stack_size, &big_color, &sub_color);
+            companion_hud_attributed_lines(hud_text, stack_size, &big_color, &sub_color);
 
         while (rendered.max_width > gap.max_width
             || rendered.total_height > aperture.radius as f64 * 0.34)
             && stack_size > 6.0
         {
             stack_size -= 1.0;
-            rendered =
-                companion_hud_attributed_lines(&hud_text, stack_size, &big_color, &sub_color);
+            rendered = companion_hud_attributed_lines(hud_text, stack_size, &big_color, &sub_color);
         }
 
         let top = bounds.size.height - gap.baseline_y;
@@ -1317,6 +1336,26 @@ mod tests {
         assert_eq!(text.daily_percent, "94% yday");
         assert_eq!(text.pace, "31M/10m");
         assert!(!text.pace.contains("/hr"));
+    }
+
+    #[test]
+    fn review_capture_hud_text_does_not_echo_live_token_strings() {
+        let live_text =
+            crate::round::hud::companion_hud_text(842_000_000.0, Some(0.94), 31_000_000.0);
+        let capture_text = review_capture_hud_text();
+
+        for live_value in [
+            live_text.today_total,
+            live_text.daily_percent,
+            live_text.pace,
+            "842M".to_string(),
+            "94% yday".to_string(),
+            "31M/10m".to_string(),
+        ] {
+            assert!(!capture_text.today_total.contains(&live_value));
+            assert!(!capture_text.daily_percent.contains(&live_value));
+            assert!(!capture_text.pace.contains(&live_value));
+        }
     }
 
     #[test]

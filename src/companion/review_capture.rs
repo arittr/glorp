@@ -22,7 +22,7 @@ pub struct ReviewCapture {
     state: CompanionReviewState,
     requested_size: Option<CompanionReviewSize>,
     duration: Duration,
-    capture_dir: PathBuf,
+    capture_dir: Option<PathBuf>,
     started_at: Instant,
     frame_count: u64,
     smooth_bob_samples: Vec<f32>,
@@ -36,10 +36,13 @@ impl ReviewCapture {
         renderer: CompanionRendererMode,
         review: &CompanionReviewOptions,
     ) -> Result<Option<Self>> {
-        let Some(capture_dir) = review.capture_dir.clone() else {
+        let capture_dir = review.capture_dir.clone();
+        if capture_dir.is_none() && review.duration_ms.is_none() {
             return Ok(None);
         };
-        std::fs::create_dir_all(&capture_dir)?;
+        if let Some(capture_dir) = capture_dir.as_ref() {
+            std::fs::create_dir_all(capture_dir)?;
+        }
         Ok(Some(Self {
             renderer,
             state: review.resolved_state(),
@@ -68,9 +71,20 @@ impl ReviewCapture {
         self.started_at.elapsed() >= self.duration && self.frame_count >= MIN_CAPTURE_FRAMES
     }
 
+    pub fn writes_artifacts(&self) -> bool {
+        self.capture_dir.is_some()
+    }
+
+    pub fn redacts_live_hud(&self) -> bool {
+        self.writes_artifacts()
+    }
+
     pub fn finish(&mut self, view: &NSView) -> Result<()> {
+        let Some(capture_dir) = self.capture_dir.as_ref() else {
+            return Ok(());
+        };
         if !self.screenshot_written {
-            write_screenshot(view, &self.capture_dir.join("screenshot.png"))?;
+            write_screenshot(view, &capture_dir.join("screenshot.png"))?;
             self.screenshot_written = true;
         }
         if !self.render_log_written {
@@ -80,14 +94,18 @@ impl ReviewCapture {
         Ok(())
     }
 
-    pub fn paths(&self) -> (PathBuf, PathBuf) {
-        (
-            self.capture_dir.join("screenshot.png"),
-            self.capture_dir.join("render-log.json"),
-        )
+    pub fn paths(&self) -> Option<(PathBuf, PathBuf)> {
+        let capture_dir = self.capture_dir.as_ref()?;
+        Some((
+            capture_dir.join("screenshot.png"),
+            capture_dir.join("render-log.json"),
+        ))
     }
 
     fn write_render_log(&self) -> Result<()> {
+        let Some(capture_dir) = self.capture_dir.as_ref() else {
+            return Ok(());
+        };
         let log = RenderLog {
             renderer: self.renderer.as_str(),
             review_state: self.state.as_str(),
@@ -98,7 +116,7 @@ impl ReviewCapture {
             panic: self.panic,
         };
         let json = serde_json::to_string_pretty(&log)?;
-        std::fs::write(self.capture_dir.join("render-log.json"), json)?;
+        std::fs::write(capture_dir.join("render-log.json"), json)?;
         Ok(())
     }
 }
@@ -157,4 +175,43 @@ fn write_screenshot(view: &NSView, path: &Path) -> Result<()> {
 
 fn round_bob_sample(value: f32) -> f32 {
     (value * 10_000.0).round() / 10_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_only_review_options_create_session_without_artifacts() {
+        let capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration-only review should create an auto-terminating session");
+
+        assert!(!capture.writes_artifacts());
+        assert!(!capture.redacts_live_hud());
+    }
+
+    #[test]
+    fn artifact_capture_requests_redacted_live_hud() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                capture_dir: Some(dir.path().join("capture")),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("capture dir should create review capture session");
+
+        assert!(capture.writes_artifacts());
+        assert!(capture.redacts_live_hud());
+    }
 }
