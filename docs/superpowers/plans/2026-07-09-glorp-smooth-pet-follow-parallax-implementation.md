@@ -1623,7 +1623,7 @@ For every `layer_transforms` row assert:
 - `parallax_translation` is numeric;
 - fixed and pet-attached values are exactly zero.
 
-Across the strip assert non-zero focus, all four non-zero planes, strict raw ordering on at least one frame, at least two Classic snap anchors, and bounded adjacent deltas.
+Across the strip assert non-zero focus, all four non-zero planes, strict resolved ordering on at least one frame, at least two Classic snap anchors, and bounded adjacent deltas. Task 3's resolver tests remain the proof for raw pre-safety ordering.
 
 - [ ] **Step 6: Extend the privacy scan**
 
@@ -1907,7 +1907,9 @@ Expected: every sampled `parallax_lifecycle_scale` is `0.25`, the visual motion 
 - [ ] **Step 5: Build and launch the companion Drew will spot-check**
 
 ```bash
-node scripts/build-macos-companion-app.mjs --profile debug
+cargo xtask companion fresh
+osascript -e 'quit app "Glorp"'
+sleep 1
 target/debug/glorp companion --renderer smooth --review-size 960x960
 ```
 
@@ -1917,7 +1919,7 @@ Leave the smooth companion running for Drew. Do not flip the default renderer.
 
 ```bash
 git status --short --branch
-git diff main@{upstream} --stat
+git diff "$(git merge-base HEAD main)"..HEAD --stat
 git log --oneline -8
 ```
 
