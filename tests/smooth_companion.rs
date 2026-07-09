@@ -3,7 +3,7 @@ use glorp::presentation::smooth::{
     SmoothCompanionPrivacyClaims, SmoothDepthPlane, SmoothLayerItem, SmoothLayerMotionBinding,
     SmoothLayerRole,
 };
-use glorp::round::scene::{build_round_scene_draw_list, CompanionMotion};
+use glorp::round::scene::CompanionMotion;
 use glorp::storage::state::{HabitatPropId, HabitatPropSource};
 use glorp::tui::view_model::{EarnedHabitatPropView, SourceStatus, WatchViewModel};
 use time::macros::datetime;
@@ -66,6 +66,7 @@ fn smooth_plan_assigns_every_current_role_its_approved_binding() {
         (DepthRings, Fixed),
         (BiomeWash, Parallax(Far)),
         (RoomGlyphs, Parallax(Far)),
+        (FloorTexture, Fixed),
         (Ambient, Parallax(Mid)),
         (Motes, Parallax(Mid)),
         (ActivityGlyphs, Parallax(Mid)),
@@ -157,19 +158,6 @@ fn anchored_bounds(
 }
 
 #[test]
-fn smooth_round_plan_flattens_to_classic_round_scene_for_fixed_fixture() {
-    let vm = parity_fixture();
-    let motion = CompanionMotion::default();
-
-    let classic = build_round_scene_draw_list(&vm, NOW, GRID_COLS, GRID_ROWS, &motion);
-    let smooth = glorp::round::smooth::build_round_smooth_scene_plan(
-        &vm, NOW, GRID_COLS, GRID_ROWS, &motion, 0,
-    );
-
-    assert_eq!(smooth.flatten_classic_cells(), classic.draw_list);
-}
-
-#[test]
 fn smooth_round_plan_includes_classic_and_round_only_roles() {
     let vm = parity_fixture();
     let plan = glorp::round::smooth::build_round_smooth_scene_plan(
@@ -188,6 +176,7 @@ fn smooth_round_plan_includes_classic_and_round_only_roles() {
             SmoothLayerRole::DepthRings,
             SmoothLayerRole::BiomeWash,
             SmoothLayerRole::RoomGlyphs,
+            SmoothLayerRole::FloorTexture,
             SmoothLayerRole::Ambient,
             SmoothLayerRole::Motes,
             SmoothLayerRole::ActivityGlyphs,
@@ -254,17 +243,15 @@ fn smooth_round_plan_keeps_classic_cell_art_in_pet_body() {
 }
 
 #[test]
-fn smooth_round_plan_records_fractional_pet_anchors_without_breaking_flatten_parity() {
+fn smooth_round_plan_records_fractional_pet_anchors() {
     let vm = parity_fixture();
     let motion = glorp::round::scene::companion_roam_motion();
     let now = datetime!(2026-07-08 18:00:00.500 UTC);
 
-    let classic = build_round_scene_draw_list(&vm, now, GRID_COLS, GRID_ROWS, &motion);
     let smooth = glorp::round::smooth::build_round_smooth_scene_plan(
         &vm, now, GRID_COLS, GRID_ROWS, &motion, 250,
     );
 
-    assert_eq!(smooth.flatten_classic_cells(), classic.draw_list);
     assert_eq!(smooth.pet.bounds.min.x, smooth.pet.classic_snap_anchor.x);
     assert_eq!(smooth.pet.bounds.min.y, smooth.pet.classic_snap_anchor.y);
     assert!(
@@ -306,9 +293,22 @@ fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
         pet_body.transform.translation.x
     );
     assert_eq!(
-        floor_projection.transform.translation.y, 0.0,
-        "the floor projection must not inherit the pet's vertical drift or bob"
+        floor_projection.transform.translation.y, -1.0,
+        "the floor projection is lifted one substrate row and must not inherit pet bob"
     );
+    for prop_role in [
+        SmoothLayerRole::PropsBehind,
+        SmoothLayerRole::TankLifeBehind,
+        SmoothLayerRole::ChestBubble,
+        SmoothLayerRole::PropsForeground,
+        SmoothLayerRole::TankLifeForeground,
+    ] {
+        let prop_layer = plan.layer_by_role(prop_role).unwrap();
+        assert!(
+            floor_projection.z < prop_layer.z,
+            "floor projection must stay below {prop_role:?}"
+        );
+    }
     assert_eq!(
         performance_cue.transform.translation.x,
         pet_body.transform.translation.x
@@ -321,6 +321,69 @@ fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
     assert_eq!(
         chest_bubble.transform.translation,
         chest_bubble.parallax_translation
+    );
+}
+
+#[test]
+fn smooth_round_plan_adds_a_glyph_only_substrate_dither_below_every_prop() {
+    let vm = parity_fixture();
+    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &CompanionMotion::default(),
+        0,
+    );
+    let room_glyphs = plan.layer_by_role(SmoothLayerRole::RoomGlyphs).unwrap();
+    let texture = plan
+        .layers
+        .iter()
+        .find(|layer| layer.id.0 == "smooth-floor-texture")
+        .expect("Smooth adds a dedicated substrate texture over the floor wash");
+    let props = plan.layer_by_role(SmoothLayerRole::PropsBehind).unwrap();
+
+    assert_eq!(texture.motion_binding, SmoothLayerMotionBinding::Fixed);
+    assert_eq!(
+        texture.z, room_glyphs.z,
+        "the texture paints after the room glyphs without participating in parallax"
+    );
+    assert!(
+        texture.z < props.z,
+        "props must stay in front of the substrate"
+    );
+
+    let cells = texture
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SmoothLayerItem::LocalCell(cell) => Some(cell),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        cells.iter().all(|cell| cell.row >= GRID_ROWS - 3),
+        "substrate texture stays in the three-row floor band"
+    );
+    assert!(
+        cells.iter().all(|cell| cell.bg.is_none()),
+        "cell backgrounds become oversized blocks in the native companion"
+    );
+    assert!(
+        cells.iter().all(|cell| cell.glyph.as_deref() == Some("⠿")),
+        "the texture needs a native pixel dither mark rather than a text dot"
+    );
+
+    let marks_per_row = (GRID_ROWS - 3..GRID_ROWS)
+        .map(|row| cells.iter().filter(|cell| cell.row == row).count())
+        .collect::<Vec<_>>();
+    assert!(
+        marks_per_row.windows(2).all(|pair| pair[0] < pair[1]),
+        "the dither gets denser toward the near edge so the floor reads as a plane"
+    );
+    assert!(
+        cells.len() < usize::from(GRID_COLS) * 2,
+        "the dither remains quiet enough to preserve HUD and prop hierarchy"
     );
 }
 
@@ -363,11 +426,10 @@ fn smooth_plan_composes_nonzero_parallax_without_moving_fixed_or_pet_layers() {
 }
 
 #[test]
-fn nonzero_parallax_preserves_exact_classic_flatten_parity() {
+fn nonzero_parallax_is_preserved_for_smooth_layers() {
     let vm = parity_fixture();
     let motion = glorp::round::scene::companion_roam_motion();
     let now = datetime!(2026-07-08 18:00:00.500 UTC);
-    let classic = build_round_scene_draw_list(&vm, now, GRID_COLS, GRID_ROWS, &motion);
     let smooth = glorp::round::smooth::build_round_smooth_scene_plan(
         &vm, now, GRID_COLS, GRID_ROWS, &motion, 500,
     );
@@ -375,7 +437,6 @@ fn nonzero_parallax_preserves_exact_classic_flatten_parity() {
     assert!(smooth.layers.iter().any(|layer| {
         layer.parallax_translation != glorp::presentation::smooth::SmoothPoint::default()
     }));
-    assert_eq!(smooth.flatten_classic_cells(), classic.draw_list);
 }
 
 #[test]

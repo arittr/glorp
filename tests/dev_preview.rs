@@ -78,10 +78,11 @@ const PIXEL_CAST_IDS: [&str; 6] = [
 const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
 const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
-const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 19] = [
+const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 20] = [
     ("depth-rings", "fixed", None),
     ("biome-wash", "parallax", Some("far")),
     ("room-glyphs", "parallax", Some("far")),
+    ("floor-texture", "fixed", None),
     ("ambient", "parallax", Some("mid")),
     ("motes", "parallax", Some("mid")),
     ("activity-glyphs", "parallax", Some("mid")),
@@ -367,7 +368,7 @@ fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
 
     assert_eq!(
         actual, SMOOTH_CANONICAL_LAYER_BINDINGS,
-        "{surface} should serialize the canonical 19-role motion mapping"
+        "{surface} should serialize the canonical 20-role motion mapping"
     );
 
     for (layer, (_, expected_binding, _)) in layers.iter().zip(SMOOTH_CANONICAL_LAYER_BINDINGS) {
@@ -2781,14 +2782,14 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
     assert_eq!(parity["schema_version"], 1);
     assert_eq!(parity["frame_id"], SMOOTH_PARITY_ID);
     assert_eq!(parity["fixture_id"], SMOOTH_BASELINE_ID);
-    assert_eq!(parity["exact_match"], true);
-    assert_eq!(
+    assert_eq!(parity["exact_match"], false);
+    assert_ne!(
         parity["classic_checksum"], parity["smooth_flatten_checksum"],
-        "smooth parity checksum must exactly match classic baseline"
+        "smooth-only layers may intentionally diverge from the Classic baseline"
     );
-    assert_eq!(parity["review_status"], "exact-match");
+    assert_eq!(parity["review_status"], "smooth-extension");
     assert_eq!(parity["missing_roles"], Value::Array(vec![]));
-    assert_eq!(parity["required_roles"].as_array().unwrap().len(), 19);
+    assert_eq!(parity["required_roles"].as_array().unwrap().len(), 20);
 
     for path in smooth_sidecars {
         let sidecar: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();

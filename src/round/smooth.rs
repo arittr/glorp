@@ -1,10 +1,11 @@
 use ratatui::layout::Rect;
 
+use crate::pet::palette::Rgb;
 use crate::presentation::smooth::{
     smooth_pet_bob, CompanionChromeReservation, CompanionViewport, SmoothBlendMode, SmoothBounds,
     SmoothClassicFlattenCompat, SmoothClip, SmoothCompanionLayer, SmoothCompanionPet,
-    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerId,
-    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothTransform,
+    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerId, SmoothLayerItem,
+    SmoothLayerMotionBinding, SmoothLayerRole, SmoothLocalCell, SmoothPoint, SmoothTransform,
 };
 use crate::presentation::PetSceneModel;
 use crate::round::layout::{
@@ -116,6 +117,10 @@ pub fn try_build_round_smooth_scene_plan(
             // anchored to the substrate while the pet bobs against the wall.
             SmoothLayerMotionBinding::FloorProjected => {
                 layer.transform.translation.x += pet_anchor_delta.x;
+                layer.transform.translation.y -= 1.0;
+                // Draw over the room grid but beneath every prop layer, so the
+                // projection reads as a floor treatment rather than an occluder.
+                layer.z = 1;
             }
             SmoothLayerMotionBinding::Fixed | SmoothLayerMotionBinding::Parallax(_) => {}
         }
@@ -126,7 +131,11 @@ pub fn try_build_round_smooth_scene_plan(
             };
             layer.transform.translation.y += bob_offset.y;
         }
+        let has_floor_texture = layer.role == SmoothLayerRole::RoomGlyphs;
         layers.push(layer);
+        if has_floor_texture {
+            layers.push(smooth_floor_texture_layer(grid_cols, grid_rows));
+        }
     }
 
     let pet_body = layers
@@ -254,6 +263,79 @@ pub fn try_build_round_smooth_scene_plan(
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
         classic_flatten_compat: SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows },
     })
+}
+
+const SMOOTH_SUBSTRATE_ROWS: u16 = 3;
+const SMOOTH_SUBSTRATE_PLUM: Rgb = Rgb::new(0x5a, 0x3d, 0x63);
+const SMOOTH_SUBSTRATE_TEAL: Rgb = Rgb::new(0x39, 0x6d, 0x5b);
+
+/// A Smooth-only dither overlay makes the small companion's floor legible
+/// without changing the shared Classic room wash. It uses increasingly dense
+/// braille marks from the far edge to the near edge, avoiding cell background
+/// fills that would read as large blocks in the native companion.
+fn smooth_floor_texture_layer(grid_cols: u16, grid_rows: u16) -> SmoothCompanionLayer {
+    let floor_top = grid_rows.saturating_sub(SMOOTH_SUBSTRATE_ROWS);
+    let mut items = Vec::with_capacity(usize::from(grid_cols).saturating_mul(3) / 2);
+
+    for row in floor_top..grid_rows {
+        let stride = match row.saturating_sub(floor_top) {
+            0 => 4,
+            1 => 3,
+            _ => 2,
+        };
+        for col in 0..grid_cols {
+            if (u32::from(col) + u32::from(row) * 3) % stride != 0 {
+                continue;
+            }
+            let fg = if (u32::from(col) + u32::from(row)) % 2 == 0 {
+                SMOOTH_SUBSTRATE_PLUM
+            } else {
+                SMOOTH_SUBSTRATE_TEAL
+            };
+            items.push(SmoothLayerItem::LocalCell(SmoothLocalCell {
+                row,
+                col,
+                glyph: Some("⠿".to_string()),
+                fg: Some(fg),
+                bg: None,
+                bold: false,
+            }));
+        }
+    }
+
+    let local_bounds = SmoothBounds {
+        min: SmoothPoint { x: 0.0, y: f32::from(floor_top) },
+        max: SmoothPoint {
+            x: f32::from(grid_cols),
+            y: f32::from(grid_rows),
+        },
+    };
+    SmoothCompanionLayer {
+        id: SmoothLayerId("smooth-floor-texture".to_string()),
+        role: SmoothLayerRole::FloorTexture,
+        motion_binding: SmoothLayerMotionBinding::Fixed,
+        // The existing room glyphs sit at z=1. Appending this layer after them
+        // gives the substrate its own readable horizon while keeping it behind
+        // every prop (which starts at z=5).
+        z: 1,
+        local_bounds,
+        anchor: SmoothPoint { x: 0.0, y: 0.0 },
+        transform_origin: SmoothPoint {
+            x: f32::from(grid_cols) / 2.0,
+            y: f32::from(floor_top),
+        },
+        transform: SmoothTransform {
+            translation: SmoothPoint { x: 0.0, y: 0.0 },
+            scale: SmoothPoint { x: 1.0, y: 1.0 },
+            rotation_degrees: 0.0,
+        },
+        parallax_translation: SmoothPoint { x: 0.0, y: 0.0 },
+        opacity: 1.0,
+        clip: SmoothClip::Rect(local_bounds),
+        blend: SmoothBlendMode::Normal,
+        items,
+        privacy: SmoothCompanionPrivacyClaims::external_companion(),
+    }
 }
 
 pub fn build_round_smooth_scene_plan(
