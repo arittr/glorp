@@ -174,6 +174,9 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
     let mut presentation_state = WatchPresentationState::default();
     let review_state = review.resolved_state();
     apply_review_state(review_state, &mut presentation_state, &mut initial_vm, now)?;
+    if renderer_mode.is_smooth() {
+        prepare_smooth_initial_view_model(&mut initial_vm, now)?;
+    }
     let scene = derive_round_scene_model(&initial_vm, now);
     let pixel_input = renderer_mode
         .is_pixel()
@@ -292,6 +295,16 @@ fn apply_review_state(
                 source.diagnostic_message = None;
             }
         }
+    }
+    Ok(())
+}
+
+fn prepare_smooth_initial_view_model(
+    vm: &mut WatchViewModel,
+    now: time::OffsetDateTime,
+) -> Result<()> {
+    if vm.pet_art.is_empty() || vm.pet_spans.is_empty() {
+        rerender_pet_for_view_model(vm, 0, vm.day_context.asleep, now)?;
     }
     Ok(())
 }
@@ -1445,6 +1458,20 @@ mod tests {
             assert!(!capture_text.daily_percent.contains(&live_value));
             assert!(!capture_text.pace.contains(&live_value));
         }
+    }
+
+    #[test]
+    fn smooth_startup_prepares_classic_pet_art_before_first_semantic_tick() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_art.clear();
+        vm.pet_spans.clear();
+        vm.day_context.asleep = false;
+
+        prepare_smooth_initial_view_model(&mut vm, now).unwrap();
+
+        assert!(!vm.pet_art.is_empty());
+        assert!(!vm.pet_spans.is_empty());
     }
 
     #[test]
