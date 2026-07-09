@@ -128,20 +128,17 @@ struct PreparedBounds {
     height_f64: f64,
 }
 
-#[allow(dead_code)] // Used only by the staged metrics cache until Task 4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CompanionMetricKey {
     width_px: u16,
     height_px: u16,
 }
 
-#[allow(dead_code)] // The cache is wired into the renderer by Task 4.
 #[derive(Debug, Clone, Copy, Default)]
 struct CompanionMetricCache {
     last: Option<(CompanionMetricKey, CompanionGridMetrics)>,
 }
 
-#[allow(dead_code)] // Later preparation tasks emit every category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompanionFramePreparationError {
     InvalidBounds,
@@ -149,7 +146,6 @@ enum CompanionFramePreparationError {
     SmoothMissingPetBody,
 }
 
-#[allow(dead_code)] // Categories are emitted by the later draw boundary.
 impl CompanionFramePreparationError {
     fn category(self) -> &'static str {
         match self {
@@ -160,7 +156,6 @@ impl CompanionFramePreparationError {
     }
 }
 
-#[allow(dead_code)] // The draw preparation boundary calls this in Task 4.
 fn prepare_bounds(
     bounds: NSRect,
 ) -> std::result::Result<PreparedBounds, CompanionFramePreparationError> {
@@ -184,7 +179,29 @@ fn prepare_bounds(
     })
 }
 
-#[allow(dead_code)] // The cache is wired into the renderer by Task 4.
+fn prepare_gauge_frame(vm: &WatchViewModel) -> PreparedGaugeFrame {
+    PreparedGaugeFrame {
+        xp_fraction: if vm.progress.is_max_stage {
+            1.0
+        } else {
+            vm.progress.fraction as f64
+        },
+        daily_fraction: daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday),
+        daily_overage_fraction: daily_overage_marker_fraction(
+            vm.daily_comparison.fraction_of_yesterday,
+        ),
+        pace_fraction: companion_pace_fraction(vm.rate_momentum.pulse.current_tokens),
+    }
+}
+
+fn prepare_hud_frame(vm: &WatchViewModel, redacts_live_hud: bool) -> CompanionHudText {
+    if redacts_live_hud {
+        review_capture_hud_text()
+    } else {
+        live_hud_text(vm)
+    }
+}
+
 impl CompanionMetricCache {
     fn metrics_for(
         &mut self,
@@ -204,6 +221,143 @@ impl CompanionMetricCache {
         self.last = Some((key, metrics));
         Ok(metrics)
     }
+}
+
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep AppState field borrows disjoint.
+fn prepare_companion_frame(
+    vm: &WatchViewModel,
+    scene: &RoundSceneModel,
+    renderer_mode: CompanionRendererMode,
+    pixel_frame: Option<&PixelFrame>,
+    smooth_started_at: Option<Instant>,
+    smooth_semantic_art_tick_index: u64,
+    redacts_live_hud: bool,
+    bounds: NSRect,
+    metric_cache: &mut CompanionMetricCache,
+) -> std::result::Result<PreparedCompanionFrame, CompanionFramePreparationError> {
+    let prepared_bounds = prepare_bounds(bounds)?;
+    let aperture = RoundAperture::new(prepared_bounds.width_px, prepared_bounds.height_px);
+    let layout = layout_round_scene(
+        scene,
+        aperture,
+        RoundRenderCapabilities::preview_truecolor(),
+    );
+    let overlay_commands = build_draw_commands(scene, &layout);
+    let background = overlay_commands
+        .iter()
+        .find(|command| command.kind == RoundDrawKind::Background)
+        .map(|command| command.color)
+        .unwrap_or(RoundColor(0.05, 0.06, 0.10, 1.0));
+    let dim_overlay = scene.lifecycle.asleep || scene.lifecycle.calm;
+    let gauges = prepare_gauge_frame(vm);
+    let hud = prepare_hud_frame(vm, redacts_live_hud);
+
+    let renderer = if renderer_mode.is_pixel() {
+        PreparedRendererFrame::Pixel {
+            frame: pixel_frame
+                .cloned()
+                .unwrap_or_else(|| PixelFrame::transparent(PixelViewport::companion_default())),
+        }
+    } else {
+        let metrics = metric_cache.metrics_for(prepared_bounds)?;
+        if renderer_mode.is_smooth() {
+            let elapsed_ms = smooth_started_at
+                .map(|started_at| started_at.elapsed().as_millis())
+                .unwrap_or(0)
+                .min(u128::from(u64::MAX)) as u64;
+            let plan = crate::round::smooth::try_build_round_smooth_scene_plan(
+                vm,
+                time::OffsetDateTime::now_utc(),
+                metrics.grid_cols,
+                metrics.grid_rows,
+                &companion_motion(),
+                elapsed_ms,
+            )
+            .map_err(|_| CompanionFramePreparationError::SmoothMissingPetBody)?;
+            let pet_center_col = f64::from(
+                plan.pet.fractional_bounds.min.x
+                    + (plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x) / 2.0,
+            );
+            let pet_center_row = f64::from(
+                plan.pet.fractional_bounds.min.y
+                    + (plan.pet.fractional_bounds.max.y - plan.pet.fractional_bounds.min.y) / 2.0,
+            );
+            let pet_width_cells =
+                f64::from(plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x);
+            PreparedRendererFrame::Smooth {
+                metrics,
+                pet_center_col,
+                pet_center_row,
+                pet_width_cells,
+                plan,
+            }
+        } else {
+            let companion_scene = crate::round::scene::build_round_scene_draw_list(
+                vm,
+                time::OffsetDateTime::now_utc(),
+                metrics.grid_cols,
+                metrics.grid_rows,
+                &companion_motion(),
+            );
+            PreparedRendererFrame::Classic {
+                metrics,
+                pet_center_col: f64::from(
+                    companion_scene.pet_rect.x + companion_scene.pet_rect.width / 2,
+                ),
+                pet_center_row: f64::from(
+                    companion_scene.pet_rect.y + companion_scene.pet_rect.height / 2,
+                ),
+                pet_width_cells: f64::from(companion_scene.pet_rect.width),
+                draw_list: companion_scene.draw_list,
+            }
+        }
+    };
+
+    let hud_font_size = match &renderer {
+        PreparedRendererFrame::Classic { metrics, .. }
+        | PreparedRendererFrame::Smooth { metrics, .. } => metrics.font_size,
+        PreparedRendererFrame::Pixel { .. } => 8.5,
+    };
+    let review_sample = match &renderer {
+        PreparedRendererFrame::Smooth { plan, .. } => {
+            Some(crate::companion::review_capture::SmoothReviewFrameSample {
+                bob_y: plan.pet.bob_offset.y,
+                semantic_art_tick_index: smooth_semantic_art_tick_index,
+                pet_visual_checksum: crate::presentation::smooth::pet_visual_checksum(
+                    &vm.pet_art,
+                    &vm.pet_spans,
+                ),
+                base_anchor: crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                    plan.pet.base_anchor,
+                ),
+                bob_offset: crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                    plan.pet.bob_offset,
+                ),
+                final_anchor:
+                    crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                        plan.pet.final_anchor,
+                    ),
+                classic_snap_anchor:
+                    crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                        plan.pet.classic_snap_anchor,
+                    ),
+            })
+        }
+        _ => None,
+    };
+
+    Ok(PreparedCompanionFrame {
+        bounds: prepared_bounds,
+        aperture,
+        background,
+        dim_overlay,
+        renderer,
+        gauges,
+        hud,
+        hud_font_size,
+        overlay_commands,
+        review_sample,
+    })
 }
 
 struct AppState {
@@ -226,6 +380,14 @@ struct AppState {
     animation_frame: u64,
     review_capture: Option<crate::companion::review_capture::ReviewCapture>,
     redacts_live_hud: bool,
+    metric_cache: CompanionMetricCache,
+    last_good_frame: Option<PreparedCompanionFrame>,
+    #[allow(dead_code)] // Read by the Task 5 paint boundary.
+    last_frame_preparation_error: Option<CompanionFramePreparationError>,
+    #[allow(dead_code)] // Updated by the Task 5 callback guard.
+    callback_panic_count: u64,
+    #[allow(dead_code)] // Updated by the Task 5 callback guard.
+    last_callback_panic_label: Option<&'static str>,
 }
 
 thread_local! {
@@ -366,8 +528,15 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             animation_frame: 0,
             review_capture,
             redacts_live_hud,
+            metric_cache: CompanionMetricCache::default(),
+            last_good_frame: None,
+            last_frame_preparation_error: None,
+            callback_panic_count: 0,
+            last_callback_panic_label: None,
         });
     });
+
+    prepare_current_frame_from_state();
 
     let tick_interval = if renderer_mode.is_pixel() || renderer_mode.is_smooth() {
         1.0 / 30.0
@@ -556,7 +725,65 @@ fn ui_tick() {
     let _mtm = MainThreadMarker::new().expect("companion ui_tick on non-main thread");
     drain_poll_results();
     animate_pet();
+    prepare_current_frame_from_state();
     finish_review_capture_if_due();
+}
+
+fn prepare_current_frame_from_state() {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        let prepared = {
+            let AppState {
+                view,
+                vm,
+                scene,
+                renderer_mode,
+                pixel_frame,
+                smooth_started_at,
+                smooth_semantic_art_tick_index,
+                redacts_live_hud,
+                metric_cache,
+                ..
+            } = state;
+            let bounds = view.bounds();
+            prepare_companion_frame(
+                vm,
+                scene,
+                *renderer_mode,
+                pixel_frame.as_ref(),
+                *smooth_started_at,
+                *smooth_semantic_art_tick_index,
+                *redacts_live_hud,
+                bounds,
+                metric_cache,
+            )
+        };
+        match prepared {
+            Ok(frame) => {
+                state.last_good_frame = Some(frame);
+                state.last_frame_preparation_error = None;
+            }
+            Err(err) => record_frame_preparation_error(state, err),
+        }
+    });
+}
+
+fn record_frame_preparation_error(state: &mut AppState, err: CompanionFramePreparationError) {
+    state.last_frame_preparation_error = Some(err);
+    let reused_last_good_frame = state.last_good_frame.is_some();
+    if let Some(capture) = state.review_capture.as_mut() {
+        capture.record_frame_preparation_error(err.category());
+        if reused_last_good_frame {
+            capture.record_last_good_frame_reused();
+        }
+    }
+    eprintln!(
+        "glorp companion frame preparation failed: {}",
+        err.category()
+    );
 }
 
 fn drain_poll_results() {
@@ -1537,6 +1764,36 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_gauge_frame_matches_current_vm_values() {
+        let mut vm = WatchViewModel::fixture();
+        vm.progress.is_max_stage = false;
+        vm.progress.fraction = 0.42;
+        vm.daily_comparison.fraction_of_yesterday = Some(1.25);
+        vm.rate_momentum.pulse.current_tokens = 31_000_000.0;
+
+        let gauges = prepare_gauge_frame(&vm);
+
+        assert_eq!(gauges.xp_fraction, vm.progress.fraction as f64);
+        assert_eq!(gauges.daily_fraction, daily_fraction_for_gauge(Some(1.25)));
+        assert_eq!(
+            gauges.daily_overage_fraction,
+            daily_overage_marker_fraction(Some(1.25))
+        );
+        assert_eq!(gauges.pace_fraction, companion_pace_fraction(31_000_000.0));
+    }
+
+    #[test]
+    fn prepared_hud_text_uses_review_redaction_when_requested() {
+        let mut vm = WatchViewModel::fixture();
+        vm.today_effective_tokens = 842_000_000.0;
+        vm.daily_comparison.fraction_of_yesterday = Some(0.94);
+        vm.rate_momentum.pulse.current_tokens = 31_000_000.0;
+
+        assert_eq!(prepare_hud_frame(&vm, true), review_capture_hud_text());
+        assert_eq!(prepare_hud_frame(&vm, false), live_hud_text(&vm));
+    }
 
     #[test]
     fn prepared_bounds_rejects_zero_negative_non_finite_and_oversized_values() {
