@@ -66,7 +66,6 @@ fn smooth_plan_assigns_every_current_role_its_approved_binding() {
         (DepthRings, Fixed),
         (BiomeWash, Parallax(Far)),
         (RoomGlyphs, Parallax(Far)),
-        (FloorTexture, Fixed),
         (Ambient, Parallax(Mid)),
         (Motes, Parallax(Mid)),
         (ActivityGlyphs, Parallax(Mid)),
@@ -176,7 +175,6 @@ fn smooth_round_plan_includes_classic_and_round_only_roles() {
             SmoothLayerRole::DepthRings,
             SmoothLayerRole::BiomeWash,
             SmoothLayerRole::RoomGlyphs,
-            SmoothLayerRole::FloorTexture,
             SmoothLayerRole::Ambient,
             SmoothLayerRole::Motes,
             SmoothLayerRole::ActivityGlyphs,
@@ -263,7 +261,7 @@ fn smooth_round_plan_records_fractional_pet_anchors() {
 }
 
 #[test]
-fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
+fn smooth_round_plan_floor_projection_stays_below_props_and_moves_pet_attached_layers() {
     let vm = parity_fixture();
     let motion = glorp::round::scene::companion_roam_motion();
     let plan = glorp::round::smooth::build_round_smooth_scene_plan(
@@ -282,6 +280,21 @@ fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
     let performance_cue = plan.layer_by_role(SmoothLayerRole::PerformanceCue).unwrap();
     let chest_bubble = plan.layer_by_role(SmoothLayerRole::ChestBubble).unwrap();
     let props_behind = plan.layer_by_role(SmoothLayerRole::PropsBehind).unwrap();
+    let first_prop_z = plan
+        .layers
+        .iter()
+        .filter(|layer| {
+            matches!(
+                layer.role,
+                SmoothLayerRole::PropsBehind
+                    | SmoothLayerRole::PropsForeground
+                    | SmoothLayerRole::TankLifeBehind
+                    | SmoothLayerRole::TankLifeForeground
+            )
+        })
+        .map(|layer| layer.z)
+        .min()
+        .unwrap();
 
     assert!(pet_body.transform.translation.x.abs() > f32::EPSILON);
     assert_eq!(
@@ -296,6 +309,11 @@ fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
         floor_projection.transform.translation.y, -1.0,
         "the floor projection is lifted one substrate row and must not inherit pet bob"
     );
+    assert!(floor_projection.z < first_prop_z);
+    assert!(!plan
+        .layers
+        .iter()
+        .any(|layer| layer.role.as_str() == "floor-texture"));
     for prop_role in [
         SmoothLayerRole::PropsBehind,
         SmoothLayerRole::TankLifeBehind,
@@ -321,69 +339,6 @@ fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
     assert_eq!(
         chest_bubble.transform.translation,
         chest_bubble.parallax_translation
-    );
-}
-
-#[test]
-fn smooth_round_plan_adds_a_glyph_only_substrate_dither_below_every_prop() {
-    let vm = parity_fixture();
-    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
-        &vm,
-        NOW,
-        GRID_COLS,
-        GRID_ROWS,
-        &CompanionMotion::default(),
-        0,
-    );
-    let room_glyphs = plan.layer_by_role(SmoothLayerRole::RoomGlyphs).unwrap();
-    let texture = plan
-        .layers
-        .iter()
-        .find(|layer| layer.id.0 == "smooth-floor-texture")
-        .expect("Smooth adds a dedicated substrate texture over the floor wash");
-    let props = plan.layer_by_role(SmoothLayerRole::PropsBehind).unwrap();
-
-    assert_eq!(texture.motion_binding, SmoothLayerMotionBinding::Fixed);
-    assert_eq!(
-        texture.z, room_glyphs.z,
-        "the texture paints after the room glyphs without participating in parallax"
-    );
-    assert!(
-        texture.z < props.z,
-        "props must stay in front of the substrate"
-    );
-
-    let cells = texture
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            SmoothLayerItem::LocalCell(cell) => Some(cell),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        cells.iter().all(|cell| cell.row >= GRID_ROWS - 3),
-        "substrate texture stays in the three-row floor band"
-    );
-    assert!(
-        cells.iter().all(|cell| cell.bg.is_none()),
-        "cell backgrounds become oversized blocks in the native companion"
-    );
-    assert!(
-        cells.iter().all(|cell| cell.glyph.as_deref() == Some("⠿")),
-        "the texture needs a native pixel dither mark rather than a text dot"
-    );
-
-    let marks_per_row = (GRID_ROWS - 3..GRID_ROWS)
-        .map(|row| cells.iter().filter(|cell| cell.row == row).count())
-        .collect::<Vec<_>>();
-    assert!(
-        marks_per_row.windows(2).all(|pair| pair[0] < pair[1]),
-        "the dither gets denser toward the near edge so the floor reads as a plane"
-    );
-    assert!(
-        cells.len() < usize::from(GRID_COLS) * 2,
-        "the dither remains quiet enough to preserve HUD and prop hierarchy"
     );
 }
 

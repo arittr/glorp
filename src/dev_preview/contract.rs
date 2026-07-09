@@ -939,11 +939,10 @@ fn smooth_item_count(layer: &SmoothCompanionLayer) -> usize {
         .count()
 }
 
-const SMOOTH_SLICE1_REQUIRED_ROLES: [SmoothLayerRole; 20] = [
+const SMOOTH_SLICE1_REQUIRED_ROLES: [SmoothLayerRole; 19] = [
     SmoothLayerRole::DepthRings,
     SmoothLayerRole::BiomeWash,
     SmoothLayerRole::RoomGlyphs,
-    SmoothLayerRole::FloorTexture,
     SmoothLayerRole::Ambient,
     SmoothLayerRole::Motes,
     SmoothLayerRole::ActivityGlyphs,
@@ -1191,7 +1190,6 @@ mod tests {
                 "depth-rings".to_string(),
                 "biome-wash".to_string(),
                 "room-glyphs".to_string(),
-                "floor-texture".to_string(),
                 "ambient".to_string(),
                 "motes".to_string(),
                 "activity-glyphs".to_string(),

@@ -89,7 +89,6 @@ pub enum SmoothLayerRole {
     DepthRings,
     BiomeWash,
     RoomGlyphs,
-    FloorTexture,
     Ambient,
     Motes,
     ActivityGlyphs,
@@ -114,7 +113,6 @@ impl SmoothLayerRole {
             Self::DepthRings => "depth-rings",
             Self::BiomeWash => "biome-wash",
             Self::RoomGlyphs => "room-glyphs",
-            Self::FloorTexture => "floor-texture",
             Self::Ambient => "ambient",
             Self::Motes => "motes",
             Self::ActivityGlyphs => "activity-glyphs",
@@ -140,7 +138,6 @@ impl SmoothLayerRole {
 
         match self {
             Self::BiomeWash | Self::RoomGlyphs => Parallax(Far),
-            Self::FloorTexture => Fixed,
             Self::Ambient | Self::Motes | Self::ActivityGlyphs => Parallax(Mid),
             Self::PropsBehind | Self::TankLifeBehind | Self::ChestBubble => Parallax(Behind),
             Self::WallShadow | Self::PetBody | Self::PerformanceCue | Self::MoodAura => PetAttached,
