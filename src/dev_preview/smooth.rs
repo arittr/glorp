@@ -22,6 +22,7 @@ const GRID_COLS: u16 = 52;
 const GRID_ROWS: u16 = 52;
 const MOTION_FRAME_DURATION_MS: u64 = 160;
 const MOTION_FRAME_COUNT: usize = 12;
+const REVIEWED_MOTION_START_UNIX_MS: i128 = 1_760_000_001_000;
 
 pub const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 pub const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
@@ -180,14 +181,17 @@ fn smooth_motion_start_now(
     vm: &WatchViewModel,
     motion: &CompanionMotion,
 ) -> time::OffsetDateTime {
-    let search_secs = motion.drift_period_secs.max(1) as i64;
-    for offset_secs in 0..search_secs {
-        let candidate = fixed_now + time::Duration::seconds(offset_secs);
-        if smooth_motion_window_crosses_snapped_anchor(candidate, vm, motion) {
-            return candidate;
-        }
+    let reviewed_start = reviewed_motion_start_now();
+    if smooth_motion_window_crosses_snapped_anchor(reviewed_start, vm, motion) {
+        reviewed_start
+    } else {
+        fixed_now
     }
-    fixed_now
+}
+
+fn reviewed_motion_start_now() -> time::OffsetDateTime {
+    time::OffsetDateTime::from_unix_timestamp_nanos(REVIEWED_MOTION_START_UNIX_MS * 1_000_000)
+        .expect("reviewed motion start timestamp should parse")
 }
 
 fn smooth_motion_window_crosses_snapped_anchor(
@@ -336,5 +340,45 @@ fn scene_draw_list_to_preview_frame(
         layout: None,
         extra_inputs: BTreeMap::new(),
         contract: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_reviewed_motion_start_satisfies_preview_contract() {
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = crate::round::scene::companion_roam_motion();
+        let reviewed_start = reviewed_motion_start_now();
+
+        assert!(smooth_motion_window_crosses_snapped_anchor(
+            reviewed_start,
+            &vm,
+            &motion,
+        ));
+    }
+
+    #[test]
+    fn smooth_motion_start_now_prefers_reviewed_start_when_it_passes_contract() {
+        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = crate::round::scene::companion_roam_motion();
+        let reviewed_start = reviewed_motion_start_now();
+
+        assert_eq!(
+            smooth_motion_start_now(fixed_now, &vm, &motion),
+            reviewed_start
+        );
+    }
+
+    #[test]
+    fn smooth_motion_start_now_falls_back_when_reviewed_start_fails_contract() {
+        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = CompanionMotion::default();
+
+        assert_eq!(smooth_motion_start_now(fixed_now, &vm, &motion), fixed_now);
     }
 }
