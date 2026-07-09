@@ -29,6 +29,27 @@ impl SmoothReviewPoint {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq)]
+pub struct SmoothReviewParallaxPlanes {
+    pub far: SmoothReviewPoint,
+    pub mid: SmoothReviewPoint,
+    pub behind: SmoothReviewPoint,
+    pub foreground: SmoothReviewPoint,
+}
+
+impl SmoothReviewParallaxPlanes {
+    pub fn from_smooth_planes(
+        planes: crate::presentation::smooth::SmoothParallaxPlaneTranslations,
+    ) -> Self {
+        Self {
+            far: SmoothReviewPoint::from_smooth_point(planes.far),
+            mid: SmoothReviewPoint::from_smooth_point(planes.mid),
+            behind: SmoothReviewPoint::from_smooth_point(planes.behind),
+            foreground: SmoothReviewPoint::from_smooth_point(planes.foreground),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct SmoothReviewFrameSample {
     pub bob_y: f32,
@@ -38,6 +59,9 @@ pub struct SmoothReviewFrameSample {
     pub bob_offset: SmoothReviewPoint,
     pub final_anchor: SmoothReviewPoint,
     pub classic_snap_anchor: SmoothReviewPoint,
+    pub parallax_focus_offset: SmoothReviewPoint,
+    pub parallax_lifecycle_scale: f32,
+    pub parallax_planes: SmoothReviewParallaxPlanes,
 }
 
 #[derive(Debug)]
@@ -53,6 +77,7 @@ pub struct ReviewCapture {
     smooth_frame_samples: Vec<SmoothReviewFrameSample>,
     max_adjacent_base_anchor_delta: SmoothReviewPoint,
     max_adjacent_final_anchor_delta: SmoothReviewPoint,
+    max_adjacent_parallax_delta_by_plane: SmoothReviewParallaxPlanes,
     pet_checksums_by_semantic_tick: BTreeMap<u64, u64>,
     pet_checksums_stable_within_semantic_ticks: bool,
     last_smooth_sample: Option<SmoothReviewFrameSample>,
@@ -90,6 +115,7 @@ impl ReviewCapture {
             smooth_frame_samples: Vec::new(),
             max_adjacent_base_anchor_delta: SmoothReviewPoint::default(),
             max_adjacent_final_anchor_delta: SmoothReviewPoint::default(),
+            max_adjacent_parallax_delta_by_plane: SmoothReviewParallaxPlanes::default(),
             pet_checksums_by_semantic_tick: BTreeMap::new(),
             pet_checksums_stable_within_semantic_ticks: true,
             last_smooth_sample: None,
@@ -121,6 +147,11 @@ impl ReviewCapture {
                     self.max_adjacent_final_anchor_delta,
                     previous.final_anchor,
                     sample.final_anchor,
+                );
+                self.max_adjacent_parallax_delta_by_plane = max_parallax_plane_delta(
+                    self.max_adjacent_parallax_delta_by_plane,
+                    previous.parallax_planes,
+                    sample.parallax_planes,
                 );
             }
             if let Some(existing) = self
@@ -224,6 +255,7 @@ impl ReviewCapture {
                 .pet_checksums_stable_within_semantic_ticks,
             max_adjacent_base_anchor_delta: self.max_adjacent_base_anchor_delta,
             max_adjacent_final_anchor_delta: self.max_adjacent_final_anchor_delta,
+            max_adjacent_parallax_delta_by_plane: self.max_adjacent_parallax_delta_by_plane,
             smooth_frame_samples: &self.smooth_frame_samples,
             privacy: ReviewPrivacyLog::from_claims(
                 &crate::presentation::smooth::SmoothCompanionPrivacyClaims::external_companion(),
@@ -255,6 +287,7 @@ struct RenderLog<'a> {
     pet_checksums_stable_within_semantic_ticks: bool,
     max_adjacent_base_anchor_delta: SmoothReviewPoint,
     max_adjacent_final_anchor_delta: SmoothReviewPoint,
+    max_adjacent_parallax_delta_by_plane: SmoothReviewParallaxPlanes,
     smooth_frame_samples: &'a [SmoothReviewFrameSample],
     privacy: ReviewPrivacyLog,
     panic: bool,
@@ -353,6 +386,14 @@ fn round_smooth_sample(sample: SmoothReviewFrameSample) -> SmoothReviewFrameSamp
         bob_offset: round_review_point(sample.bob_offset),
         final_anchor: round_review_point(sample.final_anchor),
         classic_snap_anchor: round_review_point(sample.classic_snap_anchor),
+        parallax_focus_offset: round_review_point(sample.parallax_focus_offset),
+        parallax_lifecycle_scale: round_sample(sample.parallax_lifecycle_scale),
+        parallax_planes: SmoothReviewParallaxPlanes {
+            far: round_review_point(sample.parallax_planes.far),
+            mid: round_review_point(sample.parallax_planes.mid),
+            behind: round_review_point(sample.parallax_planes.behind),
+            foreground: round_review_point(sample.parallax_planes.foreground),
+        },
     }
 }
 
@@ -368,6 +409,19 @@ fn max_point_delta(
         y: max_delta
             .y
             .max(round_sample((current.y - previous.y).abs())),
+    }
+}
+
+fn max_parallax_plane_delta(
+    maximum: SmoothReviewParallaxPlanes,
+    previous: SmoothReviewParallaxPlanes,
+    current: SmoothReviewParallaxPlanes,
+) -> SmoothReviewParallaxPlanes {
+    SmoothReviewParallaxPlanes {
+        far: max_point_delta(maximum.far, previous.far, current.far),
+        mid: max_point_delta(maximum.mid, previous.mid, current.mid),
+        behind: max_point_delta(maximum.behind, previous.behind, current.behind),
+        foreground: max_point_delta(maximum.foreground, previous.foreground, current.foreground),
     }
 }
 
@@ -460,6 +514,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
             final_anchor: SmoothReviewPoint { x: 10.25, y: 12.6 },
             classic_snap_anchor: SmoothReviewPoint { x: 10.0, y: 12.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.25, y: 0.125 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.01, y: 0.0075 },
+                mid: SmoothReviewPoint { x: 0.02, y: 0.015 },
+                behind: SmoothReviewPoint { x: 0.03, y: 0.0225 },
+                foreground: SmoothReviewPoint { x: 0.045, y: 0.03375 },
+            },
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.2,
@@ -469,6 +531,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.2 },
             final_anchor: SmoothReviewPoint { x: 10.30, y: 12.75 },
             classic_snap_anchor: SmoothReviewPoint { x: 10.0, y: 12.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.5, y: 0.25 },
+            parallax_lifecycle_scale: 0.5,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.02, y: 0.015 },
+                mid: SmoothReviewPoint { x: 0.04, y: 0.03 },
+                behind: SmoothReviewPoint { x: 0.06, y: 0.045 },
+                foreground: SmoothReviewPoint { x: 0.09, y: 0.0675 },
+            },
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.3,
@@ -478,6 +548,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.3 },
             final_anchor: SmoothReviewPoint { x: 10.30, y: 13.05 },
             classic_snap_anchor: SmoothReviewPoint { x: 10.0, y: 12.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.75, y: 0.375 },
+            parallax_lifecycle_scale: 0.25,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.03, y: 0.0225 },
+                mid: SmoothReviewPoint { x: 0.06, y: 0.045 },
+                behind: SmoothReviewPoint { x: 0.09, y: 0.0675 },
+                foreground: SmoothReviewPoint { x: 0.135, y: 0.10125 },
+            },
         }));
         let json = capture.render_log_json_for_test().unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
@@ -491,6 +569,28 @@ mod tests {
         assert_eq!(value["max_adjacent_final_anchor_delta"]["y"], 0.30);
         assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 3);
         assert_eq!(value["smooth_frame_samples"][0]["pet_visual_checksum"], 123);
+        assert_eq!(
+            value["smooth_frame_samples"][0]["parallax_lifecycle_scale"],
+            1.0
+        );
+        assert_eq!(
+            value["smooth_frame_samples"][0]["parallax_focus_offset"]["x"],
+            0.25
+        );
+        assert_eq!(
+            value["smooth_frame_samples"][0]["parallax_planes"]["far"]["x"],
+            0.01
+        );
+        assert_eq!(
+            value["smooth_frame_samples"][0]["parallax_planes"]["foreground"]["x"],
+            0.045
+        );
+        assert!(
+            value["max_adjacent_parallax_delta_by_plane"]["foreground"]["x"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
         assert_eq!(value["pet_checksums_stable_within_semantic_ticks"], true);
         assert_eq!(value["privacy"]["source_names_visible"], false);
         assert_eq!(value["privacy"]["exact_token_strings_visible"], false);
@@ -549,6 +649,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
             final_anchor: SmoothReviewPoint { x: 1.0, y: 1.1 },
             classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                mid: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            },
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.2,
@@ -558,6 +666,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.2 },
             final_anchor: SmoothReviewPoint { x: 1.1, y: 1.2 },
             classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                mid: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            },
         }));
 
         assert!(!capture.pet_checksums_stable_within_semantic_ticks_for_test());
@@ -584,6 +700,14 @@ mod tests {
                 bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
                 final_anchor: SmoothReviewPoint { x: index as f32, y: 1.1 },
                 classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+                parallax_focus_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                parallax_lifecycle_scale: 1.0,
+                parallax_planes: SmoothReviewParallaxPlanes {
+                    far: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                    mid: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                    behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                    foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                },
             }));
         }
         capture.record_frame(Some(SmoothReviewFrameSample {
@@ -594,6 +718,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
             final_anchor: SmoothReviewPoint { x: 200.0, y: 1.1 },
             classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                mid: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            },
         }));
 
         let json = capture.render_log_json_for_test().unwrap();
@@ -625,6 +757,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
             final_anchor: SmoothReviewPoint { x: 1.0, y: 1.1 },
             classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                mid: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            },
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.2,
@@ -634,6 +774,14 @@ mod tests {
             bob_offset: SmoothReviewPoint { x: 0.0, y: 0.2 },
             final_anchor: SmoothReviewPoint { x: 1.1, y: 1.2 },
             classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                mid: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
+                foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            },
         }));
 
         let json = capture.render_log_json_for_test().unwrap();

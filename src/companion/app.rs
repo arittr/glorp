@@ -364,6 +364,15 @@ fn prepare_companion_frame(
                     crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
                         plan.pet.classic_snap_anchor,
                     ),
+                parallax_focus_offset:
+                    crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                        plan.pet.parallax_focus_offset,
+                    ),
+                parallax_lifecycle_scale: plan.parallax_lifecycle_scale,
+                parallax_planes:
+                    crate::companion::review_capture::SmoothReviewParallaxPlanes::from_smooth_planes(
+                        plan.parallax_translations_by_plane(),
+                    ),
             })
         }
         _ => None,
