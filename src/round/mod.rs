@@ -6,3 +6,4 @@ pub mod pixel_fit;
 #[cfg(feature = "dev-preview")]
 pub mod preview;
 pub mod scene;
+pub mod smooth;

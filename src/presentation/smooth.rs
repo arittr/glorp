@@ -1,13 +1,13 @@
 use crate::pet::palette::Rgb;
 use crate::presentation::{DrawCell, SceneDrawList};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SmoothPoint {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SmoothBounds {
     pub min: SmoothPoint,
     pub max: SmoothPoint,
@@ -173,17 +173,37 @@ impl LayeredPetScene {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmoothCompanionScenePlan {
+    pub viewport: CompanionViewport,
     pub layers: Vec<SmoothCompanionLayer>,
+    pub pet: SmoothCompanionPet,
+    pub chrome: CompanionChromeReservation,
     pub privacy: SmoothCompanionPrivacyClaims,
+    pub(crate) classic_flatten_compat: SmoothClassicFlattenCompat,
 }
 
 impl SmoothCompanionScenePlan {
     pub fn flatten_classic_cells(&self) -> SceneDrawList {
-        flatten_layers_to_draw_list(&self.layers)
+        let mut draw_list = flatten_layers_to_draw_list(&self.layers);
+        match self.classic_flatten_compat {
+            SmoothClassicFlattenCompat::None => {}
+            SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows } => {
+                crate::round::scene::apply_uniform_porthole_recolor(&mut draw_list, grid_rows);
+            }
+        }
+        draw_list
     }
 
     pub fn classic_flatten_checksum(&self) -> u64 {
         classic_flatten_checksum(&self.flatten_classic_cells().cells)
+    }
+
+    pub fn layer_by_role(&self, role: SmoothLayerRole) -> Option<&SmoothCompanionLayer> {
+        self.layers.iter().find(|layer| layer.role == role)
+    }
+
+    pub fn with_classic_flatten_compat(mut self, compat: SmoothClassicFlattenCompat) -> Self {
+        self.classic_flatten_compat = compat;
+        self
     }
 }
 
@@ -225,6 +245,32 @@ fn classic_cell_axis(value: f32) -> u16 {
     }
 
     value.round().clamp(0.0, f32::from(u16::MAX)) as u16
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompanionViewport {
+    pub grid_cols: u16,
+    pub grid_rows: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SmoothCompanionPet {
+    pub bounds: SmoothBounds,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CompanionChromeReservation {
+    pub hud_bounds: Vec<SmoothBounds>,
+    pub gauge_bounds: Vec<SmoothBounds>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SmoothClassicFlattenCompat {
+    #[default]
+    None,
+    UniformPortholeRecolor {
+        grid_rows: u16,
+    },
 }
 
 pub fn classic_flatten_checksum(cells: &[DrawCell]) -> u64 {
@@ -455,8 +501,12 @@ mod tests {
         };
         let scene = LayeredPetScene { layers: vec![layer.clone()] };
         let plan = SmoothCompanionScenePlan {
+            viewport: CompanionViewport::default(),
             layers: vec![layer],
+            pet: SmoothCompanionPet::default(),
+            chrome: CompanionChromeReservation::default(),
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
+            classic_flatten_compat: SmoothClassicFlattenCompat::None,
         };
         let expected = SceneDrawList {
             cells: vec![
@@ -567,8 +617,12 @@ mod tests {
             )],
         };
         let plan = SmoothCompanionScenePlan {
+            viewport: CompanionViewport::default(),
             layers: layered_scene.layers.clone(),
+            pet: SmoothCompanionPet::default(),
+            chrome: CompanionChromeReservation::default(),
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
+            classic_flatten_compat: SmoothClassicFlattenCompat::None,
         };
 
         let expected = SceneDrawList {
