@@ -14,7 +14,7 @@ use crate::commands::companion_mode::{
 use crate::commands::watch::{
     build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
 };
-use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawKind};
+use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawCommand, RoundDrawKind};
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
 use crate::presentation::pixel::{
@@ -72,6 +72,138 @@ struct CompanionMenuSpec {
     quit_key: &'static str,
     fullscreen_title: &'static str,
     fullscreen_key: &'static str,
+}
+
+#[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
+#[derive(Debug, Clone)]
+struct PreparedCompanionFrame {
+    bounds: PreparedBounds,
+    aperture: RoundAperture,
+    background: RoundColor,
+    dim_overlay: bool,
+    renderer: PreparedRendererFrame,
+    gauges: PreparedGaugeFrame,
+    hud: CompanionHudText,
+    hud_font_size: f64,
+    overlay_commands: Vec<RoundDrawCommand>,
+    review_sample: Option<crate::companion::review_capture::SmoothReviewFrameSample>,
+}
+
+#[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
+#[derive(Debug, Clone)]
+enum PreparedRendererFrame {
+    Pixel {
+        frame: PixelFrame,
+    },
+    Classic {
+        metrics: CompanionGridMetrics,
+        pet_center_col: f64,
+        pet_center_row: f64,
+        pet_width_cells: f64,
+        draw_list: crate::presentation::SceneDrawList,
+    },
+    Smooth {
+        metrics: CompanionGridMetrics,
+        pet_center_col: f64,
+        pet_center_row: f64,
+        pet_width_cells: f64,
+        plan: SmoothCompanionScenePlan,
+    },
+}
+
+#[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PreparedGaugeFrame {
+    xp_fraction: f64,
+    daily_fraction: f64,
+    daily_overage_fraction: f64,
+    pace_fraction: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PreparedBounds {
+    width_px: u16,
+    height_px: u16,
+    width_f64: f64,
+    height_f64: f64,
+}
+
+#[allow(dead_code)] // Used only by the staged metrics cache until Task 4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompanionMetricKey {
+    width_px: u16,
+    height_px: u16,
+}
+
+#[allow(dead_code)] // The cache is wired into the renderer by Task 4.
+#[derive(Debug, Clone, Copy, Default)]
+struct CompanionMetricCache {
+    last: Option<(CompanionMetricKey, CompanionGridMetrics)>,
+}
+
+#[allow(dead_code)] // Later preparation tasks emit every category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionFramePreparationError {
+    InvalidBounds,
+    MissingGridMetrics,
+    SmoothMissingPetBody,
+}
+
+#[allow(dead_code)] // Categories are emitted by the later draw boundary.
+impl CompanionFramePreparationError {
+    fn category(self) -> &'static str {
+        match self {
+            CompanionFramePreparationError::InvalidBounds => "invalid-bounds",
+            CompanionFramePreparationError::MissingGridMetrics => "missing-grid-metrics",
+            CompanionFramePreparationError::SmoothMissingPetBody => "smooth-missing-pet-body",
+        }
+    }
+}
+
+#[allow(dead_code)] // The draw preparation boundary calls this in Task 4.
+fn prepare_bounds(
+    bounds: NSRect,
+) -> std::result::Result<PreparedBounds, CompanionFramePreparationError> {
+    let width = bounds.size.width;
+    let height = bounds.size.height;
+    if !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || width > f64::from(u16::MAX)
+        || height > f64::from(u16::MAX)
+    {
+        return Err(CompanionFramePreparationError::InvalidBounds);
+    }
+
+    Ok(PreparedBounds {
+        width_px: width.round() as u16,
+        height_px: height.round() as u16,
+        width_f64: width,
+        height_f64: height,
+    })
+}
+
+#[allow(dead_code)] // The cache is wired into the renderer by Task 4.
+impl CompanionMetricCache {
+    fn metrics_for(
+        &mut self,
+        bounds: PreparedBounds,
+    ) -> std::result::Result<CompanionGridMetrics, CompanionFramePreparationError> {
+        let key = CompanionMetricKey {
+            width_px: bounds.width_px,
+            height_px: bounds.height_px,
+        };
+        if let Some((cached_key, metrics)) = self.last {
+            if cached_key == key {
+                return Ok(metrics);
+            }
+        }
+        let metrics = companion_grid_metrics(bounds.width_f64, bounds.height_f64)
+            .ok_or(CompanionFramePreparationError::MissingGridMetrics)?;
+        self.last = Some((key, metrics));
+        Ok(metrics)
+    }
 }
 
 struct AppState {
@@ -1405,6 +1537,37 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_bounds_rejects_zero_negative_non_finite_and_oversized_values() {
+        for size in [
+            NSSize::new(0.0, 360.0),
+            NSSize::new(360.0, 0.0),
+            NSSize::new(-1.0, 360.0),
+            NSSize::new(360.0, -1.0),
+            NSSize::new(f64::NAN, 360.0),
+            NSSize::new(360.0, f64::INFINITY),
+            NSSize::new(f64::from(u16::MAX) + 1.0, 360.0),
+            NSSize::new(360.0, f64::from(u16::MAX) + 1.0),
+        ] {
+            let bounds = NSRect::new(NSPoint::new(0.0, 0.0), size);
+            assert_eq!(
+                prepare_bounds(bounds).unwrap_err(),
+                CompanionFramePreparationError::InvalidBounds
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_bounds_accepts_normal_companion_size() {
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0));
+        let prepared = prepare_bounds(bounds).unwrap();
+
+        assert_eq!(prepared.width_px, 360);
+        assert_eq!(prepared.height_px, 360);
+        assert_eq!(prepared.width_f64, 360.0);
+        assert_eq!(prepared.height_f64, 360.0);
+    }
 
     #[test]
     fn cell_to_point_row_zero_sits_at_top_of_origin() {
