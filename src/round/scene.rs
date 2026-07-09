@@ -45,6 +45,20 @@ pub struct CompanionMotion {
     pub wander: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SmoothPetAnchor {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompanionPetPlacement {
+    pub fractional_motion_top_left: SmoothPetAnchor,
+    pub fractional_top_left: SmoothPetAnchor,
+    pub classic_snap_top_left: (u16, u16),
+    pub classic_rect: Rect,
+}
+
 impl Default for CompanionMotion {
     fn default() -> Self {
         Self {
@@ -212,26 +226,85 @@ fn companion_drift_position(
     (art_x, art_y)
 }
 
-/// Gentle, deterministic 2D drift for the pet — top-left of the `PET_W × PET_H`
-/// art rect in grid coords. `energy` (0..1, from live activity) scales the wander
-/// amplitude, so the pet's on-screen speed reflects real usage. The reachable set
-/// per axis is ~[-1, 1]; callers needing a circular bound must sample box corners.
-fn companion_drift(
+fn companion_motion_offsets(
     now: time::OffsetDateTime,
     motion: &CompanionMotion,
     energy: f32,
-    grid_cols: u16,
-    grid_rows: u16,
-) -> (u16, u16) {
-    let (fx, fy) = if motion.wander {
-        // Scale the wander by live activity: amplitude — and so the pet's on-screen
-        // speed — shrinks toward center when idle/asleep and expands when busy.
+) -> (f32, f32) {
+    if motion.wander {
         let (wx, wy) = companion_wander_offsets(now, motion.drift_period_secs);
         (wx * energy, wy * energy)
     } else {
         companion_drift_offsets(now, motion.drift_period_secs)
-    };
-    companion_drift_position(motion, grid_cols, grid_rows, fx, fy)
+    }
+}
+
+fn companion_pet_placement_from_offsets(
+    vm: &WatchViewModel,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+    fx: f32,
+    fy: f32,
+) -> CompanionPetPlacement {
+    let cx = grid_cols / 2;
+    let cy = grid_rows / 2;
+    let half_w = PET_W / 2;
+    let half_h = PET_H / 2;
+    let safe_x = cx.saturating_sub(half_w) as f32;
+    let safe_y = cy.saturating_sub(half_h) as f32;
+    let x_radius = safe_x * motion.drift_x_frac;
+    let y_radius = safe_y * motion.drift_y_frac;
+    let bias = motion.upward_bias * safe_y;
+    let max_x = grid_cols.saturating_sub(PET_W);
+    let max_y = grid_rows.saturating_sub(PET_H);
+
+    let base_x = cx as i32 - half_w as i32;
+    let base_y = cy as i32 - half_h as i32;
+    let offset_x = fx * x_radius;
+    let offset_y = fy * y_radius;
+
+    let classic_x = (base_x + offset_x as i32).clamp(0, max_x as i32) as u16;
+    let classic_drift_y = (base_y - bias as i32 + offset_y as i32).clamp(0, max_y as i32) as u16;
+    let classic_y = (classic_drift_y + u16::from(vm.breath_offset_y)).min(max_y);
+
+    let fractional_drift_x = (base_x as f32 + offset_x).clamp(0.0, max_x as f32);
+    let fractional_drift_y = (base_y as f32 - bias + offset_y).clamp(0.0, max_y as f32);
+    let fractional_y = (fractional_drift_y + f32::from(vm.breath_offset_y)).min(max_y as f32);
+
+    CompanionPetPlacement {
+        fractional_motion_top_left: SmoothPetAnchor {
+            x: fractional_drift_x,
+            y: fractional_drift_y,
+        },
+        fractional_top_left: SmoothPetAnchor { x: fractional_drift_x, y: fractional_y },
+        classic_snap_top_left: (classic_x, classic_y),
+        classic_rect: Rect::new(classic_x, classic_y, PET_W, PET_H),
+    }
+}
+
+pub fn companion_pet_placement(
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+) -> CompanionPetPlacement {
+    let energy = companion_motion_energy(vm);
+    let (fx, fy) = companion_motion_offsets(now, motion, energy);
+    companion_pet_placement_from_offsets(vm, grid_cols, grid_rows, motion, fx, fy)
+}
+
+#[cfg(test)]
+fn companion_pet_placement_from_offsets_for_test(
+    vm: &WatchViewModel,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+    fx: f32,
+    fy: f32,
+) -> CompanionPetPlacement {
+    companion_pet_placement_from_offsets(vm, grid_cols, grid_rows, motion, fx, fy)
 }
 
 /// Movement energy in [0, 1] from real activity: a sleeping or faint (calm) pet
@@ -304,9 +377,11 @@ pub fn drift_keeps_pet_in_aperture(
 ///
 /// The pet drifts freely in 2D within the porthole (aquarium feel — no floor or
 /// ground line). `area` fills the entire grid so the background wash covers the
-/// whole circle. The pet position is driven by `companion_drift`, which eases
-/// between deterministic 2D targets every `motion.drift_period_secs` seconds,
-/// keeping the pet body within the safe central ellipse at all times.
+/// whole circle. The pet position is driven by `companion_pet_placement(...)`,
+/// which preserves the legacy Classic snap-and-breath rect while also exposing a
+/// fractional top-left anchor for Smooth renderers. Motion still follows
+/// deterministic 2D targets every `motion.drift_period_secs` seconds, keeping
+/// the pet body within the safe central ellipse at all times.
 ///
 /// Tune via the caller's `CompanionMotion` fields (`drift_x_frac`,
 /// `drift_y_frac`, `drift_period_secs`).
@@ -349,6 +424,23 @@ pub(crate) fn build_round_pet_layout<'a>(
     crate::tui::component::PetSceneLayout,
     Rect,
 ) {
+    let (vm, layout, placement) =
+        build_round_pet_layout_with_placement(vm, now, grid_cols, grid_rows, motion);
+
+    (vm, layout, placement.classic_rect)
+}
+
+pub(crate) fn build_round_pet_layout_with_placement<'a>(
+    vm: &'a WatchViewModel,
+    now: time::OffsetDateTime,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+) -> (
+    Cow<'a, WatchViewModel>,
+    crate::tui::component::PetSceneLayout,
+    CompanionPetPlacement,
+) {
     let area = Rect::new(0, 0, grid_cols, grid_rows);
     let energy = companion_motion_energy(vm);
     let wander_width = PET_W + 2 * motion.wander_half;
@@ -372,19 +464,16 @@ pub(crate) fn build_round_pet_layout<'a>(
     let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(now));
     let mut layout = PetScene::compute_layout(area, vm.as_ref(), &ctx);
     let old_pet_art = layout.pet_art;
-    let (drift_x, drift_y) = companion_drift(now, motion, energy, grid_cols, grid_rows);
-    let breathed_y =
-        (drift_y + u16::from(vm.as_ref().breath_offset_y)).min(grid_rows.saturating_sub(PET_H));
-    let new_pet_art = Rect::new(drift_x, breathed_y, PET_W, PET_H);
-    layout.pet_art = new_pet_art;
+    let placement = companion_pet_placement(vm.as_ref(), now, grid_cols, grid_rows, motion);
+    layout.pet_art = placement.classic_rect;
     for excl in &mut layout.exclusions {
         if *excl == old_pet_art {
-            *excl = new_pet_art;
+            *excl = placement.classic_rect;
             break;
         }
     }
 
-    (vm, layout, new_pet_art)
+    (vm, layout, placement)
 }
 
 pub(crate) fn apply_uniform_porthole_recolor(draw_list: &mut SceneDrawList, grid_rows: u16) {
@@ -413,6 +502,21 @@ mod tests {
     const GOLDEN_GRID_COLS: u16 = 44;
     const GOLDEN_GRID_ROWS: u16 = 18;
     const GOLDEN_NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
+
+    fn legacy_classic_pet_rect(
+        vm: &WatchViewModel,
+        now: time::OffsetDateTime,
+        grid_cols: u16,
+        grid_rows: u16,
+        motion: &CompanionMotion,
+    ) -> Rect {
+        let energy = companion_motion_energy(vm);
+        let (fx, fy) = companion_motion_offsets(now, motion, energy);
+        let (drift_x, drift_y) = companion_drift_position(motion, grid_cols, grid_rows, fx, fy);
+        let breathed_y =
+            (drift_y + u16::from(vm.breath_offset_y)).min(grid_rows.saturating_sub(PET_H));
+        Rect::new(drift_x, breathed_y, PET_W, PET_H)
+    }
 
     #[test]
     fn build_round_scene_draw_list_is_deterministic() {
@@ -547,6 +651,102 @@ mod tests {
         assert!(
             drift_keeps_pet_in_aperture(&m, 32, 16, 30.0, 60.0, 479.0),
             "default drift must keep the whole pet inside the aperture circle"
+        );
+    }
+
+    #[test]
+    fn companion_pet_placement_matches_existing_classic_rect() {
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = companion_roam_motion();
+        let samples = [
+            datetime!(2026-07-08 18:00:00 UTC),
+            datetime!(2026-07-08 18:00:00.250 UTC),
+            datetime!(2026-07-08 18:00:00.500 UTC),
+            datetime!(2026-07-08 18:00:00.750 UTC),
+        ];
+
+        for now in samples {
+            let placement =
+                companion_pet_placement(&vm, now, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &motion);
+            let scene =
+                build_round_scene_draw_list(&vm, now, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &motion);
+            let expected =
+                legacy_classic_pet_rect(&vm, now, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &motion);
+
+            assert_eq!(
+                placement.classic_rect, expected,
+                "shared placement must preserve the legacy Classic rect at {now}"
+            );
+            assert_eq!(
+                scene.pet_rect, expected,
+                "round scene must keep the legacy rect at {now}"
+            );
+            assert_eq!(placement.classic_snap_top_left, (expected.x, expected.y));
+        }
+    }
+
+    #[test]
+    fn companion_pet_placement_uses_classic_piecewise_truncation_contract() {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.breath_offset_y = 1;
+        let motion = CompanionMotion {
+            wander_half: 8,
+            drift_x_frac: 0.9,
+            drift_y_frac: 0.6,
+            drift_period_secs: 22,
+            upward_bias: 0.5,
+            wander: true,
+        };
+        let placement = companion_pet_placement_from_offsets_for_test(
+            &vm,
+            GOLDEN_GRID_COLS,
+            GOLDEN_GRID_ROWS,
+            &motion,
+            -0.25,
+            -0.25,
+        );
+
+        let cx = GOLDEN_GRID_COLS / 2;
+        let cy = GOLDEN_GRID_ROWS / 2;
+        let half_w = PET_W / 2;
+        let half_h = PET_H / 2;
+        let safe_x = cx.saturating_sub(half_w) as f32;
+        let safe_y = cy.saturating_sub(half_h) as f32;
+        let x_radius = safe_x * motion.drift_x_frac;
+        let y_radius = safe_y * motion.drift_y_frac;
+        let bias = motion.upward_bias * safe_y;
+        let classic_x = (cx as i32 - half_w as i32 + (-0.25 * x_radius) as i32)
+            .clamp(0, GOLDEN_GRID_COLS.saturating_sub(PET_W) as i32) as u16;
+        let classic_drift_y = (cy as i32 - half_h as i32 - bias as i32 + (-0.25 * y_radius) as i32)
+            .clamp(0, GOLDEN_GRID_ROWS.saturating_sub(PET_H) as i32)
+            as u16;
+        let classic_y = (classic_drift_y + u16::from(vm.breath_offset_y))
+            .min(GOLDEN_GRID_ROWS.saturating_sub(PET_H));
+
+        assert_eq!(placement.classic_snap_top_left, (classic_x, classic_y));
+        assert_ne!(
+            placement.classic_snap_top_left.1 as i32,
+            (placement.fractional_top_left.y.floor() as i32),
+            "this fixture must prove Classic snap is not composite floor"
+        );
+    }
+
+    #[test]
+    fn companion_pet_placement_exposes_fractional_top_left_for_roam_motion() {
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = companion_roam_motion();
+        let placement = companion_pet_placement(
+            &vm,
+            datetime!(2026-07-08 18:00:00.500 UTC),
+            GOLDEN_GRID_COLS,
+            GOLDEN_GRID_ROWS,
+            &motion,
+        );
+
+        assert!(
+            placement.fractional_top_left.x.fract().abs() > f32::EPSILON
+                || placement.fractional_top_left.y.fract().abs() > f32::EPSILON,
+            "roam motion should preserve a fractional anchor for Smooth renderers"
         );
     }
 

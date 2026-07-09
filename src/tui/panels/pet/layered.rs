@@ -298,7 +298,16 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
                 8,
                 contact_shadow,
             ),
-            layer_from_draw_cells("classic-pet-body", SmoothLayerRole::PetBody, 9, pet_body),
+            layer_from_draw_cells_with_anchor(
+                "classic-pet-body",
+                SmoothLayerRole::PetBody,
+                9,
+                pet_body,
+                SmoothPoint {
+                    x: pet_rect.x as f32,
+                    y: pet_rect.y as f32,
+                },
+            ),
             layer_from_draw_cells(
                 "classic-performance-cue",
                 SmoothLayerRole::PerformanceCue,
@@ -370,6 +379,16 @@ fn layer_from_draw_cells(
     cells: Vec<DrawCell>,
 ) -> SmoothCompanionLayer {
     let anchor = layer_anchor_for_cells(&cells);
+    layer_from_draw_cells_with_anchor(id, role, z, cells, anchor)
+}
+
+fn layer_from_draw_cells_with_anchor(
+    id: &str,
+    role: SmoothLayerRole,
+    z: i16,
+    cells: Vec<DrawCell>,
+    anchor: SmoothPoint,
+) -> SmoothCompanionLayer {
     let local_bounds = local_bounds_for_cells(&cells, anchor);
     SmoothCompanionLayer {
         id: SmoothLayerId(id.to_string()),

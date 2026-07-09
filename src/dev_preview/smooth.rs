@@ -15,12 +15,14 @@ use crate::round::scene::{build_round_scene_draw_list, CompanionMotion};
 use crate::round::smooth::build_round_smooth_scene_plan;
 use crate::tui::view_model::WatchViewModel;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 const GRID_COLS: u16 = 52;
 const GRID_ROWS: u16 = 52;
-const MOTION_ELAPSED_MS: [u64; 6] = [0, 173, 419, 683, 947, 1_231];
+const MOTION_FRAME_DURATION_MS: u64 = 160;
+const MOTION_FRAME_COUNT: usize = 12;
+const REVIEWED_MOTION_START_UNIX_MS: i128 = 1_760_000_001_000;
 
 pub const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 pub const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
@@ -90,18 +92,17 @@ pub fn smooth_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBundle> 
 
 pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
     let vm = WatchViewModel::fixture_with_habitat_props();
-    let motion = CompanionMotion::default();
-    let mut frames = Vec::with_capacity(MOTION_ELAPSED_MS.len());
-    let mut manifest_frames = Vec::with_capacity(MOTION_ELAPSED_MS.len());
+    let motion = crate::round::scene::companion_roam_motion();
+    let motion_start_now = smooth_motion_start_now(ctx.fixed_now, &vm, &motion);
+    let mut frames = Vec::with_capacity(MOTION_FRAME_COUNT);
+    let mut manifest_frames = Vec::with_capacity(MOTION_FRAME_COUNT);
 
-    for (index, elapsed_ms) in MOTION_ELAPSED_MS.into_iter().enumerate() {
+    for index in 0..MOTION_FRAME_COUNT {
+        let elapsed_ms = index as u64 * MOTION_FRAME_DURATION_MS;
+        let frame_now = motion_start_now + time::Duration::milliseconds(elapsed_ms as i64);
+        let semantic_art_tick_index = elapsed_ms / 250;
         let plan = build_round_smooth_scene_plan(
-            &vm,
-            ctx.fixed_now,
-            GRID_COLS,
-            GRID_ROWS,
-            &motion,
-            elapsed_ms,
+            &vm, frame_now, GRID_COLS, GRID_ROWS, &motion, elapsed_ms,
         );
         let mut frame = scene_draw_list_to_preview_frame(
             format!("{SMOOTH_MOTION_ID}-frame-{index:03}"),
@@ -114,6 +115,8 @@ pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
             SMOOTH_MOTION_ID,
             index as u16,
             elapsed_ms,
+            frame_now,
+            semantic_art_tick_index,
             &vm,
             &plan,
         ));
@@ -140,14 +143,26 @@ pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
             target_id: "pet-body".to_string(),
             playback: PreviewPlayback {
                 starts_paused: true,
-                frame_duration_ms: 160,
+                frame_duration_ms: MOTION_FRAME_DURATION_MS as u16,
             },
             inputs: BTreeMap::from([
                 (
                     "fixture".to_string(),
                     Value::String("round-smooth-motion".to_string()),
                 ),
-                ("elapsed_ms".to_string(), json!(MOTION_ELAPSED_MS)),
+                (
+                    "frame_duration_ms".to_string(),
+                    json!(MOTION_FRAME_DURATION_MS),
+                ),
+                ("frame_count".to_string(), json!(MOTION_FRAME_COUNT)),
+                ("now_advances_with_elapsed".to_string(), json!(true)),
+                (
+                    "motion_start_unix_ms".to_string(),
+                    json!(
+                        i128::from(motion_start_now.unix_timestamp()) * 1_000
+                            + i128::from(motion_start_now.millisecond())
+                    ),
+                ),
             ]),
             frames: manifest_frames,
             review_prompts: vec![
@@ -159,6 +174,56 @@ pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
         },
         frames,
     }]
+}
+
+fn smooth_motion_start_now(
+    fixed_now: time::OffsetDateTime,
+    vm: &WatchViewModel,
+    motion: &CompanionMotion,
+) -> time::OffsetDateTime {
+    let reviewed_start = reviewed_motion_start_now();
+    if smooth_motion_window_crosses_snapped_anchor(reviewed_start, vm, motion) {
+        reviewed_start
+    } else {
+        fixed_now
+    }
+}
+
+fn reviewed_motion_start_now() -> time::OffsetDateTime {
+    time::OffsetDateTime::from_unix_timestamp_nanos(REVIEWED_MOTION_START_UNIX_MS * 1_000_000)
+        .expect("reviewed motion start timestamp should parse")
+}
+
+fn smooth_motion_window_crosses_snapped_anchor(
+    start_now: time::OffsetDateTime,
+    vm: &WatchViewModel,
+    motion: &CompanionMotion,
+) -> bool {
+    let mut classic_snap_anchors = BTreeSet::new();
+    let mut last_final_anchor: Option<(f32, f32)> = None;
+
+    for index in 0..MOTION_FRAME_COUNT {
+        let elapsed_ms = index as u64 * MOTION_FRAME_DURATION_MS;
+        let frame_now = start_now + time::Duration::milliseconds(elapsed_ms as i64);
+        let plan =
+            build_round_smooth_scene_plan(vm, frame_now, GRID_COLS, GRID_ROWS, motion, elapsed_ms);
+
+        classic_snap_anchors.insert((
+            plan.pet.classic_snap_anchor.x.round() as i32,
+            plan.pet.classic_snap_anchor.y.round() as i32,
+        ));
+
+        if let Some((last_x, last_y)) = last_final_anchor {
+            let dx = (plan.pet.final_anchor.x - last_x).abs();
+            let dy = (plan.pet.final_anchor.y - last_y).abs();
+            if dx >= 1.0 || dy >= 1.0 {
+                return false;
+            }
+        }
+        last_final_anchor = Some((plan.pet.final_anchor.x, plan.pet.final_anchor.y));
+    }
+
+    classic_snap_anchors.len() >= 2
 }
 
 fn smooth_inputs(ctx: &PreviewRenderContext, mode: &str) -> BTreeMap<String, Value> {
@@ -275,5 +340,45 @@ fn scene_draw_list_to_preview_frame(
         layout: None,
         extra_inputs: BTreeMap::new(),
         contract: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_reviewed_motion_start_satisfies_preview_contract() {
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = crate::round::scene::companion_roam_motion();
+        let reviewed_start = reviewed_motion_start_now();
+
+        assert!(smooth_motion_window_crosses_snapped_anchor(
+            reviewed_start,
+            &vm,
+            &motion,
+        ));
+    }
+
+    #[test]
+    fn smooth_motion_start_now_prefers_reviewed_start_when_it_passes_contract() {
+        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = crate::round::scene::companion_roam_motion();
+        let reviewed_start = reviewed_motion_start_now();
+
+        assert_eq!(
+            smooth_motion_start_now(fixed_now, &vm, &motion),
+            reviewed_start
+        );
+    }
+
+    #[test]
+    fn smooth_motion_start_now_falls_back_when_reviewed_start_fails_contract() {
+        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = CompanionMotion::default();
+
+        assert_eq!(smooth_motion_start_now(fixed_now, &vm, &motion), fixed_now);
     }
 }

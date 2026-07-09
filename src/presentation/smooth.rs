@@ -163,7 +163,7 @@ pub struct LayeredPetScene {
 
 impl LayeredPetScene {
     pub fn flatten_classic_cells(&self) -> SceneDrawList {
-        flatten_layers_to_draw_list(&self.layers)
+        flatten_layers_to_draw_list(&self.layers, FlattenTransformMode::Apply)
     }
 
     pub fn classic_flatten_checksum(&self) -> u64 {
@@ -183,7 +183,7 @@ pub struct SmoothCompanionScenePlan {
 
 impl SmoothCompanionScenePlan {
     pub fn flatten_classic_cells(&self) -> SceneDrawList {
-        let mut draw_list = flatten_layers_to_draw_list(&self.layers);
+        let mut draw_list = flatten_layers_to_draw_list(&self.layers, FlattenTransformMode::Ignore);
         match self.classic_flatten_compat {
             SmoothClassicFlattenCompat::None => {}
             SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows } => {
@@ -211,22 +211,31 @@ pub fn flatten_classic_cells(scene: &LayeredPetScene) -> SceneDrawList {
     scene.flatten_classic_cells()
 }
 
-fn flatten_layers_to_draw_list(layers: &[SmoothCompanionLayer]) -> SceneDrawList {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlattenTransformMode {
+    Apply,
+    Ignore,
+}
+
+fn flatten_layers_to_draw_list(
+    layers: &[SmoothCompanionLayer],
+    transform_mode: FlattenTransformMode,
+) -> SceneDrawList {
     let mut ordered_layers: Vec<(usize, &SmoothCompanionLayer)> =
         layers.iter().enumerate().collect();
     ordered_layers.sort_by_key(|(index, layer)| (layer.z, *index));
 
     let mut cells = Vec::new();
     for (_, layer) in ordered_layers {
+        let translation = match transform_mode {
+            FlattenTransformMode::Apply => layer.transform.translation,
+            FlattenTransformMode::Ignore => SmoothPoint { x: 0.0, y: 0.0 },
+        };
         for item in &layer.items {
             if let SmoothLayerItem::LocalCell(cell) = item {
                 cells.push(DrawCell {
-                    row: classic_cell_axis(
-                        layer.anchor.y + layer.transform.translation.y + f32::from(cell.row),
-                    ),
-                    col: classic_cell_axis(
-                        layer.anchor.x + layer.transform.translation.x + f32::from(cell.col),
-                    ),
+                    row: classic_cell_axis(layer.anchor.y + translation.y + f32::from(cell.row)),
+                    col: classic_cell_axis(layer.anchor.x + translation.x + f32::from(cell.col)),
                     glyph: cell.glyph.clone(),
                     fg: cell.fg,
                     bg: cell.bg,
@@ -256,6 +265,11 @@ pub struct CompanionViewport {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SmoothCompanionPet {
     pub bounds: SmoothBounds,
+    pub fractional_bounds: SmoothBounds,
+    pub base_anchor: SmoothPoint,
+    pub bob_offset: SmoothPoint,
+    pub final_anchor: SmoothPoint,
+    pub classic_snap_anchor: SmoothPoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -283,6 +297,25 @@ pub fn classic_flatten_checksum(cells: &[DrawCell]) -> u64 {
         hash = hash_optional_rgb(hash, cell.fg);
         hash = hash_optional_rgb(hash, cell.bg);
         hash = hash_u8(hash, cell.bold as u8);
+    }
+    hash
+}
+
+pub fn pet_visual_checksum(
+    pet_art: &[String],
+    pet_spans: &[crate::pet::render::StyledSegment],
+) -> u64 {
+    let mut hash = FNV_OFFSET;
+    hash = hash_bytes(hash, b"pet-visual");
+    for line in pet_art {
+        hash = hash_bytes(hash, line.as_bytes());
+        hash = hash_u8(hash, 0xff);
+    }
+    for span in pet_spans {
+        hash = hash_u64(hash, span.line as u64);
+        hash = hash_u64(hash, span.start as u64);
+        hash = hash_u64(hash, span.end as u64);
+        hash = hash_bytes(hash, palette_role_name(span.role).as_bytes());
     }
     hash
 }
@@ -331,6 +364,19 @@ fn hash_optional_rgb(hash: u64, value: Option<Rgb>) -> u64 {
             u64::from(value.r) << 16 | u64::from(value.g) << 8 | u64::from(value.b),
         ),
         None => hash_u8(hash, 0),
+    }
+}
+
+fn palette_role_name(role: crate::pet::render::PaletteRoleName) -> &'static str {
+    match role {
+        crate::pet::render::PaletteRoleName::Body => "body",
+        crate::pet::render::PaletteRoleName::BodyGlow => "body-glow",
+        crate::pet::render::PaletteRoleName::Eye => "eye",
+        crate::pet::render::PaletteRoleName::Mouth => "mouth",
+        crate::pet::render::PaletteRoleName::Accent => "accent",
+        crate::pet::render::PaletteRoleName::Pattern => "pattern",
+        crate::pet::render::PaletteRoleName::Particle => "particle",
+        crate::pet::render::PaletteRoleName::Corruption => "corruption",
     }
 }
 
@@ -474,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_classic_cells_projects_local_cells_through_anchor_and_translation() {
+    fn smooth_scene_plan_classic_flatten_ignores_smooth_layer_transform() {
         let layer = SmoothCompanionLayer {
             id: SmoothLayerId("pet-body".to_string()),
             role: SmoothLayerRole::PetBody,
@@ -486,17 +532,14 @@ mod tests {
             anchor: SmoothPoint { x: 10.0, y: 20.0 },
             transform_origin: SmoothPoint { x: 0.0, y: 0.0 },
             transform: SmoothTransform {
-                translation: SmoothPoint { x: 3.0, y: 2.0 },
+                translation: SmoothPoint { x: 0.75, y: 0.33 },
                 scale: SmoothPoint { x: 1.0, y: 1.0 },
                 rotation_degrees: 0.0,
             },
             opacity: 1.0,
             clip: SmoothClip::None,
             blend: SmoothBlendMode::Normal,
-            items: vec![
-                local_item(cell(1, 4, "X", Some(rgb(1, 2, 3)), None, false)),
-                local_item(cell(0, 0, "Y", Some(rgb(4, 5, 6)), None, true)),
-            ],
+            items: vec![local_item(cell(1, 4, "X", Some(rgb(1, 2, 3)), None, false))],
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
         };
         let scene = LayeredPetScene { layers: vec![layer.clone()] };
@@ -508,28 +551,28 @@ mod tests {
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
             classic_flatten_compat: SmoothClassicFlattenCompat::None,
         };
+        let scene_expected = SceneDrawList {
+            cells: vec![DrawCell {
+                row: 21,
+                col: 15,
+                glyph: Some("X".to_string()),
+                fg: Some(rgb(1, 2, 3)),
+                bg: None,
+                bold: false,
+            }],
+        };
         let expected = SceneDrawList {
-            cells: vec![
-                DrawCell {
-                    row: 23,
-                    col: 17,
-                    glyph: Some("X".to_string()),
-                    fg: Some(rgb(1, 2, 3)),
-                    bg: None,
-                    bold: false,
-                },
-                DrawCell {
-                    row: 22,
-                    col: 13,
-                    glyph: Some("Y".to_string()),
-                    fg: Some(rgb(4, 5, 6)),
-                    bg: None,
-                    bold: true,
-                },
-            ],
+            cells: vec![DrawCell {
+                row: 21,
+                col: 14,
+                glyph: Some("X".to_string()),
+                fg: Some(rgb(1, 2, 3)),
+                bg: None,
+                bold: false,
+            }],
         };
 
-        assert_eq!(scene.flatten_classic_cells(), expected);
+        assert_eq!(scene.flatten_classic_cells(), scene_expected);
         assert_eq!(plan.flatten_classic_cells(), expected);
     }
 
@@ -703,5 +746,27 @@ mod tests {
         let mut tweaked = cells.clone();
         tweaked[0].bg = Some(rgb(4, 5, 7));
         assert_ne!(checksum_a, classic_flatten_checksum(&tweaked));
+    }
+
+    #[test]
+    fn pet_visual_checksum_tracks_art_and_spans() {
+        let pet_art = vec!["abc".to_string()];
+        let spans = vec![crate::pet::render::StyledSegment {
+            line: 0,
+            start: 0,
+            end: 1,
+            role: crate::pet::render::PaletteRoleName::Eye,
+        }];
+
+        let checksum = pet_visual_checksum(&pet_art, &spans);
+        assert_eq!(checksum, pet_visual_checksum(&pet_art, &spans));
+
+        let mut changed_art = pet_art.clone();
+        changed_art[0] = "abd".to_string();
+        assert_ne!(checksum, pet_visual_checksum(&changed_art, &spans));
+
+        let mut changed_spans = spans.clone();
+        changed_spans[0].role = crate::pet::render::PaletteRoleName::Mouth;
+        assert_ne!(checksum, pet_visual_checksum(&pet_art, &changed_spans));
     }
 }

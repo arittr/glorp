@@ -11,7 +11,9 @@ use crate::round::layout::{
     layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities,
 };
 use crate::round::model::{derive_round_scene_model, RoundHelperHealth};
-use crate::round::scene::{build_round_pet_layout, round_tank_life_geometry, CompanionMotion};
+use crate::round::scene::{
+    build_round_pet_layout_with_placement, round_tank_life_geometry, CompanionMotion,
+};
 use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
@@ -24,7 +26,8 @@ pub fn build_round_smooth_scene_plan(
     motion: &CompanionMotion,
     elapsed_ms: u64,
 ) -> SmoothCompanionScenePlan {
-    let (vm, layout, pet_rect) = build_round_pet_layout(vm, now, grid_cols, grid_rows, motion);
+    let (vm, layout, placement) =
+        build_round_pet_layout_with_placement(vm, now, grid_cols, grid_rows, motion);
     let vm = vm.as_ref();
     let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(now));
     let model = PetSceneModel::build(vm, now, ColorCapability::Truecolor);
@@ -40,11 +43,21 @@ pub fn build_round_smooth_scene_plan(
 
     let viewport = CompanionViewport { grid_cols, grid_rows };
     let viewport_bounds = rect_bounds(Rect::new(0, 0, grid_cols, grid_rows));
-    let pet_bounds = rect_bounds(pet_rect);
-    let pet_center = SmoothPoint {
-        x: pet_bounds.min.x + (pet_bounds.max.x - pet_bounds.min.x) / 2.0,
-        y: pet_bounds.min.y + (pet_bounds.max.y - pet_bounds.min.y) / 2.0,
+    let pet_body_classic_anchor = layered
+        .layers
+        .iter()
+        .find(|layer| layer.role == SmoothLayerRole::PetBody)
+        .map(|layer| layer.anchor)
+        .expect("round smooth scene should include a pet body layer");
+    let smooth_base_anchor = SmoothPoint {
+        x: placement.fractional_motion_top_left.x,
+        y: placement.fractional_motion_top_left.y,
     };
+    let pet_anchor_delta = SmoothPoint {
+        x: smooth_base_anchor.x - pet_body_classic_anchor.x,
+        y: smooth_base_anchor.y - pet_body_classic_anchor.y,
+    };
+    let bob_offset = SmoothPoint { x: 0.0, y: smooth_pet_bob(elapsed_ms) };
     let aperture_center = SmoothPoint {
         x: f32::from(grid_cols) / 2.0,
         y: f32::from(grid_rows) / 2.0,
@@ -66,15 +79,41 @@ pub fn build_round_smooth_scene_plan(
     ));
 
     for mut layer in layered.layers {
+        if matches!(
+            layer.role,
+            SmoothLayerRole::PetBody
+                | SmoothLayerRole::ContactShadow
+                | SmoothLayerRole::PerformanceCue
+        ) {
+            layer.transform.translation.x += pet_anchor_delta.x;
+            layer.transform.translation.y += pet_anchor_delta.y;
+        }
         if layer.role == SmoothLayerRole::PetBody {
             layer.transform_origin = SmoothPoint {
                 x: (layer.local_bounds.max.x - layer.local_bounds.min.x) / 2.0,
                 y: (layer.local_bounds.max.y - layer.local_bounds.min.y) / 2.0,
             };
-            layer.transform.translation.y += smooth_pet_bob(elapsed_ms);
+            layer.transform.translation.y += bob_offset.y;
         }
         layers.push(layer);
     }
+
+    let pet_body = layers
+        .iter()
+        .find(|layer| layer.role == SmoothLayerRole::PetBody)
+        .expect("round smooth scene should include a pet body layer");
+    let classic_snap_anchor = pet_body.anchor;
+    let base_anchor = SmoothPoint {
+        x: pet_body.anchor.x + pet_body.transform.translation.x - bob_offset.x,
+        y: pet_body.anchor.y + pet_body.transform.translation.y - bob_offset.y,
+    };
+    let final_anchor = SmoothPoint {
+        x: pet_body.anchor.x + pet_body.transform.translation.x,
+        y: pet_body.anchor.y + pet_body.transform.translation.y,
+    };
+    let pet_bounds = anchored_bounds(pet_body.anchor, pet_body.local_bounds);
+    let fractional_pet_bounds = anchored_bounds(final_anchor, pet_body.local_bounds);
+    let fractional_pet_center = bounds_center(fractional_pet_bounds);
 
     let round_scene = derive_round_scene_model(vm, now);
     let round_layout = layout_round_scene(
@@ -116,12 +155,12 @@ pub fn build_round_smooth_scene_plan(
         "round-mood-aura",
         SmoothLayerRole::MoodAura,
         22,
-        expand_bounds(pet_bounds, 2.0, 2.0),
-        pet_center,
+        expand_bounds(fractional_pet_bounds, 2.0, 2.0),
+        fractional_pet_center,
         SmoothClip::Circle {
-            center: pet_center,
-            radius: ((pet_bounds.max.x - pet_bounds.min.x)
-                .max(pet_bounds.max.y - pet_bounds.min.y))
+            center: fractional_pet_center,
+            radius: ((fractional_pet_bounds.max.x - fractional_pet_bounds.min.x)
+                .max(fractional_pet_bounds.max.y - fractional_pet_bounds.min.y))
                 / 2.0
                 + 2.0,
         },
@@ -157,7 +196,14 @@ pub fn build_round_smooth_scene_plan(
     SmoothCompanionScenePlan {
         viewport,
         layers,
-        pet: SmoothCompanionPet { bounds: pet_bounds },
+        pet: SmoothCompanionPet {
+            bounds: pet_bounds,
+            fractional_bounds: fractional_pet_bounds,
+            base_anchor,
+            bob_offset,
+            final_anchor,
+            classic_snap_anchor,
+        },
         chrome,
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
         classic_flatten_compat: SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows },
@@ -203,6 +249,26 @@ fn rect_bounds(rect: Rect) -> SmoothBounds {
             x: f32::from(rect.x + rect.width),
             y: f32::from(rect.y + rect.height),
         },
+    }
+}
+
+fn anchored_bounds(anchor: SmoothPoint, local_bounds: SmoothBounds) -> SmoothBounds {
+    SmoothBounds {
+        min: SmoothPoint {
+            x: anchor.x + local_bounds.min.x,
+            y: anchor.y + local_bounds.min.y,
+        },
+        max: SmoothPoint {
+            x: anchor.x + local_bounds.max.x,
+            y: anchor.y + local_bounds.max.y,
+        },
+    }
+}
+
+fn bounds_center(bounds: SmoothBounds) -> SmoothPoint {
+    SmoothPoint {
+        x: bounds.min.x + (bounds.max.x - bounds.min.x) / 2.0,
+        y: bounds.min.y + (bounds.max.y - bounds.min.y) / 2.0,
     }
 }
 
