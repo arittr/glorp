@@ -1,7 +1,7 @@
 # Glorp Smooth Pet-Follow Parallax - design
 
 - Date: 2026-07-09
-- Status: direction approved by Drew; written for review before implementation planning
+- Status: implementation-ready; direction and adversarial review incorporated
 - Builds on:
   - `docs/superpowers/specs/2026-07-08-glorp-smooth-companion-renderer-v2-design.md`
   - `docs/superpowers/specs/2026-07-09-glorp-smooth-motion-stabilization-design.md`
@@ -22,6 +22,19 @@ This slice follows the same delivery shape as the stabilization work:
 The reusable boundary is a portable layer-motion contract. The visible feature
 is subtle pet-follow parallax across the existing tank layers. This is not a
 general animation engine and not a broad polish pass.
+
+## Locked Slice
+
+This slice updates the existing Classic companion's smooth renderer. Classic
+scene derivation remains the source of truth for Glorp art, tank props, tank
+life, ambient marks, gauges, HUD, and porthole composition. The implementation
+adds one reusable motion-binding boundary and one visible feature: subtle
+pet-follow parallax across the existing habitat layers.
+
+The smooth renderer remains opt-in through `--renderer smooth`. Classic and
+Pixel remain behaviorally unchanged, and the old renderer remains available for
+fallback and parity review. No new art or replacement pet is part of this
+slice.
 
 ## Implementation Entry Gate
 
@@ -105,6 +118,31 @@ one deterministic precedence rule: asleep (`0.25`) wins over `calm_mode`
 motion-energy scaling already reduces focus displacement when the pet is idle
 or asleep; lifecycle attenuation is an additional presentation limit, not a
 replacement for that existing behavior.
+
+## Performance Contract
+
+The existing smooth timing model remains the performance baseline: native paint
+may run at approximately 30 FPS while Classic semantic art advances on its
+existing 250 ms cadence. Parallax must not alter either clock or reintroduce
+semantic-art catch-up work.
+
+Parallax work is performed once while building the prepared smooth plan. It is
+never resolved from `drawRect`, the AppKit paint callback, or a second legacy
+scene path. The native adapter consumes already-resolved transforms and must
+not rebuild layer geometry, inspect glyphs, decode assets, or allocate motion
+state while painting.
+
+Resolver work is bounded by the current layer count and the occupied local-cell
+count. Behind and Foreground safety may test only the fixed scales
+`[1.0, 0.75, 0.5, 0.25, 0.0]`; it must not introduce an unbounded search,
+catch-up loop, or physics simulation. Fixed and PetAttached layers perform no
+parallax safety work.
+
+Native review must show that smooth paint frames continue to outnumber semantic
+art ticks, frame preparation reports zero errors in a healthy capture, and
+maximum adjacent parallax deltas remain at or below `0.15` cells horizontally
+and `0.10` cells vertically for every plane. These are review gates, not
+post-hoc diagnostics.
 
 ## Architecture
 
@@ -432,6 +470,8 @@ At the standard 960 px companion size:
   intersection and do not worsen an existing one.
 - Classic flatten parity, smooth cadence checks, and privacy checks continue to
   pass.
+- Smooth paint cadence remains above semantic-art cadence, with zero healthy
+  frame-preparation errors and bounded adjacent parallax deltas.
 - Production uses the fallible prepared-frame path and never panics because of
   parallax input.
 - No scale, rotation, spring, pointer, event-reaction, or new-art scope enters
