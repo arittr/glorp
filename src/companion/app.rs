@@ -171,9 +171,15 @@ fn prepare_bounds(
         return Err(CompanionFramePreparationError::InvalidBounds);
     }
 
+    let width_px = width as u16;
+    let height_px = height as u16;
+    if width_px == 0 || height_px == 0 {
+        return Err(CompanionFramePreparationError::InvalidBounds);
+    }
+
     Ok(PreparedBounds {
-        width_px: width as u16,
-        height_px: height as u16,
+        width_px,
+        height_px,
         width_f64: width,
         height_f64: height,
     })
@@ -775,7 +781,12 @@ fn prepare_current_frame_from_state() {
 }
 
 fn record_frame_preparation_error(state: &mut AppState, err: CompanionFramePreparationError) {
+    let is_new_error =
+        should_record_frame_preparation_error(state.last_frame_preparation_error, err);
     state.last_frame_preparation_error = Some(err);
+    if !is_new_error {
+        return;
+    }
     let reused_last_good_frame = state.last_good_frame.is_some();
     if let Some(capture) = state.review_capture.as_mut() {
         capture.record_frame_preparation_error(err.category());
@@ -787,6 +798,13 @@ fn record_frame_preparation_error(state: &mut AppState, err: CompanionFramePrepa
         "glorp companion frame preparation failed: {}",
         err.category()
     );
+}
+
+fn should_record_frame_preparation_error(
+    previous: Option<CompanionFramePreparationError>,
+    current: CompanionFramePreparationError,
+) -> bool {
+    previous != Some(current)
 }
 
 fn drain_poll_results() {
@@ -1855,6 +1873,8 @@ mod tests {
         for size in [
             NSSize::new(0.0, 360.0),
             NSSize::new(360.0, 0.0),
+            NSSize::new(0.5, 360.0),
+            NSSize::new(360.0, 0.5),
             NSSize::new(-1.0, 360.0),
             NSSize::new(360.0, -1.0),
             NSSize::new(f64::NAN, 360.0),
@@ -1913,6 +1933,22 @@ mod tests {
 
         assert_eq!(second_metrics, expected_second);
         assert_ne!(first_metrics, second_metrics);
+    }
+
+    #[test]
+    fn repeated_frame_preparation_errors_are_throttled_per_category() {
+        assert!(should_record_frame_preparation_error(
+            None,
+            CompanionFramePreparationError::InvalidBounds
+        ));
+        assert!(!should_record_frame_preparation_error(
+            Some(CompanionFramePreparationError::InvalidBounds),
+            CompanionFramePreparationError::InvalidBounds
+        ));
+        assert!(should_record_frame_preparation_error(
+            Some(CompanionFramePreparationError::InvalidBounds),
+            CompanionFramePreparationError::SmoothMissingPetBody
+        ));
     }
 
     #[test]
