@@ -175,8 +175,10 @@ fn companion_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32
 /// it samples the SAME wander offset that drives the position (full base + wobble),
 /// scaled by `energy`. A deadzone holds `current` when the pet is barely moving
 /// (idle/asleep, or pausing at a turnaround), so facing never flips without a
-/// matching change of direction. Right-moving → `1`, left → `-1` (compute_facing's
-/// convention).
+/// matching change of direction. `-1` mirrors the authored art; because the
+/// companion's unmirrored artwork faces left, right-moving → `-1` and
+/// left-moving → `1`. This is intentionally local to the round companion:
+/// terminal wander keeps `compute_facing`'s convention.
 fn companion_wander_facing(
     now: time::OffsetDateTime,
     period_secs: u64,
@@ -191,9 +193,9 @@ fn companion_wander_facing(
     // Proportional to the on-screen horizontal distance moved over the window.
     let visible_dx = (fx_now - fx_prev) * energy;
     if visible_dx > DEADZONE {
-        1
-    } else if visible_dx < -DEADZONE {
         -1
+    } else if visible_dx < -DEADZONE {
+        1
     } else {
         current
     }
@@ -795,10 +797,11 @@ mod tests {
     }
 
     #[test]
-    fn wander_facing_follows_travel_and_holds_when_still() {
-        // At full energy the pet faces both ways across a cycle, matching the sign of
-        // its actual windowed travel — and never returns a non-±1 value.
-        let (mut saw_left, mut saw_right) = (false, false);
+    fn wander_facing_uses_companion_art_orientation_and_holds_when_still() {
+        // At full energy the pet uses both render orientations across a cycle.
+        // The companion's authored art faces left before mirroring, so rightward
+        // movement selects -1 (the mirrored art) and leftward movement selects 1.
+        let (mut saw_authored, mut saw_mirrored) = (false, false);
         for s in 0..30i64 {
             let now = datetime!(2026-06-13 18:00:00 UTC) + time::Duration::seconds(s);
             let (fx_now, _) = companion_wander_offsets(now, 22);
@@ -806,21 +809,22 @@ mod tests {
             let dx = fx_now - fx_prev;
             let f = companion_wander_facing(now, 22, 1.0, 1);
             match f {
-                1 => saw_right = true,
-                -1 => saw_left = true,
+                1 => saw_authored = true,
+                -1 => saw_mirrored = true,
                 other => panic!("facing must be ±1, got {other}"),
             }
-            // Facing agrees with the actual travel direction (outside the deadzone).
+            // Render-facing follows travel under the companion artwork convention
+            // (outside the deadzone).
             if dx > 0.06 {
-                assert_eq!(f, 1, "moving right ⇒ faces right at s={s}");
+                assert_eq!(f, -1, "moving right uses the mirrored art at s={s}");
             }
             if dx < -0.06 {
-                assert_eq!(f, -1, "moving left ⇒ faces left at s={s}");
+                assert_eq!(f, 1, "moving left keeps the authored art at s={s}");
             }
         }
         assert!(
-            saw_left && saw_right,
-            "pet must face both directions across a wander cycle"
+            saw_authored && saw_mirrored,
+            "pet must use both art orientations across a wander cycle"
         );
         // A (near-)still pet — energy 0, so visible movement is below the deadzone —
         // HOLDS its current facing instead of flipping. This is the bug we fixed:
