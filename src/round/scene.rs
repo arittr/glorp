@@ -54,6 +54,7 @@ pub struct SmoothPetAnchor {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompanionPetPlacement {
     pub fractional_motion_top_left: SmoothPetAnchor,
+    pub fractional_motion_origin_top_left: SmoothPetAnchor,
     pub fractional_top_left: SmoothPetAnchor,
     pub classic_snap_top_left: (u16, u16),
     pub classic_rect: Rect,
@@ -272,6 +273,10 @@ fn companion_pet_placement_from_offsets(
 
     let fractional_drift_x = (base_x as f32 + offset_x).clamp(0.0, max_x as f32);
     let fractional_drift_y = (base_y as f32 - bias + offset_y).clamp(0.0, max_y as f32);
+    let fractional_motion_origin_top_left = SmoothPetAnchor {
+        x: (base_x as f32).clamp(0.0, max_x as f32),
+        y: (base_y as f32 - bias).clamp(0.0, max_y as f32),
+    };
     let fractional_y = (fractional_drift_y + f32::from(vm.breath_offset_y)).min(max_y as f32);
 
     CompanionPetPlacement {
@@ -279,6 +284,7 @@ fn companion_pet_placement_from_offsets(
             x: fractional_drift_x,
             y: fractional_drift_y,
         },
+        fractional_motion_origin_top_left,
         fractional_top_left: SmoothPetAnchor { x: fractional_drift_x, y: fractional_y },
         classic_snap_top_left: (classic_x, classic_y),
         classic_rect: Rect::new(classic_x, classic_y, PET_W, PET_H),
@@ -685,6 +691,78 @@ mod tests {
             );
             assert_eq!(placement.classic_snap_top_left, (expected.x, expected.y));
         }
+    }
+
+    #[test]
+    fn neutral_motion_origin_uses_the_same_bias_and_clamps_as_current_motion() {
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = companion_roam_motion();
+        let placement = companion_pet_placement_from_offsets_for_test(
+            &vm,
+            GOLDEN_GRID_COLS,
+            GOLDEN_GRID_ROWS,
+            &motion,
+            0.0,
+            0.0,
+        );
+
+        assert_eq!(
+            placement.fractional_motion_top_left,
+            placement.fractional_motion_origin_top_left
+        );
+        assert!(placement.fractional_motion_origin_top_left.x >= 0.0);
+        assert!(placement.fractional_motion_origin_top_left.y >= 0.0);
+        assert!(
+            placement.fractional_motion_origin_top_left.x
+                <= f32::from(GOLDEN_GRID_COLS.saturating_sub(PET_W))
+        );
+        assert!(
+            placement.fractional_motion_origin_top_left.y
+                <= f32::from(GOLDEN_GRID_ROWS.saturating_sub(PET_H))
+        );
+    }
+
+    #[test]
+    fn classic_breath_changes_posture_but_not_continuous_motion_origin() {
+        let motion = companion_roam_motion();
+        let mut still = WatchViewModel::fixture_with_habitat_props();
+        let mut breathed = still.clone();
+        still.breath_offset_y = 0;
+        breathed.breath_offset_y = 1;
+
+        let still_placement = companion_pet_placement_from_offsets_for_test(
+            &still,
+            GOLDEN_GRID_COLS,
+            GOLDEN_GRID_ROWS,
+            &motion,
+            0.4,
+            -0.3,
+        );
+        let breathed_placement = companion_pet_placement_from_offsets_for_test(
+            &breathed,
+            GOLDEN_GRID_COLS,
+            GOLDEN_GRID_ROWS,
+            &motion,
+            0.4,
+            -0.3,
+        );
+
+        assert_eq!(
+            still_placement.fractional_motion_top_left,
+            breathed_placement.fractional_motion_top_left
+        );
+        assert_eq!(
+            still_placement.fractional_motion_origin_top_left,
+            breathed_placement.fractional_motion_origin_top_left
+        );
+        assert_ne!(
+            still_placement.fractional_top_left,
+            breathed_placement.fractional_top_left
+        );
+        assert_ne!(
+            still_placement.classic_rect,
+            breathed_placement.classic_rect
+        );
     }
 
     #[test]
