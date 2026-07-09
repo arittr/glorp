@@ -9,7 +9,10 @@ use crate::dev_preview::export::{
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
 use crate::dev_preview::scenarios::{PreviewRenderContext, PreviewScenarioBundle};
 use crate::dev_preview::strips::PreviewStripBundle;
-use crate::presentation::smooth::classic_flatten_checksum;
+use crate::presentation::smooth::{
+    classic_flatten_checksum, SmoothLayerMotionBinding, SmoothParallaxPlaneTranslations,
+    SmoothPoint,
+};
 use crate::round::layout::{RoundAperture, SAFE_INNER_RADIUS_RATIO};
 use crate::round::scene::{build_round_scene_draw_list, CompanionMotion};
 use crate::round::smooth::build_round_smooth_scene_plan;
@@ -22,11 +25,20 @@ const GRID_COLS: u16 = 52;
 const GRID_ROWS: u16 = 52;
 const MOTION_FRAME_DURATION_MS: u64 = 160;
 const MOTION_FRAME_COUNT: usize = 12;
+const WANDER_PERIOD_MS: u64 = 22_000;
 const REVIEWED_MOTION_START_UNIX_MS: i128 = 1_760_000_001_000;
 
 pub const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 pub const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
 pub const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
+
+struct SmoothMotionSample {
+    index: usize,
+    elapsed_ms: u64,
+    now: time::OffsetDateTime,
+    semantic_art_tick_index: u64,
+    plan: crate::presentation::smooth::SmoothCompanionScenePlan,
+}
 
 pub fn smooth_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBundle> {
     let vm = WatchViewModel::fixture_with_habitat_props();
@@ -94,38 +106,35 @@ pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
     let vm = WatchViewModel::fixture_with_habitat_props();
     let motion = crate::round::scene::companion_roam_motion();
     let motion_start_now = smooth_motion_start_now(ctx.fixed_now, &vm, &motion);
+    let samples = smooth_motion_samples(motion_start_now, &vm, &motion);
+    let max_adjacent_parallax_delta_by_plane = max_adjacent_parallax_delta(&samples);
     let mut frames = Vec::with_capacity(MOTION_FRAME_COUNT);
     let mut manifest_frames = Vec::with_capacity(MOTION_FRAME_COUNT);
 
-    for index in 0..MOTION_FRAME_COUNT {
-        let elapsed_ms = index as u64 * MOTION_FRAME_DURATION_MS;
-        let frame_now = motion_start_now + time::Duration::milliseconds(elapsed_ms as i64);
-        let semantic_art_tick_index = elapsed_ms / 250;
-        let plan = build_round_smooth_scene_plan(
-            &vm, frame_now, GRID_COLS, GRID_ROWS, &motion, elapsed_ms,
-        );
+    for sample in samples {
         let mut frame = scene_draw_list_to_preview_frame(
-            format!("{SMOOTH_MOTION_ID}-frame-{index:03}"),
-            format!("Smooth Motion Frame {index:03}"),
+            format!("{SMOOTH_MOTION_ID}-frame-{:03}", sample.index),
+            format!("Smooth Motion Frame {:03}", sample.index),
             GRID_COLS,
             GRID_ROWS,
-            &plan.flatten_classic_cells(),
+            &sample.plan.flatten_classic_cells(),
         );
         frame.contract.smooth_motion = Some(PreviewSmoothMotionArtifact::from_scene_plan(
             SMOOTH_MOTION_ID,
-            index as u16,
-            elapsed_ms,
-            frame_now,
-            semantic_art_tick_index,
+            sample.index as u16,
+            sample.elapsed_ms,
+            sample.now,
+            sample.semantic_art_tick_index,
             &vm,
-            &plan,
+            &sample.plan,
+            max_adjacent_parallax_delta_by_plane,
         ));
         frames.push(frame);
         manifest_frames.push(PreviewStripFrame {
-            index: index as u16,
-            phase: format!("motion-{index:03}"),
-            elapsed_ms: elapsed_ms as u16,
-            files: smooth_strip_frame_paths(index),
+            index: sample.index as u16,
+            phase: format!("motion-{:03}", sample.index),
+            elapsed_ms: sample.elapsed_ms as u16,
+            files: smooth_strip_frame_paths(sample.index),
         });
     }
 
@@ -182,11 +191,20 @@ fn smooth_motion_start_now(
     motion: &CompanionMotion,
 ) -> time::OffsetDateTime {
     let reviewed_start = reviewed_motion_start_now();
-    if smooth_motion_window_crosses_snapped_anchor(reviewed_start, vm, motion) {
-        reviewed_start
-    } else {
-        fixed_now
+    if smooth_motion_window_satisfies_preview_contract(reviewed_start, vm, motion) {
+        return reviewed_start;
     }
+
+    for offset_ms in
+        (MOTION_FRAME_DURATION_MS..WANDER_PERIOD_MS).step_by(MOTION_FRAME_DURATION_MS as usize)
+    {
+        let candidate = reviewed_start + time::Duration::milliseconds(offset_ms as i64);
+        if smooth_motion_window_satisfies_preview_contract(candidate, vm, motion) {
+            return candidate;
+        }
+    }
+
+    fixed_now
 }
 
 fn reviewed_motion_start_now() -> time::OffsetDateTime {
@@ -194,36 +212,161 @@ fn reviewed_motion_start_now() -> time::OffsetDateTime {
         .expect("reviewed motion start timestamp should parse")
 }
 
-fn smooth_motion_window_crosses_snapped_anchor(
+fn smooth_motion_samples(
+    start_now: time::OffsetDateTime,
+    vm: &WatchViewModel,
+    motion: &CompanionMotion,
+) -> Vec<SmoothMotionSample> {
+    (0..MOTION_FRAME_COUNT)
+        .map(|index| {
+            let elapsed_ms = index as u64 * MOTION_FRAME_DURATION_MS;
+            let now = start_now + time::Duration::milliseconds(elapsed_ms as i64);
+            let plan =
+                build_round_smooth_scene_plan(vm, now, GRID_COLS, GRID_ROWS, motion, elapsed_ms);
+
+            SmoothMotionSample {
+                index,
+                elapsed_ms,
+                now,
+                semantic_art_tick_index: elapsed_ms / 250,
+                plan,
+            }
+        })
+        .collect()
+}
+
+fn point_delta(previous: SmoothPoint, current: SmoothPoint) -> SmoothPoint {
+    SmoothPoint {
+        x: (current.x - previous.x).abs(),
+        y: (current.y - previous.y).abs(),
+    }
+}
+
+fn max_point(left: SmoothPoint, right: SmoothPoint) -> SmoothPoint {
+    SmoothPoint {
+        x: left.x.max(right.x),
+        y: left.y.max(right.y),
+    }
+}
+
+fn plane_delta(
+    previous: SmoothParallaxPlaneTranslations,
+    current: SmoothParallaxPlaneTranslations,
+) -> SmoothParallaxPlaneTranslations {
+    SmoothParallaxPlaneTranslations {
+        far: point_delta(previous.far, current.far),
+        mid: point_delta(previous.mid, current.mid),
+        behind: point_delta(previous.behind, current.behind),
+        foreground: point_delta(previous.foreground, current.foreground),
+    }
+}
+
+fn max_planes(
+    left: SmoothParallaxPlaneTranslations,
+    right: SmoothParallaxPlaneTranslations,
+) -> SmoothParallaxPlaneTranslations {
+    SmoothParallaxPlaneTranslations {
+        far: max_point(left.far, right.far),
+        mid: max_point(left.mid, right.mid),
+        behind: max_point(left.behind, right.behind),
+        foreground: max_point(left.foreground, right.foreground),
+    }
+}
+
+fn max_adjacent_parallax_delta(samples: &[SmoothMotionSample]) -> SmoothParallaxPlaneTranslations {
+    samples.windows(2).fold(
+        SmoothParallaxPlaneTranslations::default(),
+        |maximum, pair| {
+            let previous = pair[0].plan.parallax_translations_by_plane();
+            let current = pair[1].plan.parallax_translations_by_plane();
+            max_planes(maximum, plane_delta(previous, current))
+        },
+    )
+}
+
+fn point_is_nonzero(point: SmoothPoint) -> bool {
+    point.x != 0.0 || point.y != 0.0
+}
+
+fn points_have_strict_ordering(planes: SmoothParallaxPlaneTranslations) -> bool {
+    fn strictly_ordered(far: f32, mid: f32, behind: f32, foreground: f32) -> bool {
+        far != 0.0
+            && far.abs() < mid.abs()
+            && mid.abs() < behind.abs()
+            && behind.abs() < foreground.abs()
+    }
+
+    strictly_ordered(
+        planes.far.x,
+        planes.mid.x,
+        planes.behind.x,
+        planes.foreground.x,
+    ) || strictly_ordered(
+        planes.far.y,
+        planes.mid.y,
+        planes.behind.y,
+        planes.foreground.y,
+    )
+}
+
+fn planes_are_within_adjacent_limits(planes: SmoothParallaxPlaneTranslations) -> bool {
+    [planes.far, planes.mid, planes.behind, planes.foreground]
+        .into_iter()
+        .all(|point| point.x <= 0.15 && point.y <= 0.10)
+}
+
+fn smooth_motion_window_satisfies_preview_contract(
     start_now: time::OffsetDateTime,
     vm: &WatchViewModel,
     motion: &CompanionMotion,
 ) -> bool {
+    let samples = smooth_motion_samples(start_now, vm, motion);
     let mut classic_snap_anchors = BTreeSet::new();
-    let mut last_final_anchor: Option<(f32, f32)> = None;
+    let mut saw_nonzero_focus = false;
+    let mut saw_nonzero_planes = [false; 4];
+    let mut saw_strict_resolved_ordering = false;
 
-    for index in 0..MOTION_FRAME_COUNT {
-        let elapsed_ms = index as u64 * MOTION_FRAME_DURATION_MS;
-        let frame_now = start_now + time::Duration::milliseconds(elapsed_ms as i64);
-        let plan =
-            build_round_smooth_scene_plan(vm, frame_now, GRID_COLS, GRID_ROWS, motion, elapsed_ms);
+    for sample in &samples {
+        let plan = &sample.plan;
 
         classic_snap_anchors.insert((
             plan.pet.classic_snap_anchor.x.round() as i32,
             plan.pet.classic_snap_anchor.y.round() as i32,
         ));
+        saw_nonzero_focus |= point_is_nonzero(plan.pet.parallax_focus_offset);
 
-        if let Some((last_x, last_y)) = last_final_anchor {
-            let dx = (plan.pet.final_anchor.x - last_x).abs();
-            let dy = (plan.pet.final_anchor.y - last_y).abs();
-            if dx >= 1.0 || dy >= 1.0 {
-                return false;
-            }
+        let planes = plan.parallax_translations_by_plane();
+        saw_nonzero_planes[0] |= point_is_nonzero(planes.far);
+        saw_nonzero_planes[1] |= point_is_nonzero(planes.mid);
+        saw_nonzero_planes[2] |= point_is_nonzero(planes.behind);
+        saw_nonzero_planes[3] |= point_is_nonzero(planes.foreground);
+        saw_strict_resolved_ordering |= points_have_strict_ordering(planes);
+
+        if plan.layers.iter().any(|layer| {
+            matches!(
+                layer.motion_binding,
+                SmoothLayerMotionBinding::Fixed | SmoothLayerMotionBinding::PetAttached
+            ) && point_is_nonzero(layer.parallax_translation)
+        }) {
+            return false;
         }
-        last_final_anchor = Some((plan.pet.final_anchor.x, plan.pet.final_anchor.y));
+    }
+
+    if samples.windows(2).any(|pair| {
+        let dx = (pair[1].plan.pet.final_anchor.x - pair[0].plan.pet.final_anchor.x).abs();
+        let dy = (pair[1].plan.pet.final_anchor.y - pair[0].plan.pet.final_anchor.y).abs();
+        dx >= 1.0 || dy >= 1.0
+    }) {
+        return false;
     }
 
     classic_snap_anchors.len() >= 2
+        && saw_nonzero_focus
+        && saw_nonzero_planes
+            .into_iter()
+            .all(|saw_nonzero| saw_nonzero)
+        && saw_strict_resolved_ordering
+        && planes_are_within_adjacent_limits(max_adjacent_parallax_delta(&samples))
 }
 
 fn smooth_inputs(ctx: &PreviewRenderContext, mode: &str) -> BTreeMap<String, Value> {
@@ -353,7 +496,7 @@ mod tests {
         let motion = crate::round::scene::companion_roam_motion();
         let reviewed_start = reviewed_motion_start_now();
 
-        assert!(smooth_motion_window_crosses_snapped_anchor(
+        assert!(smooth_motion_window_satisfies_preview_contract(
             reviewed_start,
             &vm,
             &motion,
@@ -377,7 +520,11 @@ mod tests {
     fn smooth_motion_start_now_falls_back_when_reviewed_start_fails_contract() {
         let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
         let vm = WatchViewModel::fixture_with_habitat_props();
-        let motion = CompanionMotion::default();
+        let motion = CompanionMotion {
+            drift_x_frac: 0.0,
+            drift_y_frac: 0.0,
+            ..CompanionMotion::default()
+        };
 
         assert_eq!(smooth_motion_start_now(fixed_now, &vm, &motion), fixed_now);
     }

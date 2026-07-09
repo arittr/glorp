@@ -3,8 +3,8 @@ use crate::presentation::privacy::PresentationSurface;
 use crate::presentation::scene::PresentationScene;
 use crate::presentation::smooth::{
     CompanionChromeReservation, CompanionViewport, SmoothBounds, SmoothCompanionLayer,
-    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerRole, SmoothPoint,
-    SmoothTransform,
+    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerRole,
+    SmoothParallaxPlaneTranslations, SmoothPoint, SmoothTransform,
 };
 use crate::round::model::RoundSceneModel;
 use crate::tui::component::PreviewLayout;
@@ -208,6 +208,9 @@ pub struct PreviewSmoothPlanArtifact {
     pub frame_id: String,
     pub viewport: PreviewSmoothViewportArtifact,
     pub flatten_checksum: u64,
+    pub parallax_focus_offset: PreviewSmoothPointArtifact,
+    pub parallax_lifecycle_scale: f32,
+    pub parallax_planes: PreviewSmoothParallaxPlanesArtifact,
     pub layers: Vec<PreviewSmoothLayerArtifact>,
     pub chrome: PreviewSmoothChromeArtifact,
     pub abstract_state: BTreeMap<String, String>,
@@ -239,6 +242,10 @@ pub struct PreviewSmoothMotionArtifact {
     pub semantic_art_tick_index: u64,
     pub pet_visual_checksum: u64,
     pub pet_motion: PreviewSmoothPetMotionArtifact,
+    pub parallax_focus_offset: PreviewSmoothPointArtifact,
+    pub parallax_lifecycle_scale: f32,
+    pub parallax_planes: PreviewSmoothParallaxPlanesArtifact,
+    pub max_adjacent_parallax_delta_by_plane: PreviewSmoothParallaxPlanesArtifact,
     pub layer_transforms: Vec<PreviewSmoothMotionLayerArtifact>,
     pub chrome: PreviewSmoothChromeArtifact,
     pub abstract_state: BTreeMap<String, String>,
@@ -254,24 +261,38 @@ pub struct PreviewSmoothViewportArtifact {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreviewSmoothLayerArtifact {
     pub role: String,
+    pub motion_binding: String,
+    pub depth_plane: Option<String>,
     pub z: i16,
     pub local_bounds: PreviewSmoothBoundsArtifact,
     pub anchor: PreviewSmoothPointArtifact,
     pub transform_origin: PreviewSmoothPointArtifact,
     pub transform: PreviewSmoothTransformArtifact,
+    pub parallax_translation: PreviewSmoothPointArtifact,
     pub item_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreviewSmoothMotionLayerArtifact {
     pub role: String,
+    pub motion_binding: String,
+    pub depth_plane: Option<String>,
     pub z: i16,
     pub local_bounds: PreviewSmoothBoundsArtifact,
     pub translation: PreviewSmoothPointArtifact,
     pub scale: PreviewSmoothPointArtifact,
     pub rotation_degrees: f32,
     pub opacity: f32,
+    pub parallax_translation: PreviewSmoothPointArtifact,
     pub item_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct PreviewSmoothParallaxPlanesArtifact {
+    pub far: PreviewSmoothPointArtifact,
+    pub mid: PreviewSmoothPointArtifact,
+    pub behind: PreviewSmoothPointArtifact,
+    pub foreground: PreviewSmoothPointArtifact,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -547,6 +568,11 @@ impl PreviewSmoothPlanArtifact {
             frame_id: frame_id.to_string(),
             viewport: PreviewSmoothViewportArtifact::from_viewport(plan.viewport),
             flatten_checksum: plan.classic_flatten_checksum(),
+            parallax_focus_offset: PreviewSmoothPointArtifact::from_point(
+                plan.pet.parallax_focus_offset,
+            ),
+            parallax_lifecycle_scale: plan.parallax_lifecycle_scale,
+            parallax_planes: plan.parallax_translations_by_plane().into(),
             layers: plan
                 .layers
                 .iter()
@@ -596,6 +622,7 @@ impl PreviewSmoothParityArtifact {
 }
 
 impl PreviewSmoothMotionArtifact {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_scene_plan(
         strip_id: &str,
         frame_index: u16,
@@ -604,6 +631,7 @@ impl PreviewSmoothMotionArtifact {
         semantic_art_tick_index: u64,
         vm: &WatchViewModel,
         plan: &SmoothCompanionScenePlan,
+        max_adjacent_parallax_delta_by_plane: SmoothParallaxPlaneTranslations,
     ) -> Self {
         let pet_layer = plan
             .layer_by_role(SmoothLayerRole::PetBody)
@@ -639,6 +667,12 @@ impl PreviewSmoothMotionArtifact {
                 opacity: pet_layer.opacity,
                 pulse: pulse.to_string(),
             },
+            parallax_focus_offset: PreviewSmoothPointArtifact::from_point(
+                plan.pet.parallax_focus_offset,
+            ),
+            parallax_lifecycle_scale: plan.parallax_lifecycle_scale,
+            parallax_planes: plan.parallax_translations_by_plane().into(),
+            max_adjacent_parallax_delta_by_plane: max_adjacent_parallax_delta_by_plane.into(),
             layer_transforms: plan
                 .layers
                 .iter()
@@ -678,11 +712,19 @@ impl PreviewSmoothLayerArtifact {
     fn from_layer(layer: &SmoothCompanionLayer) -> Self {
         Self {
             role: layer.role.as_str().to_string(),
+            motion_binding: layer.motion_binding.as_str().to_string(),
+            depth_plane: layer
+                .motion_binding
+                .depth_plane()
+                .map(|plane| plane.as_str().to_string()),
             z: layer.z,
             local_bounds: PreviewSmoothBoundsArtifact::from_bounds(layer.local_bounds),
             anchor: PreviewSmoothPointArtifact::from_point(layer.anchor),
             transform_origin: PreviewSmoothPointArtifact::from_point(layer.transform_origin),
             transform: PreviewSmoothTransformArtifact::from_transform(layer.transform),
+            parallax_translation: PreviewSmoothPointArtifact::from_point(
+                layer.parallax_translation,
+            ),
             item_count: smooth_item_count(layer),
         }
     }
@@ -692,13 +734,32 @@ impl PreviewSmoothMotionLayerArtifact {
     fn from_layer(layer: &SmoothCompanionLayer) -> Self {
         Self {
             role: layer.role.as_str().to_string(),
+            motion_binding: layer.motion_binding.as_str().to_string(),
+            depth_plane: layer
+                .motion_binding
+                .depth_plane()
+                .map(|plane| plane.as_str().to_string()),
             z: layer.z,
             local_bounds: PreviewSmoothBoundsArtifact::from_bounds(layer.local_bounds),
             translation: PreviewSmoothPointArtifact::from_point(layer.transform.translation),
             scale: PreviewSmoothPointArtifact::from_point(layer.transform.scale),
             rotation_degrees: layer.transform.rotation_degrees,
             opacity: layer.opacity,
+            parallax_translation: PreviewSmoothPointArtifact::from_point(
+                layer.parallax_translation,
+            ),
             item_count: smooth_item_count(layer),
+        }
+    }
+}
+
+impl From<SmoothParallaxPlaneTranslations> for PreviewSmoothParallaxPlanesArtifact {
+    fn from(planes: SmoothParallaxPlaneTranslations) -> Self {
+        Self {
+            far: PreviewSmoothPointArtifact::from_point(planes.far),
+            mid: PreviewSmoothPointArtifact::from_point(planes.mid),
+            behind: PreviewSmoothPointArtifact::from_point(planes.behind),
+            foreground: PreviewSmoothPointArtifact::from_point(planes.foreground),
         }
     }
 }
@@ -1171,6 +1232,7 @@ mod tests {
             0,
             &vm,
             &plan,
+            SmoothParallaxPlaneTranslations::default(),
         );
     }
 }

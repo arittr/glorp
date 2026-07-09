@@ -253,6 +253,42 @@ fn assert_sidecar_json_values_are_sanitized(sidecar: &Value, surface: &str) {
     assert_json_value_is_sanitized(sidecar, surface, "$");
 }
 
+fn assert_smooth_enum_strings_only_in_typed_fields(sidecar: &Value, surface: &str) {
+    fn walk(value: &Value, surface: &str, path: &str) {
+        match value {
+            Value::String(text)
+                if matches!(text.as_str(), "fixed" | "pet-attached" | "parallax") =>
+            {
+                assert!(
+                    path.ends_with(".motion_binding"),
+                    "{surface} sidecar exposed motion binding {text} outside a typed field at {path}"
+                );
+            }
+            Value::String(text)
+                if matches!(text.as_str(), "far" | "mid" | "behind" | "foreground") =>
+            {
+                assert!(
+                    path.ends_with(".depth_plane"),
+                    "{surface} sidecar exposed depth plane {text} outside a typed field at {path}"
+                );
+            }
+            Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    walk(child, surface, &format!("{path}[{index}]"));
+                }
+            }
+            Value::Object(map) => {
+                for (key, child) in map {
+                    walk(child, surface, &format!("{path}.{key}"));
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    walk(sidecar, surface, "$");
+}
+
 fn assert_json_value_is_sanitized(value: &Value, surface: &str, path: &str) {
     match value {
         Value::String(text) => {
@@ -2526,7 +2562,31 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
     assert_eq!(plan["schema_version"], 1);
     assert_eq!(plan["frame_id"], SMOOTH_PARITY_ID);
     assert!(plan["viewport"]["grid_cols"].is_u64());
+    assert!(plan["parallax_focus_offset"]["x"].is_number());
+    assert!(plan["parallax_focus_offset"]["y"].is_number());
+    assert_eq!(plan["parallax_lifecycle_scale"], 1.0);
+    for plane in ["far", "mid", "behind", "foreground"] {
+        assert!(plan["parallax_planes"][plane]["x"].is_number());
+        assert!(plan["parallax_planes"][plane]["y"].is_number());
+    }
     assert!(plan["layers"].as_array().unwrap().len() >= 10);
+    for layer in plan["layers"].as_array().unwrap() {
+        let motion_binding = layer["motion_binding"].as_str().unwrap();
+        assert!(matches!(
+            motion_binding,
+            "fixed" | "pet-attached" | "parallax"
+        ));
+        match motion_binding {
+            "fixed" | "pet-attached" => assert!(layer["depth_plane"].is_null()),
+            "parallax" => assert!(matches!(
+                layer["depth_plane"].as_str().unwrap(),
+                "far" | "mid" | "behind" | "foreground"
+            )),
+            _ => unreachable!(),
+        }
+        assert!(layer["parallax_translation"]["x"].is_number());
+        assert!(layer["parallax_translation"]["y"].is_number());
+    }
     assert!(plan["chrome"]["hud_bounds"].is_array());
     assert!(plan["chrome"]["gauge_bounds"].is_array());
     assert_eq!(plan["privacy"]["source_names_visible"], false);
@@ -2558,6 +2618,7 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
     for path in smooth_sidecars {
         let sidecar: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_sidecar_json_values_are_sanitized(&sidecar, "smooth");
+        assert_smooth_enum_strings_only_in_typed_fields(&sidecar, "smooth");
     }
 }
 
@@ -2629,16 +2690,66 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
     let mut bob_offsets = BTreeSet::new();
     let mut semantic_tick_indices = Vec::new();
     let mut checksums_by_semantic_tick = BTreeMap::<u64, BTreeSet<u64>>::new();
+    let mut saw_nonzero_focus = false;
+    let mut saw_nonzero_plane = BTreeMap::from([
+        ("far", false),
+        ("mid", false),
+        ("behind", false),
+        ("foreground", false),
+    ]);
+    let mut saw_strict_resolved_ordering = false;
     for frame in frames {
         let path = frame["files"]["smooth_motion"].as_str().unwrap();
         let artifact = run.read_json(path);
         assert_eq!(artifact["schema_version"], 1);
         assert_eq!(artifact["strip_id"], SMOOTH_MOTION_ID);
+        assert_eq!(artifact["parallax_lifecycle_scale"], 1.0);
         assert!(artifact["now_unix_ms"].as_i64().is_some());
         let semantic_tick_index = artifact["semantic_art_tick_index"].as_u64().unwrap();
         let pet_visual_checksum = artifact["pet_visual_checksum"].as_u64().unwrap();
         assert_eq!(artifact["privacy"]["source_names_visible"], false);
         assert_eq!(artifact["privacy"]["exact_token_strings_visible"], false);
+        assert_sidecar_json_values_are_sanitized(&artifact, "smooth-motion");
+        assert_smooth_enum_strings_only_in_typed_fields(&artifact, "smooth-motion");
+
+        let focus_x = artifact["parallax_focus_offset"]["x"].as_f64().unwrap();
+        let focus_y = artifact["parallax_focus_offset"]["y"].as_f64().unwrap();
+        saw_nonzero_focus |= focus_x != 0.0 || focus_y != 0.0;
+
+        let mut plane_points = BTreeMap::new();
+        for plane in ["far", "mid", "behind", "foreground"] {
+            let x = artifact["parallax_planes"][plane]["x"].as_f64().unwrap();
+            let y = artifact["parallax_planes"][plane]["y"].as_f64().unwrap();
+            *saw_nonzero_plane.get_mut(plane).unwrap() |= x != 0.0 || y != 0.0;
+            plane_points.insert(plane, (x, y));
+
+            let max_x = artifact["max_adjacent_parallax_delta_by_plane"][plane]["x"]
+                .as_f64()
+                .unwrap();
+            let max_y = artifact["max_adjacent_parallax_delta_by_plane"][plane]["y"]
+                .as_f64()
+                .unwrap();
+            assert!(
+                max_x <= 0.15,
+                "{plane} adjacent parallax x delta exceeded 0.15: {max_x}"
+            );
+            assert!(
+                max_y <= 0.10,
+                "{plane} adjacent parallax y delta exceeded 0.10: {max_y}"
+            );
+        }
+
+        let [far, mid, behind, foreground] =
+            ["far", "mid", "behind", "foreground"].map(|plane| plane_points[plane]);
+        let strict_x = far.0 != 0.0
+            && far.0.abs() < mid.0.abs()
+            && mid.0.abs() < behind.0.abs()
+            && behind.0.abs() < foreground.0.abs();
+        let strict_y = far.1 != 0.0
+            && far.1.abs() < mid.1.abs()
+            && mid.1.abs() < behind.1.abs()
+            && behind.1.abs() < foreground.1.abs();
+        saw_strict_resolved_ordering |= strict_x || strict_y;
 
         let base = &artifact["pet_motion"]["base_anchor"];
         let final_anchor = &artifact["pet_motion"]["final_anchor"];
@@ -2666,15 +2777,32 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
             .entry(semantic_tick_index)
             .or_default()
             .insert(pet_visual_checksum);
-        assert!(artifact["layer_transforms"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|layer| {
-                layer["role"] == "pet-body"
-                    && layer["translation"]["y"].is_number()
-                    && layer["item_count"].as_u64().unwrap() > 0
-            }));
+        let mut saw_pet_body = false;
+        for layer in artifact["layer_transforms"].as_array().unwrap() {
+            let motion_binding = layer["motion_binding"].as_str().unwrap();
+            assert!(matches!(
+                motion_binding,
+                "fixed" | "pet-attached" | "parallax"
+            ));
+            let parallax_x = layer["parallax_translation"]["x"].as_f64().unwrap();
+            let parallax_y = layer["parallax_translation"]["y"].as_f64().unwrap();
+            match motion_binding {
+                "fixed" | "pet-attached" => {
+                    assert!(layer["depth_plane"].is_null());
+                    assert_eq!(parallax_x, 0.0);
+                    assert_eq!(parallax_y, 0.0);
+                }
+                "parallax" => assert!(matches!(
+                    layer["depth_plane"].as_str().unwrap(),
+                    "far" | "mid" | "behind" | "foreground"
+                )),
+                _ => unreachable!(),
+            }
+            saw_pet_body |= layer["role"] == "pet-body"
+                && layer["translation"]["y"].is_number()
+                && layer["item_count"].as_u64().unwrap() > 0;
+        }
+        assert!(saw_pet_body);
     }
 
     assert!(
@@ -2684,6 +2812,18 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
     assert!(
         classic_snap_anchors.len() >= 2,
         "expected classic snap anchor to cross at least two rounded cells, got {classic_snap_anchors:?}"
+    );
+    assert!(
+        saw_nonzero_focus,
+        "expected at least one non-zero parallax focus"
+    );
+    assert!(
+        saw_nonzero_plane.values().all(|saw_nonzero| *saw_nonzero),
+        "expected non-zero evidence for all four parallax planes, got {saw_nonzero_plane:?}"
+    );
+    assert!(
+        saw_strict_resolved_ordering,
+        "expected strict resolved Far < Mid < Behind < Foreground ordering on a non-zero axis"
     );
     assert!(
         bob_offsets.len() >= 5,
