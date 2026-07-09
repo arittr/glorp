@@ -31,10 +31,10 @@ life, ambient marks, gauges, HUD, and porthole composition. The implementation
 adds one reusable motion-binding boundary and one visible feature: subtle
 pet-follow parallax across the existing habitat layers.
 
-The smooth renderer remains opt-in through `--renderer smooth`. Classic and
-Pixel remain behaviorally unchanged, and the old renderer remains available for
-fallback and parity review. No new art or replacement pet is part of this
-slice.
+The smooth renderer is the temporary default for `glorp companion` and
+`glorp companion-app` so live testing exercises the new path. `--renderer
+classic` and `--renderer pixel` remain available for fallback, comparison, and
+parity review. No new art or replacement pet is part of this slice.
 
 ## Implementation Entry Gate
 
@@ -90,7 +90,7 @@ plan.
 - No feed, activity, prop-reaction, or scene-moment animation.
 - No new pet, prop, tank-life, gauge, HUD, or room art.
 - No change to the pet's wander curve, speed, facing, bob, or semantic art clock.
-- No default renderer change.
+- No removal of the Classic or Pixel renderer paths.
 - No Classic or Pixel renderer behavior change.
 - No Linux windowing implementation.
 - No general-purpose animation dependency.

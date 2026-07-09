@@ -43,7 +43,7 @@ pub enum Command {
     Menubar,
     /// Open the native macOS round companion app.
     Companion {
-        #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Classic)]
+        #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Smooth)]
         renderer: CompanionRendererMode,
         #[arg(long, hide = true)]
         review_size: Option<CompanionReviewSize>,
@@ -58,7 +58,7 @@ pub enum Command {
     },
     #[command(hide = true)]
     CompanionApp {
-        #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Classic)]
+        #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererMode::Smooth)]
         renderer: CompanionRendererMode,
         #[arg(long, hide = true)]
         review_size: Option<CompanionReviewSize>,
@@ -151,6 +151,47 @@ impl Cli {
             state: review_state,
             duration_ms: review_duration_ms,
             capture_dir: review_capture_dir,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use crate::commands::companion_mode::CompanionRendererMode;
+    use clap::Parser;
+
+    #[test]
+    fn companion_commands_default_to_smooth_renderer() {
+        for arguments in [["glorp", "companion"], ["glorp", "companion-app"]] {
+            let cli = Cli::try_parse_from(arguments).expect("companion command should parse");
+            let renderer = match cli.command {
+                Command::Companion { renderer, .. } | Command::CompanionApp { renderer, .. } => {
+                    renderer
+                }
+                command => panic!("expected companion command, got {command:?}"),
+            };
+            assert_eq!(renderer, CompanionRendererMode::Smooth);
+        }
+    }
+
+    #[test]
+    fn companion_commands_keep_explicit_legacy_renderer_selection() {
+        for (subcommand, renderer_name, expected) in [
+            ("companion", "classic", CompanionRendererMode::Classic),
+            ("companion", "pixel", CompanionRendererMode::Pixel),
+            ("companion-app", "classic", CompanionRendererMode::Classic),
+            ("companion-app", "pixel", CompanionRendererMode::Pixel),
+        ] {
+            let cli = Cli::try_parse_from(["glorp", subcommand, "--renderer", renderer_name])
+                .expect("explicit renderer should parse");
+            let renderer = match cli.command {
+                Command::Companion { renderer, .. } | Command::CompanionApp { renderer, .. } => {
+                    renderer
+                }
+                command => panic!("expected companion command, got {command:?}"),
+            };
+            assert_eq!(renderer, expected);
         }
     }
 }

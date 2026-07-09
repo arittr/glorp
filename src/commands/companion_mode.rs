@@ -76,7 +76,9 @@ impl CompanionReviewState {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompanionReviewOptions, CompanionReviewSize, CompanionReviewState};
+    use super::{
+        CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
+    };
     use std::str::FromStr;
 
     #[test]
@@ -127,13 +129,21 @@ mod tests {
 
         assert_eq!(review.resolved_state(), CompanionReviewState::AsleepCalm);
     }
+
+    #[test]
+    fn smooth_is_the_default_companion_renderer() {
+        assert_eq!(
+            CompanionRendererMode::default(),
+            CompanionRendererMode::Smooth
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum CompanionRendererMode {
-    #[default]
     Classic,
     Pixel,
+    #[default]
     Smooth,
 }
 
