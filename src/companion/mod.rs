@@ -4,6 +4,7 @@ pub mod app;
 pub mod pixel;
 pub mod render;
 pub mod review_capture;
+pub mod smooth_timing;
 
 pub fn run(
     mode: crate::commands::companion_mode::CompanionRendererMode,

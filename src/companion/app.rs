@@ -89,6 +89,8 @@ struct AppState {
     pixel_state: Option<PixelRendererState>,
     pixel_frame: Option<PixelFrame>,
     smooth_started_at: Option<Instant>,
+    smooth_semantic_clock: Option<crate::companion::smooth_timing::SmoothSemanticClock>,
+    smooth_semantic_art_tick_index: u64,
     animation_frame: u64,
     review_capture: Option<crate::companion::review_capture::ReviewCapture>,
     redacts_live_hud: bool,
@@ -180,6 +182,13 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         .as_ref()
         .map(|input| PixelRendererState::new(input, now));
     let pixel_frame = None;
+    let smooth_started_at = renderer_mode.is_smooth().then(Instant::now);
+    let smooth_semantic_clock = smooth_started_at.map(|started_at| {
+        crate::companion::smooth_timing::SmoothSemanticClock::new(
+            started_at,
+            Duration::from_secs_f64(UI_TICK_INTERVAL_SECS),
+        )
+    });
 
     let app: Retained<NSApplication> = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -216,7 +225,9 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             pixel_input,
             pixel_state,
             pixel_frame,
-            smooth_started_at: renderer_mode.is_smooth().then(Instant::now),
+            smooth_started_at,
+            smooth_semantic_clock,
+            smooth_semantic_art_tick_index: 0,
             animation_frame: 0,
             review_capture,
             redacts_live_hud,
@@ -470,8 +481,21 @@ fn animate_pet() {
             }
             return Some(state.view.clone());
         }
-        let next_frame = state.animation_frame.wrapping_add(1);
         let now = time::OffsetDateTime::now_utc();
+        if state.renderer_mode.is_smooth() {
+            let due_tick = state
+                .smooth_semantic_clock
+                .as_mut()
+                .and_then(|clock| clock.consume_due_tick(Instant::now()));
+            if let Some(tick_index) = due_tick {
+                let _ = advance_companion_animation(&mut state.vm, tick_index, now);
+                state.animation_frame = tick_index;
+                state.smooth_semantic_art_tick_index = tick_index;
+                state.scene = derive_round_scene_model(&state.vm, now);
+            }
+            return Some(state.view.clone());
+        }
+        let next_frame = state.animation_frame.wrapping_add(1);
         let _ = advance_companion_animation(&mut state.vm, next_frame, now);
         state.animation_frame = next_frame;
         state.scene = derive_round_scene_model(&state.vm, now);
@@ -556,11 +580,14 @@ fn render_live_pixel_frame(
     (frame, input)
 }
 
-fn record_review_frame(_view: &RoundView, smooth_bob: Option<f32>) {
+fn record_review_frame(
+    _view: &RoundView,
+    smooth_sample: Option<crate::companion::review_capture::SmoothReviewFrameSample>,
+) {
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
             if let Some(capture) = state.review_capture.as_mut() {
-                capture.record_frame(smooth_bob);
+                capture.record_frame(smooth_sample);
             }
         }
     });
@@ -576,12 +603,20 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
                 s.renderer_mode,
                 s.pixel_frame.clone(),
                 s.smooth_started_at,
+                s.smooth_semantic_art_tick_index,
                 s.redacts_live_hud,
             )
         })
     });
-    let Some((scene, vm, renderer_mode, pixel_frame, smooth_started_at, redacts_live_hud)) =
-        state_snapshot
+    let Some((
+        scene,
+        vm,
+        renderer_mode,
+        pixel_frame,
+        smooth_started_at,
+        smooth_semantic_art_tick_index,
+        redacts_live_hud,
+    )) = state_snapshot
     else {
         return;
     };
@@ -661,7 +696,7 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
                 crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture, &hud_text);
             }
         } else if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
-            let mut smooth_bob_sample = None;
+            let mut smooth_sample = None;
             let mut smooth_plan = None;
             let (pet_center_col, pet_center_row, pet_width_cells, draw_list) = if renderer_mode
                 .is_smooth()
@@ -670,7 +705,6 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
                     .map(|started_at| started_at.elapsed().as_millis())
                     .unwrap_or(0)
                     .min(u128::from(u64::MAX)) as u64;
-                smooth_bob_sample = Some(crate::presentation::smooth::smooth_pet_bob(elapsed_ms));
                 let plan = build_round_smooth_scene_plan(
                     &vm,
                     now,
@@ -679,13 +713,42 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
                     &companion_motion(),
                     elapsed_ms,
                 );
+                smooth_sample = Some(crate::companion::review_capture::SmoothReviewFrameSample {
+                    bob_y: plan.pet.bob_offset.y,
+                    semantic_art_tick_index: smooth_semantic_art_tick_index,
+                    pet_visual_checksum: crate::presentation::smooth::pet_visual_checksum(
+                        &vm.pet_art,
+                        &vm.pet_spans,
+                    ),
+                    base_anchor:
+                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                            plan.pet.base_anchor,
+                        ),
+                    bob_offset:
+                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                            plan.pet.bob_offset,
+                        ),
+                    final_anchor:
+                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                            plan.pet.final_anchor,
+                        ),
+                    classic_snap_anchor:
+                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
+                            plan.pet.classic_snap_anchor,
+                        ),
+                });
                 let pet_center_col = f64::from(
-                    plan.pet.bounds.min.x + (plan.pet.bounds.max.x - plan.pet.bounds.min.x) / 2.0,
+                    plan.pet.fractional_bounds.min.x
+                        + (plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x)
+                            / 2.0,
                 );
                 let pet_center_row = f64::from(
-                    plan.pet.bounds.min.y + (plan.pet.bounds.max.y - plan.pet.bounds.min.y) / 2.0,
+                    plan.pet.fractional_bounds.min.y
+                        + (plan.pet.fractional_bounds.max.y - plan.pet.fractional_bounds.min.y)
+                            / 2.0,
                 );
-                let pet_width_cells = f64::from(plan.pet.bounds.max.x - plan.pet.bounds.min.x);
+                let pet_width_cells =
+                    f64::from(plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x);
                 smooth_plan = Some(plan);
                 (
                     pet_center_col,
@@ -745,7 +808,7 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
                     m.origin_y,
                 );
             }
-            record_review_frame(view, smooth_bob_sample);
+            record_review_frame(view, smooth_sample);
         }
 
         // Companion perimeter gauges: XP, today vs yesterday, and live 10m pace.
@@ -1055,7 +1118,13 @@ fn appkit_blit_smooth_plan(
             };
             let col = layer.anchor.x + layer.transform.translation.x + f32::from(cell.col);
             let row = layer.anchor.y + layer.transform.translation.y + f32::from(cell.row);
-            let (px, py) = if layer.role == SmoothLayerRole::PetBody {
+            let fractional = matches!(
+                layer.role,
+                SmoothLayerRole::PetBody
+                    | SmoothLayerRole::ContactShadow
+                    | SmoothLayerRole::PerformanceCue
+            );
+            let (px, py) = if fractional {
                 fractional_cell_to_point(
                     f64::from(col),
                     f64::from(row),
