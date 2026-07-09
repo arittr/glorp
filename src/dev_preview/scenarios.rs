@@ -2204,6 +2204,8 @@ mod tests {
                 "round-glitch-dialect",
                 "round-crystal-dialect",
                 "round-glitch-patched-s6",
+                "round-smooth-classic-baseline",
+                "round-smooth-classic-parity",
                 "tank-life-age-empty",
                 "tank-life-age-first",
                 "tank-life-age-early",
