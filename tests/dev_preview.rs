@@ -2622,13 +2622,43 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
         "smooth motion strip should export at least five frames"
     );
 
-    let mut bob_values = BTreeSet::new();
-    let mut drift_values = BTreeSet::new();
+    let mut pet_visual_checksums = BTreeSet::new();
+    let mut base_anchors = Vec::new();
+    let mut final_anchors = Vec::new();
+    let mut classic_snap_anchors = BTreeSet::new();
+    let mut bob_offsets = BTreeSet::new();
     for frame in frames {
         let path = frame["files"]["smooth_motion"].as_str().unwrap();
         let artifact = run.read_json(path);
         assert_eq!(artifact["schema_version"], 1);
         assert_eq!(artifact["strip_id"], SMOOTH_MOTION_ID);
+        assert!(artifact["now_unix_ms"].as_i64().is_some());
+        assert!(artifact["semantic_art_tick_index"].as_u64().is_some());
+        assert!(artifact["pet_visual_checksum"].as_u64().is_some());
+        assert_eq!(artifact["privacy"]["source_names_visible"], false);
+        assert_eq!(artifact["privacy"]["exact_token_strings_visible"], false);
+
+        let base = &artifact["pet_motion"]["base_anchor"];
+        let final_anchor = &artifact["pet_motion"]["final_anchor"];
+        let snap = &artifact["pet_motion"]["classic_snap_anchor"];
+        let bob = &artifact["pet_motion"]["bob_offset"];
+
+        base_anchors.push((base["x"].as_f64().unwrap(), base["y"].as_f64().unwrap()));
+        final_anchors.push((
+            final_anchor["x"].as_f64().unwrap(),
+            final_anchor["y"].as_f64().unwrap(),
+        ));
+        classic_snap_anchors.insert(format!(
+            "{:.1}:{:.1}",
+            snap["x"].as_f64().unwrap(),
+            snap["y"].as_f64().unwrap()
+        ));
+        bob_offsets.insert(format!(
+            "{:.4}:{:.4}",
+            bob["x"].as_f64().unwrap(),
+            bob["y"].as_f64().unwrap()
+        ));
+        pet_visual_checksums.insert(artifact["pet_visual_checksum"].as_u64().unwrap());
         assert!(artifact["layer_transforms"]
             .as_array()
             .unwrap()
@@ -2638,25 +2668,37 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
                     && layer["translation"]["y"].is_number()
                     && layer["item_count"].as_u64().unwrap() > 0
             }));
-        bob_values.insert(format!(
-            "{:.4}",
-            artifact["pet_motion"]["bob_y"].as_f64().unwrap()
-        ));
-        drift_values.insert(format!(
-            "{:.4}:{:.4}",
-            artifact["pet_motion"]["anchor_x"].as_f64().unwrap(),
-            artifact["pet_motion"]["anchor_y"].as_f64().unwrap()
-        ));
     }
 
     assert!(
-        bob_values.len() >= 5,
-        "expected at least five distinct bob values, got {bob_values:?}"
+        base_anchors.windows(2).any(|pair| pair[0] != pair[1]),
+        "expected base anchors to move across adjacent frames, got {base_anchors:?}"
     );
     assert!(
-        drift_values.len() >= 5,
-        "expected at least five distinct anchor positions, got {drift_values:?}"
+        classic_snap_anchors.len() >= 2,
+        "expected classic snap anchor to cross at least two rounded cells, got {classic_snap_anchors:?}"
     );
+    assert!(
+        bob_offsets.len() >= 5,
+        "expected at least five distinct bob offsets, got {bob_offsets:?}"
+    );
+    assert_eq!(
+        pet_visual_checksums.len(),
+        1,
+        "Preview strip should prove paint motion changes without semantic art flashing"
+    );
+    for pair in final_anchors.windows(2) {
+        let dx = (pair[1].0 - pair[0].0).abs();
+        let dy = (pair[1].1 - pair[0].1).abs();
+        assert!(
+            dx < 1.0,
+            "adjacent smooth x delta should stay sub-cell: {dx}"
+        );
+        assert!(
+            dy < 1.0,
+            "adjacent smooth y delta should stay sub-cell: {dy}"
+        );
+    }
 
     let all = PreviewRun::new();
     all.run_success("all");

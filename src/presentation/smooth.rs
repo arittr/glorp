@@ -301,6 +301,25 @@ pub fn classic_flatten_checksum(cells: &[DrawCell]) -> u64 {
     hash
 }
 
+pub fn pet_visual_checksum(
+    pet_art: &[String],
+    pet_spans: &[crate::pet::render::StyledSegment],
+) -> u64 {
+    let mut hash = FNV_OFFSET;
+    hash = hash_bytes(hash, b"pet-visual");
+    for line in pet_art {
+        hash = hash_bytes(hash, line.as_bytes());
+        hash = hash_u8(hash, 0xff);
+    }
+    for span in pet_spans {
+        hash = hash_u64(hash, span.line as u64);
+        hash = hash_u64(hash, span.start as u64);
+        hash = hash_u64(hash, span.end as u64);
+        hash = hash_bytes(hash, palette_role_name(span.role).as_bytes());
+    }
+    hash
+}
+
 pub fn smooth_pet_bob(elapsed_ms: u64) -> f32 {
     const AMPLITUDE: f32 = 0.33;
     const PERIOD_MS: f32 = 2_000.0;
@@ -345,6 +364,19 @@ fn hash_optional_rgb(hash: u64, value: Option<Rgb>) -> u64 {
             u64::from(value.r) << 16 | u64::from(value.g) << 8 | u64::from(value.b),
         ),
         None => hash_u8(hash, 0),
+    }
+}
+
+fn palette_role_name(role: crate::pet::render::PaletteRoleName) -> &'static str {
+    match role {
+        crate::pet::render::PaletteRoleName::Body => "body",
+        crate::pet::render::PaletteRoleName::BodyGlow => "body-glow",
+        crate::pet::render::PaletteRoleName::Eye => "eye",
+        crate::pet::render::PaletteRoleName::Mouth => "mouth",
+        crate::pet::render::PaletteRoleName::Accent => "accent",
+        crate::pet::render::PaletteRoleName::Pattern => "pattern",
+        crate::pet::render::PaletteRoleName::Particle => "particle",
+        crate::pet::render::PaletteRoleName::Corruption => "corruption",
     }
 }
 
@@ -714,5 +746,27 @@ mod tests {
         let mut tweaked = cells.clone();
         tweaked[0].bg = Some(rgb(4, 5, 7));
         assert_ne!(checksum_a, classic_flatten_checksum(&tweaked));
+    }
+
+    #[test]
+    fn pet_visual_checksum_tracks_art_and_spans() {
+        let pet_art = vec!["abc".to_string()];
+        let spans = vec![crate::pet::render::StyledSegment {
+            line: 0,
+            start: 0,
+            end: 1,
+            role: crate::pet::render::PaletteRoleName::Eye,
+        }];
+
+        let checksum = pet_visual_checksum(&pet_art, &spans);
+        assert_eq!(checksum, pet_visual_checksum(&pet_art, &spans));
+
+        let mut changed_art = pet_art.clone();
+        changed_art[0] = "abd".to_string();
+        assert_ne!(checksum, pet_visual_checksum(&changed_art, &spans));
+
+        let mut changed_spans = spans.clone();
+        changed_spans[0].role = crate::pet::render::PaletteRoleName::Mouth;
+        assert_ne!(checksum, pet_visual_checksum(&pet_art, &changed_spans));
     }
 }

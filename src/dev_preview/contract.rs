@@ -235,6 +235,9 @@ pub struct PreviewSmoothMotionArtifact {
     pub strip_id: String,
     pub frame_index: u16,
     pub elapsed_ms: u64,
+    pub now_unix_ms: i128,
+    pub semantic_art_tick_index: u64,
+    pub pet_visual_checksum: u64,
     pub pet_motion: PreviewSmoothPetMotionArtifact,
     pub layer_transforms: Vec<PreviewSmoothMotionLayerArtifact>,
     pub chrome: PreviewSmoothChromeArtifact,
@@ -273,9 +276,10 @@ pub struct PreviewSmoothMotionLayerArtifact {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreviewSmoothPetMotionArtifact {
-    pub anchor_x: f32,
-    pub anchor_y: f32,
-    pub bob_y: f32,
+    pub base_anchor: PreviewSmoothPointArtifact,
+    pub bob_offset: PreviewSmoothPointArtifact,
+    pub final_anchor: PreviewSmoothPointArtifact,
+    pub classic_snap_anchor: PreviewSmoothPointArtifact,
     pub scale_x: f32,
     pub scale_y: f32,
     pub opacity: f32,
@@ -596,14 +600,14 @@ impl PreviewSmoothMotionArtifact {
         strip_id: &str,
         frame_index: u16,
         elapsed_ms: u64,
+        now: time::OffsetDateTime,
+        semantic_art_tick_index: u64,
         vm: &WatchViewModel,
         plan: &SmoothCompanionScenePlan,
     ) -> Self {
         let pet_layer = plan
             .layer_by_role(SmoothLayerRole::PetBody)
             .expect("smooth plan should include a pet-body layer for motion proof");
-        let anchor_x = pet_layer.anchor.x + pet_layer.transform.translation.x;
-        let anchor_y = pet_layer.anchor.y + pet_layer.transform.translation.y;
         let pulse = if vm.last_feed_pulse_at.is_some() {
             "recent-feed"
         } else if vm.day_context.asleep {
@@ -617,10 +621,19 @@ impl PreviewSmoothMotionArtifact {
             strip_id: strip_id.to_string(),
             frame_index,
             elapsed_ms,
+            now_unix_ms: i128::from(now.unix_timestamp()) * 1_000 + i128::from(now.millisecond()),
+            semantic_art_tick_index,
+            pet_visual_checksum: crate::presentation::smooth::pet_visual_checksum(
+                &vm.pet_art,
+                &vm.pet_spans,
+            ),
             pet_motion: PreviewSmoothPetMotionArtifact {
-                anchor_x,
-                anchor_y,
-                bob_y: pet_layer.transform.translation.y,
+                base_anchor: PreviewSmoothPointArtifact::from_point(plan.pet.base_anchor),
+                bob_offset: PreviewSmoothPointArtifact::from_point(plan.pet.bob_offset),
+                final_anchor: PreviewSmoothPointArtifact::from_point(plan.pet.final_anchor),
+                classic_snap_anchor: PreviewSmoothPointArtifact::from_point(
+                    plan.pet.classic_snap_anchor,
+                ),
                 scale_x: pet_layer.transform.scale.x,
                 scale_y: pet_layer.transform.scale.y,
                 opacity: pet_layer.opacity,
@@ -1150,7 +1163,14 @@ mod tests {
         plan.layers
             .retain(|layer| !matches!(layer.role, SmoothLayerRole::PetBody));
 
-        let _artifact =
-            PreviewSmoothMotionArtifact::from_scene_plan("round-smooth-motion", 0, 0, &vm, &plan);
+        let _artifact = PreviewSmoothMotionArtifact::from_scene_plan(
+            "round-smooth-motion",
+            0,
+            0,
+            now,
+            0,
+            &vm,
+            &plan,
+        );
     }
 }
