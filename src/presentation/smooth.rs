@@ -41,25 +41,47 @@ pub struct SmoothLayerId(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmoothLayerRole {
-    Backdrop,
-    Body,
-    Face,
-    Glow,
-    Prop,
-    Room,
-    Overlay,
+    DepthRings,
+    BiomeWash,
+    RoomGlyphs,
+    Ambient,
+    Motes,
+    ActivityGlyphs,
+    PropsBehind,
+    TankLifeBehind,
+    ChestBubble,
+    ContactShadow,
+    PetBody,
+    PerformanceCue,
+    PropsForeground,
+    TankLifeForeground,
+    StatusHalo,
+    TroubleIndicator,
+    MoodAura,
+    DimOverlay,
 }
 
 impl SmoothLayerRole {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Backdrop => "backdrop",
-            Self::Body => "body",
-            Self::Face => "face",
-            Self::Glow => "glow",
-            Self::Prop => "prop",
-            Self::Room => "room",
-            Self::Overlay => "overlay",
+            Self::DepthRings => "depth-rings",
+            Self::BiomeWash => "biome-wash",
+            Self::RoomGlyphs => "room-glyphs",
+            Self::Ambient => "ambient",
+            Self::Motes => "motes",
+            Self::ActivityGlyphs => "activity-glyphs",
+            Self::PropsBehind => "props-behind",
+            Self::TankLifeBehind => "tank-life-behind",
+            Self::ChestBubble => "chest-bubble",
+            Self::ContactShadow => "contact-shadow",
+            Self::PetBody => "pet-body",
+            Self::PerformanceCue => "performance-cue",
+            Self::PropsForeground => "props-foreground",
+            Self::TankLifeForeground => "tank-life-foreground",
+            Self::StatusHalo => "status-halo",
+            Self::TroubleIndicator => "trouble-indicator",
+            Self::MoodAura => "mood-aura",
+            Self::DimOverlay => "dim-overlay",
         }
     }
 }
@@ -118,23 +140,60 @@ impl SmoothCompanionPrivacyClaims {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SmoothCompanionLayer {
     pub id: SmoothLayerId,
     pub role: SmoothLayerRole,
     pub z: i16,
+    pub local_bounds: SmoothBounds,
+    pub anchor: SmoothPoint,
+    pub transform_origin: SmoothPoint,
+    pub transform: SmoothTransform,
+    pub opacity: f32,
+    pub clip: SmoothClip,
+    pub blend: SmoothBlendMode,
     pub items: Vec<SmoothLayerItem>,
     pub privacy: SmoothCompanionPrivacyClaims,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayeredPetScene {
     pub layers: Vec<SmoothCompanionLayer>,
 }
 
+impl LayeredPetScene {
+    pub fn flatten_classic_cells(&self) -> SceneDrawList {
+        flatten_layers_to_draw_list(&self.layers)
+    }
+
+    pub fn classic_flatten_checksum(&self) -> u64 {
+        classic_flatten_checksum(&self.flatten_classic_cells().cells)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SmoothCompanionScenePlan {
+    pub layers: Vec<SmoothCompanionLayer>,
+    pub privacy: SmoothCompanionPrivacyClaims,
+}
+
+impl SmoothCompanionScenePlan {
+    pub fn flatten_classic_cells(&self) -> SceneDrawList {
+        flatten_layers_to_draw_list(&self.layers)
+    }
+
+    pub fn classic_flatten_checksum(&self) -> u64 {
+        classic_flatten_checksum(&self.flatten_classic_cells().cells)
+    }
+}
+
 pub fn flatten_classic_cells(scene: &LayeredPetScene) -> SceneDrawList {
+    scene.flatten_classic_cells()
+}
+
+fn flatten_layers_to_draw_list(layers: &[SmoothCompanionLayer]) -> SceneDrawList {
     let mut ordered_layers: Vec<(usize, &SmoothCompanionLayer)> =
-        scene.layers.iter().enumerate().collect();
+        layers.iter().enumerate().collect();
     ordered_layers.sort_by_key(|(index, layer)| (layer.z, *index));
 
     let mut cells = Vec::new();
@@ -259,6 +318,20 @@ mod tests {
             id: SmoothLayerId(id.to_string()),
             role,
             z,
+            local_bounds: SmoothBounds {
+                min: SmoothPoint { x: 0.0, y: 0.0 },
+                max: SmoothPoint { x: 8.0, y: 8.0 },
+            },
+            anchor: SmoothPoint { x: 0.5, y: 1.0 },
+            transform_origin: SmoothPoint { x: 0.5, y: 0.5 },
+            transform: SmoothTransform {
+                translation: SmoothPoint { x: 0.0, y: 0.0 },
+                scale: SmoothPoint { x: 1.0, y: 1.0 },
+                rotation_degrees: 0.0,
+            },
+            opacity: 1.0,
+            clip: SmoothClip::None,
+            blend: SmoothBlendMode::Normal,
             items,
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
         }
@@ -270,7 +343,7 @@ mod tests {
             layers: vec![
                 layer(
                     "later-high",
-                    SmoothLayerRole::Overlay,
+                    SmoothLayerRole::DimOverlay,
                     2,
                     vec![
                         local_item(cell(0, 2, "A", Some(rgb(1, 2, 3)), None, false)),
@@ -279,13 +352,13 @@ mod tests {
                 ),
                 layer(
                     "first-low",
-                    SmoothLayerRole::Body,
+                    SmoothLayerRole::PetBody,
                     0,
                     vec![local_item(cell(1, 4, "C", Some(rgb(7, 8, 9)), None, false))],
                 ),
                 layer(
                     "middle-high",
-                    SmoothLayerRole::Face,
+                    SmoothLayerRole::PerformanceCue,
                     2,
                     vec![local_item(cell(
                         0,
@@ -299,7 +372,7 @@ mod tests {
             ],
         };
 
-        let flattened = flatten_classic_cells(&scene);
+        let flattened = scene.flatten_classic_cells();
 
         assert_eq!(
             flattened,
@@ -343,14 +416,114 @@ mod tests {
     }
 
     #[test]
-    fn smooth_layer_role_as_str_is_kebab_case() {
-        assert_eq!(SmoothLayerRole::Backdrop.as_str(), "backdrop");
-        assert_eq!(SmoothLayerRole::Body.as_str(), "body");
-        assert_eq!(SmoothLayerRole::Face.as_str(), "face");
-        assert_eq!(SmoothLayerRole::Glow.as_str(), "glow");
-        assert_eq!(SmoothLayerRole::Prop.as_str(), "prop");
-        assert_eq!(SmoothLayerRole::Room.as_str(), "room");
-        assert_eq!(SmoothLayerRole::Overlay.as_str(), "overlay");
+    fn smooth_layer_role_as_str_matches_slice_one_contract() {
+        let roles = [
+            (SmoothLayerRole::DepthRings, "depth-rings"),
+            (SmoothLayerRole::BiomeWash, "biome-wash"),
+            (SmoothLayerRole::RoomGlyphs, "room-glyphs"),
+            (SmoothLayerRole::Ambient, "ambient"),
+            (SmoothLayerRole::Motes, "motes"),
+            (SmoothLayerRole::ActivityGlyphs, "activity-glyphs"),
+            (SmoothLayerRole::PropsBehind, "props-behind"),
+            (SmoothLayerRole::TankLifeBehind, "tank-life-behind"),
+            (SmoothLayerRole::ChestBubble, "chest-bubble"),
+            (SmoothLayerRole::ContactShadow, "contact-shadow"),
+            (SmoothLayerRole::PetBody, "pet-body"),
+            (SmoothLayerRole::PerformanceCue, "performance-cue"),
+            (SmoothLayerRole::PropsForeground, "props-foreground"),
+            (SmoothLayerRole::TankLifeForeground, "tank-life-foreground"),
+            (SmoothLayerRole::StatusHalo, "status-halo"),
+            (SmoothLayerRole::TroubleIndicator, "trouble-indicator"),
+            (SmoothLayerRole::MoodAura, "mood-aura"),
+            (SmoothLayerRole::DimOverlay, "dim-overlay"),
+        ];
+
+        for (role, expected) in roles {
+            assert_eq!(role.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn smooth_companion_layer_can_represent_fractional_transform_contract() {
+        let layer = SmoothCompanionLayer {
+            id: SmoothLayerId("pet-body".to_string()),
+            role: SmoothLayerRole::PetBody,
+            z: 9,
+            local_bounds: SmoothBounds {
+                min: SmoothPoint { x: -1.5, y: -0.25 },
+                max: SmoothPoint { x: 4.5, y: 5.75 },
+            },
+            anchor: SmoothPoint { x: 0.5, y: 1.0 },
+            transform_origin: SmoothPoint { x: 0.5, y: 0.8 },
+            transform: SmoothTransform {
+                translation: SmoothPoint { x: 0.0, y: 0.33 },
+                scale: SmoothPoint { x: 1.0, y: 0.96 },
+                rotation_degrees: -2.5,
+            },
+            opacity: 0.85,
+            clip: SmoothClip::Rect(SmoothBounds {
+                min: SmoothPoint { x: -2.0, y: -1.0 },
+                max: SmoothPoint { x: 6.0, y: 7.0 },
+            }),
+            blend: SmoothBlendMode::Multiply,
+            items: vec![local_item(cell(1, 2, "@", Some(rgb(1, 2, 3)), None, true))],
+            privacy: SmoothCompanionPrivacyClaims::external_companion(),
+        };
+
+        assert_eq!(layer.role, SmoothLayerRole::PetBody);
+        assert_eq!(layer.local_bounds.min.x, -1.5);
+        assert_eq!(layer.anchor.y, 1.0);
+        assert_eq!(layer.transform_origin.y, 0.8);
+        assert_eq!(layer.transform.translation.y, 0.33);
+        assert_eq!(layer.transform.scale.y, 0.96);
+        assert_eq!(layer.transform.rotation_degrees, -2.5);
+        assert_eq!(layer.opacity, 0.85);
+        assert_eq!(
+            layer.clip,
+            SmoothClip::Rect(SmoothBounds {
+                min: SmoothPoint { x: -2.0, y: -1.0 },
+                max: SmoothPoint { x: 6.0, y: 7.0 },
+            })
+        );
+        assert_eq!(layer.blend, SmoothBlendMode::Multiply);
+    }
+
+    #[test]
+    fn smooth_scene_plan_and_layered_scene_offer_method_flatten_helpers() {
+        let layered_scene = LayeredPetScene {
+            layers: vec![layer(
+                "pet-body",
+                SmoothLayerRole::PetBody,
+                0,
+                vec![local_item(cell(2, 3, "P", Some(rgb(9, 8, 7)), None, false))],
+            )],
+        };
+        let plan = SmoothCompanionScenePlan {
+            layers: layered_scene.layers.clone(),
+            privacy: SmoothCompanionPrivacyClaims::external_companion(),
+        };
+
+        let expected = SceneDrawList {
+            cells: vec![DrawCell {
+                row: 2,
+                col: 3,
+                glyph: Some("P".to_string()),
+                fg: Some(rgb(9, 8, 7)),
+                bg: None,
+                bold: false,
+            }],
+        };
+
+        assert_eq!(layered_scene.flatten_classic_cells(), expected);
+        assert_eq!(plan.flatten_classic_cells(), expected);
+        assert_eq!(
+            layered_scene.classic_flatten_checksum(),
+            classic_flatten_checksum(&expected.cells)
+        );
+        assert_eq!(
+            plan.classic_flatten_checksum(),
+            classic_flatten_checksum(&expected.cells)
+        );
     }
 
     #[test]
