@@ -1,6 +1,6 @@
 use crate::presentation::smooth::{
     CompanionChromeReservation, CompanionViewport, SmoothBounds, SmoothCompanionLayer,
-    SmoothDepthPlane, SmoothLayerMotionBinding, SmoothPoint,
+    SmoothDepthPlane, SmoothLayerItem, SmoothLayerMotionBinding, SmoothPoint,
 };
 
 const FAR_MULTIPLIER: f32 = 0.01;
@@ -16,6 +16,7 @@ const OVERLAP_EPSILON: f32 = 0.000_01;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParallaxResolveError {
     NonFiniteGeometry,
+    InvalidLifecycleScale,
     UnsupportedObjectGeometry,
 }
 
@@ -43,9 +44,10 @@ fn raw_plane_delta(
     lifecycle_scale: f32,
     plane: SmoothDepthPlane,
 ) -> Result<SmoothPoint, ParallaxResolveError> {
-    if !point_is_finite(focus) || !lifecycle_scale.is_finite() {
+    if !point_is_finite(focus) {
         return Err(ParallaxResolveError::NonFiniteGeometry);
     }
+    validate_lifecycle_scale(lifecycle_scale)?;
 
     let multiplier = plane_multiplier(plane);
     let delta = SmoothPoint {
@@ -94,15 +96,16 @@ fn resolve_object_parallax(
 ) -> Result<SmoothPoint, ParallaxResolveError> {
     if layer.transform.scale != (SmoothPoint { x: 1.0, y: 1.0 })
         || layer.transform.rotation_degrees != 0.0
-        || layer.items.iter().any(|item| {
-            matches!(
-                item,
-                crate::presentation::smooth::SmoothLayerItem::Shape(_)
-                    | crate::presentation::smooth::SmoothLayerItem::Raster(_)
-            )
-        })
     {
         return Err(ParallaxResolveError::UnsupportedObjectGeometry);
+    }
+    for item in &layer.items {
+        match item {
+            SmoothLayerItem::LocalCell(_) => {}
+            SmoothLayerItem::Shape(_) | SmoothLayerItem::Raster(_) => {
+                return Err(ParallaxResolveError::UnsupportedObjectGeometry);
+            }
+        }
     }
 
     let raw_delta = raw_plane_delta(focus, lifecycle_scale, plane)?;
@@ -125,18 +128,23 @@ fn object_delta_is_safe(
     chrome: &CompanionChromeReservation,
 ) -> Result<bool, ParallaxResolveError> {
     for item in &layer.items {
-        let crate::presentation::smooth::SmoothLayerItem::LocalCell(cell) = item else {
-            continue;
-        };
-        let before = translated_cell_bounds(layer, cell.row, cell.col, SmoothPoint::default());
-        let after = translated_cell_bounds(layer, cell.row, cell.col, delta);
-        if !bounds_are_finite(before) || !bounds_are_finite(after) {
-            return Err(ParallaxResolveError::NonFiniteGeometry);
-        }
+        match item {
+            SmoothLayerItem::LocalCell(cell) => {
+                let before =
+                    translated_cell_bounds(layer, cell.row, cell.col, SmoothPoint::default());
+                let after = translated_cell_bounds(layer, cell.row, cell.col, delta);
+                if !bounds_are_finite(before) || !bounds_are_finite(after) {
+                    return Err(ParallaxResolveError::NonFiniteGeometry);
+                }
 
-        for reservation in chrome.hud_bounds.iter().chain(&chrome.gauge_bounds) {
-            if !overlap_is_safe(before, after, *reservation) {
-                return Ok(false);
+                for reservation in chrome.hud_bounds.iter().chain(&chrome.gauge_bounds) {
+                    if !overlap_is_safe(before, after, *reservation) {
+                        return Ok(false);
+                    }
+                }
+            }
+            SmoothLayerItem::Shape(_) | SmoothLayerItem::Raster(_) => {
+                return Err(ParallaxResolveError::UnsupportedObjectGeometry);
             }
         }
     }
@@ -186,7 +194,6 @@ fn validate_resolver_geometry(
     if viewport.grid_cols == 0
         || viewport.grid_rows == 0
         || !point_is_finite(focus)
-        || !lifecycle_scale.is_finite()
         || !point_is_finite(layer.anchor)
         || !point_is_finite(layer.transform.translation)
         || !point_is_finite(layer.transform.scale)
@@ -198,6 +205,17 @@ fn validate_resolver_geometry(
             .any(|bounds| !bounds_are_finite(*bounds))
     {
         return Err(ParallaxResolveError::NonFiniteGeometry);
+    }
+
+    validate_lifecycle_scale(lifecycle_scale)
+}
+
+fn validate_lifecycle_scale(lifecycle_scale: f32) -> Result<(), ParallaxResolveError> {
+    if !lifecycle_scale.is_finite() {
+        return Err(ParallaxResolveError::NonFiniteGeometry);
+    }
+    if lifecycle_scale != 1.0 && lifecycle_scale != 0.5 && lifecycle_scale != 0.25 {
+        return Err(ParallaxResolveError::InvalidLifecycleScale);
     }
 
     Ok(())
@@ -278,6 +296,66 @@ mod tests {
         assert_eq!(parallax_lifecycle_scale(false, true), 0.5);
         assert_eq!(parallax_lifecycle_scale(true, false), 0.25);
         assert_eq!(parallax_lifecycle_scale(true, true), 0.25);
+    }
+
+    #[test]
+    fn resolver_rejects_lifecycle_scales_outside_domain_without_reversing_direction() {
+        let viewport = CompanionViewport { grid_cols: 20, grid_rows: 10 };
+        let chrome = CompanionChromeReservation::default();
+        for binding in [
+            SmoothLayerMotionBinding::Fixed,
+            SmoothLayerMotionBinding::PetAttached,
+            SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Far),
+        ] {
+            let layer = local_cell_layer(binding, bounds(0.0, 0.0, 1.0, 1.0), &[(0, 0)]);
+            for invalid_scale in [-1.0, 0.0, 0.75, 2.0] {
+                assert_eq!(
+                    resolve_layer_parallax(
+                        SmoothPoint { x: 4.0, y: 3.0 },
+                        invalid_scale,
+                        &layer,
+                        viewport,
+                        &chrome,
+                    ),
+                    Err(ParallaxResolveError::InvalidLifecycleScale)
+                );
+            }
+        }
+
+        let moving = local_cell_layer(
+            SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Far),
+            bounds(0.0, 0.0, 1.0, 1.0),
+            &[(0, 0)],
+        );
+        assert_eq!(
+            resolve_layer_parallax(
+                SmoothPoint { x: 4.0, y: 3.0 },
+                f32::NAN,
+                &moving,
+                viewport,
+                &chrome,
+            ),
+            Err(ParallaxResolveError::NonFiniteGeometry)
+        );
+
+        for (asleep, calm) in [(false, false), (false, true), (true, false), (true, true)] {
+            let scale = parallax_lifecycle_scale(asleep, calm);
+            let delta = resolve_layer_parallax(
+                SmoothPoint { x: 4.0, y: 3.0 },
+                scale,
+                &moving,
+                viewport,
+                &chrome,
+            )
+            .unwrap();
+            assert_eq!(
+                delta,
+                raw_plane_delta(SmoothPoint { x: 4.0, y: 3.0 }, scale, SmoothDepthPlane::Far)
+                    .unwrap()
+            );
+            assert!(delta.x > 0.0);
+            assert!(delta.y > 0.0);
+        }
     }
 
     #[test]
