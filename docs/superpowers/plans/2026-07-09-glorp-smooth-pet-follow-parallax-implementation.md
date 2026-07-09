@@ -136,6 +136,7 @@ pub struct SmoothCompanionPet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParallaxResolveError {
     NonFiniteGeometry,
+    InvalidLifecycleScale,
     UnsupportedObjectGeometry,
 }
 
@@ -727,6 +728,9 @@ fn raw_plane_delta(
     if !focus.x.is_finite() || !focus.y.is_finite() || !lifecycle_scale.is_finite() {
         return Err(ParallaxResolveError::NonFiniteGeometry);
     }
+    if lifecycle_scale != 1.0 && lifecycle_scale != 0.5 && lifecycle_scale != 0.25 {
+        return Err(ParallaxResolveError::InvalidLifecycleScale);
+    }
     let multiplier = plane_multiplier(plane);
     Ok(SmoothPoint {
         x: (focus.x * multiplier * lifecycle_scale)
@@ -736,6 +740,10 @@ fn raw_plane_delta(
     })
 }
 ```
+
+The exact lifecycle domain is closed: only `1.0`, `0.5`, and `0.25` are
+accepted. Add a regression test proving negative and arbitrary finite values
+return `InvalidLifecycleScale` and cannot reverse the focus direction.
 
 `resolve_layer_parallax()` must return zero for `Fixed` and `PetAttached` after finite geometry validation. It must return the raw delta directly for Far and Mid.
 
@@ -982,7 +990,7 @@ cargo test --lib round::parallax::tests -- --nocapture
 cargo test --lib presentation::smooth::tests
 ```
 
-Expected: PASS for zero focus, symmetry, strict raw ordering before caps, independent caps, lifecycle precedence, fixed/pet zero movement, non-finite rejection, sparse-cell safety, no-new-overlap safety, no-worse-overlap safety, and unsupported object geometry.
+Expected: PASS for zero focus, symmetry, strict raw ordering before caps, independent caps, lifecycle precedence, invalid lifecycle rejection, fixed/pet zero movement, non-finite rejection, sparse-cell safety, no-new-overlap safety, no-worse-overlap safety, exhaustive item handling, and unsupported object geometry.
 
 - [ ] **Step 6: Commit Task 3**
 
@@ -1258,6 +1266,30 @@ fn classic_breath_does_not_change_parallax_focus() {
     );
 }
 ```
+
+Rename the existing
+`smooth_round_plan_moves_pet_attached_layers_but_keeps_chest_bubble_snapped`
+test to
+`smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind`.
+Keep its pet-attached assertions, then replace the obsolete zero-translation
+assertions with:
+
+```rust
+let props_behind = plan.layer_by_role(SmoothLayerRole::PropsBehind).unwrap();
+assert_eq!(
+    chest_bubble.motion_binding,
+    SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Behind)
+);
+assert_eq!(chest_bubble.motion_binding, props_behind.motion_binding);
+assert_eq!(
+    chest_bubble.transform.translation,
+    chest_bubble.parallax_translation
+);
+```
+
+This proves the chest bubble follows its catalogued background prop plane. Its
+resolved value may be safety-attenuated, so do not require it to be non-zero or
+equal to another Behind layer's resolved delta.
 
 - [ ] **Step 7: Run focused smooth-plan coverage**
 

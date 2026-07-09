@@ -227,6 +227,14 @@ Its output is a finite, bounded `SmoothPoint` translation delta. The scene plan
 builder composes that delta with the layer's existing translation. Pet anchor
 correction and bob remain unchanged.
 
+Lifecycle attenuation is a closed input domain. The resolver accepts only the
+three values produced by the lifecycle helper: normal (`1.0`), calm (`0.5`),
+and asleep (`0.25`). Any other finite value returns
+`ParallaxResolveError::InvalidLifecycleScale`; it is never clamped or allowed
+to reverse the direction of the focus vector. The scene-plan builder maps that
+internal error to `SmoothScenePlanError::InvalidParallaxGeometry` like other
+parallax planning failures.
+
 The initial tuning profile uses these named constants:
 
 | Plane | Focus multiplier |
@@ -282,6 +290,12 @@ item may not receive a Behind or Foreground binding until it exposes explicit
 occupied bounds; otherwise planning returns
 `SmoothScenePlanError::InvalidParallaxGeometry`.
 
+Behind and Foreground item handling must use exhaustive enum matches with no
+wildcard or fall-through branch. `LocalCell` contributes occupied geometry;
+`Shape` and `Raster` fail closed. Adding a future `SmoothLayerItem` variant must
+therefore produce a compile-time obligation to define its collision policy
+instead of silently omitting it from safety checks.
+
 Circular aperture clipping remains intentional: a foreground glyph may be
 cropped at the porthole rim just as Classic scene content is today. Parallax may
 not move coordinates outside finite viewport math or bypass the aperture clip.
@@ -311,9 +325,10 @@ current Classic draw-list checksum.
 
 ## Error Handling
 
-All resolver inputs and outputs must be finite. Invalid focus or geometry
-returns `SmoothScenePlanError::InvalidParallaxGeometry`; it is not a panic and
-not a NaN passed to AppKit.
+All resolver inputs and outputs must be finite, and lifecycle attenuation must
+belong to the closed domain above. Invalid focus, lifecycle attenuation, or
+geometry returns `SmoothScenePlanError::InvalidParallaxGeometry`; it is not a
+panic and not a NaN passed to AppKit.
 
 After the implementation entry gate passes, production frame preparation uses
 the fallible smooth planner. A parallax planning error follows the existing
@@ -365,11 +380,15 @@ raw diagnostics, and unprojected pet seeds remain forbidden.
 - Horizontal and vertical caps are enforced independently.
 - Calm and asleep attenuation use the specified factors.
 - Asleep attenuation takes precedence when asleep and calm are both true.
+- Unsupported finite lifecycle attenuation returns a categorized error and
+  cannot reverse parallax direction.
 - Fixed and pet-attached bindings add no parallax.
 - Non-finite input returns a categorized error.
 - Occupied-cell safety avoids aggregate-bounds false positives.
 - Behind and Foreground safety prevents new chrome overlap and does not worsen
   existing overlap.
+- Behind and Foreground item matching is exhaustive and fails closed for
+  geometry without occupied bounds.
 - Unknown future roles default to fixed behavior.
 
 ### Integration coverage
