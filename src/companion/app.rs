@@ -473,6 +473,9 @@ fn apply_post_poll_update(
         now,
     );
     apply_review_state(review_state, presentation_state, &mut vm, now)?;
+    if renderer_mode.is_smooth() {
+        prepare_smooth_initial_view_model(&mut vm, now)?;
+    }
     let pixel_input = renderer_mode
         .is_pixel()
         .then(|| PixelPetInput::from_watch_view_model(&vm, now));
@@ -1628,6 +1631,37 @@ mod tests {
         assert_eq!(vm.last_feed_pulse_at, None);
         let source = vm.source_health.first().expect("fixture source health");
         assert_ne!(source.status, SourceStatus::Diagnostic);
+    }
+
+    #[test]
+    fn smooth_post_poll_update_prepares_pet_art_before_next_semantic_tick() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut presentation_state = WatchPresentationState::default();
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_art.clear();
+        vm.pet_spans.clear();
+        let update = LiveWatchUpdate {
+            pet_state: crate::storage::state::PetState::new_for_test("seed", "glorp"),
+            vm,
+            applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+        };
+
+        let (vm, scene, pixel_input) = apply_post_poll_update(
+            &mut presentation_state,
+            CompanionReviewState::Normal,
+            CompanionRendererMode::Smooth,
+            update,
+            now,
+        )
+        .unwrap();
+
+        assert!(!vm.pet_art.is_empty());
+        assert!(!vm.pet_spans.is_empty());
+        assert!(!scene.pet.art_lines.is_empty());
+        assert!(pixel_input.is_none());
     }
 
     fn accent_alpha_sum(frame: &PixelFrame, input: &PixelPetInput) -> u32 {

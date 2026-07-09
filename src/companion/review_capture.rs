@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,8 @@ pub struct ReviewCapture {
     smooth_frame_samples: Vec<SmoothReviewFrameSample>,
     max_adjacent_base_anchor_delta: SmoothReviewPoint,
     max_adjacent_final_anchor_delta: SmoothReviewPoint,
+    pet_checksums_by_semantic_tick: BTreeMap<u64, u64>,
+    pet_checksums_stable_within_semantic_ticks: bool,
     last_smooth_sample: Option<SmoothReviewFrameSample>,
     panic: bool,
     screenshot_written: bool,
@@ -82,6 +85,8 @@ impl ReviewCapture {
             smooth_frame_samples: Vec::new(),
             max_adjacent_base_anchor_delta: SmoothReviewPoint::default(),
             max_adjacent_final_anchor_delta: SmoothReviewPoint::default(),
+            pet_checksums_by_semantic_tick: BTreeMap::new(),
+            pet_checksums_stable_within_semantic_ticks: true,
             last_smooth_sample: None,
             panic: false,
             screenshot_written: false,
@@ -107,6 +112,14 @@ impl ReviewCapture {
                     previous.final_anchor,
                     sample.final_anchor,
                 );
+            }
+            if let Some(existing) = self
+                .pet_checksums_by_semantic_tick
+                .insert(sample.semantic_art_tick_index, sample.pet_visual_checksum)
+            {
+                if existing != sample.pet_visual_checksum {
+                    self.pet_checksums_stable_within_semantic_ticks = false;
+                }
             }
             self.last_smooth_sample = Some(sample);
             if self.smooth_frame_samples.len() < MAX_SMOOTH_FRAME_SAMPLES {
@@ -182,6 +195,8 @@ impl ReviewCapture {
             frame_count: self.frame_count,
             elapsed_duration_ms: self.started_at.elapsed().as_millis(),
             semantic_art_tick_count: self.semantic_art_tick_count,
+            pet_checksums_stable_within_semantic_ticks: self
+                .pet_checksums_stable_within_semantic_ticks,
             max_adjacent_base_anchor_delta: self.max_adjacent_base_anchor_delta,
             max_adjacent_final_anchor_delta: self.max_adjacent_final_anchor_delta,
             smooth_frame_samples: &self.smooth_frame_samples,
@@ -194,17 +209,7 @@ impl ReviewCapture {
 
     #[cfg(test)]
     fn pet_checksums_stable_within_semantic_ticks(&self) -> bool {
-        let mut by_tick = std::collections::BTreeMap::<u64, u64>::new();
-        for sample in &self.smooth_frame_samples {
-            if let Some(existing) =
-                by_tick.insert(sample.semantic_art_tick_index, sample.pet_visual_checksum)
-            {
-                if existing != sample.pet_visual_checksum {
-                    return false;
-                }
-            }
-        }
-        true
+        self.pet_checksums_stable_within_semantic_ticks
     }
 }
 
@@ -217,6 +222,7 @@ struct RenderLog<'a> {
     frame_count: u64,
     elapsed_duration_ms: u128,
     semantic_art_tick_count: u64,
+    pet_checksums_stable_within_semantic_ticks: bool,
     max_adjacent_base_anchor_delta: SmoothReviewPoint,
     max_adjacent_final_anchor_delta: SmoothReviewPoint,
     smooth_frame_samples: &'a [SmoothReviewFrameSample],
@@ -446,6 +452,7 @@ mod tests {
         assert_eq!(value["max_adjacent_final_anchor_delta"]["y"], 0.30);
         assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 3);
         assert_eq!(value["smooth_frame_samples"][0]["pet_visual_checksum"], 123);
+        assert_eq!(value["pet_checksums_stable_within_semantic_ticks"], true);
         assert_eq!(value["privacy"]["source_names_visible"], false);
         assert_eq!(value["privacy"]["exact_token_strings_visible"], false);
     }
@@ -482,6 +489,46 @@ mod tests {
         }));
 
         assert!(!capture.pet_checksums_stable_within_semantic_ticks_for_test());
+    }
+
+    #[test]
+    fn smooth_review_capture_checksum_stability_covers_unsampled_frames() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        for index in 0..(MAX_SMOOTH_FRAME_SAMPLES + 1) {
+            capture.record_frame(Some(SmoothReviewFrameSample {
+                bob_y: 0.1,
+                semantic_art_tick_index: 0,
+                pet_visual_checksum: 123,
+                base_anchor: SmoothReviewPoint { x: index as f32, y: 1.0 },
+                bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
+                final_anchor: SmoothReviewPoint { x: index as f32, y: 1.1 },
+                classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            }));
+        }
+        capture.record_frame(Some(SmoothReviewFrameSample {
+            bob_y: 0.1,
+            semantic_art_tick_index: 0,
+            pet_visual_checksum: 456,
+            base_anchor: SmoothReviewPoint { x: 200.0, y: 1.0 },
+            bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
+            final_anchor: SmoothReviewPoint { x: 200.0, y: 1.1 },
+            classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+        }));
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 120);
+        assert_eq!(value["pet_checksums_stable_within_semantic_ticks"], false);
     }
 
     #[test]
