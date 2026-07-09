@@ -40,6 +40,49 @@ pub enum SmoothBlendMode {
 pub struct SmoothLayerId(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothDepthPlane {
+    Far,
+    Mid,
+    Behind,
+    Foreground,
+}
+
+impl SmoothDepthPlane {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Far => "far",
+            Self::Mid => "mid",
+            Self::Behind => "behind",
+            Self::Foreground => "foreground",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothLayerMotionBinding {
+    Fixed,
+    PetAttached,
+    Parallax(SmoothDepthPlane),
+}
+
+impl SmoothLayerMotionBinding {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::PetAttached => "pet-attached",
+            Self::Parallax(_) => "parallax",
+        }
+    }
+
+    pub const fn depth_plane(self) -> Option<SmoothDepthPlane> {
+        match self {
+            Self::Parallax(plane) => Some(plane),
+            Self::Fixed | Self::PetAttached => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmoothLayerRole {
     DepthRings,
     BiomeWash,
@@ -82,6 +125,22 @@ impl SmoothLayerRole {
             Self::TroubleIndicator => "trouble-indicator",
             Self::MoodAura => "mood-aura",
             Self::DimOverlay => "dim-overlay",
+        }
+    }
+
+    pub const fn motion_binding(self) -> SmoothLayerMotionBinding {
+        use SmoothDepthPlane::{Behind, Far, Foreground, Mid};
+        use SmoothLayerMotionBinding::{Fixed, Parallax, PetAttached};
+
+        match self {
+            Self::BiomeWash | Self::RoomGlyphs => Parallax(Far),
+            Self::Ambient | Self::Motes | Self::ActivityGlyphs => Parallax(Mid),
+            Self::PropsBehind | Self::TankLifeBehind | Self::ChestBubble => Parallax(Behind),
+            Self::ContactShadow | Self::PetBody | Self::PerformanceCue | Self::MoodAura => {
+                PetAttached
+            }
+            Self::PropsForeground | Self::TankLifeForeground => Parallax(Foreground),
+            _ => Fixed,
         }
     }
 }
@@ -144,16 +203,26 @@ impl SmoothCompanionPrivacyClaims {
 pub struct SmoothCompanionLayer {
     pub id: SmoothLayerId,
     pub role: SmoothLayerRole,
+    pub motion_binding: SmoothLayerMotionBinding,
     pub z: i16,
     pub local_bounds: SmoothBounds,
     pub anchor: SmoothPoint,
     pub transform_origin: SmoothPoint,
     pub transform: SmoothTransform,
+    pub parallax_translation: SmoothPoint,
     pub opacity: f32,
     pub clip: SmoothClip,
     pub blend: SmoothBlendMode,
     pub items: Vec<SmoothLayerItem>,
     pub privacy: SmoothCompanionPrivacyClaims,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SmoothParallaxPlaneTranslations {
+    pub far: SmoothPoint,
+    pub mid: SmoothPoint,
+    pub behind: SmoothPoint,
+    pub foreground: SmoothPoint,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +245,7 @@ pub struct SmoothCompanionScenePlan {
     pub viewport: CompanionViewport,
     pub layers: Vec<SmoothCompanionLayer>,
     pub pet: SmoothCompanionPet,
+    pub parallax_lifecycle_scale: f32,
     pub chrome: CompanionChromeReservation,
     pub privacy: SmoothCompanionPrivacyClaims,
     pub(crate) classic_flatten_compat: SmoothClassicFlattenCompat,
@@ -199,6 +269,44 @@ impl SmoothCompanionScenePlan {
 
     pub fn layer_by_role(&self, role: SmoothLayerRole) -> Option<&SmoothCompanionLayer> {
         self.layers.iter().find(|layer| layer.role == role)
+    }
+
+    pub fn parallax_translations_by_plane(&self) -> SmoothParallaxPlaneTranslations {
+        fn strongest_axis(current: f32, candidate: f32) -> f32 {
+            if candidate.abs() > current.abs() {
+                candidate
+            } else {
+                current
+            }
+        }
+
+        fn strongest_point(current: SmoothPoint, candidate: SmoothPoint) -> SmoothPoint {
+            SmoothPoint {
+                x: strongest_axis(current.x, candidate.x),
+                y: strongest_axis(current.y, candidate.y),
+            }
+        }
+
+        let mut result = SmoothParallaxPlaneTranslations::default();
+        for layer in &self.layers {
+            match layer.motion_binding.depth_plane() {
+                Some(SmoothDepthPlane::Far) => {
+                    result.far = strongest_point(result.far, layer.parallax_translation);
+                }
+                Some(SmoothDepthPlane::Mid) => {
+                    result.mid = strongest_point(result.mid, layer.parallax_translation);
+                }
+                Some(SmoothDepthPlane::Behind) => {
+                    result.behind = strongest_point(result.behind, layer.parallax_translation);
+                }
+                Some(SmoothDepthPlane::Foreground) => {
+                    result.foreground =
+                        strongest_point(result.foreground, layer.parallax_translation);
+                }
+                None => {}
+            }
+        }
+        result
     }
 
     pub fn with_classic_flatten_compat(mut self, compat: SmoothClassicFlattenCompat) -> Self {
@@ -270,6 +378,7 @@ pub struct SmoothCompanionPet {
     pub bob_offset: SmoothPoint,
     pub final_anchor: SmoothPoint,
     pub classic_snap_anchor: SmoothPoint,
+    pub parallax_focus_offset: SmoothPoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -421,6 +530,7 @@ mod tests {
         SmoothCompanionLayer {
             id: SmoothLayerId(id.to_string()),
             role,
+            motion_binding: role.motion_binding(),
             z,
             local_bounds: SmoothBounds {
                 min: SmoothPoint { x: 0.0, y: 0.0 },
@@ -433,6 +543,7 @@ mod tests {
                 scale: SmoothPoint { x: 1.0, y: 1.0 },
                 rotation_degrees: 0.0,
             },
+            parallax_translation: SmoothPoint { x: 0.0, y: 0.0 },
             opacity: 1.0,
             clip: SmoothClip::None,
             blend: SmoothBlendMode::Normal,
@@ -524,6 +635,7 @@ mod tests {
         let layer = SmoothCompanionLayer {
             id: SmoothLayerId("pet-body".to_string()),
             role: SmoothLayerRole::PetBody,
+            motion_binding: SmoothLayerMotionBinding::PetAttached,
             z: 0,
             local_bounds: SmoothBounds {
                 min: SmoothPoint { x: 0.0, y: 0.0 },
@@ -536,6 +648,7 @@ mod tests {
                 scale: SmoothPoint { x: 1.0, y: 1.0 },
                 rotation_degrees: 0.0,
             },
+            parallax_translation: SmoothPoint { x: 0.0, y: 0.0 },
             opacity: 1.0,
             clip: SmoothClip::None,
             blend: SmoothBlendMode::Normal,
@@ -547,6 +660,7 @@ mod tests {
             viewport: CompanionViewport::default(),
             layers: vec![layer],
             pet: SmoothCompanionPet::default(),
+            parallax_lifecycle_scale: 1.0,
             chrome: CompanionChromeReservation::default(),
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
             classic_flatten_compat: SmoothClassicFlattenCompat::None,
@@ -605,10 +719,63 @@ mod tests {
     }
 
     #[test]
+    fn current_smooth_roles_have_the_approved_motion_bindings() {
+        use SmoothDepthPlane::{Behind, Far, Foreground, Mid};
+        use SmoothLayerMotionBinding::{Fixed, Parallax, PetAttached};
+        use SmoothLayerRole::*;
+
+        let cases = [
+            (DepthRings, Fixed),
+            (BiomeWash, Parallax(Far)),
+            (RoomGlyphs, Parallax(Far)),
+            (Ambient, Parallax(Mid)),
+            (Motes, Parallax(Mid)),
+            (ActivityGlyphs, Parallax(Mid)),
+            (PropsBehind, Parallax(Behind)),
+            (TankLifeBehind, Parallax(Behind)),
+            (ChestBubble, Parallax(Behind)),
+            (ContactShadow, PetAttached),
+            (PetBody, PetAttached),
+            (PerformanceCue, PetAttached),
+            (PropsForeground, Parallax(Foreground)),
+            (TankLifeForeground, Parallax(Foreground)),
+            (StatusHalo, Fixed),
+            (TroubleIndicator, Fixed),
+            (MoodAura, PetAttached),
+            (DimOverlay, Fixed),
+        ];
+
+        for (role, expected) in cases {
+            assert_eq!(
+                role.motion_binding(),
+                expected,
+                "unexpected binding for {role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn motion_binding_exposes_privacy_safe_contract_names() {
+        use SmoothDepthPlane::*;
+        use SmoothLayerMotionBinding::*;
+
+        assert_eq!(Fixed.as_str(), "fixed");
+        assert_eq!(PetAttached.as_str(), "pet-attached");
+        assert_eq!(Parallax(Far).as_str(), "parallax");
+        assert_eq!(Parallax(Far).depth_plane(), Some(Far));
+        assert_eq!(Parallax(Mid).depth_plane(), Some(Mid));
+        assert_eq!(Parallax(Behind).depth_plane(), Some(Behind));
+        assert_eq!(Parallax(Foreground).depth_plane(), Some(Foreground));
+        assert_eq!(Fixed.depth_plane(), None);
+        assert_eq!(PetAttached.depth_plane(), None);
+    }
+
+    #[test]
     fn smooth_companion_layer_can_represent_fractional_transform_contract() {
         let layer = SmoothCompanionLayer {
             id: SmoothLayerId("pet-body".to_string()),
             role: SmoothLayerRole::PetBody,
+            motion_binding: SmoothLayerMotionBinding::PetAttached,
             z: 9,
             local_bounds: SmoothBounds {
                 min: SmoothPoint { x: -1.5, y: -0.25 },
@@ -621,6 +788,7 @@ mod tests {
                 scale: SmoothPoint { x: 1.0, y: 0.96 },
                 rotation_degrees: -2.5,
             },
+            parallax_translation: SmoothPoint { x: 0.0, y: 0.0 },
             opacity: 0.85,
             clip: SmoothClip::Rect(SmoothBounds {
                 min: SmoothPoint { x: -2.0, y: -1.0 },
@@ -663,6 +831,7 @@ mod tests {
             viewport: CompanionViewport::default(),
             layers: layered_scene.layers.clone(),
             pet: SmoothCompanionPet::default(),
+            parallax_lifecycle_scale: 1.0,
             chrome: CompanionChromeReservation::default(),
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
             classic_flatten_compat: SmoothClassicFlattenCompat::None,

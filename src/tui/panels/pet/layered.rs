@@ -393,6 +393,7 @@ fn layer_from_draw_cells_with_anchor(
     SmoothCompanionLayer {
         id: SmoothLayerId(id.to_string()),
         role,
+        motion_binding: role.motion_binding(),
         z,
         local_bounds,
         anchor,
@@ -402,6 +403,7 @@ fn layer_from_draw_cells_with_anchor(
             scale: SmoothPoint { x: 1.0, y: 1.0 },
             rotation_degrees: 0.0,
         },
+        parallax_translation: SmoothPoint { x: 0.0, y: 0.0 },
         opacity: 1.0,
         clip: SmoothClip::None,
         blend: SmoothBlendMode::Normal,
