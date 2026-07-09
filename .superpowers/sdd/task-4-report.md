@@ -217,3 +217,44 @@ Required formatting check:
 - None beyond the existing Slice 1 note above about fractional motion being
   primarily visible in `.smooth-motion.json` sidecars rather than large cell
   changes in every strip frame.
+
+## Fix Follow-up 2
+
+### Files changed
+
+- `src/dev_preview/contract.rs`
+- `tests/dev_preview.rs`
+- `.superpowers/sdd/task-4-report.md`
+
+### RED evidence
+
+- `cargo test --features dev-preview privacy_value_scan_ignores_allowed_claim_field_names`
+  - Failed as expected in `tests/dev_preview.rs`
+  - Output summary: `smooth sidecar leaked prompt` because the naive string scan matched the allowed `prompt_text_visible` claim key instead of only scanning JSON values
+- `cargo test --features dev-preview smooth_motion_artifact_requires_pet_body_layer`
+  - Failed as expected in `src/dev_preview/contract.rs`
+  - Output summary: `test did not panic as expected` because `PreviewSmoothMotionArtifact::from_scene_plan` still fell back to a non-`pet-body` populated layer
+
+### GREEN evidence
+
+- `cargo test --features dev-preview smooth_motion_artifact_requires_pet_body_layer`
+  - Passed: `1 passed; 0 failed`
+- `cargo test --features dev-preview privacy_value_scan_ignores_allowed_claim_field_names`
+  - Passed: `1 passed; 0 failed`
+- `cargo test --features dev-preview --test dev_preview dev_preview_smooth`
+  - Passed: `4 passed; 0 failed`
+- `cargo fmt --check`
+  - Failed once on rustfmt wrapping in `src/dev_preview/contract.rs` and `tests/dev_preview.rs`
+- `cargo fmt`
+  - Passed
+- `cargo fmt --check`
+  - Passed
+
+### Commit SHA(s)
+
+- `PENDING`
+
+### Concerns
+
+- Left the optional `item_count` future-proofing note untouched to keep this fix
+  strictly on the two Important reviewer findings and their focused coverage.

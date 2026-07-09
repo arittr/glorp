@@ -231,6 +231,53 @@ fn collect_smooth_sidecar_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
     }
 }
 
+const SIDECAR_FORBIDDEN_PRIVACY_VALUE_TOKENS: &[&str] = &[
+    "fixture-seed",
+    "art_text",
+    "claude",
+    "codex",
+    "openai",
+    "source_name",
+    "display_name",
+    "/users/",
+    "/tmp/",
+    "prompt",
+    "response",
+    "transcript",
+    "tool payload",
+    "diagnostic",
+    "very-secret-seed",
+];
+
+fn assert_sidecar_json_values_are_sanitized(sidecar: &Value, surface: &str) {
+    assert_json_value_is_sanitized(sidecar, surface, "$");
+}
+
+fn assert_json_value_is_sanitized(value: &Value, surface: &str, path: &str) {
+    match value {
+        Value::String(text) => {
+            let text = text.to_ascii_lowercase();
+            for forbidden in SIDECAR_FORBIDDEN_PRIVACY_VALUE_TOKENS {
+                assert!(
+                    !text.contains(forbidden),
+                    "{surface} sidecar leaked {forbidden} at {path}: {text}"
+                );
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                assert_json_value_is_sanitized(child, surface, &format!("{path}[{index}]"));
+            }
+        }
+        Value::Object(map) => {
+            for (key, child) in map {
+                assert_json_value_is_sanitized(child, surface, &format!("{path}.{key}"));
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 fn pixel_alpha_sum_for_rgb(pixel: &Value, rgb: &str) -> u32 {
     pixel["pixels"]
         .as_array()
@@ -508,6 +555,19 @@ fn dev_preview_watch_writes_expected_artifacts() {
     for id in SPECIES_DIALECT_STRICT_IDS {
         assert_artifact_type(&manifest, &format!("{id}-room-masked"), "text");
     }
+}
+
+#[test]
+fn privacy_value_scan_ignores_allowed_claim_field_names() {
+    let sidecar = serde_json::json!({
+        "privacy": {
+            "prompt_text_visible": false,
+            "response_text_visible": false,
+            "raw_diagnostics_visible": false,
+        }
+    });
+
+    assert_sidecar_json_values_are_sanitized(&sidecar, "smooth");
 }
 
 #[test]
@@ -2355,25 +2415,8 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
             continue;
         }
         let sidecar = std::fs::read_to_string(&path).unwrap().to_lowercase();
-        for forbidden in [
-            "fixture-seed",
-            "art_text",
-            "claude",
-            "codex",
-            "source_name",
-            "display_name",
-            "/users/",
-            "/tmp/",
-            "prompt",
-            "response",
-            "transcript",
-            "diagnostic",
-        ] {
-            assert!(
-                !sidecar.contains(forbidden),
-                "pixel sidecar leaked {forbidden}: {sidecar}"
-            );
-        }
+        let sidecar: Value = serde_json::from_str(&sidecar).unwrap();
+        assert_sidecar_json_values_are_sanitized(&sidecar, "pixel");
     }
 }
 
@@ -2513,22 +2556,8 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
     assert_eq!(parity["required_roles"].as_array().unwrap().len(), 18);
 
     for path in smooth_sidecars {
-        let text = std::fs::read_to_string(path).unwrap().to_ascii_lowercase();
-        for forbidden in [
-            "/users/",
-            "/tmp/",
-            "claude",
-            "codex",
-            "openai",
-            "transcript",
-            "tool payload",
-            "very-secret-seed",
-        ] {
-            assert!(
-                !text.contains(forbidden),
-                "smooth sidecar leaked {forbidden}: {text}"
-            );
-        }
+        let sidecar: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_sidecar_json_values_are_sanitized(&sidecar, "smooth");
     }
 }
 

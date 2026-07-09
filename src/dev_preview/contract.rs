@@ -601,8 +601,7 @@ impl PreviewSmoothMotionArtifact {
     ) -> Self {
         let pet_layer = plan
             .layer_by_role(SmoothLayerRole::PetBody)
-            .or_else(|| plan.layers.iter().find(|layer| !layer.items.is_empty()))
-            .expect("smooth plan should include a pet or populated layer");
+            .expect("smooth plan should include a pet-body layer for motion proof");
         let anchor_x = pet_layer.anchor.x + pet_layer.transform.translation.x;
         let anchor_y = pet_layer.anchor.y + pet_layer.transform.translation.y;
         let pulse = if vm.last_feed_pulse_at.is_some() {
@@ -1139,5 +1138,19 @@ mod tests {
         );
         assert!(!artifact.exact_match);
         assert_eq!(artifact.review_status, "missing-required-roles");
+    }
+
+    #[test]
+    #[should_panic(expected = "smooth plan should include a pet-body layer for motion proof")]
+    fn smooth_motion_artifact_requires_pet_body_layer() {
+        let now = datetime!(2026-07-08 18:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = CompanionMotion::default();
+        let mut plan = build_round_smooth_scene_plan(&vm, now, 52, 52, &motion, 0);
+        plan.layers
+            .retain(|layer| !matches!(layer.role, SmoothLayerRole::PetBody));
+
+        let _artifact =
+            PreviewSmoothMotionArtifact::from_scene_plan("round-smooth-motion", 0, 0, &vm, &plan);
     }
 }
