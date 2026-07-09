@@ -564,11 +564,16 @@ impl PreviewSmoothParityArtifact {
         plan: &SmoothCompanionScenePlan,
     ) -> Self {
         let smooth_flatten_checksum = plan.classic_flatten_checksum();
-        let required_roles = plan
-            .layers
-            .iter()
-            .map(|layer| layer.role.as_str().to_string())
-            .collect::<Vec<_>>();
+        let required_roles = smooth_required_role_names();
+        let missing_roles = smooth_missing_role_names(plan);
+        let exact_match = classic_checksum == smooth_flatten_checksum && missing_roles.is_empty();
+        let review_status = if !missing_roles.is_empty() {
+            "missing-required-roles".to_string()
+        } else if exact_match {
+            "exact-match".to_string()
+        } else {
+            "mismatch".to_string()
+        };
 
         Self {
             schema_version: CONTRACT_SCHEMA_VERSION,
@@ -576,14 +581,10 @@ impl PreviewSmoothParityArtifact {
             fixture_id: fixture_id.to_string(),
             classic_checksum,
             smooth_flatten_checksum,
-            exact_match: classic_checksum == smooth_flatten_checksum,
+            exact_match,
             required_roles,
-            missing_roles: Vec::new(),
-            review_status: if classic_checksum == smooth_flatten_checksum {
-                "exact-match".to_string()
-            } else {
-                "mismatch".to_string()
-            },
+            missing_roles,
+            review_status,
             abstract_state: smooth_abstract_state(vm),
             privacy: PreviewSmoothPrivacyArtifact::from_claims(&plan.privacy),
         }
@@ -865,19 +866,55 @@ fn smooth_item_count(layer: &SmoothCompanionLayer) -> usize {
         .count()
 }
 
+const SMOOTH_SLICE1_REQUIRED_ROLES: [SmoothLayerRole; 18] = [
+    SmoothLayerRole::DepthRings,
+    SmoothLayerRole::BiomeWash,
+    SmoothLayerRole::RoomGlyphs,
+    SmoothLayerRole::Ambient,
+    SmoothLayerRole::Motes,
+    SmoothLayerRole::ActivityGlyphs,
+    SmoothLayerRole::PropsBehind,
+    SmoothLayerRole::TankLifeBehind,
+    SmoothLayerRole::ChestBubble,
+    SmoothLayerRole::ContactShadow,
+    SmoothLayerRole::PetBody,
+    SmoothLayerRole::PerformanceCue,
+    SmoothLayerRole::PropsForeground,
+    SmoothLayerRole::TankLifeForeground,
+    SmoothLayerRole::StatusHalo,
+    SmoothLayerRole::TroubleIndicator,
+    SmoothLayerRole::MoodAura,
+    SmoothLayerRole::DimOverlay,
+];
+
+fn smooth_required_role_names() -> Vec<String> {
+    SMOOTH_SLICE1_REQUIRED_ROLES
+        .into_iter()
+        .map(|role| role.as_str().to_string())
+        .collect()
+}
+
+fn smooth_missing_role_names(plan: &SmoothCompanionScenePlan) -> Vec<String> {
+    SMOOTH_SLICE1_REQUIRED_ROLES
+        .into_iter()
+        .filter(|role| plan.layer_by_role(*role).is_none())
+        .map(|role| role.as_str().to_string())
+        .collect()
+}
+
 fn smooth_abstract_state(vm: &WatchViewModel) -> BTreeMap<String, String> {
     BTreeMap::from([
         (
             "species".to_string(),
-            vm.pet_render.generated_species.as_str().to_string(),
+            smooth_species_bucket(vm.pet_render.generated_species).to_string(),
         ),
         (
             "stage".to_string(),
-            format!("{:?}", vm.pet_render.stage).to_lowercase(),
+            smooth_stage_bucket(vm.pet_render.stage).to_string(),
         ),
         (
             "mood".to_string(),
-            format!("{:?}", vm.pet_render.mood).to_lowercase(),
+            smooth_mood_bucket(vm.pet_render.mood).to_string(),
         ),
         (
             "day_state".to_string(),
@@ -914,6 +951,42 @@ fn smooth_abstract_state(vm: &WatchViewModel) -> BTreeMap<String, String> {
     ])
 }
 
+fn smooth_species_bucket(species: crate::pet::generation::Species) -> &'static str {
+    match species {
+        crate::pet::generation::Species::Fuzz | crate::pet::generation::Species::Blob => {
+            "soft-body"
+        }
+        crate::pet::generation::Species::Ghost | crate::pet::generation::Species::Crystal => {
+            "spectral"
+        }
+        crate::pet::generation::Species::Glitch | crate::pet::generation::Species::Mech => {
+            "synthetic"
+        }
+    }
+}
+
+fn smooth_stage_bucket(stage: crate::game::evolution::Stage) -> &'static str {
+    match stage {
+        crate::game::evolution::Stage::S0
+        | crate::game::evolution::Stage::S1
+        | crate::game::evolution::Stage::S2 => "early",
+        crate::game::evolution::Stage::S3 | crate::game::evolution::Stage::S4 => "grown",
+        crate::game::evolution::Stage::S5 | crate::game::evolution::Stage::S6 => "veteran",
+    }
+}
+
+fn smooth_mood_bucket(mood: crate::game::metabolism::Mood) -> &'static str {
+    match mood {
+        crate::game::metabolism::Mood::Happy
+        | crate::game::metabolism::Mood::Ecstatic
+        | crate::game::metabolism::Mood::Content => "settled",
+        crate::game::metabolism::Mood::Sleepy => "resting",
+        crate::game::metabolism::Mood::Hungry
+        | crate::game::metabolism::Mood::Sad
+        | crate::game::metabolism::Mood::Wilted => "needs-care",
+    }
+}
+
 fn vital_bucket(value: f64) -> &'static str {
     if value < 0.34 {
         "low"
@@ -927,7 +1000,10 @@ fn vital_bucket(value: f64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::smooth::SmoothLayerRole;
     use crate::round::model::derive_round_scene_model;
+    use crate::round::scene::CompanionMotion;
+    use crate::round::smooth::build_round_smooth_scene_plan;
     use crate::tui::component::{PreviewLayout, PreviewRect, PreviewTarget};
     use crate::tui::view_model::{SourceStatus, WatchViewModel};
     use std::collections::BTreeMap;
@@ -1010,5 +1086,58 @@ mod tests {
         assert_eq!(artifact.room.dialect_status, None);
         assert!(artifact.room.prop_landmarks.is_empty());
         assert_eq!(artifact.targets, BTreeMap::new());
+    }
+
+    #[test]
+    fn smooth_parity_artifact_flags_missing_required_roles() {
+        let now = datetime!(2026-07-08 18:00 UTC);
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let motion = CompanionMotion::default();
+        let mut plan = build_round_smooth_scene_plan(&vm, now, 52, 52, &motion, 0);
+        plan.layers.retain(|layer| {
+            !matches!(
+                layer.role,
+                SmoothLayerRole::Ambient | SmoothLayerRole::PetBody
+            )
+        });
+        let checksum = plan.classic_flatten_checksum();
+
+        let artifact = PreviewSmoothParityArtifact::from_scene_plan(
+            "smooth-parity-missing",
+            "fixture",
+            &vm,
+            checksum,
+            &plan,
+        );
+
+        assert_eq!(
+            artifact.required_roles,
+            vec![
+                "depth-rings".to_string(),
+                "biome-wash".to_string(),
+                "room-glyphs".to_string(),
+                "ambient".to_string(),
+                "motes".to_string(),
+                "activity-glyphs".to_string(),
+                "props-behind".to_string(),
+                "tank-life-behind".to_string(),
+                "chest-bubble".to_string(),
+                "contact-shadow".to_string(),
+                "pet-body".to_string(),
+                "performance-cue".to_string(),
+                "props-foreground".to_string(),
+                "tank-life-foreground".to_string(),
+                "status-halo".to_string(),
+                "trouble-indicator".to_string(),
+                "mood-aura".to_string(),
+                "dim-overlay".to_string(),
+            ]
+        );
+        assert_eq!(
+            artifact.missing_roles,
+            vec!["ambient".to_string(), "pet-body".to_string()]
+        );
+        assert!(!artifact.exact_match);
+        assert_eq!(artifact.review_status, "missing-required-roles");
     }
 }

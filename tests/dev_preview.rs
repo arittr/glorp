@@ -210,6 +210,27 @@ fn collect_pixel_review_artifact_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
     }
 }
 
+fn collect_smooth_sidecar_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            collect_smooth_sidecar_paths(&path, paths);
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".smooth-plan.json")
+            || name.ends_with(".smooth-parity.json")
+            || name.ends_with(".smooth-motion.json")
+        {
+            paths.push(path);
+        }
+    }
+}
+
 fn pixel_alpha_sum_for_rgb(pixel: &Value, rgb: &str) -> u32 {
     pixel["pixels"]
         .as_array()
@@ -2456,18 +2477,8 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
 
     let plan = run.read_json(&format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json"));
     let parity = run.read_json(&format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json"));
-    let plan_text = std::fs::read_to_string(
-        run.out
-            .join(format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json")),
-    )
-    .unwrap()
-    .to_ascii_lowercase();
-    let parity_text = std::fs::read_to_string(
-        run.out
-            .join(format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json")),
-    )
-    .unwrap()
-    .to_ascii_lowercase();
+    let mut smooth_sidecars = Vec::new();
+    collect_smooth_sidecar_paths(&run.out, &mut smooth_sidecars);
 
     assert_eq!(plan["schema_version"], 1);
     assert_eq!(plan["frame_id"], SMOOTH_PARITY_ID);
@@ -2497,9 +2508,12 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
         parity["classic_checksum"], parity["smooth_flatten_checksum"],
         "smooth parity checksum must exactly match classic baseline"
     );
-    assert!(parity["required_roles"].as_array().unwrap().len() >= 10);
+    assert_eq!(parity["review_status"], "exact-match");
+    assert_eq!(parity["missing_roles"], Value::Array(vec![]));
+    assert_eq!(parity["required_roles"].as_array().unwrap().len(), 18);
 
-    for text in [&plan_text, &parity_text] {
+    for path in smooth_sidecars {
+        let text = std::fs::read_to_string(path).unwrap().to_ascii_lowercase();
         for forbidden in [
             "/users/",
             "/tmp/",
@@ -2516,6 +2530,49 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
             );
         }
     }
+}
+
+#[test]
+fn dev_preview_smooth_privacy_scan_covers_motion_sidecars() {
+    let run = PreviewRun::new();
+    run.run_success("smooth");
+
+    let manifest = run.manifest();
+    let mut scanned = Vec::new();
+    collect_smooth_sidecar_paths(&run.out, &mut scanned);
+
+    let scanned_rel: BTreeSet<String> = scanned
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(&run.out)
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+
+    let expected_motion: BTreeSet<String> = manifest["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|strip| strip["id"] == SMOOTH_MOTION_ID)
+        .flat_map(|strip| strip["frames"].as_array().unwrap().iter())
+        .map(|frame| {
+            frame["files"]["smooth_motion"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+
+    assert!(
+        !expected_motion.is_empty(),
+        "smooth manifest should declare motion sidecars"
+    );
+    assert!(
+        expected_motion.is_subset(&scanned_rel),
+        "privacy scan missed smooth motion sidecars: expected {expected_motion:?}, scanned {scanned_rel:?}"
+    );
 }
 
 #[test]
