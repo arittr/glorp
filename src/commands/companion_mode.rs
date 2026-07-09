@@ -71,6 +71,7 @@ pub enum CompanionRendererMode {
     #[default]
     Classic,
     Pixel,
+    Smooth,
 }
 
 impl CompanionRendererMode {
@@ -78,10 +79,15 @@ impl CompanionRendererMode {
         match self {
             CompanionRendererMode::Classic => "classic",
             CompanionRendererMode::Pixel => "pixel",
+            CompanionRendererMode::Smooth => "smooth",
         }
     }
 
     pub const fn is_pixel(self) -> bool {
         matches!(self, CompanionRendererMode::Pixel)
+    }
+
+    pub const fn is_smooth(self) -> bool {
+        matches!(self, CompanionRendererMode::Smooth)
     }
 }

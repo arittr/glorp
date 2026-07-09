@@ -33,14 +33,14 @@ fn build_open_command(
     review: CompanionReviewOptions,
 ) -> std::process::Command {
     let mut command = std::process::Command::new("open");
-    if mode.is_pixel() || review.initial_size.is_some() || review.active_pulse {
+    if mode.is_pixel() || mode.is_smooth() || review.initial_size.is_some() || review.active_pulse {
         command.arg("-n");
     }
     command.arg(app);
-    if mode.is_pixel() || review.initial_size.is_some() || review.active_pulse {
+    if mode.is_pixel() || mode.is_smooth() || review.initial_size.is_some() || review.active_pulse {
         command.arg("--args");
     }
-    if mode.is_pixel() {
+    if mode.is_pixel() || mode.is_smooth() {
         command.arg("--renderer").arg(mode.as_str());
     }
     if let Some(size) = review.initial_size {
@@ -112,6 +112,28 @@ mod tests {
                 OsString::from("--review-size"),
                 OsString::from("360x360"),
                 OsString::from("--review-active-pulse"),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_renderer_opens_in_fresh_window_with_renderer_arg() {
+        let command = build_open_command(
+            Path::new("/Applications/Glorp.app"),
+            CompanionRendererMode::Smooth,
+            CompanionReviewOptions::default(),
+        );
+
+        assert_eq!(command.get_program(), "open");
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-n"),
+                OsString::from("/Applications/Glorp.app"),
+                OsString::from("--args"),
+                OsString::from("--renderer"),
+                OsString::from("smooth"),
             ]
         );
     }

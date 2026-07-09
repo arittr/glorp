@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::commands::companion_mode::{
     CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
@@ -29,6 +29,7 @@ use crate::round::hud::{
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
+use crate::round::smooth::build_round_smooth_scene_plan;
 use crate::storage::state::StateStore;
 use crate::tui::view_model::WatchViewModel;
 use crate::watch_live::{LiveWatchRenderMode, LiveWatchUpdate, WatchPresentationState};
@@ -84,6 +85,7 @@ struct AppState {
     pixel_input: Option<PixelPetInput>,
     pixel_state: Option<PixelRendererState>,
     pixel_frame: Option<PixelFrame>,
+    smooth_started_at: Option<Instant>,
     animation_frame: u64,
 }
 
@@ -147,7 +149,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         now,
         crate::storage::day_axis::LocalDayMapper::System,
     )?;
-    let mut initial_vm = if renderer_mode.is_pixel() {
+    let mut initial_vm = if renderer_mode.is_pixel() || renderer_mode.is_smooth() {
         build_watch_view_model_semantic_at(
             &initial_pet,
             &paths.usage_db,
@@ -199,7 +201,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         paths,
         POLL_INTERVAL,
         "glorp-companion-poll",
-        if renderer_mode.is_pixel() {
+        if renderer_mode.is_pixel() || renderer_mode.is_smooth() {
             LiveWatchRenderMode::Semantic
         } else {
             LiveWatchRenderMode::Rendered
@@ -218,11 +220,12 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             pixel_input,
             pixel_state,
             pixel_frame,
+            smooth_started_at: renderer_mode.is_smooth().then(Instant::now),
             animation_frame: 0,
         });
     });
 
-    let tick_interval = if renderer_mode.is_pixel() {
+    let tick_interval = if renderer_mode.is_pixel() || renderer_mode.is_smooth() {
         1.0 / 30.0
     } else {
         UI_TICK_INTERVAL_SECS
@@ -462,10 +465,11 @@ fn draw_scene(bounds: NSRect) {
                 s.vm.clone(),
                 s.renderer_mode,
                 s.pixel_frame.clone(),
+                s.smooth_started_at,
             )
         })
     });
-    let Some((scene, vm, renderer_mode, pixel_frame)) = state_snapshot else {
+    let Some((scene, vm, renderer_mode, pixel_frame, smooth_started_at)) = state_snapshot else {
         return;
     };
 
@@ -544,26 +548,53 @@ fn draw_scene(bounds: NSRect) {
                 crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture, &hud_text);
             }
         } else if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
-            let companion_scene = crate::round::scene::build_round_scene_draw_list(
-                &vm,
-                now,
-                m.grid_cols,
-                m.grid_rows,
-                &companion_motion(),
-            );
+            let (pet_center_col, pet_center_row, pet_width_cells, draw_list) =
+                if renderer_mode.is_smooth() {
+                    let elapsed_ms = smooth_started_at
+                        .map(|started_at| started_at.elapsed().as_millis())
+                        .unwrap_or(0)
+                        .min(u128::from(u64::MAX)) as u64;
+                    let plan = build_round_smooth_scene_plan(
+                        &vm,
+                        now,
+                        m.grid_cols,
+                        m.grid_rows,
+                        &companion_motion(),
+                        elapsed_ms,
+                    );
+                    (
+                        f64::from(
+                            plan.pet.bounds.min.x
+                                + (plan.pet.bounds.max.x - plan.pet.bounds.min.x) / 2.0,
+                        ),
+                        f64::from(
+                            plan.pet.bounds.min.y
+                                + (plan.pet.bounds.max.y - plan.pet.bounds.min.y) / 2.0,
+                        ),
+                        f64::from(plan.pet.bounds.max.x - plan.pet.bounds.min.x),
+                        plan.flatten_classic_cells(),
+                    )
+                } else {
+                    let companion_scene = crate::round::scene::build_round_scene_draw_list(
+                        &vm,
+                        now,
+                        m.grid_cols,
+                        m.grid_rows,
+                        &companion_motion(),
+                    );
+                    (
+                        f64::from(companion_scene.pet_rect.x + companion_scene.pet_rect.width / 2),
+                        f64::from(companion_scene.pet_rect.y + companion_scene.pet_rect.height / 2),
+                        f64::from(companion_scene.pet_rect.width),
+                        companion_scene.draw_list,
+                    )
+                };
             // Mood aura — soft radial glow (concentric translucent circles) centered
             // on the pet, color by mood. Drawn under the pet so the body sits on top.
-            let pr = companion_scene.pet_rect;
-            let (cxp, cyp) = cell_to_point(
-                pr.x + pr.width / 2,
-                pr.y + pr.height / 2,
-                m.cell_w,
-                m.cell_h,
-                m.origin_x,
-                m.origin_y,
-            );
+            let cxp = m.origin_x + pet_center_col * m.cell_w;
+            let cyp = m.origin_y - (pet_center_row + 1.0) * m.cell_h;
             let base = crate::round::hud::mood_aura_color(scene.pet.mood);
-            let max_r = pr.width as f64 * m.cell_w * 0.95;
+            let max_r = pet_width_cells * m.cell_w * 0.95;
             const AURA_RINGS: usize = 8;
             for i in 0..AURA_RINGS {
                 let t = i as f64 / AURA_RINGS as f64; // 0 = outer, 1 = inner
@@ -577,7 +608,7 @@ fn draw_scene(bounds: NSRect) {
             }
 
             appkit_blit_draw_list(
-                &companion_scene.draw_list,
+                &draw_list,
                 m.font_size,
                 m.cell_w,
                 m.cell_h,
