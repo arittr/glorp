@@ -30,7 +30,6 @@ use crate::round::hud::{
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
-use crate::round::smooth::build_round_smooth_scene_plan;
 use crate::storage::state::StateStore;
 use crate::tui::view_model::SourceStatus;
 use crate::tui::view_model::WatchViewModel;
@@ -80,6 +79,7 @@ struct PreparedCompanionFrame {
     bounds: PreparedBounds,
     aperture: RoundAperture,
     background: RoundColor,
+    mood_aura_color: RoundColor,
     dim_overlay: bool,
     renderer: PreparedRendererFrame,
     gauges: PreparedGaugeFrame,
@@ -359,6 +359,7 @@ fn prepare_companion_frame(
         bounds: prepared_bounds,
         aperture,
         background,
+        mood_aura_color: crate::round::hud::mood_aura_color(scene.pet.mood),
         dim_overlay,
         renderer,
         gauges,
@@ -403,6 +404,27 @@ thread_local! {
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
+fn run_objc_callback(label: &'static str, f: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+        record_callback_panic(label);
+    }
+}
+
+fn record_callback_panic(label: &'static str) {
+    eprintln!("glorp companion caught panic in Objective-C callback: {label}");
+    APP_STATE.with(|cell| {
+        if let Ok(mut state) = cell.try_borrow_mut() {
+            if let Some(state) = state.as_mut() {
+                state.callback_panic_count = state.callback_panic_count.saturating_add(1);
+                state.last_callback_panic_label = Some(label);
+                if let Some(capture) = state.review_capture.as_mut() {
+                    capture.record_callback_panic(label);
+                }
+            }
+        }
+    });
+}
+
 declare_class!(
     pub(super) struct Controller;
 
@@ -417,7 +439,7 @@ declare_class!(
     unsafe impl Controller {
         #[method(uiTick:)]
         fn ui_tick(&self, _sender: Option<&AnyObject>) {
-            ui_tick();
+            run_objc_callback("uiTick", ui_tick);
         }
     }
 );
@@ -436,7 +458,7 @@ declare_class!(
     unsafe impl RoundView {
         #[method(drawRect:)]
         fn draw_rect(&self, _rect: NSRect) {
-            draw_scene(self, self.bounds());
+            run_objc_callback("drawRect", || draw_scene(self, self.bounds()));
         }
     }
 );
@@ -993,54 +1015,32 @@ fn record_review_frame(
 }
 
 fn draw_scene(view: &RoundView, bounds: NSRect) {
-    let _mtm = MainThreadMarker::new().expect("companion draw_scene on non-main thread");
-    let state_snapshot = APP_STATE.with(|cell| {
-        cell.borrow().as_ref().map(|s| {
-            (
-                s.scene.clone(),
-                s.vm.clone(),
-                s.renderer_mode,
-                s.pixel_frame.clone(),
-                s.smooth_started_at,
-                s.smooth_semantic_art_tick_index,
-                s.redacts_live_hud,
-            )
-        })
-    });
-    let Some((
-        scene,
-        vm,
-        renderer_mode,
-        pixel_frame,
-        smooth_started_at,
-        smooth_semantic_art_tick_index,
-        redacts_live_hud,
-    )) = state_snapshot
-    else {
+    let Some(_mtm) = MainThreadMarker::new() else {
+        eprintln!("glorp companion draw_scene called off main thread");
         return;
     };
+    let frame = APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|state| state.last_good_frame.clone())
+    });
+    match frame {
+        Some(frame) => {
+            paint_prepared_frame(view, bounds, &frame);
+            record_review_frame(view, frame.review_sample);
+        }
+        None => paint_fallback_background(bounds),
+    }
+}
 
-    let now = time::OffsetDateTime::now_utc();
-    let width = bounds.size.width as f32;
-    let height = bounds.size.height as f32;
-    let aperture = RoundAperture::new(width as u16, height as u16);
+fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompanionFrame) {
+    let aperture = frame.aperture;
+    let bg_color = frame.background;
+    let dim_overlay = frame.dim_overlay;
+    let commands = &frame.overlay_commands;
+    let hud_text = &frame.hud;
+    let hud_font_size = frame.hud_font_size;
 
-    // Build the halo/trouble commands from the round scene model (kept on top).
-    let layout = layout_round_scene(
-        &scene,
-        aperture,
-        RoundRenderCapabilities::preview_truecolor(),
-    );
-    let commands = build_draw_commands(&scene, &layout);
-
-    // Compute background color from the first Background command.
-    let bg_color = commands
-        .iter()
-        .find(|c| c.kind == RoundDrawKind::Background)
-        .map(|c| c.color)
-        .unwrap_or(RoundColor(0.05, 0.06, 0.10, 1.0));
-
-    let dim_overlay = scene.lifecycle.asleep || scene.lifecycle.calm;
     unsafe {
         // Circular clip so the scene stays inside the aperture.
         let clip = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
@@ -1085,129 +1085,32 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
         }
 
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
-        if renderer_mode.is_pixel() {
-            if let Some(frame) = pixel_frame.as_ref() {
-                let hud_text = if redacts_live_hud {
-                    review_capture_hud_text()
-                } else {
-                    live_hud_text(&vm)
-                };
-                crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture, &hud_text);
+        match &frame.renderer {
+            PreparedRendererFrame::Pixel { frame: pixel_frame } => {
+                crate::companion::pixel::draw_pixel_frame(pixel_frame, bounds, aperture, hud_text);
             }
-        } else if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
-            let mut smooth_sample = None;
-            let mut smooth_plan = None;
-            let (pet_center_col, pet_center_row, pet_width_cells, draw_list) = if renderer_mode
-                .is_smooth()
-            {
-                let elapsed_ms = smooth_started_at
-                    .map(|started_at| started_at.elapsed().as_millis())
-                    .unwrap_or(0)
-                    .min(u128::from(u64::MAX)) as u64;
-                let plan = build_round_smooth_scene_plan(
-                    &vm,
-                    now,
-                    m.grid_cols,
-                    m.grid_rows,
-                    &companion_motion(),
-                    elapsed_ms,
-                );
-                smooth_sample = Some(crate::companion::review_capture::SmoothReviewFrameSample {
-                    bob_y: plan.pet.bob_offset.y,
-                    semantic_art_tick_index: smooth_semantic_art_tick_index,
-                    pet_visual_checksum: crate::presentation::smooth::pet_visual_checksum(
-                        &vm.pet_art,
-                        &vm.pet_spans,
-                    ),
-                    base_anchor:
-                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
-                            plan.pet.base_anchor,
-                        ),
-                    bob_offset:
-                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
-                            plan.pet.bob_offset,
-                        ),
-                    final_anchor:
-                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
-                            plan.pet.final_anchor,
-                        ),
-                    classic_snap_anchor:
-                        crate::companion::review_capture::SmoothReviewPoint::from_smooth_point(
-                            plan.pet.classic_snap_anchor,
-                        ),
-                });
-                let pet_center_col = f64::from(
-                    plan.pet.fractional_bounds.min.x
-                        + (plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x)
-                            / 2.0,
-                );
-                let pet_center_row = f64::from(
-                    plan.pet.fractional_bounds.min.y
-                        + (plan.pet.fractional_bounds.max.y - plan.pet.fractional_bounds.min.y)
-                            / 2.0,
-                );
-                let pet_width_cells =
-                    f64::from(plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x);
-                smooth_plan = Some(plan);
-                (
-                    pet_center_col,
-                    pet_center_row,
-                    pet_width_cells,
-                    crate::presentation::SceneDrawList { cells: Vec::new() },
-                )
-            } else {
-                let companion_scene = crate::round::scene::build_round_scene_draw_list(
-                    &vm,
-                    now,
-                    m.grid_cols,
-                    m.grid_rows,
-                    &companion_motion(),
-                );
-                (
-                    f64::from(companion_scene.pet_rect.x + companion_scene.pet_rect.width / 2),
-                    f64::from(companion_scene.pet_rect.y + companion_scene.pet_rect.height / 2),
-                    f64::from(companion_scene.pet_rect.width),
-                    companion_scene.draw_list,
-                )
-            };
-            // Mood aura — soft radial glow (concentric translucent circles) centered
-            // on the pet, color by mood. Drawn under the pet so the body sits on top.
-            let cxp = m.origin_x + pet_center_col * m.cell_w;
-            let cyp = m.origin_y - (pet_center_row + 1.0) * m.cell_h;
-            let base = crate::round::hud::mood_aura_color(scene.pet.mood);
-            let max_r = pet_width_cells * m.cell_w * 0.95;
-            const AURA_RINGS: usize = 8;
-            for i in 0..AURA_RINGS {
-                let t = i as f64 / AURA_RINGS as f64; // 0 = outer, 1 = inner
-                let rr = max_r * (1.0 - t);
-                let glow = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                    NSPoint::new(cxp - rr, cyp - rr),
-                    NSSize::new(rr * 2.0, rr * 2.0),
-                ));
-                ns_color(&RoundColor(base.0, base.1, base.2, 0.05)).setFill();
-                glow.fill();
-            }
-
-            if let Some(plan) = smooth_plan.as_ref() {
+            PreparedRendererFrame::Smooth { metrics, plan, .. } => {
+                draw_mood_aura(frame, metrics);
                 appkit_blit_smooth_plan(
                     plan,
-                    m.font_size,
-                    m.cell_w,
-                    m.cell_h,
-                    m.origin_x,
-                    m.origin_y,
-                );
-            } else {
-                appkit_blit_draw_list(
-                    &draw_list,
-                    m.font_size,
-                    m.cell_w,
-                    m.cell_h,
-                    m.origin_x,
-                    m.origin_y,
+                    metrics.font_size,
+                    metrics.cell_w,
+                    metrics.cell_h,
+                    metrics.origin_x,
+                    metrics.origin_y,
                 );
             }
-            record_review_frame(view, smooth_sample);
+            PreparedRendererFrame::Classic { metrics, draw_list, .. } => {
+                draw_mood_aura(frame, metrics);
+                appkit_blit_draw_list(
+                    draw_list,
+                    metrics.font_size,
+                    metrics.cell_w,
+                    metrics.cell_h,
+                    metrics.origin_x,
+                    metrics.origin_y,
+                );
+            }
         }
 
         // Companion perimeter gauges: XP, today vs yesterday, and live 10m pace.
@@ -1217,24 +1120,14 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
             let layout =
                 perimeter_gauge_layout(cx, cy, aperture.radius as f64, COMPANION_GAUGE_GAP_DEG);
             let colors = perimeter_gauge_colors();
-            let xp_fraction = if vm.progress.is_max_stage {
-                1.0
-            } else {
-                vm.progress.fraction as f64
-            };
-            let daily_ratio = vm.daily_comparison.fraction_of_yesterday;
-            let daily_fraction = daily_fraction_for_gauge(daily_ratio);
-            let daily_overage_fraction = daily_overage_marker_fraction(daily_ratio);
-            let pace_fraction = companion_pace_fraction(vm.rate_momentum.pulse.current_tokens);
-
-            draw_gauge_lane(&layout.xp, &colors.xp, xp_fraction);
-            draw_gauge_lane(&layout.daily, &colors.daily, daily_fraction);
+            draw_gauge_lane(&layout.xp, &colors.xp, frame.gauges.xp_fraction);
+            draw_gauge_lane(&layout.daily, &colors.daily, frame.gauges.daily_fraction);
             draw_gauge_overfill(
                 &layout.daily,
                 &daily_overage_color(),
-                daily_overage_fraction,
+                frame.gauges.daily_overage_fraction,
             );
-            draw_gauge_lane(&layout.pace, &colors.pace, pace_fraction);
+            draw_gauge_lane(&layout.pace, &colors.pace, frame.gauges.pace_fraction);
         }
 
         // Halo and trouble indicators drawn on top of the scene blit.
@@ -1256,21 +1149,70 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
         // Ambient HUD — drawn after halo beads and before the sleep/calm dim,
         // so the dim overlay softens the HUD when the pet is resting.
         // Pass the derived font size so HUD elements scale with the display.
-        let hud_font_size = companion_grid_metrics(bounds.size.width, bounds.size.height)
-            .map(|m| m.font_size)
-            .unwrap_or(8.5);
-        let hud_text = if redacts_live_hud {
-            review_capture_hud_text()
-        } else {
-            live_hud_text(&vm)
-        };
-        draw_hud(bounds, &aperture, &hud_text, hud_font_size);
+        draw_hud(bounds, &aperture, hud_text, hud_font_size);
 
         if dim_overlay {
             let dim = NSBezierPath::bezierPathWithRect(bounds);
             NSColor::colorWithSRGBRed_green_blue_alpha(0.05, 0.06, 0.10, 0.35).setFill();
             dim.fill();
         }
+    }
+}
+
+fn draw_mood_aura(frame: &PreparedCompanionFrame, metrics: &CompanionGridMetrics) {
+    let (pet_center_col, pet_center_row, pet_width_cells) = match &frame.renderer {
+        PreparedRendererFrame::Classic {
+            pet_center_col,
+            pet_center_row,
+            pet_width_cells,
+            ..
+        }
+        | PreparedRendererFrame::Smooth {
+            pet_center_col,
+            pet_center_row,
+            pet_width_cells,
+            ..
+        } => (*pet_center_col, *pet_center_row, *pet_width_cells),
+        PreparedRendererFrame::Pixel { .. } => return,
+    };
+
+    let cxp = metrics.origin_x + pet_center_col * metrics.cell_w;
+    let cyp = metrics.origin_y - (pet_center_row + 1.0) * metrics.cell_h;
+    let max_r = pet_width_cells * metrics.cell_w * 0.95;
+    const AURA_RINGS: usize = 8;
+    unsafe {
+        for i in 0..AURA_RINGS {
+            let t = i as f64 / AURA_RINGS as f64; // 0 = outer, 1 = inner
+            let rr = max_r * (1.0 - t);
+            let glow = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                NSPoint::new(cxp - rr, cyp - rr),
+                NSSize::new(rr * 2.0, rr * 2.0),
+            ));
+            ns_color(&RoundColor(
+                frame.mood_aura_color.0,
+                frame.mood_aura_color.1,
+                frame.mood_aura_color.2,
+                0.05,
+            ))
+            .setFill();
+            glow.fill();
+        }
+    }
+}
+
+fn paint_fallback_background(bounds: NSRect) {
+    let width = bounds.size.width.max(1.0);
+    let height = bounds.size.height.max(1.0);
+    let radius = width.min(height) / 2.0;
+    let cx = width / 2.0;
+    let cy = height / 2.0;
+    unsafe {
+        let bg_path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(cx - radius, cy - radius),
+            NSSize::new(radius * 2.0, radius * 2.0),
+        ));
+        ns_color(&RoundColor(0.05, 0.06, 0.10, 1.0)).setFill();
+        bg_path.fill();
     }
 }
 
@@ -1785,6 +1727,18 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn objc_callback_guard_catches_unwind() {
+        let did_run = std::cell::Cell::new(false);
+
+        run_objc_callback("drawRect", || {
+            did_run.set(true);
+            panic!("injected callback panic");
+        });
+
+        assert!(did_run.get());
+    }
 
     #[test]
     fn prepared_gauge_frame_matches_current_vm_values() {
