@@ -23,6 +23,24 @@ The reusable boundary is a portable layer-motion contract. The visible feature
 is subtle pet-follow parallax across the existing tank layers. This is not a
 general animation engine and not a broad polish pass.
 
+## Implementation Entry Gate
+
+Parallax implementation starts only after the companion draw-boundary hardening
+slice is complete on the target branch. The implementation plan must verify all
+of these conditions before changing parallax code:
+
+- `RoundView::drawRect:` paints `last_good_frame` through the guarded prepared-
+  frame path;
+- `drawRect` does not build round layout, Classic draw lists, smooth plans, HUD
+  text, or review samples;
+- `ui_tick()` owns frame preparation and last-good-frame replacement; and
+- production smooth preparation uses `try_build_round_smooth_scene_plan(...)`.
+
+Parallax is implemented only in the prepared smooth plan. Do not add a second
+parallax implementation to the legacy `draw_scene(...)` path while boundary
+hardening is in flight. If any entry condition is false, finish or merge that
+prerequisite first.
+
 ## Problem
 
 `SmoothCompanionLayer` already preserves role, anchor, transform, bounds, z
@@ -81,11 +99,12 @@ like the habitat is sliding around independently. The effect must be visible in
 normal awake mode at the standard 960 px companion size, but it must not make
 props feel detached from the room.
 
-Horizontal motion is stronger than vertical motion. Existing `calm_mode`
-attenuates parallax to `0.5` of normal strength. Sleeping attenuates it to `0.25`.
-The pet's existing motion-energy scaling already reduces focus displacement when
-the pet is idle or asleep; lifecycle attenuation is an additional presentation
-limit, not a replacement for that existing behavior.
+Horizontal motion is stronger than vertical motion. Lifecycle attenuation uses
+one deterministic precedence rule: asleep (`0.25`) wins over `calm_mode`
+(`0.5`), which wins over normal awake mode (`1.0`). The pet's existing
+motion-energy scaling already reduces focus displacement when the pet is idle
+or asleep; lifecycle attenuation is an additional presentation limit, not a
+replacement for that existing behavior.
 
 ## Architecture
 
@@ -179,6 +198,20 @@ rendered cells.
 | `src/companion/review_capture.rs` | Native prepared-frame parallax evidence |
 | `src/companion/app.rs` | Paint the already-resolved prepared plan |
 
+### Adapter precision contract
+
+The current AppKit smooth blitter chooses fractional drawing from a hard-coded
+set of pet roles and rounds every other role to integer cells. That behavior
+must become motion-binding-driven:
+
+- `PetAttached` and `Parallax(_)` layers use `fractional_cell_to_point(...)`;
+- `Fixed` layers retain their existing snapped behavior; and
+- AppKit does not inspect `SmoothLayerRole` to decide coordinate precision.
+
+This is part of the fundamental boundary, not optional polish. With parallax
+capped below half a cell, routing a parallax layer through `cell_to_point(...)`
+would erase most movement and turn the remainder into one-cell jumps.
+
 ### Pure resolver
 
 Add one cfg-free pure resolver in `src/round/parallax.rs`. Its inputs are:
@@ -186,7 +219,7 @@ Add one cfg-free pure resolver in `src/round/parallax.rs`. Its inputs are:
 - continuous focus offset in grid cells;
 - layer motion binding;
 - lifecycle attenuation (`normal`, `calm`, or `asleep`);
-- layer bounds;
+- layer bounds and occupied local items;
 - viewport and chrome reservations; and
 - named tuning constants.
 
@@ -209,8 +242,9 @@ translation as `focus.x * multiplier` and vertical translation as
 translation is capped at `0.5` grid cells horizontally and `0.25` grid cells
 vertically.
 
-Every parallax plane moves in the same direction as the focus offset. The plane
-ordering must remain monotonic by magnitude:
+Every parallax plane moves in the same direction as the focus offset. Before
+layer-specific safety attenuation, plane ordering must remain monotonic by
+magnitude:
 
 ```text
 abs(Far) < abs(Mid) < abs(Behind) < abs(Foreground)
@@ -220,10 +254,33 @@ abs(Far) < abs(Mid) < abs(Behind) < abs(Foreground)
 
 ### Geometry safety
 
-Parallax must not create a new intersection with a HUD or gauge reservation.
-For each layer, compare its untransformed and proposed transformed bounds. If
-the proposed delta would move previously clear bounds into reserved chrome,
-attenuate that delta deterministically toward zero.
+Aggregate `local_bounds` are not sufficient collision geometry for sparse
+ambient fields or layers containing several distant props. They are only the
+outer envelope and may cross a reservation even when no rendered item does.
+
+Far and Mid planes are broad decorative fields. They use aperture clipping and
+the global displacement caps, and may continue behind fixed gauge/HUD chrome as
+they do in the Classic composition.
+
+Behind and Foreground planes contain discrete props and tank life. For these
+planes, derive occupied geometry from actual `SmoothLayerItem::LocalCell` items,
+treating each cell as a one-cell rectangle at `anchor + local position`. For
+each occupied cell:
+
+- a cell clear of a chrome reservation before motion must remain clear after
+  motion; and
+- a cell already intersecting chrome may not increase its intersection area.
+
+Evaluate the proposed layer delta at deterministic safety scales
+`[1.0, 0.75, 0.5, 0.25, 0.0]` and choose the first safe scale. This preserves one
+translation for the whole layer while avoiding bounding-box false positives.
+The plane-ordering requirement applies to raw translations before this local
+safety attenuation.
+
+All current moving object layers contain local cells. A future Shape or Raster
+item may not receive a Behind or Foreground binding until it exposes explicit
+occupied bounds; otherwise planning returns
+`SmoothScenePlanError::InvalidParallaxGeometry`.
 
 Circular aperture clipping remains intentional: a foreground glyph may be
 cropped at the porthole rim just as Classic scene content is today. Parallax may
@@ -258,10 +315,10 @@ All resolver inputs and outputs must be finite. Invalid focus or geometry
 returns `SmoothScenePlanError::InvalidParallaxGeometry`; it is not a panic and
 not a NaN passed to AppKit.
 
-Production frame preparation already uses the fallible smooth planner. A
-parallax planning error follows the existing prepared-frame contract: record
-the categorized preparation failure and retain the last good frame. Error
-categories remain static and privacy-safe.
+After the implementation entry gate passes, production frame preparation uses
+the fallible smooth planner. A parallax planning error follows the existing
+prepared-frame contract: record the categorized preparation failure and retain
+the last good frame. Error categories remain static and privacy-safe.
 
 Unclassified future layer roles resolve to `Fixed` through the role-binding
 helper. Missing pet body keeps the existing `MissingPetBody` error. Keep the
@@ -307,9 +364,12 @@ raw diagnostics, and unprojected pet seeds remain forbidden.
   cap is reached.
 - Horizontal and vertical caps are enforced independently.
 - Calm and asleep attenuation use the specified factors.
+- Asleep attenuation takes precedence when asleep and calm are both true.
 - Fixed and pet-attached bindings add no parallax.
 - Non-finite input returns a categorized error.
-- Chrome-reservation attenuation prevents new overlap.
+- Occupied-cell safety avoids aggregate-bounds false positives.
+- Behind and Foreground safety prevents new chrome overlap and does not worsen
+  existing overlap.
 - Unknown future roles default to fixed behavior.
 
 ### Integration coverage
@@ -319,6 +379,10 @@ raw diagnostics, and unprojected pet seeds remain forbidden.
 - Pet body, contact shadow, performance cue, and mood aura remain one subject
   group and preserve their existing continuous anchor relationship.
 - Classic flatten checksums remain exact with non-zero parallax transforms.
+- AppKit draws a `0.1`-cell Parallax translation at a fractional pixel position
+  instead of rounding it to the Classic cell.
+- The implementation entry-gate test proves `drawRect` consumes only prepared
+  frames before parallax work begins.
 - Prepared-frame errors retain the last good frame through the existing
   boundary-health path.
 - Preview Lab exports the new focus and layer-motion evidence.
@@ -345,7 +409,8 @@ At the standard 960 px companion size:
 - Glorp and all pet-attached layers retain the stabilized motion from the prior
   slice without added parallax.
 - Foreground displacement never exceeds `0.5` columns or `0.25` rows.
-- Parallax creates no new chrome-reservation intersection.
+- Discrete Behind and Foreground items create no new chrome-reservation
+  intersection and do not worsen an existing one.
 - Classic flatten parity, smooth cadence checks, and privacy checks continue to
   pass.
 - Production uses the fallible prepared-frame path and never panics because of
