@@ -459,6 +459,7 @@ mod tests {
     use crate::storage::state::{HabitatPropId, HabitatPropSource};
     use crate::tui::component::{watch_tank_life_geometry, PetScene};
     use crate::tui::day::DayContext;
+    use crate::tui::panels::pet::draw::render_legacy_pet_scene_draw_list_parity_oracle_with_tank_geometry;
     use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
     use ratatui::layout::Rect;
     use serde::Serialize;
@@ -728,5 +729,30 @@ mod tests {
             "layered_active_fixture_flatten_digest",
             flatten_digest(&layered.flatten_classic_cells().cells)
         );
+    }
+
+    #[test]
+    fn flattening_fixed_fixture_matches_legacy_parity_oracle() {
+        let vm = active_prop_rich_vm();
+        let (scene_model, scene, ctx, tank_geometry) = active_scene_inputs(&vm);
+
+        let layered = render_layered_pet_scene_with_tank_geometry(
+            &scene_model,
+            &vm,
+            &scene,
+            LAYERED_NOW,
+            &ctx,
+            &tank_geometry,
+        );
+        let legacy = render_legacy_pet_scene_draw_list_parity_oracle_with_tank_geometry(
+            &scene_model,
+            &vm,
+            &scene,
+            LAYERED_NOW,
+            &ctx,
+            &tank_geometry,
+        );
+
+        assert_eq!(layered.flatten_classic_cells(), legacy);
     }
 }
