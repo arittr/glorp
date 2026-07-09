@@ -367,15 +367,9 @@ fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
     );
 
     for (layer, (_, expected_binding, _)) in layers.iter().zip(SMOOTH_CANONICAL_LAYER_BINDINGS) {
-        let x = layer["parallax_translation"]["x"].as_f64().unwrap();
-        let y = layer["parallax_translation"]["y"].as_f64().unwrap();
-        if expected_binding == "parallax" {
-            assert!(
-                x != 0.0 || y != 0.0,
-                "{surface} parallax role {} should export non-zero parallax",
-                layer["role"]
-            );
-        } else {
+        if expected_binding != "parallax" {
+            let x = layer["parallax_translation"]["x"].as_f64().unwrap();
+            let y = layer["parallax_translation"]["y"].as_f64().unwrap();
             assert_eq!(
                 x, 0.0,
                 "{surface} role {} should have zero x",
@@ -388,6 +382,31 @@ fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
             );
         }
     }
+}
+
+#[test]
+fn dev_preview_smooth_canonical_mapping_accepts_safety_clamped_parallax_layer() {
+    let layers = Value::Array(
+        SMOOTH_CANONICAL_LAYER_BINDINGS
+            .into_iter()
+            .map(|(role, motion_binding, depth_plane)| {
+                let parallax_translation = if motion_binding == "parallax" && role != "props-behind"
+                {
+                    serde_json::json!({ "x": 0.25, "y": 0.125 })
+                } else {
+                    serde_json::json!({ "x": 0.0, "y": 0.0 })
+                };
+                serde_json::json!({
+                    "role": role,
+                    "motion_binding": motion_binding,
+                    "depth_plane": depth_plane,
+                    "parallax_translation": parallax_translation
+                })
+            })
+            .collect(),
+    );
+
+    assert_canonical_smooth_layer_mapping(&layers, "safety-clamped-fixture");
 }
 
 #[test]
