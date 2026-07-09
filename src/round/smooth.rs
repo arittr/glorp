@@ -3,8 +3,8 @@ use ratatui::layout::Rect;
 use crate::presentation::smooth::{
     smooth_pet_bob, CompanionChromeReservation, CompanionViewport, SmoothBlendMode, SmoothBounds,
     SmoothClassicFlattenCompat, SmoothClip, SmoothCompanionLayer, SmoothCompanionPet,
-    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerId, SmoothLayerRole,
-    SmoothPoint, SmoothTransform,
+    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerId,
+    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothTransform,
 };
 use crate::presentation::PetSceneModel;
 use crate::round::layout::{
@@ -21,12 +21,16 @@ use crate::tui::view_model::WatchViewModel;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmoothScenePlanError {
     MissingPetBody,
+    InvalidParallaxGeometry,
 }
 
 impl std::fmt::Display for SmoothScenePlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SmoothScenePlanError::MissingPetBody => f.write_str("smooth scene missing pet body"),
+            SmoothScenePlanError::InvalidParallaxGeometry => {
+                f.write_str("smooth scene has invalid parallax geometry")
+            }
         }
     }
 }
@@ -72,6 +76,15 @@ pub fn try_build_round_smooth_scene_plan(
         x: smooth_base_anchor.x - pet_body_classic_anchor.x,
         y: smooth_base_anchor.y - pet_body_classic_anchor.y,
     };
+    let parallax_focus_offset = SmoothPoint {
+        x: placement.fractional_motion_top_left.x - placement.fractional_motion_origin_top_left.x,
+        y: placement.fractional_motion_top_left.y - placement.fractional_motion_origin_top_left.y,
+    };
+    let round_scene = derive_round_scene_model(vm, now);
+    let parallax_lifecycle_scale = crate::round::parallax::parallax_lifecycle_scale(
+        round_scene.lifecycle.asleep,
+        round_scene.lifecycle.calm,
+    );
     let bob_offset = SmoothPoint { x: 0.0, y: smooth_pet_bob(elapsed_ms) };
     let aperture_center = SmoothPoint {
         x: f32::from(grid_cols) / 2.0,
@@ -94,12 +107,7 @@ pub fn try_build_round_smooth_scene_plan(
     ));
 
     for mut layer in layered.layers {
-        if matches!(
-            layer.role,
-            SmoothLayerRole::PetBody
-                | SmoothLayerRole::ContactShadow
-                | SmoothLayerRole::PerformanceCue
-        ) {
+        if layer.motion_binding == SmoothLayerMotionBinding::PetAttached {
             layer.transform.translation.x += pet_anchor_delta.x;
             layer.transform.translation.y += pet_anchor_delta.y;
         }
@@ -130,7 +138,6 @@ pub fn try_build_round_smooth_scene_plan(
     let fractional_pet_bounds = anchored_bounds(final_anchor, pet_body.local_bounds);
     let fractional_pet_center = bounds_center(fractional_pet_bounds);
 
-    let round_scene = derive_round_scene_model(vm, now);
     let round_layout = layout_round_scene(
         &round_scene,
         RoundAperture::new(grid_cols, grid_rows),
@@ -208,6 +215,20 @@ pub fn try_build_round_smooth_scene_plan(
         gauge_bounds: gauge_bounds(grid_cols, grid_rows),
     };
 
+    for layer in &mut layers {
+        let parallax_translation = crate::round::parallax::resolve_layer_parallax(
+            parallax_focus_offset,
+            parallax_lifecycle_scale,
+            layer,
+            viewport,
+            &chrome,
+        )
+        .map_err(|_| SmoothScenePlanError::InvalidParallaxGeometry)?;
+        layer.parallax_translation = parallax_translation;
+        layer.transform.translation.x += parallax_translation.x;
+        layer.transform.translation.y += parallax_translation.y;
+    }
+
     Ok(SmoothCompanionScenePlan {
         viewport,
         layers,
@@ -218,9 +239,9 @@ pub fn try_build_round_smooth_scene_plan(
             bob_offset,
             final_anchor,
             classic_snap_anchor,
-            parallax_focus_offset: SmoothPoint::default(),
+            parallax_focus_offset,
         },
-        parallax_lifecycle_scale: 1.0,
+        parallax_lifecycle_scale,
         chrome,
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
         classic_flatten_compat: SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows },

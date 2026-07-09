@@ -1,5 +1,8 @@
 use glorp::game::habitat::HabitatPropKind;
-use glorp::presentation::smooth::{SmoothCompanionPrivacyClaims, SmoothLayerItem, SmoothLayerRole};
+use glorp::presentation::smooth::{
+    SmoothCompanionPrivacyClaims, SmoothDepthPlane, SmoothLayerItem, SmoothLayerMotionBinding,
+    SmoothLayerRole,
+};
 use glorp::round::scene::{build_round_scene_draw_list, CompanionMotion};
 use glorp::storage::state::{HabitatPropId, HabitatPropSource};
 use glorp::tui::view_model::{EarnedHabitatPropView, SourceStatus, WatchViewModel};
@@ -20,6 +23,104 @@ fn parity_fixture() -> WatchViewModel {
         source: HabitatPropSource::LifetimeTokens { threshold: 2_000_000.0 },
     });
     vm
+}
+
+#[test]
+fn smooth_plan_focus_is_continuous_wander_minus_neutral_origin() {
+    let vm = parity_fixture();
+    let motion = glorp::round::scene::companion_roam_motion();
+    let now = datetime!(2026-07-08 18:00:00.500 UTC);
+    let placement =
+        glorp::round::scene::companion_pet_placement(&vm, now, GRID_COLS, GRID_ROWS, &motion);
+    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm, now, GRID_COLS, GRID_ROWS, &motion, 500,
+    );
+
+    assert_eq!(
+        plan.pet.parallax_focus_offset,
+        glorp::presentation::smooth::SmoothPoint {
+            x: placement.fractional_motion_top_left.x
+                - placement.fractional_motion_origin_top_left.x,
+            y: placement.fractional_motion_top_left.y
+                - placement.fractional_motion_origin_top_left.y,
+        }
+    );
+}
+
+#[test]
+fn smooth_plan_assigns_every_current_role_its_approved_binding() {
+    use SmoothDepthPlane::{Behind, Far, Foreground, Mid};
+    use SmoothLayerMotionBinding::{Fixed, Parallax, PetAttached};
+    use SmoothLayerRole::*;
+
+    let vm = parity_fixture();
+    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &glorp::round::scene::companion_roam_motion(),
+        0,
+    );
+    let expected = [
+        (DepthRings, Fixed),
+        (BiomeWash, Parallax(Far)),
+        (RoomGlyphs, Parallax(Far)),
+        (Ambient, Parallax(Mid)),
+        (Motes, Parallax(Mid)),
+        (ActivityGlyphs, Parallax(Mid)),
+        (PropsBehind, Parallax(Behind)),
+        (TankLifeBehind, Parallax(Behind)),
+        (ChestBubble, Parallax(Behind)),
+        (ContactShadow, PetAttached),
+        (PetBody, PetAttached),
+        (PerformanceCue, PetAttached),
+        (PropsForeground, Parallax(Foreground)),
+        (TankLifeForeground, Parallax(Foreground)),
+        (StatusHalo, Fixed),
+        (TroubleIndicator, Fixed),
+        (MoodAura, PetAttached),
+        (DimOverlay, Fixed),
+    ];
+
+    for (role, binding) in expected {
+        let layer = plan.layer_by_role(role).expect("current role should exist");
+        assert_eq!(
+            layer.motion_binding, binding,
+            "unexpected binding for {role:?}"
+        );
+    }
+}
+
+#[test]
+fn smooth_plan_lifecycle_scale_uses_asleep_precedence() {
+    let motion = glorp::round::scene::companion_roam_motion();
+    let mut normal = parity_fixture();
+    normal.day_context.asleep = false;
+    normal.life_profile.calm_mode = false;
+    let mut calm = normal.clone();
+    calm.life_profile.calm_mode = true;
+    let mut asleep_and_calm = calm.clone();
+    asleep_and_calm.day_context.asleep = true;
+
+    let normal_plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &normal, NOW, GRID_COLS, GRID_ROWS, &motion, 0,
+    );
+    let calm_plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &calm, NOW, GRID_COLS, GRID_ROWS, &motion, 0,
+    );
+    let asleep_plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &asleep_and_calm,
+        NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &motion,
+        0,
+    );
+
+    assert_eq!(normal_plan.parallax_lifecycle_scale, 1.0);
+    assert_eq!(calm_plan.parallax_lifecycle_scale, 0.5);
+    assert_eq!(asleep_plan.parallax_lifecycle_scale, 0.25);
 }
 
 #[test]
@@ -173,7 +274,7 @@ fn smooth_round_plan_records_fractional_pet_anchors_without_breaking_flatten_par
 }
 
 #[test]
-fn smooth_round_plan_moves_pet_attached_layers_but_keeps_chest_bubble_snapped() {
+fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
     let vm = parity_fixture();
     let motion = glorp::round::scene::companion_roam_motion();
     let plan = glorp::round::smooth::build_round_smooth_scene_plan(
@@ -188,6 +289,7 @@ fn smooth_round_plan_moves_pet_attached_layers_but_keeps_chest_bubble_snapped() 
     let contact_shadow = plan.layer_by_role(SmoothLayerRole::ContactShadow).unwrap();
     let performance_cue = plan.layer_by_role(SmoothLayerRole::PerformanceCue).unwrap();
     let chest_bubble = plan.layer_by_role(SmoothLayerRole::ChestBubble).unwrap();
+    let props_behind = plan.layer_by_role(SmoothLayerRole::PropsBehind).unwrap();
 
     assert!(pet_body.transform.translation.x.abs() > f32::EPSILON);
     assert_eq!(
@@ -198,8 +300,88 @@ fn smooth_round_plan_moves_pet_attached_layers_but_keeps_chest_bubble_snapped() 
         performance_cue.transform.translation.x,
         pet_body.transform.translation.x
     );
-    assert_eq!(chest_bubble.transform.translation.x, 0.0);
-    assert_eq!(chest_bubble.transform.translation.y, 0.0);
+    assert_eq!(
+        chest_bubble.motion_binding,
+        SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Behind)
+    );
+    assert_eq!(chest_bubble.motion_binding, props_behind.motion_binding);
+    assert_eq!(
+        chest_bubble.transform.translation,
+        chest_bubble.parallax_translation
+    );
+}
+
+#[test]
+fn smooth_plan_composes_nonzero_parallax_without_moving_fixed_or_pet_layers() {
+    let vm = parity_fixture();
+    let motion = glorp::round::scene::companion_roam_motion();
+    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        datetime!(2026-07-08 18:00:00.500 UTC),
+        GRID_COLS,
+        GRID_ROWS,
+        &motion,
+        500,
+    );
+
+    assert_ne!(
+        plan.pet.parallax_focus_offset,
+        glorp::presentation::smooth::SmoothPoint::default()
+    );
+    assert!(plan.layers.iter().any(|layer| {
+        matches!(layer.motion_binding, SmoothLayerMotionBinding::Parallax(_))
+            && layer.parallax_translation != glorp::presentation::smooth::SmoothPoint::default()
+    }));
+    for layer in &plan.layers {
+        if matches!(
+            layer.motion_binding,
+            SmoothLayerMotionBinding::Fixed | SmoothLayerMotionBinding::PetAttached
+        ) {
+            assert_eq!(
+                layer.parallax_translation,
+                glorp::presentation::smooth::SmoothPoint::default(),
+                "fixed and pet-attached layers must not receive parallax: {:?}",
+                layer.role
+            );
+        }
+    }
+}
+
+#[test]
+fn nonzero_parallax_preserves_exact_classic_flatten_parity() {
+    let vm = parity_fixture();
+    let motion = glorp::round::scene::companion_roam_motion();
+    let now = datetime!(2026-07-08 18:00:00.500 UTC);
+    let classic = build_round_scene_draw_list(&vm, now, GRID_COLS, GRID_ROWS, &motion);
+    let smooth = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm, now, GRID_COLS, GRID_ROWS, &motion, 500,
+    );
+
+    assert!(smooth.layers.iter().any(|layer| {
+        layer.parallax_translation != glorp::presentation::smooth::SmoothPoint::default()
+    }));
+    assert_eq!(smooth.flatten_classic_cells(), classic.draw_list);
+}
+
+#[test]
+fn classic_breath_does_not_change_parallax_focus() {
+    let motion = glorp::round::scene::companion_roam_motion();
+    let mut still = parity_fixture();
+    let mut breathed = still.clone();
+    still.breath_offset_y = 0;
+    breathed.breath_offset_y = 1;
+
+    let still_plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &still, NOW, GRID_COLS, GRID_ROWS, &motion, 0,
+    );
+    let breathed_plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &breathed, NOW, GRID_COLS, GRID_ROWS, &motion, 0,
+    );
+
+    assert_eq!(
+        still_plan.pet.parallax_focus_offset,
+        breathed_plan.pet.parallax_focus_offset
+    );
 }
 
 #[test]
