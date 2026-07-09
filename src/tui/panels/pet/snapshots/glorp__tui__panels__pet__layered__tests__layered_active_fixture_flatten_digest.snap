@@ -1,10 +1,10 @@
 ---
 source: src/tui/panels/pet/layered.rs
-assertion_line: 720
+assertion_line: 749
 expression: flatten_digest(&layered.flatten_classic_cells().cells)
 ---
-cell_count: 1549
-checksum: 3951855857483982885
+cell_count: 1553
+checksum: 2820337050003523568
 head:
   - row: 0
     col: 0

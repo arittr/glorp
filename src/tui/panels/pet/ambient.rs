@@ -97,12 +97,12 @@ pub(super) fn biome_floor_wash_color(tag: crate::tui::room::RoomBiomeTag) -> rat
     Color::Rgb(darken(r), darken(g), darken(b))
 }
 
-/// The contact shadow under the pet's feet: the floor wash deepened a bit
-/// further so the pet reads as resting ON the ground, never a hard black
-/// blob. Calm, never high-contrast (Tamagotchi spirit).
+/// The contact shadow under the pet's feet: the floor wash deepened enough to
+/// ground the pet without becoming a hard black blob. The brighter footprint
+/// layers are composed in `grounding`.
 pub(super) fn contact_shadow_color(floor_wash: ratatui::style::Color) -> ratatui::style::Color {
     use ratatui::style::Color;
-    const SHADOW_DARKEN: i16 = 16;
+    const SHADOW_DARKEN: i16 = 8;
     let Color::Rgb(r, g, b) = floor_wash else {
         return floor_wash;
     };

@@ -2,12 +2,19 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use super::ambient::{biome_floor_wash_color, biome_wash_color, contact_shadow_color};
+use crate::pet::palette::Rgb;
 use crate::presentation::DrawCell;
 use crate::tui::room::RoomBiomeTag;
 
 /// The lower N habitat rows painted with the deeper floor wash so the ground
 /// reads as a value distinct from the lighter sky above it.
 pub(super) const FLOOR_BAND_ROWS: u16 = 3;
+
+const FOOTPRINT_OUTER_PADDING: u16 = 2;
+const FOOTPRINT_INNER_PADDING: u16 = 1;
+const FOOTPRINT_OUTER_TINT: Rgb = Rgb::new(0x4f, 0x38, 0x60);
+const FOOTPRINT_INNER_TINT: Rgb = Rgb::new(0x72, 0x54, 0x87);
+const FOOTPRINT_CORE_TINT: Rgb = Rgb::new(0x9d, 0x78, 0xb4);
 
 /// Computes the y-coordinate that anchors the pet art's feet one row above the
 /// habitat floor. `art_lines` are the framed 10 rows (`vm.pet_art`); `feet_row`
@@ -61,9 +68,10 @@ pub(super) fn contact_shadow_cells(
         .collect()
 }
 
-/// Returns one bg-only [`DrawCell`] per habitat cell: sky rows use
-/// [`biome_wash_color`] and the bottom [`FLOOR_BAND_ROWS`] rows use
-/// [`biome_floor_wash_color`].
+/// Returns one bg-only [`DrawCell`] per habitat cell. Sky rows use
+/// [`biome_wash_color`]; the lower [`FLOOR_BAND_ROWS`] use broad stepped value
+/// bands with sparse tile variation so the floor remains legible on small
+/// companion displays.
 pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCell> {
     let sky_wash = biome_wash_color(biome);
     let floor_wash = biome_floor_wash_color(biome);
@@ -72,16 +80,16 @@ pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCe
         .saturating_add(habitat.height.saturating_sub(FLOOR_BAND_ROWS));
     let mut cells = Vec::with_capacity((habitat.width as usize) * (habitat.height as usize));
     for wy in habitat.y..habitat.y.saturating_add(habitat.height) {
-        let wash = if wy >= floor_band_top {
-            floor_wash
-        } else {
-            sky_wash
-        };
-        let bg = match wash {
-            Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
-            _ => continue, // non-RGB color cap: skip
-        };
+        let floor_row = wy.saturating_sub(floor_band_top);
         for wx in habitat.x..habitat.x.saturating_add(habitat.width) {
+            let wash = if wy >= floor_band_top {
+                floor_substrate_color(floor_wash, floor_row, wx)
+            } else {
+                sky_wash
+            };
+            let Some(bg) = rgb_from_color(wash) else {
+                continue; // non-RGB color cap: skip
+            };
             cells.push(DrawCell {
                 row: wy,
                 col: wx,
@@ -95,9 +103,9 @@ pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCe
     cells
 }
 
-/// Returns one bg-only [`DrawCell`] per shadow position: the columns directly
-/// under the pet's feet on the floor row, clipped to `habitat`. Color is
-/// derived from [`contact_shadow_color`] applied to the biome floor wash.
+/// Returns a clipped, cell-native contact footprint below the pet's feet. The
+/// outer band stays dark, while the inner lavender bands improve small-display
+/// legibility without introducing a blurred glow or a renderer-specific shape.
 pub(super) fn contact_shadow_draw_cells(
     scene_pet_art: Rect,
     pet_art_lines: &[String],
@@ -107,22 +115,156 @@ pub(super) fn contact_shadow_draw_cells(
 ) -> Vec<DrawCell> {
     let mirror = facing == -1;
     let floor_wash = biome_floor_wash_color(biome);
-    let shadow = contact_shadow_color(floor_wash);
-    let bg = match shadow {
-        ratatui::style::Color::Rgb(r, g, b) => crate::pet::palette::Rgb::new(r, g, b),
-        _ => return Vec::new(), // non-RGB color cap: skip
+    let Some((outer_color, inner_color, core_color)) = contact_footprint_colors(floor_wash) else {
+        return Vec::new(); // non-RGB color cap: skip
     };
-    contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat)
-        .into_iter()
-        .map(|(col, row)| DrawCell {
+    let feet = contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat);
+    let Some((foot_start, foot_end, row)) = footprint_bounds(&feet) else {
+        return Vec::new();
+    };
+    let habitat_end = habitat.x.saturating_add(habitat.width).saturating_sub(1);
+    let outer_start = foot_start
+        .saturating_sub(FOOTPRINT_OUTER_PADDING)
+        .max(habitat.x);
+    let outer_end = foot_end
+        .saturating_add(FOOTPRINT_OUTER_PADDING)
+        .min(habitat_end);
+    let inner_start = foot_start
+        .saturating_sub(FOOTPRINT_INNER_PADDING)
+        .max(outer_start);
+    let inner_end = foot_end
+        .saturating_add(FOOTPRINT_INNER_PADDING)
+        .min(outer_end);
+
+    let mut cells = Vec::with_capacity(
+        usize::from(outer_end.saturating_sub(outer_start).saturating_add(1)) * 2,
+    );
+    append_footprint_row(
+        &mut cells,
+        row,
+        outer_start,
+        outer_end,
+        inner_start,
+        inner_end,
+        Some((foot_start, foot_end)),
+        outer_color,
+        inner_color,
+        core_color,
+    );
+
+    let lower_row = row.saturating_add(1);
+    if lower_row < habitat.y.saturating_add(habitat.height)
+        && outer_start.saturating_add(1) <= outer_end.saturating_sub(1)
+    {
+        append_footprint_row(
+            &mut cells,
+            lower_row,
+            outer_start.saturating_add(1),
+            outer_end.saturating_sub(1),
+            inner_start.saturating_add(1),
+            inner_end.saturating_sub(1),
+            None,
+            outer_color,
+            inner_color,
+            core_color,
+        );
+    }
+
+    cells
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_footprint_row(
+    cells: &mut Vec<DrawCell>,
+    row: u16,
+    outer_start: u16,
+    outer_end: u16,
+    inner_start: u16,
+    inner_end: u16,
+    core_span: Option<(u16, u16)>,
+    outer_color: Rgb,
+    inner_color: Rgb,
+    core_color: Rgb,
+) {
+    for col in outer_start..=outer_end {
+        let bg = if core_span.is_some_and(|(start, end)| col >= start && col <= end) {
+            core_color
+        } else if col >= inner_start && col <= inner_end {
+            inner_color
+        } else {
+            outer_color
+        };
+        cells.push(DrawCell {
             row,
             col,
             glyph: None,
             fg: None,
             bg: Some(bg),
             bold: false,
-        })
-        .collect()
+        });
+    }
+}
+
+fn floor_substrate_color(floor_wash: Color, floor_row: u16, col: u16) -> Color {
+    let Color::Rgb(r, g, b) = floor_wash else {
+        return floor_wash;
+    };
+    let band_delta = match floor_row {
+        0 => 6,
+        1 => 0,
+        _ => -8,
+    };
+    let tile_delta = match col % 7 {
+        0 => 3,
+        4 => -3,
+        _ => 0,
+    };
+    let floor = Rgb::new(r, g, b);
+    let color = adjust_rgb(floor, band_delta + tile_delta);
+    Color::Rgb(color.r, color.g, color.b)
+}
+
+fn contact_footprint_colors(floor_wash: Color) -> Option<(Rgb, Rgb, Rgb)> {
+    let floor = rgb_from_color(floor_wash)?;
+    let shadow = rgb_from_color(contact_shadow_color(floor_wash))?;
+    let outer = blend_rgb(shadow, FOOTPRINT_OUTER_TINT, 96);
+    let inner = blend_rgb(floor, FOOTPRINT_INNER_TINT, 112);
+    let core = blend_rgb(floor, FOOTPRINT_CORE_TINT, 144);
+    Some((outer, inner, core))
+}
+
+fn footprint_bounds(feet: &[(u16, u16)]) -> Option<(u16, u16, u16)> {
+    let &(first_col, row) = feet.first()?;
+    let (start, end) = feet
+        .iter()
+        .fold((first_col, first_col), |(start, end), &(col, _)| {
+            (start.min(col), end.max(col))
+        });
+    Some((start, end, row))
+}
+
+fn rgb_from_color(color: Color) -> Option<Rgb> {
+    match color {
+        Color::Rgb(r, g, b) => Some(Rgb::new(r, g, b)),
+        _ => None,
+    }
+}
+
+fn adjust_rgb(color: Rgb, delta: i16) -> Rgb {
+    let adjust = |channel: u8| (i16::from(channel) + delta).clamp(0, 255) as u8;
+    Rgb::new(adjust(color.r), adjust(color.g), adjust(color.b))
+}
+
+fn blend_rgb(base: Rgb, tint: Rgb, tint_weight: u16) -> Rgb {
+    let base_weight = 255_u16.saturating_sub(tint_weight);
+    let blend = |base: u8, tint: u8| {
+        ((u16::from(base) * base_weight + u16::from(tint) * tint_weight) / 255) as u8
+    };
+    Rgb::new(
+        blend(base.r, tint.r),
+        blend(base.g, tint.g),
+        blend(base.b, tint.b),
+    )
 }
 
 #[cfg(test)]
@@ -192,6 +334,81 @@ pub(crate) mod tests {
         assert!(set.contains(&(16, 26)), "shadow under right foot");
         assert!(!set.contains(&(15, 26)), "gap between feet is not shadowed");
         assert_eq!(set.len(), 2, "shadow is exactly the feet columns, no halo");
+    }
+
+    #[test]
+    fn contact_shadow_draw_cells_expand_to_a_three_value_footprint() {
+        let art_lines: Vec<String> = vec![
+            "             ".to_string(),
+            "             ".to_string(),
+            "             ".to_string(),
+            "             ".to_string(),
+            "             ".to_string(),
+            "  XXXXXXX    ".to_string(),
+            "             ".to_string(),
+            "             ".to_string(),
+            "             ".to_string(),
+            "             ".to_string(),
+        ];
+        let pet_rect = Rect::new(5, 5, 13, 10);
+        let habitat = Rect::new(0, 0, 60, 40);
+        let cells =
+            contact_shadow_draw_cells(pet_rect, &art_lines, 1, habitat, RoomBiomeTag::Starter);
+
+        assert_eq!(
+            cells.len(),
+            20,
+            "the main footprint and inset lower shelf both render"
+        );
+        assert!(cells.iter().all(|cell| cell.glyph.is_none()));
+        assert_eq!(cells.iter().filter(|cell| cell.row == 11).count(), 11);
+        assert_eq!(cells.iter().filter(|cell| cell.row == 12).count(), 9);
+        assert_eq!(cells.iter().map(|cell| cell.col).min(), Some(5));
+        assert_eq!(cells.iter().map(|cell| cell.col).max(), Some(15));
+
+        let color_at = |col, row| {
+            cells
+                .iter()
+                .find(|cell| cell.col == col && cell.row == row)
+                .and_then(|cell| cell.bg)
+                .unwrap()
+        };
+        let outer = color_at(5, 11);
+        let inner = color_at(6, 11);
+        let core = color_at(8, 11);
+        assert_eq!(
+            color_at(8, 12),
+            inner,
+            "lower shelf retains the lavender band"
+        );
+        let luminance = |color: Rgb| u32::from(color.r) + u32::from(color.g) + u32::from(color.b);
+        assert!(luminance(outer) < luminance(inner));
+        assert!(luminance(inner) < luminance(core));
+    }
+
+    #[test]
+    fn biome_wash_uses_textured_three_value_substrate() {
+        let habitat = Rect::new(0, 0, 12, 6);
+        let cells = biome_wash_cells(habitat, RoomBiomeTag::Starter);
+        let bg_at = |col, row| {
+            cells
+                .iter()
+                .find(|cell| cell.col == col && cell.row == row)
+                .and_then(|cell| cell.bg)
+                .expect("every wash cell should have an RGB background")
+        };
+        let luminance = |color: Rgb| u32::from(color.r) + u32::from(color.g) + u32::from(color.b);
+
+        let top = bg_at(1, 3);
+        let middle = bg_at(1, 4);
+        let bottom = bg_at(1, 5);
+        assert!(luminance(top) > luminance(middle));
+        assert!(luminance(middle) > luminance(bottom));
+        assert_ne!(
+            bg_at(0, 3),
+            top,
+            "sparse tile variation breaks up the flat band"
+        );
     }
 
     #[test]
@@ -291,7 +508,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn contact_shadow_never_exceeds_the_feet_span() {
+    fn contact_shadow_cells_preserve_the_exact_feet_span_for_footprint_derivation() {
         let art_lines: Vec<String> = vec![
             "             ".to_string(),
             "             ".to_string(),
