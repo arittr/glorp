@@ -83,6 +83,7 @@ struct AppState {
     presentation_state: WatchPresentationState,
     vm: WatchViewModel,
     scene: RoundSceneModel,
+    review_state: CompanionReviewState,
     renderer_mode: CompanionRendererMode,
     pixel_input: Option<PixelPetInput>,
     pixel_state: Option<PixelRendererState>,
@@ -169,12 +170,8 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         )?
     };
     let mut presentation_state = WatchPresentationState::default();
-    apply_review_state(
-        review.resolved_state(),
-        &mut presentation_state,
-        &mut initial_vm,
-        now,
-    )?;
+    let review_state = review.resolved_state();
+    apply_review_state(review_state, &mut presentation_state, &mut initial_vm, now)?;
     let scene = derive_round_scene_model(&initial_vm, now);
     let pixel_input = renderer_mode
         .is_pixel()
@@ -214,6 +211,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             presentation_state,
             vm: initial_vm,
             scene,
+            review_state,
             renderer_mode,
             pixel_input,
             pixel_state,
@@ -418,22 +416,44 @@ fn drain_poll_results() {
     };
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
-            let mut vm = update.vm;
             let now = time::OffsetDateTime::now_utc();
-            crate::watch_live::stamp_live_presentation(
+            let Ok((vm, scene, pixel_input)) = apply_post_poll_update(
                 &mut state.presentation_state,
-                &mut vm,
-                update.applied_signal,
+                state.review_state,
+                state.renderer_mode,
+                update,
                 now,
-            );
-            if state.renderer_mode.is_pixel() {
-                state.pixel_input = Some(PixelPetInput::from_watch_view_model(&vm, now));
-            }
-            state.scene = derive_round_scene_model(&vm, now);
+            ) else {
+                return;
+            };
+            state.pixel_input = pixel_input;
+            state.scene = scene;
             state.vm = vm;
             unsafe { state.view.setNeedsDisplay(true) };
         }
     });
+}
+
+fn apply_post_poll_update(
+    presentation_state: &mut WatchPresentationState,
+    review_state: CompanionReviewState,
+    renderer_mode: CompanionRendererMode,
+    update: LiveWatchUpdate,
+    now: time::OffsetDateTime,
+) -> Result<(WatchViewModel, RoundSceneModel, Option<PixelPetInput>)> {
+    let mut vm = update.vm;
+    crate::watch_live::stamp_live_presentation(
+        presentation_state,
+        &mut vm,
+        update.applied_signal,
+        now,
+    );
+    apply_review_state(review_state, presentation_state, &mut vm, now)?;
+    let pixel_input = renderer_mode
+        .is_pixel()
+        .then(|| PixelPetInput::from_watch_view_model(&vm, now));
+    let scene = derive_round_scene_model(&vm, now);
+    Ok((vm, scene, pixel_input))
 }
 
 fn animate_pet() {
@@ -1397,6 +1417,121 @@ mod tests {
             late_accent_alpha < first_accent_alpha,
             "live Pixel tick should decay feed-pulse aura without waiting for the next poll: first={first_accent_alpha}, late={late_accent_alpha}"
         );
+    }
+
+    #[test]
+    fn post_poll_review_state_active_pulse_reapplies_after_live_update() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut presentation_state = WatchPresentationState::default();
+        let update = LiveWatchUpdate {
+            pet_state: crate::storage::state::PetState::new_for_test("seed", "glorp"),
+            vm: WatchViewModel::fixture(),
+            applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+        };
+
+        let (vm, _, pixel_input) = apply_post_poll_update(
+            &mut presentation_state,
+            CompanionReviewState::ActivePulse,
+            CompanionRendererMode::Classic,
+            update,
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(vm.last_feed_pulse_at, Some(now));
+        assert!(vm.life_profile.burst_level > 0.0);
+        assert!(pixel_input.is_none());
+    }
+
+    #[test]
+    fn post_poll_review_state_asleep_calm_reapplies_after_live_update() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut presentation_state = WatchPresentationState::default();
+        let mut vm = WatchViewModel::fixture();
+        vm.day_context.asleep = false;
+        vm.life_profile.calm_mode = false;
+        vm.last_feed_pulse_at = Some(now);
+        let update = LiveWatchUpdate {
+            pet_state: crate::storage::state::PetState::new_for_test("seed", "glorp"),
+            vm,
+            applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+        };
+
+        let (vm, _, _) = apply_post_poll_update(
+            &mut presentation_state,
+            CompanionReviewState::AsleepCalm,
+            CompanionRendererMode::Classic,
+            update,
+            now,
+        )
+        .unwrap();
+
+        assert!(vm.day_context.asleep);
+        assert!(vm.life_profile.calm_mode);
+        assert_eq!(vm.last_feed_pulse_at, None);
+    }
+
+    #[test]
+    fn post_poll_review_state_helper_trouble_reapplies_after_live_update() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut presentation_state = WatchPresentationState::default();
+        let update = LiveWatchUpdate {
+            pet_state: crate::storage::state::PetState::new_for_test("seed", "glorp"),
+            vm: WatchViewModel::fixture(),
+            applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+        };
+
+        let (vm, _, _) = apply_post_poll_update(
+            &mut presentation_state,
+            CompanionReviewState::HelperTrouble,
+            CompanionRendererMode::Classic,
+            update,
+            now,
+        )
+        .unwrap();
+
+        let source = vm.source_health.first().expect("fixture source health");
+        assert_eq!(source.status, SourceStatus::Diagnostic);
+        assert_eq!(source.diagnostic_code.as_deref(), Some("review-state"));
+        assert_eq!(source.diagnostic_message, None);
+    }
+
+    #[test]
+    fn post_poll_review_state_normal_preserves_live_behavior() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut presentation_state = WatchPresentationState::default();
+        let update = LiveWatchUpdate {
+            pet_state: crate::storage::state::PetState::new_for_test("seed", "glorp"),
+            vm: WatchViewModel::fixture(),
+            applied_signal: crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                now,
+                time::Duration::seconds(10),
+            ),
+        };
+
+        let (vm, _, _) = apply_post_poll_update(
+            &mut presentation_state,
+            CompanionReviewState::Normal,
+            CompanionRendererMode::Classic,
+            update,
+            now,
+        )
+        .unwrap();
+
+        assert!(!vm.day_context.asleep);
+        assert!(!vm.life_profile.calm_mode);
+        assert_eq!(vm.last_feed_pulse_at, None);
+        let source = vm.source_health.first().expect("fixture source health");
+        assert_ne!(source.status, SourceStatus::Diagnostic);
     }
 
     fn accent_alpha_sum(frame: &PixelFrame, input: &PixelPetInput) -> u32 {

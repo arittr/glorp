@@ -109,6 +109,71 @@ Fresh screenshot fact:
 
 ## Concerns
 
+## Final Review Fix
+
+### Files Changed
+
+- `src/companion/app.rs`
+- `.superpowers/sdd/task-6-report.md`
+
+### RED Evidence
+
+Command:
+
+```bash
+cargo test --lib review_state -- --nocapture
+```
+
+Result before the fix: failed for the targeted drift behavior after post-poll updates. Summary: `2 passed; 3 failed; 831 filtered out`.
+
+Representative failures:
+
+- `post_poll_review_state_active_pulse_reapplies_after_live_update`: `left: None`, `right: Some(2026-07-08 12:00:00.0 +00:00:00)`
+- `post_poll_review_state_asleep_calm_reapplies_after_live_update`: `assertion failed: vm.day_context.asleep`
+- `post_poll_review_state_helper_trouble_reapplies_after_live_update`: `left: Ready`, `right: Diagnostic`
+
+### GREEN Evidence
+
+Focused check:
+
+```bash
+cargo test --lib review_state -- --nocapture
+```
+
+Result after the fix: passed. Summary: `5 passed; 0 failed; 831 filtered out`.
+
+Required checks:
+
+```bash
+cargo build
+cargo fmt --check
+```
+
+Results:
+
+- `cargo build`: passed (`Finished dev profile`)
+- `cargo fmt --check`: passed
+
+Native review checks:
+
+```bash
+cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 2000 --review-capture-dir target/glorp-review/smooth-360-active
+cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 12000 --review-capture-dir target/glorp-review/smooth-360-active-12s
+```
+
+Results:
+
+- Required 2s capture exited 0 with `review_state: active-pulse`, `frame_count: 59`, `elapsed_duration_ms: 2050`, `panic: false`
+- Extra 12s capture exited 0 across the 10s poll boundary with `review_state: active-pulse`, `frame_count: 359`, `elapsed_duration_ms: 12037`, `panic: false`
+
+### Commit SHA
+
+- Placeholder: `PENDING_COMMIT_SHA`
+
+### Concerns
+
+- The focused regression tests directly cover the bug path, but the native capture logs do not expose a fixture-specific boolean for post-poll pulse persistence, so runtime verification here is exit-status plus review-state metadata rather than a stronger artifact assertion.
+
 - No functional concerns from the final checks.
 - The report cannot contain its own final commit SHA without changing the commit hash; final response records the actual commit SHA.
 
