@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::commands::companion_mode::{
-    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize,
+    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
 };
 use crate::commands::watch::{
     build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
@@ -21,6 +21,7 @@ use crate::presentation::pixel::{
     render_pixel_frame, PixelFrame, PixelPetInput, PixelRendererState, PixelRendererTick,
     PixelViewport,
 };
+use crate::presentation::smooth::{SmoothCompanionScenePlan, SmoothLayerItem, SmoothLayerRole};
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge, daily_overage_color,
     daily_overage_marker_arc, daily_overage_marker_fraction, growth_ring_fill_end_deg,
@@ -31,6 +32,7 @@ use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabil
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
 use crate::round::smooth::build_round_smooth_scene_plan;
 use crate::storage::state::StateStore;
+use crate::tui::view_model::SourceStatus;
 use crate::tui::view_model::WatchViewModel;
 use crate::watch_live::{LiveWatchRenderMode, LiveWatchUpdate, WatchPresentationState};
 use objc2::declare_class;
@@ -87,6 +89,7 @@ struct AppState {
     pixel_frame: Option<PixelFrame>,
     smooth_started_at: Option<Instant>,
     animation_frame: u64,
+    review_capture: Option<crate::companion::review_capture::ReviewCapture>,
 }
 
 thread_local! {
@@ -126,7 +129,7 @@ declare_class!(
     unsafe impl RoundView {
         #[method(drawRect:)]
         fn draw_rect(&self, _rect: NSRect) {
-            draw_scene(self.bounds());
+            draw_scene(self, self.bounds());
         }
     }
 );
@@ -165,23 +168,12 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         )?
     };
     let mut presentation_state = WatchPresentationState::default();
-    if review.active_pulse {
-        crate::watch_live::stamp_live_presentation(
-            &mut presentation_state,
-            &mut initial_vm,
-            crate::tui::life::AppliedUsageSignal::diagnostics_only(
-                now,
-                time::Duration::seconds(10),
-            ),
-            now,
-        );
-        crate::watch_live::stamp_live_presentation(
-            &mut presentation_state,
-            &mut initial_vm,
-            crate::watch_live::bursting_review_signal(now),
-            now,
-        );
-    }
+    apply_review_state(
+        review.resolved_state(),
+        &mut presentation_state,
+        &mut initial_vm,
+        now,
+    )?;
     let scene = derive_round_scene_model(&initial_vm, now);
     let pixel_input = renderer_mode
         .is_pixel()
@@ -196,6 +188,8 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
     install_app_menu(&app, mtm);
 
     let controller: Retained<Controller> = unsafe { msg_send_id![Controller::class(), new] };
+    let review_capture =
+        crate::companion::review_capture::ReviewCapture::from_options(renderer_mode, &review)?;
     let (window, view) = build_window(mtm, review.initial_size);
     let poll_rx = crate::watch_live::spawn_live_watch_worker(
         paths,
@@ -222,6 +216,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             pixel_frame,
             smooth_started_at: renderer_mode.is_smooth().then(Instant::now),
             animation_frame: 0,
+            review_capture,
         });
     });
 
@@ -241,6 +236,49 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
     };
 
     unsafe { app.run() };
+    Ok(())
+}
+
+fn apply_review_state(
+    state: CompanionReviewState,
+    presentation_state: &mut WatchPresentationState,
+    vm: &mut WatchViewModel,
+    now: time::OffsetDateTime,
+) -> Result<()> {
+    match state {
+        CompanionReviewState::Normal => {}
+        CompanionReviewState::ActivePulse => {
+            crate::watch_live::stamp_live_presentation(
+                presentation_state,
+                vm,
+                crate::tui::life::AppliedUsageSignal::diagnostics_only(
+                    now,
+                    time::Duration::seconds(10),
+                ),
+                now,
+            );
+            crate::watch_live::stamp_live_presentation(
+                presentation_state,
+                vm,
+                crate::watch_live::bursting_review_signal(now),
+                now,
+            );
+        }
+        CompanionReviewState::AsleepCalm => {
+            vm.day_context.asleep = true;
+            vm.life_profile.calm_mode = true;
+            vm.last_feed_pulse_at = None;
+            vm.breath_offset_y = 0;
+            rerender_pet_for_view_model(vm, 0, true, now)?;
+        }
+        CompanionReviewState::HelperTrouble => {
+            if let Some(source) = vm.source_health.first_mut() {
+                source.status = SourceStatus::Diagnostic;
+                source.diagnostic_code = Some("review-state".into());
+                source.diagnostic_message = None;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -358,6 +396,7 @@ fn ui_tick() {
     let _mtm = MainThreadMarker::new().expect("companion ui_tick on non-main thread");
     drain_poll_results();
     animate_pet();
+    finish_review_capture_if_due();
 }
 
 fn drain_poll_results() {
@@ -439,6 +478,42 @@ fn advance_companion_animation(
         || vm.breath_offset_y != prev_breath_offset_y)
 }
 
+fn finish_review_capture_if_due() {
+    let pending_capture = APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let state = state.as_mut()?;
+        if state
+            .review_capture
+            .as_ref()
+            .is_some_and(|capture| capture.ready_to_finish())
+        {
+            let capture = state.review_capture.take()?;
+            Some((state.view.clone(), capture))
+        } else {
+            None
+        }
+    });
+    let Some((view, mut capture)) = pending_capture else {
+        return;
+    };
+
+    match capture.finish(view.as_super()) {
+        Ok(()) => unsafe {
+            if let Some(mtm) = MainThreadMarker::new() {
+                NSApplication::sharedApplication(mtm).terminate(None);
+            }
+        },
+        Err(err) => {
+            eprintln!("glorp review capture failed: {err}");
+            unsafe {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    NSApplication::sharedApplication(mtm).terminate(None);
+                }
+            }
+        }
+    }
+}
+
 fn render_live_pixel_frame(
     vm: &WatchViewModel,
     pixel_state: &mut PixelRendererState,
@@ -456,7 +531,17 @@ fn render_live_pixel_frame(
     (frame, input)
 }
 
-fn draw_scene(bounds: NSRect) {
+fn record_review_frame(_view: &RoundView, smooth_bob: Option<f32>) {
+    APP_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            if let Some(capture) = state.review_capture.as_mut() {
+                capture.record_frame(smooth_bob);
+            }
+        }
+    });
+}
+
+fn draw_scene(view: &RoundView, bounds: NSRect) {
     let _mtm = MainThreadMarker::new().expect("companion draw_scene on non-main thread");
     let state_snapshot = APP_STATE.with(|cell| {
         cell.borrow().as_ref().map(|s| {
@@ -548,47 +633,53 @@ fn draw_scene(bounds: NSRect) {
                 crate::companion::pixel::draw_pixel_frame(frame, bounds, aperture, &hud_text);
             }
         } else if let Some(m) = companion_grid_metrics(bounds.size.width, bounds.size.height) {
-            let (pet_center_col, pet_center_row, pet_width_cells, draw_list) =
-                if renderer_mode.is_smooth() {
-                    let elapsed_ms = smooth_started_at
-                        .map(|started_at| started_at.elapsed().as_millis())
-                        .unwrap_or(0)
-                        .min(u128::from(u64::MAX)) as u64;
-                    let plan = build_round_smooth_scene_plan(
-                        &vm,
-                        now,
-                        m.grid_cols,
-                        m.grid_rows,
-                        &companion_motion(),
-                        elapsed_ms,
-                    );
-                    (
-                        f64::from(
-                            plan.pet.bounds.min.x
-                                + (plan.pet.bounds.max.x - plan.pet.bounds.min.x) / 2.0,
-                        ),
-                        f64::from(
-                            plan.pet.bounds.min.y
-                                + (plan.pet.bounds.max.y - plan.pet.bounds.min.y) / 2.0,
-                        ),
-                        f64::from(plan.pet.bounds.max.x - plan.pet.bounds.min.x),
-                        plan.flatten_classic_cells(),
-                    )
-                } else {
-                    let companion_scene = crate::round::scene::build_round_scene_draw_list(
-                        &vm,
-                        now,
-                        m.grid_cols,
-                        m.grid_rows,
-                        &companion_motion(),
-                    );
-                    (
-                        f64::from(companion_scene.pet_rect.x + companion_scene.pet_rect.width / 2),
-                        f64::from(companion_scene.pet_rect.y + companion_scene.pet_rect.height / 2),
-                        f64::from(companion_scene.pet_rect.width),
-                        companion_scene.draw_list,
-                    )
-                };
+            let mut smooth_bob_sample = None;
+            let mut smooth_plan = None;
+            let (pet_center_col, pet_center_row, pet_width_cells, draw_list) = if renderer_mode
+                .is_smooth()
+            {
+                let elapsed_ms = smooth_started_at
+                    .map(|started_at| started_at.elapsed().as_millis())
+                    .unwrap_or(0)
+                    .min(u128::from(u64::MAX)) as u64;
+                smooth_bob_sample = Some(crate::presentation::smooth::smooth_pet_bob(elapsed_ms));
+                let plan = build_round_smooth_scene_plan(
+                    &vm,
+                    now,
+                    m.grid_cols,
+                    m.grid_rows,
+                    &companion_motion(),
+                    elapsed_ms,
+                );
+                let pet_center_col = f64::from(
+                    plan.pet.bounds.min.x + (plan.pet.bounds.max.x - plan.pet.bounds.min.x) / 2.0,
+                );
+                let pet_center_row = f64::from(
+                    plan.pet.bounds.min.y + (plan.pet.bounds.max.y - plan.pet.bounds.min.y) / 2.0,
+                );
+                let pet_width_cells = f64::from(plan.pet.bounds.max.x - plan.pet.bounds.min.x);
+                smooth_plan = Some(plan);
+                (
+                    pet_center_col,
+                    pet_center_row,
+                    pet_width_cells,
+                    crate::presentation::SceneDrawList { cells: Vec::new() },
+                )
+            } else {
+                let companion_scene = crate::round::scene::build_round_scene_draw_list(
+                    &vm,
+                    now,
+                    m.grid_cols,
+                    m.grid_rows,
+                    &companion_motion(),
+                );
+                (
+                    f64::from(companion_scene.pet_rect.x + companion_scene.pet_rect.width / 2),
+                    f64::from(companion_scene.pet_rect.y + companion_scene.pet_rect.height / 2),
+                    f64::from(companion_scene.pet_rect.width),
+                    companion_scene.draw_list,
+                )
+            };
             // Mood aura — soft radial glow (concentric translucent circles) centered
             // on the pet, color by mood. Drawn under the pet so the body sits on top.
             let cxp = m.origin_x + pet_center_col * m.cell_w;
@@ -607,14 +698,26 @@ fn draw_scene(bounds: NSRect) {
                 glow.fill();
             }
 
-            appkit_blit_draw_list(
-                &draw_list,
-                m.font_size,
-                m.cell_w,
-                m.cell_h,
-                m.origin_x,
-                m.origin_y,
-            );
+            if let Some(plan) = smooth_plan.as_ref() {
+                appkit_blit_smooth_plan(
+                    plan,
+                    m.font_size,
+                    m.cell_w,
+                    m.cell_h,
+                    m.origin_x,
+                    m.origin_y,
+                );
+            } else {
+                appkit_blit_draw_list(
+                    &draw_list,
+                    m.font_size,
+                    m.cell_w,
+                    m.cell_h,
+                    m.origin_x,
+                    m.origin_y,
+                );
+            }
+            record_review_frame(view, smooth_bob_sample);
         }
 
         // Companion perimeter gauges: XP, today vs yesterday, and live 10m pace.
@@ -878,6 +981,77 @@ fn cell_to_point(
     (px, py)
 }
 
+fn fractional_cell_to_point(
+    col: f64,
+    row: f64,
+    cell_w: f64,
+    cell_h: f64,
+    origin_x: f64,
+    origin_y: f64,
+) -> (f64, f64) {
+    let px = origin_x + col * cell_w;
+    let py = origin_y - (row + 1.0) * cell_h;
+    (px, py)
+}
+
+fn appkit_cell_axis(value: f32) -> u16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.round().clamp(0.0, f32::from(u16::MAX)) as u16
+}
+
+fn appkit_blit_smooth_plan(
+    plan: &SmoothCompanionScenePlan,
+    font_size: f64,
+    cell_w: f64,
+    cell_h: f64,
+    origin_x: f64,
+    origin_y: f64,
+) {
+    let mut ordered_layers: Vec<_> = plan.layers.iter().enumerate().collect();
+    ordered_layers.sort_by_key(|(index, layer)| (layer.z, *index));
+
+    for (_, layer) in ordered_layers {
+        if layer.opacity <= 0.0 {
+            continue;
+        }
+        for item in &layer.items {
+            let SmoothLayerItem::LocalCell(cell) = item else {
+                continue;
+            };
+            let col = layer.anchor.x + layer.transform.translation.x + f32::from(cell.col);
+            let row = layer.anchor.y + layer.transform.translation.y + f32::from(cell.row);
+            let (px, py) = if layer.role == SmoothLayerRole::PetBody {
+                fractional_cell_to_point(
+                    f64::from(col),
+                    f64::from(row),
+                    cell_w,
+                    cell_h,
+                    origin_x,
+                    origin_y,
+                )
+            } else {
+                cell_to_point(
+                    appkit_cell_axis(col),
+                    appkit_cell_axis(row),
+                    cell_w,
+                    cell_h,
+                    origin_x,
+                    origin_y,
+                )
+            };
+            appkit_draw_cell_parts(
+                cell.glyph.as_deref(),
+                cell.fg,
+                cell.bg,
+                cell.bold,
+                AppkitCellFrame { px, py, font_size, cell_w, cell_h },
+            );
+        }
+    }
+}
+
 /// Blit a [`crate::presentation::SceneDrawList`] to the current AppKit
 /// graphics context. The caller is responsible for installing the aperture
 /// clip before calling (as `draw_scene` already does).
@@ -897,50 +1071,70 @@ fn appkit_blit_draw_list(
     origin_x: f64,
     origin_y: f64,
 ) {
+    for cell in &list.cells {
+        if cell.bg.is_none() && cell.glyph.is_none() {
+            continue;
+        }
+
+        let (px, py) = cell_to_point(cell.col, cell.row, cell_w, cell_h, origin_x, origin_y);
+
+        appkit_draw_cell_parts(
+            cell.glyph.as_deref(),
+            cell.fg,
+            cell.bg,
+            cell.bold,
+            AppkitCellFrame { px, py, font_size, cell_w, cell_h },
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AppkitCellFrame {
+    px: f64,
+    py: f64,
+    font_size: f64,
+    cell_w: f64,
+    cell_h: f64,
+}
+
+fn appkit_draw_cell_parts(
+    glyph: Option<&str>,
+    fg: Option<crate::pet::palette::Rgb>,
+    bg: Option<crate::pet::palette::Rgb>,
+    bold: bool,
+    frame: AppkitCellFrame,
+) {
     unsafe {
-        for cell in &list.cells {
-            if cell.bg.is_none() && cell.glyph.is_none() {
-                continue;
-            }
+        if let Some(bg) = bg {
+            let bg_color = rgb_color(bg.r, bg.g, bg.b);
+            let path = NSBezierPath::bezierPathWithRect(NSRect::new(
+                NSPoint::new(frame.px, frame.py),
+                NSSize::new(frame.cell_w, frame.cell_h),
+            ));
+            ns_color(&bg_color).setFill();
+            path.fill();
+        }
 
-            let (px, py) = cell_to_point(cell.col, cell.row, cell_w, cell_h, origin_x, origin_y);
-
-            if let Some(bg) = &cell.bg {
-                let bg_color = rgb_color(bg.r, bg.g, bg.b);
-                let path = NSBezierPath::bezierPathWithRect(NSRect::new(
-                    NSPoint::new(px, py),
-                    NSSize::new(cell_w, cell_h),
-                ));
-                ns_color(&bg_color).setFill();
-                path.fill();
-            }
-
-            if let Some(glyph) = &cell.glyph {
-                let fg = cell
-                    .fg
-                    .as_ref()
-                    .map(|c| rgb_color(c.r, c.g, c.b))
-                    .unwrap_or(RoundColor(1.0, 1.0, 1.0, 1.0));
-                let attr = if cell.bold {
-                    // `attributed_pet_glyph` uses weight 0.0 (NSFontWeightRegular).
-                    // For bold cells we build the attributed string with NSFontWeightBold.
-                    let text = NSString::from_str(glyph);
-                    let font =
-                        NSFont::monospacedSystemFontOfSize_weight(font_size, NSFontWeightBold);
-                    let mut a = NSMutableAttributedString::from_nsstring(&text);
-                    let range = objc2_foundation::NSRange::from(0..text.length());
-                    a.addAttribute_value_range(NSFontAttributeName, &font, range);
-                    a.addAttribute_value_range(
-                        NSForegroundColorAttributeName,
-                        &ns_color(&fg),
-                        range,
-                    );
-                    a
-                } else {
-                    attributed_pet_glyph(glyph, font_size, &fg)
-                };
-                attr.drawAtPoint(NSPoint::new(px, py));
-            }
+        if let Some(glyph) = glyph {
+            let fg = fg
+                .as_ref()
+                .map(|c| rgb_color(c.r, c.g, c.b))
+                .unwrap_or(RoundColor(1.0, 1.0, 1.0, 1.0));
+            let attr = if bold {
+                // `attributed_pet_glyph` uses weight 0.0 (NSFontWeightRegular).
+                // For bold cells we build the attributed string with NSFontWeightBold.
+                let text = NSString::from_str(glyph);
+                let font =
+                    NSFont::monospacedSystemFontOfSize_weight(frame.font_size, NSFontWeightBold);
+                let mut a = NSMutableAttributedString::from_nsstring(&text);
+                let range = objc2_foundation::NSRange::from(0..text.length());
+                a.addAttribute_value_range(NSFontAttributeName, &font, range);
+                a.addAttribute_value_range(NSForegroundColorAttributeName, &ns_color(&fg), range);
+                a
+            } else {
+                attributed_pet_glyph(glyph, frame.font_size, &fg)
+            };
+            attr.drawAtPoint(NSPoint::new(frame.px, frame.py));
         }
     }
 }

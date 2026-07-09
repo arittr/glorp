@@ -260,6 +260,82 @@ fn companion_app_help_accepts_hidden_smooth_renderer_choice() {
         .stdout(predicate::str::contains("smooth").not());
 }
 
+#[test]
+fn companion_review_accepts_hidden_state_duration_and_capture_flags() {
+    for state in ["normal", "active-pulse", "asleep-calm", "helper-trouble"] {
+        Command::cargo_bin("glorp")
+            .unwrap()
+            .args([
+                "companion",
+                "--renderer",
+                "smooth",
+                "--review-size",
+                "360x360",
+                "--review-state",
+                state,
+                "--review-duration-ms",
+                "2000",
+                "--review-capture-dir",
+                "target/glorp-review/test",
+                "--help",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--review-state").not())
+            .stdout(predicate::str::contains("--review-duration-ms").not())
+            .stdout(predicate::str::contains("--review-capture-dir").not());
+    }
+}
+
+#[test]
+fn companion_review_accepts_hidden_companion_app_review_flags() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args([
+            "companion-app",
+            "--renderer",
+            "smooth",
+            "--review-size",
+            "360x360",
+            "--review-state",
+            "active-pulse",
+            "--review-duration-ms",
+            "2000",
+            "--review-capture-dir",
+            "target/glorp-review/test",
+            "--help",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--review-state").not())
+        .stdout(predicate::str::contains("--review-duration-ms").not())
+        .stdout(predicate::str::contains("--review-capture-dir").not());
+}
+
+#[test]
+fn companion_review_legacy_active_pulse_flag_still_parses() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args([
+            "companion",
+            "--renderer",
+            "smooth",
+            "--review-size",
+            "360x360",
+            "--review-active-pulse",
+            "--review-duration-ms",
+            "2000",
+            "--review-capture-dir",
+            "target/glorp-review/test",
+            "--help",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--review-active-pulse").not())
+        .stdout(predicate::str::contains("--review-duration-ms").not())
+        .stdout(predicate::str::contains("--review-capture-dir").not());
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn companion_reports_macos_only_on_other_platforms() {

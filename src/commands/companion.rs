@@ -33,11 +33,12 @@ fn build_open_command(
     review: CompanionReviewOptions,
 ) -> std::process::Command {
     let mut command = std::process::Command::new("open");
-    if mode.is_pixel() || mode.is_smooth() || review.initial_size.is_some() || review.active_pulse {
+    let needs_args = mode.is_pixel() || mode.is_smooth() || review.has_review_launch_options();
+    if needs_args {
         command.arg("-n");
     }
     command.arg(app);
-    if mode.is_pixel() || mode.is_smooth() || review.initial_size.is_some() || review.active_pulse {
+    if needs_args {
         command.arg("--args");
     }
     if mode.is_pixel() || mode.is_smooth() {
@@ -49,6 +50,17 @@ fn build_open_command(
     }
     if review.active_pulse {
         command.arg("--review-active-pulse");
+    }
+    if let Some(state) = review.state {
+        command.arg("--review-state").arg(state.as_str());
+    }
+    if let Some(duration_ms) = review.duration_ms {
+        command
+            .arg("--review-duration-ms")
+            .arg(duration_ms.to_string());
+    }
+    if let Some(capture_dir) = review.capture_dir {
+        command.arg("--review-capture-dir").arg(capture_dir);
     }
     command
 }
@@ -98,6 +110,7 @@ mod tests {
             CompanionReviewOptions {
                 initial_size: Some(CompanionReviewSize { width: 360, height: 360 }),
                 active_pulse: true,
+                ..CompanionReviewOptions::default()
             },
         );
 
