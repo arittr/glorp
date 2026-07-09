@@ -520,7 +520,7 @@ mod tests {
                 far: SmoothReviewPoint { x: 0.01, y: 0.0075 },
                 mid: SmoothReviewPoint { x: 0.02, y: 0.015 },
                 behind: SmoothReviewPoint { x: 0.03, y: 0.0225 },
-                foreground: SmoothReviewPoint { x: 0.045, y: 0.03375 },
+                foreground: SmoothReviewPoint { x: 0.045, y: 0.03374 },
             },
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
@@ -534,10 +534,10 @@ mod tests {
             parallax_focus_offset: SmoothReviewPoint { x: 0.5, y: 0.25 },
             parallax_lifecycle_scale: 0.5,
             parallax_planes: SmoothReviewParallaxPlanes {
-                far: SmoothReviewPoint { x: 0.02, y: 0.015 },
-                mid: SmoothReviewPoint { x: 0.04, y: 0.03 },
-                behind: SmoothReviewPoint { x: 0.06, y: 0.045 },
-                foreground: SmoothReviewPoint { x: 0.09, y: 0.0675 },
+                far: SmoothReviewPoint { x: -0.01516, y: -0.01014 },
+                mid: SmoothReviewPoint { x: -0.00216, y: 0.01714 },
+                behind: SmoothReviewPoint { x: 0.01114, y: -0.00114 },
+                foreground: SmoothReviewPoint { x: -0.00516, y: 0.00494 },
             },
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
@@ -551,23 +551,40 @@ mod tests {
             parallax_focus_offset: SmoothReviewPoint { x: 0.75, y: 0.375 },
             parallax_lifecycle_scale: 0.25,
             parallax_planes: SmoothReviewParallaxPlanes {
-                far: SmoothReviewPoint { x: 0.03, y: 0.0225 },
-                mid: SmoothReviewPoint { x: 0.06, y: 0.045 },
-                behind: SmoothReviewPoint { x: 0.09, y: 0.0675 },
-                foreground: SmoothReviewPoint { x: 0.135, y: 0.10125 },
+                far: SmoothReviewPoint { x: 0.00494, y: 0.02226 },
+                mid: SmoothReviewPoint { x: 0.02506, y: -0.01266 },
+                behind: SmoothReviewPoint { x: -0.00994, y: 0.04444 },
+                foreground: SmoothReviewPoint { x: 0.03006, y: -0.02666 },
+            },
+        }));
+        capture.record_frame(Some(SmoothReviewFrameSample {
+            bob_y: 0.4,
+            semantic_art_tick_index: 2,
+            pet_visual_checksum: 789,
+            base_anchor: SmoothReviewPoint { x: 10.4, y: 13.15 },
+            bob_offset: SmoothReviewPoint { x: 0.0, y: 0.4 },
+            final_anchor: SmoothReviewPoint { x: 10.4, y: 13.55 },
+            classic_snap_anchor: SmoothReviewPoint { x: 10.0, y: 12.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: -0.5, y: 0.625 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: -0.01004, y: -0.00376 },
+                mid: SmoothReviewPoint { x: -0.01504, y: 0.00626 },
+                behind: SmoothReviewPoint { x: 0.01806, y: 0.01004 },
+                foreground: SmoothReviewPoint { x: -0.02244, y: 0.01884 },
             },
         }));
         let json = capture.render_log_json_for_test().unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(value["paint_frame_count"], 3);
-        assert_eq!(value["frame_count"], 3);
-        assert_eq!(value["semantic_art_tick_count"], 1);
-        assert_eq!(value["max_adjacent_base_anchor_delta"]["x"], 0.05);
-        assert_eq!(value["max_adjacent_base_anchor_delta"]["y"], 0.30);
-        assert_eq!(value["max_adjacent_final_anchor_delta"]["x"], 0.05);
-        assert_eq!(value["max_adjacent_final_anchor_delta"]["y"], 0.30);
-        assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 3);
+        assert_eq!(value["paint_frame_count"], 4);
+        assert_eq!(value["frame_count"], 4);
+        assert_eq!(value["semantic_art_tick_count"], 2);
+        assert_eq!(value["max_adjacent_base_anchor_delta"]["x"], 0.1);
+        assert_eq!(value["max_adjacent_base_anchor_delta"]["y"], 0.3);
+        assert_eq!(value["max_adjacent_final_anchor_delta"]["x"], 0.1);
+        assert_eq!(value["max_adjacent_final_anchor_delta"]["y"], 0.5);
+        assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 4);
         assert_eq!(value["smooth_frame_samples"][0]["pet_visual_checksum"], 123);
         assert_eq!(
             value["smooth_frame_samples"][0]["parallax_lifecycle_scale"],
@@ -585,15 +602,108 @@ mod tests {
             value["smooth_frame_samples"][0]["parallax_planes"]["foreground"]["x"],
             0.045
         );
-        assert!(
-            value["max_adjacent_parallax_delta_by_plane"]["foreground"]["x"]
-                .as_f64()
-                .unwrap()
-                > 0.0
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["far"]["x"],
+            0.0252
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["far"]["y"],
+            0.0324
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["mid"]["x"],
+            0.0401
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["mid"]["y"],
+            0.0298
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["behind"]["x"],
+            0.028
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["behind"]["y"],
+            0.0455
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["foreground"]["x"],
+            0.0525
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["foreground"]["y"],
+            0.0455
         );
         assert_eq!(value["pet_checksums_stable_within_semantic_ticks"], true);
         assert_eq!(value["privacy"]["source_names_visible"], false);
         assert_eq!(value["privacy"]["exact_token_strings_visible"], false);
+    }
+
+    #[test]
+    fn smooth_review_capture_first_sample_has_zero_parallax_aggregate() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        capture.record_frame(Some(SmoothReviewFrameSample {
+            bob_y: 0.1,
+            semantic_art_tick_index: 0,
+            pet_visual_checksum: 123,
+            base_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
+            final_anchor: SmoothReviewPoint { x: 1.0, y: 1.1 },
+            classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: -0.5, y: 0.25 },
+            parallax_lifecycle_scale: 0.5,
+            parallax_planes: SmoothReviewParallaxPlanes {
+                far: SmoothReviewPoint { x: -0.01004, y: 0.00756 },
+                mid: SmoothReviewPoint { x: 0.02006, y: -0.01504 },
+                behind: SmoothReviewPoint { x: -0.03006, y: 0.02504 },
+                foreground: SmoothReviewPoint { x: 0.04004, y: -0.03506 },
+            },
+        }));
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["far"]["x"],
+            0.0
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["far"]["y"],
+            0.0
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["mid"]["x"],
+            0.0
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["mid"]["y"],
+            0.0
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["behind"]["x"],
+            0.0
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["behind"]["y"],
+            0.0
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["foreground"]["x"],
+            0.0
+        );
+        assert_eq!(
+            value["max_adjacent_parallax_delta_by_plane"]["foreground"]["y"],
+            0.0
+        );
     }
 
     #[test]
