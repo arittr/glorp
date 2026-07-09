@@ -57,6 +57,11 @@ pub struct ReviewCapture {
     pet_checksums_stable_within_semantic_ticks: bool,
     last_smooth_sample: Option<SmoothReviewFrameSample>,
     panic: bool,
+    callback_panic_count: u64,
+    last_callback_panic_label: Option<&'static str>,
+    frame_preparation_error_count: u64,
+    last_frame_preparation_error: Option<&'static str>,
+    last_good_frame_reused_count: u64,
     screenshot_written: bool,
     render_log_written: bool,
 }
@@ -89,6 +94,11 @@ impl ReviewCapture {
             pet_checksums_stable_within_semantic_ticks: true,
             last_smooth_sample: None,
             panic: false,
+            callback_panic_count: 0,
+            last_callback_panic_label: None,
+            frame_preparation_error_count: 0,
+            last_frame_preparation_error: None,
+            last_good_frame_reused_count: 0,
             screenshot_written: false,
             render_log_written: false,
         }))
@@ -126,6 +136,21 @@ impl ReviewCapture {
                 self.smooth_frame_samples.push(sample);
             }
         }
+    }
+
+    pub fn record_callback_panic(&mut self, label: &'static str) {
+        self.panic = true;
+        self.callback_panic_count = self.callback_panic_count.saturating_add(1);
+        self.last_callback_panic_label = Some(label);
+    }
+
+    pub fn record_frame_preparation_error(&mut self, category: &'static str) {
+        self.frame_preparation_error_count = self.frame_preparation_error_count.saturating_add(1);
+        self.last_frame_preparation_error = Some(category);
+    }
+
+    pub fn record_last_good_frame_reused(&mut self) {
+        self.last_good_frame_reused_count = self.last_good_frame_reused_count.saturating_add(1);
     }
 
     pub fn ready_to_finish(&self) -> bool {
@@ -204,6 +229,11 @@ impl ReviewCapture {
                 &crate::presentation::smooth::SmoothCompanionPrivacyClaims::external_companion(),
             ),
             panic: self.panic,
+            callback_panic_count: self.callback_panic_count,
+            last_callback_panic_label: self.last_callback_panic_label,
+            frame_preparation_error_count: self.frame_preparation_error_count,
+            last_frame_preparation_error: self.last_frame_preparation_error,
+            last_good_frame_reused_count: self.last_good_frame_reused_count,
         }
     }
 
@@ -228,6 +258,11 @@ struct RenderLog<'a> {
     smooth_frame_samples: &'a [SmoothReviewFrameSample],
     privacy: ReviewPrivacyLog,
     panic: bool,
+    callback_panic_count: u64,
+    last_callback_panic_label: Option<&'static str>,
+    frame_preparation_error_count: u64,
+    last_frame_preparation_error: Option<&'static str>,
+    last_good_frame_reused_count: u64,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -349,6 +384,9 @@ mod tests {
         "active-pulse",
         "asleep-calm",
         "helper-trouble",
+        "drawrect",
+        "uitick",
+        "smooth-missing-pet-body",
     ];
 
     const RENDER_LOG_FORBIDDEN_PRIVACY_VALUE_TOKENS: &[&str] = &[
@@ -455,6 +493,39 @@ mod tests {
         assert_eq!(value["pet_checksums_stable_within_semantic_ticks"], true);
         assert_eq!(value["privacy"]["source_names_visible"], false);
         assert_eq!(value["privacy"]["exact_token_strings_visible"], false);
+    }
+
+    #[test]
+    fn review_capture_records_boundary_health_without_private_strings() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                state: Some(CompanionReviewState::Normal),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        capture.record_callback_panic("drawRect");
+        capture.record_callback_panic("uiTick");
+        capture.record_frame_preparation_error("smooth-missing-pet-body");
+        capture.record_last_good_frame_reused();
+        capture.record_last_good_frame_reused();
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["callback_panic_count"], 2);
+        assert_eq!(value["last_callback_panic_label"], "uiTick");
+        assert_eq!(value["frame_preparation_error_count"], 1);
+        assert_eq!(
+            value["last_frame_preparation_error"],
+            "smooth-missing-pet-body"
+        );
+        assert_eq!(value["last_good_frame_reused_count"], 2);
+        assert_render_log_json_values_are_sanitized(&value, "$");
     }
 
     #[test]
