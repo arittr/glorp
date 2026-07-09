@@ -7,8 +7,8 @@ use crate::tui::view_model::WatchViewModel;
 ///
 /// Callers blit the result once via `blit_draw_list`. Z-order (back to front):
 /// biome-wash → room-glyphs → ambient → motes → activity →
-/// props/tank-life(Background, Behind) → contact-shadow → pet-body →
-/// performance-cue → props/tank-life(Foreground).
+/// props/tank-life(Background, Behind) → chest-bubble → contact-shadow →
+/// pet-body → performance-cue → props/tank-life(Foreground).
 ///
 /// Speech is NOT in the draw list: it occupies the top rows of the habitat
 /// (an entry in `ambient_exclusions`) and is painted separately AFTER the

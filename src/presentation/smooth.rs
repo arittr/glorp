@@ -201,8 +201,12 @@ fn flatten_layers_to_draw_list(layers: &[SmoothCompanionLayer]) -> SceneDrawList
         for item in &layer.items {
             if let SmoothLayerItem::LocalCell(cell) = item {
                 cells.push(DrawCell {
-                    row: cell.row,
-                    col: cell.col,
+                    row: classic_cell_axis(
+                        layer.anchor.y + layer.transform.translation.y + f32::from(cell.row),
+                    ),
+                    col: classic_cell_axis(
+                        layer.anchor.x + layer.transform.translation.x + f32::from(cell.col),
+                    ),
                     glyph: cell.glyph.clone(),
                     fg: cell.fg,
                     bg: cell.bg,
@@ -213,6 +217,14 @@ fn flatten_layers_to_draw_list(layers: &[SmoothCompanionLayer]) -> SceneDrawList
     }
 
     SceneDrawList { cells }
+}
+
+fn classic_cell_axis(value: f32) -> u16 {
+    if !value.is_finite() {
+        return 0;
+    }
+
+    value.round().clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
 pub fn classic_flatten_checksum(cells: &[DrawCell]) -> u64 {
@@ -322,7 +334,7 @@ mod tests {
                 min: SmoothPoint { x: 0.0, y: 0.0 },
                 max: SmoothPoint { x: 8.0, y: 8.0 },
             },
-            anchor: SmoothPoint { x: 0.5, y: 1.0 },
+            anchor: SmoothPoint { x: 0.0, y: 0.0 },
             transform_origin: SmoothPoint { x: 0.5, y: 0.5 },
             transform: SmoothTransform {
                 translation: SmoothPoint { x: 0.0, y: 0.0 },
@@ -413,6 +425,62 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn flatten_classic_cells_projects_local_cells_through_anchor_and_translation() {
+        let layer = SmoothCompanionLayer {
+            id: SmoothLayerId("pet-body".to_string()),
+            role: SmoothLayerRole::PetBody,
+            z: 0,
+            local_bounds: SmoothBounds {
+                min: SmoothPoint { x: 0.0, y: 0.0 },
+                max: SmoothPoint { x: 8.0, y: 8.0 },
+            },
+            anchor: SmoothPoint { x: 10.0, y: 20.0 },
+            transform_origin: SmoothPoint { x: 0.0, y: 0.0 },
+            transform: SmoothTransform {
+                translation: SmoothPoint { x: 3.0, y: 2.0 },
+                scale: SmoothPoint { x: 1.0, y: 1.0 },
+                rotation_degrees: 0.0,
+            },
+            opacity: 1.0,
+            clip: SmoothClip::None,
+            blend: SmoothBlendMode::Normal,
+            items: vec![
+                local_item(cell(1, 4, "X", Some(rgb(1, 2, 3)), None, false)),
+                local_item(cell(0, 0, "Y", Some(rgb(4, 5, 6)), None, true)),
+            ],
+            privacy: SmoothCompanionPrivacyClaims::external_companion(),
+        };
+        let scene = LayeredPetScene { layers: vec![layer.clone()] };
+        let plan = SmoothCompanionScenePlan {
+            layers: vec![layer],
+            privacy: SmoothCompanionPrivacyClaims::external_companion(),
+        };
+        let expected = SceneDrawList {
+            cells: vec![
+                DrawCell {
+                    row: 23,
+                    col: 17,
+                    glyph: Some("X".to_string()),
+                    fg: Some(rgb(1, 2, 3)),
+                    bg: None,
+                    bold: false,
+                },
+                DrawCell {
+                    row: 22,
+                    col: 13,
+                    glyph: Some("Y".to_string()),
+                    fg: Some(rgb(4, 5, 6)),
+                    bg: None,
+                    bold: true,
+                },
+            ],
+        };
+
+        assert_eq!(scene.flatten_classic_cells(), expected);
+        assert_eq!(plan.flatten_classic_cells(), expected);
     }
 
     #[test]

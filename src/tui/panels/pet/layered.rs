@@ -369,13 +369,14 @@ fn layer_from_draw_cells(
     z: i16,
     cells: Vec<DrawCell>,
 ) -> SmoothCompanionLayer {
-    let local_bounds = local_bounds_for_cells(&cells);
+    let anchor = layer_anchor_for_cells(&cells);
+    let local_bounds = local_bounds_for_cells(&cells, anchor);
     SmoothCompanionLayer {
         id: SmoothLayerId(id.to_string()),
         role,
         z,
         local_bounds,
-        anchor: SmoothPoint { x: 0.0, y: 0.0 },
+        anchor,
         transform_origin: SmoothPoint { x: 0.0, y: 0.0 },
         transform: SmoothTransform {
             translation: SmoothPoint { x: 0.0, y: 0.0 },
@@ -385,15 +386,18 @@ fn layer_from_draw_cells(
         opacity: 1.0,
         clip: SmoothClip::None,
         blend: SmoothBlendMode::Normal,
-        items: cells.into_iter().map(draw_cell_to_layer_item).collect(),
+        items: cells
+            .into_iter()
+            .map(|cell| draw_cell_to_layer_item(cell, anchor))
+            .collect(),
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
     }
 }
 
-fn draw_cell_to_layer_item(cell: DrawCell) -> SmoothLayerItem {
+fn draw_cell_to_layer_item(cell: DrawCell, anchor: SmoothPoint) -> SmoothLayerItem {
     SmoothLayerItem::LocalCell(SmoothLocalCell {
-        row: cell.row,
-        col: cell.col,
+        row: cell.row.saturating_sub(anchor.y as u16),
+        col: cell.col.saturating_sub(anchor.x as u16),
         glyph: cell.glyph,
         fg: cell.fg,
         bg: cell.bg,
@@ -401,7 +405,22 @@ fn draw_cell_to_layer_item(cell: DrawCell) -> SmoothLayerItem {
     })
 }
 
-fn local_bounds_for_cells(cells: &[DrawCell]) -> SmoothBounds {
+fn layer_anchor_for_cells(cells: &[DrawCell]) -> SmoothPoint {
+    let Some(first) = cells.first() else {
+        return SmoothPoint { x: 0.0, y: 0.0 };
+    };
+
+    let mut min_x = first.col;
+    let mut min_y = first.row;
+    for cell in cells.iter().skip(1) {
+        min_x = min_x.min(cell.col);
+        min_y = min_y.min(cell.row);
+    }
+
+    SmoothPoint { x: min_x as f32, y: min_y as f32 }
+}
+
+fn local_bounds_for_cells(cells: &[DrawCell], anchor: SmoothPoint) -> SmoothBounds {
     let Some(first) = cells.first() else {
         return SmoothBounds {
             min: SmoothPoint { x: 0.0, y: 0.0 },
@@ -409,19 +428,17 @@ fn local_bounds_for_cells(cells: &[DrawCell]) -> SmoothBounds {
         };
     };
 
-    let mut min_x = first.col;
-    let mut min_y = first.row;
-    let mut max_x = first.col;
-    let mut max_y = first.row;
+    let anchor_col = anchor.x as u16;
+    let anchor_row = anchor.y as u16;
+    let mut max_x = first.col.saturating_sub(anchor_col);
+    let mut max_y = first.row.saturating_sub(anchor_row);
     for cell in cells.iter().skip(1) {
-        min_x = min_x.min(cell.col);
-        min_y = min_y.min(cell.row);
-        max_x = max_x.max(cell.col);
-        max_y = max_y.max(cell.row);
+        max_x = max_x.max(cell.col.saturating_sub(anchor_col));
+        max_y = max_y.max(cell.row.saturating_sub(anchor_row));
     }
 
     SmoothBounds {
-        min: SmoothPoint { x: min_x as f32, y: min_y as f32 },
+        min: SmoothPoint { x: 0.0, y: 0.0 },
         max: SmoothPoint {
             x: (max_x + 1) as f32,
             y: (max_y + 1) as f32,
@@ -435,16 +452,68 @@ mod tests {
     use crate::game::habitat::{
         HabitatPropKind, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_HANGING_VINE_25M, TOKEN_TREASURE_CHEST_2M,
     };
-    use crate::presentation::smooth::SmoothLayerRole;
-    use crate::presentation::PetSceneModel;
+    use crate::presentation::smooth::{
+        SmoothBounds, SmoothLayerItem, SmoothLayerRole, SmoothPoint,
+    };
+    use crate::presentation::{DrawCell, PetSceneModel};
     use crate::storage::state::{HabitatPropId, HabitatPropSource};
     use crate::tui::component::{watch_tank_life_geometry, PetScene};
     use crate::tui::day::DayContext;
     use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
     use ratatui::layout::Rect;
+    use serde::Serialize;
     use time::macros::{date, datetime};
 
     const LAYERED_NOW: time::OffsetDateTime = datetime!(2026-07-08 18:00 UTC);
+
+    #[derive(Debug, Serialize)]
+    struct FlattenDigest {
+        cell_count: usize,
+        checksum: u64,
+        head: Vec<CellDigest>,
+        tail: Vec<CellDigest>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct CellDigest {
+        row: u16,
+        col: u16,
+        glyph: Option<String>,
+        fg: Option<(u8, u8, u8)>,
+        bg: Option<(u8, u8, u8)>,
+        bold: bool,
+    }
+
+    impl From<&DrawCell> for CellDigest {
+        fn from(cell: &DrawCell) -> Self {
+            Self {
+                row: cell.row,
+                col: cell.col,
+                glyph: cell.glyph.clone(),
+                fg: cell.fg.map(|rgb| (rgb.r, rgb.g, rgb.b)),
+                bg: cell.bg.map(|rgb| (rgb.r, rgb.g, rgb.b)),
+                bold: cell.bold,
+            }
+        }
+    }
+
+    fn flatten_digest(cells: &[DrawCell]) -> FlattenDigest {
+        let records: Vec<CellDigest> = cells.iter().map(CellDigest::from).collect();
+        FlattenDigest {
+            cell_count: records.len(),
+            checksum: crate::presentation::smooth::classic_flatten_checksum(cells),
+            head: records.iter().take(20).cloned().collect(),
+            tail: records
+                .iter()
+                .rev()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect(),
+        }
+    }
 
     fn active_prop_rich_vm() -> WatchViewModel {
         let mut vm = super::super::tests::vm_with_real_pet();
@@ -586,18 +655,66 @@ mod tests {
     }
 
     #[test]
-    fn flattening_matches_the_classic_draw_list_for_fixed_fixture() {
+    fn layer_from_draw_cells_localizes_cells_and_bounds_from_top_left_anchor() {
+        let layer = super::layer_from_draw_cells(
+            "test-pet-body",
+            SmoothLayerRole::PetBody,
+            9,
+            vec![
+                DrawCell {
+                    row: 7,
+                    col: 11,
+                    glyph: Some("A".to_string()),
+                    fg: None,
+                    bg: None,
+                    bold: false,
+                },
+                DrawCell {
+                    row: 9,
+                    col: 14,
+                    glyph: Some("B".to_string()),
+                    fg: None,
+                    bg: None,
+                    bold: true,
+                },
+            ],
+        );
+
+        assert_eq!(layer.anchor, SmoothPoint { x: 11.0, y: 7.0 });
+        assert_eq!(
+            layer.local_bounds,
+            SmoothBounds {
+                min: SmoothPoint { x: 0.0, y: 0.0 },
+                max: SmoothPoint { x: 4.0, y: 3.0 },
+            }
+        );
+        assert_eq!(
+            layer.items,
+            vec![
+                SmoothLayerItem::LocalCell(crate::presentation::smooth::SmoothLocalCell {
+                    row: 0,
+                    col: 0,
+                    glyph: Some("A".to_string()),
+                    fg: None,
+                    bg: None,
+                    bold: false,
+                }),
+                SmoothLayerItem::LocalCell(crate::presentation::smooth::SmoothLocalCell {
+                    row: 2,
+                    col: 3,
+                    glyph: Some("B".to_string()),
+                    fg: None,
+                    bg: None,
+                    bold: true,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn flattening_fixed_fixture_matches_digest_lock() {
         let vm = active_prop_rich_vm();
         let (scene_model, scene, ctx, tank_geometry) = active_scene_inputs(&vm);
-
-        let classic = super::super::draw::render_pet_to_draw_list_with_tank_geometry(
-            &scene_model,
-            &vm,
-            &scene,
-            LAYERED_NOW,
-            &ctx,
-            &tank_geometry,
-        );
         let layered = render_layered_pet_scene_with_tank_geometry(
             &scene_model,
             &vm,
@@ -607,6 +724,9 @@ mod tests {
             &tank_geometry,
         );
 
-        assert_eq!(layered.flatten_classic_cells(), classic);
+        insta::assert_yaml_snapshot!(
+            "layered_active_fixture_flatten_digest",
+            flatten_digest(&layered.flatten_classic_cells().cells)
+        );
     }
 }
