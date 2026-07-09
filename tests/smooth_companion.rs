@@ -229,6 +229,92 @@ fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata_and_aura() {
 }
 
 #[test]
+fn smooth_round_plan_limits_adjacent_paint_frame_anchor_delta() {
+    let start = datetime!(2026-07-08 12:00 UTC);
+    const COMPANION_GRID_COLS: u16 = 36;
+    const COMPANION_GRID_ROWS: u16 = 18;
+    let motion = glorp::round::scene::companion_roam_motion();
+    let mut vm = parity_fixture();
+    vm.pet_render.generated_species = glorp::pet::generation::Species::Glitch;
+    vm.pet_render.stage = glorp::game::evolution::Stage::S4;
+    vm.life_profile.burst_level = 1.0;
+    vm.progress.rate_per_hour = 75_000_000.0;
+    glorp::commands::watch::rerender_pet_for_view_model(&mut vm, 0, false, start).unwrap();
+
+    let mut previous: Option<glorp::presentation::smooth::SmoothPoint> = None;
+    let mut max_delta = 0.0f32;
+    for frame in 0..(22 * 30) {
+        let elapsed_ms = frame * 33;
+        let now = start + time::Duration::milliseconds(elapsed_ms);
+        let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+            &vm,
+            now,
+            COMPANION_GRID_COLS,
+            COMPANION_GRID_ROWS,
+            &motion,
+            elapsed_ms as u64,
+        );
+        if let Some(last) = previous {
+            let dx = (plan.pet.base_anchor.x - last.x).abs();
+            let dy = (plan.pet.base_anchor.y - last.y).abs();
+            max_delta = max_delta.max(dx).max(dy);
+        }
+        previous = Some(plan.pet.base_anchor);
+    }
+
+    assert!(
+        max_delta <= 0.25,
+        "adjacent paint frame anchors should stay smooth; max delta was {max_delta:.3}"
+    );
+}
+
+#[test]
+fn smooth_round_plan_does_not_turn_classic_breath_step_into_world_motion() {
+    let now = datetime!(2026-07-08 12:00 UTC);
+    let motion = glorp::round::scene::companion_roam_motion();
+    let mut still = parity_fixture();
+    let mut breathed = still.clone();
+    still.breath_offset_y = 0;
+    breathed.breath_offset_y = 1;
+
+    let still_plan =
+        glorp::round::smooth::build_round_smooth_scene_plan(&still, now, 36, 18, &motion, 0);
+    let breathed_plan =
+        glorp::round::smooth::build_round_smooth_scene_plan(&breathed, now, 36, 18, &motion, 0);
+
+    assert_ne!(
+        still_plan.pet.classic_snap_anchor.y, breathed_plan.pet.classic_snap_anchor.y,
+        "Classic snap should still preserve the discrete breath row"
+    );
+    assert_eq!(still_plan.pet.base_anchor, breathed_plan.pet.base_anchor);
+    assert_eq!(still_plan.pet.final_anchor, breathed_plan.pet.final_anchor);
+}
+
+#[test]
+fn smooth_round_plan_does_not_turn_performance_posture_step_into_world_motion() {
+    let now = datetime!(2026-07-08 12:00 UTC);
+    let motion = glorp::round::scene::companion_roam_motion();
+    let mut perked = parity_fixture();
+    perked.life_profile.burst_level = 1.0;
+    perked.last_feed_pulse_at = Some(now);
+    let mut settled = perked.clone();
+    settled.last_feed_pulse_at = None;
+    settled.day_context.tiredness = 0.9;
+
+    let perked_plan =
+        glorp::round::smooth::build_round_smooth_scene_plan(&perked, now, 36, 18, &motion, 0);
+    let settled_plan =
+        glorp::round::smooth::build_round_smooth_scene_plan(&settled, now, 36, 18, &motion, 0);
+
+    assert_ne!(
+        perked_plan.pet.classic_snap_anchor.y, settled_plan.pet.classic_snap_anchor.y,
+        "Classic snap should still preserve the settled posture row"
+    );
+    assert_eq!(perked_plan.pet.base_anchor, settled_plan.pet.base_anchor);
+    assert_eq!(perked_plan.pet.final_anchor, settled_plan.pet.final_anchor);
+}
+
+#[test]
 fn smooth_round_plan_keeps_privacy_claims_external_safe() {
     let vm = parity_fixture();
     let plan = glorp::round::smooth::build_round_smooth_scene_plan(

@@ -53,6 +53,7 @@ pub struct SmoothPetAnchor {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompanionPetPlacement {
+    pub fractional_motion_top_left: SmoothPetAnchor,
     pub fractional_top_left: SmoothPetAnchor,
     pub classic_snap_top_left: (u16, u16),
     pub classic_rect: Rect,
@@ -272,6 +273,10 @@ fn companion_pet_placement_from_offsets(
     let fractional_y = (fractional_drift_y + f32::from(vm.breath_offset_y)).min(max_y as f32);
 
     CompanionPetPlacement {
+        fractional_motion_top_left: SmoothPetAnchor {
+            x: fractional_drift_x,
+            y: fractional_drift_y,
+        },
         fractional_top_left: SmoothPetAnchor { x: fractional_drift_x, y: fractional_y },
         classic_snap_top_left: (classic_x, classic_y),
         classic_rect: Rect::new(classic_x, classic_y, PET_W, PET_H),

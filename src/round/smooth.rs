@@ -43,9 +43,19 @@ pub fn build_round_smooth_scene_plan(
 
     let viewport = CompanionViewport { grid_cols, grid_rows };
     let viewport_bounds = rect_bounds(Rect::new(0, 0, grid_cols, grid_rows));
-    let residual = SmoothPoint {
-        x: placement.fractional_top_left.x - f32::from(placement.classic_snap_top_left.0),
-        y: placement.fractional_top_left.y - f32::from(placement.classic_snap_top_left.1),
+    let pet_body_classic_anchor = layered
+        .layers
+        .iter()
+        .find(|layer| layer.role == SmoothLayerRole::PetBody)
+        .map(|layer| layer.anchor)
+        .expect("round smooth scene should include a pet body layer");
+    let smooth_base_anchor = SmoothPoint {
+        x: placement.fractional_motion_top_left.x,
+        y: placement.fractional_motion_top_left.y,
+    };
+    let pet_anchor_delta = SmoothPoint {
+        x: smooth_base_anchor.x - pet_body_classic_anchor.x,
+        y: smooth_base_anchor.y - pet_body_classic_anchor.y,
     };
     let bob_offset = SmoothPoint { x: 0.0, y: smooth_pet_bob(elapsed_ms) };
     let aperture_center = SmoothPoint {
@@ -75,8 +85,8 @@ pub fn build_round_smooth_scene_plan(
                 | SmoothLayerRole::ContactShadow
                 | SmoothLayerRole::PerformanceCue
         ) {
-            layer.transform.translation.x += residual.x;
-            layer.transform.translation.y += residual.y;
+            layer.transform.translation.x += pet_anchor_delta.x;
+            layer.transform.translation.y += pet_anchor_delta.y;
         }
         if layer.role == SmoothLayerRole::PetBody {
             layer.transform_origin = SmoothPoint {
