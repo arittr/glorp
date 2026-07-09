@@ -17,6 +17,7 @@ mod chest_bubble;
 mod colors;
 mod draw;
 mod grounding;
+mod layered;
 mod performance;
 mod props;
 mod tank_life;
@@ -29,6 +30,7 @@ use art_lines::render_speech_bubble;
 use blit::blit_draw_list;
 pub(crate) use colors::pet_role_style;
 pub(crate) use draw::{render_pet_to_draw_list, render_pet_to_draw_list_with_tank_geometry};
+pub(crate) use layered::render_layered_pet_scene_with_tank_geometry;
 
 #[cfg(test)]
 use crate::game::evolution::Stage;
