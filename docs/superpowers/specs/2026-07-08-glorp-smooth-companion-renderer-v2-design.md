@@ -25,6 +25,11 @@ perimeter gauges, HUD text, and the round porthole composition. The difference
 is that the renderer underneath has continuous time, stable semantic layers,
 fractional placement, and room for richer effects.
 
+The first implementation must visibly demonstrate that new capability. It may
+be a deliberately small motion proof, but it cannot be a renderer-only seam:
+the Classic pet layer should show a smooth fractional breath/bob or drift when
+run live.
+
 The earlier Pixel companion work is useful as rendering research and fixture
 coverage, but it is not the product center. Pixel/3D-ish treatment can become a
 style or layer treatment inside Renderer v2 after Classic parity is preserved.
@@ -379,10 +384,17 @@ diagnostics, or unprojected pet seed values.
 
 ## Rollout Shape
 
-### Slice 1: layer-aware Classic parity
+### Slice 1: layer-aware Classic parity plus visible motion proof
 
 Create the scene-plan seam and render a v2 parity frame that looks like Classic.
-Motion can be minimal, but the plan must preserve layer identity.
+The plan must preserve layer identity and also apply one small smooth transform
+to the Classic pet layer so Drew can see the new renderer doing something that
+the old cell-snapped path cannot do.
+
+The required first motion is intentionally narrow: a fractional pet breath/bob
+or gentle sub-cell drift on the `PetBody` layer, driven by continuous elapsed
+time and exported as motion metadata. It must not replace the pet art, move
+props independently yet, or turn the companion into a separate Pixel treatment.
 
 Acceptance:
 
@@ -397,6 +409,11 @@ Acceptance:
   dim overlay, and chrome reservations.
 - For fixed parity fixtures, `flatten_classic_cells()` matches the existing
   Classic companion draw-list exactly for cell layers.
+- The smooth renderer applies a visible fractional `PetBody` transform in live
+  AppKit review mode while preserving the Classic flattened cell source.
+- `strips/round-smooth-motion/frame-NNN.smooth-motion.json` shows changing
+  fractional pet bob/drift values across at least five frames before Slice 1 is
+  considered reviewable.
 - Privacy scans pass for all smooth sidecars.
 - Drew reviews the Classic/v2 side-by-side parity artifact and explicitly
   accepts that it still reads as the current Glorp companion.
@@ -404,8 +421,9 @@ Acceptance:
 
 ### Slice 2: smooth pet motion
 
-Move pet drift/bob/blink/pulse to continuous renderer transforms while keeping
-Classic art and composition.
+Expand the visible proof into the full smooth-motion behavior: richer
+drift/bob/blink/pulse and native review capture while keeping Classic art and
+composition.
 
 Acceptance:
 
