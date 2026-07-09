@@ -410,8 +410,15 @@ fn run_objc_callback(label: &'static str, f: impl FnOnce()) {
     }
 }
 
+fn write_boundary_diagnostic(args: std::fmt::Arguments<'_>) {
+    let mut stderr = std::io::stderr();
+    let _ = std::io::Write::write_fmt(&mut stderr, args);
+}
+
 fn record_callback_panic(label: &'static str) {
-    eprintln!("glorp companion caught panic in Objective-C callback: {label}");
+    write_boundary_diagnostic(format_args!(
+        "glorp companion caught panic in Objective-C callback: {label}\n"
+    ));
     APP_STATE.with(|cell| {
         if let Ok(mut state) = cell.try_borrow_mut() {
             if let Some(state) = state.as_mut() {
@@ -816,10 +823,10 @@ fn record_frame_preparation_error(state: &mut AppState, err: CompanionFramePrepa
             capture.record_last_good_frame_reused();
         }
     }
-    eprintln!(
-        "glorp companion frame preparation failed: {}",
+    write_boundary_diagnostic(format_args!(
+        "glorp companion frame preparation failed: {}\n",
         err.category()
-    );
+    ));
 }
 
 fn should_record_frame_preparation_error(
@@ -1016,7 +1023,9 @@ fn record_review_frame(
 
 fn draw_scene(view: &RoundView, bounds: NSRect) {
     let Some(_mtm) = MainThreadMarker::new() else {
-        eprintln!("glorp companion draw_scene called off main thread");
+        write_boundary_diagnostic(format_args!(
+            "glorp companion draw_scene called off main thread\n"
+        ));
         return;
     };
     let frame = APP_STATE.with(|cell| {
@@ -1201,8 +1210,8 @@ fn draw_mood_aura(frame: &PreparedCompanionFrame, metrics: &CompanionGridMetrics
 }
 
 fn paint_fallback_background(bounds: NSRect) {
-    let width = bounds.size.width.max(1.0);
-    let height = bounds.size.height.max(1.0);
+    let width = fallback_dimension(bounds.size.width);
+    let height = fallback_dimension(bounds.size.height);
     let radius = width.min(height) / 2.0;
     let cx = width / 2.0;
     let cy = height / 2.0;
@@ -1213,6 +1222,14 @@ fn paint_fallback_background(bounds: NSRect) {
         ));
         ns_color(&RoundColor(0.05, 0.06, 0.10, 1.0)).setFill();
         bg_path.fill();
+    }
+}
+
+fn fallback_dimension(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(1.0)
+    } else {
+        1.0
     }
 }
 
@@ -1738,6 +1755,15 @@ mod tests {
         });
 
         assert!(did_run.get());
+    }
+
+    #[test]
+    fn fallback_dimension_replaces_non_finite_values() {
+        assert_eq!(fallback_dimension(f64::INFINITY), 1.0);
+        assert_eq!(fallback_dimension(f64::NEG_INFINITY), 1.0);
+        assert_eq!(fallback_dimension(f64::NAN), 1.0);
+        assert_eq!(fallback_dimension(0.5), 1.0);
+        assert_eq!(fallback_dimension(4.0), 4.0);
     }
 
     #[test]
