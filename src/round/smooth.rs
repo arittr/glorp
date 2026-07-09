@@ -18,14 +18,29 @@ use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
-pub fn build_round_smooth_scene_plan(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothScenePlanError {
+    MissingPetBody,
+}
+
+impl std::fmt::Display for SmoothScenePlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SmoothScenePlanError::MissingPetBody => f.write_str("smooth scene missing pet body"),
+        }
+    }
+}
+
+impl std::error::Error for SmoothScenePlanError {}
+
+pub fn try_build_round_smooth_scene_plan(
     vm: &WatchViewModel,
     now: time::OffsetDateTime,
     grid_cols: u16,
     grid_rows: u16,
     motion: &CompanionMotion,
     elapsed_ms: u64,
-) -> SmoothCompanionScenePlan {
+) -> std::result::Result<SmoothCompanionScenePlan, SmoothScenePlanError> {
     let (vm, layout, placement) =
         build_round_pet_layout_with_placement(vm, now, grid_cols, grid_rows, motion);
     let vm = vm.as_ref();
@@ -48,7 +63,7 @@ pub fn build_round_smooth_scene_plan(
         .iter()
         .find(|layer| layer.role == SmoothLayerRole::PetBody)
         .map(|layer| layer.anchor)
-        .expect("round smooth scene should include a pet body layer");
+        .ok_or(SmoothScenePlanError::MissingPetBody)?;
     let smooth_base_anchor = SmoothPoint {
         x: placement.fractional_motion_top_left.x,
         y: placement.fractional_motion_top_left.y,
@@ -101,7 +116,7 @@ pub fn build_round_smooth_scene_plan(
     let pet_body = layers
         .iter()
         .find(|layer| layer.role == SmoothLayerRole::PetBody)
-        .expect("round smooth scene should include a pet body layer");
+        .ok_or(SmoothScenePlanError::MissingPetBody)?;
     let classic_snap_anchor = pet_body.anchor;
     let base_anchor = SmoothPoint {
         x: pet_body.anchor.x + pet_body.transform.translation.x - bob_offset.x,
@@ -193,7 +208,7 @@ pub fn build_round_smooth_scene_plan(
         gauge_bounds: gauge_bounds(grid_cols, grid_rows),
     };
 
-    SmoothCompanionScenePlan {
+    Ok(SmoothCompanionScenePlan {
         viewport,
         layers,
         pet: SmoothCompanionPet {
@@ -207,7 +222,19 @@ pub fn build_round_smooth_scene_plan(
         chrome,
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
         classic_flatten_compat: SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows },
-    }
+    })
+}
+
+pub fn build_round_smooth_scene_plan(
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+    elapsed_ms: u64,
+) -> SmoothCompanionScenePlan {
+    try_build_round_smooth_scene_plan(vm, now, grid_cols, grid_rows, motion, elapsed_ms)
+        .expect("round smooth scene should include a pet body layer")
 }
 
 fn reservation_layer(

@@ -22,6 +22,22 @@ fn parity_fixture() -> WatchViewModel {
     vm
 }
 
+#[test]
+fn fallible_smooth_round_plan_matches_existing_infallible_plan() {
+    let vm = parity_fixture();
+    let motion = CompanionMotion::default();
+
+    let infallible = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm, NOW, GRID_COLS, GRID_ROWS, &motion, 250,
+    );
+    let fallible = glorp::round::smooth::try_build_round_smooth_scene_plan(
+        &vm, NOW, GRID_COLS, GRID_ROWS, &motion, 250,
+    )
+    .expect("fixture should include pet body layer");
+
+    assert_eq!(fallible, infallible);
+}
+
 fn anchored_bounds(
     anchor: glorp::presentation::smooth::SmoothPoint,
     local_bounds: glorp::presentation::smooth::SmoothBounds,
