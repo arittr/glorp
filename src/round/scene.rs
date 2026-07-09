@@ -372,9 +372,11 @@ pub fn drift_keeps_pet_in_aperture(
 ///
 /// The pet drifts freely in 2D within the porthole (aquarium feel — no floor or
 /// ground line). `area` fills the entire grid so the background wash covers the
-/// whole circle. The pet position is driven by `companion_drift`, which eases
-/// between deterministic 2D targets every `motion.drift_period_secs` seconds,
-/// keeping the pet body within the safe central ellipse at all times.
+/// whole circle. The pet position is driven by `companion_pet_placement(...)`,
+/// which preserves the legacy Classic snap-and-breath rect while also exposing a
+/// fractional top-left anchor for Smooth renderers. Motion still follows
+/// deterministic 2D targets every `motion.drift_period_secs` seconds, keeping
+/// the pet body within the safe central ellipse at all times.
 ///
 /// Tune via the caller's `CompanionMotion` fields (`drift_x_frac`,
 /// `drift_y_frac`, `drift_period_secs`).
@@ -479,6 +481,21 @@ mod tests {
     const GOLDEN_GRID_COLS: u16 = 44;
     const GOLDEN_GRID_ROWS: u16 = 18;
     const GOLDEN_NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
+
+    fn legacy_classic_pet_rect(
+        vm: &WatchViewModel,
+        now: time::OffsetDateTime,
+        grid_cols: u16,
+        grid_rows: u16,
+        motion: &CompanionMotion,
+    ) -> Rect {
+        let energy = companion_motion_energy(vm);
+        let (fx, fy) = companion_motion_offsets(now, motion, energy);
+        let (drift_x, drift_y) = companion_drift_position(motion, grid_cols, grid_rows, fx, fy);
+        let breathed_y =
+            (drift_y + u16::from(vm.breath_offset_y)).min(grid_rows.saturating_sub(PET_H));
+        Rect::new(drift_x, breathed_y, PET_W, PET_H)
+    }
 
     #[test]
     fn build_round_scene_draw_list_is_deterministic() {
@@ -632,15 +649,18 @@ mod tests {
                 companion_pet_placement(&vm, now, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &motion);
             let scene =
                 build_round_scene_draw_list(&vm, now, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &motion);
+            let expected =
+                legacy_classic_pet_rect(&vm, now, GOLDEN_GRID_COLS, GOLDEN_GRID_ROWS, &motion);
 
             assert_eq!(
-                placement.classic_rect, scene.pet_rect,
-                "shared placement must reproduce current Classic pet rect at {now}"
+                placement.classic_rect, expected,
+                "shared placement must preserve the legacy Classic rect at {now}"
             );
             assert_eq!(
-                placement.classic_snap_top_left,
-                (scene.pet_rect.x, scene.pet_rect.y)
+                scene.pet_rect, expected,
+                "round scene must keep the legacy rect at {now}"
             );
+            assert_eq!(placement.classic_snap_top_left, (expected.x, expected.y));
         }
     }
 
