@@ -50,7 +50,7 @@ fn smooth_plan_focus_is_continuous_wander_minus_neutral_origin() {
 #[test]
 fn smooth_plan_assigns_every_current_role_its_approved_binding() {
     use SmoothDepthPlane::{Behind, Far, Foreground, Mid};
-    use SmoothLayerMotionBinding::{Fixed, Parallax, PetAttached};
+    use SmoothLayerMotionBinding::{Fixed, FloorProjected, Parallax, PetAttached};
     use SmoothLayerRole::*;
 
     let vm = parity_fixture();
@@ -72,7 +72,8 @@ fn smooth_plan_assigns_every_current_role_its_approved_binding() {
         (PropsBehind, Parallax(Behind)),
         (TankLifeBehind, Parallax(Behind)),
         (ChestBubble, Parallax(Behind)),
-        (ContactShadow, PetAttached),
+        (WallShadow, PetAttached),
+        (FloorProjection, FloorProjected),
         (PetBody, PetAttached),
         (PerformanceCue, PetAttached),
         (PropsForeground, Parallax(Foreground)),
@@ -193,7 +194,8 @@ fn smooth_round_plan_includes_classic_and_round_only_roles() {
             SmoothLayerRole::PropsBehind,
             SmoothLayerRole::TankLifeBehind,
             SmoothLayerRole::ChestBubble,
-            SmoothLayerRole::ContactShadow,
+            SmoothLayerRole::WallShadow,
+            SmoothLayerRole::FloorProjection,
             SmoothLayerRole::PetBody,
             SmoothLayerRole::PerformanceCue,
             SmoothLayerRole::PropsForeground,
@@ -286,15 +288,26 @@ fn smooth_round_plan_moves_pet_attached_layers_and_binds_chest_bubble_behind() {
         250,
     );
     let pet_body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
-    let contact_shadow = plan.layer_by_role(SmoothLayerRole::ContactShadow).unwrap();
+    let wall_shadow = plan.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
+    let floor_projection = plan
+        .layer_by_role(SmoothLayerRole::FloorProjection)
+        .unwrap();
     let performance_cue = plan.layer_by_role(SmoothLayerRole::PerformanceCue).unwrap();
     let chest_bubble = plan.layer_by_role(SmoothLayerRole::ChestBubble).unwrap();
     let props_behind = plan.layer_by_role(SmoothLayerRole::PropsBehind).unwrap();
 
     assert!(pet_body.transform.translation.x.abs() > f32::EPSILON);
     assert_eq!(
-        contact_shadow.transform.translation.x,
+        wall_shadow.transform.translation.x,
         pet_body.transform.translation.x
+    );
+    assert_eq!(
+        floor_projection.transform.translation.x,
+        pet_body.transform.translation.x
+    );
+    assert_eq!(
+        floor_projection.transform.translation.y, 0.0,
+        "the floor projection must not inherit the pet's vertical drift or bob"
     );
     assert_eq!(
         performance_cue.transform.translation.x,
@@ -335,7 +348,9 @@ fn smooth_plan_composes_nonzero_parallax_without_moving_fixed_or_pet_layers() {
     for layer in &plan.layers {
         if matches!(
             layer.motion_binding,
-            SmoothLayerMotionBinding::Fixed | SmoothLayerMotionBinding::PetAttached
+            SmoothLayerMotionBinding::Fixed
+                | SmoothLayerMotionBinding::PetAttached
+                | SmoothLayerMotionBinding::FloorProjected
         ) {
             assert_eq!(
                 layer.parallax_translation,

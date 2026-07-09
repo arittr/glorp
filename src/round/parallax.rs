@@ -72,9 +72,9 @@ pub fn resolve_layer_parallax(
     validate_resolver_geometry(focus, lifecycle_scale, layer, viewport, chrome)?;
 
     match layer.motion_binding {
-        SmoothLayerMotionBinding::Fixed | SmoothLayerMotionBinding::PetAttached => {
-            Ok(SmoothPoint::default())
-        }
+        SmoothLayerMotionBinding::Fixed
+        | SmoothLayerMotionBinding::PetAttached
+        | SmoothLayerMotionBinding::FloorProjected => Ok(SmoothPoint::default()),
         SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Far) => {
             raw_plane_delta(focus, lifecycle_scale, SmoothDepthPlane::Far)
         }

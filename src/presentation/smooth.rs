@@ -62,6 +62,7 @@ impl SmoothDepthPlane {
 pub enum SmoothLayerMotionBinding {
     Fixed,
     PetAttached,
+    FloorProjected,
     Parallax(SmoothDepthPlane),
 }
 
@@ -70,6 +71,7 @@ impl SmoothLayerMotionBinding {
         match self {
             Self::Fixed => "fixed",
             Self::PetAttached => "pet-attached",
+            Self::FloorProjected => "floor-projected",
             Self::Parallax(_) => "parallax",
         }
     }
@@ -77,7 +79,7 @@ impl SmoothLayerMotionBinding {
     pub const fn depth_plane(self) -> Option<SmoothDepthPlane> {
         match self {
             Self::Parallax(plane) => Some(plane),
-            Self::Fixed | Self::PetAttached => None,
+            Self::Fixed | Self::PetAttached | Self::FloorProjected => None,
         }
     }
 }
@@ -93,7 +95,8 @@ pub enum SmoothLayerRole {
     PropsBehind,
     TankLifeBehind,
     ChestBubble,
-    ContactShadow,
+    WallShadow,
+    FloorProjection,
     PetBody,
     PerformanceCue,
     PropsForeground,
@@ -116,7 +119,8 @@ impl SmoothLayerRole {
             Self::PropsBehind => "props-behind",
             Self::TankLifeBehind => "tank-life-behind",
             Self::ChestBubble => "chest-bubble",
-            Self::ContactShadow => "contact-shadow",
+            Self::WallShadow => "wall-shadow",
+            Self::FloorProjection => "floor-projection",
             Self::PetBody => "pet-body",
             Self::PerformanceCue => "performance-cue",
             Self::PropsForeground => "props-foreground",
@@ -130,15 +134,14 @@ impl SmoothLayerRole {
 
     pub const fn motion_binding(self) -> SmoothLayerMotionBinding {
         use SmoothDepthPlane::{Behind, Far, Foreground, Mid};
-        use SmoothLayerMotionBinding::{Fixed, Parallax, PetAttached};
+        use SmoothLayerMotionBinding::{Fixed, FloorProjected, Parallax, PetAttached};
 
         match self {
             Self::BiomeWash | Self::RoomGlyphs => Parallax(Far),
             Self::Ambient | Self::Motes | Self::ActivityGlyphs => Parallax(Mid),
             Self::PropsBehind | Self::TankLifeBehind | Self::ChestBubble => Parallax(Behind),
-            Self::ContactShadow | Self::PetBody | Self::PerformanceCue | Self::MoodAura => {
-                PetAttached
-            }
+            Self::WallShadow | Self::PetBody | Self::PerformanceCue | Self::MoodAura => PetAttached,
+            Self::FloorProjection => FloorProjected,
             Self::PropsForeground | Self::TankLifeForeground => Parallax(Foreground),
             _ => Fixed,
         }
@@ -702,7 +705,8 @@ mod tests {
             (SmoothLayerRole::PropsBehind, "props-behind"),
             (SmoothLayerRole::TankLifeBehind, "tank-life-behind"),
             (SmoothLayerRole::ChestBubble, "chest-bubble"),
-            (SmoothLayerRole::ContactShadow, "contact-shadow"),
+            (SmoothLayerRole::WallShadow, "wall-shadow"),
+            (SmoothLayerRole::FloorProjection, "floor-projection"),
             (SmoothLayerRole::PetBody, "pet-body"),
             (SmoothLayerRole::PerformanceCue, "performance-cue"),
             (SmoothLayerRole::PropsForeground, "props-foreground"),
@@ -721,7 +725,7 @@ mod tests {
     #[test]
     fn current_smooth_roles_have_the_approved_motion_bindings() {
         use SmoothDepthPlane::{Behind, Far, Foreground, Mid};
-        use SmoothLayerMotionBinding::{Fixed, Parallax, PetAttached};
+        use SmoothLayerMotionBinding::{Fixed, FloorProjected, Parallax, PetAttached};
         use SmoothLayerRole::*;
 
         let cases = [
@@ -734,7 +738,8 @@ mod tests {
             (PropsBehind, Parallax(Behind)),
             (TankLifeBehind, Parallax(Behind)),
             (ChestBubble, Parallax(Behind)),
-            (ContactShadow, PetAttached),
+            (WallShadow, PetAttached),
+            (FloorProjection, FloorProjected),
             (PetBody, PetAttached),
             (PerformanceCue, PetAttached),
             (PropsForeground, Parallax(Foreground)),

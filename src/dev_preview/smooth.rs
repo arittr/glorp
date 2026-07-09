@@ -345,7 +345,9 @@ fn smooth_motion_window_satisfies_preview_contract(
         if plan.layers.iter().any(|layer| {
             matches!(
                 layer.motion_binding,
-                SmoothLayerMotionBinding::Fixed | SmoothLayerMotionBinding::PetAttached
+                SmoothLayerMotionBinding::Fixed
+                    | SmoothLayerMotionBinding::PetAttached
+                    | SmoothLayerMotionBinding::FloorProjected
             ) && point_is_nonzero(layer.parallax_translation)
         }) {
             return false;

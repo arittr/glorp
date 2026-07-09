@@ -10,11 +10,10 @@ use crate::tui::room::RoomBiomeTag;
 /// reads as a value distinct from the lighter sky above it.
 pub(super) const FLOOR_BAND_ROWS: u16 = 3;
 
-const FOOTPRINT_OUTER_PADDING: u16 = 2;
-const FOOTPRINT_INNER_PADDING: u16 = 1;
-const FOOTPRINT_OUTER_TINT: Rgb = Rgb::new(0x4f, 0x38, 0x60);
-const FOOTPRINT_INNER_TINT: Rgb = Rgb::new(0x72, 0x54, 0x87);
-const FOOTPRINT_CORE_TINT: Rgb = Rgb::new(0x9d, 0x78, 0xb4);
+const FLOOR_PROJECTION_FAR_TINT: Rgb = Rgb::new(0x43, 0x31, 0x54);
+const FLOOR_PROJECTION_NEAR_TINT: Rgb = Rgb::new(0x66, 0x4b, 0x79);
+const WALL_SHADOW_TINT: Rgb = Rgb::new(0x3c, 0x2c, 0x49);
+const WALL_SHADOW_OFFSET: u16 = 1;
 
 /// Computes the y-coordinate that anchors the pet art's feet one row above the
 /// habitat floor. `art_lines` are the framed 10 rows (`vm.pet_art`); `feet_row`
@@ -28,44 +27,6 @@ pub(crate) fn pet_feet_anchor_y(area: Rect, art_lines: &[String], pet_h: u16) ->
         crate::pet::render::feet_row(art_lines).unwrap_or((pet_h as usize).saturating_sub(1));
     let anchor = feet_target_row.saturating_sub(feet as u16);
     anchor.max(area.y)
-}
-
-/// Absolute `(col, row)` cells of the contact shadow: the columns directly
-/// under the silhouette's feet, on the row one below the lowest art glyph,
-/// clipped to `habitat`. `mirror` flips columns the same way the pet art is
-/// mirrored when facing left. Restricted to feet columns so side-column
-/// gutter identity (Crystal facets, Mech LED) is never overwritten
-/// (gutter-precedence rule, Phase 1 §2.4).
-pub(super) fn contact_shadow_cells(
-    pet_rect: Rect,
-    art_lines: &[String],
-    mirror: bool,
-    habitat: Rect,
-) -> Vec<(u16, u16)> {
-    let Some(feet) = crate::pet::render::feet_row(art_lines) else {
-        return Vec::new();
-    };
-    let shadow_row = pet_rect.y + (feet as u16) + 1;
-    // Clip: must be inside the habitat (and at/below the feet, never above).
-    if shadow_row < habitat.y || shadow_row >= habitat.y.saturating_add(habitat.height) {
-        return Vec::new();
-    }
-    let line_width = art_lines.get(feet).map(|l| l.chars().count()).unwrap_or(0);
-    crate::pet::render::feet_columns(art_lines)
-        .into_iter()
-        .filter_map(|col| {
-            let col_in_frame = if mirror {
-                line_width.saturating_sub(1).saturating_sub(col)
-            } else {
-                col
-            };
-            let abs_col = pet_rect.x + col_in_frame as u16;
-            if abs_col < habitat.x || abs_col >= habitat.x.saturating_add(habitat.width) {
-                return None;
-            }
-            Some((abs_col, shadow_row))
-        })
-        .collect()
 }
 
 /// Returns one bg-only [`DrawCell`] per habitat cell. Sky rows use
@@ -103,97 +64,86 @@ pub(super) fn biome_wash_cells(habitat: Rect, biome: RoomBiomeTag) -> Vec<DrawCe
     cells
 }
 
-/// Returns a clipped, cell-native contact footprint below the pet's feet. The
-/// outer band stays dark, while the inner lavender bands improve small-display
-/// legibility without introducing a blurred glow or a renderer-specific shape.
-pub(super) fn contact_shadow_draw_cells(
-    scene_pet_art: Rect,
-    pet_art_lines: &[String],
-    facing: i8,
+/// Projects a compact, tapered shadow onto the habitat's bottom substrate.
+/// The Classic companion places the pet high in the tank, so drawing at its
+/// feet would paint a wall decal rather than a floor shadow. The projection is
+/// instead centered beneath the rendered body and confined to the floor band.
+pub(super) fn floor_projection_draw_cells(
+    pet_body: &[DrawCell],
     habitat: Rect,
     biome: RoomBiomeTag,
 ) -> Vec<DrawCell> {
-    let mirror = facing == -1;
     let floor_wash = biome_floor_wash_color(biome);
-    let Some((outer_color, inner_color, core_color)) = contact_footprint_colors(floor_wash) else {
+    let Some((far_color, near_color)) = floor_projection_colors(floor_wash) else {
         return Vec::new(); // non-RGB color cap: skip
     };
-    let feet = contact_shadow_cells(scene_pet_art, pet_art_lines, mirror, habitat);
-    let Some((foot_start, foot_end, row)) = footprint_bounds(&feet) else {
+    let Some((body_start, body_end)) = horizontal_body_bounds(pet_body) else {
         return Vec::new();
     };
+    let floor_top = habitat
+        .y
+        .saturating_add(habitat.height.saturating_sub(FLOOR_BAND_ROWS));
+    let far_row = floor_top.saturating_add(1);
+    let near_row = far_row.saturating_add(1);
+    let habitat_bottom = habitat.y.saturating_add(habitat.height);
+    if near_row >= habitat_bottom {
+        return Vec::new();
+    }
+
+    let center = body_start.saturating_add(body_end.saturating_sub(body_start) / 2);
+    let body_width = body_end.saturating_sub(body_start).saturating_add(1);
+    let far_half_span = (body_width.saturating_add(3) / 6).max(1);
+    let near_half_span = far_half_span.saturating_add(1);
+    let mut cells = Vec::new();
+    let (far_start, far_end) = centered_span(center, far_half_span, habitat);
+    append_shadow_band(&mut cells, far_row, far_start, far_end, far_color);
+    let (near_start, near_end) = centered_span(center, near_half_span, habitat);
+    append_shadow_band(&mut cells, near_row, near_start, near_end, near_color);
+    cells
+}
+
+/// Builds a dim, offset silhouette on the tank wall. It is deliberately a
+/// separate layer so the cast stays behind the pet while the floor projection
+/// remains below its feet.
+pub(super) fn wall_shadow_draw_cells(
+    pet_body: &[DrawCell],
+    habitat: Rect,
+    biome: RoomBiomeTag,
+) -> Vec<DrawCell> {
+    let Some(wall) = rgb_from_color(biome_wash_color(biome)) else {
+        return Vec::new();
+    };
+    let color = blend_rgb(adjust_rgb(wall, -6), WALL_SHADOW_TINT, 48);
+    let mut spans: Vec<(u16, u16, u16)> = Vec::new();
+    for cell in pet_body.iter().filter(|cell| cell.glyph.is_some()) {
+        if let Some((_, start, end)) = spans.iter_mut().find(|(row, _, _)| *row == cell.row) {
+            *start = (*start).min(cell.col);
+            *end = (*end).max(cell.col);
+        } else {
+            spans.push((cell.row, cell.col, cell.col));
+        }
+    }
+
     let habitat_end = habitat.x.saturating_add(habitat.width).saturating_sub(1);
-    let outer_start = foot_start
-        .saturating_sub(FOOTPRINT_OUTER_PADDING)
-        .max(habitat.x);
-    let outer_end = foot_end
-        .saturating_add(FOOTPRINT_OUTER_PADDING)
-        .min(habitat_end);
-    let inner_start = foot_start
-        .saturating_sub(FOOTPRINT_INNER_PADDING)
-        .max(outer_start);
-    let inner_end = foot_end
-        .saturating_add(FOOTPRINT_INNER_PADDING)
-        .min(outer_end);
-
-    let mut cells = Vec::with_capacity(
-        usize::from(outer_end.saturating_sub(outer_start).saturating_add(1)) * 2,
-    );
-    append_footprint_row(
-        &mut cells,
-        row,
-        outer_start,
-        outer_end,
-        inner_start,
-        inner_end,
-        Some((foot_start, foot_end)),
-        outer_color,
-        inner_color,
-        core_color,
-    );
-
-    let lower_row = row.saturating_add(1);
-    if lower_row < habitat.y.saturating_add(habitat.height)
-        && outer_start.saturating_add(1) <= outer_end.saturating_sub(1)
-    {
-        append_footprint_row(
-            &mut cells,
-            lower_row,
-            outer_start.saturating_add(1),
-            outer_end.saturating_sub(1),
-            inner_start.saturating_add(1),
-            inner_end.saturating_sub(1),
-            None,
-            outer_color,
-            inner_color,
-            core_color,
-        );
+    let habitat_bottom = habitat.y.saturating_add(habitat.height);
+    let mut cells = Vec::new();
+    for (row, start, end) in spans {
+        let shadow_row = row.saturating_add(WALL_SHADOW_OFFSET);
+        if shadow_row >= habitat_bottom {
+            continue;
+        }
+        let shadow_start = start.saturating_add(WALL_SHADOW_OFFSET).max(habitat.x);
+        let shadow_end = end.saturating_add(WALL_SHADOW_OFFSET).min(habitat_end);
+        if shadow_start <= shadow_end {
+            append_shadow_band(&mut cells, shadow_row, shadow_start, shadow_end, color);
+        }
     }
 
     cells
 }
 
-#[allow(clippy::too_many_arguments)]
-fn append_footprint_row(
-    cells: &mut Vec<DrawCell>,
-    row: u16,
-    outer_start: u16,
-    outer_end: u16,
-    inner_start: u16,
-    inner_end: u16,
-    core_span: Option<(u16, u16)>,
-    outer_color: Rgb,
-    inner_color: Rgb,
-    core_color: Rgb,
-) {
-    for col in outer_start..=outer_end {
-        let bg = if core_span.is_some_and(|(start, end)| col >= start && col <= end) {
-            core_color
-        } else if col >= inner_start && col <= inner_end {
-            inner_color
-        } else {
-            outer_color
-        };
+fn append_shadow_band(cells: &mut Vec<DrawCell>, row: u16, start: u16, end: u16, bg: Rgb) {
+    for col in start..=end {
         cells.push(DrawCell {
             row,
             col,
@@ -224,23 +174,27 @@ fn floor_substrate_color(floor_wash: Color, floor_row: u16, col: u16) -> Color {
     Color::Rgb(color.r, color.g, color.b)
 }
 
-fn contact_footprint_colors(floor_wash: Color) -> Option<(Rgb, Rgb, Rgb)> {
-    let floor = rgb_from_color(floor_wash)?;
+fn floor_projection_colors(floor_wash: Color) -> Option<(Rgb, Rgb)> {
     let shadow = rgb_from_color(contact_shadow_color(floor_wash))?;
-    let outer = blend_rgb(shadow, FOOTPRINT_OUTER_TINT, 96);
-    let inner = blend_rgb(floor, FOOTPRINT_INNER_TINT, 112);
-    let core = blend_rgb(floor, FOOTPRINT_CORE_TINT, 144);
-    Some((outer, inner, core))
+    let far = blend_rgb(shadow, FLOOR_PROJECTION_FAR_TINT, 64);
+    let near = blend_rgb(shadow, FLOOR_PROJECTION_NEAR_TINT, 88);
+    Some((far, near))
 }
 
-fn footprint_bounds(feet: &[(u16, u16)]) -> Option<(u16, u16, u16)> {
-    let &(first_col, row) = feet.first()?;
-    let (start, end) = feet
-        .iter()
-        .fold((first_col, first_col), |(start, end), &(col, _)| {
-            (start.min(col), end.max(col))
-        });
-    Some((start, end, row))
+fn horizontal_body_bounds(pet_body: &[DrawCell]) -> Option<(u16, u16)> {
+    let mut glyphs = pet_body.iter().filter(|cell| cell.glyph.is_some());
+    let first = glyphs.next()?;
+    Some(glyphs.fold((first.col, first.col), |(start, end), cell| {
+        (start.min(cell.col), end.max(cell.col))
+    }))
+}
+
+fn centered_span(center: u16, half_span: u16, habitat: Rect) -> (u16, u16) {
+    let habitat_end = habitat.x.saturating_add(habitat.width).saturating_sub(1);
+    (
+        center.saturating_sub(half_span).max(habitat.x),
+        center.saturating_add(half_span).min(habitat_end),
+    )
 }
 
 fn rgb_from_color(color: Color) -> Option<Rgb> {
@@ -310,60 +264,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn contact_shadow_lands_one_row_below_feet_under_feet_columns() {
-        // Framed art: feet glyphs at framed row 5, columns 4 and 6.
-        let art_lines: Vec<String> = vec![
-            "             ".to_string(), // 0
-            "             ".to_string(), // 1
-            "             ".to_string(), // 2
-            "             ".to_string(), // 3
-            "             ".to_string(), // 4
-            "    X X      ".to_string(), // 5 feet at cols 4 and 6
-            "             ".to_string(), // 6
-            "             ".to_string(), // 7
-            "             ".to_string(), // 8
-            "             ".to_string(), // 9
-        ];
-        let pet_rect = Rect::new(10, 20, 13, 10);
-        let habitat = Rect::new(0, 0, 60, 40);
-        let cells = contact_shadow_cells(pet_rect, &art_lines, false, habitat);
-        // feet_row = 5 -> shadow row = pet_rect.y + 6 = 26.
-        // feet cols 4,6 -> absolute 14,16.
-        let set: std::collections::HashSet<(u16, u16)> = cells.into_iter().collect();
-        assert!(set.contains(&(14, 26)), "shadow under left foot");
-        assert!(set.contains(&(16, 26)), "shadow under right foot");
-        assert!(!set.contains(&(15, 26)), "gap between feet is not shadowed");
-        assert_eq!(set.len(), 2, "shadow is exactly the feet columns, no halo");
-    }
-
-    #[test]
-    fn contact_shadow_draw_cells_expand_to_a_three_value_footprint() {
-        let art_lines: Vec<String> = vec![
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "  XXXXXXX    ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-        ];
-        let pet_rect = Rect::new(5, 5, 13, 10);
-        let habitat = Rect::new(0, 0, 60, 40);
-        let cells =
-            contact_shadow_draw_cells(pet_rect, &art_lines, 1, habitat, RoomBiomeTag::Starter);
+    fn floor_projection_stays_on_the_substrate_and_tapers_toward_the_far_edge() {
+        let pet_body = (10..=16)
+            .map(|col| DrawCell {
+                row: 5,
+                col,
+                glyph: Some("X".to_string()),
+                fg: None,
+                bg: None,
+                bold: false,
+            })
+            .collect::<Vec<_>>();
+        let habitat = Rect::new(0, 0, 40, 24);
+        let cells = floor_projection_draw_cells(&pet_body, habitat, RoomBiomeTag::Starter);
 
         assert_eq!(
             cells.len(),
-            20,
-            "the main footprint and inset lower shelf both render"
+            8,
+            "the projection is a compact two-row trapezoid"
         );
         assert!(cells.iter().all(|cell| cell.glyph.is_none()));
-        assert_eq!(cells.iter().filter(|cell| cell.row == 11).count(), 11);
-        assert_eq!(cells.iter().filter(|cell| cell.row == 12).count(), 9);
-        assert_eq!(cells.iter().map(|cell| cell.col).min(), Some(5));
+        assert!(cells.iter().all(|cell| cell.row >= 21));
+        assert_eq!(cells.iter().filter(|cell| cell.row == 22).count(), 3);
+        assert_eq!(cells.iter().filter(|cell| cell.row == 23).count(), 5);
+        assert_eq!(cells.iter().map(|cell| cell.col).min(), Some(11));
         assert_eq!(cells.iter().map(|cell| cell.col).max(), Some(15));
 
         let color_at = |col, row| {
@@ -373,17 +297,48 @@ pub(crate) mod tests {
                 .and_then(|cell| cell.bg)
                 .unwrap()
         };
-        let outer = color_at(5, 11);
-        let inner = color_at(6, 11);
-        let core = color_at(8, 11);
-        assert_eq!(
-            color_at(8, 12),
-            inner,
-            "lower shelf retains the lavender band"
-        );
+        let far = color_at(13, 22);
+        let near = color_at(13, 23);
         let luminance = |color: Rgb| u32::from(color.r) + u32::from(color.g) + u32::from(color.b);
-        assert!(luminance(outer) < luminance(inner));
-        assert!(luminance(inner) < luminance(core));
+        assert!(luminance(far) < luminance(near));
+    }
+
+    #[test]
+    fn wall_shadow_offsets_and_fills_the_pet_silhouette_behind_its_body() {
+        let pet_body = vec![
+            DrawCell {
+                row: 5,
+                col: 4,
+                glyph: Some("X".to_string()),
+                fg: None,
+                bg: None,
+                bold: false,
+            },
+            DrawCell {
+                row: 5,
+                col: 6,
+                glyph: Some("X".to_string()),
+                fg: None,
+                bg: None,
+                bold: false,
+            },
+            DrawCell {
+                row: 6,
+                col: 5,
+                glyph: Some("X".to_string()),
+                fg: None,
+                bg: None,
+                bold: false,
+            },
+        ];
+        let cells =
+            wall_shadow_draw_cells(&pet_body, Rect::new(0, 0, 20, 20), RoomBiomeTag::Starter);
+
+        let positions: std::collections::HashSet<_> =
+            cells.iter().map(|cell| (cell.col, cell.row)).collect();
+        assert_eq!(positions, [(5, 6), (6, 6), (7, 6), (6, 7)].into());
+        assert!(cells.iter().all(|cell| cell.glyph.is_none()));
+        assert!(cells.iter().all(|cell| cell.bg.is_some()));
     }
 
     #[test]
@@ -412,28 +367,25 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn contact_shadow_is_clipped_to_habitat() {
-        let art_lines: Vec<String> = (0..10)
-            .map(|i| {
-                if i == 7 {
-                    "#############".to_string()
-                } else {
-                    "             ".to_string()
-                }
-            })
-            .collect();
-        let pet_rect = Rect::new(0, 0, 13, 10);
-        // Habitat only 5 rows tall: shadow row would be below it -> empty.
-        let habitat = Rect::new(0, 0, 13, 5);
-        let cells = contact_shadow_cells(pet_rect, &art_lines, false, habitat);
+    fn floor_projection_skips_habitats_without_two_substrate_rows() {
+        let pet_body = vec![DrawCell {
+            row: 0,
+            col: 6,
+            glyph: Some("X".to_string()),
+            fg: None,
+            bg: None,
+            bold: false,
+        }];
+        let habitat = Rect::new(0, 0, 13, 2);
+        let cells = floor_projection_draw_cells(&pet_body, habitat, RoomBiomeTag::Starter);
         assert!(
             cells.is_empty(),
-            "shadow below the habitat floor is clipped away"
+            "a projection requires the two visible rows beneath the floor horizon"
         );
     }
 
     #[test]
-    fn contact_shadow_deepens_bg_under_feet_without_replacing_glyphs() {
+    fn floor_projection_deepens_substrate_without_replacing_glyphs() {
         use super::super::{pet_inner_rect_in_panel, PetPanel};
         use crate::tui::panels::pet::tests::{test_context, vm_with_real_pet};
         use crate::tui::panels::LegacyPanel;
@@ -449,18 +401,33 @@ pub(crate) mod tests {
             .draw(|f| panel.render(f.area(), f.buffer_mut(), &vm, &ctx))
             .unwrap();
         let buf = terminal.backend().buffer();
-        // Find the pet rect, derive its feet/shadow cells, and assert at least one
-        // shadow cell carries a non-default bg (the shadow tint) and is not blanked
-        // out as a glyph (the shadow is bg-only).
+        // Build the body from the displayed art region and verify the projection
+        // is a background-only layer in the actual substrate rows.
         let area = f_area();
         let pet_rect = pet_inner_rect_in_panel(area, &vm);
-        let cells = contact_shadow_cells(pet_rect, &vm.pet_art, vm.facing == -1, area);
-        // At least one shadow cell exists for a grounded S2 pet in a 24-tall area.
-        assert!(!cells.is_empty(), "a grounded pet has a contact shadow");
+        let pet_body = vm
+            .pet_art
+            .iter()
+            .enumerate()
+            .flat_map(|(row, line)| {
+                line.chars().enumerate().filter_map(move |(col, glyph)| {
+                    (!glyph.is_whitespace()).then_some(DrawCell {
+                        row: pet_rect.y + row as u16,
+                        col: pet_rect.x + col as u16,
+                        glyph: Some(glyph.to_string()),
+                        fg: None,
+                        bg: None,
+                        bold: false,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let cells = floor_projection_draw_cells(&pet_body, area, RoomBiomeTag::Starter);
+        assert!(!cells.is_empty(), "a grounded pet has a floor projection");
         let mut deepened = 0usize;
-        for (x, y) in &cells {
-            if *x < 40 && *y < 24 {
-                if let Some(ratatui::style::Color::Rgb(..)) = buf[(*x, *y)].style().bg {
+        for cell in &cells {
+            if cell.col < 40 && cell.row < 24 {
+                if let Some(ratatui::style::Color::Rgb(..)) = buf[(cell.col, cell.row)].style().bg {
                     deepened += 1;
                 }
             }
@@ -505,30 +472,6 @@ pub(crate) mod tests {
             lowest_pet_row >= 12,
             "grounded pet's lowest glyph should be in the lower half (row >= 12), got {lowest_pet_row}"
         );
-    }
-
-    #[test]
-    fn contact_shadow_cells_preserve_the_exact_feet_span_for_footprint_derivation() {
-        let art_lines: Vec<String> = vec![
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-            "  ▙▒▒▒▒▒▟    ".to_string(), // feet span cols 2..=8
-            "             ".to_string(),
-            "             ".to_string(),
-            "             ".to_string(),
-        ];
-        let pet_rect = Rect::new(5, 5, 13, 10);
-        let habitat = Rect::new(0, 0, 60, 40);
-        let cells = contact_shadow_cells(pet_rect, &art_lines, false, habitat);
-        let cols: std::collections::HashSet<u16> = cells.iter().map(|(c, _)| *c).collect();
-        // No shadow column outside the feet glyph span (abs cols 7..=13 for cols 2..=8).
-        for c in &cols {
-            assert!(*c >= 7 && *c <= 13, "shadow col {c} escaped the feet span");
-        }
     }
 
     #[test]

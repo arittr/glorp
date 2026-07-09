@@ -232,14 +232,14 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
         &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
     );
     let chest_bubble = treasure_chest_bubble_cells(&prop_cells, scene.habitat, now, vm);
-    let contact_shadow = grounding::contact_shadow_draw_cells(
-        scene.pet_art,
-        &vm.pet_art,
-        vm.facing,
+    let pet_body = pet_body_cells(pet_rect, &lines);
+    let wall_shadow =
+        grounding::wall_shadow_draw_cells(&pet_body, scene.habitat, room_profile.biome.primary);
+    let floor_projection = grounding::floor_projection_draw_cells(
+        &pet_body,
         scene.habitat,
         room_profile.biome.primary,
     );
-    let pet_body = pet_body_cells(pet_rect, &lines);
     let performance_cue =
         performance_cue_cells(scene, room_profile.pet_performance, ctx.color_capability);
     let props_foreground = prop_layer_cells(
@@ -293,15 +293,21 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
                 chest_bubble,
             ),
             layer_from_draw_cells(
-                "classic-contact-shadow",
-                SmoothLayerRole::ContactShadow,
+                "classic-wall-shadow",
+                SmoothLayerRole::WallShadow,
                 8,
-                contact_shadow,
+                wall_shadow,
+            ),
+            layer_from_draw_cells(
+                "classic-floor-projection",
+                SmoothLayerRole::FloorProjection,
+                9,
+                floor_projection,
             ),
             layer_from_draw_cells_with_anchor(
                 "classic-pet-body",
                 SmoothLayerRole::PetBody,
-                9,
+                10,
                 pet_body,
                 SmoothPoint {
                     x: pet_rect.x as f32,
@@ -311,19 +317,19 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
             layer_from_draw_cells(
                 "classic-performance-cue",
                 SmoothLayerRole::PerformanceCue,
-                10,
+                11,
                 performance_cue,
             ),
             layer_from_draw_cells(
                 "classic-props-foreground",
                 SmoothLayerRole::PropsForeground,
-                11,
+                12,
                 props_foreground,
             ),
             layer_from_draw_cells(
                 "classic-tank-life-foreground",
                 SmoothLayerRole::TankLifeForeground,
-                12,
+                13,
                 tank_life_foreground,
             ),
         ],
@@ -633,7 +639,8 @@ mod tests {
                 SmoothLayerRole::ActivityGlyphs,
                 SmoothLayerRole::PropsBehind,
                 SmoothLayerRole::TankLifeBehind,
-                SmoothLayerRole::ContactShadow,
+                SmoothLayerRole::WallShadow,
+                SmoothLayerRole::FloorProjection,
                 SmoothLayerRole::PetBody,
                 SmoothLayerRole::PerformanceCue,
                 SmoothLayerRole::PropsForeground,
@@ -667,7 +674,8 @@ mod tests {
                 SmoothLayerRole::PropsBehind,
                 SmoothLayerRole::TankLifeBehind,
                 SmoothLayerRole::ChestBubble,
-                SmoothLayerRole::ContactShadow,
+                SmoothLayerRole::WallShadow,
+                SmoothLayerRole::FloorProjection,
                 SmoothLayerRole::PetBody,
                 SmoothLayerRole::PerformanceCue,
                 SmoothLayerRole::PropsForeground,

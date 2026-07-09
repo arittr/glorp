@@ -939,7 +939,7 @@ fn smooth_item_count(layer: &SmoothCompanionLayer) -> usize {
         .count()
 }
 
-const SMOOTH_SLICE1_REQUIRED_ROLES: [SmoothLayerRole; 18] = [
+const SMOOTH_SLICE1_REQUIRED_ROLES: [SmoothLayerRole; 19] = [
     SmoothLayerRole::DepthRings,
     SmoothLayerRole::BiomeWash,
     SmoothLayerRole::RoomGlyphs,
@@ -949,7 +949,8 @@ const SMOOTH_SLICE1_REQUIRED_ROLES: [SmoothLayerRole; 18] = [
     SmoothLayerRole::PropsBehind,
     SmoothLayerRole::TankLifeBehind,
     SmoothLayerRole::ChestBubble,
-    SmoothLayerRole::ContactShadow,
+    SmoothLayerRole::WallShadow,
+    SmoothLayerRole::FloorProjection,
     SmoothLayerRole::PetBody,
     SmoothLayerRole::PerformanceCue,
     SmoothLayerRole::PropsForeground,
@@ -1195,7 +1196,8 @@ mod tests {
                 "props-behind".to_string(),
                 "tank-life-behind".to_string(),
                 "chest-bubble".to_string(),
-                "contact-shadow".to_string(),
+                "wall-shadow".to_string(),
+                "floor-projection".to_string(),
                 "pet-body".to_string(),
                 "performance-cue".to_string(),
                 "props-foreground".to_string(),

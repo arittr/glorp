@@ -17,8 +17,8 @@ use crate::tui::life::build_prop_reactions;
 ///
 /// Callers blit the result once via `blit_draw_list`. Z-order (back to front):
 /// biome-wash → room-glyphs → ambient → motes → activity →
-/// props/tank-life(Background, Behind) → chest-bubble → contact-shadow →
-/// pet-body → performance-cue → props/tank-life(Foreground).
+/// props/tank-life(Background, Behind) → chest-bubble → wall-shadow →
+/// floor-projection → pet-body → performance-cue → props/tank-life(Foreground).
 ///
 /// Speech is NOT in the draw list: it occupies the top rows of the habitat
 /// (an entry in `ambient_exclusions`) and is painted separately AFTER the
@@ -280,14 +280,6 @@ pub(crate) fn render_legacy_pet_scene_draw_list_parity_oracle_with_tank_geometry
         ));
     }
 
-    list.extend(super::grounding::contact_shadow_draw_cells(
-        scene.pet_art,
-        &vm.pet_art,
-        vm.facing,
-        scene.habitat,
-        room_profile.biome.primary,
-    ));
-
     let effects = scene_model.effects;
     let inputs = super::colors::watch_live_color_inputs(
         vm,
@@ -313,7 +305,18 @@ pub(crate) fn render_legacy_pet_scene_draw_list_parity_oracle_with_tank_geometry
         cursor_norm_x,
         effective_twinkle,
     );
-    list.extend(super::art_lines::pet_body_cells(pet_rect, &lines));
+    let pet_body = super::art_lines::pet_body_cells(pet_rect, &lines);
+    list.extend(super::grounding::wall_shadow_draw_cells(
+        &pet_body,
+        scene.habitat,
+        room_profile.biome.primary,
+    ));
+    list.extend(super::grounding::floor_projection_draw_cells(
+        &pet_body,
+        scene.habitat,
+        room_profile.biome.primary,
+    ));
+    list.extend(pet_body);
 
     list.extend(super::performance::performance_cue_cells(
         scene,

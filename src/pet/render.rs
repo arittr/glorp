@@ -1156,7 +1156,8 @@ pub(crate) fn feet_row(art_lines: &[String]) -> Option<usize> {
         .map(|(row, _)| row)
 }
 
-/// Non-space columns of the feet row (the contact-shadow footprint).
+/// Non-space columns of the feet row for renderer-level footprint tests.
+#[cfg(test)]
 pub(crate) fn feet_columns(art_lines: &[String]) -> Vec<usize> {
     match feet_row(art_lines) {
         None => Vec::new(),

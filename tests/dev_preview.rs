@@ -78,7 +78,7 @@ const PIXEL_CAST_IDS: [&str; 6] = [
 const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
 const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
-const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 18] = [
+const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 19] = [
     ("depth-rings", "fixed", None),
     ("biome-wash", "parallax", Some("far")),
     ("room-glyphs", "parallax", Some("far")),
@@ -88,7 +88,8 @@ const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 18] = [
     ("props-behind", "parallax", Some("behind")),
     ("tank-life-behind", "parallax", Some("behind")),
     ("chest-bubble", "parallax", Some("behind")),
-    ("contact-shadow", "pet-attached", None),
+    ("wall-shadow", "pet-attached", None),
+    ("floor-projection", "floor-projected", None),
     ("pet-body", "pet-attached", None),
     ("performance-cue", "pet-attached", None),
     ("props-foreground", "parallax", Some("foreground")),
@@ -292,7 +293,10 @@ fn validate_smooth_enum_string_paths(sidecar: &Value, surface: &str) -> Result<(
     ) -> Result<(), String> {
         match value {
             Value::String(text)
-                if matches!(text.as_str(), "fixed" | "pet-attached" | "parallax") =>
+                if matches!(
+                    text.as_str(),
+                    "fixed" | "pet-attached" | "floor-projected" | "parallax"
+                ) =>
             {
                 if !is_canonical_layer_field(path, collection_prefix, "motion_binding") {
                     return Err(format!(
@@ -363,7 +367,7 @@ fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
 
     assert_eq!(
         actual, SMOOTH_CANONICAL_LAYER_BINDINGS,
-        "{surface} should serialize the canonical 18-role motion mapping"
+        "{surface} should serialize the canonical 19-role motion mapping"
     );
 
     for (layer, (_, expected_binding, _)) in layers.iter().zip(SMOOTH_CANONICAL_LAYER_BINDINGS) {
@@ -2743,10 +2747,12 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
         let motion_binding = layer["motion_binding"].as_str().unwrap();
         assert!(matches!(
             motion_binding,
-            "fixed" | "pet-attached" | "parallax"
+            "fixed" | "pet-attached" | "floor-projected" | "parallax"
         ));
         match motion_binding {
-            "fixed" | "pet-attached" => assert!(layer["depth_plane"].is_null()),
+            "fixed" | "pet-attached" | "floor-projected" => {
+                assert!(layer["depth_plane"].is_null())
+            }
             "parallax" => assert!(matches!(
                 layer["depth_plane"].as_str().unwrap(),
                 "far" | "mid" | "behind" | "foreground"
@@ -2782,7 +2788,7 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
     );
     assert_eq!(parity["review_status"], "exact-match");
     assert_eq!(parity["missing_roles"], Value::Array(vec![]));
-    assert_eq!(parity["required_roles"].as_array().unwrap().len(), 18);
+    assert_eq!(parity["required_roles"].as_array().unwrap().len(), 19);
 
     for path in smooth_sidecars {
         let sidecar: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -2964,12 +2970,12 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
             let motion_binding = layer["motion_binding"].as_str().unwrap();
             assert!(matches!(
                 motion_binding,
-                "fixed" | "pet-attached" | "parallax"
+                "fixed" | "pet-attached" | "floor-projected" | "parallax"
             ));
             let parallax_x = layer["parallax_translation"]["x"].as_f64().unwrap();
             let parallax_y = layer["parallax_translation"]["y"].as_f64().unwrap();
             match motion_binding {
-                "fixed" | "pet-attached" => {
+                "fixed" | "pet-attached" | "floor-projected" => {
                     assert!(layer["depth_plane"].is_null());
                     assert_eq!(parallax_x, 0.0);
                     assert_eq!(parallax_y, 0.0);

@@ -107,9 +107,17 @@ pub fn try_build_round_smooth_scene_plan(
     ));
 
     for mut layer in layered.layers {
-        if layer.motion_binding == SmoothLayerMotionBinding::PetAttached {
-            layer.transform.translation.x += pet_anchor_delta.x;
-            layer.transform.translation.y += pet_anchor_delta.y;
+        match layer.motion_binding {
+            SmoothLayerMotionBinding::PetAttached => {
+                layer.transform.translation.x += pet_anchor_delta.x;
+                layer.transform.translation.y += pet_anchor_delta.y;
+            }
+            // The floor projection follows the pet across the tank, but stays
+            // anchored to the substrate while the pet bobs against the wall.
+            SmoothLayerMotionBinding::FloorProjected => {
+                layer.transform.translation.x += pet_anchor_delta.x;
+            }
+            SmoothLayerMotionBinding::Fixed | SmoothLayerMotionBinding::Parallax(_) => {}
         }
         if layer.role == SmoothLayerRole::PetBody {
             layer.transform_origin = SmoothPoint {

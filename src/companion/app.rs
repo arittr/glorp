@@ -1481,7 +1481,9 @@ fn appkit_cell_axis(value: f32) -> u16 {
 fn motion_binding_uses_fractional_coordinates(binding: SmoothLayerMotionBinding) -> bool {
     matches!(
         binding,
-        SmoothLayerMotionBinding::PetAttached | SmoothLayerMotionBinding::Parallax(_)
+        SmoothLayerMotionBinding::PetAttached
+            | SmoothLayerMotionBinding::FloorProjected
+            | SmoothLayerMotionBinding::Parallax(_)
     )
 }
 
@@ -1965,6 +1967,9 @@ mod tests {
         ));
         assert!(motion_binding_uses_fractional_coordinates(
             SmoothLayerMotionBinding::PetAttached
+        ));
+        assert!(motion_binding_uses_fractional_coordinates(
+            SmoothLayerMotionBinding::FloorProjected
         ));
         assert!(motion_binding_uses_fractional_coordinates(
             SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Far)
