@@ -16,7 +16,7 @@ use serde::Serialize;
 const MIN_CAPTURE_FRAMES: u64 = 5;
 const MAX_SMOOTH_FRAME_SAMPLES: usize = 120;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq)]
 pub struct SmoothReviewPoint {
     pub x: f32,
     pub y: f32,
@@ -48,7 +48,11 @@ pub struct ReviewCapture {
     capture_dir: Option<PathBuf>,
     started_at: Instant,
     frame_count: u64,
+    semantic_art_tick_count: u64,
     smooth_frame_samples: Vec<SmoothReviewFrameSample>,
+    max_adjacent_base_anchor_delta: SmoothReviewPoint,
+    max_adjacent_final_anchor_delta: SmoothReviewPoint,
+    last_smooth_sample: Option<SmoothReviewFrameSample>,
     panic: bool,
     screenshot_written: bool,
     render_log_written: bool,
@@ -74,7 +78,11 @@ impl ReviewCapture {
             capture_dir,
             started_at: Instant::now(),
             frame_count: 0,
+            semantic_art_tick_count: 0,
             smooth_frame_samples: Vec::new(),
+            max_adjacent_base_anchor_delta: SmoothReviewPoint::default(),
+            max_adjacent_final_anchor_delta: SmoothReviewPoint::default(),
+            last_smooth_sample: None,
             panic: false,
             screenshot_written: false,
             render_log_written: false,
@@ -84,8 +92,25 @@ impl ReviewCapture {
     pub fn record_frame(&mut self, smooth_sample: Option<SmoothReviewFrameSample>) {
         self.frame_count = self.frame_count.saturating_add(1);
         if let Some(sample) = smooth_sample {
+            let sample = round_smooth_sample(sample);
+            self.semantic_art_tick_count = self
+                .semantic_art_tick_count
+                .max(sample.semantic_art_tick_index);
+            if let Some(previous) = self.last_smooth_sample {
+                self.max_adjacent_base_anchor_delta = max_point_delta(
+                    self.max_adjacent_base_anchor_delta,
+                    previous.base_anchor,
+                    sample.base_anchor,
+                );
+                self.max_adjacent_final_anchor_delta = max_point_delta(
+                    self.max_adjacent_final_anchor_delta,
+                    previous.final_anchor,
+                    sample.final_anchor,
+                );
+            }
+            self.last_smooth_sample = Some(sample);
             if self.smooth_frame_samples.len() < MAX_SMOOTH_FRAME_SAMPLES {
-                self.smooth_frame_samples.push(round_smooth_sample(sample));
+                self.smooth_frame_samples.push(sample);
             }
         }
     }
@@ -153,23 +178,18 @@ impl ReviewCapture {
             renderer: self.renderer.as_str(),
             review_state: self.state.as_str(),
             requested_size: self.requested_size.map(ReviewSizeLog::from),
+            paint_frame_count: self.frame_count,
             frame_count: self.frame_count,
             elapsed_duration_ms: self.started_at.elapsed().as_millis(),
-            semantic_art_tick_count: self.semantic_art_tick_count(),
+            semantic_art_tick_count: self.semantic_art_tick_count,
+            max_adjacent_base_anchor_delta: self.max_adjacent_base_anchor_delta,
+            max_adjacent_final_anchor_delta: self.max_adjacent_final_anchor_delta,
             smooth_frame_samples: &self.smooth_frame_samples,
             privacy: ReviewPrivacyLog::from_claims(
                 &crate::presentation::smooth::SmoothCompanionPrivacyClaims::external_companion(),
             ),
             panic: self.panic,
         }
-    }
-
-    fn semantic_art_tick_count(&self) -> u64 {
-        self.smooth_frame_samples
-            .iter()
-            .map(|sample| sample.semantic_art_tick_index)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len() as u64
     }
 
     #[cfg(test)]
@@ -193,9 +213,12 @@ struct RenderLog<'a> {
     renderer: &'static str,
     review_state: &'static str,
     requested_size: Option<ReviewSizeLog>,
+    paint_frame_count: u64,
     frame_count: u64,
     elapsed_duration_ms: u128,
     semantic_art_tick_count: u64,
+    max_adjacent_base_anchor_delta: SmoothReviewPoint,
+    max_adjacent_final_anchor_delta: SmoothReviewPoint,
     smooth_frame_samples: &'a [SmoothReviewFrameSample],
     privacy: ReviewPrivacyLog,
     panic: bool,
@@ -292,9 +315,49 @@ fn round_smooth_sample(sample: SmoothReviewFrameSample) -> SmoothReviewFrameSamp
     }
 }
 
+fn max_point_delta(
+    max_delta: SmoothReviewPoint,
+    previous: SmoothReviewPoint,
+    current: SmoothReviewPoint,
+) -> SmoothReviewPoint {
+    SmoothReviewPoint {
+        x: max_delta
+            .x
+            .max(round_sample((current.x - previous.x).abs())),
+        y: max_delta
+            .y
+            .max(round_sample((current.y - previous.y).abs())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    const RENDER_LOG_ALLOWED_STRING_VALUES: &[&str] = &[
+        "classic",
+        "pixel",
+        "smooth",
+        "normal",
+        "active-pulse",
+        "asleep-calm",
+        "helper-trouble",
+    ];
+
+    const RENDER_LOG_FORBIDDEN_PRIVACY_VALUE_TOKENS: &[&str] = &[
+        "source_name",
+        "display_name",
+        "client-secret-project",
+        "/users/",
+        "/tmp/",
+        "prompt",
+        "response",
+        "transcript",
+        "tool payload",
+        "diagnostic",
+        "very-secret-seed",
+    ];
 
     #[test]
     fn duration_only_review_options_create_session_without_artifacts() {
@@ -331,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn smooth_review_capture_records_semantic_ticks_anchors_and_privacy() {
+    fn smooth_review_capture_records_requested_evidence_and_privacy() {
         let dir = tempfile::tempdir().unwrap();
         let mut capture = ReviewCapture::from_options(
             CompanionRendererMode::Smooth,
@@ -362,12 +425,26 @@ mod tests {
             final_anchor: SmoothReviewPoint { x: 10.30, y: 12.75 },
             classic_snap_anchor: SmoothReviewPoint { x: 10.0, y: 12.0 },
         }));
+        capture.record_frame(Some(SmoothReviewFrameSample {
+            bob_y: 0.3,
+            semantic_art_tick_index: 1,
+            pet_visual_checksum: 456,
+            base_anchor: SmoothReviewPoint { x: 10.30, y: 12.85 },
+            bob_offset: SmoothReviewPoint { x: 0.0, y: 0.3 },
+            final_anchor: SmoothReviewPoint { x: 10.30, y: 13.05 },
+            classic_snap_anchor: SmoothReviewPoint { x: 10.0, y: 12.0 },
+        }));
         let json = capture.render_log_json_for_test().unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(value["frame_count"], 2);
+        assert_eq!(value["paint_frame_count"], 3);
+        assert_eq!(value["frame_count"], 3);
         assert_eq!(value["semantic_art_tick_count"], 1);
-        assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 2);
+        assert_eq!(value["max_adjacent_base_anchor_delta"]["x"], 0.05);
+        assert_eq!(value["max_adjacent_base_anchor_delta"]["y"], 0.30);
+        assert_eq!(value["max_adjacent_final_anchor_delta"]["x"], 0.05);
+        assert_eq!(value["max_adjacent_final_anchor_delta"]["y"], 0.30);
+        assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 3);
         assert_eq!(value["smooth_frame_samples"][0]["pet_visual_checksum"], 123);
         assert_eq!(value["privacy"]["source_names_visible"], false);
         assert_eq!(value["privacy"]["exact_token_strings_visible"], false);
@@ -405,5 +482,73 @@ mod tests {
         }));
 
         assert!(!capture.pet_checksums_stable_within_semantic_ticks_for_test());
+    }
+
+    #[test]
+    fn smooth_review_capture_render_log_strings_stay_sanitized() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                state: Some(CompanionReviewState::HelperTrouble),
+                initial_size: Some(CompanionReviewSize { width: 360, height: 360 }),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        capture.record_frame(Some(SmoothReviewFrameSample {
+            bob_y: 0.1,
+            semantic_art_tick_index: 0,
+            pet_visual_checksum: 123,
+            base_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            bob_offset: SmoothReviewPoint { x: 0.0, y: 0.1 },
+            final_anchor: SmoothReviewPoint { x: 1.0, y: 1.1 },
+            classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+        }));
+        capture.record_frame(Some(SmoothReviewFrameSample {
+            bob_y: 0.2,
+            semantic_art_tick_index: 1,
+            pet_visual_checksum: 123,
+            base_anchor: SmoothReviewPoint { x: 1.1, y: 1.0 },
+            bob_offset: SmoothReviewPoint { x: 0.0, y: 0.2 },
+            final_anchor: SmoothReviewPoint { x: 1.1, y: 1.2 },
+            classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+        }));
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_render_log_json_values_are_sanitized(&value, "$");
+    }
+
+    fn assert_render_log_json_values_are_sanitized(value: &Value, path: &str) {
+        match value {
+            Value::String(text) => {
+                let text = text.to_ascii_lowercase();
+                assert!(
+                    RENDER_LOG_ALLOWED_STRING_VALUES.contains(&text.as_str()),
+                    "unexpected render log string at {path}: {text}"
+                );
+                for forbidden in RENDER_LOG_FORBIDDEN_PRIVACY_VALUE_TOKENS {
+                    assert!(
+                        !text.contains(forbidden),
+                        "render log leaked {forbidden} at {path}: {text}"
+                    );
+                }
+            }
+            Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    assert_render_log_json_values_are_sanitized(child, &format!("{path}[{index}]"));
+                }
+            }
+            Value::Object(map) => {
+                for (key, child) in map {
+                    assert_render_log_json_values_are_sanitized(child, &format!("{path}.{key}"));
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
     }
 }
