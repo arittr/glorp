@@ -252,7 +252,7 @@ Required formatting check:
 
 ### Commit SHA(s)
 
-- `PENDING`
+- `8a9073c`
 
 ### Concerns
 
