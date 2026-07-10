@@ -534,7 +534,7 @@ pub struct CompanionViewport {
     pub grid_rows: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothCompanionPet {
     pub bounds: SmoothBounds,
     pub fractional_bounds: SmoothBounds,
@@ -543,6 +543,39 @@ pub struct SmoothCompanionPet {
     pub final_anchor: SmoothPoint,
     pub classic_snap_anchor: SmoothPoint,
     pub parallax_focus_offset: SmoothPoint,
+    /// Raw depth channel in `[-1, 1]`; negative is far, positive is near.
+    pub depth: f32,
+    /// Uniform scale resolved from `depth` and the lifecycle attenuation.
+    pub scale: f32,
+    /// Depth translation applied to every pet-attached layer.
+    pub perspective_offset: SmoothPoint,
+    /// The pet body's bounds after scale, perspective, and idle bob.
+    pub transformed_bounds: SmoothBounds,
+    /// The creature ink at maximum depth scale plus the full perspective
+    /// excursion in both directions. The roam envelope keeps this inside the
+    /// aperture, the gauges, and the HUD reserve at every point of the cycle.
+    pub max_scale_clearance: SmoothBounds,
+}
+
+impl Default for SmoothCompanionPet {
+    fn default() -> Self {
+        Self {
+            bounds: SmoothBounds::default(),
+            fractional_bounds: SmoothBounds::default(),
+            base_anchor: SmoothPoint::default(),
+            bob_offset: SmoothPoint::default(),
+            final_anchor: SmoothPoint::default(),
+            classic_snap_anchor: SmoothPoint::default(),
+            parallax_focus_offset: SmoothPoint::default(),
+            depth: 0.0,
+            // A zero scale is not a valid transform, so the neutral plane is the
+            // only sound default here.
+            scale: 1.0,
+            perspective_offset: SmoothPoint::default(),
+            transformed_bounds: SmoothBounds::default(),
+            max_scale_clearance: SmoothBounds::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

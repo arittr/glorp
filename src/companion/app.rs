@@ -148,9 +148,12 @@ enum CompanionFramePreparationError {
     MissingGridMetrics,
     SmoothMissingPetBody,
     SmoothInvalidParallaxGeometry,
+    SmoothInvalidDepth,
+    SmoothInvalidLayerGeometry,
 }
 
 impl CompanionFramePreparationError {
+    /// Static, privacy-safe category strings: no geometry values, no pet state.
     fn category(self) -> &'static str {
         match self {
             CompanionFramePreparationError::InvalidBounds => "invalid-bounds",
@@ -158,6 +161,10 @@ impl CompanionFramePreparationError {
             CompanionFramePreparationError::SmoothMissingPetBody => "smooth-missing-pet-body",
             CompanionFramePreparationError::SmoothInvalidParallaxGeometry => {
                 "smooth-invalid-parallax-geometry"
+            }
+            CompanionFramePreparationError::SmoothInvalidDepth => "smooth-invalid-depth",
+            CompanionFramePreparationError::SmoothInvalidLayerGeometry => {
+                "smooth-invalid-layer-geometry"
             }
         }
     }
@@ -292,6 +299,12 @@ fn prepare_companion_frame(
                 }
                 SmoothScenePlanError::InvalidParallaxGeometry => {
                     CompanionFramePreparationError::SmoothInvalidParallaxGeometry
+                }
+                SmoothScenePlanError::InvalidDepth(_) => {
+                    CompanionFramePreparationError::SmoothInvalidDepth
+                }
+                SmoothScenePlanError::InvalidLayerGeometry(_) => {
+                    CompanionFramePreparationError::SmoothInvalidLayerGeometry
                 }
             })?;
             let pet_center_col = f64::from(

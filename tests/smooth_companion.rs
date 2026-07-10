@@ -845,13 +845,17 @@ fn smooth_round_plan_floor_projection_stays_below_props_and_moves_pet_attached_l
         wall_shadow.transform.translation.x,
         pet_body.transform.translation.x
     );
+    // The projection is a bed-anchored ellipse positioned in viewport coordinates
+    // from the pet centre and the depth sample, so it carries no transform of its
+    // own and cannot inherit the pet's bob.
     assert_eq!(
-        floor_projection.transform.translation.x,
-        pet_body.transform.translation.x
+        floor_projection.transform.translation,
+        SmoothPoint { x: 0.0, y: 0.0 },
+        "the bed-anchored projection must not be translated with the pet body"
     );
     assert_eq!(
-        floor_projection.transform.translation.y, -1.0,
-        "the floor projection is lifted one substrate row and must not inherit pet bob"
+        floor_projection.transform.scale,
+        SmoothPoint { x: 1.0, y: 1.0 }
     );
     assert!(floor_projection.z < first_prop_z);
     assert!(!plan
@@ -998,7 +1002,21 @@ fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata_and_aura() {
     );
     assert_eq!(plan.pet.final_anchor, fractional_anchor);
     assert_eq!(plan.pet.fractional_bounds, fractional_bounds);
-    assert_eq!(mood_aura.transform_origin, fractional_center);
+
+    // The aura tracks the composed pet transform. Even an asleep pet's attenuated
+    // depth scales the body, so an aura pinned to the unscaled art would drift off
+    // the creature as it swims.
+    let transformed_bounds = transformed_smooth_bounds(pet_body).unwrap();
+    let transformed_center = SmoothPoint {
+        x: (transformed_bounds.min.x + transformed_bounds.max.x) / 2.0,
+        y: (transformed_bounds.min.y + transformed_bounds.max.y) / 2.0,
+    };
+    assert_eq!(plan.pet.transformed_bounds, transformed_bounds);
+    assert_eq!(mood_aura.transform_origin, transformed_center);
+    assert_ne!(
+        transformed_center, fractional_center,
+        "this fixture must carry a nonneutral depth or the aura contract is untested"
+    );
 }
 
 #[test]
@@ -1107,4 +1125,338 @@ fn smooth_round_plan_keeps_privacy_claims_external_safe() {
         .layers
         .iter()
         .all(|layer| layer.privacy == SmoothCompanionPrivacyClaims::external_companion()));
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: composed pet depth and the bed-anchored floor projection.
+// ---------------------------------------------------------------------------
+
+const DEPTH_NOW: time::OffsetDateTime = datetime!(2026-07-08 18:00:00.500 UTC);
+
+/// Depth excursions are attenuated when the pet is calm or asleep, so the
+/// far/neutral/near scale contract only holds in a normal lifecycle.
+fn normal_lifecycle_fixture() -> WatchViewModel {
+    let mut vm = parity_fixture();
+    vm.day_context.asleep = false;
+    vm.life_profile.calm_mode = false;
+    vm
+}
+
+fn plan_at_depth(
+    vm: &WatchViewModel,
+    elapsed_ms: u64,
+    depth: f32,
+) -> glorp::presentation::smooth::SmoothCompanionScenePlan {
+    glorp::round::smooth::try_build_round_smooth_scene_plan_with_options(
+        vm,
+        DEPTH_NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &glorp::round::scene::companion_roam_motion(),
+        elapsed_ms,
+        glorp::round::smooth::SmoothSceneBuildOptions { depth_override: Some(depth) },
+    )
+    .expect("normal fixture builds a smooth plan")
+}
+
+fn only_ellipse(layer: &SmoothCompanionLayer) -> (SmoothBounds, SmoothRgba8) {
+    assert_eq!(
+        layer.items.len(),
+        1,
+        "{:?} must carry exactly one typed shape",
+        layer.role
+    );
+    match &layer.items[0] {
+        SmoothLayerItem::Shape(SmoothShape {
+            geometry: SmoothShapeGeometry::Ellipse { bounds },
+            color,
+        }) => (*bounds, *color),
+        other => panic!("expected a typed ellipse, got {other:?}"),
+    }
+}
+
+fn center_x(b: SmoothBounds) -> f32 {
+    b.min.x + (b.max.x - b.min.x) / 2.0
+}
+
+fn center_y(b: SmoothBounds) -> f32 {
+    b.min.y + (b.max.y - b.min.y) / 2.0
+}
+
+const PET_ATTACHED_ROLES: [SmoothLayerRole; 3] = [
+    SmoothLayerRole::PetBody,
+    SmoothLayerRole::WallShadow,
+    SmoothLayerRole::PerformanceCue,
+];
+
+#[test]
+fn depth_transform_maps_far_neutral_and_near_onto_scale_and_perspective() {
+    let vm = normal_lifecycle_fixture();
+
+    let far = plan_at_depth(&vm, 250, -1.0);
+    let neutral = plan_at_depth(&vm, 250, 0.0);
+    let near = plan_at_depth(&vm, 250, 1.0);
+
+    assert_eq!(far.pet.scale, SMOOTH_PET_FAR_SCALE);
+    assert_eq!(neutral.pet.scale, 1.0);
+    assert_eq!(near.pet.scale, SMOOTH_PET_NEAR_SCALE);
+
+    assert_eq!(far.pet.depth, -1.0);
+    assert_eq!(neutral.pet.depth, 0.0);
+    assert_eq!(near.pet.depth, 1.0);
+
+    // Far is up and small; near is down and large.
+    assert!(far.pet.perspective_offset.y < 0.0);
+    assert_eq!(neutral.pet.perspective_offset.y, 0.0);
+    assert!(near.pet.perspective_offset.y > 0.0);
+    assert_eq!(near.pet.perspective_offset.y, SMOOTH_PERSPECTIVE_Y_MAX);
+    assert_eq!(far.pet.perspective_offset.x, 0.0);
+
+    // One depth sample drives every pet-attached layer, uniformly.
+    for plan in [&far, &neutral, &near] {
+        for role in PET_ATTACHED_ROLES {
+            let layer = plan.layer_by_role(role).unwrap();
+            assert_eq!(
+                layer.transform.scale.x, plan.pet.scale,
+                "{role:?} must carry the composed pet scale"
+            );
+            assert_eq!(
+                layer.transform.scale.y, layer.transform.scale.x,
+                "{role:?} depth scale must stay uniform"
+            );
+        }
+    }
+
+    // The perspective translation moves all three by exactly the same amount.
+    for role in PET_ATTACHED_ROLES {
+        let step = near.layer_by_role(role).unwrap().transform.translation.y
+            - neutral.layer_by_role(role).unwrap().transform.translation.y;
+        assert!(
+            (step - SMOOTH_PERSPECTIVE_Y_MAX).abs() < 1e-5,
+            "{role:?} moved {step} for a near depth step, expected {SMOOTH_PERSPECTIVE_Y_MAX}"
+        );
+    }
+}
+
+#[test]
+fn depth_transform_keeps_idle_bob_on_the_pet_body_alone() {
+    let vm = normal_lifecycle_fixture();
+    let early = plan_at_depth(&vm, 250, 0.0);
+    let late = plan_at_depth(&vm, 1250, 0.0);
+
+    assert_ne!(
+        early.pet.bob_offset.y, late.pet.bob_offset.y,
+        "fixture must straddle a bob phase or this test proves nothing"
+    );
+
+    let body_step = late
+        .layer_by_role(SmoothLayerRole::PetBody)
+        .unwrap()
+        .transform
+        .translation
+        .y
+        - early
+            .layer_by_role(SmoothLayerRole::PetBody)
+            .unwrap()
+            .transform
+            .translation
+            .y;
+    assert!(
+        (body_step - (late.pet.bob_offset.y - early.pet.bob_offset.y)).abs() < 1e-5,
+        "the pet body must carry the idle bob"
+    );
+
+    for role in [
+        SmoothLayerRole::WallShadow,
+        SmoothLayerRole::PerformanceCue,
+        SmoothLayerRole::FloorProjection,
+    ] {
+        assert_eq!(
+            early.layer_by_role(role).unwrap().transform.translation.y,
+            late.layer_by_role(role).unwrap().transform.translation.y,
+            "{role:?} must not inherit the pet's idle bob"
+        );
+    }
+}
+
+#[test]
+fn depth_transform_publishes_transformed_bounds_and_drives_the_mood_aura() {
+    let vm = normal_lifecycle_fixture();
+
+    for depth in [-1.0, 0.0, 1.0] {
+        let plan = plan_at_depth(&vm, 250, depth);
+        let pet_body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
+        assert_eq!(
+            plan.pet.transformed_bounds,
+            transformed_smooth_bounds(pet_body).unwrap(),
+            "published pet bounds must equal the pet body's transformed bounds"
+        );
+
+        // The aura is prepared from the transformed bounds, not the unscaled art.
+        let aura = plan.layer_by_role(SmoothLayerRole::MoodAura).unwrap();
+        let aura_center = match aura.clip {
+            SmoothClip::Circle { center, .. } => center,
+            other => panic!("mood aura must keep a circular clip, got {other:?}"),
+        };
+        assert!((aura_center.x - center_x(plan.pet.transformed_bounds)).abs() < 1e-4);
+        assert!((aura_center.y - center_y(plan.pet.transformed_bounds)).abs() < 1e-4);
+    }
+
+    let far = plan_at_depth(&vm, 250, -1.0);
+    let near = plan_at_depth(&vm, 250, 1.0);
+    let width = |b: SmoothBounds| b.max.x - b.min.x;
+    assert!(
+        width(near.pet.transformed_bounds) > width(far.pet.transformed_bounds),
+        "the near pet must render wider than the far pet"
+    );
+}
+
+#[test]
+fn floor_projection_is_one_bed_anchored_ellipse_that_tracks_depth() {
+    let vm = normal_lifecycle_fixture();
+    let far = plan_at_depth(&vm, 250, -1.0);
+    let near = plan_at_depth(&vm, 250, 1.0);
+
+    let bed = smooth_tank_bed_geometry(
+        CompanionViewport {
+            grid_cols: GRID_COLS,
+            grid_rows: GRID_ROWS,
+        },
+        glorp::presentation::PetSceneModel::build(
+            &vm,
+            DEPTH_NOW,
+            glorp::tui::style::ColorCapability::Truecolor,
+        )
+        .room
+        .biome,
+    )
+    .expect("normal viewport has a tank bed");
+
+    let (far_bounds, far_color) =
+        only_ellipse(far.layer_by_role(SmoothLayerRole::FloorProjection).unwrap());
+    let (near_bounds, near_color) = only_ellipse(
+        near.layer_by_role(SmoothLayerRole::FloorProjection)
+            .unwrap(),
+    );
+
+    // No leftover Classic background cells survive in the Smooth projection.
+    for plan in [&far, &near] {
+        let projection = plan
+            .layer_by_role(SmoothLayerRole::FloorProjection)
+            .unwrap();
+        assert!(
+            !projection
+                .items
+                .iter()
+                .any(|item| matches!(item, SmoothLayerItem::LocalCell(_))),
+            "the smooth floor projection must not keep Classic cells"
+        );
+    }
+
+    // Near reads bigger, stronger, and further down the bed than far.
+    assert!(near_bounds.max.x - near_bounds.min.x > far_bounds.max.x - far_bounds.min.x);
+    assert!(near_bounds.max.y - near_bounds.min.y > far_bounds.max.y - far_bounds.min.y);
+    assert!(near_color.a > far_color.a);
+    assert!(
+        center_y(far_bounds) < center_y(near_bounds),
+        "the far projection must sit closer to the bed horizon"
+    );
+    assert!(center_y(far_bounds) >= bed.horizon_y);
+    assert!(center_y(near_bounds) <= bed.near_edge_y);
+
+    // It tracks the pet across the tank. The creature's centre is the centre of
+    // its particle frame, which `max_scale_clearance` is built around; the
+    // transformed cell bounding box is not centred on the creature.
+    for plan in [&far, &near] {
+        let (projection_bounds, _) = only_ellipse(
+            plan.layer_by_role(SmoothLayerRole::FloorProjection)
+                .unwrap(),
+        );
+        assert!(
+            (center_x(projection_bounds) - center_x(plan.pet.max_scale_clearance)).abs() < 1e-3,
+            "the projection must sit under the creature"
+        );
+    }
+
+    // And it stays beneath every prop and tank inhabitant.
+    let projection = near
+        .layer_by_role(SmoothLayerRole::FloorProjection)
+        .unwrap();
+    for prop_role in [
+        SmoothLayerRole::PropsBehind,
+        SmoothLayerRole::TankLifeBehind,
+        SmoothLayerRole::ChestBubble,
+        SmoothLayerRole::PropsForeground,
+        SmoothLayerRole::TankLifeForeground,
+    ] {
+        assert!(
+            projection.z < near.layer_by_role(prop_role).unwrap().z,
+            "floor projection must stay below {prop_role:?}"
+        );
+    }
+}
+
+#[test]
+fn composed_plan_publishes_max_scale_clearance_inside_the_protected_regions() {
+    let vm = normal_lifecycle_fixture();
+    let hud_start = GRID_ROWS
+        - glorp::round::scene::round_tank_life_geometry(GRID_COLS, GRID_ROWS).reserved_regions[0]
+            .height;
+
+    for step in 0..240 {
+        let now = DEPTH_NOW + time::Duration::milliseconds((step * 250) as i64);
+        let plan = glorp::round::smooth::try_build_round_smooth_scene_plan(
+            &vm,
+            now,
+            GRID_COLS,
+            GRID_ROWS,
+            &glorp::round::scene::companion_roam_motion(),
+            (step * 250) as u64,
+        )
+        .expect("plan builds across the roam cycle");
+
+        let clearance = plan.pet.max_scale_clearance;
+        assert!(
+            clearance.min.x >= -1e-4 && clearance.max.x <= f32::from(GRID_COLS) + 1e-4,
+            "max-scale clearance left the aperture at {now}: {clearance:?}"
+        );
+        assert!(
+            clearance.min.y >= -1e-4,
+            "max-scale clearance rose above the aperture at {now}: {clearance:?}"
+        );
+        assert!(
+            clearance.max.y <= f32::from(hud_start) + 1e-4,
+            "max-scale clearance entered the HUD reserve at {now}: {clearance:?}"
+        );
+
+        // The clearance is the promise the roam envelope makes: the creature ink at
+        // maximum scale, plus the full perspective excursion in both directions.
+        let expected_w = f32::from(PET_INK_W) * SMOOTH_PET_NEAR_SCALE;
+        let expected_h =
+            f32::from(PET_INK_H) * SMOOTH_PET_NEAR_SCALE + 2.0 * SMOOTH_PERSPECTIVE_Y_MAX;
+        assert!((clearance.max.x - clearance.min.x - expected_w).abs() < 1e-3);
+        assert!((clearance.max.y - clearance.min.y - expected_h).abs() < 1e-3);
+    }
+}
+
+#[test]
+fn composed_plan_rejects_a_nonfinite_depth_override_without_blaming_parallax() {
+    let vm = normal_lifecycle_fixture();
+    let err = glorp::round::smooth::try_build_round_smooth_scene_plan_with_options(
+        &vm,
+        DEPTH_NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &glorp::round::scene::companion_roam_motion(),
+        250,
+        glorp::round::smooth::SmoothSceneBuildOptions { depth_override: Some(f32::NAN) },
+    )
+    .expect_err("a nonfinite depth override must not reach the renderer");
+
+    assert_eq!(
+        err,
+        glorp::round::smooth::SmoothScenePlanError::InvalidDepth(
+            SmoothDepthError::NonFiniteRawDepth
+        )
+    );
 }

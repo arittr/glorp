@@ -1,6 +1,7 @@
 use crate::presentation::smooth::{
     CompanionViewport, SmoothBounds, SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry,
 };
+use crate::round::depth::SmoothDepthSample;
 use crate::tui::room::{RoomBiome, RoomBiomeTag};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8,7 +9,18 @@ pub struct SmoothTankBedGeometry {
     pub shapes: Vec<SmoothShape>,
     pub horizon_y: f32,
     pub near_edge_y: f32,
+    /// Opaque base colour for anything cast onto the bed. Callers set their own
+    /// alpha; the projection fades with depth.
+    pub shadow: SmoothRgba8,
 }
+
+/// Alpha of the pet's floor projection at the far and near planes.
+const PROJECTION_ALPHA_FAR: f32 = 46.0;
+const PROJECTION_ALPHA_NEAR: f32 = 92.0;
+
+/// Fraction of the bed's depth the projection keeps clear of each edge, so the
+/// pet never appears to stand on the horizon line or off the near lip.
+const PROJECTION_EDGE_INSET: f32 = 0.10;
 
 pub fn smooth_tank_bed_geometry(
     viewport: CompanionViewport,
@@ -58,7 +70,87 @@ pub fn smooth_tank_bed_geometry(
         ));
     }
 
-    Some(SmoothTankBedGeometry { shapes, horizon_y, near_edge_y: height })
+    Some(SmoothTankBedGeometry {
+        shapes,
+        horizon_y,
+        near_edge_y: height,
+        shadow: bed_shadow(primary),
+    })
+}
+
+/// The pet's contact projection on the bed, resolved from the same depth sample
+/// that drives its scale and perspective. Near is larger, stronger, and further
+/// down the bed; far is smaller, fainter, and closer to the horizon.
+pub fn smooth_floor_projection_shape(
+    viewport: CompanionViewport,
+    bed: &SmoothTankBedGeometry,
+    pet_center_x: f32,
+    depth: SmoothDepthSample,
+) -> Option<SmoothShape> {
+    if viewport.grid_cols < 2 || viewport.grid_rows < 2 || !pet_center_x.is_finite() {
+        return None;
+    }
+    let width = f32::from(viewport.grid_cols);
+    let height = f32::from(viewport.grid_rows);
+    let bed_height = bed.near_edge_y - bed.horizon_y;
+    if !bed_height.is_finite() || bed_height <= 0.0 {
+        return None;
+    }
+
+    let t = (depth.effective_z + 1.0) * 0.5;
+    let inset = PROJECTION_EDGE_INSET * bed_height;
+    let center_y = lerp(bed.horizon_y + inset, bed.near_edge_y - inset, t);
+    let radius_x = lerp(0.055 * width, 0.105 * width, t);
+    let radius_y = lerp(0.012 * height, 0.030 * height, t);
+    if !radius_x.is_finite() || radius_x <= 0.0 || !radius_y.is_finite() || radius_y <= 0.0 {
+        return None;
+    }
+    if !center_y.is_finite() {
+        return None;
+    }
+
+    // Keep the whole ellipse inside the aperture's horizontal span.
+    let center_x = pet_center_x.clamp(radius_x, (width - radius_x).max(radius_x));
+    let alpha = lerp(PROJECTION_ALPHA_FAR, PROJECTION_ALPHA_NEAR, t)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+
+    let bounds = SmoothBounds {
+        min: SmoothPoint {
+            x: center_x - radius_x,
+            y: center_y - radius_y,
+        },
+        max: SmoothPoint {
+            x: center_x + radius_x,
+            y: center_y + radius_y,
+        },
+    };
+    if !bounds_are_finite(bounds) {
+        return None;
+    }
+    Some(ellipse(bounds, with_alpha(bed.shadow, alpha)))
+}
+
+fn bounds_are_finite(bounds: SmoothBounds) -> bool {
+    bounds.min.x.is_finite()
+        && bounds.min.y.is_finite()
+        && bounds.max.x.is_finite()
+        && bounds.max.y.is_finite()
+}
+
+fn lerp(from: f32, to: f32, t: f32) -> f32 {
+    from + (to - from) * t
+}
+
+/// A cast shadow reads as the bed's own colour in shade, so darken the biome
+/// primary rather than introducing an unrelated neutral.
+fn bed_shadow(primary: SmoothRgba8) -> SmoothRgba8 {
+    SmoothRgba8 {
+        r: primary.r / 3,
+        g: primary.g / 3,
+        b: primary.b / 3,
+        a: 255,
+    }
 }
 
 fn ellipse(bounds: SmoothBounds, color: SmoothRgba8) -> SmoothShape {
