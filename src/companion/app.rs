@@ -59,7 +59,10 @@ use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
 
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
+// The pace gauge reads a ten-minute window and the pet's vitals move on hour
+// scales, so ten-second polls bought nothing but CPU: every cycle re-runs the
+// helper over the whole current day's transcripts.
+const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const UI_TICK_INTERVAL_SECS: f64 = 0.25;
 const DEFAULT_WINDOW_SIZE: f64 = 360.0;
 const WINDOW_ORIGIN_X: f64 = 120.0;
@@ -638,8 +641,14 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
 
     prepare_current_frame_from_state();
 
-    let tick_interval = if renderer_mode.is_pixel() || renderer_mode.is_smooth() {
+    // The smooth scene is CPU-drawn: every tick invalidates the whole porthole
+    // for a full CG redraw and CoreAnimation recomposite. Its motion is slow
+    // multi-second drift and bob, which reads identically at fifteen frames, so
+    // thirty just doubles the energy bill.
+    let tick_interval = if renderer_mode.is_pixel() {
         1.0 / 30.0
+    } else if renderer_mode.is_smooth() {
+        1.0 / 15.0
     } else {
         UI_TICK_INTERVAL_SECS
     };
@@ -1463,13 +1472,49 @@ fn attributed_pet_glyph(
 ) -> Retained<NSMutableAttributedString> {
     unsafe {
         let text = NSString::from_str(text);
-        let font = NSFont::monospacedSystemFontOfSize_weight(font_size, 0.0);
+        let font = cached_monospaced_font(font_size, false);
         let mut attr = NSMutableAttributedString::from_nsstring(&text);
         let range = objc2_foundation::NSRange::from(0..text.length());
         attr.addAttribute_value_range(NSFontAttributeName, &font, range);
         attr.addAttribute_value_range(NSForegroundColorAttributeName, &ns_color(color), range);
         attr
     }
+}
+
+/// Quantised font-cache key: the pet's depth scale drifts a hair every frame,
+/// and a twentieth of a point is far below visibility, so keys stay stable
+/// across frames instead of missing on every one.
+fn font_cache_key(font_size: f64, bold: bool) -> (i64, bool) {
+    ((font_size * 20.0).round() as i64, bold)
+}
+
+/// System monospaced fonts resolve through the font-descriptor machinery, which
+/// is hot when paid per glyph per frame. Every cell in a frame shares one or two
+/// fonts, so a tiny keyed cache removes the lookup entirely.
+fn cached_monospaced_font(font_size: f64, bold: bool) -> Retained<NSFont> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static FONTS: RefCell<HashMap<(i64, bool), Retained<NSFont>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    FONTS.with(|fonts| {
+        let mut fonts = fonts.borrow_mut();
+        // The key space is tiny in practice (a handful of sizes per session), but
+        // a runaway resize loop must not grow it without bound.
+        if fonts.len() > 64 {
+            fonts.clear();
+        }
+        fonts
+            .entry(font_cache_key(font_size, bold))
+            .or_insert_with(|| unsafe {
+                let weight = if bold { NSFontWeightBold } else { 0.0 };
+                NSFont::monospacedSystemFontOfSize_weight(font_size, weight)
+            })
+            .clone()
+    })
 }
 
 fn ns_color(color: &RoundColor) -> Retained<NSColor> {
@@ -2042,8 +2087,7 @@ fn appkit_draw_cell_parts(
                 // `attributed_pet_glyph` uses weight 0.0 (NSFontWeightRegular).
                 // For bold cells we build the attributed string with NSFontWeightBold.
                 let text = NSString::from_str(glyph);
-                let font =
-                    NSFont::monospacedSystemFontOfSize_weight(frame.font_size, NSFontWeightBold);
+                let font = cached_monospaced_font(frame.font_size, true);
                 let mut a = NSMutableAttributedString::from_nsstring(&text);
                 let range = objc2_foundation::NSRange::from(0..text.length());
                 a.addAttribute_value_range(NSFontAttributeName, &font, range);
@@ -3019,6 +3063,24 @@ mod smooth_geometry_tests {
         // A 1.12x cell whose top-left is at row 4 has its bottom at row 5.12.
         let (_, py) = smooth_cell_to_point(point(0.0, 4.0), 1.12, 4.0, 8.0, 100.0, 200.0);
         assert!((py - (200.0 - 5.12 * 8.0)).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod font_cache_tests {
+    use super::*;
+
+    #[test]
+    fn font_cache_key_is_stable_under_depth_scale_drift_but_splits_real_changes() {
+        // Adjacent frames of a depth transition differ by well under a
+        // twentieth of a point and must share a key.
+        assert_eq!(
+            font_cache_key(21.4001, false),
+            font_cache_key(21.4103, false)
+        );
+        // Distinct rendered sizes and weights must not collide.
+        assert_ne!(font_cache_key(21.4, false), font_cache_key(24.0, false));
+        assert_ne!(font_cache_key(21.4, false), font_cache_key(21.4, true));
     }
 }
 
