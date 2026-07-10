@@ -790,9 +790,10 @@ pub fn needs_full_history_poll(
 
 impl AgentsviewDiscovery {
     pub fn discover() -> Self {
-        let agentsview = std::env::var_os("GLORP_AGENTSVIEW_BIN")
-            .map(PathBuf::from)
-            .or_else(|| which::which("agentsview").ok());
+        let explicit = std::env::var_os("GLORP_AGENTSVIEW_BIN").map(PathBuf::from);
+        let path_candidate = which::which("agentsview").ok();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let agentsview = discover_agentsview_path(explicit, path_candidate, home.as_deref());
         Self { agentsview }
     }
 
@@ -814,6 +815,18 @@ impl AgentsviewDiscovery {
         }
         Ok(discovered)
     }
+}
+
+fn discover_agentsview_path(
+    explicit: Option<PathBuf>,
+    path_candidate: Option<PathBuf>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    explicit.or(path_candidate).or_else(|| {
+        let home = home?;
+        let user_bin = home.join(".local").join("bin");
+        which::which_in("agentsview", Some(user_bin.as_os_str()), home).ok()
+    })
 }
 
 impl From<AgentsviewDiscovery> for AgentsviewPaths {
@@ -1195,6 +1208,22 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    #[test]
+    fn discovery_falls_back_to_user_local_bin_without_env_or_path_helper() {
+        let home = tempfile::tempdir().unwrap();
+        let helper = home
+            .path()
+            .join(".local")
+            .join("bin")
+            .join(format!("agentsview{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        write_helper(&helper, "#!/bin/sh\nexit 0", "@echo off\nexit /b 0");
+
+        let discovered = discover_agentsview_path(None, None, Some(home.path()));
+
+        assert_eq!(discovered, Some(helper));
     }
 
     #[test]
