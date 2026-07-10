@@ -383,12 +383,17 @@ fn status_uses_tokenmaxxing_day_axis_under_non_los_angeles_tz() {
             ..NormalizedUsageEvent::for_test_at(event_at, 123_456.0)
         })
         .unwrap();
+    // The usage event deliberately sits outside the process UTC day, which for
+    // most of the tokenmaxxing day means the future. The snapshot's observed_at
+    // must stay in the past: attempts are ranked by observed_at, so a
+    // future-dated snapshot would outrank the blocked poll the status run is
+    // about to record and the state would stay Current instead of Stale.
     seed_status_snapshot_for_test(
         &mut usage_store,
         glorp::usage::day_axis::tokenmaxxing_provider_day(now),
         "codex",
         123_456.0,
-        event_at,
+        now - Duration::minutes(5),
     );
     drop(usage_store);
 
