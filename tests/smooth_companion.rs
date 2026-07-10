@@ -6,8 +6,8 @@ use glorp::presentation::smooth::{
     SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry, SmoothTransform,
 };
 use glorp::round::depth::{
-    depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError, SMOOTH_PERSPECTIVE_Y_MAX,
-    SMOOTH_PET_FAR_SCALE, SMOOTH_PET_NEAR_SCALE,
+    depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError, SMOOTH_FAR_ATMOSPHERE,
+    SMOOTH_PERSPECTIVE_Y_MAX, SMOOTH_PET_FAR_SCALE, SMOOTH_PET_NEAR_SCALE,
 };
 use glorp::round::scene::CompanionMotion;
 use glorp::round::tank_bed::smooth_tank_bed_geometry;
@@ -1540,6 +1540,55 @@ fn aperture_clipped_layers_describe_the_cell_space_aperture_ellipse() {
             plan.layer_by_role(role).unwrap().clip,
             expected,
             "{role:?} must be clipped to the aperture ellipse"
+        );
+    }
+}
+
+/// Distant things lose contrast into the medium they recede through. Without it a
+/// 12% size change reads as "the pet grew", not "the pet swam away".
+#[test]
+fn smooth_depth_resolves_atmospheric_attenuation_from_the_same_sample() {
+    assert_eq!(
+        resolve_smooth_depth(-1.0, 1.0).unwrap().atmosphere,
+        SMOOTH_FAR_ATMOSPHERE
+    );
+    assert_eq!(resolve_smooth_depth(1.0, 1.0).unwrap().atmosphere, 1.0);
+
+    let neutral = resolve_smooth_depth(0.0, 1.0).unwrap().atmosphere;
+    assert!((neutral - (SMOOTH_FAR_ATMOSPHERE + 1.0) / 2.0).abs() < 1e-6);
+
+    // A calm pet's depth excursion is attenuated, so its fade is too.
+    let calm_far = resolve_smooth_depth(-1.0, 0.5).unwrap().atmosphere;
+    assert!(calm_far > SMOOTH_FAR_ATMOSPHERE && calm_far < 1.0);
+}
+
+#[test]
+fn far_depth_fades_pet_attached_layers_without_touching_the_tank() {
+    let vm = normal_lifecycle_fixture();
+    let far = plan_at_depth(&vm, 250, -1.0);
+    let near = plan_at_depth(&vm, 250, 1.0);
+
+    for role in PET_ATTACHED_ROLES {
+        let far_opacity = far.layer_by_role(role).unwrap().opacity;
+        let near_opacity = near.layer_by_role(role).unwrap().opacity;
+        assert!(
+            far_opacity < near_opacity,
+            "{role:?} must recede into the water at the far plane"
+        );
+        assert_eq!(near_opacity, 1.0, "{role:?} is fully present at the glass");
+        assert!((far_opacity - SMOOTH_FAR_ATMOSPHERE).abs() < 1e-5);
+    }
+
+    // The tank itself does not breathe with the pet's depth.
+    for role in [
+        SmoothLayerRole::TankBed,
+        SmoothLayerRole::RoomGlyphs,
+        SmoothLayerRole::PropsBehind,
+    ] {
+        assert_eq!(
+            far.layer_by_role(role).unwrap().opacity,
+            near.layer_by_role(role).unwrap().opacity,
+            "{role:?} is fixed to the tank, not to the pet's depth"
         );
     }
 }

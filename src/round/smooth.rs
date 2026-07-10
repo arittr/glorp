@@ -202,6 +202,9 @@ pub fn try_build_round_smooth_scene_plan_with_options(
                     y: pet_pivot.y - layer.anchor.y,
                 };
                 layer.transform.scale = SmoothPoint { x: depth.scale, y: depth.scale };
+                // Atmospheric perspective: the far pet recedes into the water
+                // rather than merely shrinking against it.
+                layer.opacity = (layer.opacity * depth.atmosphere).clamp(0.0, 1.0);
             }
             // The floor projection follows the pet across the tank, but stays
             // anchored to the bed while the pet bobs against the wall.

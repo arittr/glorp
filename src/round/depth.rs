@@ -2,12 +2,19 @@ pub const SMOOTH_PET_FAR_SCALE: f32 = 0.88;
 pub const SMOOTH_PET_NEAR_SCALE: f32 = 1.12;
 pub const SMOOTH_PERSPECTIVE_Y_MAX: f32 = 0.45;
 
+/// Atmospheric perspective: things seen through more water lose contrast to it.
+/// The far plane keeps this fraction of its ink; the near plane is fully present.
+/// Size alone is a weak depth cue at a 12% excursion — this is what sells it.
+pub const SMOOTH_FAR_ATMOSPHERE: f32 = 0.74;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothDepthSample {
     pub raw_z: f32,
     pub effective_z: f32,
     pub scale: f32,
     pub perspective_y: f32,
+    /// Opacity multiplier for the pet's attached layers at this depth.
+    pub atmosphere: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +63,14 @@ pub fn resolve_smooth_depth(
     let depth01 = (effective_z + 1.0) * 0.5;
     let scale = SMOOTH_PET_FAR_SCALE + depth01 * (SMOOTH_PET_NEAR_SCALE - SMOOTH_PET_FAR_SCALE);
     let perspective_y = effective_z * SMOOTH_PERSPECTIVE_Y_MAX;
-    validate_smooth_depth_sample(SmoothDepthSample { raw_z, effective_z, scale, perspective_y })
+    let atmosphere = SMOOTH_FAR_ATMOSPHERE + depth01 * (1.0 - SMOOTH_FAR_ATMOSPHERE);
+    validate_smooth_depth_sample(SmoothDepthSample {
+        raw_z,
+        effective_z,
+        scale,
+        perspective_y,
+        atmosphere,
+    })
 }
 
 fn validate_smooth_depth_sample(
@@ -70,6 +84,8 @@ fn validate_smooth_depth_sample(
         || !sample.perspective_y.is_finite()
         || sample.perspective_y.abs() > SMOOTH_PERSPECTIVE_Y_MAX
         || sample.perspective_y.abs() >= 1.0
+        || !sample.atmosphere.is_finite()
+        || !(SMOOTH_FAR_ATMOSPHERE..=1.0).contains(&sample.atmosphere)
     {
         return Err(SmoothDepthError::InvalidOutput);
     }
@@ -87,6 +103,7 @@ mod tests {
             effective_z: 0.0,
             scale: 1.0,
             perspective_y: 0.0,
+            atmosphere: 1.0,
         };
         assert_eq!(validate_smooth_depth_sample(valid), Ok(valid));
 
@@ -102,6 +119,11 @@ mod tests {
             },
             SmoothDepthSample { effective_z: 1.01, ..valid },
             SmoothDepthSample { perspective_y: 1.0, ..valid },
+            SmoothDepthSample {
+                atmosphere: SMOOTH_FAR_ATMOSPHERE - 0.01,
+                ..valid
+            },
+            SmoothDepthSample { atmosphere: 1.01, ..valid },
         ] {
             assert_eq!(
                 validate_smooth_depth_sample(invalid),
