@@ -217,9 +217,17 @@ pub struct AnimationProfile {
     pub blink_jitter: u8,
 }
 
-const ART_WIDTH: usize = 11;
-const FRAME_WIDTH: usize = 13;
-const FRAME_HEIGHT: usize = 10;
+pub(crate) const ART_WIDTH: usize = 11;
+pub(crate) const ART_HEIGHT: usize = 8;
+pub(crate) const FRAME_WIDTH: usize = 13;
+pub(crate) const FRAME_HEIGHT: usize = 10;
+
+/// The art is centred in the particle frame, leaving one ambient gutter cell on
+/// every side. Companion depth clearance reserves against the art rather than the
+/// frame, and converts an art centre back into a frame anchor by subtracting half
+/// the frame — an identity that holds only while these origins are symmetric.
+pub(crate) const ART_ORIGIN_COL: usize = (FRAME_WIDTH - ART_WIDTH) / 2;
+pub(crate) const ART_ORIGIN_ROW: usize = (FRAME_HEIGHT - ART_HEIGHT) / 2;
 
 const GLITCH_NOISE: &[char] = &[
     '\u{2592}', '\u{2591}', '\u{2593}', '\u{2580}', '\u{2584}', '\u{258c}', '\u{2590}',
@@ -1083,20 +1091,20 @@ fn frame_with_particles(
     // the 11x8 art at rows 1..=8, cols 1..=11.
     let mut grid: Vec<Vec<char>> = (0..FRAME_HEIGHT).map(|_| vec![' '; FRAME_WIDTH]).collect();
 
-    for (row_index, line) in art_lines.iter().enumerate().take(8) {
-        let target_row = row_index + 1;
+    for (row_index, line) in art_lines.iter().enumerate().take(ART_HEIGHT) {
+        let target_row = row_index + ART_ORIGIN_ROW;
         for (col_index, ch) in line.chars().take(ART_WIDTH).enumerate() {
-            grid[target_row][col_index + 1] = ch;
+            grid[target_row][col_index + ART_ORIGIN_COL] = ch;
         }
     }
 
-    // Translate art spans to framed-grid spans (line +1, start/end +1).
+    // Translate art spans to framed-grid spans by the same centring origin.
     let mut framed_spans: Vec<StyledSegment> = art_spans
         .into_iter()
         .map(|span| StyledSegment {
-            line: span.line + 1,
-            start: span.start + 1,
-            end: span.end + 1,
+            line: span.line + ART_ORIGIN_ROW,
+            start: span.start + ART_ORIGIN_COL,
+            end: span.end + ART_ORIGIN_COL,
             role: span.role,
         })
         .collect();

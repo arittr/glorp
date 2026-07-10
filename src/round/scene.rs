@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use ratatui::layout::Rect;
 
 use crate::presentation::{PetSceneModel, SceneDrawList};
-use crate::round::depth::SMOOTH_PET_NEAR_SCALE;
+use crate::round::depth::{SMOOTH_PERSPECTIVE_Y_MAX, SMOOTH_PET_NEAR_SCALE};
 use crate::tui::component::PetScene;
 use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
@@ -21,6 +21,12 @@ pub struct CompanionScene {
 const PET_W: u16 = 13;
 /// Pet art height (must match `PET_H` in `src/tui/panels/pet.rs`).
 const PET_H: u16 = 10;
+/// The creature art inside the particle frame. `PET_W`/`PET_H` carry a one-cell
+/// particle gutter on every side, so the ink is 11x8 and concentric with the
+/// frame. Depth clearance is reserved against the ink: reserving against the
+/// ambient gutter too would crush the roam envelope on a companion-sized grid.
+const PET_INK_W: u16 = 11;
+const PET_INK_H: u16 = 8;
 
 /// Companion motion config. Defaults reproduce the historical drift exactly, so
 /// the shared menubar / preview / goldens are byte-identical; only the companion
@@ -292,25 +298,38 @@ struct SmoothRoamEnvelope {
 /// Derive the safe Smooth anchor envelope from the protected regions:
 ///
 /// ```text
-/// scaled_half     = unscaled_half * SMOOTH_PET_NEAR_SCALE
-/// safe_center_min = protected_min + scaled_half
-/// safe_center_max = protected_max - scaled_half
+/// scaled_ink_half = ink_half * SMOOTH_PET_NEAR_SCALE
+/// safe_center_min = protected_min + scaled_ink_half + SMOOTH_PERSPECTIVE_Y_MAX
+/// safe_center_max = protected_max - scaled_ink_half - SMOOTH_PERSPECTIVE_Y_MAX
 /// ```
 ///
-/// Expressed in top-left space by subtracting the unscaled half extent. Uses the
-/// true fractional half extents (`13/2`, `10/2`), not Classic's integer halves.
+/// The anchor is the particle frame's top-left and the ink is concentric with the
+/// frame, so a center is converted back to an anchor by subtracting the *frame*
+/// half extent. Uses true fractional halves, not Classic's integer ones.
+///
+/// Clearance is reserved against the creature ink, not the particle frame: the
+/// frame carries a one-cell ambient gutter per side, and reserving that too makes
+/// the band inconsistent with a `1.12x` near scale on a companion-sized grid (it
+/// inverts at 16 rows). The gutter's sparse glyphs may therefore graze the HUD
+/// reserve, which is sound because the native HUD draws above the scene.
+///
+/// Depth also *translates* the pet — near is down by `SMOOTH_PERSPECTIVE_Y_MAX`,
+/// far is up — and that translation is composed after this clamp, so it is
+/// reserved on both edges. Pairing it with the near scale on the top edge
+/// over-reserves slightly (far poses are drawn at `0.88x`), which is the safe
+/// direction and keeps one envelope rather than one per depth.
 fn smooth_roam_envelope(grid_cols: u16, grid_rows: u16) -> SmoothRoamEnvelope {
-    let half_w = f32::from(PET_W) / 2.0;
-    let half_h = f32::from(PET_H) / 2.0;
-    let scaled_half_w = half_w * SMOOTH_PET_NEAR_SCALE;
-    let scaled_half_h = half_h * SMOOTH_PET_NEAR_SCALE;
+    let frame_half_w = f32::from(PET_W) / 2.0;
+    let frame_half_h = f32::from(PET_H) / 2.0;
+    let scaled_ink_half_w = f32::from(PET_INK_W) / 2.0 * SMOOTH_PET_NEAR_SCALE;
+    let scaled_ink_half_h = f32::from(PET_INK_H) / 2.0 * SMOOTH_PET_NEAR_SCALE;
     let protected_bottom = f32::from(grid_rows.saturating_sub(round_hud_reserve_rows(grid_rows)));
 
     SmoothRoamEnvelope {
-        min_x: scaled_half_w - half_w,
-        max_x: f32::from(grid_cols) - scaled_half_w - half_w,
-        min_y: scaled_half_h - half_h,
-        max_y: protected_bottom - scaled_half_h - half_h,
+        min_x: scaled_ink_half_w - frame_half_w,
+        max_x: f32::from(grid_cols) - scaled_ink_half_w - frame_half_w,
+        min_y: scaled_ink_half_h - frame_half_h + SMOOTH_PERSPECTIVE_Y_MAX,
+        max_y: protected_bottom - scaled_ink_half_h - frame_half_h - SMOOTH_PERSPECTIVE_Y_MAX,
     }
 }
 
@@ -740,6 +759,92 @@ mod tests {
             }),
             "round scene must not remove non-tank-life glyphs from the HUD reserve; the native HUD draws above the scene"
         );
+    }
+
+    /// `smooth_roam_envelope` reserves clearance against the creature ink but
+    /// converts an ink centre back into a frame anchor by subtracting half the
+    /// *frame*. That identity holds only while these constants track the renderer's
+    /// real frame and art, and the art is centred inside the frame.
+    #[test]
+    fn pet_extents_track_the_renderer_frame_and_centred_art() {
+        use crate::pet::render::{
+            ART_HEIGHT, ART_ORIGIN_COL, ART_ORIGIN_ROW, ART_WIDTH, FRAME_HEIGHT, FRAME_WIDTH,
+        };
+
+        assert_eq!(usize::from(PET_W), FRAME_WIDTH);
+        assert_eq!(usize::from(PET_H), FRAME_HEIGHT);
+        assert_eq!(usize::from(PET_INK_W), ART_WIDTH);
+        assert_eq!(usize::from(PET_INK_H), ART_HEIGHT);
+
+        assert_eq!(
+            FRAME_WIDTH - ART_WIDTH,
+            ART_ORIGIN_COL * 2,
+            "art must be horizontally centred in the particle frame"
+        );
+        assert_eq!(
+            FRAME_HEIGHT - ART_HEIGHT,
+            ART_ORIGIN_ROW * 2,
+            "art must be vertically centred in the particle frame"
+        );
+    }
+
+    #[test]
+    fn smooth_roam_envelope_leaves_a_usable_band_at_companion_grid_sizes() {
+        // Reserving maximum-scale clearance against the particle frame rather than
+        // the ink inverted this band at 16 rows and left 1.8 cells at 18, pinning
+        // the pet against an invisible ceiling for most of its cycle.
+        for grid_rows in 16..=24 {
+            let envelope = smooth_roam_envelope(36, grid_rows);
+            assert!(
+                envelope.max_y >= envelope.min_y,
+                "{grid_rows}-row grid inverted the vertical roam band"
+            );
+            assert!(envelope.max_x > envelope.min_x);
+        }
+
+        // The shipping companion is 36x18 (`COMPANION_TARGET_COLS`, and square-view
+        // rows). Non-inversion alone would be satisfied by a hairline band, so pin
+        // the grid the pet actually swims in.
+        let live = smooth_roam_envelope(36, 18);
+        assert!(
+            live.max_y - live.min_y >= 3.0,
+            "live 36x18 companion grid left only {:.2} cells of vertical roam",
+            live.max_y - live.min_y
+        );
+    }
+
+    /// The envelope reserves clearance for the *maximum* depth scale, but depth also
+    /// translates the pet: near is `+SMOOTH_PERSPECTIVE_Y_MAX` (down), far is
+    /// negative (up). That translation is composed onto the pet-attached layers
+    /// after this clamp, so it has to be reserved here or the nearest pose pushes
+    /// the creature's ink into the HUD reserve.
+    #[test]
+    fn smooth_roam_envelope_reserves_the_near_depth_perspective_excursion() {
+        let frame_half_h = f32::from(PET_H) / 2.0;
+        let scaled_ink_half_h = f32::from(PET_INK_H) / 2.0 * SMOOTH_PET_NEAR_SCALE;
+
+        for grid_rows in 16..=24 {
+            let envelope = smooth_roam_envelope(36, grid_rows);
+            let protected_bottom =
+                f32::from(grid_rows.saturating_sub(round_hud_reserve_rows(grid_rows)));
+
+            let nearest_ink_bottom =
+                envelope.max_y + frame_half_h + scaled_ink_half_h + SMOOTH_PERSPECTIVE_Y_MAX;
+            assert!(
+                nearest_ink_bottom <= protected_bottom + 1e-4,
+                "{grid_rows}-row grid: nearest pet ink reached {nearest_ink_bottom:.2}, \
+                 {:.2} cells into the HUD reserve at {protected_bottom:.2}",
+                nearest_ink_bottom - protected_bottom
+            );
+
+            let farthest_ink_top =
+                envelope.min_y + frame_half_h - scaled_ink_half_h - SMOOTH_PERSPECTIVE_Y_MAX;
+            assert!(
+                farthest_ink_top >= -1e-4,
+                "{grid_rows}-row grid: farthest pet ink rose to {farthest_ink_top:.2}, \
+                 above the aperture top"
+            );
+        }
     }
 
     #[test]

@@ -21,6 +21,9 @@ const GRID_ROWS: u16 = 18;
 const NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
 const PET_W: u16 = 13;
 const PET_H: u16 = 10;
+/// The creature art inside the 13x10 particle frame: one gutter cell per side.
+const PET_INK_W: u16 = 11;
+const PET_INK_H: u16 = 8;
 
 fn bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> SmoothBounds {
     SmoothBounds {
@@ -366,10 +369,14 @@ fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
     let hud_start = GRID_ROWS
         - glorp::round::scene::round_tank_life_geometry(GRID_COLS, GRID_ROWS).reserved_regions[0]
             .height;
-    let half_w = f32::from(PET_W) / 2.0;
-    let half_h = f32::from(PET_H) / 2.0;
-    let scaled_half_w = half_w * SMOOTH_PET_NEAR_SCALE;
-    let scaled_half_h = half_h * SMOOTH_PET_NEAR_SCALE;
+    // The anchor is the particle frame's top-left; the creature ink is concentric
+    // inside it, so the ink center sits half a frame from the anchor. Clearance is
+    // reserved for the ink at maximum scale, not for the ambient particle gutter.
+    let frame_half_w = f32::from(PET_W) / 2.0;
+    let frame_half_h = f32::from(PET_H) / 2.0;
+    let scaled_ink_half_w = f32::from(PET_INK_W) / 2.0 * SMOOTH_PET_NEAR_SCALE;
+    let scaled_ink_half_h = f32::from(PET_INK_H) / 2.0 * SMOOTH_PET_NEAR_SCALE;
+    let mut roam_ys = Vec::new();
 
     for step in 0..=(motion.drift_period_secs * 2 * 20) {
         let now = NOW + time::Duration::milliseconds((step * 50) as i64);
@@ -381,12 +388,12 @@ fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
             "adding Z must not change Classic placement at {now}"
         );
 
-        let center_x = placement.fractional_motion_top_left.x + half_w;
-        let center_y = placement.fractional_motion_top_left.y + half_h;
-        let min_x = center_x - scaled_half_w;
-        let max_x = center_x + scaled_half_w;
-        let min_y = center_y - scaled_half_h;
-        let max_y = center_y + scaled_half_h;
+        let center_x = placement.fractional_motion_top_left.x + frame_half_w;
+        let center_y = placement.fractional_motion_top_left.y + frame_half_h;
+        let min_x = center_x - scaled_ink_half_w;
+        let max_x = center_x + scaled_ink_half_w;
+        let min_y = center_y - scaled_ink_half_h;
+        let max_y = center_y + scaled_ink_half_h;
         assert!(min_x >= 0.0 && max_x <= f32::from(GRID_COLS));
         assert!(
             min_y >= 0.0,
@@ -396,7 +403,28 @@ fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
             max_y <= f32::from(hud_start),
             "maximum-scale pet entered the HUD reserve at {now}: max_y={max_y}"
         );
+        roam_ys.push(placement.fractional_motion_top_left.y);
     }
+
+    // Clearance alone is satisfiable by pinning the pet against the envelope, which
+    // would silently trade the free-swimming composition for safety. Reserving
+    // against the maximum scale is only allowed to shrink the roam *slightly*.
+    let lowest = roam_ys.iter().copied().fold(f32::MAX, f32::min);
+    let highest = roam_ys.iter().copied().fold(f32::MIN, f32::max);
+    assert!(
+        highest - lowest >= 2.0,
+        "max-scale clearance crushed the vertical roam to {:.2} cells of travel",
+        highest - lowest
+    );
+    let pinned = roam_ys
+        .iter()
+        .filter(|y| (**y - lowest).abs() < 1e-3 || (**y - highest).abs() < 1e-3)
+        .count();
+    assert!(
+        pinned * 2 < roam_ys.len(),
+        "pet sat pinned against the roam envelope for {pinned}/{} of the cycle",
+        roam_ys.len()
+    );
 }
 
 #[test]
