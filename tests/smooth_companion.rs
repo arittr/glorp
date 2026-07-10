@@ -597,14 +597,20 @@ fn tank_bed_layer_is_fixed_clipped_and_independent_of_pet_motion() {
         .iter()
         .all(|item| matches!(item, SmoothLayerItem::Shape(_))));
     assert!(validate_smooth_layer(bed).is_ok());
+    // The aperture is a circle in pixels, so in the 2:1 cell grid it is an ellipse
+    // inscribed in the viewport. A cell-space circle would crop the bed to half the
+    // view's width.
     assert_eq!(
         bed.clip,
-        SmoothClip::Circle {
+        SmoothClip::Ellipse {
             center: SmoothPoint {
                 x: f32::from(GRID_COLS) / 2.0,
                 y: f32::from(GRID_ROWS) / 2.0,
             },
-            radius: f32::from(GRID_COLS.min(GRID_ROWS)) / 2.0,
+            radii: SmoothPoint {
+                x: f32::from(GRID_COLS) / 2.0,
+                y: f32::from(GRID_ROWS) / 2.0,
+            },
         }
     );
 
@@ -1494,5 +1500,46 @@ fn tank_bed_bands_stay_translucent_enough_to_read_as_depth() {
                 shape.color.a
             );
         }
+    }
+}
+
+/// The companion aperture is a circle in pixels, but cells are 2:1, so in the
+/// cell grid the scene plan speaks it is an ellipse. Describing it as a cell-space
+/// circle inscribes it and crops every clipped layer to half the view.
+#[test]
+fn aperture_clipped_layers_describe_the_cell_space_aperture_ellipse() {
+    let vm = parity_fixture();
+    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &CompanionMotion::default(),
+        250,
+    );
+
+    let expected = SmoothClip::Ellipse {
+        center: SmoothPoint {
+            x: f32::from(GRID_COLS) / 2.0,
+            y: f32::from(GRID_ROWS) / 2.0,
+        },
+        radii: SmoothPoint {
+            x: f32::from(GRID_COLS) / 2.0,
+            y: f32::from(GRID_ROWS) / 2.0,
+        },
+    };
+
+    for role in [
+        SmoothLayerRole::TankBed,
+        SmoothLayerRole::DepthRings,
+        SmoothLayerRole::StatusHalo,
+        SmoothLayerRole::TroubleIndicator,
+        SmoothLayerRole::DimOverlay,
+    ] {
+        assert_eq!(
+            plan.layer_by_role(role).unwrap().clip,
+            expected,
+            "{role:?} must be clipped to the aperture ellipse"
+        );
     }
 }

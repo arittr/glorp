@@ -25,7 +25,18 @@ pub struct SmoothTransform {
 pub enum SmoothClip {
     None,
     Rect(SmoothBounds),
-    Circle { center: SmoothPoint, radius: f32 },
+    /// A true circle in cell space. Cells are not square, so this is an ellipse
+    /// once rendered — use it only where a circle of *cells* is what is meant.
+    Circle {
+        center: SmoothPoint,
+        radius: f32,
+    },
+    /// Per-axis radii in cell space. The companion aperture is a circle in pixels,
+    /// which is this shape in the cell grid.
+    Ellipse {
+        center: SmoothPoint,
+        radii: SmoothPoint,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +287,14 @@ pub fn validate_smooth_layer(layer: &SmoothCompanionLayer) -> Result<(), SmoothG
         SmoothClip::Circle { center, radius } => {
             if !point_is_finite(center) || !radius.is_finite() {
                 return Err(SmoothGeometryError::NonFiniteClipBounds);
+            }
+        }
+        SmoothClip::Ellipse { center, radii } => {
+            if !point_is_finite(center) || !point_is_finite(radii) {
+                return Err(SmoothGeometryError::NonFiniteClipBounds);
+            }
+            if radii.x < 0.0 || radii.y < 0.0 {
+                return Err(SmoothGeometryError::InvertedClipBounds);
             }
         }
     }

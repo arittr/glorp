@@ -170,7 +170,12 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         x: f32::from(grid_cols) / 2.0,
         y: f32::from(grid_rows) / 2.0,
     };
-    let aperture_radius = f32::from(grid_cols.min(grid_rows)) / 2.0;
+    // The aperture is a circle in pixels. Cells are not square, so in cell space
+    // it is an ellipse inscribed in the viewport.
+    let aperture_radii = SmoothPoint {
+        x: f32::from(grid_cols) / 2.0,
+        y: f32::from(grid_rows) / 2.0,
+    };
 
     let mut layers = Vec::with_capacity(layered.layers.len() + 5);
     layers.push(reservation_layer(
@@ -179,9 +184,9 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         -10,
         viewport_bounds,
         aperture_center,
-        SmoothClip::Circle {
+        SmoothClip::Ellipse {
             center: aperture_center,
-            radius: aperture_radius.max(0.0),
+            radii: aperture_radii,
         },
         0.25,
     ));
@@ -281,9 +286,9 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         20,
         viewport_bounds,
         aperture_center,
-        SmoothClip::Circle {
+        SmoothClip::Ellipse {
             center: aperture_center,
-            radius: aperture_radius.max(0.0),
+            radii: aperture_radii,
         },
         if has_status_halo { 1.0 } else { 0.0 },
     ));
@@ -293,9 +298,9 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         21,
         viewport_bounds,
         aperture_center,
-        SmoothClip::Circle {
+        SmoothClip::Ellipse {
             center: aperture_center,
-            radius: aperture_radius.max(0.0),
+            radii: aperture_radii,
         },
         if has_trouble { 1.0 } else { 0.0 },
     ));
@@ -320,9 +325,9 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         23,
         viewport_bounds,
         aperture_center,
-        SmoothClip::Circle {
+        SmoothClip::Ellipse {
             center: aperture_center,
-            radius: aperture_radius.max(0.0),
+            radii: aperture_radii,
         },
         if round_scene.lifecycle.asleep || round_scene.lifecycle.calm {
             0.35
@@ -407,9 +412,12 @@ fn tank_bed_layer(
         },
         parallax_translation: SmoothPoint::default(),
         opacity: 1.0,
-        clip: SmoothClip::Circle {
+        clip: SmoothClip::Ellipse {
             center: aperture_center,
-            radius: f32::from(viewport.grid_cols.min(viewport.grid_rows)) / 2.0,
+            radii: SmoothPoint {
+                x: f32::from(viewport.grid_cols) / 2.0,
+                y: f32::from(viewport.grid_rows) / 2.0,
+            },
         },
         blend: SmoothBlendMode::Normal,
         items: bed

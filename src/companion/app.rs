@@ -1581,6 +1581,21 @@ fn compositing_operation(blend: SmoothBlendMode) -> NSCompositingOperation {
     }
 }
 
+/// Clip to an oval whose centre and per-axis radii are given in cell units.
+fn appkit_oval_clip(metrics: &CompanionGridMetrics, center: SmoothPoint, radii: SmoothPoint) {
+    let rx = f64::from(radii.x) * metrics.cell_w;
+    let ry = f64::from(radii.y) * metrics.cell_h;
+    let cx = metrics.origin_x + f64::from(center.x) * metrics.cell_w;
+    let cy = metrics.origin_y - f64::from(center.y) * metrics.cell_h;
+    unsafe {
+        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(cx - rx, cy - ry),
+            NSSize::new(rx * 2.0, ry * 2.0),
+        ))
+        .addClip();
+    }
+}
+
 /// Intersect the layer's own clip with the aperture clip the caller installed.
 fn apply_smooth_layer_clip(clip: &SmoothClip, metrics: &CompanionGridMetrics) {
     unsafe {
@@ -1599,18 +1614,12 @@ fn apply_smooth_layer_clip(clip: &SmoothClip, metrics: &CompanionGridMetrics) {
                 ))
                 .addClip();
             }
+            // Cells are not square, so a circle of cells is an ellipse in pixels.
             SmoothClip::Circle { center, radius } => {
-                // Cells are not square, so a circular clip in cell space is an
-                // ellipse in pixel space.
-                let rx = f64::from(*radius) * metrics.cell_w;
-                let ry = f64::from(*radius) * metrics.cell_h;
-                let cx = metrics.origin_x + f64::from(center.x) * metrics.cell_w;
-                let cy = metrics.origin_y - f64::from(center.y) * metrics.cell_h;
-                NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                    NSPoint::new(cx - rx, cy - ry),
-                    NSSize::new(rx * 2.0, ry * 2.0),
-                ))
-                .addClip();
+                appkit_oval_clip(metrics, *center, SmoothPoint { x: *radius, y: *radius });
+            }
+            SmoothClip::Ellipse { center, radii } => {
+                appkit_oval_clip(metrics, *center, *radii);
             }
         }
     }
