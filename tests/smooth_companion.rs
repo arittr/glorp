@@ -1460,3 +1460,39 @@ fn composed_plan_rejects_a_nonfinite_depth_override_without_blaming_parallax() {
         )
     );
 }
+
+/// The bed is a receding substrate seen through tank water. Stacked opaque bands
+/// turn it into a footer bowl at companion size, which is what the first native
+/// capture showed.
+#[test]
+fn tank_bed_bands_stay_translucent_enough_to_read_as_depth() {
+    const MAX_BED_ALPHA: u8 = 80;
+
+    for biome in [
+        RoomBiome {
+            primary: RoomBiomeTag::Starter,
+            secondary: None,
+        },
+        RoomBiome {
+            primary: RoomBiomeTag::Celestial,
+            secondary: Some(RoomBiomeTag::Botanical),
+        },
+    ] {
+        let bed = smooth_tank_bed_geometry(
+            CompanionViewport {
+                grid_cols: GRID_COLS,
+                grid_rows: GRID_ROWS,
+            },
+            biome,
+        )
+        .expect("normal viewport has a tank bed");
+
+        for shape in &bed.shapes {
+            assert!(
+                shape.color.a <= MAX_BED_ALPHA,
+                "bed shape alpha {} reads as a solid footer, not a substrate",
+                shape.color.a
+            );
+        }
+    }
+}

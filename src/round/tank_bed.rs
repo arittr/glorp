@@ -14,6 +14,18 @@ pub struct SmoothTankBedGeometry {
     pub shadow: SmoothRgba8,
 }
 
+/// The bed is a receding substrate seen through tank water, not a solid floor.
+/// These bands stack, so each stays translucent enough for the tank's darkness to
+/// read through; opaque bands turn the bed into a footer bowl at companion size.
+const BED_BASE_ALPHA: u8 = 70;
+const BED_MID_ALPHA: u8 = 48;
+const BED_INNER_ALPHA: u8 = 34;
+
+/// Flecks are the bed's texture and sit over the faintest band, so they carry a
+/// little more weight than the bands beneath them.
+const BED_FLECK_PRIMARY_ALPHA: u8 = 60;
+const BED_FLECK_SECONDARY_ALPHA: u8 = 55;
+
 /// Alpha of the pet's floor projection at the far and near planes.
 const PROJECTION_ALPHA_FAR: f32 = 46.0;
 const PROJECTION_ALPHA_NEAR: f32 = 92.0;
@@ -39,14 +51,14 @@ pub fn smooth_tank_bed_geometry(
     };
     let (primary, secondary) = bed_colors(biome);
     let mut shapes = vec![
-        ellipse(base, with_alpha(primary, 192)),
+        ellipse(base, with_alpha(primary, BED_BASE_ALPHA)),
         ellipse(
             inset_bounds(base, width * 0.06, height * 0.055),
-            with_alpha(secondary, 126),
+            with_alpha(secondary, BED_MID_ALPHA),
         ),
         ellipse(
             inset_bounds(base, width * 0.14, height * 0.125),
-            with_alpha(primary, 92),
+            with_alpha(primary, BED_INNER_ALPHA),
         ),
     ];
 
@@ -57,9 +69,9 @@ pub fn smooth_tank_bed_geometry(
         let fleck_width = width * (0.012 + 0.028 * hash_unit(&mut hash));
         let fleck_height = height * (0.009 + 0.022 * hash_unit(&mut hash));
         let color = if hash_unit(&mut hash) < 0.5 {
-            with_alpha(primary, 100)
+            with_alpha(primary, BED_FLECK_PRIMARY_ALPHA)
         } else {
-            with_alpha(secondary, 92)
+            with_alpha(secondary, BED_FLECK_SECONDARY_ALPHA)
         };
         shapes.push(ellipse(
             SmoothBounds {
