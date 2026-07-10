@@ -22,7 +22,9 @@ use crate::presentation::pixel::{
     PixelViewport,
 };
 use crate::presentation::smooth::{
-    SmoothCompanionScenePlan, SmoothLayerItem, SmoothLayerMotionBinding,
+    validate_smooth_layer, SmoothBlendMode, SmoothBounds, SmoothClip, SmoothCompanionLayer,
+    SmoothCompanionScenePlan, SmoothGeometryError, SmoothLayerItem, SmoothLayerMotionBinding,
+    SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
 };
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge, daily_overage_color,
@@ -46,9 +48,10 @@ use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
     NSBackingStoreType, NSBezierPath, NSButtLineCapStyle, NSColor, NSCommandKeyMask,
-    NSControlKeyMask, NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightBold,
-    NSForegroundColorAttributeName, NSLineCapStyle, NSMenu, NSMenuItem, NSRoundLineCapStyle,
-    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSCompositingOperation, NSControlKeyMask, NSEventModifierFlags, NSFont, NSFontAttributeName,
+    NSFontWeightBold, NSForegroundColorAttributeName, NSGraphicsContext, NSLineCapStyle, NSMenu,
+    NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -307,16 +310,14 @@ fn prepare_companion_frame(
                     CompanionFramePreparationError::SmoothInvalidLayerGeometry
                 }
             })?;
-            let pet_center_col = f64::from(
-                plan.pet.fractional_bounds.min.x
-                    + (plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x) / 2.0,
-            );
-            let pet_center_row = f64::from(
-                plan.pet.fractional_bounds.min.y
-                    + (plan.pet.fractional_bounds.max.y - plan.pet.fractional_bounds.min.y) / 2.0,
-            );
-            let pet_width_cells =
-                f64::from(plan.pet.fractional_bounds.max.x - plan.pet.fractional_bounds.min.x);
+            // The aura follows the pet's composed depth transform, so it grows and
+            // sinks with the creature instead of staying pinned to the unscaled art.
+            let transformed = plan.pet.transformed_bounds;
+            let pet_center_col =
+                f64::from(transformed.min.x + (transformed.max.x - transformed.min.x) / 2.0);
+            let pet_center_row =
+                f64::from(transformed.min.y + (transformed.max.y - transformed.min.y) / 2.0);
+            let pet_width_cells = f64::from(transformed.max.x - transformed.min.x);
             PreparedRendererFrame::Smooth {
                 metrics,
                 pet_center_col,
@@ -1136,14 +1137,7 @@ fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompa
             }
             PreparedRendererFrame::Smooth { metrics, plan, .. } => {
                 draw_mood_aura(frame, metrics);
-                appkit_blit_smooth_plan(
-                    plan,
-                    metrics.font_size,
-                    metrics.cell_w,
-                    metrics.cell_h,
-                    metrics.origin_x,
-                    metrics.origin_y,
-                );
+                appkit_blit_smooth_plan(plan, metrics);
             }
             PreparedRendererFrame::Classic { metrics, draw_list, .. } => {
                 draw_mood_aura(frame, metrics);
@@ -1471,19 +1465,6 @@ fn cell_to_point(
     (px, py)
 }
 
-fn fractional_cell_to_point(
-    col: f64,
-    row: f64,
-    cell_w: f64,
-    cell_h: f64,
-    origin_x: f64,
-    origin_y: f64,
-) -> (f64, f64) {
-    let px = origin_x + col * cell_w;
-    let py = origin_y - (row + 1.0) * cell_h;
-    (px, py)
-}
-
 fn appkit_cell_axis(value: f32) -> u16 {
     if !value.is_finite() {
         return 0;
@@ -1500,54 +1481,235 @@ fn motion_binding_uses_fractional_coordinates(binding: SmoothLayerMotionBinding)
     )
 }
 
-fn appkit_blit_smooth_plan(
-    plan: &SmoothCompanionScenePlan,
-    font_size: f64,
+/// The world-space point a layer's transform scales about.
+fn smooth_layer_pivot(layer: &SmoothCompanionLayer) -> SmoothPoint {
+    SmoothPoint {
+        x: layer.anchor.x + layer.transform_origin.x,
+        y: layer.anchor.y + layer.transform_origin.y,
+    }
+}
+
+/// `world = pivot + (anchor + local - pivot) * scale + translation`
+///
+/// The caller must have validated the layer; this is the hot inner form used once
+/// per cell.
+fn transform_local_point(
+    layer: &SmoothCompanionLayer,
+    pivot: SmoothPoint,
+    local: SmoothPoint,
+) -> SmoothPoint {
+    SmoothPoint {
+        x: pivot.x
+            + (layer.anchor.x + local.x - pivot.x) * layer.transform.scale.x
+            + layer.transform.translation.x,
+        y: pivot.y
+            + (layer.anchor.y + local.y - pivot.y) * layer.transform.scale.y
+            + layer.transform.translation.y,
+    }
+}
+
+/// Transform a layer-local point into logical grid coordinates through the
+/// layer's validated pivot, uniform scale, and translation.
+fn smooth_layer_point(
+    layer: &SmoothCompanionLayer,
+    local: SmoothPoint,
+) -> std::result::Result<SmoothPoint, SmoothGeometryError> {
+    validate_smooth_layer(layer)?;
+    Ok(transform_local_point(
+        layer,
+        smooth_layer_pivot(layer),
+        local,
+    ))
+}
+
+/// The AppKit rect an ellipse's layer-local bounds occupy, in the Y-up view
+/// coordinate space.
+fn smooth_shape_rect(
+    metrics: &CompanionGridMetrics,
+    layer: &SmoothCompanionLayer,
+    bounds: SmoothBounds,
+) -> std::result::Result<NSRect, SmoothGeometryError> {
+    let min = smooth_layer_point(layer, bounds.min)?;
+    let max = smooth_layer_point(layer, bounds.max)?;
+    Ok(NSRect::new(
+        NSPoint::new(
+            metrics.origin_x + f64::from(min.x) * metrics.cell_w,
+            metrics.origin_y - f64::from(max.y) * metrics.cell_h,
+        ),
+        NSSize::new(
+            f64::from(max.x - min.x) * metrics.cell_w,
+            f64::from(max.y - min.y) * metrics.cell_h,
+        ),
+    ))
+}
+
+/// AppKit origin (bottom-left, Y-up) of a cell scaled by `scale` whose top-left
+/// sits at `world` in logical cell units. At unit scale this is exactly
+/// [`fractional_cell_to_point`].
+fn smooth_cell_to_point(
+    world: SmoothPoint,
+    scale: f64,
     cell_w: f64,
     cell_h: f64,
     origin_x: f64,
     origin_y: f64,
-) {
+) -> (f64, f64) {
+    (
+        origin_x + f64::from(world.x) * cell_w,
+        origin_y - (f64::from(world.y) + scale) * cell_h,
+    )
+}
+
+fn rgba_to_nscolor(color: SmoothRgba8, opacity: f32) -> Retained<NSColor> {
+    unsafe {
+        NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(color.r) / 255.0,
+            f64::from(color.g) / 255.0,
+            f64::from(color.b) / 255.0,
+            f64::from(color.a) / 255.0 * f64::from(opacity.clamp(0.0, 1.0)),
+        )
+    }
+}
+
+fn compositing_operation(blend: SmoothBlendMode) -> NSCompositingOperation {
+    match blend {
+        SmoothBlendMode::Normal => NSCompositingOperation::SourceOver,
+        SmoothBlendMode::Multiply => NSCompositingOperation::Multiply,
+        SmoothBlendMode::Screen => NSCompositingOperation::Screen,
+        SmoothBlendMode::Add => NSCompositingOperation::PlusLighter,
+        SmoothBlendMode::Replace => NSCompositingOperation::Copy,
+    }
+}
+
+/// Intersect the layer's own clip with the aperture clip the caller installed.
+fn apply_smooth_layer_clip(clip: &SmoothClip, metrics: &CompanionGridMetrics) {
+    unsafe {
+        match clip {
+            SmoothClip::None => {}
+            SmoothClip::Rect(bounds) => {
+                NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(
+                        metrics.origin_x + f64::from(bounds.min.x) * metrics.cell_w,
+                        metrics.origin_y - f64::from(bounds.max.y) * metrics.cell_h,
+                    ),
+                    NSSize::new(
+                        f64::from(bounds.max.x - bounds.min.x) * metrics.cell_w,
+                        f64::from(bounds.max.y - bounds.min.y) * metrics.cell_h,
+                    ),
+                ))
+                .addClip();
+            }
+            SmoothClip::Circle { center, radius } => {
+                // Cells are not square, so a circular clip in cell space is an
+                // ellipse in pixel space.
+                let rx = f64::from(*radius) * metrics.cell_w;
+                let ry = f64::from(*radius) * metrics.cell_h;
+                let cx = metrics.origin_x + f64::from(center.x) * metrics.cell_w;
+                let cy = metrics.origin_y - f64::from(center.y) * metrics.cell_h;
+                NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                    NSPoint::new(cx - rx, cy - ry),
+                    NSSize::new(rx * 2.0, ry * 2.0),
+                ))
+                .addClip();
+            }
+        }
+    }
+}
+
+/// Blit a validated Smooth scene plan. The caller installs the aperture clip; each
+/// layer's own clip is intersected with it inside a saved graphics state.
+///
+/// The plan is validated during frame preparation, so an invalid layer here means
+/// a bug rather than bad input: skip it instead of drawing garbage or panicking.
+fn appkit_blit_smooth_plan(plan: &SmoothCompanionScenePlan, metrics: &CompanionGridMetrics) {
+    let CompanionGridMetrics {
+        font_size,
+        cell_w,
+        cell_h,
+        origin_x,
+        origin_y,
+        ..
+    } = *metrics;
+
     let mut ordered_layers: Vec<_> = plan.layers.iter().enumerate().collect();
     ordered_layers.sort_by_key(|(index, layer)| (layer.z, *index));
 
     for (_, layer) in ordered_layers {
-        if layer.opacity <= 0.0 {
+        if layer.opacity <= 0.0 || validate_smooth_layer(layer).is_err() {
             continue;
         }
+
+        let pivot = smooth_layer_pivot(layer);
+        // Validation guarantees the scale is uniform and positive.
+        let scale = f64::from(layer.transform.scale.x);
+        let fractional = motion_binding_uses_fractional_coordinates(layer.motion_binding);
+
+        unsafe {
+            NSGraphicsContext::saveGraphicsState_class();
+            if let Some(context) = NSGraphicsContext::currentContext() {
+                context.setCompositingOperation(compositing_operation(layer.blend));
+            }
+            apply_smooth_layer_clip(&layer.clip, metrics);
+        }
+
         for item in &layer.items {
-            let SmoothLayerItem::LocalCell(cell) = item else {
-                continue;
-            };
-            let col = layer.anchor.x + layer.transform.translation.x + f32::from(cell.col);
-            let row = layer.anchor.y + layer.transform.translation.y + f32::from(cell.row);
-            let fractional = motion_binding_uses_fractional_coordinates(layer.motion_binding);
-            let (px, py) = if fractional {
-                fractional_cell_to_point(
-                    f64::from(col),
-                    f64::from(row),
-                    cell_w,
-                    cell_h,
-                    origin_x,
-                    origin_y,
-                )
-            } else {
-                cell_to_point(
-                    appkit_cell_axis(col),
-                    appkit_cell_axis(row),
-                    cell_w,
-                    cell_h,
-                    origin_x,
-                    origin_y,
-                )
-            };
-            appkit_draw_cell_parts(
-                cell.glyph.as_deref(),
-                cell.fg,
-                cell.bg,
-                cell.bold,
-                AppkitCellFrame { px, py, font_size, cell_w, cell_h },
-            );
+            match item {
+                SmoothLayerItem::LocalCell(cell) => {
+                    let world = transform_local_point(
+                        layer,
+                        pivot,
+                        SmoothPoint {
+                            x: f32::from(cell.col),
+                            y: f32::from(cell.row),
+                        },
+                    );
+                    let (px, py) = if fractional {
+                        smooth_cell_to_point(world, scale, cell_w, cell_h, origin_x, origin_y)
+                    } else {
+                        cell_to_point(
+                            appkit_cell_axis(world.x),
+                            appkit_cell_axis(world.y),
+                            cell_w,
+                            cell_h,
+                            origin_x,
+                            origin_y,
+                        )
+                    };
+                    // Cell size and glyph size scale together, so a grown pet keeps
+                    // its proportions instead of spreading its glyphs apart.
+                    appkit_draw_cell_parts(
+                        cell.glyph.as_deref(),
+                        cell.fg,
+                        cell.bg,
+                        cell.bold,
+                        AppkitCellFrame {
+                            px,
+                            py,
+                            font_size: font_size * scale,
+                            cell_w: cell_w * scale,
+                            cell_h: cell_h * scale,
+                        },
+                    );
+                }
+                SmoothLayerItem::Shape(shape) => {
+                    let SmoothShapeGeometry::Ellipse { bounds } = shape.geometry;
+                    let Ok(rect) = smooth_shape_rect(metrics, layer, bounds) else {
+                        continue;
+                    };
+                    unsafe {
+                        let path = NSBezierPath::bezierPathWithOvalInRect(rect);
+                        rgba_to_nscolor(shape.color, layer.opacity).setFill();
+                        path.fill();
+                    }
+                }
+                // Rasters are descriptive only; this slice has no raster backend and
+                // must not silently reinterpret one as a shape.
+                SmoothLayerItem::Raster(_) => continue,
+            }
+        }
+
+        unsafe {
+            NSGraphicsContext::restoreGraphicsState_class();
         }
     }
 }
@@ -1991,7 +2153,8 @@ mod tests {
             SmoothLayerMotionBinding::Parallax(SmoothDepthPlane::Foreground)
         ));
 
-        let fractional = fractional_cell_to_point(10.1, 4.0, 30.0, 60.0, 0.0, 960.0);
+        let fractional =
+            smooth_cell_to_point(SmoothPoint { x: 10.1, y: 4.0 }, 1.0, 30.0, 60.0, 0.0, 960.0);
         let snapped = cell_to_point(
             appkit_cell_axis(10.1),
             appkit_cell_axis(4.0),
@@ -2000,7 +2163,9 @@ mod tests {
             0.0,
             960.0,
         );
-        assert!((fractional.0 - 303.0).abs() < 0.000_000_001);
+        // Scene-plan coordinates are f32, so the tolerance tracks single-precision
+        // rather than the exact f64 arithmetic this helper used to be handed.
+        assert!((fractional.0 - 303.0).abs() < 1e-4);
         assert_eq!(snapped.0, 300.0);
     }
 
@@ -2364,5 +2529,186 @@ mod tests {
             })
             .map(|pixel| u32::from(pixel.a))
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod smooth_geometry_tests {
+    use super::*;
+    use crate::presentation::smooth::{
+        SmoothBlendMode, SmoothClip, SmoothCompanionPrivacyClaims, SmoothLayerId, SmoothLayerRole,
+        SmoothRgba8, SmoothShape, SmoothShapeGeometry, SmoothTransform,
+    };
+
+    fn point(x: f32, y: f32) -> SmoothPoint {
+        SmoothPoint { x, y }
+    }
+
+    fn bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> SmoothBounds {
+        SmoothBounds {
+            min: point(min_x, min_y),
+            max: point(max_x, max_y),
+        }
+    }
+
+    /// A 2x2 layer anchored at (10, 20) whose pivot is its own centre.
+    fn layer() -> SmoothCompanionLayer {
+        SmoothCompanionLayer {
+            id: SmoothLayerId("shape-layer".to_string()),
+            role: SmoothLayerRole::PetBody,
+            motion_binding: SmoothLayerMotionBinding::PetAttached,
+            z: 0,
+            local_bounds: bounds(0.0, 0.0, 2.0, 2.0),
+            anchor: point(10.0, 20.0),
+            transform_origin: point(1.0, 1.0),
+            transform: SmoothTransform {
+                translation: point(0.0, 0.0),
+                scale: point(1.0, 1.0),
+                rotation_degrees: 0.0,
+            },
+            parallax_translation: point(0.0, 0.0),
+            opacity: 1.0,
+            clip: SmoothClip::None,
+            blend: SmoothBlendMode::Normal,
+            items: vec![SmoothLayerItem::Shape(SmoothShape {
+                geometry: SmoothShapeGeometry::Ellipse { bounds: bounds(0.0, 0.0, 2.0, 2.0) },
+                color: SmoothRgba8 { r: 1, g: 2, b: 3, a: 255 },
+            })],
+            privacy: SmoothCompanionPrivacyClaims::external_companion(),
+        }
+    }
+
+    fn metrics() -> CompanionGridMetrics {
+        CompanionGridMetrics {
+            font_size: 10.0,
+            cell_w: 4.0,
+            cell_h: 8.0,
+            grid_cols: 36,
+            grid_rows: 18,
+            origin_x: 100.0,
+            origin_y: 200.0,
+        }
+    }
+
+    #[test]
+    fn smooth_layer_point_is_the_identity_at_unit_scale() {
+        let layer = layer();
+        assert_eq!(
+            smooth_layer_point(&layer, point(0.0, 0.0)).unwrap(),
+            point(10.0, 20.0)
+        );
+        assert_eq!(
+            smooth_layer_point(&layer, point(2.0, 2.0)).unwrap(),
+            point(12.0, 22.0)
+        );
+    }
+
+    #[test]
+    fn smooth_layer_point_scales_about_the_pivot_and_leaves_it_fixed() {
+        let mut near = layer();
+        near.transform.scale = point(1.12, 1.12);
+        // The pivot is anchor + transform_origin = (11, 21) and must not move.
+        assert_eq!(
+            smooth_layer_point(&near, point(1.0, 1.0)).unwrap(),
+            point(11.0, 21.0)
+        );
+        // Corners push out by half the extra extent.
+        let min = smooth_layer_point(&near, point(0.0, 0.0)).unwrap();
+        let max = smooth_layer_point(&near, point(2.0, 2.0)).unwrap();
+        assert!((max.x - min.x - 2.24).abs() < 1e-5);
+        assert!((max.y - min.y - 2.24).abs() < 1e-5);
+
+        let mut far = layer();
+        far.transform.scale = point(0.88, 0.88);
+        let min = smooth_layer_point(&far, point(0.0, 0.0)).unwrap();
+        let max = smooth_layer_point(&far, point(2.0, 2.0)).unwrap();
+        assert!((max.x - min.x - 1.76).abs() < 1e-5);
+    }
+
+    #[test]
+    fn smooth_layer_point_applies_translation_after_scale() {
+        let mut layer = layer();
+        layer.transform.scale = point(1.12, 1.12);
+        layer.transform.translation = point(3.0, -4.0);
+        assert_eq!(
+            smooth_layer_point(&layer, point(1.0, 1.0)).unwrap(),
+            point(14.0, 17.0)
+        );
+    }
+
+    #[test]
+    fn smooth_layer_point_rejects_invalid_geometry() {
+        let mut rotated = layer();
+        rotated.transform.rotation_degrees = 1.0;
+        assert_eq!(
+            smooth_layer_point(&rotated, point(0.0, 0.0)),
+            Err(SmoothGeometryError::RotationUnsupported)
+        );
+
+        let mut nonuniform = layer();
+        nonuniform.transform.scale = point(1.0, 1.2);
+        assert_eq!(
+            smooth_layer_point(&nonuniform, point(0.0, 0.0)),
+            Err(SmoothGeometryError::NonUniformScale)
+        );
+
+        let mut nonpositive = layer();
+        nonpositive.transform.scale = point(0.0, 0.0);
+        assert_eq!(
+            smooth_layer_point(&nonpositive, point(0.0, 0.0)),
+            Err(SmoothGeometryError::NonPositiveScale)
+        );
+    }
+
+    #[test]
+    fn smooth_shape_rect_maps_cells_to_appkit_pixels_with_y_flipped() {
+        let metrics = metrics();
+        let rect = smooth_shape_rect(&metrics, &layer(), bounds(0.0, 0.0, 2.0, 2.0)).unwrap();
+
+        // x grows rightward from the grid origin; the ellipse spans cols 10..12.
+        assert_eq!(rect.origin.x, 100.0 + 10.0 * 4.0);
+        assert_eq!(rect.size.width, 2.0 * 4.0);
+        // AppKit is Y-up, so the rect's origin is the *bottom* of rows 20..22.
+        assert_eq!(rect.origin.y, 200.0 - 22.0 * 8.0);
+        assert_eq!(rect.size.height, 2.0 * 8.0);
+    }
+
+    #[test]
+    fn smooth_shape_rect_grows_the_ellipse_with_the_layer_scale() {
+        let metrics = metrics();
+        let mut near = layer();
+        near.transform.scale = point(1.12, 1.12);
+
+        let unit = smooth_shape_rect(&metrics, &layer(), bounds(0.0, 0.0, 2.0, 2.0)).unwrap();
+        let scaled = smooth_shape_rect(&metrics, &near, bounds(0.0, 0.0, 2.0, 2.0)).unwrap();
+
+        assert!((scaled.size.width / unit.size.width - 1.12).abs() < 1e-5);
+        assert!((scaled.size.height / unit.size.height - 1.12).abs() < 1e-5);
+    }
+
+    #[test]
+    fn smooth_shape_rect_rejects_invalid_geometry() {
+        let metrics = metrics();
+        let mut rotated = layer();
+        rotated.transform.rotation_degrees = 1.0;
+        assert_eq!(
+            smooth_shape_rect(&metrics, &rotated, bounds(0.0, 0.0, 2.0, 2.0)),
+            Err(SmoothGeometryError::RotationUnsupported)
+        );
+    }
+
+    #[test]
+    fn smooth_cell_to_point_places_a_unit_cell_at_its_own_row() {
+        // Y-up: the cell's AppKit origin is the bottom of row 4.25, one cell down.
+        let (px, py) = smooth_cell_to_point(point(3.5, 4.25), 1.0, 4.0, 8.0, 100.0, 200.0);
+        assert_eq!(px, 100.0 + 3.5 * 4.0);
+        assert_eq!(py, 200.0 - 5.25 * 8.0);
+    }
+
+    #[test]
+    fn smooth_cell_to_point_drops_a_scaled_cell_from_its_top_left() {
+        // A 1.12x cell whose top-left is at row 4 has its bottom at row 5.12.
+        let (_, py) = smooth_cell_to_point(point(0.0, 4.0), 1.12, 4.0, 8.0, 100.0, 200.0);
+        assert!((py - (200.0 - 5.12 * 8.0)).abs() < 1e-9);
     }
 }
