@@ -65,6 +65,7 @@ objc2-app-kit = { version = "0.2", features = [
     "NSControl",
     "NSFont",
     "NSFontDescriptor",
+    "NSGradient",
     "NSGraphics",
     "NSGraphicsContext",
     "NSImage",

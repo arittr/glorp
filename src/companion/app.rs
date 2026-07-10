@@ -50,9 +50,9 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
     NSBackingStoreType, NSBezierPath, NSButtLineCapStyle, NSColor, NSCommandKeyMask,
     NSCompositingOperation, NSControlKeyMask, NSEventModifierFlags, NSFont, NSFontAttributeName,
-    NSFontWeightBold, NSForegroundColorAttributeName, NSGraphicsContext, NSLineCapStyle, NSMenu,
-    NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSFontWeightBold, NSForegroundColorAttributeName, NSGradient, NSGradientDrawingOptions,
+    NSGraphicsContext, NSLineCapStyle, NSMenu, NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -1141,19 +1141,22 @@ fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompa
         ns_color(&bg_color).setFill();
         bg_path.fill();
 
-        // Tank depth: concentric translucent rings, darker toward the rim, so the
-        // porthole reads as depth rather than a flat void. (NSGradient isn't bound.)
-        const DEPTH_RINGS: usize = 7;
-        for i in 0..DEPTH_RINGS {
-            let t = i as f64 / DEPTH_RINGS as f64; // 0 center → ~1 rim
-            let rr = aperture.radius as f64 * (1.0 - t);
-            let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(aperture.center_x as f64 - rr, aperture.center_y as f64 - rr),
-                NSSize::new(rr * 2.0, rr * 2.0),
-            ));
-            // Brighter core (additive translucency builds toward center).
-            ns_color(&RoundColor(0.10, 0.11, 0.20, 0.05)).setFill();
-            ring.fill();
+        // Tank depth: a continuous radial falloff from a lifted core to a darker
+        // rim, so the porthole reads as receding water. This was seven stacked
+        // translucent ovals, whose constant-alpha steps banded visibly.
+        let core = ns_color(&tank_core_color(&bg_color));
+        let rim = ns_color(&bg_color);
+        if let Some(gradient) =
+            NSGradient::initWithStartingColor_endingColor(NSGradient::alloc(), &core, &rim)
+        {
+            let center = NSPoint::new(aperture.center_x as f64, aperture.center_y as f64);
+            gradient.drawFromCenter_radius_toCenter_radius_options(
+                center,
+                0.0,
+                center,
+                aperture.radius as f64,
+                NSGradientDrawingOptions(0),
+            );
         }
 
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
@@ -1163,7 +1166,7 @@ fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompa
             }
             PreparedRendererFrame::Smooth { metrics, plan, .. } => {
                 draw_mood_aura(frame, metrics);
-                appkit_blit_smooth_plan(plan, metrics);
+                appkit_blit_smooth_plan(plan, metrics, &aperture);
             }
             PreparedRendererFrame::Classic { metrics, draw_list, .. } => {
                 draw_mood_aura(frame, metrics);
@@ -1287,6 +1290,31 @@ fn fallback_dimension(value: f64) -> f64 {
     } else {
         1.0
     }
+}
+
+/// The colour the tank's depth falloff lifts its core toward.
+const TANK_DEPTH_TINT: RoundColor = RoundColor(0.10, 0.11, 0.20, 1.0);
+
+/// How much of the tint reaches the core. The stepped rings this replaced
+/// accumulated seven passes of `alpha 0.05`, so the core carried roughly this
+/// much tint; the falloff to the rim is now continuous instead of banded.
+const TANK_CORE_TINT_WEIGHT: f32 = 0.30;
+
+fn tank_core_color(background: &RoundColor) -> RoundColor {
+    let mix = |base: f32, tint: f32| base + (tint - base) * TANK_CORE_TINT_WEIGHT;
+    RoundColor(
+        mix(background.0, TANK_DEPTH_TINT.0),
+        mix(background.1, TANK_DEPTH_TINT.1),
+        mix(background.2, TANK_DEPTH_TINT.2),
+        background.3,
+    )
+}
+
+/// Cell ink attenuated by its layer's opacity. Opacity scales alpha only, so a
+/// receding layer fades into the water rather than shifting hue.
+fn cell_ink_color(rgb: crate::pet::palette::Rgb, opacity: f32) -> RoundColor {
+    let base = rgb_color(rgb.r, rgb.g, rgb.b);
+    RoundColor(base.0, base.1, base.2, base.3 * opacity.clamp(0.0, 1.0))
 }
 
 fn rgb_color(r: u8, g: u8, b: u8) -> RoundColor {
@@ -1607,6 +1635,22 @@ fn compositing_operation(blend: SmoothBlendMode) -> NSCompositingOperation {
     }
 }
 
+/// Clip to the round porthole. Scene content never escapes it, whatever graphics
+/// state the caller left behind.
+unsafe fn appkit_aperture_clip(aperture: &RoundAperture) {
+    NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+        NSPoint::new(
+            (aperture.center_x - aperture.radius) as f64,
+            (aperture.center_y - aperture.radius) as f64,
+        ),
+        NSSize::new(
+            (aperture.radius * 2.0) as f64,
+            (aperture.radius * 2.0) as f64,
+        ),
+    ))
+    .addClip();
+}
+
 /// Clip to an oval whose centre and per-axis radii are given in cell units.
 fn appkit_oval_clip(metrics: &CompanionGridMetrics, center: SmoothPoint, radii: SmoothPoint) {
     let rx = f64::from(radii.x) * metrics.cell_w;
@@ -1651,12 +1695,18 @@ fn apply_smooth_layer_clip(clip: &SmoothClip, metrics: &CompanionGridMetrics) {
     }
 }
 
-/// Blit a validated Smooth scene plan. The caller installs the aperture clip; each
-/// layer's own clip is intersected with it inside a saved graphics state.
+/// Blit a validated Smooth scene plan. Every layer is clipped to the aperture
+/// inside its own saved graphics state, then intersected with the layer's own
+/// clip. The blit does not rely on an aperture clip installed by the caller
+/// surviving its save/restore pairs.
 ///
 /// The plan is validated during frame preparation, so an invalid layer here means
 /// a bug rather than bad input: skip it instead of drawing garbage or panicking.
-fn appkit_blit_smooth_plan(plan: &SmoothCompanionScenePlan, metrics: &CompanionGridMetrics) {
+fn appkit_blit_smooth_plan(
+    plan: &SmoothCompanionScenePlan,
+    metrics: &CompanionGridMetrics,
+    aperture: &RoundAperture,
+) {
     let CompanionGridMetrics {
         font_size,
         cell_w,
@@ -1684,6 +1734,7 @@ fn appkit_blit_smooth_plan(plan: &SmoothCompanionScenePlan, metrics: &CompanionG
             if let Some(context) = NSGraphicsContext::currentContext() {
                 context.setCompositingOperation(compositing_operation(layer.blend));
             }
+            appkit_aperture_clip(aperture);
             apply_smooth_layer_clip(&layer.clip, metrics);
         }
 
@@ -1723,6 +1774,7 @@ fn appkit_blit_smooth_plan(plan: &SmoothCompanionScenePlan, metrics: &CompanionG
                             font_size: font_size * scale,
                             cell_w: cell_w * scale,
                             cell_h: cell_h * scale,
+                            opacity: layer.opacity,
                         },
                     );
                 }
@@ -1780,7 +1832,14 @@ fn appkit_blit_draw_list(
             cell.fg,
             cell.bg,
             cell.bold,
-            AppkitCellFrame { px, py, font_size, cell_w, cell_h },
+            AppkitCellFrame {
+                px,
+                py,
+                font_size,
+                cell_w,
+                cell_h,
+                opacity: 1.0,
+            },
         );
     }
 }
@@ -1792,6 +1851,8 @@ struct AppkitCellFrame {
     font_size: f64,
     cell_w: f64,
     cell_h: f64,
+    /// The owning layer's opacity, multiplied into every ink alpha.
+    opacity: f32,
 }
 
 fn appkit_draw_cell_parts(
@@ -1803,7 +1864,7 @@ fn appkit_draw_cell_parts(
 ) {
     unsafe {
         if let Some(bg) = bg {
-            let bg_color = rgb_color(bg.r, bg.g, bg.b);
+            let bg_color = cell_ink_color(bg, frame.opacity);
             let path = NSBezierPath::bezierPathWithRect(NSRect::new(
                 NSPoint::new(frame.px, frame.py),
                 NSSize::new(frame.cell_w, frame.cell_h),
@@ -1814,9 +1875,8 @@ fn appkit_draw_cell_parts(
 
         if let Some(glyph) = glyph {
             let fg = fg
-                .as_ref()
-                .map(|c| rgb_color(c.r, c.g, c.b))
-                .unwrap_or(RoundColor(1.0, 1.0, 1.0, 1.0));
+                .map(|c| cell_ink_color(c, frame.opacity))
+                .unwrap_or(RoundColor(1.0, 1.0, 1.0, frame.opacity.clamp(0.0, 1.0)));
             let attr = if bold {
                 // `attributed_pet_glyph` uses weight 0.0 (NSFontWeightRegular).
                 // For bold cells we build the attributed string with NSFontWeightBold.
@@ -2566,6 +2626,57 @@ mod tests {
             })
             .map(|pixel| u32::from(pixel.a))
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tank_depth_gradient_tests {
+    use super::*;
+
+    #[test]
+    fn tank_core_lifts_the_background_toward_the_depth_tint() {
+        let bg = RoundColor(0.05, 0.05, 0.06, 1.0);
+        let core = tank_core_color(&bg);
+
+        // The core is a blend toward the tint, so it sits strictly between the two.
+        assert!(core.0 > bg.0 && core.0 < TANK_DEPTH_TINT.0);
+        assert!(core.1 > bg.1 && core.1 < TANK_DEPTH_TINT.1);
+        assert!(core.2 > bg.2 && core.2 < TANK_DEPTH_TINT.2);
+        // The porthole is opaque; only the tint's weight varies.
+        assert_eq!(core.3, 1.0);
+    }
+
+    #[test]
+    fn tank_core_reproduces_the_weight_the_stepped_rings_accumulated() {
+        let bg = RoundColor(0.0, 0.0, 0.0, 1.0);
+        let core = tank_core_color(&bg);
+        assert!((core.0 - TANK_DEPTH_TINT.0 * TANK_CORE_TINT_WEIGHT).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod smooth_opacity_tests {
+    use super::*;
+    use crate::pet::palette::Rgb;
+
+    #[test]
+    fn cell_ink_alpha_scales_with_layer_opacity() {
+        let opaque = cell_ink_color(Rgb { r: 255, g: 128, b: 0 }, 1.0);
+        assert_eq!(opaque.3, 1.0);
+        assert_eq!(opaque.0, 1.0);
+
+        let half = cell_ink_color(Rgb { r: 255, g: 128, b: 0 }, 0.5);
+        assert_eq!(half.3, 0.5);
+        // Opacity attenuates alpha, never the colour itself.
+        assert_eq!(half.0, opaque.0);
+        assert_eq!(half.1, opaque.1);
+        assert_eq!(half.2, opaque.2);
+    }
+
+    #[test]
+    fn cell_ink_alpha_is_clamped_into_the_unit_range() {
+        assert_eq!(cell_ink_color(Rgb { r: 1, g: 2, b: 3 }, -1.0).3, 0.0);
+        assert_eq!(cell_ink_color(Rgb { r: 1, g: 2, b: 3 }, 2.0).3, 1.0);
     }
 }
 
