@@ -78,10 +78,11 @@ const PIXEL_CAST_IDS: [&str; 6] = [
 const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
 const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
-const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 19] = [
+const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 20] = [
     ("depth-rings", "fixed", None),
     ("biome-wash", "parallax", Some("far")),
     ("room-glyphs", "parallax", Some("far")),
+    ("tank-bed", "fixed", None),
     ("ambient", "parallax", Some("mid")),
     ("motes", "parallax", Some("mid")),
     ("activity-glyphs", "parallax", Some("mid")),
@@ -367,7 +368,7 @@ fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
 
     assert_eq!(
         actual, SMOOTH_CANONICAL_LAYER_BINDINGS,
-        "{surface} should serialize the canonical 19-role motion mapping"
+        "{surface} should serialize the canonical 20-role motion mapping"
     );
 
     for (layer, (_, expected_binding, _)) in layers.iter().zip(SMOOTH_CANONICAL_LAYER_BINDINGS) {
