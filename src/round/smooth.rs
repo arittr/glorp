@@ -219,6 +219,22 @@ pub fn try_build_round_smooth_scene_plan_with_options(
                             }
                         }
                     }
+                    // The offset between the body and its cast shadow is what
+                    // makes Z legible: hugging and dark with the pet against the
+                    // rear wall, detached and diffuse as it comes to the glass.
+                    // The silhouette cells carry a baked one-cell offset that
+                    // scales with the body, so only the difference is added here.
+                    let depth01 = (depth.effective_z + 1.0) * 0.5;
+                    let detach = WALL_SHADOW_DETACH_FAR
+                        + (WALL_SHADOW_DETACH_NEAR - WALL_SHADOW_DETACH_FAR) * depth01;
+                    let extra = detach - WALL_SHADOW_BAKED_OFFSET * depth.scale;
+                    layer.transform.translation.x += extra;
+                    layer.transform.translation.y += extra;
+                    // Strength encodes distance from the wall, which runs
+                    // opposite to the water's atmosphere; it replaces the
+                    // atmosphere fade applied above.
+                    layer.opacity = WALL_SHADOW_STRENGTH_FAR
+                        + (WALL_SHADOW_STRENGTH_NEAR - WALL_SHADOW_STRENGTH_FAR) * depth01;
                 }
             }
             // The floor projection follows the pet across the tank, but stays
@@ -450,6 +466,20 @@ fn tank_bed_layer(
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
     }
 }
+
+/// The wall shadow's total diagonal offset from the body, in cells, at the far
+/// and near planes. The spread is the Z cue: a shadow that hugs the silhouette
+/// reads as "against the wall", one that drifts away reads as "at the glass".
+const WALL_SHADOW_DETACH_FAR: f32 = 0.35;
+const WALL_SHADOW_DETACH_NEAR: f32 = 2.4;
+/// The one-cell offset baked into the classic silhouette cells, which scales
+/// with the body about the shared pivot.
+const WALL_SHADOW_BAKED_OFFSET: f32 = 1.0;
+/// Veil strength at the far and near planes: sharp and dark against the wall,
+/// diffuse toward the glass. The near end stays strong enough to survive the
+/// shipping panel's lifted blacks.
+const WALL_SHADOW_STRENGTH_FAR: f32 = 1.0;
+const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.6;
 
 /// Multiply factor for the smooth wall shadow: darkens what it covers by not
 /// quite half, with a slightly cool cast so it reads as shade rather than dirt.

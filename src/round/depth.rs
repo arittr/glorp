@@ -1,11 +1,14 @@
-pub const SMOOTH_PET_FAR_SCALE: f32 = 0.88;
+/// The tank is deliberately shallow: the pet never recedes far enough to get
+/// lost in the murk, and the wall shadow's detachment carries the Z story
+/// across the small excursion.
+pub const SMOOTH_PET_FAR_SCALE: f32 = 0.92;
 pub const SMOOTH_PET_NEAR_SCALE: f32 = 1.12;
 pub const SMOOTH_PERSPECTIVE_Y_MAX: f32 = 0.30;
 
 /// Atmospheric perspective: things seen through more water lose contrast to it.
 /// The far plane keeps this fraction of its ink; the near plane is fully present.
 /// Size alone is a weak depth cue at a 12% excursion — this is what sells it.
-pub const SMOOTH_FAR_ATMOSPHERE: f32 = 0.74;
+pub const SMOOTH_FAR_ATMOSPHERE: f32 = 0.82;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothDepthSample {
@@ -60,10 +63,18 @@ pub fn resolve_smooth_depth(
     }
 
     let effective_z = raw_z.clamp(-1.0, 1.0) * lifecycle_scale;
-    let depth01 = (effective_z + 1.0) * 0.5;
-    let scale = SMOOTH_PET_FAR_SCALE + depth01 * (SMOOTH_PET_NEAR_SCALE - SMOOTH_PET_FAR_SCALE);
+    // The neutral plane renders the art at exactly 1.0 for Classic parity, so the
+    // asymmetric excursion is mapped piecewise around it: a shallow back half and
+    // a slightly deeper front half.
+    let scale = if effective_z >= 0.0 {
+        1.0 + effective_z * (SMOOTH_PET_NEAR_SCALE - 1.0)
+    } else {
+        1.0 + effective_z * (1.0 - SMOOTH_PET_FAR_SCALE)
+    };
     let perspective_y = effective_z * SMOOTH_PERSPECTIVE_Y_MAX;
-    let atmosphere = SMOOTH_FAR_ATMOSPHERE + depth01 * (1.0 - SMOOTH_FAR_ATMOSPHERE);
+    // Only the back half of the tank carries murk: from neutral to the glass the
+    // pet is fully present.
+    let atmosphere = 1.0 + effective_z.min(0.0) * (1.0 - SMOOTH_FAR_ATMOSPHERE);
     validate_smooth_depth_sample(SmoothDepthSample {
         raw_z,
         effective_z,

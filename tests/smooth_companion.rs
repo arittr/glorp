@@ -275,7 +275,10 @@ fn parity_fixture() -> WatchViewModel {
 
 #[test]
 fn smooth_depth_resolver_maps_bounds_lifecycle_and_rejects_invalid_inputs() {
-    assert_eq!(resolve_smooth_depth(-1.0, 1.0).unwrap().scale, 0.88);
+    assert_eq!(
+        resolve_smooth_depth(-1.0, 1.0).unwrap().scale,
+        SMOOTH_PET_FAR_SCALE
+    );
     assert_eq!(resolve_smooth_depth(0.0, 1.0).unwrap().scale, 1.0);
     assert_eq!(resolve_smooth_depth(1.0, 1.0).unwrap().scale, 1.12);
     assert_eq!(depth_lifecycle_scale(false, false), 1.0);
@@ -914,9 +917,15 @@ fn smooth_round_plan_floor_projection_stays_below_props_and_moves_pet_attached_l
         .unwrap();
 
     assert!(pet_body.transform.translation.x.abs() > f32::EPSILON);
-    assert_eq!(
-        wall_shadow.transform.translation.x,
-        pet_body.transform.translation.x
+    // The wall shadow tracks the body plus its depth-driven detachment; the
+    // detachment contract itself is pinned by the wall-distance test.
+    let depth01 = (plan.pet.depth + 1.0) * 0.5;
+    let expected_detach_extra = 0.35 + (2.4 - 0.35) * depth01 - plan.pet.scale;
+    assert!(
+        (wall_shadow.transform.translation.x
+            - (pet_body.transform.translation.x + expected_detach_extra))
+            .abs()
+            < 1e-4
     );
     // The projection is a bed-anchored ellipse positioned in viewport coordinates
     // from the pet centre and the depth sample, so it carries no transform of its
@@ -1300,8 +1309,10 @@ fn depth_transform_maps_far_neutral_and_near_onto_scale_and_perspective() {
         }
     }
 
-    // The perspective translation moves all three by exactly the same amount.
-    for role in PET_ATTACHED_ROLES {
+    // The perspective translation moves the body and the cue by exactly the same
+    // amount. The wall shadow adds its own depth-driven detachment on top, so it
+    // is covered by the wall-distance test instead.
+    for role in [SmoothLayerRole::PetBody, SmoothLayerRole::PerformanceCue] {
         let step = near.layer_by_role(role).unwrap().transform.translation.y
             - neutral.layer_by_role(role).unwrap().transform.translation.y;
         assert!(
@@ -1309,6 +1320,61 @@ fn depth_transform_maps_far_neutral_and_near_onto_scale_and_perspective() {
             "{role:?} moved {step} for a near depth step, expected {SMOOTH_PERSPECTIVE_Y_MAX}"
         );
     }
+}
+
+/// The offset between a body and its cast shadow encodes distance from the wall:
+/// hugging and dark when the pet swims at the back, detached and soft as it comes
+/// to the glass. Without this, the veil just tracks the body and carries no Z.
+#[test]
+fn wall_shadow_detachment_and_strength_encode_wall_distance() {
+    let vm = normal_lifecycle_fixture();
+    let far = plan_at_depth(&vm, 250, -1.0);
+    let neutral = plan_at_depth(&vm, 250, 0.0);
+    let near = plan_at_depth(&vm, 250, 1.0);
+
+    // The silhouette cells carry a baked one-cell offset that scales with the
+    // body, so the visible offset is `baked * scale + extra translation`.
+    let offset = |plan: &glorp::presentation::smooth::SmoothCompanionScenePlan| {
+        let shadow = plan.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
+        let body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
+        (shadow.transform.translation.x - body.transform.translation.x) + plan.pet.scale
+    };
+
+    let far_offset = offset(&far);
+    let neutral_offset = offset(&neutral);
+    let near_offset = offset(&near);
+    assert!(
+        far_offset < neutral_offset && neutral_offset < near_offset,
+        "detachment must grow toward the glass: {far_offset} / {neutral_offset} / {near_offset}"
+    );
+    assert!((far_offset - 0.35).abs() < 1e-4, "got {far_offset}");
+    assert!((near_offset - 2.4).abs() < 1e-4, "got {near_offset}");
+
+    // Detachment is diagonal: the same extra distance on both axes.
+    for plan in [&far, &neutral, &near] {
+        let shadow = plan.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
+        let body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
+        let extra_x = shadow.transform.translation.x - body.transform.translation.x;
+        // The body carries the idle bob; the shadow does not.
+        let extra_y =
+            shadow.transform.translation.y - (body.transform.translation.y - plan.pet.bob_offset.y);
+        assert!(
+            (extra_x - extra_y).abs() < 1e-4,
+            "detachment must be diagonal, got x={extra_x} y={extra_y}"
+        );
+    }
+
+    // Strength encodes wall distance, not water depth: sharp and dark against the
+    // wall, diffuse toward the glass. This deliberately replaces the atmosphere
+    // fade on this one layer.
+    let strength = |plan: &glorp::presentation::smooth::SmoothCompanionScenePlan| {
+        plan.layer_by_role(SmoothLayerRole::WallShadow)
+            .unwrap()
+            .opacity
+    };
+    assert_eq!(strength(&far), 1.0);
+    assert!((strength(&near) - 0.6).abs() < 1e-5);
+    assert!(strength(&far) > strength(&neutral) && strength(&neutral) > strength(&near));
 }
 
 #[test]
@@ -1651,8 +1717,9 @@ fn smooth_depth_resolves_atmospheric_attenuation_from_the_same_sample() {
     );
     assert_eq!(resolve_smooth_depth(1.0, 1.0).unwrap().atmosphere, 1.0);
 
-    let neutral = resolve_smooth_depth(0.0, 1.0).unwrap().atmosphere;
-    assert!((neutral - (SMOOTH_FAR_ATMOSPHERE + 1.0) / 2.0).abs() < 1e-6);
+    // Only the back half of the tank carries murk: the pet is fully present from
+    // the neutral plane to the glass.
+    assert_eq!(resolve_smooth_depth(0.0, 1.0).unwrap().atmosphere, 1.0);
 
     // A calm pet's depth excursion is attenuated, so its fade is too.
     let calm_far = resolve_smooth_depth(-1.0, 0.5).unwrap().atmosphere;
@@ -1665,7 +1732,9 @@ fn far_depth_fades_pet_attached_layers_without_touching_the_tank() {
     let far = plan_at_depth(&vm, 250, -1.0);
     let near = plan_at_depth(&vm, 250, 1.0);
 
-    for role in PET_ATTACHED_ROLES {
+    // The wall shadow is exempt: its strength encodes distance from the wall,
+    // which runs opposite to the atmosphere, and is covered by its own test.
+    for role in [SmoothLayerRole::PetBody, SmoothLayerRole::PerformanceCue] {
         let far_opacity = far.layer_by_role(role).unwrap().opacity;
         let near_opacity = near.layer_by_role(role).unwrap().opacity;
         assert!(
@@ -1732,8 +1801,9 @@ fn wall_shadow_is_a_multiply_veil_in_the_smooth_plan() {
         }
     }
 
-    // The veil still recedes with the pet.
+    // Against the wall the shadow is sharpest and darkest; at the glass it has
+    // detached and diffused.
     let near_shadow = near.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
     let far_shadow = far.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
-    assert!(far_shadow.opacity < near_shadow.opacity);
+    assert!(far_shadow.opacity > near_shadow.opacity);
 }
