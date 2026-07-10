@@ -48,11 +48,12 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
-    NSBackingStoreType, NSBezierPath, NSButtLineCapStyle, NSColor, NSCommandKeyMask,
-    NSCompositingOperation, NSControlKeyMask, NSEventModifierFlags, NSFont, NSFontAttributeName,
-    NSFontWeightBold, NSForegroundColorAttributeName, NSGradient, NSGradientDrawingOptions,
-    NSGraphicsContext, NSLineCapStyle, NSMenu, NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSBackingStoreType, NSBezierPath, NSBitmapImageRep, NSButtLineCapStyle,
+    NSCalibratedRGBColorSpace, NSColor, NSCommandKeyMask, NSCompositingOperation, NSControlKeyMask,
+    NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightBold,
+    NSForegroundColorAttributeName, NSGradient, NSGraphicsContext, NSImage, NSLineCapStyle, NSMenu,
+    NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -1141,23 +1142,11 @@ fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompa
         ns_color(&bg_color).setFill();
         bg_path.fill();
 
-        // Tank depth: a continuous radial falloff from a lifted core to a darker
-        // rim, so the porthole reads as receding water. This was seven stacked
-        // translucent ovals, whose constant-alpha steps banded visibly.
-        let core = ns_color(&tank_core_color(&bg_color));
-        let rim = ns_color(&bg_color);
-        if let Some(gradient) =
-            NSGradient::initWithStartingColor_endingColor(NSGradient::alloc(), &core, &rim)
-        {
-            let center = NSPoint::new(aperture.center_x as f64, aperture.center_y as f64);
-            gradient.drawFromCenter_radius_toCenter_radius_options(
-                center,
-                0.0,
-                center,
-                aperture.radius as f64,
-                NSGradientDrawingOptions(0),
-            );
-        }
+        // Tank depth: a radial falloff from a lifted core to a darker rim, so the
+        // porthole reads as receding water. NSGradient quantises to 8 bits with no
+        // dither, and on a dark span its steps show as visible rings, so the
+        // falloff is rendered once into a dithered bitmap and cached per size.
+        draw_dithered_tank_background(&aperture, &bg_color);
 
         // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
         match &frame.renderer {
@@ -1299,6 +1288,146 @@ const TANK_DEPTH_TINT: RoundColor = RoundColor(0.10, 0.11, 0.20, 1.0);
 /// accumulated seven passes of `alpha 0.05`, so the core carried roughly this
 /// much tint; the falloff to the rim is now continuous instead of banded.
 const TANK_CORE_TINT_WEIGHT: f32 = 0.30;
+
+/// Deterministic per-pixel noise in [-1.5, 1.5] output levels. A smooth dark
+/// gradient quantised to 8 bits shows its steps as visible bands; dithering
+/// trades them for imperceptible grain.
+fn dither_noise(x: u32, y: u32) -> f32 {
+    let mut h = x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    ((h & 0xFFFF) as f32 / 65535.0 - 0.5) * 3.0
+}
+
+/// One RGBA pixel of the tank's radial depth falloff, dithered.
+fn tank_background_pixel(
+    x: u32,
+    y: u32,
+    center: (f32, f32),
+    radius: f32,
+    core: &RoundColor,
+    rim: &RoundColor,
+) -> [u8; 4] {
+    let dx = x as f32 + 0.5 - center.0;
+    let dy = y as f32 + 0.5 - center.1;
+    let t = if radius > 0.0 {
+        ((dx * dx + dy * dy).sqrt() / radius).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let noise = dither_noise(x, y);
+    let channel = |core_c: f32, rim_c: f32| {
+        ((core_c + (rim_c - core_c) * t) * 255.0 + noise)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    [
+        channel(core.0, rim.0),
+        channel(core.1, rim.1),
+        channel(core.2, rim.2),
+        255,
+    ]
+}
+
+/// Render the dithered tank falloff, rebuilding its cached bitmap only when the
+/// aperture size or background colour changes.
+/// One cached background bitmap: its pixel size, its colour key, and the image.
+type CachedTankBackground = (u32, u32, [u32; 3], Retained<NSImage>);
+
+fn draw_dithered_tank_background(aperture: &RoundAperture, background: &RoundColor) {
+    use std::cell::RefCell;
+
+    // Cell size is measured on the main thread and drawing happens there too, so
+    // a main-thread-only cache is sound. Keyed on size and background colour.
+    thread_local! {
+        static TANK_BACKGROUND: RefCell<Option<CachedTankBackground>> =
+            const { RefCell::new(None) };
+    }
+
+    let width = (aperture.radius * 2.0).round().max(1.0) as u32;
+    let height = width;
+    let color_key = [
+        background.0.to_bits(),
+        background.1.to_bits(),
+        background.2.to_bits(),
+    ];
+
+    let dest = NSRect::new(
+        NSPoint::new(
+            (aperture.center_x - aperture.radius) as f64,
+            (aperture.center_y - aperture.radius) as f64,
+        ),
+        NSSize::new(f64::from(width), f64::from(height)),
+    );
+
+    TANK_BACKGROUND.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let stale = !matches!(
+            slot.as_ref(),
+            Some((w, h, key, _)) if *w == width && *h == height && *key == color_key
+        );
+        if stale {
+            *slot = build_dithered_tank_image(width, height, background)
+                .map(|image| (width, height, color_key, image));
+        }
+        if let Some((_, _, _, image)) = slot.as_ref() {
+            unsafe {
+                image.drawInRect_fromRect_operation_fraction(
+                    dest,
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+                    NSCompositingOperation::SourceOver,
+                    1.0,
+                );
+            }
+        }
+    });
+}
+
+/// Fill an RGBA bitmap with the dithered radial falloff and wrap it in an image.
+fn build_dithered_tank_image(
+    width: u32,
+    height: u32,
+    background: &RoundColor,
+) -> Option<Retained<NSImage>> {
+    let core = tank_core_color(background);
+    let center = (width as f32 / 2.0, height as f32 / 2.0);
+    let radius = width.min(height) as f32 / 2.0;
+
+    unsafe {
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            width as isize,
+            height as isize,
+            8,
+            4,
+            true,
+            false,
+            NSCalibratedRGBColorSpace,
+            (width * 4) as isize,
+            32,
+        )?;
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = tank_background_pixel(x, y, center, radius, &core, background);
+                let offset = ((y * width + x) * 4) as usize;
+                std::ptr::copy_nonoverlapping(pixel.as_ptr(), data.add(offset), 4);
+            }
+        }
+
+        let image = NSImage::initWithSize(
+            NSImage::alloc(),
+            NSSize::new(f64::from(width), f64::from(height)),
+        );
+        image.addRepresentation(&rep);
+        Some(image)
+    }
+}
 
 fn tank_core_color(background: &RoundColor) -> RoundColor {
     let mix = |base: f32, tint: f32| base + (tint - base) * TANK_CORE_TINT_WEIGHT;
@@ -2889,5 +3018,45 @@ mod smooth_geometry_tests {
         // A 1.12x cell whose top-left is at row 4 has its bottom at row 5.12.
         let (_, py) = smooth_cell_to_point(point(0.0, 4.0), 1.12, 4.0, 8.0, 100.0, 200.0);
         assert!((py - (200.0 - 5.12 * 8.0)).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod tank_dither_tests {
+    use super::*;
+
+    #[test]
+    fn dither_noise_is_deterministic_bounded_and_varied() {
+        let mut seen = std::collections::BTreeSet::new();
+        for x in 0..64u32 {
+            for y in 0..64u32 {
+                let n = dither_noise(x, y);
+                assert_eq!(n, dither_noise(x, y));
+                assert!((-1.5..=1.5).contains(&n), "noise {n} out of range");
+                seen.insert((n * 1000.0) as i32);
+            }
+        }
+        assert!(
+            seen.len() > 100,
+            "noise must vary, got {} values",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn tank_background_pixel_runs_core_to_rim_with_grain_smaller_than_a_band() {
+        let core = RoundColor(0.20, 0.22, 0.30, 1.0);
+        let rim = RoundColor(0.05, 0.05, 0.06, 1.0);
+        let center = (100.0, 100.0);
+
+        let at_core = tank_background_pixel(100, 100, center, 100.0, &core, &rim);
+        let at_rim = tank_background_pixel(199, 100, center, 100.0, &core, &rim);
+        assert!((f32::from(at_core[0]) - 0.20 * 255.0).abs() <= 2.0);
+        assert!((f32::from(at_rim[0]) - 0.05 * 255.0).abs() <= 2.0);
+        assert_eq!(at_core[3], 255);
+
+        // Past the radius the falloff clamps: only the dither grain remains.
+        let beyond = tank_background_pixel(390, 100, center, 100.0, &core, &rim);
+        assert!((f32::from(beyond[0]) - 0.05 * 255.0).abs() <= 2.0);
     }
 }

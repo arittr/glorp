@@ -575,7 +575,26 @@ fn tank_bed_geometry_is_curved_deterministic_and_finite() {
         broad_band_count, 1,
         "one gradient band replaces the stacked hard-edged bands"
     );
-    assert!((8..=14).contains(&fleck_count));
+    // The speckle texture is dense on purpose: it masks the 8-bit banding a bare
+    // gradient shows, and its density falloff toward the horizon is itself a
+    // depth cue.
+    assert!((34..=52).contains(&fleck_count), "got {fleck_count} flecks");
+    let ys: Vec<f32> = bed
+        .shapes
+        .iter()
+        .filter(|shape| {
+            let bounds = ellipse_bounds(shape);
+            bounds.max.x - bounds.min.x <= f32::from(viewport.grid_cols) * 0.5
+        })
+        .map(|shape| ellipse_bounds(shape).min.y)
+        .collect();
+    let bed_mid = bed.horizon_y + (bed.near_edge_y - bed.horizon_y) * 0.5;
+    let lower = ys.iter().filter(|y| **y > bed_mid).count();
+    assert!(
+        lower * 2 > ys.len(),
+        "speckles must thin toward the horizon: {lower}/{} below the midline",
+        ys.len()
+    );
     assert!((bed.horizon_y - f32::from(viewport.grid_rows) * 0.76).abs() < 0.01);
     assert!((bed.near_edge_y - f32::from(viewport.grid_rows)).abs() < 0.01);
 
@@ -1547,7 +1566,10 @@ fn composed_plan_rejects_a_nonfinite_depth_override_without_blaming_parallax() {
 /// capture showed.
 #[test]
 fn tank_bed_bands_stay_translucent_enough_to_read_as_depth() {
-    const MAX_BED_ALPHA: u8 = 80;
+    // The vignette and the HUD band sit over the lower bed, and the pet's shadow
+    // needs real ground light to read against, so the bed runs stronger than the
+    // first slice did. Anything past this still reads as a solid footer.
+    const MAX_BED_ALPHA: u8 = 110;
 
     for biome in [
         RoomBiome {

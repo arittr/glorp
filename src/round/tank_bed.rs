@@ -18,8 +18,8 @@ pub struct SmoothTankBedGeometry {
 /// The bed is a receding substrate seen through tank water, not a solid floor. One
 /// hue, one monotone vertical falloff: strongest at the near floor, fading to
 /// almost nothing at the horizon.
-const BED_NEAR_ALPHA: u8 = 78;
-const BED_HORIZON_ALPHA: u8 = 26;
+const BED_NEAR_ALPHA: u8 = 96;
+const BED_HORIZON_ALPHA: u8 = 18;
 
 /// How far the bed's fill is lifted toward white. The biome primaries are wall
 /// colours, dark enough that an alpha-blended bed sinks into the water and gives
@@ -33,8 +33,8 @@ const BED_FLECK_SECONDARY_ALPHA: u8 = 55;
 
 /// Core alpha of the pet's floor projection at the far and near planes. The rim
 /// always fades to nothing, so these can run strong without a hard edge.
-const PROJECTION_ALPHA_FAR: f32 = 110.0;
-const PROJECTION_ALPHA_NEAR: f32 = 190.0;
+const PROJECTION_ALPHA_FAR: f32 = 130.0;
+const PROJECTION_ALPHA_NEAR: f32 = 210.0;
 
 /// The projection's travel band on the bed, as fractions of the bed's depth below
 /// the horizon. The lower bed sits under the bottom vignette and the HUD reserve,
@@ -53,12 +53,11 @@ pub fn smooth_tank_bed_geometry(
     let width = f32::from(viewport.grid_cols);
     let height = f32::from(viewport.grid_rows);
     let horizon_y = height * 0.76;
-    // The ellipse barely dips below the aperture: just enough for the curved
-    // horizon, while keeping nearly the whole vertical falloff on screen so the
-    // floor carries real light where shadows have to read.
+    // Deep enough below the aperture for a real receding curve, shallow enough
+    // that most of the vertical falloff stays on screen and lights the floor.
     let base = SmoothBounds {
         min: SmoothPoint { x: -width * 0.08, y: horizon_y },
-        max: SmoothPoint { x: width * 1.08, y: height * 1.02 },
+        max: SmoothPoint { x: width * 1.08, y: height * 1.15 },
     };
     let (primary, secondary) = bed_colors(biome);
     let floor = lift(primary, BED_LIFT);
@@ -70,16 +69,30 @@ pub fn smooth_tank_bed_geometry(
         },
     )];
 
+    // A dense speckle texture over the gradient: it masks the banding an 8-bit
+    // gradient shows on a dark field, and thinning it toward the horizon is
+    // itself a depth cue. `depth` biases speckles toward the near floor and lets
+    // nearer speckles run larger and stronger, like a substrate seen at an angle.
     let mut hash = tank_bed_hash(viewport, biome);
-    for _ in 0..10 {
-        let x = width * (0.03 + 0.9 * hash_unit(&mut hash));
-        let y = horizon_y + height * (0.045 + 0.18 * hash_unit(&mut hash));
-        let fleck_width = width * (0.012 + 0.028 * hash_unit(&mut hash));
-        let fleck_height = height * (0.009 + 0.022 * hash_unit(&mut hash));
+    let bed_height = height - horizon_y;
+    for _ in 0..42 {
+        let depth = hash_unit(&mut hash).powf(0.55);
+        let x = width * (0.02 + 0.94 * hash_unit(&mut hash));
+        let y = horizon_y + bed_height * (0.04 + 0.9 * depth);
+        let size = 0.5 + depth * 0.9;
+        let fleck_width = width * (0.008 + 0.02 * hash_unit(&mut hash)) * size;
+        let fleck_height = height * (0.006 + 0.014 * hash_unit(&mut hash)) * size;
+        let strength = 0.45 + 0.55 * depth;
         let color = if hash_unit(&mut hash) < 0.5 {
-            with_alpha(primary, BED_FLECK_PRIMARY_ALPHA)
+            with_alpha(
+                lift(primary, 0.18),
+                (f32::from(BED_FLECK_PRIMARY_ALPHA) * strength) as u8,
+            )
         } else {
-            with_alpha(secondary, BED_FLECK_SECONDARY_ALPHA)
+            with_alpha(
+                lift(secondary, 0.18),
+                (f32::from(BED_FLECK_SECONDARY_ALPHA) * strength) as u8,
+            )
         };
         shapes.push(ellipse(
             SmoothBounds {
@@ -123,8 +136,8 @@ pub fn smooth_floor_projection_shape(
         bed.horizon_y + PROJECTION_BAND_NEAR * bed_height,
         t,
     );
-    let radius_x = lerp(0.06 * width, 0.115 * width, t);
-    let radius_y = lerp(0.014 * height, 0.034 * height, t);
+    let radius_x = lerp(0.07 * width, 0.13 * width, t);
+    let radius_y = lerp(0.016 * height, 0.04 * height, t);
     if !radius_x.is_finite() || radius_x <= 0.0 || !radius_y.is_finite() || radius_y <= 0.0 {
         return None;
     }
@@ -177,9 +190,9 @@ fn lerp(from: f32, to: f32, t: f32) -> f32 {
 /// as the bed's own colour in shadow.
 fn bed_shadow(primary: SmoothRgba8) -> SmoothRgba8 {
     SmoothRgba8 {
-        r: primary.r / 2 + 60,
-        g: primary.g / 2 + 60,
-        b: primary.b / 2 + 60,
+        r: primary.r / 3 + 30,
+        g: primary.g / 3 + 30,
+        b: primary.b / 3 + 30,
         a: 255,
     }
 }
