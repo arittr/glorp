@@ -8,6 +8,36 @@ pub struct CompanionReviewOptions {
     pub state: Option<CompanionReviewState>,
     pub duration_ms: Option<u64>,
     pub capture_dir: Option<PathBuf>,
+    /// Pins the pet's depth plane for deterministic captures. Never persisted, and
+    /// consumed only by Smooth scene preparation.
+    pub depth: Option<CompanionReviewDepth>,
+}
+
+/// The three depth planes a review capture can pin, normalized onto the raw depth
+/// channel's `[-1, 1]` contract. Far is away and small; near is toward the glass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompanionReviewDepth {
+    Far,
+    Neutral,
+    Near,
+}
+
+impl CompanionReviewDepth {
+    pub const fn normalized(self) -> f32 {
+        match self {
+            Self::Far => -1.0,
+            Self::Neutral => 0.0,
+            Self::Near => 1.0,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Far => "far",
+            Self::Neutral => "neutral",
+            Self::Near => "near",
+        }
+    }
 }
 
 impl CompanionReviewOptions {
@@ -25,6 +55,7 @@ impl CompanionReviewOptions {
             || self.state.is_some()
             || self.duration_ms.is_some()
             || self.capture_dir.is_some()
+            || self.depth.is_some()
     }
 }
 

@@ -9,7 +9,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::commands::companion_mode::{
-    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
+    CompanionRendererMode, CompanionReviewDepth, CompanionReviewOptions, CompanionReviewSize,
+    CompanionReviewState,
 };
 use crate::commands::watch::{
     build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
@@ -251,6 +252,7 @@ fn prepare_companion_frame(
     vm: &WatchViewModel,
     scene: &RoundSceneModel,
     renderer_mode: CompanionRendererMode,
+    review_depth: Option<CompanionReviewDepth>,
     pixel_frame: Option<&PixelFrame>,
     smooth_started_at: Option<Instant>,
     smooth_semantic_art_tick_index: u64,
@@ -288,13 +290,17 @@ fn prepare_companion_frame(
                 .map(|started_at| started_at.elapsed().as_millis())
                 .unwrap_or(0)
                 .min(u128::from(u64::MAX)) as u64;
-            let plan = crate::round::smooth::try_build_round_smooth_scene_plan(
+            // Normal runs pass None here and keep their roam-driven depth.
+            let plan = crate::round::smooth::try_build_round_smooth_scene_plan_with_options(
                 vm,
                 time::OffsetDateTime::now_utc(),
                 metrics.grid_cols,
                 metrics.grid_rows,
                 &companion_motion(),
                 elapsed_ms,
+                crate::round::smooth::SmoothSceneBuildOptions {
+                    depth_override: review_depth.map(CompanionReviewDepth::normalized),
+                },
             )
             .map_err(|err| match err {
                 SmoothScenePlanError::MissingPetBody => {
@@ -387,6 +393,21 @@ fn prepare_companion_frame(
                     crate::companion::review_capture::SmoothReviewParallaxPlanes::from_smooth_planes(
                         plan.parallax_translations_by_plane(),
                     ),
+                depth: plan.pet.depth,
+                pet_scale: plan.pet.scale,
+                perspective_y: plan.pet.perspective_offset.y,
+                pet_extent_width: plan.pet.transformed_bounds.max.x
+                    - plan.pet.transformed_bounds.min.x,
+                pet_extent_height: plan.pet.transformed_bounds.max.y
+                    - plan.pet.transformed_bounds.min.y,
+                shape_draw_count: plan
+                    .layers
+                    .iter()
+                    .flat_map(|layer| layer.items.iter())
+                    .filter(|item| {
+                        matches!(item, crate::presentation::smooth::SmoothLayerItem::Shape(_))
+                    })
+                    .count() as u32,
             })
         }
         _ => None,
@@ -417,6 +438,8 @@ struct AppState {
     vm: WatchViewModel,
     scene: RoundSceneModel,
     review_state: CompanionReviewState,
+    /// Pins the Smooth pet's depth plane for deterministic review captures.
+    review_depth: Option<CompanionReviewDepth>,
     renderer_mode: CompanionRendererMode,
     pixel_input: Option<PixelPetInput>,
     pixel_state: Option<PixelRendererState>,
@@ -593,6 +616,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             vm: initial_vm,
             scene,
             review_state,
+            review_depth: review.depth,
             renderer_mode,
             pixel_input,
             pixel_state,
@@ -816,6 +840,7 @@ fn prepare_current_frame_from_state() {
                 vm,
                 scene,
                 renderer_mode,
+                review_depth,
                 pixel_frame,
                 smooth_started_at,
                 smooth_semantic_art_tick_index,
@@ -828,6 +853,7 @@ fn prepare_current_frame_from_state() {
                 vm,
                 scene,
                 *renderer_mode,
+                *review_depth,
                 pixel_frame.as_ref(),
                 *smooth_started_at,
                 *smooth_semantic_art_tick_index,
@@ -2029,6 +2055,7 @@ mod tests {
             CompanionRendererMode::Pixel,
             None,
             None,
+            None,
             0,
             false,
             measured_bounds,
@@ -2047,6 +2074,7 @@ mod tests {
             &vm,
             &scene,
             CompanionRendererMode::Pixel,
+            None,
             None,
             None,
             0,

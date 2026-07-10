@@ -62,6 +62,18 @@ pub struct SmoothReviewFrameSample {
     pub parallax_focus_offset: SmoothReviewPoint,
     pub parallax_lifecycle_scale: f32,
     pub parallax_planes: SmoothReviewParallaxPlanes,
+    /// Raw depth channel in `[-1, 1]`; negative is far, positive is near.
+    pub depth: f32,
+    /// Uniform depth scale applied to the pet this frame.
+    pub pet_scale: f32,
+    /// Vertical perspective offset the depth sample resolves to.
+    pub perspective_y: f32,
+    /// Width of the pet's transformed bounds after depth composition.
+    pub pet_extent_width: f32,
+    /// Height of the pet's transformed bounds after depth composition.
+    pub pet_extent_height: f32,
+    /// Count of typed shape draws emitted across every layer this frame.
+    pub shape_draw_count: u32,
 }
 
 #[derive(Debug)]
@@ -78,6 +90,10 @@ pub struct ReviewCapture {
     max_adjacent_base_anchor_delta: SmoothReviewPoint,
     max_adjacent_final_anchor_delta: SmoothReviewPoint,
     max_adjacent_parallax_delta_by_plane: SmoothReviewParallaxPlanes,
+    min_pet_scale: f32,
+    max_pet_scale: f32,
+    max_adjacent_pet_scale_delta: f32,
+    nonblank_shape_frame_count: u64,
     pet_checksums_by_semantic_tick: BTreeMap<u64, u64>,
     pet_checksums_stable_within_semantic_ticks: bool,
     last_smooth_sample: Option<SmoothReviewFrameSample>,
@@ -116,6 +132,12 @@ impl ReviewCapture {
             max_adjacent_base_anchor_delta: SmoothReviewPoint::default(),
             max_adjacent_final_anchor_delta: SmoothReviewPoint::default(),
             max_adjacent_parallax_delta_by_plane: SmoothReviewParallaxPlanes::default(),
+            // Seed the scale bounds finite so a zero-sample run serializes real
+            // numbers; the first recorded sample overwrites both seeds.
+            min_pet_scale: 0.0,
+            max_pet_scale: 0.0,
+            max_adjacent_pet_scale_delta: 0.0,
+            nonblank_shape_frame_count: 0,
             pet_checksums_by_semantic_tick: BTreeMap::new(),
             pet_checksums_stable_within_semantic_ticks: true,
             last_smooth_sample: None,
@@ -137,6 +159,9 @@ impl ReviewCapture {
             self.semantic_art_tick_count = self
                 .semantic_art_tick_count
                 .max(sample.semantic_art_tick_index);
+            if sample.shape_draw_count > 0 {
+                self.nonblank_shape_frame_count = self.nonblank_shape_frame_count.saturating_add(1);
+            }
             if let Some(previous) = self.last_smooth_sample {
                 self.max_adjacent_base_anchor_delta = max_point_delta(
                     self.max_adjacent_base_anchor_delta,
@@ -153,6 +178,16 @@ impl ReviewCapture {
                     previous.parallax_planes,
                     sample.parallax_planes,
                 );
+                self.min_pet_scale = self.min_pet_scale.min(sample.pet_scale);
+                self.max_pet_scale = self.max_pet_scale.max(sample.pet_scale);
+                self.max_adjacent_pet_scale_delta = self
+                    .max_adjacent_pet_scale_delta
+                    .max(round_sample((sample.pet_scale - previous.pet_scale).abs()));
+            } else {
+                // The first sample seeds both scale bounds so a single-frame run
+                // reports its real scale instead of the finite zero placeholder.
+                self.min_pet_scale = sample.pet_scale;
+                self.max_pet_scale = sample.pet_scale;
             }
             if let Some(existing) = self
                 .pet_checksums_by_semantic_tick
@@ -256,6 +291,10 @@ impl ReviewCapture {
             max_adjacent_base_anchor_delta: self.max_adjacent_base_anchor_delta,
             max_adjacent_final_anchor_delta: self.max_adjacent_final_anchor_delta,
             max_adjacent_parallax_delta_by_plane: self.max_adjacent_parallax_delta_by_plane,
+            min_pet_scale: self.min_pet_scale,
+            max_pet_scale: self.max_pet_scale,
+            max_adjacent_pet_scale_delta: self.max_adjacent_pet_scale_delta,
+            nonblank_shape_frame_count: self.nonblank_shape_frame_count,
             smooth_frame_samples: &self.smooth_frame_samples,
             privacy: ReviewPrivacyLog::from_claims(
                 &crate::presentation::smooth::SmoothCompanionPrivacyClaims::external_companion(),
@@ -288,6 +327,10 @@ struct RenderLog<'a> {
     max_adjacent_base_anchor_delta: SmoothReviewPoint,
     max_adjacent_final_anchor_delta: SmoothReviewPoint,
     max_adjacent_parallax_delta_by_plane: SmoothReviewParallaxPlanes,
+    min_pet_scale: f32,
+    max_pet_scale: f32,
+    max_adjacent_pet_scale_delta: f32,
+    nonblank_shape_frame_count: u64,
     smooth_frame_samples: &'a [SmoothReviewFrameSample],
     privacy: ReviewPrivacyLog,
     panic: bool,
@@ -394,6 +437,12 @@ fn round_smooth_sample(sample: SmoothReviewFrameSample) -> SmoothReviewFrameSamp
             behind: round_review_point(sample.parallax_planes.behind),
             foreground: round_review_point(sample.parallax_planes.foreground),
         },
+        depth: round_sample(sample.depth),
+        pet_scale: round_sample(sample.pet_scale),
+        perspective_y: round_sample(sample.perspective_y),
+        pet_extent_width: round_sample(sample.pet_extent_width),
+        pet_extent_height: round_sample(sample.pet_extent_height),
+        shape_draw_count: sample.shape_draw_count,
     }
 }
 
@@ -522,6 +571,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.03, y: 0.0225 },
                 foreground: SmoothReviewPoint { x: 0.045, y: 0.03374 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.2,
@@ -539,6 +594,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.01114, y: -0.00114 },
                 foreground: SmoothReviewPoint { x: -0.00516, y: 0.00494 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.3,
@@ -556,6 +617,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: -0.00994, y: 0.04444 },
                 foreground: SmoothReviewPoint { x: 0.03006, y: -0.02666 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.4,
@@ -573,6 +640,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.01806, y: 0.01004 },
                 foreground: SmoothReviewPoint { x: -0.02244, y: 0.01884 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
         let json = capture.render_log_json_for_test().unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
@@ -667,6 +740,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: -0.03006, y: 0.02504 },
                 foreground: SmoothReviewPoint { x: 0.04004, y: -0.03506 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
 
         let json = capture.render_log_json_for_test().unwrap();
@@ -767,6 +846,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
                 foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.2,
@@ -784,6 +869,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
                 foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
 
         assert!(!capture.pet_checksums_stable_within_semantic_ticks_for_test());
@@ -818,6 +909,12 @@ mod tests {
                     behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
                     foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
                 },
+                depth: 0.0,
+                pet_scale: 1.0,
+                perspective_y: 0.0,
+                pet_extent_width: 9.0,
+                pet_extent_height: 6.0,
+                shape_draw_count: 0,
             }));
         }
         capture.record_frame(Some(SmoothReviewFrameSample {
@@ -836,6 +933,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
                 foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
 
         let json = capture.render_log_json_for_test().unwrap();
@@ -875,6 +978,12 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
                 foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
         capture.record_frame(Some(SmoothReviewFrameSample {
             bob_y: 0.2,
@@ -892,7 +1001,170 @@ mod tests {
                 behind: SmoothReviewPoint { x: 0.0, y: 0.0 },
                 foreground: SmoothReviewPoint { x: 0.0, y: 0.0 },
             },
+            depth: 0.0,
+            pet_scale: 1.0,
+            perspective_y: 0.0,
+            pet_extent_width: 9.0,
+            pet_extent_height: 6.0,
+            shape_draw_count: 0,
         }));
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_render_log_json_values_are_sanitized(&value, "$");
+    }
+
+    fn depth_evidence_sample(
+        pet_scale: f32,
+        pet_extent_width: f32,
+        pet_extent_height: f32,
+        shape_draw_count: u32,
+    ) -> SmoothReviewFrameSample {
+        SmoothReviewFrameSample {
+            bob_y: 0.0,
+            semantic_art_tick_index: 0,
+            pet_visual_checksum: 123,
+            base_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            bob_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            final_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            classic_snap_anchor: SmoothReviewPoint { x: 1.0, y: 1.0 },
+            parallax_focus_offset: SmoothReviewPoint { x: 0.0, y: 0.0 },
+            parallax_lifecycle_scale: 1.0,
+            parallax_planes: SmoothReviewParallaxPlanes::default(),
+            depth: (pet_scale - 0.88) / 0.12 - 1.0,
+            pet_scale,
+            perspective_y: (pet_scale - 1.0) * 3.75,
+            pet_extent_width,
+            pet_extent_height,
+            shape_draw_count,
+        }
+    }
+
+    #[test]
+    fn depth_review_samples_are_ordered_from_far_to_near() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        capture.record_frame(Some(depth_evidence_sample(0.88, 8.0, 6.0, 3)));
+        capture.record_frame(Some(depth_evidence_sample(1.0, 9.0, 6.75, 3)));
+        capture.record_frame(Some(depth_evidence_sample(1.12, 10.0, 7.5, 3)));
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        let samples = value["smooth_frame_samples"].as_array().unwrap();
+        let width = |index: usize| samples[index]["pet_extent_width"].as_f64().unwrap();
+        let scale = |index: usize| samples[index]["pet_scale"].as_f64().unwrap();
+        assert!(width(0) < width(1) && width(1) < width(2));
+        assert!(scale(0) < scale(1) && scale(1) < scale(2));
+        assert_eq!(value["min_pet_scale"], 0.88);
+        assert_eq!(value["max_pet_scale"], 1.12);
+    }
+
+    #[test]
+    fn nonblank_shape_frame_count_counts_only_frames_with_shape_draws() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        capture.record_frame(Some(depth_evidence_sample(1.0, 9.0, 6.0, 0)));
+        capture.record_frame(Some(depth_evidence_sample(1.0, 9.0, 6.0, 4)));
+        capture.record_frame(Some(depth_evidence_sample(1.0, 9.0, 6.0, 0)));
+        capture.record_frame(Some(depth_evidence_sample(1.0, 9.0, 6.0, 2)));
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["frame_count"], 4);
+        assert_eq!(value["nonblank_shape_frame_count"], 2);
+    }
+
+    #[test]
+    fn max_adjacent_pet_scale_delta_stays_bounded_across_animation() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        // Ramp the pet forward and back one step at a time, mimicking the smooth
+        // depth roam without pinning it to a fixed plane.
+        let scales = [
+            0.88, 0.90, 0.94, 0.99, 1.04, 1.09, 1.12, 1.09, 1.03, 0.97, 0.91, 0.88,
+        ];
+        for scale in scales {
+            capture.record_frame(Some(depth_evidence_sample(scale, 9.0, 6.0, 3)));
+        }
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        let delta = value["max_adjacent_pet_scale_delta"].as_f64().unwrap();
+        assert!(delta > 0.0, "animation should exercise scale change");
+        assert!(
+            delta < 0.08,
+            "adjacent scale delta must stay bounded, got {delta}"
+        );
+        assert_eq!(value["min_pet_scale"], 0.88);
+        assert_eq!(value["max_pet_scale"], 1.12);
+    }
+
+    #[test]
+    fn zero_sample_run_serializes_finite_scale_bounds() {
+        let capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert!(value["min_pet_scale"].as_f64().unwrap().is_finite());
+        assert!(value["max_pet_scale"].as_f64().unwrap().is_finite());
+        assert_eq!(value["max_adjacent_pet_scale_delta"], 0.0);
+        assert_eq!(value["nonblank_shape_frame_count"], 0);
+    }
+
+    #[test]
+    fn depth_review_evidence_stays_sanitized() {
+        let mut capture = ReviewCapture::from_options(
+            CompanionRendererMode::Smooth,
+            &CompanionReviewOptions {
+                duration_ms: Some(2000),
+                state: Some(CompanionReviewState::HelperTrouble),
+                initial_size: Some(CompanionReviewSize { width: 360, height: 360 }),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("duration should create review capture session");
+
+        capture.record_frame(Some(depth_evidence_sample(0.88, 8.0, 6.0, 3)));
+        capture.record_frame(Some(depth_evidence_sample(1.0, 9.0, 6.75, 3)));
+        capture.record_frame(Some(depth_evidence_sample(1.12, 10.0, 7.5, 3)));
 
         let json = capture.render_log_json_for_test().unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();

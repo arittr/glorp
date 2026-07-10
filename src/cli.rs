@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::commands::companion_mode::{
-    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
+    CompanionRendererMode, CompanionReviewDepth, CompanionReviewOptions, CompanionReviewSize,
+    CompanionReviewState,
 };
 
 #[derive(Debug, Parser)]
@@ -55,6 +56,8 @@ pub enum Command {
         review_duration_ms: Option<u64>,
         #[arg(long, hide = true)]
         review_capture_dir: Option<PathBuf>,
+        #[arg(long, value_enum, hide = true)]
+        review_depth: Option<CompanionReviewDepth>,
     },
     #[command(hide = true)]
     CompanionApp {
@@ -70,6 +73,8 @@ pub enum Command {
         review_duration_ms: Option<u64>,
         #[arg(long, hide = true)]
         review_capture_dir: Option<PathBuf>,
+        #[arg(long, value_enum, hide = true)]
+        review_depth: Option<CompanionReviewDepth>,
     },
     /// Print a compact non-interactive pet and usage summary.
     Status,
@@ -144,6 +149,7 @@ impl Cli {
         review_state: Option<CompanionReviewState>,
         review_duration_ms: Option<u64>,
         review_capture_dir: Option<PathBuf>,
+        review_depth: Option<CompanionReviewDepth>,
     ) -> CompanionReviewOptions {
         CompanionReviewOptions {
             initial_size: review_size,
@@ -151,6 +157,7 @@ impl Cli {
             state: review_state,
             duration_ms: review_duration_ms,
             capture_dir: review_capture_dir,
+            depth: review_depth,
         }
     }
 }
@@ -193,5 +200,58 @@ mod tests {
             };
             assert_eq!(renderer, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod companion_review_depth_tests {
+    use super::Cli;
+    use crate::commands::companion_mode::CompanionReviewDepth;
+    use clap::Parser;
+
+    fn parse_depth(command: &str, value: &str) -> Option<CompanionReviewDepth> {
+        let cli = Cli::try_parse_from(["glorp", command, "--review-depth", value])
+            .expect("hidden review-depth must parse");
+        match cli.command {
+            super::Command::Companion { review_depth, .. }
+            | super::Command::CompanionApp { review_depth, .. } => review_depth,
+            other => panic!("expected a companion command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn companion_review_depth_parses_all_three_planes_for_both_commands() {
+        for command in ["companion", "companion-app"] {
+            assert_eq!(parse_depth(command, "far"), Some(CompanionReviewDepth::Far));
+            assert_eq!(
+                parse_depth(command, "neutral"),
+                Some(CompanionReviewDepth::Neutral)
+            );
+            assert_eq!(
+                parse_depth(command, "near"),
+                Some(CompanionReviewDepth::Near)
+            );
+        }
+    }
+
+    #[test]
+    fn companion_review_depth_normalizes_onto_the_raw_depth_contract() {
+        assert_eq!(CompanionReviewDepth::Far.normalized(), -1.0);
+        assert_eq!(CompanionReviewDepth::Neutral.normalized(), 0.0);
+        assert_eq!(CompanionReviewDepth::Near.normalized(), 1.0);
+    }
+
+    #[test]
+    fn companion_review_depth_alone_counts_as_a_review_launch() {
+        let options = Cli::companion_review_options(
+            None,
+            false,
+            None,
+            None,
+            None,
+            Some(CompanionReviewDepth::Near),
+        );
+        assert!(options.has_review_launch_options());
+        assert_eq!(options.depth, Some(CompanionReviewDepth::Near));
     }
 }

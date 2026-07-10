@@ -62,6 +62,9 @@ fn build_open_command(
     if let Some(capture_dir) = review.capture_dir {
         command.arg("--review-capture-dir").arg(capture_dir);
     }
+    if let Some(depth) = review.depth {
+        command.arg("--review-depth").arg(depth.as_str());
+    }
     command
 }
 
@@ -182,5 +185,56 @@ mod tests {
                 OsString::from("target/glorp-review/test"),
             ]
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod review_depth_forwarding_tests {
+    use super::build_open_command;
+    use crate::commands::companion_mode::{
+        CompanionRendererMode, CompanionReviewDepth, CompanionReviewOptions,
+    };
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    #[test]
+    fn review_depth_is_forwarded_to_the_native_companion_process() {
+        for (depth, expected) in [
+            (CompanionReviewDepth::Far, "far"),
+            (CompanionReviewDepth::Neutral, "neutral"),
+            (CompanionReviewDepth::Near, "near"),
+        ] {
+            let command = build_open_command(
+                Path::new("/Applications/Glorp.app"),
+                CompanionRendererMode::Smooth,
+                CompanionReviewOptions {
+                    depth: Some(depth),
+                    ..CompanionReviewOptions::default()
+                },
+            );
+            let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--review-depth" && pair[1] == expected),
+                "expected --review-depth {expected} in {args:?}"
+            );
+        }
+    }
+
+    /// A pinned depth is a review launch on its own, so the app must be spawned
+    /// with `-n` and `--args` rather than reusing a running instance.
+    #[test]
+    fn review_depth_alone_spawns_a_fresh_instance_with_args() {
+        let command = build_open_command(
+            Path::new("/Applications/Glorp.app"),
+            CompanionRendererMode::Classic,
+            CompanionReviewOptions {
+                depth: Some(CompanionReviewDepth::Far),
+                ..CompanionReviewOptions::default()
+            },
+        );
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(args[0], OsString::from("-n"));
+        assert!(args.contains(&OsString::from("--args")));
     }
 }
