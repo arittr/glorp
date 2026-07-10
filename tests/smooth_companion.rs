@@ -110,13 +110,17 @@ fn smooth_fill_reports_the_strongest_alpha_it_can_paint() {
         SmoothFill::RadialGradient { inner: faint, outer: strong }.max_alpha(),
         90
     );
+    assert_eq!(
+        SmoothFill::LinearGradientY { top: faint, bottom: strong }.max_alpha(),
+        90
+    );
 }
 
-/// The bed was three stacked hard-edged ellipses whose hue ran
-/// primary -> secondary -> primary. That is not a falloff, it is an oscillation,
-/// and it read as odd colour banding.
+/// The bed recedes vertically toward its horizon. A circular radial gradient in an
+/// ellipse three times wider than tall paints concentric arcs across it, which
+/// read as banding; the falloff must be vertical.
 #[test]
-fn tank_bed_base_is_one_radial_gradient_of_a_single_hue() {
+fn tank_bed_base_is_one_vertical_gradient_of_a_single_hue() {
     let viewport = CompanionViewport {
         grid_cols: GRID_COLS,
         grid_rows: GRID_ROWS,
@@ -124,18 +128,17 @@ fn tank_bed_base_is_one_radial_gradient_of_a_single_hue() {
     let bed = smooth_tank_bed_geometry(viewport, tank_bed_biome()).expect("bed");
 
     let base = bed.shapes.first().expect("bed has a base band");
-    let SmoothFill::RadialGradient { inner, outer } = base.fill else {
+    let SmoothFill::LinearGradientY { top, bottom } = base.fill else {
         panic!(
-            "the bed base must be a radial gradient, got {:?}",
+            "the bed base must be a vertical gradient, got {:?}",
             base.fill
         );
     };
 
     // One hue: only the alpha varies between the near floor and the horizon.
-    assert_eq!((inner.r, inner.g, inner.b), (outer.r, outer.g, outer.b));
-    // The centre of the base ellipse sits below the aperture, so its outer edge is
-    // the horizon and must be the fainter end.
-    assert!(inner.a > outer.a);
+    assert_eq!((top.r, top.g, top.b), (bottom.r, bottom.g, bottom.b));
+    // The shape's top edge is the horizon, so it must be the fainter end.
+    assert!(bottom.a > top.a);
 }
 
 #[test]
@@ -1413,7 +1416,34 @@ fn floor_projection_is_one_bed_anchored_ellipse_that_tracks_depth() {
         "the far projection must sit closer to the bed horizon"
     );
     assert!(center_y(far_bounds) >= bed.horizon_y);
-    assert!(center_y(near_bounds) <= bed.near_edge_y);
+    // The lower bed sits under the bottom vignette and the HUD reserve, where a
+    // shadow cannot read. The whole travel band stays in the upper half of the bed.
+    let bed_height = bed.near_edge_y - bed.horizon_y;
+    assert!(
+        center_y(near_bounds) <= bed.horizon_y + bed_height * 0.5 + 1e-3,
+        "the near projection sank into the vignette at y={}",
+        center_y(near_bounds)
+    );
+
+    // A shadow must darken whatever the bed shows beneath it; dark paint on a
+    // dark floor reads as nothing.
+    for plan in [&far, &near] {
+        assert_eq!(
+            plan.layer_by_role(SmoothLayerRole::FloorProjection)
+                .unwrap()
+                .blend,
+            SmoothBlendMode::Multiply
+        );
+    }
+
+    // A hard-edged solid blob does not read as a shadow; it needs a soft rim.
+    for fill in [far_fill, near_fill] {
+        let SmoothFill::RadialGradient { inner, outer } = fill else {
+            panic!("the projection must be a soft radial shadow, got {fill:?}");
+        };
+        assert!(inner.a > 0, "the projection core must be visible");
+        assert_eq!(outer.a, 0, "the projection rim must fade to nothing");
+    }
 
     // It tracks the pet across the tank. The creature's centre is the centre of
     // its particle frame, which `max_scale_clearance` is built around; the
@@ -1620,8 +1650,17 @@ fn far_depth_fades_pet_attached_layers_without_touching_the_tank() {
             far_opacity < near_opacity,
             "{role:?} must recede into the water at the far plane"
         );
-        assert_eq!(near_opacity, 1.0, "{role:?} is fully present at the glass");
-        assert!((far_opacity - SMOOTH_FAR_ATMOSPHERE).abs() < 1e-5);
+        assert!(
+            (far_opacity / near_opacity - SMOOTH_FAR_ATMOSPHERE).abs() < 1e-5,
+            "{role:?} must fade by exactly the atmospheric attenuation"
+        );
+    }
+    for role in [SmoothLayerRole::PetBody, SmoothLayerRole::PerformanceCue] {
+        assert_eq!(
+            near.layer_by_role(role).unwrap().opacity,
+            1.0,
+            "{role:?} is fully present at the glass"
+        );
     }
 
     // The tank itself does not breathe with the pet's depth.
@@ -1636,4 +1675,40 @@ fn far_depth_fades_pet_attached_layers_without_touching_the_tank() {
             "{role:?} is fixed to the tank, not to the pet's depth"
         );
     }
+}
+
+/// The classic wall shadow repaints the wall wash one step darker, which presumes
+/// an opaquely painted wall behind the pet. The smooth tank is a dark gradient, so
+/// that repaint reads as nothing. A multiply veil darkens whatever is actually
+/// beneath it, on any background.
+#[test]
+fn wall_shadow_is_a_multiply_veil_in_the_smooth_plan() {
+    let vm = normal_lifecycle_fixture();
+    let near = plan_at_depth(&vm, 250, 1.0);
+    let far = plan_at_depth(&vm, 250, -1.0);
+
+    for plan in [&near, &far] {
+        let shadow = plan.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
+        assert_eq!(shadow.blend, SmoothBlendMode::Multiply);
+        assert!(!shadow.items.is_empty(), "the wall shadow must carry cells");
+        for item in &shadow.items {
+            let SmoothLayerItem::LocalCell(cell) = item else {
+                panic!("wall shadow items are cells, got {item:?}");
+            };
+            let bg = cell.bg.expect("wall shadow cells are background-only");
+            assert!(
+                bg.r > 120 && bg.g > 120 && bg.b > 120,
+                "a multiply factor this dark ({bg:?}) blacks out the scene instead of shading it"
+            );
+            assert!(
+                bg.r < 230 && bg.g < 230 && bg.b < 230,
+                "a multiply factor this light ({bg:?}) is invisible"
+            );
+        }
+    }
+
+    // The veil still recedes with the pet.
+    let near_shadow = near.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
+    let far_shadow = far.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
+    assert!(far_shadow.opacity < near_shadow.opacity);
 }

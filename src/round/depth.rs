@@ -1,6 +1,6 @@
 pub const SMOOTH_PET_FAR_SCALE: f32 = 0.88;
 pub const SMOOTH_PET_NEAR_SCALE: f32 = 1.12;
-pub const SMOOTH_PERSPECTIVE_Y_MAX: f32 = 0.45;
+pub const SMOOTH_PERSPECTIVE_Y_MAX: f32 = 0.30;
 
 /// Atmospheric perspective: things seen through more water lose contrast to it.
 /// The far plane keeps this fraction of its ink; the near plane is fully present.

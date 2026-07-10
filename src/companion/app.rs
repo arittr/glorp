@@ -1804,6 +1804,19 @@ fn appkit_blit_smooth_plan(
                                     );
                                 }
                             }
+                            SmoothFill::LinearGradientY { top, bottom } => {
+                                // AppKit is Y-up: angle 90 draws the starting
+                                // colour at the rect's bottom edge, which is the
+                                // shape's bottom in cell space.
+                                let gradient = NSGradient::initWithStartingColor_endingColor(
+                                    NSGradient::alloc(),
+                                    &rgba_to_nscolor(bottom, layer.opacity),
+                                    &rgba_to_nscolor(top, layer.opacity),
+                                );
+                                if let Some(gradient) = gradient {
+                                    gradient.drawInBezierPath_angle(&path, 90.0);
+                                }
+                            }
                         }
                     }
                 }

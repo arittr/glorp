@@ -205,6 +205,21 @@ pub fn try_build_round_smooth_scene_plan_with_options(
                 // Atmospheric perspective: the far pet recedes into the water
                 // rather than merely shrinking against it.
                 layer.opacity = (layer.opacity * depth.atmosphere).clamp(0.0, 1.0);
+                if layer.role == SmoothLayerRole::WallShadow {
+                    // The classic wall shadow repaints the wall wash one step
+                    // darker, which presumes an opaquely painted wall behind the
+                    // pet. The smooth tank is a dark gradient, so that repaint
+                    // reads as nothing. A multiply veil darkens whatever actually
+                    // sits beneath it, on any background.
+                    layer.blend = SmoothBlendMode::Multiply;
+                    for item in &mut layer.items {
+                        if let SmoothLayerItem::LocalCell(cell) = item {
+                            if cell.bg.is_some() {
+                                cell.bg = Some(WALL_SHADOW_MULTIPLY);
+                            }
+                        }
+                    }
+                }
             }
             // The floor projection follows the pet across the tank, but stays
             // anchored to the bed while the pet bobs against the wall.
@@ -212,6 +227,9 @@ pub fn try_build_round_smooth_scene_plan_with_options(
                 // Draw over the room grid but beneath every prop layer, so the
                 // projection reads as a floor treatment rather than an occluder.
                 layer.z = 1;
+                // A shadow darkens what the bed shows beneath it. Painting a dark
+                // colour over a dark floor reads as nothing.
+                layer.blend = SmoothBlendMode::Multiply;
                 match tank_bed.as_ref().and_then(|bed| {
                     smooth_floor_projection_shape(viewport, bed, pet_center_x, depth)
                 }) {
@@ -432,6 +450,11 @@ fn tank_bed_layer(
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
     }
 }
+
+/// Multiply factor for the smooth wall shadow: darkens what it covers by about a
+/// third, with a slightly cool cast so it reads as shade rather than dirt.
+const WALL_SHADOW_MULTIPLY: crate::pet::palette::Rgb =
+    crate::pet::palette::Rgb { r: 168, g: 164, b: 182 };
 
 /// The worst case the pet can ever occupy around a roam centre: creature ink at
 /// the maximum depth scale, plus the full perspective excursion in both

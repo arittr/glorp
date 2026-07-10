@@ -195,6 +195,13 @@ pub enum SmoothFill {
         inner: SmoothRgba8,
         outer: SmoothRgba8,
     },
+    /// Vertical falloff from the shape's top edge to its bottom edge. A ground
+    /// plane recedes toward its horizon; a radial falloff in a wide ellipse paints
+    /// concentric arcs across it instead.
+    LinearGradientY {
+        top: SmoothRgba8,
+        bottom: SmoothRgba8,
+    },
 }
 
 impl SmoothFill {
@@ -207,6 +214,13 @@ impl SmoothFill {
                     inner.a
                 } else {
                     outer.a
+                }
+            }
+            Self::LinearGradientY { top, bottom } => {
+                if top.a > bottom.a {
+                    top.a
+                } else {
+                    bottom.a
                 }
             }
         }

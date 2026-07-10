@@ -15,26 +15,32 @@ pub struct SmoothTankBedGeometry {
     pub shadow: SmoothRgba8,
 }
 
-/// The bed is a receding substrate seen through tank water, not a solid floor. Its
-/// base ellipse is centred below the aperture, so the gradient's outer edge is the
-/// horizon and its inner region is the near floor. One hue, one monotone falloff:
-/// the stacked bands this replaced ran primary -> secondary -> primary, which read
-/// as odd colour banding rather than distance.
+/// The bed is a receding substrate seen through tank water, not a solid floor. One
+/// hue, one monotone vertical falloff: strongest at the near floor, fading to
+/// almost nothing at the horizon.
 const BED_NEAR_ALPHA: u8 = 78;
-const BED_HORIZON_ALPHA: u8 = 22;
+const BED_HORIZON_ALPHA: u8 = 26;
+
+/// How far the bed's fill is lifted toward white. The biome primaries are wall
+/// colours, dark enough that an alpha-blended bed sinks into the water and gives
+/// the pet's shadow nothing to sit on.
+const BED_LIFT: f32 = 0.30;
 
 /// Flecks are the bed's texture and sit over the faintest band, so they carry a
 /// little more weight than the bands beneath them.
 const BED_FLECK_PRIMARY_ALPHA: u8 = 60;
 const BED_FLECK_SECONDARY_ALPHA: u8 = 55;
 
-/// Alpha of the pet's floor projection at the far and near planes.
-const PROJECTION_ALPHA_FAR: f32 = 46.0;
-const PROJECTION_ALPHA_NEAR: f32 = 92.0;
+/// Core alpha of the pet's floor projection at the far and near planes. The rim
+/// always fades to nothing, so these can run strong without a hard edge.
+const PROJECTION_ALPHA_FAR: f32 = 110.0;
+const PROJECTION_ALPHA_NEAR: f32 = 190.0;
 
-/// Fraction of the bed's depth the projection keeps clear of each edge, so the
-/// pet never appears to stand on the horizon line or off the near lip.
-const PROJECTION_EDGE_INSET: f32 = 0.10;
+/// The projection's travel band on the bed, as fractions of the bed's depth below
+/// the horizon. The lower bed sits under the bottom vignette and the HUD reserve,
+/// where a shadow cannot read, so the band is collapsed into the upper half.
+const PROJECTION_BAND_FAR: f32 = 0.10;
+const PROJECTION_BAND_NEAR: f32 = 0.45;
 
 pub fn smooth_tank_bed_geometry(
     viewport: CompanionViewport,
@@ -47,16 +53,20 @@ pub fn smooth_tank_bed_geometry(
     let width = f32::from(viewport.grid_cols);
     let height = f32::from(viewport.grid_rows);
     let horizon_y = height * 0.76;
+    // The ellipse barely dips below the aperture: just enough for the curved
+    // horizon, while keeping nearly the whole vertical falloff on screen so the
+    // floor carries real light where shadows have to read.
     let base = SmoothBounds {
         min: SmoothPoint { x: -width * 0.08, y: horizon_y },
-        max: SmoothPoint { x: width * 1.08, y: height * 1.34 },
+        max: SmoothPoint { x: width * 1.08, y: height * 1.02 },
     };
     let (primary, secondary) = bed_colors(biome);
+    let floor = lift(primary, BED_LIFT);
     let mut shapes = vec![ellipse(
         base,
-        SmoothFill::RadialGradient {
-            inner: with_alpha(primary, BED_NEAR_ALPHA),
-            outer: with_alpha(primary, BED_HORIZON_ALPHA),
+        SmoothFill::LinearGradientY {
+            top: with_alpha(floor, BED_HORIZON_ALPHA),
+            bottom: with_alpha(floor, BED_NEAR_ALPHA),
         },
     )];
 
@@ -108,10 +118,13 @@ pub fn smooth_floor_projection_shape(
     }
 
     let t = (depth.effective_z + 1.0) * 0.5;
-    let inset = PROJECTION_EDGE_INSET * bed_height;
-    let center_y = lerp(bed.horizon_y + inset, bed.near_edge_y - inset, t);
-    let radius_x = lerp(0.055 * width, 0.105 * width, t);
-    let radius_y = lerp(0.012 * height, 0.030 * height, t);
+    let center_y = lerp(
+        bed.horizon_y + PROJECTION_BAND_FAR * bed_height,
+        bed.horizon_y + PROJECTION_BAND_NEAR * bed_height,
+        t,
+    );
+    let radius_x = lerp(0.06 * width, 0.115 * width, t);
+    let radius_y = lerp(0.014 * height, 0.034 * height, t);
     if !radius_x.is_finite() || radius_x <= 0.0 || !radius_y.is_finite() || radius_y <= 0.0 {
         return None;
     }
@@ -138,9 +151,13 @@ pub fn smooth_floor_projection_shape(
     if !bounds_are_finite(bounds) {
         return None;
     }
+    // A soft rim: a hard-edged solid blob reads as a hole in the bed, not a shadow.
     Some(ellipse(
         bounds,
-        SmoothFill::Solid(with_alpha(bed.shadow, alpha)),
+        SmoothFill::RadialGradient {
+            inner: with_alpha(bed.shadow, alpha),
+            outer: with_alpha(bed.shadow, 0),
+        },
     ))
 }
 
@@ -155,13 +172,14 @@ fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
 }
 
-/// A cast shadow reads as the bed's own colour in shade, so darken the biome
-/// primary rather than introducing an unrelated neutral.
+/// The projection's multiply factor: darkens the floor beneath it to roughly
+/// forty percent at the core, keeping the biome primary's hue so the shade reads
+/// as the bed's own colour in shadow.
 fn bed_shadow(primary: SmoothRgba8) -> SmoothRgba8 {
     SmoothRgba8 {
-        r: primary.r / 3,
-        g: primary.g / 3,
-        b: primary.b / 3,
+        r: primary.r / 2 + 60,
+        g: primary.g / 2 + 60,
+        b: primary.b / 2 + 60,
         a: 255,
     }
 }
@@ -192,6 +210,17 @@ fn color_for_biome(biome: RoomBiomeTag) -> SmoothRgba8 {
         RoomBiomeTag::Celestial => SmoothRgba8 { r: 89, g: 75, b: 125, a: 255 },
         RoomBiomeTag::Artifact => SmoothRgba8 { r: 108, g: 83, b: 102, a: 255 },
         RoomBiomeTag::Cozy => SmoothRgba8 { r: 105, g: 78, b: 106, a: 255 },
+    }
+}
+
+fn lift(color: SmoothRgba8, amount: f32) -> SmoothRgba8 {
+    let lift_channel =
+        |channel: u8| (f32::from(channel) + (255.0 - f32::from(channel)) * amount).round() as u8;
+    SmoothRgba8 {
+        r: lift_channel(color.r),
+        g: lift_channel(color.g),
+        b: lift_channel(color.b),
+        a: color.a,
     }
 }
 
