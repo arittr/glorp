@@ -16,7 +16,18 @@
 - Keep `literal_floor_allowed: false`; the tank bed is presentation geometry, not a route substrate.
 - Remove the unshipped `FloorTexture` role and glyph-dither implementation. Do not preserve a compatibility alias.
 - Keep all scene meaning in platform-neutral Rust types. AppKit receives geometry and transforms; it does not infer tank semantics.
-- Support ellipse shapes only in this slice. Do not add polygons, gradients, images, blur, physics, dynamic occlusion, or Linux windowing.
+- Support ellipse shapes only in this slice. Do not add polygons, images, blur, physics, dynamic occlusion, or Linux windowing.
+- **Amended during implementation:** gradients are now in scope. Faking a gradient
+  by stacking constant-alpha shapes bands visibly at companion size, which is what
+  the tank bed and the tank's own depth falloff both did. Shapes carry a typed
+  `SmoothFill` of `Solid` or `RadialGradient`, and the native tank background uses
+  `NSGradient` directly. Polygons, images, blur, and physics remain out of scope.
+- **Amended during implementation:** roam clearance is reserved against the 11x8
+  creature art, not the 13x10 particle frame, and additionally reserves the full
+  `SMOOTH_PERSPECTIVE_Y_MAX` excursion. Reserving the frame is incompatible with a
+  `1.12x` near scale on the shipping 36x18 grid: the band inverts. The frame's
+  ambient gutter may graze the HUD reserve, which is sound because the native HUD
+  draws above the scene.
 - Support finite, positive, uniform scale and zero rotation. Reject unsupported transforms before the native draw callback.
 - Reserve X/Y roam clearance against the maximum `1.12x` scale, not only the current frame.
 - Apply the composed pet transform to `PetBody`, `WallShadow`, `PerformanceCue`, and the actual mood-aura draw path.
