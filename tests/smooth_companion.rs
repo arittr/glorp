@@ -1569,7 +1569,7 @@ fn tank_bed_bands_stay_translucent_enough_to_read_as_depth() {
     // The vignette and the HUD band sit over the lower bed, and the pet's shadow
     // needs real ground light to read against, so the bed runs stronger than the
     // first slice did. Anything past this still reads as a solid footer.
-    const MAX_BED_ALPHA: u8 = 110;
+    const MAX_BED_ALPHA: u8 = 150;
 
     for biome in [
         RoomBiome {
@@ -1718,8 +1718,11 @@ fn wall_shadow_is_a_multiply_veil_in_the_smooth_plan() {
                 panic!("wall shadow items are cells, got {item:?}");
             };
             let bg = cell.bg.expect("wall shadow cells are background-only");
+            // The lower bound is tuned for the shipping round panel, which lifts
+            // blacks: a veil this strong still reads as shade there, but anything
+            // past it blacks out the scene.
             assert!(
-                bg.r > 120 && bg.g > 120 && bg.b > 120,
+                bg.r > 100 && bg.g > 100 && bg.b > 100,
                 "a multiply factor this dark ({bg:?}) blacks out the scene instead of shading it"
             );
             assert!(

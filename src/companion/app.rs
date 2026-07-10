@@ -1284,10 +1284,11 @@ fn fallback_dimension(value: f64) -> f64 {
 /// The colour the tank's depth falloff lifts its core toward.
 const TANK_DEPTH_TINT: RoundColor = RoundColor(0.10, 0.11, 0.20, 1.0);
 
-/// How much of the tint reaches the core. The stepped rings this replaced
-/// accumulated seven passes of `alpha 0.05`, so the core carried roughly this
-/// much tint; the falloff to the rim is now continuous instead of banded.
-const TANK_CORE_TINT_WEIGHT: f32 = 0.30;
+/// How much of the tint reaches the core. Tuned against the shipping round
+/// accessory panel, which lifts blacks and eats subtle deltas: the falloff has to
+/// be strong enough to survive that tone curve, not merely read on a calibrated
+/// Mac display.
+const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
 
 /// Deterministic per-pixel noise in [-1.5, 1.5] output levels. A smooth dark
 /// gradient quantised to 8 bits shows its steps as visible bands; dithering

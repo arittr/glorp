@@ -18,23 +18,23 @@ pub struct SmoothTankBedGeometry {
 /// The bed is a receding substrate seen through tank water, not a solid floor. One
 /// hue, one monotone vertical falloff: strongest at the near floor, fading to
 /// almost nothing at the horizon.
-const BED_NEAR_ALPHA: u8 = 96;
-const BED_HORIZON_ALPHA: u8 = 18;
+const BED_NEAR_ALPHA: u8 = 120;
+const BED_HORIZON_ALPHA: u8 = 28;
 
 /// How far the bed's fill is lifted toward white. The biome primaries are wall
 /// colours, dark enough that an alpha-blended bed sinks into the water and gives
 /// the pet's shadow nothing to sit on.
-const BED_LIFT: f32 = 0.30;
+const BED_LIFT: f32 = 0.45;
 
 /// Flecks are the bed's texture and sit over the faintest band, so they carry a
 /// little more weight than the bands beneath them.
-const BED_FLECK_PRIMARY_ALPHA: u8 = 60;
-const BED_FLECK_SECONDARY_ALPHA: u8 = 55;
+const BED_FLECK_PRIMARY_ALPHA: u8 = 88;
+const BED_FLECK_SECONDARY_ALPHA: u8 = 80;
 
 /// Core alpha of the pet's floor projection at the far and near planes. The rim
 /// always fades to nothing, so these can run strong without a hard edge.
-const PROJECTION_ALPHA_FAR: f32 = 130.0;
-const PROJECTION_ALPHA_NEAR: f32 = 210.0;
+const PROJECTION_ALPHA_FAR: f32 = 165.0;
+const PROJECTION_ALPHA_NEAR: f32 = 235.0;
 
 /// The projection's travel band on the bed, as fractions of the bed's depth below
 /// the horizon. The lower bed sits under the bottom vignette and the HUD reserve,

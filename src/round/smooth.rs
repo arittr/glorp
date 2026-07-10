@@ -454,7 +454,7 @@ fn tank_bed_layer(
 /// Multiply factor for the smooth wall shadow: darkens what it covers by not
 /// quite half, with a slightly cool cast so it reads as shade rather than dirt.
 const WALL_SHADOW_MULTIPLY: crate::pet::palette::Rgb =
-    crate::pet::palette::Rgb { r: 142, g: 138, b: 160 };
+    crate::pet::palette::Rgb { r: 118, g: 114, b: 142 };
 
 /// The worst case the pet can ever occupy around a roam centre: creature ink at
 /// the maximum depth scale, plus the full perspective excursion in both
