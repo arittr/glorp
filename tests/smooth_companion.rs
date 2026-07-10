@@ -1,7 +1,9 @@
 use glorp::game::habitat::HabitatPropKind;
 use glorp::presentation::smooth::{
-    SmoothCompanionPrivacyClaims, SmoothDepthPlane, SmoothLayerItem, SmoothLayerMotionBinding,
-    SmoothLayerRole,
+    transformed_smooth_bounds, SmoothBlendMode, SmoothBounds, SmoothClip, SmoothCompanionLayer,
+    SmoothCompanionPrivacyClaims, SmoothDepthPlane, SmoothGeometryError, SmoothLayerId,
+    SmoothLayerItem, SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothRgba8,
+    SmoothShape, SmoothShapeGeometry, SmoothTransform,
 };
 use glorp::round::scene::CompanionMotion;
 use glorp::storage::state::{HabitatPropId, HabitatPropSource};
@@ -11,6 +13,196 @@ use time::macros::datetime;
 const GRID_COLS: u16 = 44;
 const GRID_ROWS: u16 = 18;
 const NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
+
+fn bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> SmoothBounds {
+    SmoothBounds {
+        min: SmoothPoint { x: min_x, y: min_y },
+        max: SmoothPoint { x: max_x, y: max_y },
+    }
+}
+
+fn ellipse(bounds: SmoothBounds) -> SmoothShape {
+    SmoothShape {
+        geometry: SmoothShapeGeometry::Ellipse { bounds },
+        color: SmoothRgba8 { r: 90, g: 61, b: 99, a: 128 },
+    }
+}
+
+fn valid_smooth_layer() -> SmoothCompanionLayer {
+    SmoothCompanionLayer {
+        id: SmoothLayerId("typed-ellipse".to_string()),
+        role: SmoothLayerRole::PetBody,
+        motion_binding: SmoothLayerMotionBinding::PetAttached,
+        z: 0,
+        local_bounds: bounds(0.0, 0.0, 2.0, 2.0),
+        anchor: SmoothPoint { x: 10.0, y: 20.0 },
+        transform_origin: SmoothPoint { x: 1.0, y: 1.0 },
+        transform: SmoothTransform {
+            translation: SmoothPoint { x: 0.0, y: 0.0 },
+            scale: SmoothPoint { x: 1.0, y: 1.0 },
+            rotation_degrees: 0.0,
+        },
+        parallax_translation: SmoothPoint { x: 0.0, y: 0.0 },
+        opacity: 1.0,
+        clip: SmoothClip::Rect(bounds(0.0, 0.0, 2.0, 2.0)),
+        blend: SmoothBlendMode::Normal,
+        items: vec![SmoothLayerItem::Shape(ellipse(bounds(0.0, 0.0, 2.0, 2.0)))],
+        privacy: SmoothCompanionPrivacyClaims::external_companion(),
+    }
+}
+
+fn ellipse_bounds_mut(layer: &mut SmoothCompanionLayer) -> &mut SmoothBounds {
+    let SmoothLayerItem::Shape(SmoothShape {
+        geometry: SmoothShapeGeometry::Ellipse { bounds },
+        ..
+    }) = layer
+        .items
+        .first_mut()
+        .expect("fixture includes an ellipse")
+    else {
+        panic!("fixture must include a typed ellipse");
+    };
+    bounds
+}
+
+#[test]
+fn smooth_shape_is_typed_and_serializable() {
+    let shape = ellipse(bounds(1.0, 2.0, 4.0, 6.0));
+
+    assert_eq!(
+        shape.geometry,
+        SmoothShapeGeometry::Ellipse { bounds: bounds(1.0, 2.0, 4.0, 6.0) }
+    );
+
+    let json = serde_json::to_value(shape).expect("typed shape should serialize");
+    assert_eq!(json["geometry"]["Ellipse"]["bounds"]["min"]["x"], 1.0);
+    assert_eq!(json["geometry"]["Ellipse"]["bounds"]["min"]["y"], 2.0);
+    assert_eq!(json["geometry"]["Ellipse"]["bounds"]["max"]["x"], 4.0);
+    assert_eq!(json["geometry"]["Ellipse"]["bounds"]["max"]["y"], 6.0);
+    assert_eq!(json["color"]["r"], 90);
+    assert_eq!(json["color"]["g"], 61);
+    assert_eq!(json["color"]["b"], 99);
+    assert_eq!(json["color"]["a"], 128);
+}
+
+#[test]
+fn smooth_geometry_rejects_nonfinite_nonpositive_nonuniform_and_rotated_layers() {
+    let mut nonfinite_layer_bounds = valid_smooth_layer();
+    nonfinite_layer_bounds.local_bounds.min.x = f32::NAN;
+
+    let mut inverted_layer_bounds = valid_smooth_layer();
+    inverted_layer_bounds.local_bounds.max.x = -1.0;
+
+    let mut nonfinite_anchor = valid_smooth_layer();
+    nonfinite_anchor.anchor.y = f32::INFINITY;
+
+    let mut nonfinite_transform_origin = valid_smooth_layer();
+    nonfinite_transform_origin.transform_origin.x = f32::NEG_INFINITY;
+
+    let mut nonfinite_translation = valid_smooth_layer();
+    nonfinite_translation.transform.translation.y = f32::NAN;
+
+    let mut nonfinite_opacity = valid_smooth_layer();
+    nonfinite_opacity.opacity = f32::NAN;
+
+    let mut opacity_out_of_range = valid_smooth_layer();
+    opacity_out_of_range.opacity = 1.01;
+
+    let mut nonfinite_scale = valid_smooth_layer();
+    nonfinite_scale.transform.scale.x = f32::INFINITY;
+
+    let mut nonpositive_scale = valid_smooth_layer();
+    nonpositive_scale.transform.scale.y = 0.0;
+
+    let mut nonuniform_scale = valid_smooth_layer();
+    nonuniform_scale.transform.scale.y = 1.01;
+
+    let mut rotated = valid_smooth_layer();
+    rotated.transform.rotation_degrees = 0.1;
+
+    let mut nonfinite_shape_bounds = valid_smooth_layer();
+    ellipse_bounds_mut(&mut nonfinite_shape_bounds).max.y = f32::NAN;
+
+    let mut inverted_shape_bounds = valid_smooth_layer();
+    ellipse_bounds_mut(&mut inverted_shape_bounds).min.y = 3.0;
+
+    let mut nonfinite_clip_bounds = valid_smooth_layer();
+    nonfinite_clip_bounds.clip = SmoothClip::Rect(bounds(0.0, 0.0, f32::INFINITY, 2.0));
+
+    let mut inverted_clip_bounds = valid_smooth_layer();
+    inverted_clip_bounds.clip = SmoothClip::Rect(bounds(1.0, 0.0, 0.0, 2.0));
+
+    let cases = [
+        (
+            nonfinite_layer_bounds,
+            SmoothGeometryError::NonFiniteLayerBounds,
+        ),
+        (
+            inverted_layer_bounds,
+            SmoothGeometryError::InvertedLayerBounds,
+        ),
+        (nonfinite_anchor, SmoothGeometryError::NonFiniteAnchor),
+        (
+            nonfinite_transform_origin,
+            SmoothGeometryError::NonFiniteTransformOrigin,
+        ),
+        (
+            nonfinite_translation,
+            SmoothGeometryError::NonFiniteTranslation,
+        ),
+        (nonfinite_opacity, SmoothGeometryError::NonFiniteOpacity),
+        (opacity_out_of_range, SmoothGeometryError::OpacityOutOfRange),
+        (nonfinite_scale, SmoothGeometryError::NonFiniteScale),
+        (nonpositive_scale, SmoothGeometryError::NonPositiveScale),
+        (nonuniform_scale, SmoothGeometryError::NonUniformScale),
+        (rotated, SmoothGeometryError::RotationUnsupported),
+        (
+            nonfinite_shape_bounds,
+            SmoothGeometryError::NonFiniteShapeBounds,
+        ),
+        (
+            inverted_shape_bounds,
+            SmoothGeometryError::InvertedShapeBounds,
+        ),
+        (
+            nonfinite_clip_bounds,
+            SmoothGeometryError::NonFiniteClipBounds,
+        ),
+        (
+            inverted_clip_bounds,
+            SmoothGeometryError::InvertedClipBounds,
+        ),
+    ];
+
+    for (layer, expected) in cases {
+        assert_eq!(transformed_smooth_bounds(&layer), Err(expected));
+    }
+}
+
+#[test]
+fn transformed_bounds_scale_around_the_declared_origin() {
+    let mut layer = valid_smooth_layer();
+    layer.transform.scale = SmoothPoint { x: 1.12, y: 1.12 };
+
+    let transformed = transformed_smooth_bounds(&layer).expect("layer should be valid");
+    let width = transformed.max.x - transformed.min.x;
+    let height = transformed.max.y - transformed.min.y;
+    let center = SmoothPoint {
+        x: transformed.min.x + width / 2.0,
+        y: transformed.min.y + height / 2.0,
+    };
+
+    const TRANSFORM_ASSERT_EPSILON: f32 = f32::EPSILON * 16.0;
+    assert!(
+        (width - 2.24).abs() <= TRANSFORM_ASSERT_EPSILON,
+        "width was {width}"
+    );
+    assert!(
+        (height - 2.24).abs() <= TRANSFORM_ASSERT_EPSILON,
+        "height was {height}"
+    );
+    assert_eq!(center, SmoothPoint { x: 11.0, y: 21.0 });
+}
 
 fn parity_fixture() -> WatchViewModel {
     let mut vm = WatchViewModel::fixture_with_habitat_props();

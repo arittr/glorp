@@ -1,13 +1,14 @@
 use crate::pet::palette::Rgb;
 use crate::presentation::{DrawCell, SceneDrawList};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
 pub struct SmoothPoint {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
 pub struct SmoothBounds {
     pub min: SmoothPoint,
     pub max: SmoothPoint,
@@ -158,9 +159,23 @@ pub struct SmoothLocalCell {
     pub bold: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SmoothShapeRef {
-    pub name: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SmoothRgba8 {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum SmoothShapeGeometry {
+    Ellipse { bounds: SmoothBounds },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SmoothShape {
+    pub geometry: SmoothShapeGeometry,
+    pub color: SmoothRgba8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,11 +183,155 @@ pub struct SmoothRasterRef {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SmoothLayerItem {
     LocalCell(SmoothLocalCell),
-    Shape(SmoothShapeRef),
+    Shape(SmoothShape),
     Raster(SmoothRasterRef),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothGeometryError {
+    NonFiniteLayerBounds,
+    InvertedLayerBounds,
+    NonFiniteAnchor,
+    NonFiniteTransformOrigin,
+    NonFiniteTranslation,
+    NonFiniteOpacity,
+    OpacityOutOfRange,
+    NonFiniteScale,
+    NonPositiveScale,
+    NonUniformScale,
+    RotationUnsupported,
+    NonFiniteShapeBounds,
+    InvertedShapeBounds,
+    NonFiniteClipBounds,
+    InvertedClipBounds,
+}
+
+pub fn validate_smooth_layer(layer: &SmoothCompanionLayer) -> Result<(), SmoothGeometryError> {
+    if !bounds_are_finite(layer.local_bounds) {
+        return Err(SmoothGeometryError::NonFiniteLayerBounds);
+    }
+    if bounds_are_inverted(layer.local_bounds) {
+        return Err(SmoothGeometryError::InvertedLayerBounds);
+    }
+    if !point_is_finite(layer.anchor) {
+        return Err(SmoothGeometryError::NonFiniteAnchor);
+    }
+    if !point_is_finite(layer.transform_origin) {
+        return Err(SmoothGeometryError::NonFiniteTransformOrigin);
+    }
+    if !point_is_finite(layer.transform.translation) {
+        return Err(SmoothGeometryError::NonFiniteTranslation);
+    }
+    if !layer.opacity.is_finite() {
+        return Err(SmoothGeometryError::NonFiniteOpacity);
+    }
+    if !(0.0..=1.0).contains(&layer.opacity) {
+        return Err(SmoothGeometryError::OpacityOutOfRange);
+    }
+    if !point_is_finite(layer.transform.scale) {
+        return Err(SmoothGeometryError::NonFiniteScale);
+    }
+    if layer.transform.scale.x <= 0.0 || layer.transform.scale.y <= 0.0 {
+        return Err(SmoothGeometryError::NonPositiveScale);
+    }
+    if (layer.transform.scale.x - layer.transform.scale.y).abs() > f32::EPSILON * 8.0 {
+        return Err(SmoothGeometryError::NonUniformScale);
+    }
+    if !layer.transform.rotation_degrees.is_finite()
+        || layer.transform.rotation_degrees.abs() > f32::EPSILON
+    {
+        return Err(SmoothGeometryError::RotationUnsupported);
+    }
+
+    for item in &layer.items {
+        if let SmoothLayerItem::Shape(SmoothShape {
+            geometry: SmoothShapeGeometry::Ellipse { bounds },
+            ..
+        }) = item
+        {
+            if !bounds_are_finite(*bounds) {
+                return Err(SmoothGeometryError::NonFiniteShapeBounds);
+            }
+            if bounds_are_inverted(*bounds) {
+                return Err(SmoothGeometryError::InvertedShapeBounds);
+            }
+        }
+    }
+
+    match layer.clip {
+        SmoothClip::None => {}
+        SmoothClip::Rect(bounds) => {
+            if !bounds_are_finite(bounds) {
+                return Err(SmoothGeometryError::NonFiniteClipBounds);
+            }
+            if bounds_are_inverted(bounds) {
+                return Err(SmoothGeometryError::InvertedClipBounds);
+            }
+        }
+        SmoothClip::Circle { center, radius } => {
+            if !point_is_finite(center) || !radius.is_finite() {
+                return Err(SmoothGeometryError::NonFiniteClipBounds);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn transformed_smooth_bounds(
+    layer: &SmoothCompanionLayer,
+) -> Result<SmoothBounds, SmoothGeometryError> {
+    validate_smooth_layer(layer)?;
+
+    let pivot = SmoothPoint {
+        x: layer.anchor.x + layer.transform_origin.x,
+        y: layer.anchor.y + layer.transform_origin.y,
+    };
+    let corners = [
+        layer.local_bounds.min,
+        SmoothPoint {
+            x: layer.local_bounds.max.x,
+            y: layer.local_bounds.min.y,
+        },
+        SmoothPoint {
+            x: layer.local_bounds.min.x,
+            y: layer.local_bounds.max.y,
+        },
+        layer.local_bounds.max,
+    ];
+    let mut transformed = corners.into_iter().map(|local_point| SmoothPoint {
+        x: pivot.x
+            + (layer.anchor.x + local_point.x - pivot.x) * layer.transform.scale.x
+            + layer.transform.translation.x,
+        y: pivot.y
+            + (layer.anchor.y + local_point.y - pivot.y) * layer.transform.scale.y
+            + layer.transform.translation.y,
+    });
+    let first = transformed.next().expect("bounds always have four corners");
+    let mut bounds = SmoothBounds { min: first, max: first };
+    for point in transformed {
+        bounds.min.x = bounds.min.x.min(point.x);
+        bounds.min.y = bounds.min.y.min(point.y);
+        bounds.max.x = bounds.max.x.max(point.x);
+        bounds.max.y = bounds.max.y.max(point.y);
+    }
+
+    Ok(bounds)
+}
+
+fn point_is_finite(point: SmoothPoint) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn bounds_are_finite(bounds: SmoothBounds) -> bool {
+    point_is_finite(bounds.min) && point_is_finite(bounds.max)
+}
+
+fn bounds_are_inverted(bounds: SmoothBounds) -> bool {
+    bounds.min.x > bounds.max.x || bounds.min.y > bounds.max.y
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
