@@ -5,6 +5,10 @@ use glorp::presentation::smooth::{
     SmoothGeometryError, SmoothLayerId, SmoothLayerItem, SmoothLayerMotionBinding, SmoothLayerRole,
     SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry, SmoothTransform,
 };
+use glorp::round::depth::{
+    depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError, SMOOTH_PERSPECTIVE_Y_MAX,
+    SMOOTH_PET_FAR_SCALE, SMOOTH_PET_NEAR_SCALE,
+};
 use glorp::round::scene::CompanionMotion;
 use glorp::round::tank_bed::smooth_tank_bed_geometry;
 use glorp::storage::state::{HabitatPropId, HabitatPropSource};
@@ -15,6 +19,8 @@ use time::macros::datetime;
 const GRID_COLS: u16 = 44;
 const GRID_ROWS: u16 = 18;
 const NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
+const PET_W: u16 = 13;
+const PET_H: u16 = 10;
 
 fn bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> SmoothBounds {
     SmoothBounds {
@@ -217,6 +223,180 @@ fn parity_fixture() -> WatchViewModel {
         source: HabitatPropSource::LifetimeTokens { threshold: 2_000_000.0 },
     });
     vm
+}
+
+#[test]
+fn smooth_depth_resolver_maps_bounds_lifecycle_and_rejects_invalid_inputs() {
+    assert_eq!(resolve_smooth_depth(-1.0, 1.0).unwrap().scale, 0.88);
+    assert_eq!(resolve_smooth_depth(0.0, 1.0).unwrap().scale, 1.0);
+    assert_eq!(resolve_smooth_depth(1.0, 1.0).unwrap().scale, 1.12);
+    assert_eq!(depth_lifecycle_scale(false, false), 1.0);
+    assert_eq!(depth_lifecycle_scale(false, true), 0.5);
+    assert_eq!(depth_lifecycle_scale(true, false), 0.25);
+    assert_eq!(depth_lifecycle_scale(true, true), 0.25);
+
+    for raw_z in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert_eq!(
+            resolve_smooth_depth(raw_z, 1.0),
+            Err(SmoothDepthError::NonFiniteRawDepth)
+        );
+    }
+    for lifecycle_scale in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            resolve_smooth_depth(0.0, lifecycle_scale),
+            Err(SmoothDepthError::InvalidLifecycleScale)
+        );
+    }
+
+    for raw_z in [-f32::MAX, -1.0, 0.0, 1.0, f32::MAX] {
+        for lifecycle_scale in [0.0, 0.25, 0.5, 1.0] {
+            let sample = resolve_smooth_depth(raw_z, lifecycle_scale).unwrap();
+            assert!(sample.effective_z.is_finite());
+            assert!((-1.0..=1.0).contains(&sample.effective_z));
+            assert!((SMOOTH_PET_FAR_SCALE..=SMOOTH_PET_NEAR_SCALE).contains(&sample.scale));
+            assert!(sample.perspective_y.is_finite());
+            assert!(sample.perspective_y.abs() <= SMOOTH_PERSPECTIVE_Y_MAX);
+            assert!(sample.perspective_y.abs() < 1.0);
+        }
+    }
+}
+
+fn sample_motion_channels(motion: CompanionMotion) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut vm = parity_fixture();
+    vm.day_context.asleep = false;
+    vm.life_profile.calm_mode = false;
+    vm.progress.rate_per_hour = 50_000_000.0;
+    let period_ms = motion.drift_period_secs * 1_000;
+    let sample_count = period_ms * 2 / 50;
+    let mut xs = Vec::with_capacity(sample_count as usize + 1);
+    let mut ys = Vec::with_capacity(sample_count as usize + 1);
+    let mut zs = Vec::with_capacity(sample_count as usize + 1);
+
+    for step in 0..=sample_count {
+        let now = NOW + time::Duration::milliseconds((step * 50) as i64);
+        let first =
+            glorp::round::scene::companion_pet_placement(&vm, now, GRID_COLS, GRID_ROWS, &motion);
+        let second =
+            glorp::round::scene::companion_pet_placement(&vm, now, GRID_COLS, GRID_ROWS, &motion);
+        assert_eq!(first.raw_depth, second.raw_depth);
+        assert!((-1.0..=1.0).contains(&first.raw_depth));
+        xs.push(first.fractional_motion_top_left.x - first.fractional_motion_origin_top_left.x);
+        ys.push(first.fractional_motion_top_left.y - first.fractional_motion_origin_top_left.y);
+        zs.push(first.raw_depth);
+    }
+
+    for pair in zs.windows(2) {
+        assert!(
+            (pair[1] - pair[0]).abs() <= 0.05,
+            "adjacent raw-Z jump exceeded the 50 ms continuity bound: {pair:?}"
+        );
+    }
+    (xs, ys, zs)
+}
+
+fn normalized_channel(values: &[f32]) -> Vec<f32> {
+    let max_abs = values.iter().copied().map(f32::abs).fold(0.0, f32::max);
+    values.iter().map(|value| value / max_abs).collect()
+}
+
+#[test]
+fn smooth_depth_motion_is_deterministic_continuous_bounded_and_separately_salted() {
+    for motion in [
+        CompanionMotion::default(),
+        glorp::round::scene::companion_roam_motion(),
+    ] {
+        let (xs, ys, zs) = sample_motion_channels(motion);
+        let xs = normalized_channel(&xs);
+        let ys = normalized_channel(&ys);
+        assert!(
+            zs.iter().zip(&xs).any(|(z, x)| (z - x).abs() > 0.001),
+            "Z must not duplicate the X channel"
+        );
+        assert!(
+            zs.iter().zip(&ys).any(|(z, y)| (z - y).abs() > 0.001),
+            "Z must not duplicate the Y channel"
+        );
+    }
+}
+
+fn legacy_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
+    use std::f64::consts::TAU;
+    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
+        / period_secs.max(1) as f64;
+    let fx = 0.72 * (TAU * t).cos() + 0.28 * (TAU * t * 1.93 + 0.6).sin();
+    let fy = 0.72 * (TAU * t * 1.21 + 0.3).sin() + 0.28 * (TAU * t * 2.41 + 1.5).cos();
+    (fx as f32, fy as f32)
+}
+
+fn legacy_classic_rect(
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+) -> ratatui::layout::Rect {
+    let (fx, fy) = legacy_wander_offsets(now, motion.drift_period_secs);
+    let cx = grid_cols / 2;
+    let cy = grid_rows / 2;
+    let half_w = PET_W / 2;
+    let half_h = PET_H / 2;
+    let safe_x = cx.saturating_sub(half_w) as f32;
+    let safe_y = cy.saturating_sub(half_h) as f32;
+    let x_radius = safe_x * motion.drift_x_frac;
+    let y_radius = safe_y * motion.drift_y_frac;
+    let bias = motion.upward_bias * safe_y;
+    let max_x = grid_cols.saturating_sub(PET_W);
+    let max_y = grid_rows.saturating_sub(PET_H);
+    let classic_x =
+        (cx as i32 - half_w as i32 + (fx * x_radius) as i32).clamp(0, max_x as i32) as u16;
+    let classic_drift_y = (cy as i32 - half_h as i32 - bias as i32 + (fy * y_radius) as i32)
+        .clamp(0, max_y as i32) as u16;
+    let classic_y = (classic_drift_y + u16::from(vm.breath_offset_y)).min(max_y);
+    ratatui::layout::Rect::new(classic_x, classic_y, PET_W, PET_H)
+}
+
+#[test]
+fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
+    let mut vm = parity_fixture();
+    vm.day_context.asleep = false;
+    vm.life_profile.calm_mode = false;
+    vm.progress.rate_per_hour = 50_000_000.0;
+    vm.breath_offset_y = 1;
+    let motion = glorp::round::scene::companion_roam_motion();
+    let hud_start = GRID_ROWS
+        - glorp::round::scene::round_tank_life_geometry(GRID_COLS, GRID_ROWS).reserved_regions[0]
+            .height;
+    let half_w = f32::from(PET_W) / 2.0;
+    let half_h = f32::from(PET_H) / 2.0;
+    let scaled_half_w = half_w * SMOOTH_PET_NEAR_SCALE;
+    let scaled_half_h = half_h * SMOOTH_PET_NEAR_SCALE;
+
+    for step in 0..=(motion.drift_period_secs * 2 * 20) {
+        let now = NOW + time::Duration::milliseconds((step * 50) as i64);
+        let placement =
+            glorp::round::scene::companion_pet_placement(&vm, now, GRID_COLS, GRID_ROWS, &motion);
+        assert_eq!(
+            placement.classic_rect,
+            legacy_classic_rect(&vm, now, GRID_COLS, GRID_ROWS, &motion),
+            "adding Z must not change Classic placement at {now}"
+        );
+
+        let center_x = placement.fractional_motion_top_left.x + half_w;
+        let center_y = placement.fractional_motion_top_left.y + half_h;
+        let min_x = center_x - scaled_half_w;
+        let max_x = center_x + scaled_half_w;
+        let min_y = center_y - scaled_half_h;
+        let max_y = center_y + scaled_half_h;
+        assert!(min_x >= 0.0 && max_x <= f32::from(GRID_COLS));
+        assert!(
+            min_y >= 0.0,
+            "maximum-scale pet crossed the aperture top at {now}"
+        );
+        assert!(
+            max_y <= f32::from(hud_start),
+            "maximum-scale pet entered the HUD reserve at {now}: max_y={max_y}"
+        );
+    }
 }
 
 #[test]

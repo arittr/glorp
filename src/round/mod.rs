@@ -1,3 +1,4 @@
+pub mod depth;
 pub mod draw;
 pub mod hud;
 pub mod layout;
