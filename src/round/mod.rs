@@ -8,3 +8,4 @@ pub mod pixel_fit;
 pub mod preview;
 pub mod scene;
 pub mod smooth;
+pub mod tank_bed;

@@ -1,12 +1,14 @@
 use glorp::game::habitat::HabitatPropKind;
 use glorp::presentation::smooth::{
-    transformed_smooth_bounds, SmoothBlendMode, SmoothBounds, SmoothClip, SmoothCompanionLayer,
-    SmoothCompanionPrivacyClaims, SmoothDepthPlane, SmoothGeometryError, SmoothLayerId,
-    SmoothLayerItem, SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothRgba8,
-    SmoothShape, SmoothShapeGeometry, SmoothTransform,
+    transformed_smooth_bounds, validate_smooth_layer, CompanionViewport, SmoothBlendMode,
+    SmoothBounds, SmoothClip, SmoothCompanionLayer, SmoothCompanionPrivacyClaims, SmoothDepthPlane,
+    SmoothGeometryError, SmoothLayerId, SmoothLayerItem, SmoothLayerMotionBinding, SmoothLayerRole,
+    SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry, SmoothTransform,
 };
 use glorp::round::scene::CompanionMotion;
+use glorp::round::tank_bed::smooth_tank_bed_geometry;
 use glorp::storage::state::{HabitatPropId, HabitatPropSource};
+use glorp::tui::room::{RoomBiome, RoomBiomeTag};
 use glorp::tui::view_model::{EarnedHabitatPropView, SourceStatus, WatchViewModel};
 use time::macros::datetime;
 
@@ -258,6 +260,7 @@ fn smooth_plan_assigns_every_current_role_its_approved_binding() {
         (DepthRings, Fixed),
         (BiomeWash, Parallax(Far)),
         (RoomGlyphs, Parallax(Far)),
+        (TankBed, Fixed),
         (Ambient, Parallax(Mid)),
         (Motes, Parallax(Mid)),
         (ActivityGlyphs, Parallax(Mid)),
@@ -283,6 +286,146 @@ fn smooth_plan_assigns_every_current_role_its_approved_binding() {
             "unexpected binding for {role:?}"
         );
     }
+}
+
+fn tank_bed_biome() -> RoomBiome {
+    RoomBiome {
+        primary: RoomBiomeTag::Technical,
+        secondary: Some(RoomBiomeTag::Celestial),
+    }
+}
+
+fn ellipse_bounds(shape: &SmoothShape) -> SmoothBounds {
+    let SmoothShapeGeometry::Ellipse { bounds } = shape.geometry;
+    bounds
+}
+
+#[test]
+fn tank_bed_geometry_is_curved_deterministic_and_finite() {
+    let viewport = CompanionViewport {
+        grid_cols: GRID_COLS,
+        grid_rows: GRID_ROWS,
+    };
+    let bed = smooth_tank_bed_geometry(viewport, tank_bed_biome())
+        .expect("normal companion viewport should have a tank bed");
+
+    let broad_band_count = bed
+        .shapes
+        .iter()
+        .filter(|shape| {
+            let bounds = ellipse_bounds(shape);
+            bounds.max.x - bounds.min.x > f32::from(viewport.grid_cols) * 0.5
+        })
+        .count();
+    let fleck_count = bed.shapes.len() - broad_band_count;
+    assert!((2..=3).contains(&broad_band_count));
+    assert!((8..=14).contains(&fleck_count));
+    assert!((bed.horizon_y - f32::from(viewport.grid_rows) * 0.76).abs() < 0.01);
+    assert!((bed.near_edge_y - f32::from(viewport.grid_rows)).abs() < 0.01);
+
+    for shape in &bed.shapes {
+        let bounds = ellipse_bounds(shape);
+        assert!(
+            [bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y]
+                .into_iter()
+                .all(f32::is_finite),
+            "tank bed ellipses must stay finite"
+        );
+        assert!(bounds.max.x > bounds.min.x && bounds.max.y > bounds.min.y);
+    }
+
+    assert_eq!(
+        smooth_tank_bed_geometry(viewport, tank_bed_biome()),
+        Some(bed),
+        "bed geometry must depend only on biome and viewport"
+    );
+}
+
+#[test]
+fn tank_bed_geometry_rejects_degenerate_viewports() {
+    for viewport in [
+        CompanionViewport { grid_cols: 0, grid_rows: GRID_ROWS },
+        CompanionViewport { grid_cols: GRID_COLS, grid_rows: 0 },
+        CompanionViewport { grid_cols: 1, grid_rows: 1 },
+    ] {
+        assert_eq!(smooth_tank_bed_geometry(viewport, tank_bed_biome()), None);
+    }
+}
+
+#[test]
+fn tank_bed_layer_is_fixed_clipped_and_independent_of_pet_motion() {
+    let vm = parity_fixture();
+    let still = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &CompanionMotion::default(),
+        0,
+    );
+    let moving = glorp::round::smooth::build_round_smooth_scene_plan(
+        &vm,
+        datetime!(2026-07-08 18:00:00.500 UTC),
+        GRID_COLS,
+        GRID_ROWS,
+        &glorp::round::scene::companion_roam_motion(),
+        500,
+    );
+    let bed = still
+        .layer_by_role(SmoothLayerRole::TankBed)
+        .expect("smooth scene should include the tank bed");
+    let moving_bed = moving
+        .layer_by_role(SmoothLayerRole::TankBed)
+        .expect("smooth scene should include the tank bed while moving");
+
+    assert_eq!(SmoothLayerRole::TankBed.as_str(), "tank-bed");
+    assert_eq!(bed.motion_binding, SmoothLayerMotionBinding::Fixed);
+    assert_eq!(bed.z, 1);
+    assert_eq!(bed.items, moving_bed.items);
+    assert_eq!(bed.transform.translation, SmoothPoint::default());
+    assert_eq!(bed.parallax_translation, SmoothPoint::default());
+    assert!(bed
+        .items
+        .iter()
+        .all(|item| matches!(item, SmoothLayerItem::Shape(_))));
+    assert!(validate_smooth_layer(bed).is_ok());
+    assert_eq!(
+        bed.clip,
+        SmoothClip::Circle {
+            center: SmoothPoint {
+                x: f32::from(GRID_COLS) / 2.0,
+                y: f32::from(GRID_ROWS) / 2.0,
+            },
+            radius: f32::from(GRID_COLS.min(GRID_ROWS)) / 2.0,
+        }
+    );
+
+    let roles: Vec<_> = still.layers.iter().map(|layer| layer.role).collect();
+    let room = roles
+        .iter()
+        .position(|role| *role == SmoothLayerRole::RoomGlyphs)
+        .unwrap();
+    let tank_bed = roles
+        .iter()
+        .position(|role| *role == SmoothLayerRole::TankBed)
+        .unwrap();
+    let ambient = roles
+        .iter()
+        .position(|role| *role == SmoothLayerRole::Ambient)
+        .unwrap();
+    let first_prop_or_life = roles
+        .iter()
+        .position(|role| {
+            matches!(
+                role,
+                SmoothLayerRole::PropsBehind
+                    | SmoothLayerRole::TankLifeBehind
+                    | SmoothLayerRole::PropsForeground
+                    | SmoothLayerRole::TankLifeForeground
+            )
+        })
+        .unwrap();
+    assert!(room < tank_bed && tank_bed < ambient && tank_bed < first_prop_or_life);
 }
 
 #[test]
@@ -367,6 +510,7 @@ fn smooth_round_plan_includes_classic_and_round_only_roles() {
             SmoothLayerRole::DepthRings,
             SmoothLayerRole::BiomeWash,
             SmoothLayerRole::RoomGlyphs,
+            SmoothLayerRole::TankBed,
             SmoothLayerRole::Ambient,
             SmoothLayerRole::Motes,
             SmoothLayerRole::ActivityGlyphs,

@@ -3,8 +3,9 @@ use ratatui::layout::Rect;
 use crate::presentation::smooth::{
     smooth_pet_bob, CompanionChromeReservation, CompanionViewport, SmoothBlendMode, SmoothBounds,
     SmoothClassicFlattenCompat, SmoothClip, SmoothCompanionLayer, SmoothCompanionPet,
-    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerId,
-    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothTransform,
+    SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerId, SmoothLayerItem,
+    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothShape, SmoothShapeGeometry,
+    SmoothTransform,
 };
 use crate::presentation::PetSceneModel;
 use crate::round::layout::{
@@ -14,6 +15,7 @@ use crate::round::model::{derive_round_scene_model, RoundHelperHealth};
 use crate::round::scene::{
     build_round_pet_layout_with_placement, round_tank_life_geometry, CompanionMotion,
 };
+use crate::round::tank_bed::{smooth_tank_bed_geometry, SmoothTankBedGeometry};
 use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
@@ -62,6 +64,7 @@ pub fn try_build_round_smooth_scene_plan(
 
     let viewport = CompanionViewport { grid_cols, grid_rows };
     let viewport_bounds = rect_bounds(Rect::new(0, 0, grid_cols, grid_rows));
+    let tank_bed = smooth_tank_bed_geometry(viewport, model.room.biome);
     let pet_body_classic_anchor = layered
         .layers
         .iter()
@@ -130,7 +133,13 @@ pub fn try_build_round_smooth_scene_plan(
             };
             layer.transform.translation.y += bob_offset.y;
         }
+        let is_room_glyphs = layer.role == SmoothLayerRole::RoomGlyphs;
         layers.push(layer);
+        if is_room_glyphs {
+            if let Some(bed) = tank_bed.as_ref() {
+                layers.push(tank_bed_layer(viewport, bed));
+            }
+        }
     }
 
     let pet_body = layers
@@ -258,6 +267,62 @@ pub fn try_build_round_smooth_scene_plan(
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
         classic_flatten_compat: SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows },
     })
+}
+
+fn tank_bed_layer(
+    viewport: CompanionViewport,
+    bed: &SmoothTankBedGeometry,
+) -> SmoothCompanionLayer {
+    let aperture_center = SmoothPoint {
+        x: f32::from(viewport.grid_cols) / 2.0,
+        y: f32::from(viewport.grid_rows) / 2.0,
+    };
+    SmoothCompanionLayer {
+        id: SmoothLayerId("round-tank-bed".to_string()),
+        role: SmoothLayerRole::TankBed,
+        motion_binding: SmoothLayerMotionBinding::Fixed,
+        z: 1,
+        local_bounds: shape_bounds(&bed.shapes),
+        anchor: SmoothPoint::default(),
+        transform_origin: SmoothPoint::default(),
+        transform: SmoothTransform {
+            translation: SmoothPoint::default(),
+            scale: SmoothPoint { x: 1.0, y: 1.0 },
+            rotation_degrees: 0.0,
+        },
+        parallax_translation: SmoothPoint::default(),
+        opacity: 1.0,
+        clip: SmoothClip::Circle {
+            center: aperture_center,
+            radius: f32::from(viewport.grid_cols.min(viewport.grid_rows)) / 2.0,
+        },
+        blend: SmoothBlendMode::Normal,
+        items: bed
+            .shapes
+            .iter()
+            .copied()
+            .map(SmoothLayerItem::Shape)
+            .collect(),
+        privacy: SmoothCompanionPrivacyClaims::external_companion(),
+    }
+}
+
+fn shape_bounds(shapes: &[SmoothShape]) -> SmoothBounds {
+    let mut result = SmoothBounds {
+        min: SmoothPoint { x: f32::INFINITY, y: f32::INFINITY },
+        max: SmoothPoint {
+            x: f32::NEG_INFINITY,
+            y: f32::NEG_INFINITY,
+        },
+    };
+    for shape in shapes {
+        let SmoothShapeGeometry::Ellipse { bounds } = shape.geometry;
+        result.min.x = result.min.x.min(bounds.min.x);
+        result.min.y = result.min.y.min(bounds.min.y);
+        result.max.x = result.max.x.max(bounds.max.x);
+        result.max.y = result.max.y.max(bounds.max.y);
+    }
+    result
 }
 
 pub fn build_round_smooth_scene_plan(
