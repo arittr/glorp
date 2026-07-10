@@ -1,5 +1,6 @@
 use crate::presentation::smooth::{
-    CompanionViewport, SmoothBounds, SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry,
+    CompanionViewport, SmoothBounds, SmoothFill, SmoothPoint, SmoothRgba8, SmoothShape,
+    SmoothShapeGeometry,
 };
 use crate::round::depth::SmoothDepthSample;
 use crate::tui::room::{RoomBiome, RoomBiomeTag};
@@ -14,12 +15,13 @@ pub struct SmoothTankBedGeometry {
     pub shadow: SmoothRgba8,
 }
 
-/// The bed is a receding substrate seen through tank water, not a solid floor.
-/// These bands stack, so each stays translucent enough for the tank's darkness to
-/// read through; opaque bands turn the bed into a footer bowl at companion size.
-const BED_BASE_ALPHA: u8 = 70;
-const BED_MID_ALPHA: u8 = 48;
-const BED_INNER_ALPHA: u8 = 34;
+/// The bed is a receding substrate seen through tank water, not a solid floor. Its
+/// base ellipse is centred below the aperture, so the gradient's outer edge is the
+/// horizon and its inner region is the near floor. One hue, one monotone falloff:
+/// the stacked bands this replaced ran primary -> secondary -> primary, which read
+/// as odd colour banding rather than distance.
+const BED_NEAR_ALPHA: u8 = 78;
+const BED_HORIZON_ALPHA: u8 = 22;
 
 /// Flecks are the bed's texture and sit over the faintest band, so they carry a
 /// little more weight than the bands beneath them.
@@ -50,17 +52,13 @@ pub fn smooth_tank_bed_geometry(
         max: SmoothPoint { x: width * 1.08, y: height * 1.34 },
     };
     let (primary, secondary) = bed_colors(biome);
-    let mut shapes = vec![
-        ellipse(base, with_alpha(primary, BED_BASE_ALPHA)),
-        ellipse(
-            inset_bounds(base, width * 0.06, height * 0.055),
-            with_alpha(secondary, BED_MID_ALPHA),
-        ),
-        ellipse(
-            inset_bounds(base, width * 0.14, height * 0.125),
-            with_alpha(primary, BED_INNER_ALPHA),
-        ),
-    ];
+    let mut shapes = vec![ellipse(
+        base,
+        SmoothFill::RadialGradient {
+            inner: with_alpha(primary, BED_NEAR_ALPHA),
+            outer: with_alpha(primary, BED_HORIZON_ALPHA),
+        },
+    )];
 
     let mut hash = tank_bed_hash(viewport, biome);
     for _ in 0..10 {
@@ -78,7 +76,7 @@ pub fn smooth_tank_bed_geometry(
                 min: SmoothPoint { x, y },
                 max: SmoothPoint { x: x + fleck_width, y: y + fleck_height },
             },
-            color,
+            SmoothFill::Solid(color),
         ));
     }
 
@@ -140,7 +138,10 @@ pub fn smooth_floor_projection_shape(
     if !bounds_are_finite(bounds) {
         return None;
     }
-    Some(ellipse(bounds, with_alpha(bed.shadow, alpha)))
+    Some(ellipse(
+        bounds,
+        SmoothFill::Solid(with_alpha(bed.shadow, alpha)),
+    ))
 }
 
 fn bounds_are_finite(bounds: SmoothBounds) -> bool {
@@ -165,23 +166,10 @@ fn bed_shadow(primary: SmoothRgba8) -> SmoothRgba8 {
     }
 }
 
-fn ellipse(bounds: SmoothBounds, color: SmoothRgba8) -> SmoothShape {
+fn ellipse(bounds: SmoothBounds, fill: SmoothFill) -> SmoothShape {
     SmoothShape {
         geometry: SmoothShapeGeometry::Ellipse { bounds },
-        color,
-    }
-}
-
-fn inset_bounds(bounds: SmoothBounds, inset_x: f32, inset_y: f32) -> SmoothBounds {
-    SmoothBounds {
-        min: SmoothPoint {
-            x: bounds.min.x + inset_x,
-            y: bounds.min.y + inset_y,
-        },
-        max: SmoothPoint {
-            x: bounds.max.x - inset_x,
-            y: bounds.max.y - inset_y,
-        },
+        fill,
     }
 }
 

@@ -185,10 +185,38 @@ pub enum SmoothShapeGeometry {
     Ellipse { bounds: SmoothBounds },
 }
 
+/// How a shape is painted. A gradient cannot be faked by stacking constant-alpha
+/// shapes: the steps band visibly at companion size.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum SmoothFill {
+    Solid(SmoothRgba8),
+    /// Radial falloff from the shape's centre out to its bounds.
+    RadialGradient {
+        inner: SmoothRgba8,
+        outer: SmoothRgba8,
+    },
+}
+
+impl SmoothFill {
+    /// The strongest alpha this fill can paint anywhere in the shape.
+    pub const fn max_alpha(self) -> u8 {
+        match self {
+            Self::Solid(color) => color.a,
+            Self::RadialGradient { inner, outer } => {
+                if inner.a > outer.a {
+                    inner.a
+                } else {
+                    outer.a
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct SmoothShape {
     pub geometry: SmoothShapeGeometry,
-    pub color: SmoothRgba8,
+    pub fill: SmoothFill,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

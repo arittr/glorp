@@ -2,8 +2,8 @@ use glorp::game::habitat::HabitatPropKind;
 use glorp::presentation::smooth::{
     transformed_smooth_bounds, validate_smooth_layer, CompanionViewport, SmoothBlendMode,
     SmoothBounds, SmoothClip, SmoothCompanionLayer, SmoothCompanionPrivacyClaims, SmoothDepthPlane,
-    SmoothGeometryError, SmoothLayerId, SmoothLayerItem, SmoothLayerMotionBinding, SmoothLayerRole,
-    SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry, SmoothTransform,
+    SmoothFill, SmoothGeometryError, SmoothLayerId, SmoothLayerItem, SmoothLayerMotionBinding,
+    SmoothLayerRole, SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry, SmoothTransform,
 };
 use glorp::round::depth::{
     depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError, SMOOTH_FAR_ATMOSPHERE,
@@ -35,7 +35,7 @@ fn bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> SmoothBounds {
 fn ellipse(bounds: SmoothBounds) -> SmoothShape {
     SmoothShape {
         geometry: SmoothShapeGeometry::Ellipse { bounds },
-        color: SmoothRgba8 { r: 90, g: 61, b: 99, a: 128 },
+        fill: SmoothFill::Solid(SmoothRgba8 { r: 90, g: 61, b: 99, a: 128 }),
     }
 }
 
@@ -90,10 +90,52 @@ fn smooth_shape_is_typed_and_serializable() {
     assert_eq!(json["geometry"]["Ellipse"]["bounds"]["min"]["y"], 2.0);
     assert_eq!(json["geometry"]["Ellipse"]["bounds"]["max"]["x"], 4.0);
     assert_eq!(json["geometry"]["Ellipse"]["bounds"]["max"]["y"], 6.0);
-    assert_eq!(json["color"]["r"], 90);
-    assert_eq!(json["color"]["g"], 61);
-    assert_eq!(json["color"]["b"], 99);
-    assert_eq!(json["color"]["a"], 128);
+    assert_eq!(json["fill"]["Solid"]["r"], 90);
+    assert_eq!(json["fill"]["Solid"]["g"], 61);
+    assert_eq!(json["fill"]["Solid"]["b"], 99);
+    assert_eq!(json["fill"]["Solid"]["a"], 128);
+}
+
+#[test]
+fn smooth_fill_reports_the_strongest_alpha_it_can_paint() {
+    let faint = SmoothRgba8 { r: 1, g: 2, b: 3, a: 20 };
+    let strong = SmoothRgba8 { r: 1, g: 2, b: 3, a: 90 };
+
+    assert_eq!(SmoothFill::Solid(strong).max_alpha(), 90);
+    assert_eq!(
+        SmoothFill::RadialGradient { inner: strong, outer: faint }.max_alpha(),
+        90
+    );
+    assert_eq!(
+        SmoothFill::RadialGradient { inner: faint, outer: strong }.max_alpha(),
+        90
+    );
+}
+
+/// The bed was three stacked hard-edged ellipses whose hue ran
+/// primary -> secondary -> primary. That is not a falloff, it is an oscillation,
+/// and it read as odd colour banding.
+#[test]
+fn tank_bed_base_is_one_radial_gradient_of_a_single_hue() {
+    let viewport = CompanionViewport {
+        grid_cols: GRID_COLS,
+        grid_rows: GRID_ROWS,
+    };
+    let bed = smooth_tank_bed_geometry(viewport, tank_bed_biome()).expect("bed");
+
+    let base = bed.shapes.first().expect("bed has a base band");
+    let SmoothFill::RadialGradient { inner, outer } = base.fill else {
+        panic!(
+            "the bed base must be a radial gradient, got {:?}",
+            base.fill
+        );
+    };
+
+    // One hue: only the alpha varies between the near floor and the horizon.
+    assert_eq!((inner.r, inner.g, inner.b), (outer.r, outer.g, outer.b));
+    // The centre of the base ellipse sits below the aperture, so its outer edge is
+    // the horizon and must be the fainter end.
+    assert!(inner.a > outer.a);
 }
 
 #[test]
@@ -526,7 +568,10 @@ fn tank_bed_geometry_is_curved_deterministic_and_finite() {
         })
         .count();
     let fleck_count = bed.shapes.len() - broad_band_count;
-    assert!((2..=3).contains(&broad_band_count));
+    assert_eq!(
+        broad_band_count, 1,
+        "one gradient band replaces the stacked hard-edged bands"
+    );
     assert!((8..=14).contains(&fleck_count));
     assert!((bed.horizon_y - f32::from(viewport.grid_rows) * 0.76).abs() < 0.01);
     assert!((bed.near_edge_y - f32::from(viewport.grid_rows)).abs() < 0.01);
@@ -1165,7 +1210,7 @@ fn plan_at_depth(
     .expect("normal fixture builds a smooth plan")
 }
 
-fn only_ellipse(layer: &SmoothCompanionLayer) -> (SmoothBounds, SmoothRgba8) {
+fn only_ellipse(layer: &SmoothCompanionLayer) -> (SmoothBounds, SmoothFill) {
     assert_eq!(
         layer.items.len(),
         1,
@@ -1175,8 +1220,8 @@ fn only_ellipse(layer: &SmoothCompanionLayer) -> (SmoothBounds, SmoothRgba8) {
     match &layer.items[0] {
         SmoothLayerItem::Shape(SmoothShape {
             geometry: SmoothShapeGeometry::Ellipse { bounds },
-            color,
-        }) => (*bounds, *color),
+            fill,
+        }) => (*bounds, *fill),
         other => panic!("expected a typed ellipse, got {other:?}"),
     }
 }
@@ -1338,9 +1383,9 @@ fn floor_projection_is_one_bed_anchored_ellipse_that_tracks_depth() {
     )
     .expect("normal viewport has a tank bed");
 
-    let (far_bounds, far_color) =
+    let (far_bounds, far_fill) =
         only_ellipse(far.layer_by_role(SmoothLayerRole::FloorProjection).unwrap());
-    let (near_bounds, near_color) = only_ellipse(
+    let (near_bounds, near_fill) = only_ellipse(
         near.layer_by_role(SmoothLayerRole::FloorProjection)
             .unwrap(),
     );
@@ -1362,7 +1407,7 @@ fn floor_projection_is_one_bed_anchored_ellipse_that_tracks_depth() {
     // Near reads bigger, stronger, and further down the bed than far.
     assert!(near_bounds.max.x - near_bounds.min.x > far_bounds.max.x - far_bounds.min.x);
     assert!(near_bounds.max.y - near_bounds.min.y > far_bounds.max.y - far_bounds.min.y);
-    assert!(near_color.a > far_color.a);
+    assert!(near_fill.max_alpha() > far_fill.max_alpha());
     assert!(
         center_y(far_bounds) < center_y(near_bounds),
         "the far projection must sit closer to the bed horizon"
@@ -1495,9 +1540,9 @@ fn tank_bed_bands_stay_translucent_enough_to_read_as_depth() {
 
         for shape in &bed.shapes {
             assert!(
-                shape.color.a <= MAX_BED_ALPHA,
+                shape.fill.max_alpha() <= MAX_BED_ALPHA,
                 "bed shape alpha {} reads as a solid footer, not a substrate",
-                shape.color.a
+                shape.fill.max_alpha()
             );
         }
     }

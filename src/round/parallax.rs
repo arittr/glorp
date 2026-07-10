@@ -233,9 +233,9 @@ fn bounds_are_finite(bounds: SmoothBounds) -> bool {
 mod tests {
     use super::*;
     use crate::presentation::smooth::{
-        SmoothBlendMode, SmoothClip, SmoothCompanionPrivacyClaims, SmoothLayerId, SmoothLayerItem,
-        SmoothLayerRole, SmoothLocalCell, SmoothRasterRef, SmoothRgba8, SmoothShape,
-        SmoothShapeGeometry, SmoothTransform,
+        SmoothBlendMode, SmoothClip, SmoothCompanionPrivacyClaims, SmoothFill, SmoothLayerId,
+        SmoothLayerItem, SmoothLayerRole, SmoothLocalCell, SmoothRasterRef, SmoothRgba8,
+        SmoothShape, SmoothShapeGeometry, SmoothTransform,
     };
 
     fn bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> SmoothBounds {
@@ -489,7 +489,7 @@ mod tests {
         for item in [
             SmoothLayerItem::Shape(SmoothShape {
                 geometry: SmoothShapeGeometry::Ellipse { bounds: bounds(0.0, 0.0, 1.0, 1.0) },
-                color: SmoothRgba8 { r: 0, g: 0, b: 0, a: 0 },
+                fill: SmoothFill::Solid(SmoothRgba8 { r: 0, g: 0, b: 0, a: 0 }),
             }),
             SmoothLayerItem::Raster(SmoothRasterRef { name: "raster".to_string() }),
         ] {

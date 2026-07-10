@@ -24,8 +24,8 @@ use crate::presentation::pixel::{
 };
 use crate::presentation::smooth::{
     validate_smooth_layer, SmoothBlendMode, SmoothBounds, SmoothClip, SmoothCompanionLayer,
-    SmoothCompanionScenePlan, SmoothGeometryError, SmoothLayerItem, SmoothLayerMotionBinding,
-    SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
+    SmoothCompanionScenePlan, SmoothFill, SmoothGeometryError, SmoothLayerItem,
+    SmoothLayerMotionBinding, SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
 };
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge, daily_overage_color,
@@ -1785,8 +1785,26 @@ fn appkit_blit_smooth_plan(
                     };
                     unsafe {
                         let path = NSBezierPath::bezierPathWithOvalInRect(rect);
-                        rgba_to_nscolor(shape.color, layer.opacity).setFill();
-                        path.fill();
+                        match shape.fill {
+                            SmoothFill::Solid(color) => {
+                                rgba_to_nscolor(color, layer.opacity).setFill();
+                                path.fill();
+                            }
+                            SmoothFill::RadialGradient { inner, outer } => {
+                                let gradient = NSGradient::initWithStartingColor_endingColor(
+                                    NSGradient::alloc(),
+                                    &rgba_to_nscolor(inner, layer.opacity),
+                                    &rgba_to_nscolor(outer, layer.opacity),
+                                );
+                                if let Some(gradient) = gradient {
+                                    // Relative centre (0, 0) is the shape's own centre.
+                                    gradient.drawInBezierPath_relativeCenterPosition(
+                                        &path,
+                                        NSPoint::new(0.0, 0.0),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 // Rasters are descriptive only; this slice has no raster backend and
@@ -2720,7 +2738,7 @@ mod smooth_geometry_tests {
             blend: SmoothBlendMode::Normal,
             items: vec![SmoothLayerItem::Shape(SmoothShape {
                 geometry: SmoothShapeGeometry::Ellipse { bounds: bounds(0.0, 0.0, 2.0, 2.0) },
-                color: SmoothRgba8 { r: 1, g: 2, b: 3, a: 255 },
+                fill: SmoothFill::Solid(SmoothRgba8 { r: 1, g: 2, b: 3, a: 255 }),
             })],
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
         }
