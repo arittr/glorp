@@ -466,6 +466,58 @@ fn companion_app_rejects_unknown_renderer() {
 }
 
 #[test]
+fn companion_accepts_hidden_auto_renderer_choice() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--renderer", "auto", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--renderer").not());
+}
+
+#[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+#[test]
+fn companion_accepts_hidden_retained_renderer_under_feature() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--renderer", "retained", "--help"])
+        .assert()
+        .success();
+}
+
+#[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+#[test]
+fn companion_app_accepts_hidden_retained_renderer_under_feature() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion-app", "--renderer", "retained", "--help"])
+        .assert()
+        .success();
+}
+
+#[cfg(not(feature = "retained-renderer"))]
+#[test]
+fn companion_rejects_retained_renderer_without_feature() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion", "--renderer", "retained"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[cfg(not(feature = "retained-renderer"))]
+#[test]
+fn companion_app_rejects_retained_renderer_without_feature() {
+    Command::cargo_bin("glorp")
+        .unwrap()
+        .args(["companion-app", "--renderer", "retained"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
 fn init_uses_historical_usage_for_calibration_without_initial_xp() {
     let dir = tempfile::tempdir().unwrap();
     Command::cargo_bin("glorp")

@@ -1,8 +1,8 @@
-use crate::commands::companion_mode::{CompanionRendererMode, CompanionReviewOptions};
+use crate::commands::companion_mode::{CompanionRendererRequest, CompanionReviewOptions};
 use crate::error::{GlorpError, Result};
 
 #[cfg(target_os = "macos")]
-pub fn run(mode: CompanionRendererMode, review: CompanionReviewOptions) -> Result<()> {
+pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) -> Result<()> {
     let paths = crate::paths::AppPaths::resolve()?;
     paths.ensure()?;
     let locator = crate::usage::helper_locator::HelperLocator::from_current_environment();
@@ -15,7 +15,7 @@ pub fn run(mode: CompanionRendererMode, review: CompanionReviewOptions) -> Resul
         )?;
     }
     let app = companion_app_path()?;
-    let mut command = build_open_command(&app, mode, review);
+    let mut command = build_open_command(&app, request, review);
     let status = command.status()?;
     if !status.success() {
         return Err(GlorpError::Message(format!(
@@ -29,12 +29,12 @@ pub fn run(mode: CompanionRendererMode, review: CompanionReviewOptions) -> Resul
 #[cfg(target_os = "macos")]
 fn build_open_command(
     app: &std::path::Path,
-    mode: CompanionRendererMode,
+    request: CompanionRendererRequest,
     review: CompanionReviewOptions,
 ) -> std::process::Command {
     let mut command = std::process::Command::new("open");
-    let needs_args =
-        mode.is_pixel() || mode.uses_smooth_scene() || review.has_review_launch_options();
+    let renderer_arg = request.forwarded_arg();
+    let needs_args = renderer_arg.is_some() || review.has_review_launch_options();
     if needs_args {
         command.arg("-n");
     }
@@ -42,8 +42,8 @@ fn build_open_command(
     if needs_args {
         command.arg("--args");
     }
-    if mode.is_pixel() || mode.uses_smooth_scene() {
-        command.arg("--renderer").arg(mode.as_str());
+    if let Some(renderer_arg) = renderer_arg {
+        command.arg("--renderer").arg(renderer_arg);
     }
     if let Some(size) = review.initial_size {
         let size = format!("{}x{}", size.width, size.height);
@@ -70,7 +70,7 @@ fn build_open_command(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run(_mode: CompanionRendererMode, _review: CompanionReviewOptions) -> Result<()> {
+pub fn run(_request: CompanionRendererRequest, _review: CompanionReviewOptions) -> Result<()> {
     Err(GlorpError::Message(
         "glorp companion is only available on macOS".into(),
     ))
@@ -101,16 +101,29 @@ fn companion_app_path() -> Result<std::path::PathBuf> {
 mod tests {
     use super::build_open_command;
     use crate::commands::companion_mode::{
-        CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
+        CompanionRendererRequest, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
     };
     use std::ffi::OsString;
     use std::path::Path;
 
     #[test]
+    fn auto_request_reuses_running_instance_without_renderer_arg() {
+        let command = build_open_command(
+            Path::new("/Applications/Glorp.app"),
+            CompanionRendererRequest::Auto,
+            CompanionReviewOptions::default(),
+        );
+
+        assert_eq!(command.get_program(), "open");
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(args, vec![OsString::from("/Applications/Glorp.app")]);
+    }
+
+    #[test]
     fn review_options_force_fresh_open_for_classic_renderer() {
         let command = build_open_command(
             Path::new("/Applications/Glorp.app"),
-            CompanionRendererMode::Classic,
+            CompanionRendererRequest::Classic,
             CompanionReviewOptions {
                 initial_size: Some(CompanionReviewSize { width: 360, height: 360 }),
                 active_pulse: true,
@@ -126,6 +139,8 @@ mod tests {
                 OsString::from("-n"),
                 OsString::from("/Applications/Glorp.app"),
                 OsString::from("--args"),
+                OsString::from("--renderer"),
+                OsString::from("classic"),
                 OsString::from("--review-size"),
                 OsString::from("360x360"),
                 OsString::from("--review-active-pulse"),
@@ -137,7 +152,7 @@ mod tests {
     fn smooth_renderer_opens_in_fresh_window_with_renderer_arg() {
         let command = build_open_command(
             Path::new("/Applications/Glorp.app"),
-            CompanionRendererMode::Smooth,
+            CompanionRendererRequest::Smooth,
             CompanionReviewOptions::default(),
         );
 
@@ -159,7 +174,7 @@ mod tests {
     fn review_open_command_forwards_state_duration_and_capture_dir() {
         let command = build_open_command(
             Path::new("/Applications/Glorp.app"),
-            CompanionRendererMode::Smooth,
+            CompanionRendererRequest::Smooth,
             CompanionReviewOptions {
                 state: Some(CompanionReviewState::ActivePulse),
                 duration_ms: Some(2000),
@@ -193,7 +208,7 @@ mod tests {
 mod review_depth_forwarding_tests {
     use super::build_open_command;
     use crate::commands::companion_mode::{
-        CompanionRendererMode, CompanionReviewDepth, CompanionReviewOptions,
+        CompanionRendererRequest, CompanionReviewDepth, CompanionReviewOptions,
     };
     use std::ffi::OsString;
     use std::path::Path;
@@ -207,7 +222,7 @@ mod review_depth_forwarding_tests {
         ] {
             let command = build_open_command(
                 Path::new("/Applications/Glorp.app"),
-                CompanionRendererMode::Smooth,
+                CompanionRendererRequest::Smooth,
                 CompanionReviewOptions {
                     depth: Some(depth),
                     ..CompanionReviewOptions::default()
@@ -228,7 +243,7 @@ mod review_depth_forwarding_tests {
     fn review_depth_alone_spawns_a_fresh_instance_with_args() {
         let command = build_open_command(
             Path::new("/Applications/Glorp.app"),
-            CompanionRendererMode::Classic,
+            CompanionRendererRequest::Classic,
             CompanionReviewOptions {
                 depth: Some(CompanionReviewDepth::Far),
                 ..CompanionReviewOptions::default()

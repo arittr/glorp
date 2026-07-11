@@ -9,8 +9,8 @@ pub mod review_capture;
 pub mod smooth_timing;
 
 pub fn run(
-    mode: crate::commands::companion_mode::CompanionRendererMode,
+    request: crate::commands::companion_mode::CompanionRendererRequest,
     review: crate::commands::companion_mode::CompanionReviewOptions,
 ) -> crate::error::Result<()> {
-    app::run(mode, review)
+    app::run(request, review)
 }

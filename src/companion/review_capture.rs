@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::commands::companion_mode::{
-    CompanionRendererMode, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
+    CompanionReviewOptions, CompanionReviewSize, CompanionReviewState, EffectiveCompanionRenderer,
 };
 use crate::error::{GlorpError, Result};
 use objc2::rc::Retained;
@@ -78,7 +78,7 @@ pub struct SmoothReviewFrameSample {
 
 #[derive(Debug)]
 pub struct ReviewCapture {
-    renderer: CompanionRendererMode,
+    renderer: EffectiveCompanionRenderer,
     state: CompanionReviewState,
     requested_size: Option<CompanionReviewSize>,
     duration: Duration,
@@ -109,7 +109,7 @@ pub struct ReviewCapture {
 
 impl ReviewCapture {
     pub fn from_options(
-        renderer: CompanionRendererMode,
+        renderer: EffectiveCompanionRenderer,
         review: &CompanionReviewOptions,
     ) -> Result<Option<Self>> {
         let capture_dir = review.capture_dir.clone();
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn duration_only_review_options_create_session_without_artifacts() {
         let capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -527,7 +527,7 @@ mod tests {
     fn artifact_capture_requests_redacted_live_hud() {
         let dir = tempfile::tempdir().unwrap();
         let capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 capture_dir: Some(dir.path().join("capture")),
@@ -545,7 +545,7 @@ mod tests {
     fn smooth_review_capture_records_requested_evidence_and_privacy() {
         let dir = tempfile::tempdir().unwrap();
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 capture_dir: Some(dir.path().join("capture")),
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn smooth_review_capture_first_sample_has_zero_parallax_aggregate() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn review_capture_records_boundary_health_without_private_strings() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 state: Some(CompanionReviewState::Normal),
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn smooth_review_capture_checksum_stability_detects_flashing() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -883,7 +883,7 @@ mod tests {
     #[test]
     fn smooth_review_capture_checksum_stability_covers_unsampled_frames() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn smooth_review_capture_render_log_strings_stay_sanitized() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 state: Some(CompanionReviewState::HelperTrouble),
@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn depth_review_samples_are_ordered_from_far_to_near() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn nonblank_shape_frame_count_counts_only_frames_with_shape_draws() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn max_adjacent_pet_scale_delta_stays_bounded_across_animation() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -1130,7 +1130,7 @@ mod tests {
     #[test]
     fn zero_sample_run_serializes_finite_scale_bounds() {
         let capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 ..CompanionReviewOptions::default()
@@ -1151,7 +1151,7 @@ mod tests {
     #[test]
     fn depth_review_evidence_stays_sanitized() {
         let mut capture = ReviewCapture::from_options(
-            CompanionRendererMode::Smooth,
+            EffectiveCompanionRenderer::Smooth,
             &CompanionReviewOptions {
                 duration_ms: Some(2000),
                 state: Some(CompanionReviewState::HelperTrouble),
