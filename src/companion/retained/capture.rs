@@ -34,13 +34,34 @@ pub(super) enum PixelOrder {
 /// [`PairedReviewFrame`](super::super::paired_review::PairedReviewFrame) the
 /// capture repainted, so an artifact correlates 1:1 with its review row.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Consumed by the Task 7 paired-capture coordinator.
-pub(super) struct CanonicalRgbaFrame {
-    pub(super) frame_id: u64,
-    pub(super) resource_generation: u64,
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) rgba: Vec<u8>,
+pub(crate) struct CanonicalRgbaFrame {
+    frame_id: u64,
+    resource_generation: u64,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+impl CanonicalRgbaFrame {
+    pub(crate) fn frame_id(&self) -> u64 {
+        self.frame_id
+    }
+
+    pub(crate) fn resource_generation(&self) -> u64 {
+        self.resource_generation
+    }
+
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub(crate) fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
 }
 
 /// The physical-size row layout a readback copies through: the tightly packed
@@ -149,12 +170,10 @@ pub(super) fn normalize_readback_rows(
 /// paired-review frame into an off-screen physical-size intermediate and reads
 /// it back as a [`CanonicalRgbaFrame`]. The intermediate and staging buffers are
 /// created per call for correctness; Task 10 makes them persistent and bounded.
-#[allow(dead_code)] // Driven by the Task 7 paired-capture coordinator.
 pub(super) struct RetainedCaptureTarget<'host> {
     host: &'host mut RetainedHost,
 }
 
-#[allow(dead_code)] // Driven by the Task 7 paired-capture coordinator.
 impl<'host> RetainedCaptureTarget<'host> {
     /// Borrows the active host whose device/queue/pipelines/atlas the readback
     /// reuses so the capture rasterizes with the identical pipeline as `render`.

@@ -16,6 +16,10 @@ pub struct CompanionReviewOptions {
     /// hidden `--review-capture-live-values` flag; enforcement lives in the
     /// paired-capture coordinator, not the single-renderer capture path.
     pub review_capture_live_values: bool,
+    /// Forces the resting dim composition onto the frozen live frame. Threaded
+    /// from the hidden `--review-force-dim` flag (the xtask `--dimmed` matrix
+    /// variant); never persisted.
+    pub force_dim_overlay: bool,
 }
 
 /// The three depth planes a review capture can pin, normalized onto the raw depth

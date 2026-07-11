@@ -381,6 +381,7 @@ fn prepare_companion_frame(
     smooth_started_at: Option<Instant>,
     smooth_semantic_art_tick_index: u64,
     redacts_live_hud: bool,
+    force_dim_overlay: bool,
     bounds: NSRect,
     metric_cache: &mut CompanionMetricCache,
 ) -> std::result::Result<PreparedCompanionFrame, CompanionFramePreparationError> {
@@ -397,7 +398,9 @@ fn prepare_companion_frame(
         .find(|command| command.kind == RoundDrawKind::Background)
         .map(|command| command.color)
         .unwrap_or(RoundColor(0.05, 0.06, 0.10, 1.0));
-    let dim_overlay = scene.lifecycle.asleep || scene.lifecycle.calm;
+    // `--dimmed` forces the resting dim composition onto the live frame for the
+    // final review matrix, on top of any lifecycle-driven dim.
+    let dim_overlay = scene.lifecycle.asleep || scene.lifecycle.calm || force_dim_overlay;
     let gauges = prepare_gauge_frame(vm);
     let hud = prepare_hud_frame(vm, redacts_live_hud);
 
@@ -578,6 +581,12 @@ struct AppState {
     animation_frame: u64,
     review_capture: Option<crate::companion::review_capture::ReviewCapture>,
     redacts_live_hud: bool,
+    /// Forces the resting dim composition onto the live frame (`--dimmed`).
+    force_dim_overlay: bool,
+    /// The opt-in `--review-capture-live-values` flag, threaded to the paired
+    /// capture's privacy mode.
+    #[cfg_attr(not(feature = "retained-renderer"), allow(dead_code))]
+    review_capture_live_values: bool,
     metric_cache: CompanionMetricCache,
     last_good_frame: Option<PreparedCompanionFrame>,
     #[allow(dead_code)] // Read by the Task 5 paint boundary.
@@ -822,6 +831,8 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             animation_frame: 0,
             review_capture,
             redacts_live_hud,
+            force_dim_overlay: review.force_dim_overlay,
+            review_capture_live_values: review.review_capture_live_values,
             metric_cache: CompanionMetricCache::default(),
             last_good_frame: None,
             last_frame_preparation_error: None,
@@ -843,6 +854,12 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     };
 
     unsafe { app.run() };
+    // A paired-capture fault after NSApplication exits must fail the process so a
+    // successful `open`/spawn cannot hide an app-side capture failure.
+    #[cfg(feature = "retained-renderer")]
+    if let Some(Err(err)) = take_pair_capture_outcome() {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -1066,6 +1083,7 @@ fn prepare_current_frame_from_state() {
                 smooth_started_at,
                 smooth_semantic_art_tick_index,
                 redacts_live_hud,
+                force_dim_overlay,
                 metric_cache,
                 ..
             } = state;
@@ -1079,6 +1097,7 @@ fn prepare_current_frame_from_state() {
                 *smooth_started_at,
                 *smooth_semantic_art_tick_index,
                 *redacts_live_hud,
+                *force_dim_overlay,
                 bounds,
                 metric_cache,
             )
@@ -1339,36 +1358,119 @@ fn finish_review_capture_if_due() {
     let pending_capture = APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
-        if state
+        if !state
             .review_capture
             .as_ref()
             .is_some_and(|capture| capture.ready_to_finish())
         {
-            let capture = state.review_capture.take()?;
-            Some((state.view.clone(), capture))
-        } else {
-            None
+            return None;
         }
+        // Produce the paired Smooth/Retained artifacts from the frozen last-good
+        // frame before the capture session is torn down.
+        #[cfg(feature = "retained-renderer")]
+        run_paired_capture(state);
+        let capture = state.review_capture.take()?;
+        Some((state.view.clone(), capture))
     });
     let Some((view, mut capture)) = pending_capture else {
         return;
     };
 
-    match capture.finish(view.as_super()) {
-        Ok(()) => unsafe {
-            if let Some(mtm) = MainThreadMarker::new() {
-                NSApplication::sharedApplication(mtm).terminate(None);
-            }
-        },
-        Err(err) => {
-            eprintln!("glorp review capture failed: {err}");
-            unsafe {
-                if let Some(mtm) = MainThreadMarker::new() {
-                    NSApplication::sharedApplication(mtm).terminate(None);
-                }
-            }
+    // Relay the paired-capture terminal result to the process-level slot so `run`
+    // can fail the process after NSApplication exits.
+    #[cfg(feature = "retained-renderer")]
+    if let Some(outcome) = capture.take_pair_capture_result() {
+        store_pair_capture_outcome(outcome);
+    }
+
+    if let Err(err) = capture.finish(view.as_super()) {
+        eprintln!("glorp review capture failed: {err}");
+    }
+    unsafe {
+        if let Some(mtm) = MainThreadMarker::new() {
+            NSApplication::sharedApplication(mtm).terminate(None);
         }
     }
+}
+
+/// Freezes the last-good frame and produces the paired Smooth/Retained capture.
+/// Runs only when the review writes artifacts and a retained host is live; the
+/// terminal result is stashed on the [`ReviewCapture`] for the process to relay.
+#[cfg(feature = "retained-renderer")]
+fn run_paired_capture(state: &mut AppState) {
+    use crate::companion::paired_review::{
+        CapturePrivacy, PairedCaptureCoordinator, PairedReviewFrame, ReviewFrameDimensions,
+    };
+
+    let AppState {
+        review_capture,
+        retained_host,
+        last_good_frame,
+        renderer_runtime,
+        smooth_started_at,
+        smooth_semantic_art_tick_index,
+        review_capture_live_values,
+        ..
+    } = state;
+
+    let Some(capture) = review_capture.as_mut() else {
+        return;
+    };
+    let Some(out_dir) = capture.capture_dir().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let Some(host) = retained_host.as_mut() else {
+        return;
+    };
+    let Some(prepared) = last_good_frame.as_ref() else {
+        return;
+    };
+
+    let (physical_width, physical_height) = host.physical_size();
+    let logical = ReviewFrameDimensions {
+        width: prepared.bounds.width_f64,
+        height: prepared.bounds.height_f64,
+    };
+    let physical = ReviewFrameDimensions {
+        width: f64::from(physical_width),
+        height: f64::from(physical_height),
+    };
+    let elapsed_ms = smooth_started_at
+        .map(|started_at| started_at.elapsed().as_millis())
+        .unwrap_or(0)
+        .min(u128::from(u64::MAX)) as u64;
+    // Freeze ONE review frame; both capture paths consume this frozen frame.
+    let frame = PairedReviewFrame::from_prepared(
+        prepared.clone(),
+        host.backing_scale(),
+        logical,
+        physical,
+        *smooth_semantic_art_tick_index,
+        elapsed_ms,
+        host.current_frame_id(),
+        host.current_resource_generation(),
+    );
+    let privacy = CapturePrivacy::from_live_values(*review_capture_live_values);
+    let result =
+        PairedCaptureCoordinator::new(&frame, host, renderer_runtime, privacy, out_dir).run();
+    capture.record_pair_capture_result(result);
+}
+
+// The process-level terminal outcome of the paired capture, relayed from the
+// review lifecycle so `run` can fail the process after NSApplication exits.
+#[cfg(feature = "retained-renderer")]
+thread_local! {
+    static PAIRED_CAPTURE_OUTCOME: RefCell<Option<Result<()>>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "retained-renderer")]
+fn store_pair_capture_outcome(outcome: Result<()>) {
+    PAIRED_CAPTURE_OUTCOME.with(|cell| *cell.borrow_mut() = Some(outcome));
+}
+
+#[cfg(feature = "retained-renderer")]
+fn take_pair_capture_outcome() -> Option<Result<()>> {
+    PAIRED_CAPTURE_OUTCOME.with(|cell| cell.borrow_mut().take())
 }
 
 fn render_live_pixel_frame(
@@ -1429,7 +1531,7 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
             .and_then(|state| state.last_good_frame.as_ref())
         {
             Some(frame) => {
-                paint_prepared_frame(view, bounds, frame);
+                paint_prepared_frame(bounds, frame);
                 frame.review_sample
             }
             None => {
@@ -1441,7 +1543,7 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
     record_review_frame(view, review_sample);
 }
 
-fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompanionFrame) {
+fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
     let aperture = frame.aperture;
     let bg_color = frame.background;
     let dim_overlay = frame.dim_overlay;
@@ -1548,6 +1650,69 @@ fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompa
             NSColor::colorWithSRGBRed_green_blue_alpha(0.05, 0.06, 0.10, 0.35).setFill();
             dim.fill();
         }
+    }
+}
+
+/// Paints the frozen prepared frame into an off-screen physical-size bitmap and
+/// returns its straight RGBA8 bytes. The retained-renderer paired capture uses
+/// this for the Smooth half so both PNGs share one physical resolution. The
+/// bitmap's point size is the logical frame, so the AppKit painter's
+/// logical-coordinate drawing scales up to fill the physical pixel grid.
+///
+/// This paints the SAME frozen [`PreparedCompanionFrame`] the retained readback
+/// consumes — it never rebuilds the scene or reads any `AppState` clock.
+#[cfg(feature = "retained-renderer")]
+pub(super) fn render_prepared_frame_to_rgba(
+    frame: &PreparedCompanionFrame,
+    physical_width: u32,
+    physical_height: u32,
+    backing_scale: f64,
+) -> Result<Vec<u8>> {
+    if physical_width == 0 || physical_height == 0 || backing_scale <= 0.0 {
+        return Err(GlorpError::Message(
+            "invalid paired smooth capture dimensions".into(),
+        ));
+    }
+    let logical_width = f64::from(physical_width) / backing_scale;
+    let logical_height = f64::from(physical_height) / backing_scale;
+    unsafe {
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            physical_width as isize,
+            physical_height as isize,
+            8,
+            4,
+            true,
+            false,
+            NSCalibratedRGBColorSpace,
+            (physical_width * 4) as isize,
+            32,
+        )
+        .ok_or_else(|| GlorpError::Message("failed to allocate paired smooth capture bitmap".into()))?;
+        rep.setSize(NSSize::new(logical_width, logical_height));
+        let context =
+            NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep).ok_or_else(|| {
+                GlorpError::Message("failed to create paired smooth capture context".into())
+            })?;
+        let previous = NSGraphicsContext::currentContext();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        let bounds = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(logical_width, logical_height),
+        );
+        paint_prepared_frame(bounds, frame);
+        context.flushGraphics();
+        NSGraphicsContext::setCurrentContext(previous.as_deref());
+
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return Err(GlorpError::Message(
+                "paired smooth capture bitmap has no backing store".into(),
+            ));
+        }
+        let len = (physical_width * physical_height * 4) as usize;
+        Ok(std::slice::from_raw_parts(data, len).to_vec())
     }
 }
 
@@ -2726,6 +2891,7 @@ mod tests {
             None,
             0,
             false,
+            false,
             measured_bounds,
             &mut metric_cache,
         )
@@ -2746,6 +2912,7 @@ mod tests {
             None,
             None,
             0,
+            false,
             false,
             fallback_bounds,
             &mut metric_cache,

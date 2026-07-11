@@ -105,6 +105,11 @@ pub struct ReviewCapture {
     last_good_frame_reused_count: u64,
     screenshot_written: bool,
     render_log_written: bool,
+    /// The terminal outcome of the paired Smooth/Retained capture, if one ran.
+    /// The direct companion-app review process relays this so a capture fault
+    /// becomes a process error after `NSApplication` exits.
+    #[cfg(feature = "retained-renderer")]
+    pair_capture_result: Option<Result<()>>,
 }
 
 impl ReviewCapture {
@@ -149,7 +154,27 @@ impl ReviewCapture {
             last_good_frame_reused_count: 0,
             screenshot_written: false,
             render_log_written: false,
+            #[cfg(feature = "retained-renderer")]
+            pair_capture_result: None,
         }))
+    }
+
+    /// The capture output directory, when this review writes artifacts.
+    #[cfg(feature = "retained-renderer")]
+    pub fn capture_dir(&self) -> Option<&Path> {
+        self.capture_dir.as_deref()
+    }
+
+    /// Stores the terminal result of the paired capture for the process to relay.
+    #[cfg(feature = "retained-renderer")]
+    pub fn record_pair_capture_result(&mut self, result: Result<()>) {
+        self.pair_capture_result = Some(result);
+    }
+
+    /// Takes the paired-capture terminal result, if one was recorded.
+    #[cfg(feature = "retained-renderer")]
+    pub fn take_pair_capture_result(&mut self) -> Option<Result<()>> {
+        self.pair_capture_result.take()
     }
 
     pub fn record_frame(&mut self, smooth_sample: Option<SmoothReviewFrameSample>) {

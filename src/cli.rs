@@ -61,6 +61,8 @@ pub enum Command {
         review_depth: Option<CompanionReviewDepth>,
         #[arg(long, hide = true)]
         review_capture_live_values: bool,
+        #[arg(long, hide = true)]
+        review_force_dim: bool,
     },
     #[command(hide = true)]
     CompanionApp {
@@ -80,6 +82,8 @@ pub enum Command {
         review_depth: Option<CompanionReviewDepth>,
         #[arg(long, hide = true)]
         review_capture_live_values: bool,
+        #[arg(long, hide = true)]
+        review_force_dim: bool,
     },
     /// Print a compact non-interactive pet and usage summary.
     Status,
@@ -164,6 +168,7 @@ impl From<DevPetSpecies> for crate::pet::generation::Species {
 }
 
 impl Cli {
+    #[allow(clippy::too_many_arguments)] // Flat review-flag plumbing from clap args.
     pub(crate) fn companion_review_options(
         review_size: Option<CompanionReviewSize>,
         review_active_pulse: bool,
@@ -172,6 +177,7 @@ impl Cli {
         review_capture_dir: Option<PathBuf>,
         review_depth: Option<CompanionReviewDepth>,
         review_capture_live_values: bool,
+        review_force_dim: bool,
     ) -> CompanionReviewOptions {
         CompanionReviewOptions {
             initial_size: review_size,
@@ -181,6 +187,7 @@ impl Cli {
             capture_dir: review_capture_dir,
             depth: review_depth,
             review_capture_live_values,
+            force_dim_overlay: review_force_dim,
         }
     }
 }
@@ -277,6 +284,7 @@ mod companion_review_depth_tests {
             None,
             None,
             Some(CompanionReviewDepth::Near),
+            false,
             false,
         );
         assert!(options.has_review_launch_options());

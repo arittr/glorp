@@ -5,14 +5,13 @@ use std::sync::mpsc::{Receiver, Sender};
 /// ladder a frame climbs; `mark` only accepts the milestone that immediately
 /// follows the highest one already observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum FrameMilestone {
+pub(crate) enum FrameMilestone {
     Prepared,
     Encoded,
     Submitted,
     SurfacePresentCalled,
     GpuCompleted,
     /// Reached once the readback capture path lands (Task 6).
-    #[allow(dead_code)]
     ReadbackCompleted,
 }
 

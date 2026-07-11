@@ -32,9 +32,10 @@ use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 mod capture;
 mod presentation;
 
-use presentation::FrameMilestone;
+pub(crate) use capture::CanonicalRgbaFrame;
 pub(crate) use presentation::{
-    FrameDisposition, FrameProgress, GpuErrorMailbox, RetainedFailureCategory, SkipReason,
+    FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox, RetainedFailureCategory,
+    SkipReason,
 };
 
 const ATLAS_CELL: u32 = 80;
@@ -389,6 +390,39 @@ impl ActiveRetainedHost {
         unsafe { view.setLayer(None) };
         view.setWantsLayer(false);
         unsafe { view.setNeedsDisplay(true) };
+    }
+
+    /// Renders the frozen paired-review frame into an off-screen intermediate and
+    /// reads it back as a [`CanonicalRgbaFrame`]. Reuses the live host's
+    /// device/queue/pipelines so the capture rasterizes with the identical
+    /// pipeline as the on-screen present.
+    pub(crate) fn capture(
+        &mut self,
+        frame: &crate::companion::paired_review::PairedReviewFrame,
+    ) -> std::result::Result<CanonicalRgbaFrame, RetainedFailureCategory> {
+        capture::RetainedCaptureTarget::new(&mut self.host).capture(frame)
+    }
+
+    /// The physical-pixel drawable size the retained surface is configured for.
+    pub(crate) fn physical_size(&self) -> (u32, u32) {
+        (self.host.physical_width, self.host.physical_height)
+    }
+
+    /// The window backing scale the host resolved its physical size from.
+    pub(crate) fn backing_scale(&self) -> f64 {
+        self.host.backing_scale
+    }
+
+    /// The id of the next frame the host would render. A paired capture stamps
+    /// this onto the frozen review frame so both artifacts share one id.
+    pub(crate) fn current_frame_id(&self) -> u64 {
+        self.host.frame_counter
+    }
+
+    /// The resource generation the host currently renders against. Real
+    /// generations arrive in Task 9; today the host tracks a single generation.
+    pub(crate) fn current_resource_generation(&self) -> u64 {
+        0
     }
 }
 

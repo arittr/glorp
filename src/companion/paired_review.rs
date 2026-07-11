@@ -16,10 +16,14 @@
 use std::fmt::Debug;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::commands::companion_mode::{
+    CompanionRendererRequest, EffectiveCompanionRenderer, RendererRuntimeState,
+};
 use crate::companion::app::{CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame};
+use crate::companion::retained::{ActiveRetainedHost, FrameDisposition, FrameMilestone};
 use crate::presentation::draw_list::SceneDrawList;
 use crate::presentation::pixel::PixelFrame;
 use crate::presentation::smooth::SmoothCompanionScenePlan;
@@ -533,9 +537,421 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
+/// The only pair-manifest schema this build reads or writes.
+pub const PAIR_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// A machine-verifiable record of one paired Smooth/Retained capture. It carries
+/// only redacted metadata — renderer names, kebab-case milestones and terminal
+/// dispositions, resource counters, the frozen-frame checksum, and the two
+/// artifact paths. It NEVER records the frozen frame's HUD strings; the checksum
+/// is the sole (one-way) witness of the frame's chrome.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairManifest {
+    pub schema_version: u32,
+    /// `"success"` only when both artifacts were produced and the retained
+    /// readback completed; any capture fault flips this to `"failed"`.
+    pub status: String,
+    pub requested_renderer: String,
+    pub effective_renderer: String,
+    pub compiled_capabilities: Vec<String>,
+    pub frame_checksum: String,
+    pub logical: PairDimensions,
+    pub physical: PairDimensions,
+    pub backing_scale: f64,
+    pub frame_id: u64,
+    pub resource_generation: u64,
+    pub fallback_transition_count: u64,
+    pub last_fallback_reason: Option<String>,
+    pub privacy_mode: String,
+    pub smooth: PairRendererSection,
+    pub retained: PairRendererSection,
+}
+
+/// Logical (points) or physical (pixels) dimensions recorded in the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PairDimensions {
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The per-renderer half of a paired capture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairRendererSection {
+    pub effective_renderer: String,
+    pub milestones: Vec<String>,
+    pub terminal_disposition: String,
+    pub frame_id: u64,
+    pub resource_generation: u64,
+    pub resource_counters: PairResourceCounters,
+    pub png_path: String,
+}
+
+/// The concrete artifact counters a reviewer or validator can cross-check.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PairResourceCounters {
+    pub captured_width: u32,
+    pub captured_height: u32,
+}
+
+impl PairManifest {
+    /// A deterministic, valid paired manifest for tests. Both sections are frozen
+    /// from the same identity, so [`validate_review_pair`] accepts it.
+    pub fn fixture() -> Self {
+        Self {
+            schema_version: PAIR_MANIFEST_SCHEMA_VERSION,
+            status: "success".to_string(),
+            requested_renderer: "retained".to_string(),
+            effective_renderer: "retained".to_string(),
+            compiled_capabilities: vec!["retained-renderer".to_string()],
+            frame_checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            logical: PairDimensions { width: 360.0, height: 360.0 },
+            physical: PairDimensions { width: 720.0, height: 720.0 },
+            backing_scale: 2.0,
+            frame_id: 3,
+            resource_generation: 1,
+            fallback_transition_count: 0,
+            last_fallback_reason: None,
+            privacy_mode: "redacted".to_string(),
+            smooth: PairRendererSection {
+                effective_renderer: "smooth".to_string(),
+                milestones: vec!["surface-present-called".to_string()],
+                terminal_disposition: "smooth-painted".to_string(),
+                frame_id: 3,
+                resource_generation: 1,
+                resource_counters: PairResourceCounters {
+                    captured_width: 720,
+                    captured_height: 720,
+                },
+                png_path: "smooth.png".to_string(),
+            },
+            retained: PairRendererSection {
+                effective_renderer: "retained".to_string(),
+                milestones: vec![
+                    "gpu-completed".to_string(),
+                    "readback-completed".to_string(),
+                ],
+                terminal_disposition: "captured".to_string(),
+                frame_id: 3,
+                resource_generation: 1,
+                resource_counters: PairResourceCounters {
+                    captured_width: 720,
+                    captured_height: 720,
+                },
+                png_path: "retained.png".to_string(),
+            },
+        }
+    }
+}
+
+/// Validates a paired-capture manifest. A Smooth-fallback retained section can
+/// never satisfy a retained capture, and a retained artifact is only trustworthy
+/// once the GPU work and its readback are both observed. Beyond those two
+/// contract checks, this hardens the manifest: the sections must be frozen from
+/// one frame (matching frame/generation IDs and overlaid physical dimensions),
+/// the Smooth section must actually be Smooth, and — for an integral backing
+/// scale — the physical size must equal the logical size times that scale.
+pub fn validate_review_pair(manifest: &PairManifest) -> Result<(), String> {
+    if manifest.schema_version != PAIR_MANIFEST_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported pair manifest schema version {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.status != "success" {
+        return Err(format!("paired capture status is {}", manifest.status));
+    }
+    // A retained section that fell back to Smooth is a Smooth capture wearing a
+    // retained label; it can never be the retained half of the pair.
+    if manifest.retained.effective_renderer == "smooth" {
+        return Err("retained capture fell back to the smooth renderer".to_string());
+    }
+    if manifest.retained.effective_renderer != "retained" {
+        return Err(format!(
+            "retained section reports the {} renderer",
+            manifest.retained.effective_renderer
+        ));
+    }
+    if !manifest
+        .retained
+        .milestones
+        .iter()
+        .any(|milestone| milestone == "readback-completed")
+    {
+        return Err("retained capture missing readback-completed".to_string());
+    }
+    if !manifest
+        .retained
+        .milestones
+        .iter()
+        .any(|milestone| milestone == "gpu-completed")
+    {
+        return Err("retained capture missing gpu-completed".to_string());
+    }
+    if manifest.retained.terminal_disposition != "captured" {
+        return Err(format!(
+            "retained capture terminal disposition is {}",
+            manifest.retained.terminal_disposition
+        ));
+    }
+    if manifest.smooth.effective_renderer != "smooth" {
+        return Err(format!(
+            "smooth section reports the {} renderer",
+            manifest.smooth.effective_renderer
+        ));
+    }
+    if manifest.smooth.frame_id != manifest.retained.frame_id
+        || manifest.smooth.frame_id != manifest.frame_id
+    {
+        return Err("paired sections disagree on the frozen frame id".to_string());
+    }
+    if manifest.smooth.resource_generation != manifest.retained.resource_generation
+        || manifest.smooth.resource_generation != manifest.resource_generation
+    {
+        return Err("paired sections disagree on the resource generation".to_string());
+    }
+    // Both artifacts must overlay, so their captured pixel dimensions must match.
+    if manifest.smooth.resource_counters != manifest.retained.resource_counters {
+        return Err("paired captures differ in physical dimensions".to_string());
+    }
+    // Physical == logical × backing scale, verified exactly only for an integral
+    // scale (fractional scales round and are checked by the native run).
+    if manifest.backing_scale.fract() == 0.0 {
+        let expected_width = manifest.logical.width * manifest.backing_scale;
+        let expected_height = manifest.logical.height * manifest.backing_scale;
+        if (expected_width - manifest.physical.width).abs() > f64::EPSILON
+            || (expected_height - manifest.physical.height).abs() > f64::EPSILON
+        {
+            return Err(
+                "physical size does not equal logical size times the integral backing scale"
+                    .to_string(),
+            );
+        }
+        if f64::from(manifest.retained.resource_counters.captured_width) != manifest.physical.width
+            || f64::from(manifest.retained.resource_counters.captured_height)
+                != manifest.physical.height
+        {
+            return Err(
+                "captured pixel dimensions do not match the declared physical size".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The stable kebab-case tag for a retained frame milestone. Recorded verbatim in
+/// the manifest so a validator can assert the readback ladder without importing
+/// the internal enum.
+pub(crate) const fn milestone_kebab(milestone: FrameMilestone) -> &'static str {
+    match milestone {
+        FrameMilestone::Prepared => "prepared",
+        FrameMilestone::Encoded => "encoded",
+        FrameMilestone::Submitted => "submitted",
+        FrameMilestone::SurfacePresentCalled => "surface-present-called",
+        FrameMilestone::GpuCompleted => "gpu-completed",
+        FrameMilestone::ReadbackCompleted => "readback-completed",
+    }
+}
+
+/// The stable kebab-case tag for a terminal frame disposition. A failed
+/// disposition maps to its static failure category so the manifest carries the
+/// specific fault without dynamic text.
+pub(crate) fn disposition_kebab(disposition: FrameDisposition) -> &'static str {
+    match disposition {
+        FrameDisposition::SurfacePresentCalled => "surface-present-called",
+        FrameDisposition::Captured => "captured",
+        FrameDisposition::Skipped(_) => "skipped",
+        FrameDisposition::Failed(category) => category.category(),
+        FrameDisposition::FallbackPending(_) => "fallback-pending",
+        FrameDisposition::FallbackPainted(_) => "fallback-painted",
+    }
+}
+
+impl CapturePrivacy {
+    /// The manifest tag for this privacy policy.
+    pub(crate) const fn manifest_tag(self) -> &'static str {
+        match self {
+            CapturePrivacy::RedactedHud => "redacted",
+            CapturePrivacy::SensitiveLiveValues => "sensitive-live-values",
+        }
+    }
+}
+
+/// The manifest tag for a renderer request. `Auto` is recorded as `"auto"` so the
+/// manifest shows the operator's intent even before resolution.
+fn renderer_request_tag(request: CompanionRendererRequest) -> &'static str {
+    request.forwarded_arg().unwrap_or("auto")
+}
+
+/// Produces a paired Smooth/Retained capture from ONE frozen review frame.
+///
+/// The coordinator consumes a single [`PairedReviewFrame`]: it paints that exact
+/// frozen frame into an off-screen bitmap for the Smooth artifact and reads the
+/// same frozen frame back off the GPU for the Retained artifact, so the two PNGs
+/// overlay pixel-for-pixel. Neither path rebuilds the scene or reads an
+/// `AppState` clock. A retained readback fault is recorded as the retained
+/// terminal disposition, flips the manifest to `"failed"`, and surfaces as a
+/// `GlorpError` — a Smooth fallback therefore cannot masquerade as a retained
+/// capture.
+pub(super) struct PairedCaptureCoordinator<'a> {
+    frame: &'a PairedReviewFrame,
+    host: &'a mut ActiveRetainedHost,
+    runtime: &'a RendererRuntimeState,
+    privacy: CapturePrivacy,
+    out_dir: PathBuf,
+}
+
+impl<'a> PairedCaptureCoordinator<'a> {
+    pub(super) fn new(
+        frame: &'a PairedReviewFrame,
+        host: &'a mut ActiveRetainedHost,
+        runtime: &'a RendererRuntimeState,
+        privacy: CapturePrivacy,
+        out_dir: PathBuf,
+    ) -> Self {
+        Self { frame, host, runtime, privacy, out_dir }
+    }
+
+    /// Captures both renderers, writes `smooth.png`, `retained.png`, and
+    /// `pair-manifest.json`, then returns `Ok` only when the written manifest is a
+    /// successful pair that passes [`validate_review_pair`].
+    pub(super) fn run(self) -> crate::error::Result<()> {
+        std::fs::create_dir_all(&self.out_dir)?;
+        let identity = &self.frame.identity;
+        let physical_width = identity.physical.width.round() as u32;
+        let physical_height = identity.physical.height.round() as u32;
+
+        // Smooth half: repaint the frozen frame into an off-screen bitmap.
+        let smooth_rgba = crate::companion::app::render_prepared_frame_to_rgba(
+            self.frame.prepared(),
+            physical_width,
+            physical_height,
+            identity.backing_scale,
+        )?;
+        write_rgba_png(
+            &self.out_dir.join("smooth.png"),
+            physical_width,
+            physical_height,
+            &smooth_rgba,
+        )?;
+        let smooth_counters = PairResourceCounters {
+            captured_width: physical_width,
+            captured_height: physical_height,
+        };
+        let smooth = PairRendererSection {
+            effective_renderer: EffectiveCompanionRenderer::Smooth.as_str().to_string(),
+            milestones: vec![milestone_kebab(FrameMilestone::SurfacePresentCalled).to_string()],
+            terminal_disposition: "smooth-painted".to_string(),
+            frame_id: identity.frame_id,
+            resource_generation: identity.resource_generation,
+            resource_counters: smooth_counters,
+            png_path: "smooth.png".to_string(),
+        };
+
+        // Retained half: GPU readback of the SAME frozen frame.
+        let (retained, status) = match self.host.capture(self.frame) {
+            Ok(captured) => {
+                write_rgba_png(
+                    &self.out_dir.join("retained.png"),
+                    captured.width(),
+                    captured.height(),
+                    captured.rgba(),
+                )?;
+                let retained = PairRendererSection {
+                    effective_renderer: EffectiveCompanionRenderer::Retained.as_str().to_string(),
+                    // A successful capture polled the GPU submission to completion
+                    // and read it back, so both milestones are observed.
+                    milestones: vec![
+                        milestone_kebab(FrameMilestone::GpuCompleted).to_string(),
+                        milestone_kebab(FrameMilestone::ReadbackCompleted).to_string(),
+                    ],
+                    terminal_disposition: disposition_kebab(FrameDisposition::Captured).to_string(),
+                    frame_id: captured.frame_id(),
+                    resource_generation: captured.resource_generation(),
+                    resource_counters: PairResourceCounters {
+                        captured_width: captured.width(),
+                        captured_height: captured.height(),
+                    },
+                    png_path: "retained.png".to_string(),
+                };
+                (retained, "success")
+            }
+            Err(category) => {
+                let retained = PairRendererSection {
+                    effective_renderer: EffectiveCompanionRenderer::Retained.as_str().to_string(),
+                    milestones: Vec::new(),
+                    terminal_disposition: disposition_kebab(FrameDisposition::Failed(category))
+                        .to_string(),
+                    frame_id: identity.frame_id,
+                    resource_generation: identity.resource_generation,
+                    resource_counters: smooth_counters,
+                    png_path: "retained.png".to_string(),
+                };
+                (retained, "failed")
+            }
+        };
+
+        let manifest = PairManifest {
+            schema_version: PAIR_MANIFEST_SCHEMA_VERSION,
+            status: status.to_string(),
+            requested_renderer: renderer_request_tag(self.runtime.requested()).to_string(),
+            effective_renderer: self.runtime.effective().as_str().to_string(),
+            compiled_capabilities: vec!["retained-renderer".to_string()],
+            frame_checksum: self.frame.checksum.clone(),
+            logical: PairDimensions {
+                width: identity.logical.width,
+                height: identity.logical.height,
+            },
+            physical: PairDimensions {
+                width: identity.physical.width,
+                height: identity.physical.height,
+            },
+            backing_scale: identity.backing_scale,
+            frame_id: identity.frame_id,
+            resource_generation: identity.resource_generation,
+            fallback_transition_count: self.runtime.transition_count(),
+            last_fallback_reason: self.runtime.last_fallback_reason().map(str::to_string),
+            privacy_mode: self.privacy.manifest_tag().to_string(),
+            smooth,
+            retained,
+        };
+
+        let json = serde_json::to_vec_pretty(&manifest)?;
+        std::fs::write(self.out_dir.join("pair-manifest.json"), json)?;
+
+        if status != "success" {
+            return Err(crate::error::GlorpError::Message(format!(
+                "paired retained capture failed: {}",
+                manifest.retained.terminal_disposition
+            )));
+        }
+        validate_review_pair(&manifest).map_err(|reason| {
+            crate::error::GlorpError::Message(format!("paired capture manifest invalid: {reason}"))
+        })?;
+        Ok(())
+    }
+}
+
+/// Writes straight RGBA8 bytes as a PNG. Task 11 canonicalizes color/orientation;
+/// this writes the raw captured bytes at the given physical dimensions.
+fn write_rgba_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> crate::error::Result<()> {
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(rgba))
+        .map_err(|error| {
+            crate::error::GlorpError::Message(format!("paired capture png failed: {error}"))
+        })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::companion::retained::RetainedFailureCategory;
 
     #[test]
     fn frozen_frame_checksum_changes_with_chrome_or_geometry() {
@@ -685,5 +1101,127 @@ mod tests {
             .checksum
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn retained_pair_requires_matching_gpu_and_readback_milestones() {
+        let mut manifest = PairManifest::fixture();
+        manifest
+            .retained
+            .milestones
+            .retain(|m| m != "readback-completed");
+        assert_eq!(
+            validate_review_pair(&manifest).unwrap_err(),
+            "retained capture missing readback-completed",
+        );
+    }
+
+    #[test]
+    fn smooth_fallback_cannot_satisfy_retained_capture() {
+        let mut manifest = PairManifest::fixture();
+        manifest.retained.effective_renderer = "smooth".into();
+        assert!(validate_review_pair(&manifest).is_err());
+    }
+
+    #[test]
+    fn pair_manifest_round_trips_through_serde() {
+        let manifest = PairManifest::fixture();
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: PairManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(manifest, parsed);
+        assert!(validate_review_pair(&parsed).is_ok());
+    }
+
+    #[test]
+    fn fixture_manifest_passes_validation() {
+        assert!(validate_review_pair(&PairManifest::fixture()).is_ok());
+    }
+
+    #[test]
+    fn retained_capture_requires_gpu_completed_milestone() {
+        let mut manifest = PairManifest::fixture();
+        manifest
+            .retained
+            .milestones
+            .retain(|m| m != "gpu-completed");
+        assert_eq!(
+            validate_review_pair(&manifest).unwrap_err(),
+            "retained capture missing gpu-completed",
+        );
+    }
+
+    #[test]
+    fn smooth_section_must_report_the_smooth_renderer() {
+        let mut manifest = PairManifest::fixture();
+        manifest.smooth.effective_renderer = "retained".into();
+        assert!(validate_review_pair(&manifest).is_err());
+    }
+
+    #[test]
+    fn failed_status_manifest_is_rejected() {
+        let mut manifest = PairManifest::fixture();
+        manifest.status = "failed".into();
+        assert!(validate_review_pair(&manifest).is_err());
+    }
+
+    #[test]
+    fn integral_backing_scale_requires_physical_equals_logical_times_scale() {
+        let mut manifest = PairManifest::fixture();
+        manifest.physical.width += 1.0;
+        assert!(validate_review_pair(&manifest).is_err());
+    }
+
+    #[test]
+    fn sections_must_agree_on_frame_and_generation_ids() {
+        let mut manifest = PairManifest::fixture();
+        manifest.retained.frame_id = manifest.smooth.frame_id + 1;
+        assert!(validate_review_pair(&manifest).is_err());
+        let mut manifest = PairManifest::fixture();
+        manifest.retained.resource_generation = manifest.smooth.resource_generation + 1;
+        assert!(validate_review_pair(&manifest).is_err());
+    }
+
+    #[test]
+    fn frame_milestones_map_to_stable_kebab_strings() {
+        assert_eq!(
+            milestone_kebab(FrameMilestone::GpuCompleted),
+            "gpu-completed"
+        );
+        assert_eq!(
+            milestone_kebab(FrameMilestone::ReadbackCompleted),
+            "readback-completed"
+        );
+        assert_eq!(
+            milestone_kebab(FrameMilestone::SurfacePresentCalled),
+            "surface-present-called"
+        );
+    }
+
+    #[test]
+    fn frame_dispositions_map_to_stable_kebab_strings() {
+        assert_eq!(disposition_kebab(FrameDisposition::Captured), "captured");
+        assert_eq!(
+            disposition_kebab(FrameDisposition::SurfacePresentCalled),
+            "surface-present-called"
+        );
+        assert_eq!(
+            disposition_kebab(FrameDisposition::Failed(
+                RetainedFailureCategory::CapturePollTimeout
+            )),
+            "retained-capture-poll-timeout"
+        );
+    }
+
+    #[test]
+    fn fixture_manifest_records_no_hud_strings() {
+        let json = serde_json::to_string(&PairManifest::fixture())
+            .unwrap()
+            .to_ascii_lowercase();
+        for forbidden in ["today", "pace", "%", "tokens", "daily_percent", "→"] {
+            assert!(
+                !json.contains(forbidden),
+                "pair manifest leaked HUD-shaped token: {forbidden}"
+            );
+        }
     }
 }

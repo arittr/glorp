@@ -16,6 +16,13 @@ pub enum XtaskCommand {
     CompanionFresh {
         release: bool,
     },
+    CompanionReviewPair {
+        size: u16,
+        state: Option<String>,
+        dimmed: bool,
+        live_values: bool,
+        out: String,
+    },
     RendererSpikeValidate {
         out: String,
     },
@@ -37,7 +44,7 @@ pub enum XtaskCommand {
     },
 }
 
-const USAGE: &str = "Usage:\n  cargo xtask companion fresh [--debug|--release]\n  cargo xtask renderer-spike validate --out DIR\n  cargo xtask renderer-spike run --candidate smooth|wgpu|software --track TRACK --size 360|720 --duration-ms N --out DIR\n  cargo xtask renderer-spike qualify --binary target/renderer-spikes/bin/FILE --target TARGET --candidate smooth|wgpu --track TRACK --size 360|720 --duration-ms N --out target/renderer-spikes/DIR";
+const USAGE: &str = "Usage:\n  cargo xtask companion fresh [--debug|--release]\n  cargo xtask companion review-pair --size N [--state STATE] [--dimmed] [--live-values] --out DIR\n  cargo xtask renderer-spike validate --out DIR\n  cargo xtask renderer-spike run --candidate smooth|wgpu|software --track TRACK --size 360|720 --duration-ms N --out DIR\n  cargo xtask renderer-spike qualify --binary target/renderer-spikes/bin/FILE --target TARGET --candidate smooth|wgpu --track TRACK --size 360|720 --duration-ms N --out target/renderer-spikes/DIR";
 
 pub fn parse_args<I, S>(args: I) -> Result<XtaskCommand, String>
 where
@@ -65,6 +72,11 @@ where
             if companion == "companion" && fresh == "fresh" && flag == "--debug" =>
         {
             Ok(XtaskCommand::CompanionFresh { release: false })
+        }
+        [companion, subcommand, rest @ ..]
+            if companion == "companion" && subcommand == "review-pair" =>
+        {
+            parse_companion_review_pair(rest)
         }
         [renderer, validate, out_flag, out]
             if renderer == "renderer-spike" && validate == "validate" && out_flag == "--out" =>
@@ -207,6 +219,69 @@ fn parse_renderer_spike_qualify(args: &[String]) -> Result<XtaskCommand, String>
     })
 }
 
+fn parse_companion_review_pair(args: &[String]) -> Result<XtaskCommand, String> {
+    let mut size = None;
+    let mut state = None;
+    let mut dimmed = false;
+    let mut live_values = false;
+    let mut out = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dimmed" => {
+                dimmed = true;
+                index += 1;
+            }
+            "--live-values" => {
+                live_values = true;
+                index += 1;
+            }
+            flag => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| format!("missing value for `{flag}`\n\n{USAGE}"))?;
+                match flag {
+                    "--size" => {
+                        size = Some(
+                            value
+                                .parse::<u16>()
+                                .map_err(|_| format!("invalid size\n\n{USAGE}"))?,
+                        )
+                    }
+                    "--state" => state = Some(value.clone()),
+                    "--out" => out = Some(value.clone()),
+                    other => return Err(format!("unknown review-pair flag `{other}`\n\n{USAGE}")),
+                }
+                index += 2;
+            }
+        }
+    }
+    let size = size.ok_or_else(|| format!("missing --size\n\n{USAGE}"))?;
+    if size < 260 {
+        return Err(format!("review-pair size must be at least 260\n\n{USAGE}"));
+    }
+    if let Some(state) = state.as_deref() {
+        if !matches!(
+            state,
+            "normal" | "active-pulse" | "asleep-calm" | "helper-trouble"
+        ) {
+            return Err(format!(
+                "state must be normal, active-pulse, asleep-calm, or helper-trouble\n\n{USAGE}"
+            ));
+        }
+    }
+    let out = out.ok_or_else(|| format!("missing --out\n\n{USAGE}"))?;
+    // Redacted pairs live under the review root; sensitive live-value pairs are
+    // confined to the sensitive review root.
+    let review_root = if live_values {
+        "target/glorp-review-sensitive"
+    } else {
+        "target/glorp-review"
+    };
+    require_owned_relative_path(&out, review_root, "out")?;
+    Ok(XtaskCommand::CompanionReviewPair { size, state, dimmed, live_values, out })
+}
+
 fn require_owned_relative_path(value: &str, prefix: &str, label: &str) -> Result<(), String> {
     let path = Path::new(value);
     if path.is_absolute()
@@ -270,6 +345,9 @@ where
             }
             run_steps(&companion_fresh_steps(release), repo_root)
         }
+        XtaskCommand::CompanionReviewPair { size, state, dimmed, live_values, out } => {
+            run_companion_review_pair(repo_root, size, state.as_deref(), dimmed, live_values, &out)
+        }
         XtaskCommand::RendererSpikeValidate { out } => validate_renderer_spike(repo_root, &out),
         XtaskCommand::RendererSpikeRun { candidate, track, size, duration_ms, out } => {
             if std::env::consts::OS != "macos" {
@@ -332,6 +410,150 @@ where
             &out,
         ),
     }
+}
+
+/// How long the companion review process paints before it captures and exits, and
+/// the extra head-room granted to the bounded process before it is force-killed.
+const REVIEW_PAIR_DURATION_MS: u64 = 2_000;
+const REVIEW_PAIR_TIMEOUT_HEADROOM_MS: u64 = 60_000;
+
+fn run_companion_review_pair(
+    repo_root: &Path,
+    size: u16,
+    state: Option<&str>,
+    dimmed: bool,
+    live_values: bool,
+    out: &str,
+) -> Result<(), String> {
+    if std::env::consts::OS != "macos" {
+        return Err("cargo xtask companion review-pair is only supported on macOS".to_string());
+    }
+    run_steps(
+        &[ProcessStep {
+            program: "cargo".to_string(),
+            args: vec![
+                "build".into(),
+                "--release".into(),
+                "--features".into(),
+                "retained-renderer".into(),
+            ],
+            best_effort: false,
+        }],
+        repo_root,
+    )?;
+    // Force the retained renderer so an ActiveRetainedHost exists for the retained
+    // half; a runtime fallback then honestly fails manifest validation below.
+    let mut args: Vec<String> = vec![
+        "companion-app".into(),
+        "--renderer".into(),
+        "retained".into(),
+        "--review-capture-dir".into(),
+        out.to_string(),
+        "--review-size".into(),
+        format!("{size}x{size}"),
+        "--review-duration-ms".into(),
+        REVIEW_PAIR_DURATION_MS.to_string(),
+    ];
+    if let Some(state) = state {
+        args.push("--review-state".into());
+        args.push(state.to_string());
+    }
+    if dimmed {
+        args.push("--review-force-dim".into());
+    }
+    if live_values {
+        args.push("--review-capture-live-values".into());
+    }
+    run_bounded_process(
+        &repo_root.join("target/release/glorp"),
+        &args,
+        repo_root,
+        Duration::from_millis(
+            REVIEW_PAIR_DURATION_MS.saturating_add(REVIEW_PAIR_TIMEOUT_HEADROOM_MS),
+        ),
+    )?;
+    validate_pair_manifest(repo_root, out)
+}
+
+/// Validates the paired-review manifest and both PNG artifacts. Rejects a missing
+/// or non-success manifest so a successful process launch cannot hide an app-side
+/// capture failure.
+fn validate_pair_manifest(repo_root: &Path, out: &str) -> Result<(), String> {
+    let root = repo_root.join(out);
+    let manifest_path = root.join("pair-manifest.json");
+    if !manifest_path.is_file() {
+        return Err(format!(
+            "paired review missing manifest: {}",
+            manifest_path.display()
+        ));
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|err| err.to_string())?)
+            .map_err(|err| format!("failed to parse pair manifest: {err}"))?;
+    validate_pair_manifest_value(&manifest)?;
+    for section in ["smooth", "retained"] {
+        let png = manifest
+            .get(section)
+            .and_then(|value| value.get("png_path"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("pair manifest {section} section has no png path"))?;
+        let bytes = std::fs::metadata(root.join(png))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if bytes == 0 {
+            return Err(format!("paired review artifact missing or empty: {png}"));
+        }
+    }
+    Ok(())
+}
+
+/// The manifest contract xtask enforces: a successful pair whose retained half is
+/// a genuine retained capture that observed both the GPU and readback milestones,
+/// paired with a Smooth half. Mirrors the main crate's `validate_review_pair`
+/// against the untyped manifest JSON so xtask stays free of the GPU crate deps.
+fn validate_pair_manifest_value(manifest: &serde_json::Value) -> Result<(), String> {
+    let status = manifest.get("status").and_then(serde_json::Value::as_str);
+    if status != Some("success") {
+        return Err(format!(
+            "paired capture status is {}",
+            status.unwrap_or("missing")
+        ));
+    }
+    let retained = manifest
+        .get("retained")
+        .ok_or_else(|| "pair manifest has no retained section".to_string())?;
+    let retained_effective = retained
+        .get("effective_renderer")
+        .and_then(serde_json::Value::as_str);
+    if retained_effective == Some("smooth") {
+        return Err("retained capture fell back to the smooth renderer".to_string());
+    }
+    if retained_effective != Some("retained") {
+        return Err("retained section is not the retained renderer".to_string());
+    }
+    let milestones = retained
+        .get("milestones")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "retained section has no milestones".to_string())?;
+    let observed = |milestone: &str| {
+        milestones
+            .iter()
+            .any(|value| value.as_str() == Some(milestone))
+    };
+    if !observed("readback-completed") {
+        return Err("retained capture missing readback-completed".to_string());
+    }
+    if !observed("gpu-completed") {
+        return Err("retained capture missing gpu-completed".to_string());
+    }
+    let smooth_effective = manifest
+        .get("smooth")
+        .and_then(|section| section.get("effective_renderer"))
+        .and_then(serde_json::Value::as_str);
+    if smooth_effective != Some("smooth") {
+        return Err("smooth section is not the smooth renderer".to_string());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1021,6 +1243,147 @@ mod tests {
     fn rejects_unknown_command_with_usage_hint() {
         let err = parse_args(["nope"]).unwrap_err();
         assert!(err.contains("cargo xtask companion fresh"));
+    }
+
+    #[test]
+    fn parses_companion_review_pair() {
+        assert_eq!(
+            parse_args([
+                "companion",
+                "review-pair",
+                "--size",
+                "360",
+                "--state",
+                "normal",
+                "--out",
+                "target/glorp-review/pair",
+            ]),
+            Ok(XtaskCommand::CompanionReviewPair {
+                size: 360,
+                state: Some("normal".into()),
+                dimmed: false,
+                live_values: false,
+                out: "target/glorp-review/pair".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_companion_review_pair_live_and_dimmed() {
+        assert_eq!(
+            parse_args([
+                "companion",
+                "review-pair",
+                "--size",
+                "720",
+                "--dimmed",
+                "--live-values",
+                "--out",
+                "target/glorp-review-sensitive/live-pair",
+            ]),
+            Ok(XtaskCommand::CompanionReviewPair {
+                size: 720,
+                state: None,
+                dimmed: true,
+                live_values: true,
+                out: "target/glorp-review-sensitive/live-pair".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn review_pair_live_values_require_the_sensitive_root() {
+        let error = parse_args([
+            "companion",
+            "review-pair",
+            "--size",
+            "360",
+            "--live-values",
+            "--out",
+            "target/glorp-review/pair",
+        ])
+        .unwrap_err();
+        assert!(error.contains("below `target/glorp-review-sensitive`"));
+    }
+
+    #[test]
+    fn review_pair_rejects_output_outside_the_review_root() {
+        for out in [
+            "/tmp/glorp-review/pair",
+            "target/glorp-review/../../private/pair",
+            "target/not-glorp-review/pair",
+        ] {
+            let error = parse_args(["companion", "review-pair", "--size", "360", "--out", out])
+                .unwrap_err();
+            assert!(error.contains("below `target/glorp-review`"));
+        }
+    }
+
+    #[test]
+    fn review_pair_rejects_unfair_size_and_bad_state() {
+        assert!(parse_args([
+            "companion",
+            "review-pair",
+            "--size",
+            "128",
+            "--out",
+            "target/glorp-review/pair",
+        ])
+        .unwrap_err()
+        .contains("at least 260"));
+        assert!(parse_args([
+            "companion",
+            "review-pair",
+            "--size",
+            "360",
+            "--state",
+            "bogus",
+            "--out",
+            "target/glorp-review/pair",
+        ])
+        .unwrap_err()
+        .contains("state must be"));
+    }
+
+    fn valid_pair_manifest_value() -> serde_json::Value {
+        serde_json::json!({
+            "status": "success",
+            "smooth": { "effective_renderer": "smooth", "png_path": "smooth.png" },
+            "retained": {
+                "effective_renderer": "retained",
+                "milestones": ["gpu-completed", "readback-completed"],
+                "png_path": "retained.png",
+            },
+        })
+    }
+
+    #[test]
+    fn pair_manifest_validation_accepts_a_successful_pair() {
+        validate_pair_manifest_value(&valid_pair_manifest_value()).unwrap();
+    }
+
+    #[test]
+    fn pair_manifest_validation_rejects_a_smooth_fallback_retained_half() {
+        let mut manifest = valid_pair_manifest_value();
+        manifest["retained"]["effective_renderer"] = serde_json::json!("smooth");
+        assert!(validate_pair_manifest_value(&manifest).is_err());
+    }
+
+    #[test]
+    fn pair_manifest_validation_rejects_a_missing_readback_milestone() {
+        let mut manifest = valid_pair_manifest_value();
+        manifest["retained"]["milestones"] = serde_json::json!(["gpu-completed"]);
+        assert_eq!(
+            validate_pair_manifest_value(&manifest).unwrap_err(),
+            "retained capture missing readback-completed"
+        );
+    }
+
+    #[test]
+    fn pair_manifest_validation_rejects_a_failed_status() {
+        let mut manifest = valid_pair_manifest_value();
+        manifest["status"] = serde_json::json!("failed");
+        assert!(validate_pair_manifest_value(&manifest).is_err());
     }
 
     #[test]
