@@ -173,6 +173,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 srgb_to_linear(quantized.b) * a,
                 a,
             );
+        } else if (kind > 5.5) {
+            // Radial gradient (kind 6): premultiplied interpolation from the
+            // authored inner colour at the centre (radius 0) to the outer colour at
+            // the rim (radius 1), with the round primitive's analytic edge coverage.
+            // Unlike the opaque tank falloff (kind 3), this carries the inner→outer
+            // ALPHA falloff a soft cast shadow needs. Interpolating the premultiplied
+            // endpoints keeps a fading-alpha gradient free of dark-edge fringing.
+            let t = clamp(radius, 0.0, 1.0);
+            output = mix(in.color_a, in.color_b, t);
+            let round_sd = radius - 1.0;
+            coverage = coverage * analytic_coverage(round_sd, fwidth(round_sd));
         } else if (kind >= 4.5) {
             // Exact stroked arc: analytic coverage on the arc's signed distance,
             // with the same shared centerline radius, width, angles, and round/butt

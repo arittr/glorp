@@ -334,7 +334,7 @@ mod oracle {
     use objc2::ClassType;
     use objc2_app_kit::{
         NSBezierPath, NSBitmapImageRep, NSCalibratedRGBColorSpace, NSColor, NSColorRenderingIntent,
-        NSColorSpace, NSCompositingOperation, NSGraphicsContext,
+        NSColorSpace, NSCompositingOperation, NSGradient, NSGraphicsContext,
     };
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
@@ -365,14 +365,14 @@ mod oracle {
     }
 
     /// Runs `paint` into a fresh `size`×`size` offscreen bitmap and returns the
-    /// center pixel's straight-sRGB8 bytes.
+    /// whole frame's straight-sRGB8 bytes, tightly packed at `size*4` per row.
     ///
     /// This mirrors the production paired Smooth capture
     /// ([`crate::companion::app::render_prepared_frame_to_rgba`]): compositing
     /// happens in the offscreen bitmap, then the result is converted to a faithful
     /// sRGB color space (`NSCalibratedRGBColorSpace` is gamma 1.8 on macOS, so
     /// reading it raw would be an unfaithful sRGB reference — sRGB 128 → 108).
-    unsafe fn appkit_render_srgb(size: usize, paint: impl Fn()) -> [u8; 4] {
+    unsafe fn appkit_render_srgb_frame(size: usize, paint: impl Fn()) -> Vec<u8> {
         let stride = size * 4;
         let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
@@ -395,12 +395,29 @@ mod oracle {
         let row_stride = srgb_rep.bytesPerRow() as usize;
         let data = srgb_rep.bitmapData();
         let bytes = std::slice::from_raw_parts(data, row_stride * size);
-        let center = (size / 2) * row_stride + (size / 2) * 4;
+        // Compact the (possibly padded) AppKit rows into a tight `size*4`-per-row
+        // straight-sRGB8 frame, matching the retained readback's row layout so both
+        // frames index identically.
+        let mut frame = vec![0_u8; size * stride];
+        for row in 0..size {
+            let src = row * row_stride;
+            let dst = row * stride;
+            frame[dst..dst + stride].copy_from_slice(&bytes[src..src + stride]);
+        }
+        frame
+    }
+
+    /// Renders `paint` into a fresh `size`×`size` offscreen bitmap and returns the
+    /// center pixel's straight-sRGB8 bytes.
+    unsafe fn appkit_render_srgb(size: usize, paint: impl Fn()) -> [u8; 4] {
+        let frame = appkit_render_srgb_frame(size, paint);
+        let stride = size * 4;
+        let center = (size / 2) * stride + (size / 2) * 4;
         [
-            bytes[center],
-            bytes[center + 1],
-            bytes[center + 2],
-            bytes[center + 3],
+            frame[center],
+            frame[center + 1],
+            frame[center + 2],
+            frame[center + 3],
         ]
     }
 
@@ -1075,5 +1092,151 @@ mod oracle {
         );
         let frame = target.render(size, &primitives, &blends, [0.0; 4]);
         assert_edge_antialiased(&frame, size as usize / 4, "arc stroke and round cap");
+    }
+
+    // ----- Radial-gradient cast shadow (floor projection) -------------------
+
+    /// The floor projection paints the pet's soft cast shadow as a
+    /// [`crate::presentation::smooth::SmoothFill::RadialGradient`] whose alpha falls
+    /// from the inner core to zero at the rim (Multiply blend), so the shadow reads
+    /// as a graded oval rather than a flat disc. Smooth draws it with an
+    /// `NSGradient` radial fill. This pins the retained radial path against Smooth's
+    /// falloff *shape*: the absolute darkening carries the accepted linear-vs-gamma
+    /// blend-space residual, so the assertions compare the falloff profile
+    /// (core→mid→rim), which that residual leaves intact.
+    ///
+    /// Before the fix, `SmoothFill::RadialGradient` shared the opaque tank falloff
+    /// (kind 3), which paints a constant-alpha, hard-edged disc — flat, not graded.
+    #[test]
+    fn radial_gradient_shadow_grades_like_smooth() {
+        let size = 96_u32;
+        let radius = size as f32 * 0.42;
+        let center = size as f32 / 2.0;
+        // Opaque mid-grey floor, dark shadow tint fading to nothing at the rim.
+        let background = gray(128, 1.0);
+        let inner = gray(40, 0.8);
+        let outer = gray(40, 0.0);
+
+        // Retained: the production radial primitive through the real shader.
+        let primitive = super::super::GpuPrimitive {
+            rect: [center - radius, center - radius, radius * 2.0, radius * 2.0],
+            color_a: premultiply_linear_srgb(inner),
+            color_b: premultiply_linear_srgb(outer),
+            uv: [0.0; 4],
+            params: [super::super::RADIAL_GRADIENT_KIND, 0.0, 0.0, 0.0],
+            clip_rect: [0.0; 4],
+            clip_ellipse: [0.0; 4],
+            viewport_aperture: [size as f32, size as f32, center, center],
+            aperture_radius: [1.0e6, 0.0, 0.0, 0.0],
+        };
+        let target = EdgeTarget::new();
+        let retained = target.render(size, &[primitive], &[SmoothBlendMode::Multiply], background);
+
+        // Smooth: NSGradient radial fill, Multiply, over the same floor.
+        let smooth = unsafe {
+            appkit_render_srgb_frame(size as usize, || {
+                appkit_fill(NSCompositingOperation::Copy, f64::from(size), background);
+                if let Some(ctx) = NSGraphicsContext::currentContext() {
+                    ctx.setCompositingOperation(NSCompositingOperation::Multiply);
+                }
+                let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                    NSPoint::new(f64::from(center - radius), f64::from(center - radius)),
+                    NSSize::new(f64::from(radius * 2.0), f64::from(radius * 2.0)),
+                ));
+                let gradient = NSGradient::initWithStartingColor_endingColor(
+                    NSGradient::alloc(),
+                    &NSColor::colorWithSRGBRed_green_blue_alpha(
+                        f64::from(inner[0]),
+                        f64::from(inner[1]),
+                        f64::from(inner[2]),
+                        f64::from(inner[3]),
+                    ),
+                    &NSColor::colorWithSRGBRed_green_blue_alpha(
+                        f64::from(outer[0]),
+                        f64::from(outer[1]),
+                        f64::from(outer[2]),
+                        f64::from(outer[3]),
+                    ),
+                );
+                if let Some(gradient) = gradient {
+                    gradient.drawInBezierPath_relativeCenterPosition(&path, NSPoint::new(0.0, 0.0));
+                }
+            })
+        };
+
+        // Sample along the horizontal centerline (y-flip-agnostic): core, mid, rim,
+        // and just outside the oval (the untouched floor).
+        let row = size / 2;
+        let sample =
+            |frame: &[u8], x: u32| -> f32 { f32::from(frame[((row * size + x) * 4) as usize]) };
+        let core_x = size / 2;
+        let mid_x = size / 2 + (radius * 0.5) as u32;
+        let rim_x = size / 2 + (radius * 0.85) as u32;
+        let out_x = size / 2 + radius as u32 + 4;
+
+        let r_bg = sample(&retained, out_x);
+        let r_core = sample(&retained, core_x);
+        let r_mid = sample(&retained, mid_x);
+        let r_rim = sample(&retained, rim_x);
+        let s_bg = sample(&smooth, out_x);
+        let s_core = sample(&smooth, core_x);
+        let s_mid = sample(&smooth, mid_x);
+
+        // Darkening = how far below the untouched floor each sample sits.
+        let r_dcore = r_bg - r_core;
+        let r_dmid = r_bg - r_mid;
+        let r_drim = r_bg - r_rim;
+        let s_dcore = s_bg - s_core;
+        let s_dmid = s_bg - s_mid;
+        eprintln!(
+            "RADIAL retained bg={r_bg} core={r_core} mid={r_mid} rim={r_rim} \
+             (D core={r_dcore} mid={r_dmid} rim={r_drim})"
+        );
+        eprintln!(
+            "RADIAL smooth   bg={s_bg} core={s_core} mid={s_mid} (D core={s_dcore} mid={s_dmid})"
+        );
+
+        // The shadow must darken its core, or the ratios below are noise.
+        assert!(
+            r_dcore > 20.0,
+            "retained shadow core barely darkens the floor (D={r_dcore})"
+        );
+        assert!(
+            s_dcore > 20.0,
+            "smooth shadow core barely darkens the floor (D={s_dcore})"
+        );
+
+        // (1) Graded, not flat: darkening falls off monotonically from core to rim.
+        // The kind-3 tank branch paints a constant-alpha disc, so core≈mid≈rim.
+        assert!(
+            r_dmid + 8.0 < r_dcore,
+            "retained shadow is flat: mid darkening {r_dmid} not meaningfully below core {r_dcore}"
+        );
+        assert!(
+            r_drim + 8.0 < r_dmid,
+            "retained shadow is flat: rim darkening {r_drim} not meaningfully below mid {r_dmid}"
+        );
+
+        // (2) Rim reaches the floor: a soft radial shadow fades to ~nothing at its
+        // edge, unlike a hard-edged constant disc.
+        assert!(
+            r_drim < r_dcore * 0.35,
+            "retained shadow rim {r_drim} still dark vs core {r_dcore}: edge is hard, not soft"
+        );
+
+        // (3) Falloff SHAPE resembles Smooth at the mid sample. Comparing the
+        // core→mid ratio (not absolute darkening) isolates the falloff profile from
+        // the linear-vs-gamma Multiply *magnitude* difference; a residual profile gap
+        // remains because Smooth multiplies in gamma-1.8 space and Retained in linear
+        // (the accepted blend-space tradeoff), so the tolerance is set to admit that
+        // residual (~0.2 here) while still rejecting the pre-fix flat disc, whose
+        // ratio sits near 1.0 — well outside 0.3 of Smooth's ~0.6.
+        let r_ratio = r_dmid / r_dcore;
+        let s_ratio = s_dmid / s_dcore;
+        eprintln!("RADIAL mid ratio retained={r_ratio:.3} smooth={s_ratio:.3}");
+        assert!(
+            (r_ratio - s_ratio).abs() <= 0.3,
+            "retained mid falloff ratio {r_ratio:.3} differs from Smooth {s_ratio:.3} beyond 0.3"
+        );
     }
 }

@@ -50,6 +50,15 @@ const GLYPH_FONT_SIZE: f64 = RETAINED_ATLAS_POINT_SIZE;
 /// logical pixels covers the outer half-band at every backing scale.
 const ARC_AA_MARGIN: f64 = 2.0;
 
+/// Primitive kind for a translucent [`SmoothFill::RadialGradient`]: a premultiplied
+/// interpolation from the authored inner colour at the shape's centre to the outer
+/// colour at its rim, with the round primitive's analytic edge coverage. This is a
+/// distinct path from the opaque tank falloff (kind 3): the tank base holds an
+/// output-space sRGB dither and a constant opaque alpha, so it cannot express the
+/// inner→outer alpha falloff a soft cast shadow needs. The value is shared with the
+/// shader's radial branch in `retained.wgsl`.
+const RADIAL_GRADIENT_KIND: f32 = 6.0;
+
 pub(super) struct RetainedChrome<'a> {
     pub(super) mood_aura: [f32; 4],
     pub(super) pet_center_col: f64,
@@ -1133,9 +1142,11 @@ fn prepare_gpu_frame(
                     let rect = shape_rect(layer, bounds.min, bounds.max, metrics);
                     let (color_a, color_b, kind) = match shape.fill {
                         SmoothFill::Solid(color) => (rgba(color, layer.opacity), [0.0; 4], 2.0),
-                        SmoothFill::RadialGradient { inner, outer } => {
-                            (rgba(inner, layer.opacity), rgba(outer, layer.opacity), 3.0)
-                        }
+                        SmoothFill::RadialGradient { inner, outer } => (
+                            rgba(inner, layer.opacity),
+                            rgba(outer, layer.opacity),
+                            RADIAL_GRADIENT_KIND,
+                        ),
                         SmoothFill::LinearGradientY { top, bottom } => {
                             (rgba(top, layer.opacity), rgba(bottom, layer.opacity), 4.0)
                         }
