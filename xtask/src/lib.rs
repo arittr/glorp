@@ -425,6 +425,19 @@ where
 const REVIEW_PAIR_DURATION_MS: u64 = 2_000;
 const REVIEW_PAIR_TIMEOUT_HEADROOM_MS: u64 = 60_000;
 
+/// Removes a prior review-pair output directory (if any) so a run that legitimately
+/// produces no manifest — e.g. a graceful retained-unavailable fallback that exits
+/// before writing one — can never be validated against a stale manifest left behind
+/// by an earlier successful run. A missing directory is not an error; the app (or
+/// `create_dir_all`) recreates it on the way in.
+fn reset_review_out_dir(root: &Path) -> Result<(), String> {
+    match std::fs::remove_dir_all(root) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 fn run_companion_review_pair(
     repo_root: &Path,
     size: u16,
@@ -436,6 +449,7 @@ fn run_companion_review_pair(
     if std::env::consts::OS != "macos" {
         return Err("cargo xtask companion review-pair is only supported on macOS".to_string());
     }
+    reset_review_out_dir(&repo_root.join(out))?;
     run_steps(
         &[ProcessStep {
             program: "cargo".to_string(),
@@ -1424,6 +1438,45 @@ mod tests {
         let mut manifest = valid_pair_manifest_value();
         manifest["status"] = serde_json::json!("failed");
         assert!(validate_pair_manifest_value(&manifest).is_err());
+    }
+
+    #[test]
+    fn review_pair_reset_removes_a_stale_manifest_left_by_a_prior_run() {
+        let unique = format!(
+            "glorp-xtask-review-pair-reset-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("pair-manifest.json"),
+            serde_json::to_vec(&valid_pair_manifest_value()).unwrap(),
+        )
+        .unwrap();
+
+        reset_review_out_dir(&root).unwrap();
+
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn review_pair_reset_tolerates_an_output_directory_that_does_not_exist() {
+        let unique = format!(
+            "glorp-xtask-review-pair-reset-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        assert!(!root.exists());
+
+        reset_review_out_dir(&root).unwrap();
     }
 
     #[test]
