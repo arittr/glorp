@@ -2,24 +2,36 @@
 //!
 //! The retained renderer uses ONE color convention end to end: authored colors
 //! are straight sRGB, and every color handed to the GPU is converted to
-//! **premultiplied linear** RGBA before upload. The blend equations, the shader
-//! fragment output, and the canonical readback are all defined against that one
-//! convention so the retained output matches the Smooth/AppKit renderer.
+//! **premultiplied gamma** (sRGB-space) RGBA before upload — the sRGB channel
+//! values are multiplied by alpha directly, with NO sRGB→linear step. The blend
+//! equations, the shader fragment output, and the canonical readback are all
+//! defined against that one convention so the retained output composites
+//! translucency in the same gamma space CoreGraphics/Smooth does.
 //!
-//! - [`premultiply_linear_srgb`] is the single upload conversion: sRGB → linear
-//!   per channel, then multiply RGB by alpha (alpha passthrough).
+//! This gamma convention is the Drew-approved parity fix: it overrides the
+//! plan's §2/§5 "premultiplied linear" mandate (the fallback the plan itself
+//! pre-marked). Physically-correct linear blending read brighter/heavier than
+//! Smooth on translucent elements (floor plane, unfilled gauge tracks, ring);
+//! gamma-space blending matches Smooth. Opaque colors are unaffected either way.
+//!
+//! - [`premultiply_gamma_srgb`] is the single upload conversion: multiply the
+//!   straight-sRGB channels by alpha (alpha passthrough), staying in sRGB space.
 //! - [`BlendContract`] names the premultiplied blend equation for every
 //!   [`SmoothBlendMode`], so `create_pipelines` never hardcodes a straight-alpha
-//!   equation again.
+//!   equation again. The equations are unchanged in shape; they now operate in
+//!   gamma space because the render target is a linear (non-sRGB) format.
 //! - [`canonical_png_rgba`] is the inverse at the capture seam: premultiplied
-//!   readback → straight sRGB8, a no-op for fully opaque or fully transparent
-//!   pixels.
+//!   sRGB readback → straight sRGB8 (divide by alpha in sRGB space), a no-op for
+//!   fully opaque or fully transparent pixels.
 
 use crate::presentation::smooth::SmoothBlendMode;
 
 /// The standard sRGB electro-optical transfer: gamma-encoded channel → linear
-/// light. Shared by every color the retained renderer uploads so the convention
-/// is defined in exactly one place.
+/// light. The gamma color convention does not use this at upload or capture; it
+/// backs the parity oracle's linear-space prediction diagnostic (the "what the
+/// old linear convention would have produced" contrast) and the sRGB-curve unit
+/// test, so it is compiled only for tests.
+#[cfg(test)]
 pub(super) fn srgb_channel_to_linear(channel: f32) -> f32 {
     if channel <= 0.040_45 {
         channel / 12.92
@@ -29,7 +41,9 @@ pub(super) fn srgb_channel_to_linear(channel: f32) -> f32 {
 }
 
 /// The inverse opto-electronic transfer: linear light → gamma-encoded sRGB
-/// channel. Used to canonicalize a linear readback back into straight sRGB8.
+/// channel. Like [`srgb_channel_to_linear`], the gamma convention no longer uses
+/// this; it backs the oracle's linear-space prediction diagnostic only.
+#[cfg(test)]
 pub(super) fn linear_channel_to_srgb(channel: f32) -> f32 {
     if channel <= 0.003_130_8 {
         channel * 12.92
@@ -65,22 +79,21 @@ fn analytic_coverage(signed_distance: f32, pixel_width: f32) -> f32 {
     1.0 - smoothstep(-half, half, signed_distance)
 }
 
-/// Converts an authored straight-sRGB RGBA color into the premultiplied-linear
-/// RGBA the GPU pipeline consumes: each color channel is linearized then scaled
-/// by alpha, and alpha passes through unchanged. This is the single color
-/// convention every retained primitive, atlas pixel, and coverage mask obeys.
-pub(super) fn premultiply_linear_srgb(color: [f32; 4]) -> [f32; 4] {
+/// Converts an authored straight-sRGB RGBA color into the premultiplied-gamma
+/// RGBA the GPU pipeline consumes: each straight-sRGB channel is scaled by alpha
+/// directly (NO sRGB→linear step), and alpha passes through unchanged. Staying in
+/// sRGB space is what makes a translucent blend against the linear-format render
+/// target composite in gamma, matching CoreGraphics/Smooth. This is the single
+/// color convention every retained primitive, atlas pixel, and coverage mask
+/// obeys.
+pub(super) fn premultiply_gamma_srgb(color: [f32; 4]) -> [f32; 4] {
     let alpha = color[3];
-    [
-        srgb_channel_to_linear(color[0]) * alpha,
-        srgb_channel_to_linear(color[1]) * alpha,
-        srgb_channel_to_linear(color[2]) * alpha,
-        alpha,
-    ]
+    [color[0] * alpha, color[1] * alpha, color[2] * alpha, alpha]
 }
 
-/// The premultiplied-linear blend equation for one [`SmoothBlendMode`]. Every
-/// Smooth compositing mode has an exact premultiplied counterpart, so
+/// The premultiplied blend equation for one [`SmoothBlendMode`], operating in
+/// gamma space (the render target is a linear format holding sRGB-space values).
+/// Every Smooth compositing mode has an exact premultiplied counterpart, so
 /// [`BlendContract::for_mode`] returns `Some` for all five and
 /// `create_pipelines` builds its color-target blend from
 /// [`BlendContract::blend_state`] instead of a hand-written equation.
@@ -159,12 +172,13 @@ impl BlendContract {
 /// Canonicalizes a premultiplied-sRGB8 readback frame into the straight-sRGB8
 /// RGBA a PNG stores.
 ///
-/// The sRGB color target stores `sRGB_encode(premultiplied_linear_rgb)` with a
-/// straight composite alpha. Recovering the straight color unpremultiplies in
-/// **linear light** — decode to linear, divide by alpha, re-encode to sRGB — so
-/// the PNG lands in standard straight sRGB. The pass is an exact no-op for a
-/// fully opaque (alpha 255) or fully transparent (alpha 0) pixel, so an
-/// all-opaque frame round-trips byte for byte and stays canonical.
+/// The linear-format render target stores the gamma-premultiplied sRGB values
+/// directly (`straight_srgb * alpha`) with a straight composite alpha. Recovering
+/// the straight color unpremultiplies in **gamma/sRGB space** — divide each sRGB
+/// channel by alpha, no linear round-trip — so the PNG lands in standard straight
+/// sRGB. The pass is an exact no-op for a fully opaque (alpha 255) or fully
+/// transparent (alpha 0) pixel, so an all-opaque frame round-trips byte for byte
+/// and stays canonical.
 pub(super) fn canonical_png_rgba(premultiplied_srgb: &[u8]) -> Vec<u8> {
     let mut canonical = vec![0_u8; premultiplied_srgb.len()];
     for (out_pixel, in_pixel) in canonical
@@ -194,9 +208,10 @@ fn unpremultiply_srgb8_pixel(pixel: [u8; 4]) -> [u8; 4] {
     }
     let alpha_fraction = f32::from(alpha) / 255.0;
     let unpremultiply = |channel: u8| {
-        let linear_premultiplied = srgb_channel_to_linear(f32::from(channel) / 255.0);
-        let straight_linear = (linear_premultiplied / alpha_fraction).clamp(0.0, 1.0);
-        (linear_channel_to_srgb(straight_linear) * 255.0).round() as u8
+        // Gamma-space unpremultiply: the stored value is `straight_srgb * alpha`,
+        // so dividing the sRGB channel by alpha recovers the straight sRGB value.
+        let straight_srgb = (f32::from(channel) / 255.0 / alpha_fraction).clamp(0.0, 1.0);
+        (straight_srgb * 255.0).round() as u8
     };
     [
         unpremultiply(pixel[0]),
@@ -262,11 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn premultiplied_linear_contract_is_explicit() {
-        let color = premultiply_linear_srgb([0.5, 0.25, 0.0, 0.5]);
-        assert!((color[0] - 0.107_020_57).abs() < 1e-6);
-        assert!((color[1] - 0.025_438).abs() < 1e-5);
-        assert_eq!(color[3], 0.5);
+    fn premultiplied_gamma_contract_is_explicit() {
+        // The Drew-approved gamma convention (overriding the plan's linear §2/§5):
+        // straight sRGB channels are scaled by alpha directly, with no sRGB→linear
+        // step, so [0.5, 0.25, 0.0] at alpha 0.5 premultiplies to exactly half.
+        let color = premultiply_gamma_srgb([0.5, 0.25, 0.0, 0.5]);
+        assert_eq!(color, [0.25, 0.125, 0.0, 0.5]);
     }
 
     #[test]
@@ -313,10 +329,10 @@ mod tests {
 
     #[test]
     fn canonical_png_rgba_unpremultiplies_a_half_alpha_pixel() {
-        // A half-alpha white stores as premultiplied sRGB 188 (linear_to_srgb(0.5));
-        // canonicalizing recovers straight white, brightening the stored value.
+        // In gamma space a half-alpha white stores as premultiplied sRGB 128
+        // (255 * 0.5); canonicalizing divides by alpha to recover straight white.
         assert_eq!(
-            canonical_png_rgba(&[188, 188, 188, 128]),
+            canonical_png_rgba(&[128, 128, 128, 128]),
             vec![255, 255, 255, 128],
         );
     }
@@ -329,7 +345,7 @@ mod tests {
 /// blend / output math is wrong.
 #[cfg(test)]
 mod oracle {
-    use super::{canonical_png_rgba, premultiply_linear_srgb, srgb_channel_to_linear};
+    use super::{canonical_png_rgba, premultiply_gamma_srgb, srgb_channel_to_linear};
     use crate::presentation::smooth::SmoothBlendMode;
     use objc2::ClassType;
     use objc2_app_kit::{
@@ -368,17 +384,24 @@ mod oracle {
     /// whole frame's straight-sRGB8 bytes, tightly packed at `size*4` per row.
     ///
     /// This mirrors the production paired Smooth capture
-    /// ([`crate::companion::app::render_prepared_frame_to_rgba`]): compositing
-    /// happens in the offscreen bitmap, then the result is converted to a faithful
-    /// sRGB color space (`NSCalibratedRGBColorSpace` is gamma 1.8 on macOS, so
-    /// reading it raw would be an unfaithful sRGB reference — sRGB 128 → 108).
+    /// ([`crate::companion::app::render_prepared_frame_to_rgba`]): the storage is
+    /// allocated, then **retagged to sRGB before compositing** so translucency
+    /// blends in the same sRGB/display space the live Smooth NSView context does —
+    /// not in `NSCalibratedRGBColorSpace` (gamma ≈ 1.8), which the live path never
+    /// uses. The final convert-to-sRGB is then an identity kept for symmetry with
+    /// production.
     unsafe fn appkit_render_srgb_frame(size: usize, paint: impl Fn()) -> Vec<u8> {
         let stride = size * 4;
-        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+        let storage = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
             std::ptr::null_mut(), size as isize, size as isize, 8, 4, true, false,
             NSCalibratedRGBColorSpace, stride as isize, 32,
         ).expect("allocate swatch bitmap");
+        // Retag the shared pixel buffer to sRGB so the graphics context composites
+        // in sRGB (gamma), matching the live Smooth display path and retained-gamma.
+        let rep = storage
+            .bitmapImageRepByRetaggingWithColorSpace(&NSColorSpace::sRGBColorSpace())
+            .expect("retag swatch bitmap to sRGB");
         let ctx =
             NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep).expect("swatch context");
         let previous = NSGraphicsContext::currentContext();
@@ -458,7 +481,10 @@ mod oracle {
     }
 
     const SWATCH_SIZE: u32 = 4;
-    const SWATCH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+    // A linear (non-sRGB) format: the GPU blends the stored premultiplied-sRGB
+    // values directly (gamma space), with no sRGB→linear→sRGB round-trip, exactly
+    // as the production render target now does.
+    const SWATCH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
     impl RetainedSwatch {
         fn new() -> Self {
@@ -525,12 +551,12 @@ mod oracle {
         /// through the production pipeline, returning the canonical straight-sRGB8
         /// center pixel.
         fn render(&self, background: [f32; 4], ops: &[([f32; 4], SmoothBlendMode)]) -> [u8; 4] {
-            let clear = premultiply_linear_srgb(background);
+            let clear = premultiply_gamma_srgb(background);
             let primitives: Vec<super::super::GpuPrimitive> = ops
                 .iter()
                 .map(|(color, _)| super::super::GpuPrimitive {
                     rect: [0.0, 0.0, SWATCH_SIZE as f32, SWATCH_SIZE as f32],
-                    color_a: premultiply_linear_srgb(*color),
+                    color_a: premultiply_gamma_srgb(*color),
                     color_b: [0.0; 4],
                     uv: [0.0; 4],
                     // kind 1.0 = solid rect, no clip, no atlas sample.
@@ -660,7 +686,9 @@ mod oracle {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            // Matches the production atlas' linear (non-sRGB) format; never sampled
+            // by the solid-rect/round swatch primitives, but kept consistent.
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -732,16 +760,14 @@ mod oracle {
         }
     }
 
-    // Task-15 parity decision, not a defect here: with the Smooth capture now a
-    // faithful sRGB reference (opaque is exact above), the residual translucent
-    // gap is purely the blend space — Retained composites in linear (plan §2/§5),
-    // CoreGraphics/Smooth composites in gamma — so a 0.5-alpha swatch lands
-    // ~43/255 apart. Drew judges the live pairs at Task 15; if he rejects the
-    // translucency difference, switch BlendContract to sRGB-gamma-space
-    // premultiplied blending HERE (the smallest fix). Kept ignored, not deleted,
-    // so the measured evidence is one `--ignored` run away.
+    // Translucent parity now holds: retained composites premultiplied translucency
+    // in gamma (sRGB) space against the linear-format target, and the Smooth
+    // reference composites in the same sRGB/display space the live Smooth NSView
+    // context uses (not the legacy `NSCalibratedRGBColorSpace` gamma-1.8 the
+    // offscreen capture used to blend in). Both land on the sRGB-space
+    // premultiplied-over value, so a 0.5-alpha swatch that was ~43/255 apart under
+    // linear blending now matches within a rounding step.
     #[test]
-    #[ignore = "translucent parity is the Task-15 gamma-vs-linear blend-space decision"]
     fn translucent_swatches_match_smooth_within_tolerance() {
         let retained = RetainedSwatch::new();
         // Opaque background gray, translucent gray swatch over it: endpoints and
@@ -833,7 +859,7 @@ mod oracle {
             blends: &[SmoothBlendMode],
             background: [f32; 4],
         ) -> Vec<u8> {
-            let clear = premultiply_linear_srgb(background);
+            let clear = premultiply_gamma_srgb(background);
             let target = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("glorp-parity-edge-target"),
                 size: wgpu::Extent3d {
@@ -950,7 +976,7 @@ mod oracle {
     ) -> super::super::GpuPrimitive {
         super::super::GpuPrimitive {
             rect: [0.0, 0.0, size as f32, size as f32],
-            color_a: premultiply_linear_srgb([1.0, 1.0, 1.0, 1.0]),
+            color_a: premultiply_gamma_srgb([1.0, 1.0, 1.0, 1.0]),
             color_b: [0.0; 4],
             uv: [0.0; 4],
             params,
@@ -1026,7 +1052,7 @@ mod oracle {
                     radius * 2.0,
                     radius * 2.0,
                 ],
-                color_a: premultiply_linear_srgb([1.0, 1.0, 1.0, 1.0]),
+                color_a: premultiply_gamma_srgb([1.0, 1.0, 1.0, 1.0]),
                 color_b: [0.0; 4],
                 uv: [0.0; 4],
                 // kind 2.0 = solid round primitive.
@@ -1120,8 +1146,8 @@ mod oracle {
         // Retained: the production radial primitive through the real shader.
         let primitive = super::super::GpuPrimitive {
             rect: [center - radius, center - radius, radius * 2.0, radius * 2.0],
-            color_a: premultiply_linear_srgb(inner),
-            color_b: premultiply_linear_srgb(outer),
+            color_a: premultiply_gamma_srgb(inner),
+            color_b: premultiply_gamma_srgb(outer),
             uv: [0.0; 4],
             params: [super::super::RADIAL_GRADIENT_KIND, 0.0, 0.0, 0.0],
             clip_rect: [0.0; 4],

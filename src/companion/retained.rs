@@ -427,9 +427,15 @@ impl PreparedRetainedHost {
             };
             let _ = gpu_error_sender.send(category);
         }));
-        let config = surface
+        let mut config = surface
             .get_default_config(&adapter, width, height)
             .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
+        // Composite in gamma space to match CoreGraphics/Smooth: a linear
+        // (non-sRGB) target blends the stored premultiplied-sRGB values directly,
+        // with no sRGB→linear→sRGB round-trip. The default surface format is the
+        // sRGB variant; drop the sRGB suffix so the raw sRGB-space values are what
+        // get blended. Metal's CAMetalLayer surface supports both variants.
+        config.format = config.format.remove_srgb_suffix();
         surface.configure(&device, &config);
         let mut counters = RetainedResourceCounters::default();
         let atlas_layout = create_atlas_bind_group_layout(&device);
@@ -716,9 +722,10 @@ impl RetainedHost {
             resolve_target: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear({
-                    // The premultiplied-linear convention: the sRGB target wants a
-                    // linear clear value, premultiplied by the background alpha.
-                    let clear = parity::premultiply_linear_srgb(background);
+                    // The premultiplied-gamma convention: the linear-format target
+                    // holds sRGB-space values, so the clear is the straight-sRGB
+                    // background premultiplied by its alpha (no sRGB→linear step).
+                    let clear = parity::premultiply_gamma_srgb(background);
                     wgpu::Color {
                         r: f64::from(clear[0]),
                         g: f64::from(clear[1]),
@@ -932,7 +939,12 @@ fn upload_glyph_atlas(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        // A linear (non-sRGB) format so `textureSample` returns the raw stored
+        // premultiplied-sRGB atlas bytes without an sRGB→linear decode. Mask
+        // glyphs read only alpha (unaffected by format); native-color emoji pass
+        // their premultiplied-sRGB pixels straight through, keeping the gamma
+        // convention every other primitive obeys.
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -1027,7 +1039,7 @@ fn create_pipelines(
             cache: None,
         })
     };
-    // Every pipeline's blend equation comes from the premultiplied-linear
+    // Every pipeline's blend equation comes from the premultiplied gamma-space
     // BlendContract, so the color convention lives in exactly one place.
     let blend = |mode: SmoothBlendMode| {
         parity::BlendContract::for_mode(mode)
@@ -1111,7 +1123,7 @@ fn prepare_gpu_frame(
                             .copied()
                             .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
                         let fg = cell.fg.map_or_else(
-                            || parity::premultiply_linear_srgb([1.0, 1.0, 1.0, layer.opacity]),
+                            || parity::premultiply_gamma_srgb([1.0, 1.0, 1.0, layer.opacity]),
                             |fg| rgb(fg.r, fg.g, fg.b, layer.opacity),
                         );
                         if let Some(glyph_rect) = glyph_ink_rect(
@@ -1544,11 +1556,11 @@ fn display_round_color(color: RoundColor) -> [f32; 4] {
     display_rgba([color.0, color.1, color.2, color.3])
 }
 
-/// Projects an authored straight-sRGB RGBA color into the premultiplied-linear
+/// Projects an authored straight-sRGB RGBA color into the premultiplied-gamma
 /// RGBA every GPU primitive carries. This is the single color convention; see
-/// [`parity::premultiply_linear_srgb`].
+/// [`parity::premultiply_gamma_srgb`].
 fn display_rgba(color: [f32; 4]) -> [f32; 4] {
-    parity::premultiply_linear_srgb(color)
+    parity::premultiply_gamma_srgb(color)
 }
 
 fn glyph_scale(font_size: f32) -> f32 {
@@ -1708,7 +1720,7 @@ fn clip_params(clip: SmoothClip, metrics: CompanionGridMetrics) -> ([f32; 4], [f
 }
 
 fn rgba(color: SmoothRgba8, opacity: f32) -> [f32; 4] {
-    parity::premultiply_linear_srgb([
+    parity::premultiply_gamma_srgb([
         color.r as f32 / 255.0,
         color.g as f32 / 255.0,
         color.b as f32 / 255.0,
@@ -1717,7 +1729,7 @@ fn rgba(color: SmoothRgba8, opacity: f32) -> [f32; 4] {
 }
 
 fn rgb(r: u8, g: u8, b: u8, opacity: f32) -> [f32; 4] {
-    parity::premultiply_linear_srgb([
+    parity::premultiply_gamma_srgb([
         r as f32 / 255.0,
         g as f32 / 255.0,
         b as f32 / 255.0,
@@ -1743,9 +1755,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// The surface format the headless resource harness builds its pipelines and
-    /// capture intermediate against — Metal's common `Bgra8UnormSrgb`. No surface
+    /// capture intermediate against — the linear (non-sRGB) `Bgra8Unorm` the
+    /// production surface now composites into for gamma-space blending. No surface
     /// is created, so this only selects the pipeline color-target format.
-    const TEST_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+    const TEST_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
     /// The fixed instance count of a synthetic ambient frame. Ambient idle motion
     /// wobbles a fixed set of primitives, so the count never changes and the
@@ -1956,7 +1969,9 @@ mod tests {
     }
 
     #[test]
-    fn srgb_colors_are_linearized_for_an_srgb_surface() {
+    fn srgb_transfer_curve_matches_the_standard_eotf() {
+        // The gamma render convention no longer linearizes at upload; this pins the
+        // sRGB transfer curve the parity oracle's linear-space prediction relies on.
         assert_eq!(srgb_channel_to_linear(0.0), 0.0);
         assert_eq!(srgb_channel_to_linear(1.0), 1.0);
         assert!((srgb_channel_to_linear(0.5) - 0.214_041_14).abs() < 0.000_001);

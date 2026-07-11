@@ -122,7 +122,7 @@ fn pixel_order_for_format(format: wgpu::TextureFormat) -> PixelOrder {
 /// when the mapped buffer cannot even hold the last row's real span.
 ///
 /// This is a pure **row-layout** step: it drops padding and swizzles channel
-/// order but never touches color. The premultiplied-linear → straight-sRGB
+/// order but never touches color. The premultiplied-sRGB → straight-sRGB
 /// unpremultiply is a separate color seam applied by [`RetainedCaptureTarget`]
 /// via [`super::parity::canonical_png_rgba`] once the rows are assembled, so the
 /// two concerns (layout vs color convention) stay independently testable.
@@ -323,9 +323,9 @@ impl<'host> RetainedCaptureTarget<'host> {
         )?;
         drop(mapped);
         capture.staging.unmap();
-        // Color seam: the sRGB target stored premultiplied-linear color; the
-        // canonical artifact is straight sRGB. Unpremultiply once here (a no-op
-        // for opaque/transparent pixels).
+        // Color seam: the linear-format target stored gamma-premultiplied sRGB
+        // color; the canonical artifact is straight sRGB. Unpremultiply once here
+        // (a no-op for opaque/transparent pixels).
         let rgba = super::parity::canonical_png_rgba(&premultiplied);
 
         Ok(CanonicalRgbaFrame {
@@ -339,7 +339,7 @@ impl<'host> RetainedCaptureTarget<'host> {
 }
 
 /// Projects a `RoundColor` into the straight sRGB channel array the scene
-/// encoder linearizes.
+/// encoder premultiplies.
 fn round_color_to_rgba(color: RoundColor) -> [f32; 4] {
     [color.0, color.1, color.2, color.3]
 }

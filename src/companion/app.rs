@@ -1829,7 +1829,7 @@ pub(super) fn render_prepared_frame_to_rgba(
     let logical_width = f64::from(physical_width) / backing_scale;
     let logical_height = f64::from(physical_height) / backing_scale;
     unsafe {
-        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+        let storage = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
             std::ptr::null_mut(),
             physical_width as isize,
@@ -1843,6 +1843,18 @@ pub(super) fn render_prepared_frame_to_rgba(
             32,
         )
         .ok_or_else(|| GlorpError::Message("failed to allocate paired smooth capture bitmap".into()))?;
+        // Retag the shared pixel buffer to sRGB BEFORE compositing so translucency
+        // blends in the same sRGB/display space the live Smooth NSView context uses,
+        // not in `NSCalibratedRGBColorSpace` (gamma ≈ 1.8). The live path never
+        // composites in the calibrated space, so blending there made the captured
+        // `smooth.png` an unfaithful reference for translucent content (opaque was
+        // already exact via the convert-on-readback below). This is the
+        // compositing-space completion of the earlier output-encoding fix.
+        let rep = storage
+            .bitmapImageRepByRetaggingWithColorSpace(&NSColorSpace::sRGBColorSpace())
+            .ok_or_else(|| {
+                GlorpError::Message("failed to retag paired smooth capture to sRGB".into())
+            })?;
         rep.setSize(NSSize::new(logical_width, logical_height));
         let context =
             NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep).ok_or_else(|| {
@@ -1858,12 +1870,9 @@ pub(super) fn render_prepared_frame_to_rgba(
         context.flushGraphics();
         NSGraphicsContext::setCurrentContext(previous.as_deref());
 
-        // Composite happens in the offscreen bitmap, then the captured bytes are
-        // normalized to a faithful straight-sRGB color space. `NSCalibratedRGBColorSpace`
-        // is gamma 1.8 on macOS, so reading it directly would store e.g. sRGB 128
-        // as 108 and make `smooth.png` an unfaithful sRGB reference that corrupts
-        // the parity comparison even for opaque content. Only the stored color
-        // space is normalized; the compositing is unchanged.
+        // Compositing already happened in sRGB (the rep is retagged sRGB above), so
+        // this convert-to-sRGB is now an identity kept for symmetry and to drop any
+        // row padding uniformly.
         let srgb_rep = rep
             .bitmapImageRepByConvertingToColorSpace_renderingIntent(
                 &NSColorSpace::sRGBColorSpace(),
@@ -2022,7 +2031,7 @@ fn build_dithered_tank_image(
     let radius = width.min(height) as f32 / 2.0;
 
     unsafe {
-        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+        let storage = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
             std::ptr::null_mut(),
             width as isize,
@@ -2034,6 +2043,16 @@ fn build_dithered_tank_image(
             NSCalibratedRGBColorSpace,
             (width * 4) as isize,
             32,
+        )?;
+        // `tank_background_sample` writes straight-sRGB8 bytes, and the retained
+        // shader outputs those same sRGB values verbatim. Tag the buffer sRGB (not
+        // the legacy `NSCalibratedRGBColorSpace` gamma-1.8) so drawing this image
+        // into the sRGB/display context does not colour-shift the bytes, keeping the
+        // Smooth tank base bit-identical to the retained kind-3 tank falloff.
+        // Fully-qualified: the `NSColorSpace` import is retained-renderer-gated, but
+        // this Smooth-backend tank builder compiles feature-off too.
+        let rep = storage.bitmapImageRepByRetaggingWithColorSpace(
+            &objc2_app_kit::NSColorSpace::sRGBColorSpace(),
         )?;
         let data = rep.bitmapData();
         if data.is_null() {

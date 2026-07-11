@@ -53,20 +53,6 @@ fn vs_main(
     return out;
 }
 
-fn linear_to_srgb(channel: f32) -> f32 {
-    if (channel <= 0.0031308) {
-        return channel * 12.92;
-    }
-    return 1.055 * pow(channel, 1.0 / 2.4) - 0.055;
-}
-
-fn srgb_to_linear(channel: f32) -> f32 {
-    if (channel <= 0.04045) {
-        return channel / 12.92;
-    }
-    return pow((channel + 0.055) / 1.055, 2.4);
-}
-
 fn dither_noise(pixel: vec2<u32>) -> f32 {
     var h = pixel.x * 0x9E3779B9u ^ pixel.y * 0x85EBCA6Bu;
     h = h ^ (h >> 16u);
@@ -126,9 +112,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let atlas_uv = mix(in.uv.xy, in.uv.zw, vec2<f32>(in.local.x, 1.0 - in.local.y));
         let sample = textureSample(atlas, atlas_sampler, atlas_uv);
         if (in.params.w > 0.5) {
-            // Native-color glyph (emoji): the atlas already holds premultiplied
-            // RGBA, which is exactly the fragment output convention, so it passes
-            // through and the authored foreground tint is ignored entirely.
+            // Native-color glyph (emoji): the atlas is a linear-format texture, so
+            // the sample is the raw premultiplied-sRGB atlas bytes — exactly the
+            // gamma fragment output convention — so it passes through and the
+            // authored foreground tint is ignored entirely.
             output = sample;
         } else {
             // Coverage mask: the authored premultiplied color scaled by coverage,
@@ -144,35 +131,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             // add the round-primitive coverage (that would double-darken the rim).
             // Invariant: the tank base is always opaque and drawn source-copy
             // (Replace), so `color_a`/`color_b` premultiplied equal their straight
-            // linear values and the sRGB dither below is exact. Do NOT introduce a
+            // sRGB values and the sRGB dither below is exact. Do NOT introduce a
             // translucent tank base.
             //
-            // Smooth interpolates and dithers in 8-bit sRGB output space. Recreate
-            // that quantization, then return linear values for the sRGB surface.
+            // Smooth interpolates and dithers in 8-bit sRGB output space. The gamma
+            // convention already carries colours in sRGB space, so the endpoints are
+            // used directly; the output is the dithered sRGB value (the linear-format
+            // target stores it verbatim), premultiplied by alpha like every other
+            // primitive.
             let t = clamp(radius, 0.0, 1.0);
-            let core = vec3<f32>(
-                linear_to_srgb(in.color_a.r),
-                linear_to_srgb(in.color_a.g),
-                linear_to_srgb(in.color_a.b),
-            );
-            let rim = vec3<f32>(
-                linear_to_srgb(in.color_b.r),
-                linear_to_srgb(in.color_b.g),
-                linear_to_srgb(in.color_b.b),
-            );
+            let core = in.color_a.rgb;
+            let rim = in.color_b.rgb;
             let local_pixel = vec2<u32>(floor(in.local * in.rect.zw));
             let noise = dither_noise(local_pixel);
             let quantized = clamp(round(mix(core, rim, t) * 255.0 + vec3<f32>(noise)) / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
             let a = in.color_a.a;
-            // Premultiplied-linear output: the tank falloff keeps its output-space
-            // dither, then premultiplies the linear result by alpha like every
-            // other primitive.
-            output = vec4<f32>(
-                srgb_to_linear(quantized.r) * a,
-                srgb_to_linear(quantized.g) * a,
-                srgb_to_linear(quantized.b) * a,
-                a,
-            );
+            output = vec4<f32>(quantized * a, a);
         } else if (kind > 5.5) {
             // Radial gradient (kind 6): premultiplied interpolation from the
             // authored inner colour at the centre (radius 0) to the outer colour at
@@ -225,8 +199,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // glyph mask path does.
     output = output * coverage;
     if (output.a <= 0.001) { discard; }
-    // Every fragment output is already premultiplied-linear, and every blend
-    // pipeline is the premultiplied BlendContract, so no per-mode premultiply
-    // step is needed here.
+    // Every fragment output is already premultiplied in gamma (sRGB) space, and
+    // every blend pipeline is the premultiplied BlendContract, so no per-mode
+    // premultiply step is needed here. The linear-format target stores these
+    // sRGB-space values verbatim, so the blend composites in gamma like Smooth.
     return output;
 }
