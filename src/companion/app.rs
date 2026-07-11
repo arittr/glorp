@@ -1484,13 +1484,32 @@ fn finish_review_capture_if_due() {
     // Relay the paired-capture terminal result to the process-level slot so `run`
     // can fail the process after NSApplication exits.
     #[cfg(feature = "retained-renderer")]
-    if let Some(outcome) = capture.take_pair_capture_result() {
+    let pair_capture_failed = if let Some(outcome) = capture.take_pair_capture_result() {
+        if let Err(err) = &outcome {
+            eprintln!("glorp: {err}");
+        }
+        let failed = outcome.is_err();
         store_pair_capture_outcome(outcome);
-    }
+        failed
+    } else {
+        false
+    };
 
     if let Err(err) = capture.finish(view.as_super()) {
         eprintln!("glorp review capture failed: {err}");
     }
+
+    // A capture fault (readback/map/blank/write) must fail the process, but
+    // NSApplication::terminate exits with status 0 and never returns — so `run`'s
+    // post-`app.run()` relay check can never observe the stored Err. Fail the
+    // process here, before terminating cleanly, so a direct `companion-app`
+    // capture failure exits nonzero. A capture-only fault does not degrade the
+    // renderer, so the effective renderer stays Retained.
+    #[cfg(feature = "retained-renderer")]
+    if pair_capture_failed {
+        std::process::exit(1);
+    }
+
     unsafe {
         if let Some(mtm) = MainThreadMarker::new() {
             NSApplication::sharedApplication(mtm).terminate(None);

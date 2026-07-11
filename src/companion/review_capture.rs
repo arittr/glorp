@@ -592,6 +592,35 @@ mod tests {
 
     #[cfg(feature = "retained-renderer")]
     #[test]
+    fn capture_fault_is_a_terminal_process_error_but_graceful_run_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut capture = ReviewCapture::from_options(
+            EffectiveCompanionRenderer::Retained,
+            &CompanionReviewOptions {
+                duration_ms: Some(0),
+                capture_dir: Some(dir.path().join("pair")),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("capture dir should create review capture session");
+
+        // A graceful run (no paired-capture fault) records nothing, so there is no
+        // terminal error and the process exits cleanly.
+        assert!(capture.take_pair_capture_result().is_none());
+
+        // A capture fault records a terminal Err, which finish_review_capture_if_due
+        // turns into a nonzero process exit.
+        capture.record_pair_capture_result(Err(crate::error::GlorpError::Message(
+            "paired retained capture failed: retained-capture-map-failed".into(),
+        )));
+        assert!(matches!(capture.take_pair_capture_result(), Some(Err(_))));
+        // Draining is idempotent.
+        assert!(capture.take_pair_capture_result().is_none());
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
     fn retained_review_terminates_on_offscreen_ticks_without_any_present() {
         let dir = tempfile::tempdir().unwrap();
         let mut capture = ReviewCapture::from_options(
