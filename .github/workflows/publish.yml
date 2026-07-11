@@ -109,9 +109,9 @@ jobs:
         run: node scripts/build-macos-companion-app.mjs --binary "target/${{ matrix.rust_target }}/release/glorp"
       - name: staged retained capability smoke (Apple Silicon)
         # Reads the shipped capability matrix from the freshly built binary's
-        # bounded metadata command. Auto stays Smooth (the cutover constant is
-        # still false — flipped later), while explicit Retained proves the
-        # shipped capability now.
+        # bounded metadata command. Auto now resolves to Retained (the cutover
+        # constant is on), and explicit Retained still proves the shipped
+        # capability.
         if: matrix.target == 'darwin-arm64'
         shell: bash
         run: |
@@ -120,16 +120,17 @@ jobs:
           echo "$auto"
           echo "$auto" | grep -qx "requested-renderer=auto"
           echo "$auto" | grep -qx "retained-compiled=true"
-          echo "$auto" | grep -qx "auto-retained-on-apple-silicon=false"
-          echo "$auto" | grep -qx "effective-renderer=smooth"
+          echo "$auto" | grep -qx "auto-retained-on-apple-silicon=true"
+          echo "$auto" | grep -qx "effective-renderer=retained"
           retained="$("$bin" companion-app --renderer retained --print-capabilities)"
           echo "$retained"
           echo "$retained" | grep -qx "requested-renderer=retained"
           echo "$retained" | grep -qx "effective-renderer=retained"
       - name: staged smooth-only smoke (Intel)
-        # The Intel artifact ships without the retained backend: Auto is Smooth
-        # and explicit Retained is rejected outright. Rosetta lets the arm64
-        # runner execute the cross-compiled x86_64 binary.
+        # The Intel artifact ships without the retained backend: Auto stays
+        # Smooth even with the cutover constant on, and explicit Retained is
+        # rejected outright. Rosetta lets the arm64 runner execute the
+        # cross-compiled x86_64 binary.
         if: matrix.target == 'darwin-x64'
         shell: bash
         run: |
@@ -139,7 +140,7 @@ jobs:
           echo "$auto"
           echo "$auto" | grep -qx "requested-renderer=auto"
           echo "$auto" | grep -qx "retained-compiled=false"
-          echo "$auto" | grep -qx "auto-retained-on-apple-silicon=false"
+          echo "$auto" | grep -qx "auto-retained-on-apple-silicon=true"
           echo "$auto" | grep -qx "effective-renderer=smooth"
           if "$bin" companion-app --renderer retained --print-capabilities; then
             echo "explicit retained must be rejected on the Intel build" >&2

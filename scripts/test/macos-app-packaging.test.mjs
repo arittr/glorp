@@ -147,8 +147,8 @@ describe("macOS app packaging", () => {
   it("runs staged capability smokes proving the shipped matrix before upload", () => {
     const workflow = readPublishWorkflow();
 
-    // Apple Silicon: retained compiled in, Auto still Smooth (policy off), and
-    // explicit Retained proves the shipped capability.
+    // Apple Silicon: retained compiled in and Auto now resolves to Retained
+    // (the cutover constant is on); explicit Retained still proves the matrix.
     const armSmoke = "staged retained capability smoke (Apple Silicon)";
     assert(workflow.includes(armSmoke));
     const armSmokeBlock = workflow.slice(
@@ -157,15 +157,16 @@ describe("macOS app packaging", () => {
     );
     assert.match(armSmokeBlock, /companion-app --print-capabilities/);
     assert.match(armSmokeBlock, /retained-compiled=true/);
-    assert.match(armSmokeBlock, /auto-retained-on-apple-silicon=false/);
-    assert.match(armSmokeBlock, /effective-renderer=smooth/);
+    assert.match(armSmokeBlock, /auto-retained-on-apple-silicon=true/);
+    assert.match(armSmokeBlock, /effective-renderer=retained/);
     assert.match(
       armSmokeBlock,
       /companion-app --renderer retained --print-capabilities/,
     );
     assert.match(armSmokeBlock, /effective-renderer=retained/);
 
-    // Intel: retained unavailable, Auto Smooth, explicit Retained rejected.
+    // Intel: retained unavailable, so Auto stays Smooth even though the cutover
+    // constant is on; explicit Retained is rejected.
     const intelSmoke = "staged smooth-only smoke (Intel)";
     assert(workflow.includes(intelSmoke));
     const intelSmokeBlock = workflow.slice(
@@ -173,7 +174,7 @@ describe("macOS app packaging", () => {
       workflow.indexOf("stage binary at workspace root for upload"),
     );
     assert.match(intelSmokeBlock, /retained-compiled=false/);
-    assert.match(intelSmokeBlock, /auto-retained-on-apple-silicon=false/);
+    assert.match(intelSmokeBlock, /auto-retained-on-apple-silicon=true/);
     assert.match(intelSmokeBlock, /effective-renderer=smooth/);
     assert.match(
       intelSmokeBlock,

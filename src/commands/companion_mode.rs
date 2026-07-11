@@ -485,9 +485,10 @@ mod tests {
 
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
     #[test]
-    fn auto_stays_smooth_while_the_cutover_constant_is_disabled() {
-        // Drives Auto with the real cutover constant: if it is ever flipped to
-        // true, Apple Silicon resolves to Retained and this assertion fails.
+    fn auto_resolves_to_retained_now_that_the_cutover_constant_is_enabled() {
+        // Drives Auto with the real cutover constant: while it is true, Apple
+        // Silicon resolves to Retained. Reverting the constant to false flips
+        // this back to Smooth and is the one-line rollback.
         assert_eq!(
             resolve_renderer(
                 CompanionRendererRequest::Auto,
@@ -495,25 +496,38 @@ mod tests {
                 true,
                 super::AUTO_RETAINED_ON_APPLE_SILICON,
             ),
-            Ok(EffectiveCompanionRenderer::Smooth),
+            Ok(EffectiveCompanionRenderer::Retained),
         );
     }
 
     #[test]
-    fn capabilities_metadata_reports_auto_smooth_and_the_disabled_policy() {
+    fn capabilities_metadata_reports_auto_resolution_and_the_enabled_policy() {
         let mut out = Vec::new();
         super::print_companion_capabilities(CompanionRendererRequest::Auto, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("glorp-companion-capabilities: v1"), "{text}");
         assert!(text.contains("requested-renderer=auto"), "{text}");
-        // While the cutover constant is disabled, Auto is Smooth on every target.
-        assert!(text.contains("effective-renderer=smooth"), "{text}");
+        // The cutover constant is enabled, so the metadata always reports it on.
         assert!(
-            text.contains("auto-retained-on-apple-silicon=false"),
+            text.contains("auto-retained-on-apple-silicon=true"),
             "{text}"
         );
         assert!(
             text.contains(&format!("retained-compiled={}", super::RETAINED_COMPILED)),
+            "{text}"
+        );
+        // Auto's effective renderer is whatever the resolver picks for this
+        // build's compiled capability and host target: Retained only on a
+        // capable Apple-Silicon build, Smooth otherwise.
+        let expected = resolve_renderer(
+            CompanionRendererRequest::Auto,
+            CompanionRendererTarget::current(),
+            super::RETAINED_COMPILED,
+            super::AUTO_RETAINED_ON_APPLE_SILICON,
+        )
+        .expect("auto resolves to a renderer");
+        assert!(
+            text.contains(&format!("effective-renderer={}", expected.as_str())),
             "{text}"
         );
     }
@@ -695,9 +709,10 @@ pub fn print_companion_capabilities(
     Ok(())
 }
 
-/// The single cutover switch. While this stays `false`, `Auto` never resolves to
-/// Retained even on capable hardware; flipping it is a later, human-gated step.
-pub const AUTO_RETAINED_ON_APPLE_SILICON: bool = false;
+/// The single cutover switch. While this is `true`, `Auto` resolves to Retained
+/// on capable Apple-Silicon hardware; reverting it to `false` is the one-line
+/// rollback that returns Auto to Smooth everywhere.
+pub const AUTO_RETAINED_ON_APPLE_SILICON: bool = true;
 
 /// A request could not be honored. The category is a sanitized `&'static str`, so
 /// no dynamic or user-derived text ever reaches an error surface.
