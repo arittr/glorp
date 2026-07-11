@@ -53,10 +53,11 @@ use objc2_app_kit::{
     NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightBold,
     NSForegroundColorAttributeName, NSGradient, NSGraphicsContext, NSImage, NSLineCapStyle, NSMenu,
     NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer,
+    MainThreadMarker, NSAttributedString, NSMutableAttributedString, NSPoint, NSRect, NSSize,
+    NSString, NSTimer,
 };
 
 // The pace gauge reads a ten-minute window and the pet's vitals move on hour
@@ -118,7 +119,12 @@ enum PreparedRendererFrame {
         pet_center_col: f64,
         pet_center_row: f64,
         pet_width_cells: f64,
-        plan: SmoothCompanionScenePlan,
+        plan: Box<SmoothCompanionScenePlan>,
+        /// Stable painter order computed and validated off the draw callback.
+        /// Layer z values are not insertion ordered (the projected floor is
+        /// deliberately moved beneath props), so the native painter used to
+        /// allocate and sort this list again on every repaint.
+        draw_order: Vec<usize>,
     },
 }
 
@@ -320,6 +326,7 @@ fn prepare_companion_frame(
                     CompanionFramePreparationError::SmoothInvalidLayerGeometry
                 }
             })?;
+            let draw_order = smooth_layer_draw_order(&plan);
             // The aura follows the pet's composed depth transform, so it grows and
             // sinks with the creature instead of staying pinned to the unscaled art.
             let transformed = plan.pet.transformed_bounds;
@@ -333,7 +340,8 @@ fn prepare_companion_frame(
                 pet_center_col,
                 pet_center_row,
                 pet_width_cells,
-                plan,
+                plan: Box::new(plan),
+                draw_order,
             }
         } else {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
@@ -833,9 +841,40 @@ fn build_window(
 fn ui_tick() {
     let _mtm = MainThreadMarker::new().expect("companion ui_tick on non-main thread");
     drain_poll_results();
+    // AppKit does not need fresh backing-store contents for a window that cannot
+    // be seen. Pausing the CPU renderer here preserves the time-based motion: on
+    // reveal the next tick samples the current drift/depth/bob position instead
+    // of replaying hidden frames.
+    if !companion_view_is_visible() {
+        finish_review_capture_if_due();
+        return;
+    }
     animate_pet();
     prepare_current_frame_from_state();
     finish_review_capture_if_due();
+}
+
+fn companion_view_is_visible() -> bool {
+    APP_STATE.with(|cell| {
+        let state = cell.borrow();
+        let Some(state) = state.as_ref() else {
+            return false;
+        };
+        // Review runs are bounded automation, not an idle background window.
+        // They must keep painting even when another app covers the companion or
+        // the capture can never reach MIN_CAPTURE_FRAMES and terminate.
+        if state.review_capture.is_some() {
+            return true;
+        }
+        let Some(window) = state.view.window() else {
+            return false;
+        };
+        window.isVisible()
+            && !window.isMiniaturized()
+            && window
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible)
+    })
 }
 
 fn prepare_current_frame_from_state() {
@@ -1101,18 +1140,27 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
         ));
         return;
     };
-    let frame = APP_STATE.with(|cell| {
-        cell.borrow()
+    // Paint directly from the immutable prepared frame. Cloning here copied the
+    // full layered scene (including every glyph String and Vec) on every AppKit
+    // repaint solely to shorten a RefCell borrow; draw callbacks are synchronous,
+    // so holding the immutable borrow across paint is both safe and much cheaper.
+    let review_sample = APP_STATE.with(|cell| {
+        let state = cell.borrow();
+        match state
             .as_ref()
-            .and_then(|state| state.last_good_frame.clone())
-    });
-    match frame {
-        Some(frame) => {
-            paint_prepared_frame(view, bounds, &frame);
-            record_review_frame(view, frame.review_sample);
+            .and_then(|state| state.last_good_frame.as_ref())
+        {
+            Some(frame) => {
+                paint_prepared_frame(view, bounds, frame);
+                frame.review_sample
+            }
+            None => {
+                paint_fallback_background(bounds);
+                None
+            }
         }
-        None => paint_fallback_background(bounds),
-    }
+    });
+    record_review_frame(view, review_sample);
 }
 
 fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompanionFrame) {
@@ -1162,9 +1210,9 @@ fn paint_prepared_frame(_view: &RoundView, bounds: NSRect, frame: &PreparedCompa
             PreparedRendererFrame::Pixel { frame: pixel_frame } => {
                 crate::companion::pixel::draw_pixel_frame(pixel_frame, bounds, aperture, hud_text);
             }
-            PreparedRendererFrame::Smooth { metrics, plan, .. } => {
+            PreparedRendererFrame::Smooth { metrics, plan, draw_order, .. } => {
                 draw_mood_aura(frame, metrics);
-                appkit_blit_smooth_plan(plan, metrics, &aperture);
+                appkit_blit_smooth_plan(plan, draw_order, metrics, &aperture);
             }
             PreparedRendererFrame::Classic { metrics, draw_list, .. } => {
                 draw_mood_aura(frame, metrics);
@@ -1469,16 +1517,8 @@ fn attributed_pet_glyph(
     text: &str,
     font_size: f64,
     color: &RoundColor,
-) -> Retained<NSMutableAttributedString> {
-    unsafe {
-        let text = NSString::from_str(text);
-        let font = cached_monospaced_font(font_size, false);
-        let mut attr = NSMutableAttributedString::from_nsstring(&text);
-        let range = objc2_foundation::NSRange::from(0..text.length());
-        attr.addAttribute_value_range(NSFontAttributeName, &font, range);
-        attr.addAttribute_value_range(NSForegroundColorAttributeName, &ns_color(color), range);
-        attr
-    }
+) -> Retained<NSAttributedString> {
+    cached_attributed_text(text, font_size, false, color)
 }
 
 /// Quantised font-cache key: the pet's depth scale drifts a hair every frame,
@@ -1517,20 +1557,104 @@ fn cached_monospaced_font(font_size: f64, bold: bool) -> Retained<NSFont> {
     })
 }
 
-fn ns_color(color: &RoundColor) -> Retained<NSColor> {
-    unsafe {
-        NSColor::colorWithSRGBRed_green_blue_alpha(
-            color.0 as f64,
-            color.1 as f64,
-            color.2 as f64,
-            color.3 as f64,
-        )
+fn rgba8_key(color: &RoundColor) -> [u8; 4] {
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [
+        channel(color.0),
+        channel(color.1),
+        channel(color.2),
+        channel(color.3),
+    ]
+}
+
+/// Attributed strings retain CoreText's shaped run and attribute dictionary.
+/// Smooth cells reuse a small glyph/palette/font vocabulary, but previously
+/// rebuilt those objects for every cell of every frame.
+fn cached_attributed_text(
+    text: &str,
+    font_size: f64,
+    bold: bool,
+    color: &RoundColor,
+) -> Retained<NSAttributedString> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    type AttributedStyleKey = ((i64, bool), [u8; 4]);
+    #[derive(Default)]
+    struct AttributedTextCache {
+        by_style: HashMap<AttributedStyleKey, HashMap<String, Retained<NSAttributedString>>>,
+        len: usize,
     }
+
+    thread_local! {
+        static ATTRIBUTED_TEXT: RefCell<AttributedTextCache> =
+            RefCell::new(AttributedTextCache::default());
+    }
+
+    let style_key = (font_cache_key(font_size, bold), rgba8_key(color));
+    ATTRIBUTED_TEXT.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        // HUD totals can change over a long session and depth introduces a few
+        // adjacent alpha/size keys. Keep this a bounded session cache.
+        if cache.len > 512 {
+            *cache = AttributedTextCache::default();
+        }
+        if let Some(cached) = cache
+            .by_style
+            .get(&style_key)
+            .and_then(|texts| texts.get(text))
+        {
+            return cached.clone();
+        }
+
+        let attributed = unsafe {
+            let text = NSString::from_str(text);
+            let font = cached_monospaced_font(font_size, bold);
+            let mut attr = NSMutableAttributedString::from_nsstring(&text);
+            let range = objc2_foundation::NSRange::from(0..text.length());
+            attr.addAttribute_value_range(NSFontAttributeName, &font, range);
+            attr.addAttribute_value_range(NSForegroundColorAttributeName, &ns_color(color), range);
+            Retained::into_super(attr)
+        };
+        cache
+            .by_style
+            .entry(style_key)
+            .or_default()
+            .insert(text.to_string(), attributed.clone());
+        cache.len += 1;
+        attributed
+    })
+}
+
+fn ns_color(color: &RoundColor) -> Retained<NSColor> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static COLORS: RefCell<HashMap<[u8; 4], Retained<NSColor>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    let key = rgba8_key(color);
+    COLORS.with(|colors| {
+        let mut colors = colors.borrow_mut();
+        colors
+            .entry(key)
+            .or_insert_with(|| unsafe {
+                NSColor::colorWithSRGBRed_green_blue_alpha(
+                    f64::from(key[0]) / 255.0,
+                    f64::from(key[1]) / 255.0,
+                    f64::from(key[2]) / 255.0,
+                    f64::from(key[3]) / 255.0,
+                )
+            })
+            .clone()
+    })
 }
 
 #[cfg(target_os = "macos")]
 struct CompanionAttributedLine {
-    text: Retained<NSMutableAttributedString>,
+    text: Retained<NSAttributedString>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1810,6 +1934,12 @@ fn compositing_operation(blend: SmoothBlendMode) -> NSCompositingOperation {
     }
 }
 
+fn smooth_layer_draw_order(plan: &SmoothCompanionScenePlan) -> Vec<usize> {
+    let mut order: Vec<_> = (0..plan.layers.len()).collect();
+    order.sort_by_key(|&index| (plan.layers[index].z, index));
+    order
+}
+
 /// Clip to the round porthole. Scene content never escapes it, whatever graphics
 /// state the caller left behind.
 unsafe fn appkit_aperture_clip(aperture: &RoundAperture) {
@@ -1879,6 +2009,7 @@ fn apply_smooth_layer_clip(clip: &SmoothClip, metrics: &CompanionGridMetrics) {
 /// a bug rather than bad input: skip it instead of drawing garbage or panicking.
 fn appkit_blit_smooth_plan(
     plan: &SmoothCompanionScenePlan,
+    draw_order: &[usize],
     metrics: &CompanionGridMetrics,
     aperture: &RoundAperture,
 ) {
@@ -1891,11 +2022,13 @@ fn appkit_blit_smooth_plan(
         ..
     } = *metrics;
 
-    let mut ordered_layers: Vec<_> = plan.layers.iter().enumerate().collect();
-    ordered_layers.sort_by_key(|(index, layer)| (layer.z, *index));
-
-    for (_, layer) in ordered_layers {
-        if layer.opacity <= 0.0 || validate_smooth_layer(layer).is_err() {
+    for &layer_index in draw_order {
+        let Some(layer) = plan.layers.get(layer_index) else {
+            debug_assert!(false, "prepared smooth draw order must reference a layer");
+            continue;
+        };
+        // Validation already happened while constructing the prepared plan.
+        if layer.opacity <= 0.0 {
             continue;
         }
 
@@ -2084,15 +2217,7 @@ fn appkit_draw_cell_parts(
                 .map(|c| cell_ink_color(c, frame.opacity))
                 .unwrap_or(RoundColor(1.0, 1.0, 1.0, frame.opacity.clamp(0.0, 1.0)));
             let attr = if bold {
-                // `attributed_pet_glyph` uses weight 0.0 (NSFontWeightRegular).
-                // For bold cells we build the attributed string with NSFontWeightBold.
-                let text = NSString::from_str(glyph);
-                let font = cached_monospaced_font(frame.font_size, true);
-                let mut a = NSMutableAttributedString::from_nsstring(&text);
-                let range = objc2_foundation::NSRange::from(0..text.length());
-                a.addAttribute_value_range(NSFontAttributeName, &font, range);
-                a.addAttribute_value_range(NSForegroundColorAttributeName, &ns_color(&fg), range);
-                a
+                cached_attributed_text(glyph, frame.font_size, true, &fg)
             } else {
                 attributed_pet_glyph(glyph, frame.font_size, &fg)
             };

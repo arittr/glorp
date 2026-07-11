@@ -14,8 +14,12 @@ fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 #[test]
 fn draw_scene_consumes_only_the_last_prepared_frame() {
     let body = source_between(APP_SOURCE, "\nfn draw_scene(", "\nfn paint_prepared_frame(");
-    assert!(body.contains("state.last_good_frame.clone()"));
-    assert!(body.contains("paint_prepared_frame(view, bounds, &frame)"));
+    assert!(body.contains("state.last_good_frame.as_ref()"));
+    assert!(body.contains("paint_prepared_frame(view, bounds, frame)"));
+    assert!(
+        !body.contains("last_good_frame.clone()"),
+        "draw_scene must not deep-clone the prepared scene"
+    );
     for forbidden in [
         "prepare_companion_frame(",
         "prepare_current_frame_from_state(",
