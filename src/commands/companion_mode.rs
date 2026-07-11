@@ -11,6 +11,11 @@ pub struct CompanionReviewOptions {
     /// Pins the pet's depth plane for deterministic captures. Never persisted, and
     /// consumed only by Smooth scene preparation.
     pub depth: Option<CompanionReviewDepth>,
+    /// Opt-in to capturing the live (unredacted) HUD. Off by default; when on, a
+    /// paired capture must land in the sensitive review root. Threaded from the
+    /// hidden `--review-capture-live-values` flag; enforcement lives in the
+    /// paired-capture coordinator, not the single-renderer capture path.
+    pub review_capture_live_values: bool,
 }
 
 /// The three depth planes a review capture can pin, normalized onto the raw depth

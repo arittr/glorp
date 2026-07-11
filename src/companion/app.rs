@@ -88,7 +88,7 @@ struct CompanionMenuSpec {
 
 #[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
 #[derive(Debug, Clone)]
-struct PreparedCompanionFrame {
+pub(super) struct PreparedCompanionFrame {
     bounds: PreparedBounds,
     aperture: RoundAperture,
     background: RoundColor,
@@ -136,6 +136,119 @@ pub(super) struct PreparedGaugeFrame {
     pub(super) daily_fraction: f64,
     pub(super) daily_overage_fraction: f64,
     pub(super) pace_fraction: f64,
+}
+
+/// Minimal read-only accessors used by [`crate::companion::paired_review`] to
+/// freeze a prepared frame into a checksummable review identity. Only the
+/// already-projected chrome and geometry are exposed; no `AppState` or
+/// `WatchViewModel` state is reachable through these.
+#[cfg(feature = "retained-renderer")]
+impl PreparedCompanionFrame {
+    pub(super) fn review_aperture(&self) -> RoundAperture {
+        self.aperture
+    }
+
+    pub(super) fn review_background(&self) -> RoundColor {
+        self.background
+    }
+
+    pub(super) fn review_mood_aura(&self) -> RoundColor {
+        self.mood_aura_color
+    }
+
+    pub(super) fn review_dim_overlay(&self) -> bool {
+        self.dim_overlay
+    }
+
+    pub(super) fn review_gauges(&self) -> PreparedGaugeFrame {
+        self.gauges
+    }
+
+    pub(super) fn review_hud(&self) -> &CompanionHudText {
+        &self.hud
+    }
+
+    pub(super) fn review_hud_font_size(&self) -> f64 {
+        self.hud_font_size
+    }
+
+    pub(super) fn review_overlays(&self) -> &[RoundDrawCommand] {
+        &self.overlay_commands
+    }
+
+    /// Hands out a borrowed view of the renderer payload so paired_review can
+    /// project the renderer identity without app.rs depending on its serde
+    /// projection types.
+    pub(super) fn renderer_source(
+        &self,
+    ) -> crate::companion::paired_review::RendererIdentitySource<'_> {
+        use crate::companion::paired_review::RendererIdentitySource;
+        match &self.renderer {
+            PreparedRendererFrame::Pixel { frame } => RendererIdentitySource::Pixel { frame },
+            PreparedRendererFrame::Classic {
+                metrics,
+                pet_center_col,
+                pet_center_row,
+                pet_width_cells,
+                draw_list,
+            } => RendererIdentitySource::Classic {
+                metrics: *metrics,
+                pet_center_col: *pet_center_col,
+                pet_center_row: *pet_center_row,
+                pet_width_cells: *pet_width_cells,
+                draw_list,
+            },
+            PreparedRendererFrame::Smooth {
+                metrics,
+                pet_center_col,
+                pet_center_row,
+                pet_width_cells,
+                plan,
+                draw_order,
+            } => RendererIdentitySource::Smooth {
+                metrics: *metrics,
+                pet_center_col: *pet_center_col,
+                pet_center_row: *pet_center_row,
+                pet_width_cells: *pet_width_cells,
+                plan,
+                draw_order,
+            },
+        }
+    }
+
+    /// A deterministic prepared frame for review fixtures and tests. Built
+    /// entirely from constants — never from live pet state.
+    pub(super) fn fixture() -> Self {
+        PreparedCompanionFrame {
+            bounds: PreparedBounds {
+                width_px: 360,
+                height_px: 360,
+                width_f64: 360.0,
+                height_f64: 360.0,
+            },
+            aperture: RoundAperture::new(360, 360),
+            background: RoundColor(0.05, 0.06, 0.10, 1.0),
+            mood_aura_color: RoundColor(0.30, 0.40, 0.55, 0.80),
+            dim_overlay: false,
+            renderer: PreparedRendererFrame::Pixel {
+                frame: PixelFrame::transparent(PixelViewport::companion_default()),
+            },
+            gauges: PreparedGaugeFrame {
+                xp_fraction: 0.5,
+                daily_fraction: 0.5,
+                daily_overage_fraction: 0.0,
+                pace_fraction: 0.5,
+            },
+            hud: CompanionHudText {
+                today_total: "—".to_string(),
+                daily_percent: "—".to_string(),
+                pace: "—".to_string(),
+            },
+            hud_font_size: 8.5,
+            overlay_commands: Vec::new(),
+            review_sample: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -21,7 +21,9 @@ dev-preview = []
 retained-renderer = [
     "dep:bytemuck",
     "dep:objc2-quartz-core",
+    "dep:png",
     "dep:pollster",
+    "dep:sha2",
     "dep:wgpu",
     "objc2-app-kit/objc2-quartz-core",
 ]

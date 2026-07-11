@@ -1,6 +1,8 @@
 #![cfg(target_os = "macos")]
 
 pub mod app;
+#[cfg(feature = "retained-renderer")]
+pub mod paired_review;
 pub mod pixel;
 pub mod render;
 #[cfg(feature = "retained-renderer")]

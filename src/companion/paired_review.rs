@@ -1,0 +1,680 @@
+//! Frozen, checksummable paired review frames and capture-path privacy policy.
+//!
+//! A [`PairedReviewFrame`] freezes a prepared companion frame together with a
+//! serializable [`PairedReviewIdentity`] and a precomputed content checksum. The
+//! identity captures every chrome/geometry input that a reviewer compares across
+//! two renderers, projected into a stable serde form; the checksum is a
+//! lowercase SHA-256 over ONLY that identity, so it changes whenever the frozen
+//! frame's chrome or geometry changes and stays byte-stable otherwise.
+//!
+//! [`validate_review_output`] enforces where a capture may be written. The
+//! privacy policy keeps redacted-HUD captures under `target/glorp-review` and
+//! confines sensitive live-value captures to `target/glorp-review-sensitive`,
+//! rejecting absolute destinations, parent-directory escapes, symlink traversal,
+//! and any destination that resolves outside the review root.
+
+use std::fmt::Debug;
+use std::path::{Component, Path, PathBuf};
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::companion::app::{CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame};
+use crate::presentation::draw_list::SceneDrawList;
+use crate::presentation::pixel::PixelFrame;
+use crate::presentation::smooth::SmoothCompanionScenePlan;
+use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
+use crate::round::hud::CompanionHudText;
+use crate::round::layout::RoundAperture;
+
+/// A frozen companion frame: a cloned [`PreparedCompanionFrame`], the
+/// serializable identity projected from it plus its sampling context, and a
+/// precomputed content checksum over that identity.
+#[derive(Debug, Clone)]
+pub struct PairedReviewFrame {
+    /// The immutable prepared frame this review row was frozen from. Retained so
+    /// the Task 7 paired-capture coordinator can repaint the exact same frame.
+    #[allow(dead_code)] // Repainted by the Task 7 paired-capture coordinator.
+    frame: PreparedCompanionFrame,
+    pub identity: PairedReviewIdentity,
+    pub checksum: String,
+}
+
+impl PairedReviewFrame {
+    /// Freezes a prepared frame with its sampling context into a checksummed
+    /// review row. Exposes only the minimum prepared-frame accessors it needs;
+    /// no live `AppState` or `WatchViewModel` state is projected.
+    #[allow(clippy::too_many_arguments)] // Explicit sampling context stays flat.
+    pub(super) fn from_prepared(
+        frame: PreparedCompanionFrame,
+        backing_scale: f64,
+        logical: ReviewFrameDimensions,
+        physical: ReviewFrameDimensions,
+        semantic_tick: u64,
+        elapsed_ms: u64,
+        frame_id: u64,
+        resource_generation: u64,
+    ) -> Self {
+        let identity = PairedReviewIdentity {
+            renderer: RendererIdentity::from_source(frame.renderer_source()),
+            aperture: ApertureIdentity::from_aperture(frame.review_aperture()),
+            background: color_channels(frame.review_background()),
+            mood_aura: color_channels(frame.review_mood_aura()),
+            dim_overlay: frame.review_dim_overlay(),
+            gauges: GaugeIdentity::from_gauges(frame.review_gauges()),
+            hud: HudIdentity::from_hud(frame.review_hud()),
+            hud_font_size: frame.review_hud_font_size(),
+            overlays: frame
+                .review_overlays()
+                .iter()
+                .map(OverlayIdentity::from_command)
+                .collect(),
+            logical,
+            physical,
+            backing_scale,
+            semantic_tick,
+            elapsed_ms,
+            frame_id,
+            resource_generation,
+        };
+        let checksum = canonical_frame_checksum(&identity);
+        Self { frame, identity, checksum }
+    }
+
+    /// Recomputes the checksum from the current identity. Freezing sets
+    /// [`Self::checksum`]; this recomputes it so a caller can detect that the
+    /// identity was mutated away from the frozen value.
+    pub fn recompute_checksum(&self) -> String {
+        canonical_frame_checksum(&self.identity)
+    }
+
+    /// A deterministic paired review frame for tests and design review. Built
+    /// entirely from constants, never from live pet state.
+    pub fn fixture() -> Self {
+        Self::from_prepared(
+            PreparedCompanionFrame::fixture(),
+            2.0,
+            ReviewFrameDimensions { width: 360.0, height: 360.0 },
+            ReviewFrameDimensions { width: 720.0, height: 720.0 },
+            7,
+            250,
+            3,
+            1,
+        )
+    }
+}
+
+/// A serializable projection of every frozen chrome and geometry input a
+/// reviewer compares between two renderers. Field order is the declaration order
+/// (a derived `Serialize`), so the serialization is deterministic.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PairedReviewIdentity {
+    pub renderer: RendererIdentity,
+    pub aperture: ApertureIdentity,
+    pub background: [f32; 4],
+    pub mood_aura: [f32; 4],
+    pub dim_overlay: bool,
+    pub gauges: GaugeIdentity,
+    pub hud: HudIdentity,
+    pub hud_font_size: f64,
+    pub overlays: Vec<OverlayIdentity>,
+    pub logical: ReviewFrameDimensions,
+    pub physical: ReviewFrameDimensions,
+    pub backing_scale: f64,
+    pub semantic_tick: u64,
+    pub elapsed_ms: u64,
+    pub frame_id: u64,
+    pub resource_generation: u64,
+}
+
+/// Logical (points) or physical (pixels) frame dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct ReviewFrameDimensions {
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The four normalized gauge fractions, mirrored from `PreparedGaugeFrame` into
+/// a public serde form so the identity never leaks the internal companion type.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct GaugeIdentity {
+    pub xp_fraction: f64,
+    pub daily_fraction: f64,
+    pub daily_overage_fraction: f64,
+    pub pace_fraction: f64,
+}
+
+impl GaugeIdentity {
+    fn from_gauges(gauges: PreparedGaugeFrame) -> Self {
+        Self {
+            xp_fraction: gauges.xp_fraction,
+            daily_fraction: gauges.daily_fraction,
+            daily_overage_fraction: gauges.daily_overage_fraction,
+            pace_fraction: gauges.pace_fraction,
+        }
+    }
+}
+
+/// The round aperture projected into its numeric fields.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct ApertureIdentity {
+    pub width: u16,
+    pub height: u16,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub radius: f32,
+}
+
+impl ApertureIdentity {
+    fn from_aperture(aperture: RoundAperture) -> Self {
+        Self {
+            width: aperture.width,
+            height: aperture.height,
+            center_x: aperture.center_x,
+            center_y: aperture.center_y,
+            radius: aperture.radius,
+        }
+    }
+}
+
+/// The companion grid metrics projected into their numeric fields.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct MetricsIdentity {
+    pub font_size: f64,
+    pub cell_w: f64,
+    pub cell_h: f64,
+    pub grid_cols: u16,
+    pub grid_rows: u16,
+    pub origin_x: f64,
+    pub origin_y: f64,
+}
+
+impl MetricsIdentity {
+    fn from_metrics(metrics: CompanionGridMetrics) -> Self {
+        Self {
+            font_size: metrics.font_size,
+            cell_w: metrics.cell_w,
+            cell_h: metrics.cell_h,
+            grid_cols: metrics.grid_cols,
+            grid_rows: metrics.grid_rows,
+            origin_x: metrics.origin_x,
+            origin_y: metrics.origin_y,
+        }
+    }
+}
+
+/// The HUD text lines carried by the frozen frame. These are already whatever
+/// the frame preparation chose (redacted or live); the identity only records
+/// them for checksumming and never writes them to a capture artifact itself.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HudIdentity {
+    pub today_total: String,
+    pub daily_percent: String,
+    pub pace: String,
+}
+
+impl HudIdentity {
+    fn from_hud(hud: &CompanionHudText) -> Self {
+        Self {
+            today_total: hud.today_total.clone(),
+            daily_percent: hud.daily_percent.clone(),
+            pace: hud.pace.clone(),
+        }
+    }
+}
+
+/// A stable serde projection of one overlay draw command.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OverlayIdentity {
+    pub kind: &'static str,
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub label: Option<char>,
+    pub text: Option<String>,
+    pub span_count: usize,
+    pub color: [f32; 4],
+}
+
+impl OverlayIdentity {
+    fn from_command(command: &RoundDrawCommand) -> Self {
+        Self {
+            kind: round_draw_kind_tag(command.kind),
+            x: command.x,
+            y: command.y,
+            radius: command.radius,
+            label: command.label,
+            text: command.text.clone(),
+            span_count: command.spans.len(),
+            color: color_channels(command.color),
+        }
+    }
+}
+
+/// The renderer-specific identity: plan checksum, draw order, and metrics live
+/// here because they only exist for the renderers that produce them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum RendererIdentity {
+    Pixel {
+        pixel_checksum: String,
+    },
+    Classic {
+        metrics: MetricsIdentity,
+        pet_center_col: f64,
+        pet_center_row: f64,
+        pet_width_cells: f64,
+        draw_list_checksum: String,
+    },
+    Smooth {
+        metrics: MetricsIdentity,
+        pet_center_col: f64,
+        pet_center_row: f64,
+        pet_width_cells: f64,
+        plan_checksum: String,
+        draw_order: Vec<usize>,
+    },
+}
+
+impl RendererIdentity {
+    fn from_source(source: RendererIdentitySource<'_>) -> Self {
+        match source {
+            RendererIdentitySource::Pixel { frame } => {
+                RendererIdentity::Pixel { pixel_checksum: debug_checksum(frame) }
+            }
+            RendererIdentitySource::Classic {
+                metrics,
+                pet_center_col,
+                pet_center_row,
+                pet_width_cells,
+                draw_list,
+            } => RendererIdentity::Classic {
+                metrics: MetricsIdentity::from_metrics(metrics),
+                pet_center_col,
+                pet_center_row,
+                pet_width_cells,
+                draw_list_checksum: debug_checksum(draw_list),
+            },
+            RendererIdentitySource::Smooth {
+                metrics,
+                pet_center_col,
+                pet_center_row,
+                pet_width_cells,
+                plan,
+                draw_order,
+            } => RendererIdentity::Smooth {
+                metrics: MetricsIdentity::from_metrics(metrics),
+                pet_center_col,
+                pet_center_row,
+                pet_width_cells,
+                plan_checksum: debug_checksum(plan),
+                draw_order: draw_order.to_vec(),
+            },
+        }
+    }
+}
+
+/// A borrowed view of a prepared frame's renderer payload, handed out by
+/// [`PreparedCompanionFrame::renderer_source`] so this module can project the
+/// renderer identity without app.rs depending on the serde projection types.
+pub(super) enum RendererIdentitySource<'a> {
+    Pixel {
+        frame: &'a PixelFrame,
+    },
+    Classic {
+        metrics: CompanionGridMetrics,
+        pet_center_col: f64,
+        pet_center_row: f64,
+        pet_width_cells: f64,
+        draw_list: &'a SceneDrawList,
+    },
+    Smooth {
+        metrics: CompanionGridMetrics,
+        pet_center_col: f64,
+        pet_center_row: f64,
+        pet_width_cells: f64,
+        plan: &'a SmoothCompanionScenePlan,
+        draw_order: &'a [usize],
+    },
+}
+
+/// Lowercase hex SHA-256 over a deterministic serialization of ONLY the frozen
+/// identity. It never mixes in the live `WatchViewModel`, `AppState`, wall-clock
+/// time, or any input outside the frozen frame.
+pub fn canonical_frame_checksum(identity: &PairedReviewIdentity) -> String {
+    let serialized =
+        serde_json::to_vec(identity).expect("paired review identity is always serializable");
+    sha256_hex(&serialized)
+}
+
+/// Where a capture may be written, and how sensitive its HUD is. Redacted-HUD is
+/// the default; sensitive live values are opt-in and confined to a separate root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapturePrivacy {
+    /// The HUD is redacted; captures land under `target/glorp-review`.
+    #[default]
+    RedactedHud,
+    /// The HUD shows live values; captures are confined to
+    /// `target/glorp-review-sensitive`.
+    SensitiveLiveValues,
+}
+
+impl CapturePrivacy {
+    /// Maps the opt-in `--review-capture-live-values` flag onto the policy.
+    pub fn from_live_values(review_capture_live_values: bool) -> Self {
+        if review_capture_live_values {
+            CapturePrivacy::SensitiveLiveValues
+        } else {
+            CapturePrivacy::RedactedHud
+        }
+    }
+
+    /// The repo-relative review root this policy confines captures to.
+    pub fn review_root(self) -> &'static str {
+        match self {
+            CapturePrivacy::RedactedHud => "target/glorp-review",
+            CapturePrivacy::SensitiveLiveValues => "target/glorp-review-sensitive",
+        }
+    }
+}
+
+/// Why a proposed review-capture destination was rejected. Every variant is a
+/// static category, so no user-derived path text reaches a diagnostic surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewOutputError {
+    /// The destination was absolute; review captures must be repo-relative.
+    AbsoluteDestination,
+    /// The destination contained a `..`, root, or drive-prefix component.
+    NonLexicalComponent,
+    /// The destination did not resolve strictly under the review root.
+    OutsideReviewRoot,
+    /// A component of the destination resolved through a symlink.
+    SymlinkTraversal,
+    /// The repository root could not be canonicalized.
+    RepoUnavailable,
+}
+
+impl ReviewOutputError {
+    /// A sanitized, static category string for privacy-safe logging.
+    pub fn category(self) -> &'static str {
+        match self {
+            ReviewOutputError::AbsoluteDestination => "absolute-destination",
+            ReviewOutputError::NonLexicalComponent => "non-lexical-component",
+            ReviewOutputError::OutsideReviewRoot => "outside-review-root",
+            ReviewOutputError::SymlinkTraversal => "symlink-traversal",
+            ReviewOutputError::RepoUnavailable => "repo-unavailable",
+        }
+    }
+}
+
+/// Validates a proposed review-capture destination against the privacy policy
+/// and returns the resolved, symlink-free absolute path on success.
+///
+/// The checks are ordered cheapest-and-lexical first, then filesystem-resolving:
+///
+/// 1. **Absolute reject** — `dest` must be repo-relative.
+/// 2. **Component reject** — every component must be `Normal` (or the harmless
+///    leading `.`); any `..`, root, or prefix component is rejected lexically,
+///    before any path is joined or touched.
+/// 3. **Lexical containment** — `dest` must start with the policy's review root
+///    subdirectory. This rejects a differently-named sibling (including a
+///    symlink under a different name) without touching the filesystem.
+/// 4. **Symlink defense** — after canonicalizing the repo root, the deepest
+///    EXISTING ancestor of the repo-joined destination is canonicalized and
+///    required to equal its lexical (symlink-free) form. Because the trailing
+///    non-existent components are all `Normal` (step 2), a symlink anywhere in
+///    the existing prefix makes the canonical form diverge and is rejected. The
+///    capture leaf itself need not exist yet.
+/// 5. **Canonical containment** — the resolved destination must be a strict
+///    descendant of the canonicalized review root.
+pub fn validate_review_output(
+    repo: &Path,
+    dest: &Path,
+    privacy: CapturePrivacy,
+) -> Result<PathBuf, ReviewOutputError> {
+    // 1. Absolute destinations are rejected outright (lexical).
+    if dest.is_absolute() {
+        return Err(ReviewOutputError::AbsoluteDestination);
+    }
+
+    // 2. Only in-place `Normal`/`CurDir` components are allowed (lexical). A
+    //    `..`, root, or drive prefix can escape the review root and is rejected
+    //    before the path is ever joined or resolved.
+    for component in dest.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ReviewOutputError::NonLexicalComponent);
+            }
+        }
+    }
+
+    // 3. The destination must live under the policy's review root by name
+    //    (lexical). This rejects any differently-named path, so a symlink under
+    //    a different name never even reaches the filesystem checks below.
+    let review_root_rel = Path::new(privacy.review_root());
+    if !dest.starts_with(review_root_rel) {
+        return Err(ReviewOutputError::OutsideReviewRoot);
+    }
+
+    // 4. Canonicalize the repo root, then walk the repo-joined destination up to
+    //    its deepest existing ancestor and require that ancestor to be
+    //    symlink-free (its canonical form equals its lexical form).
+    let repo_canonical = repo
+        .canonicalize()
+        .map_err(|_| ReviewOutputError::RepoUnavailable)?;
+    let resolved = repo_canonical.join(dest);
+
+    let mut existing = resolved.as_path();
+    loop {
+        match existing.canonicalize() {
+            Ok(canonical) => {
+                if canonical != existing {
+                    return Err(ReviewOutputError::SymlinkTraversal);
+                }
+                break;
+            }
+            Err(_) => match existing.parent() {
+                Some(parent) => existing = parent,
+                None => return Err(ReviewOutputError::OutsideReviewRoot),
+            },
+        }
+    }
+
+    // 5. The resolved destination must be a strict descendant of the
+    //    canonicalized review root. Steps 2–4 guarantee it has no `..` and a
+    //    symlink-free existing prefix, so this lexical check on the canonical
+    //    repo path is a true containment guarantee.
+    let review_root = repo_canonical.join(review_root_rel);
+    if !resolved.starts_with(&review_root) || resolved == review_root {
+        return Err(ReviewOutputError::OutsideReviewRoot);
+    }
+
+    Ok(resolved)
+}
+
+/// Projects a `RoundColor` into its channel array.
+fn color_channels(color: RoundColor) -> [f32; 4] {
+    [color.0, color.1, color.2, color.3]
+}
+
+/// A static tag for an overlay draw kind.
+fn round_draw_kind_tag(kind: RoundDrawKind) -> &'static str {
+    match kind {
+        RoundDrawKind::Background => "background",
+        RoundDrawKind::Halo => "halo",
+        RoundDrawKind::Trouble => "trouble",
+    }
+}
+
+/// A deterministic SHA-256 (lowercase hex) over the `Debug` rendering of a
+/// value. Used for the renderer payloads that do not implement `Serialize`; the
+/// derived `Debug` of their fixed-precision numeric fields is stable.
+fn debug_checksum<T: Debug>(value: &T) -> String {
+    sha256_hex(format!("{value:?}").as_bytes())
+}
+
+/// Lowercase hex SHA-256 of the given bytes.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frozen_frame_checksum_changes_with_chrome_or_geometry() {
+        let frame = PairedReviewFrame::fixture();
+        let mut changed = frame.clone();
+        changed.identity.gauges.pace_fraction = 0.75;
+        assert_ne!(frame.checksum, changed.recompute_checksum());
+    }
+
+    #[test]
+    fn sensitive_capture_rejects_escape_and_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path();
+        std::fs::create_dir_all(repo.join("target/glorp-review-sensitive")).unwrap();
+        assert!(validate_review_output(
+            repo,
+            std::path::Path::new("target/glorp-review-sensitive/pair"),
+            CapturePrivacy::SensitiveLiveValues,
+        )
+        .is_ok());
+        assert!(validate_review_output(
+            repo,
+            std::path::Path::new("target/glorp-review-sensitive/../../private"),
+            CapturePrivacy::SensitiveLiveValues,
+        )
+        .is_err());
+        std::os::unix::fs::symlink(
+            repo.join("target/glorp-review-sensitive"),
+            repo.join("target/review-link"),
+        )
+        .unwrap();
+        assert!(validate_review_output(
+            repo,
+            std::path::Path::new("target/review-link/pair"),
+            CapturePrivacy::SensitiveLiveValues,
+        )
+        .is_err());
+        assert!(validate_review_output(
+            repo,
+            repo.join("target/glorp-review-sensitive/pair").as_path(),
+            CapturePrivacy::SensitiveLiveValues,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn capture_privacy_defaults_to_redacted_and_maps_the_opt_in_flag() {
+        assert_eq!(CapturePrivacy::default(), CapturePrivacy::RedactedHud);
+        assert_eq!(
+            CapturePrivacy::from_live_values(false),
+            CapturePrivacy::RedactedHud
+        );
+        assert_eq!(
+            CapturePrivacy::from_live_values(true),
+            CapturePrivacy::SensitiveLiveValues
+        );
+        assert_eq!(
+            CapturePrivacy::RedactedHud.review_root(),
+            "target/glorp-review"
+        );
+        assert_eq!(
+            CapturePrivacy::SensitiveLiveValues.review_root(),
+            "target/glorp-review-sensitive"
+        );
+    }
+
+    #[test]
+    fn redacted_capture_accepts_default_root_and_rejects_escapes() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path();
+        std::fs::create_dir_all(repo.join("target/glorp-review")).unwrap();
+
+        assert!(validate_review_output(
+            repo,
+            std::path::Path::new("target/glorp-review/pair"),
+            CapturePrivacy::RedactedHud,
+        )
+        .is_ok());
+        // A sensitive-root destination is not the redacted root.
+        assert!(validate_review_output(
+            repo,
+            std::path::Path::new("target/glorp-review-sensitive/pair"),
+            CapturePrivacy::RedactedHud,
+        )
+        .is_err());
+        // Absolute and parent-escape destinations are rejected here too.
+        assert!(validate_review_output(
+            repo,
+            repo.join("target/glorp-review/pair").as_path(),
+            CapturePrivacy::RedactedHud,
+        )
+        .is_err());
+        assert!(validate_review_output(
+            repo,
+            std::path::Path::new("target/glorp-review/../../escape"),
+            CapturePrivacy::RedactedHud,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sensitive_capture_rejects_a_symlinked_review_root() {
+        // The mandated test's symlink has a different NAME, so the lexical root
+        // check catches it. This exercises the canonical defense directly: the
+        // review root itself is a symlink pointing outside the repo, so its
+        // name matches but its canonical form diverges.
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let repo = root.path();
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.join("target/glorp-review-sensitive"))
+            .unwrap();
+
+        assert_eq!(
+            validate_review_output(
+                repo,
+                std::path::Path::new("target/glorp-review-sensitive/pair"),
+                CapturePrivacy::SensitiveLiveValues,
+            ),
+            Err(ReviewOutputError::SymlinkTraversal),
+        );
+    }
+
+    #[test]
+    fn sensitive_capture_rejects_the_review_root_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path();
+        std::fs::create_dir_all(repo.join("target/glorp-review-sensitive")).unwrap();
+
+        assert_eq!(
+            validate_review_output(
+                repo,
+                std::path::Path::new("target/glorp-review-sensitive"),
+                CapturePrivacy::SensitiveLiveValues,
+            ),
+            Err(ReviewOutputError::OutsideReviewRoot),
+        );
+    }
+
+    #[test]
+    fn recompute_matches_the_frozen_checksum_when_unmutated() {
+        let frame = PairedReviewFrame::fixture();
+        assert_eq!(frame.checksum, frame.recompute_checksum());
+        // The checksum is lowercase hex SHA-256 (32 bytes = 64 hex chars).
+        assert_eq!(frame.checksum.len(), 64);
+        assert!(frame
+            .checksum
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+}

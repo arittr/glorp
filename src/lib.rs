@@ -49,6 +49,7 @@ pub fn run() -> Result<()> {
             review_duration_ms,
             review_capture_dir,
             review_depth,
+            review_capture_live_values,
         } => commands::companion::run(
             renderer,
             Cli::companion_review_options(
@@ -58,6 +59,7 @@ pub fn run() -> Result<()> {
                 review_duration_ms,
                 review_capture_dir,
                 review_depth,
+                review_capture_live_values,
             ),
         )?,
         Command::CompanionApp {
@@ -68,6 +70,7 @@ pub fn run() -> Result<()> {
             review_duration_ms,
             review_capture_dir,
             review_depth,
+            review_capture_live_values,
         } => commands::companion_app::run(
             renderer,
             Cli::companion_review_options(
@@ -77,6 +80,7 @@ pub fn run() -> Result<()> {
                 review_duration_ms,
                 review_capture_dir,
                 review_depth,
+                review_capture_live_values,
             ),
         )?,
         #[cfg(feature = "dev-preview")]

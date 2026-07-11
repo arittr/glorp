@@ -59,6 +59,8 @@ pub enum Command {
         review_capture_dir: Option<PathBuf>,
         #[arg(long, value_enum, hide = true)]
         review_depth: Option<CompanionReviewDepth>,
+        #[arg(long, hide = true)]
+        review_capture_live_values: bool,
     },
     #[command(hide = true)]
     CompanionApp {
@@ -76,6 +78,8 @@ pub enum Command {
         review_capture_dir: Option<PathBuf>,
         #[arg(long, value_enum, hide = true)]
         review_depth: Option<CompanionReviewDepth>,
+        #[arg(long, hide = true)]
+        review_capture_live_values: bool,
     },
     /// Print a compact non-interactive pet and usage summary.
     Status,
@@ -167,6 +171,7 @@ impl Cli {
         review_duration_ms: Option<u64>,
         review_capture_dir: Option<PathBuf>,
         review_depth: Option<CompanionReviewDepth>,
+        review_capture_live_values: bool,
     ) -> CompanionReviewOptions {
         CompanionReviewOptions {
             initial_size: review_size,
@@ -175,6 +180,7 @@ impl Cli {
             duration_ms: review_duration_ms,
             capture_dir: review_capture_dir,
             depth: review_depth,
+            review_capture_live_values,
         }
     }
 }
@@ -271,6 +277,7 @@ mod companion_review_depth_tests {
             None,
             None,
             Some(CompanionReviewDepth::Near),
+            false,
         );
         assert!(options.has_review_launch_options());
         assert_eq!(options.depth, Some(CompanionReviewDepth::Near));
