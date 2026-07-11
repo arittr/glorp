@@ -455,7 +455,7 @@ struct AppState {
     review_depth: Option<CompanionReviewDepth>,
     renderer_runtime: RendererRuntimeState,
     #[cfg(feature = "retained-renderer")]
-    retained_host: Option<crate::companion::retained::RetainedHost>,
+    retained_host: Option<crate::companion::retained::ActiveRetainedHost>,
     pixel_input: Option<PixelPetInput>,
     pixel_state: Option<PixelRendererState>,
     pixel_frame: Option<PixelFrame>,
@@ -628,17 +628,19 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     install_app_menu(&app, mtm);
 
     let controller: Retained<Controller> = unsafe { msg_send_id![Controller::class(), new] };
-    let review_capture = crate::companion::review_capture::ReviewCapture::from_options(
-        renderer_runtime.effective(),
-        &review,
-    )?;
-    let redacts_live_hud = review_capture
-        .as_ref()
-        .is_some_and(|capture| capture.redacts_live_hud());
     let (window, view) = build_window(mtm, review.initial_size);
+    // Prepare all fallible GPU work on a detached layer, then activate (install
+    // the layer on the view) only on success. A failure in either phase falls the
+    // effective renderer back to Smooth and leaves the view with no residual
+    // retained layer, so the review capture below reads the true post-fallback
+    // renderer.
     #[cfg(feature = "retained-renderer")]
     let retained_host = if renderer_runtime.effective().is_retained() {
-        match crate::companion::retained::RetainedHost::new(view.as_super()) {
+        let mailbox = crate::companion::retained::GpuErrorMailbox::new();
+        let activation =
+            crate::companion::retained::PreparedRetainedHost::prepare(view.as_super(), mailbox)
+                .and_then(|prepared| prepared.activate(view.as_super()));
+        match activation {
             Ok(host) => Some(host),
             Err(error) => {
                 write_boundary_diagnostic(format_args!(
@@ -652,6 +654,13 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     } else {
         None
     };
+    let review_capture = crate::companion::review_capture::ReviewCapture::from_options(
+        renderer_runtime.effective(),
+        &review,
+    )?;
+    let redacts_live_hud = review_capture
+        .as_ref()
+        .is_some_and(|capture| capture.redacts_live_hud());
     let poll_rx = crate::watch_live::spawn_live_watch_worker(
         paths,
         POLL_INTERVAL,
@@ -1058,7 +1067,7 @@ fn fallback_from_retained(error: crate::companion::retained::RetainedFailureCate
             return;
         }
         state.retained_host.take();
-        crate::companion::retained::RetainedHost::restore_appkit(state.view.as_super());
+        crate::companion::retained::ActiveRetainedHost::restore_appkit(state.view.as_super());
         state.renderer_runtime.fallback_to_smooth(error.category());
         write_boundary_diagnostic(format_args!(
             "glorp retained renderer fell back to Smooth: {}\n",

@@ -170,13 +170,13 @@ impl FrameProgress {
 /// thread. The callback holds only a cloned [`Sender`] and emits `'static`
 /// categories; the main thread drains the [`Receiver`] before treating any
 /// present as a success.
-pub(super) struct GpuErrorMailbox {
+pub(crate) struct GpuErrorMailbox {
     sender: Sender<RetainedFailureCategory>,
     receiver: Receiver<RetainedFailureCategory>,
 }
 
 impl GpuErrorMailbox {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
         Self { sender, receiver }
     }

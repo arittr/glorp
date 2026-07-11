@@ -31,10 +31,10 @@ use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 
 mod presentation;
 
+use presentation::FrameMilestone;
 pub(crate) use presentation::{
-    FrameDisposition, FrameProgress, RetainedFailureCategory, SkipReason,
+    FrameDisposition, FrameProgress, GpuErrorMailbox, RetainedFailureCategory, SkipReason,
 };
-use presentation::{FrameMilestone, GpuErrorMailbox};
 
 const ATLAS_CELL: u32 = 80;
 const ATLAS_PADDING: u32 = 6;
@@ -155,8 +155,127 @@ impl Pipelines {
     }
 }
 
-impl RetainedHost {
-    pub(super) fn new(view: &NSView) -> std::result::Result<Self, RetainedFailureCategory> {
+/// Tracks whether the Metal layer is installed on the AppKit view and whether
+/// the view still holds its original AppKit layer state. The activation guard
+/// consults it to decide whether a dropped, uncommitted activation must roll the
+/// attach back.
+#[derive(Debug, Default, Clone, Copy)]
+struct LayerActivationState {
+    attached: bool,
+    appkit_restored: bool,
+}
+
+impl LayerActivationState {
+    /// Records that the Metal layer was installed on the view.
+    fn mark_attached(&mut self) {
+        self.attached = true;
+        self.appkit_restored = false;
+    }
+
+    /// Records that preparation failed before the layer was ever installed, so
+    /// the view keeps its original AppKit layer untouched.
+    #[allow(dead_code)] // Models the never-attached invariant the activation-state tests pin.
+    fn preflight_failed(&mut self) {
+        self.attached = false;
+        self.appkit_restored = true;
+    }
+
+    fn attached(&self) -> bool {
+        self.attached
+    }
+
+    #[allow(dead_code)] // Read by the activation-state tests.
+    fn appkit_restored(&self) -> bool {
+        self.appkit_restored
+    }
+}
+
+/// Where a dropped, uncommitted activation guard sends its rollback.
+enum ActivationRollback<'a> {
+    /// Production rollback restores the view's prior AppKit layer state.
+    View(&'a NSView),
+    /// Test rollback clears an observable attachment flag.
+    #[cfg(test)]
+    TestFlag(std::rc::Rc<std::cell::Cell<bool>>),
+}
+
+/// RAII guard for the AppKit layer attach performed by
+/// [`PreparedRetainedHost::activate`]. Dropping it before
+/// [`LayerActivationGuard::commit`] rolls the attach back, so a failure after
+/// the layer is installed never leaves the view half-attached.
+struct LayerActivationGuard<'a> {
+    rollback: ActivationRollback<'a>,
+    state: LayerActivationState,
+    committed: bool,
+}
+
+impl<'a> LayerActivationGuard<'a> {
+    /// Arms a guard that restores the view's prior AppKit layer state on drop
+    /// until committed.
+    fn install(view: &'a NSView) -> Self {
+        let mut state = LayerActivationState::default();
+        state.mark_attached();
+        Self {
+            rollback: ActivationRollback::View(view),
+            state,
+            committed: false,
+        }
+    }
+
+    /// Test constructor whose rollback clears the supplied attachment flag.
+    #[cfg(test)]
+    fn for_test(flag: std::rc::Rc<std::cell::Cell<bool>>) -> Self {
+        let mut state = LayerActivationState::default();
+        state.mark_attached();
+        Self {
+            rollback: ActivationRollback::TestFlag(flag),
+            state,
+            committed: false,
+        }
+    }
+
+    /// Keeps the attach; the guard no longer rolls back on drop.
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for LayerActivationGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed || !self.state.attached() {
+            return;
+        }
+        match &self.rollback {
+            ActivationRollback::View(view) => ActiveRetainedHost::restore_appkit(view),
+            #[cfg(test)]
+            ActivationRollback::TestFlag(flag) => flag.set(false),
+        }
+    }
+}
+
+/// A fully built retained host whose Metal layer is not yet installed on the
+/// view. All fallible GPU work is done; [`PreparedRetainedHost::activate`] is the
+/// only step that touches the AppKit view.
+pub(super) struct PreparedRetainedHost {
+    host: RetainedHost,
+}
+
+/// A retained host whose Metal layer is installed on the view and rendering.
+/// Derefs to the inner [`RetainedHost`] so `render` and the mailbox drain read
+/// through transparently.
+pub(super) struct ActiveRetainedHost {
+    host: RetainedHost,
+}
+
+impl PreparedRetainedHost {
+    /// Builds the CAMetalLayer, wgpu surface, device, configuration, and
+    /// pipelines against a layer that stays detached from the view. A
+    /// CAMetalLayer renders fine while detached; installing it on the view later
+    /// is what makes it visible. Any failure here leaves the view untouched.
+    pub(super) fn prepare(
+        view: &NSView,
+        mailbox: GpuErrorMailbox,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
         let window = view
             .window()
             .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
@@ -165,10 +284,8 @@ impl RetainedHost {
         let width = physical_dimension(bounds.size.width, scale);
         let height = physical_dimension(bounds.size.height, scale);
         let layer = unsafe { CAMetalLayer::new() };
-        view.setWantsLayer(true);
         unsafe {
             layer.setDrawableSize(NSSize::new(f64::from(width), f64::from(height)));
-            view.setLayer(Some(&layer));
         }
 
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -194,8 +311,7 @@ impl RetainedHost {
             ..Default::default()
         }))
         .map_err(|_| RetainedFailureCategory::DeviceUnavailable)?;
-        let gpu_errors = GpuErrorMailbox::new();
-        let gpu_error_sender = gpu_errors.sender();
+        let gpu_error_sender = mailbox.sender();
         device.on_uncaptured_error(Arc::new(move |error| {
             let category = match error {
                 wgpu::Error::OutOfMemory { .. } => RetainedFailureCategory::DeviceOutOfMemory,
@@ -231,28 +347,65 @@ impl RetainedHost {
         });
         let pipelines = create_pipelines(&device, config.format, &atlas_layout);
         Ok(Self {
-            surface,
-            device,
-            queue,
-            config,
-            layer,
-            pipelines,
-            atlas_layout,
-            glyph_atlas: None,
-            physical_width: width,
-            physical_height: height,
-            backing_scale: scale,
-            frame_counter: 0,
-            gpu_errors,
+            host: RetainedHost {
+                surface,
+                device,
+                queue,
+                config,
+                layer,
+                pipelines,
+                atlas_layout,
+                glyph_atlas: None,
+                physical_width: width,
+                physical_height: height,
+                backing_scale: scale,
+                frame_counter: 0,
+                gpu_errors: mailbox,
+            },
         })
     }
 
+    /// Installs the Metal layer on the view under a rollback guard. This is the
+    /// only code that calls `setWantsLayer`/`setLayer`; if a fallible post-attach
+    /// step is ever added and fails, the dropped guard restores the view's prior
+    /// AppKit layer state before the error propagates.
+    pub(super) fn activate(
+        self,
+        view: &NSView,
+    ) -> std::result::Result<ActiveRetainedHost, RetainedFailureCategory> {
+        let guard = LayerActivationGuard::install(view);
+        view.setWantsLayer(true);
+        unsafe { view.setLayer(Some(&self.host.layer)) };
+        guard.commit();
+        Ok(ActiveRetainedHost { host: self.host })
+    }
+}
+
+impl ActiveRetainedHost {
+    /// Restores the view's prior AppKit layer state. Idempotent, so a redundant
+    /// call after fallback is harmless.
     pub(super) fn restore_appkit(view: &NSView) {
         unsafe { view.setLayer(None) };
         view.setWantsLayer(false);
         unsafe { view.setNeedsDisplay(true) };
     }
+}
 
+impl std::ops::Deref for ActiveRetainedHost {
+    type Target = RetainedHost;
+
+    fn deref(&self) -> &Self::Target {
+        &self.host
+    }
+}
+
+impl std::ops::DerefMut for ActiveRetainedHost {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.host
+    }
+}
+
+impl RetainedHost {
     /// Advances the monotonic frame counter, returning the id for the frame
     /// about to be attempted. Real resource generations arrive in Task 9.
     fn next_frame_id(&mut self) -> u64 {
@@ -1485,8 +1638,26 @@ mod tests {
     use super::{
         glyph_advance, glyph_atlas_needs_rebuild, glyph_ink_rect, hud_layout, physical_dimension,
         push_analytic_arc, srgb_channel_to_linear, GlyphAtlas, GlyphAtlasEntry,
+        LayerActivationGuard, LayerActivationState,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn failed_preflight_never_marks_layer_attached() {
+        let mut state = LayerActivationState::default();
+        state.preflight_failed();
+        assert!(!state.attached());
+        assert!(state.appkit_restored());
+    }
+
+    #[test]
+    fn activation_guard_restores_uncommitted_attachment() {
+        let state = std::rc::Rc::new(std::cell::Cell::new(true));
+        {
+            let _guard = LayerActivationGuard::for_test(state.clone());
+        }
+        assert!(!state.get());
+    }
 
     #[test]
     fn physical_dimensions_follow_backing_scale() {
