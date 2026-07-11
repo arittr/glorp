@@ -723,37 +723,39 @@ fn declared_hud_glyphs() -> BTreeSet<char> {
 pub fn collect_companion_glyph_repertoire(
     identity: &CompanionContentIdentity,
 ) -> Vec<RepertoireGlyph> {
-    let mut regular: BTreeSet<char> = BTreeSet::new();
-    let mut bold: BTreeSet<char> = BTreeSet::new();
+    let mut chars: BTreeSet<char> = BTreeSet::new();
 
     // Species-independent inventories.
-    regular.extend(crate::tui::component::tank_life::declared_tank_life_glyphs());
-    regular.extend(crate::tui::panels::pet::declared_performance_cue_glyphs());
-    regular.extend(crate::tui::panels::pet::declared_chest_bubble_glyphs());
-    regular.extend(crate::tui::component::habitat_props::declared_prop_glyphs(
+    chars.extend(crate::tui::component::tank_life::declared_tank_life_glyphs());
+    chars.extend(crate::tui::panels::pet::declared_performance_cue_glyphs());
+    chars.extend(crate::tui::panels::pet::declared_chest_bubble_glyphs());
+    chars.extend(crate::tui::component::habitat_props::declared_prop_glyphs(
         identity.species(),
     ));
-    regular.extend(declared_hud_glyphs());
+    chars.extend(declared_hud_glyphs());
 
     // Per-species inventories: pet body, room dialect, ambient palettes.
     for &species in identity.species() {
-        regular.extend(crate::pet::render::declared_pet_glyphs(species));
-        regular.extend(crate::tui::room::declared_room_glyphs(
+        chars.extend(crate::pet::render::declared_pet_glyphs(species));
+        chars.extend(crate::tui::room::declared_room_glyphs(
             RoomSpeciesDialect::for_species(species),
         ));
-        regular.extend(crate::tui::panels::pet::declared_ambient_glyphs(species));
-        // The eye role is the only surface role painted bold.
-        bold.extend(crate::pet::render::declared_pet_eye_glyphs(species));
+        chars.extend(crate::tui::panels::pet::declared_ambient_glyphs(species));
     }
 
-    let mut glyphs: Vec<RepertoireGlyph> = regular
-        .into_iter()
-        .map(|ch| RepertoireGlyph { sequence: ch.to_string(), bold: false })
-        .chain(
-            bold.into_iter()
-                .map(|ch| RepertoireGlyph { sequence: ch.to_string(), bold: true }),
-        )
-        .collect();
+    // Provision every glyph in BOTH regular and bold weights. Many content roles
+    // render bold — the eye role, tank-life foreground, and potentially others —
+    // and the render path looks up `(glyph, cell.bold)`, so a glyph missing in the
+    // weight a cell happens to use is an atlas miss and a fallback. Mis-tracking a
+    // source's weight is exactly that failure, so both-weights-for-all is the
+    // robust preflight. Weight is a fixed property of the repertoire, so this does
+    // not change the generation key across the per-minute reshuffle.
+    let mut glyphs: Vec<RepertoireGlyph> = Vec::with_capacity(chars.len() * 2);
+    for ch in chars {
+        let sequence = ch.to_string();
+        glyphs.push(RepertoireGlyph { sequence: sequence.clone(), bold: false });
+        glyphs.push(RepertoireGlyph { sequence, bold: true });
+    }
     glyphs.sort();
     glyphs.dedup();
     glyphs

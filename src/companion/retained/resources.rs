@@ -642,8 +642,11 @@ impl GlyphRepertoireManifest {
             .into_iter()
             .map(|glyph| GlyphKey::new(glyph.sequence, glyph.bold))
             .collect();
+        // Chrome/effect glyphs, both weights — a fallback replacement can land in
+        // a bold cell just like any other glyph.
         for chrome in CHROME_GLYPHS {
             glyphs.push(GlyphKey::new(*chrome, false));
+            glyphs.push(GlyphKey::new(*chrome, true));
         }
         glyphs.sort();
         glyphs.dedup();
@@ -1255,5 +1258,85 @@ mod repertoire_tests {
                 );
             }
         }
+    }
+
+    /// The render path looks up `GlyphKey{sequence, bold}` for every scene cell,
+    /// where the weight is the cell's real BOLD flag — and tank-life foreground
+    /// (and other roles) render bold, not just the eye role. This walks a
+    /// live-like scene that renders bold tank-life foreground cells and asserts
+    /// every rendered `(glyph, weight)` pair is present in the preflighted
+    /// repertoire, guarding the invariant `repertoire ⊇ rendered-(glyph,bold)-set`
+    /// against any collector/render weight-or-glyph drift.
+    #[test]
+    fn preflighted_repertoire_covers_every_rendered_glyph_and_weight() {
+        use crate::presentation::smooth::{SmoothLayerItem, SmoothLayerRole};
+
+        let manifest = GlyphRepertoireManifest::for_fixture_pet();
+        let base = datetime!(2026-06-13 18:00:30 UTC);
+        let motion = CompanionMotion::default();
+        // A habitat with the full tank-life cast (foreground sprites render bold)
+        // and earned props — the content the live `--state normal` companion draws.
+        let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, base.date());
+        vm.habitat.earned_props = WatchViewModel::fixture_with_habitat_props()
+            .habitat
+            .earned_props;
+
+        let present = |glyph: &str, bold: bool| {
+            manifest
+                .glyphs()
+                .iter()
+                .any(|key| key.sequence.as_str() == glyph && key.bold == bold)
+        };
+
+        let mut saw_bold_tank_foreground = false;
+        let mut missing: Vec<(String, bool)> = Vec::new();
+        for species in Species::all() {
+            vm.pet_render.generated_species = species;
+            for stage in [Stage::S3, Stage::S6] {
+                vm.pet_render.stage = stage;
+                for minute in [0_i64, 1] {
+                    let now = base + time::Duration::minutes(minute);
+                    let tick = now.unix_timestamp().max(0) as u64;
+                    crate::commands::watch::rerender_pet_for_view_model(&mut vm, tick, false, now)
+                        .expect("pet rerenders");
+                    // Device-like grid (COMPANION_TARGET_COLS square) so the tank
+                    // bed is large enough to place the swimming/foreground cast.
+                    let plan = build_round_smooth_scene_plan(&vm, now, 36, 36, &motion, tick * 250);
+                    for layer in &plan.layers {
+                        for item in &layer.items {
+                            if let SmoothLayerItem::LocalCell(cell) = item {
+                                if let Some(glyph) = cell.glyph.as_ref() {
+                                    if !present(glyph, cell.bold) {
+                                        missing.push((glyph.clone(), cell.bold));
+                                    }
+                                    if cell.bold
+                                        && layer.role == SmoothLayerRole::TankLifeForeground
+                                    {
+                                        saw_bold_tank_foreground = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // The HUD is always regular weight.
+                    let hud = companion_hud_text(1_234_567.0, Some(0.5), 8_900.0);
+                    for line in [&hud.today_total, &hud.daily_percent, &hud.pace] {
+                        for scalar in line.chars() {
+                            if !present(&scalar.to_string(), false) {
+                                missing.push((scalar.to_string(), false));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_bold_tank_foreground,
+            "the test must exercise a bold tank-life foreground cell to guard the regression",
+        );
+        assert!(
+            missing.is_empty(),
+            "rendered (glyph, bold) pairs absent from the preflighted repertoire: {missing:?}",
+        );
     }
 }
