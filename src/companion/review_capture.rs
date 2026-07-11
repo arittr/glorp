@@ -85,6 +85,13 @@ pub struct ReviewCapture {
     capture_dir: Option<PathBuf>,
     started_at: Instant,
     frame_count: u64,
+    /// Ticks that prepared a valid frame the offscreen retained capture can
+    /// consume, but whose on-screen present was Skipped. The retained review
+    /// artifact is read back off an intermediate texture, so these still advance
+    /// the bounded run toward [`Self::ready_to_finish`] even though nothing was
+    /// presented. Kept separate from `frame_count` so presented-sample metrics
+    /// stay exact.
+    offscreen_review_tick_count: u64,
     semantic_art_tick_count: u64,
     smooth_frame_samples: Vec<SmoothReviewFrameSample>,
     max_adjacent_base_anchor_delta: SmoothReviewPoint,
@@ -132,6 +139,7 @@ impl ReviewCapture {
             capture_dir,
             started_at: Instant::now(),
             frame_count: 0,
+            offscreen_review_tick_count: 0,
             semantic_art_tick_count: 0,
             smooth_frame_samples: Vec::new(),
             max_adjacent_base_anchor_delta: SmoothReviewPoint::default(),
@@ -244,8 +252,24 @@ impl ReviewCapture {
         self.last_good_frame_reused_count = self.last_good_frame_reused_count.saturating_add(1);
     }
 
+    /// Records a retained tick that prepared a valid frame the offscreen capture
+    /// can consume, but whose on-screen present was Skipped. Advances the bounded
+    /// run without recording a presented-frame sample.
+    #[cfg(feature = "retained-renderer")]
+    pub fn record_offscreen_review_tick(&mut self) {
+        self.offscreen_review_tick_count = self.offscreen_review_tick_count.saturating_add(1);
+    }
+
     pub fn ready_to_finish(&self) -> bool {
-        self.started_at.elapsed() >= self.duration && self.frame_count >= MIN_CAPTURE_FRAMES
+        // A retained review captures OFFSCREEN, so its on-screen present is
+        // perpetually Skipped when the window is not frontmost (automation
+        // context). Count those prepared-but-skipped ticks toward the budget so
+        // the bounded run terminates; otherwise it would hang until the hard
+        // timeout, writing no artifacts.
+        let prepared_ticks = self
+            .frame_count
+            .saturating_add(self.offscreen_review_tick_count);
+        self.started_at.elapsed() >= self.duration && prepared_ticks >= MIN_CAPTURE_FRAMES
     }
 
     pub fn writes_artifacts(&self) -> bool {
@@ -564,6 +588,43 @@ mod tests {
 
         assert!(capture.writes_artifacts());
         assert!(capture.redacts_live_hud());
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn retained_review_terminates_on_offscreen_ticks_without_any_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut capture = ReviewCapture::from_options(
+            EffectiveCompanionRenderer::Retained,
+            &CompanionReviewOptions {
+                duration_ms: Some(0),
+                capture_dir: Some(dir.path().join("pair")),
+                ..CompanionReviewOptions::default()
+            },
+        )
+        .unwrap()
+        .expect("capture dir should create a review session");
+
+        // The on-screen present is perpetually Skipped in an automation window, so
+        // no presented frame is ever recorded and the legacy frame_count gate would
+        // never fire. Prepared-but-skipped ticks feed the offscreen capture and
+        // must still drive the bounded run to completion.
+        for _ in 0..(MIN_CAPTURE_FRAMES - 1) {
+            assert!(!capture.ready_to_finish());
+            capture.record_offscreen_review_tick();
+        }
+        capture.record_offscreen_review_tick();
+        assert!(
+            capture.ready_to_finish(),
+            "offscreen retained ticks must satisfy the bounded run without any present",
+        );
+
+        // Nothing was presented, so presented-sample metrics stay empty: the paired
+        // capture path is reached with zero SurfacePresentCalled frames.
+        let json = capture.render_log_json_for_test().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["frame_count"], 0);
+        assert_eq!(value["smooth_frame_samples"].as_array().unwrap().len(), 0);
     }
 
     #[test]

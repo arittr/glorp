@@ -1178,8 +1178,18 @@ fn present_retained_frame() {
                 None
             }
             Some(FrameDisposition::Failed(category)) => Some(category),
-            // Skipped frames dropped nothing to present; do not record them.
-            _ => None,
+            // A Skipped on-screen present dropped nothing to display, but this
+            // tick DID prepare a valid frame — which is exactly what the offscreen
+            // retained review capture consumes. Advance the review's bounded-run
+            // budget so a perpetually-occluded automation window still terminates
+            // and produces the paired artifacts. Presented-sample metrics stay on
+            // record_frame above, so this never inflates them.
+            _ => {
+                if let Some(capture) = state.review_capture.as_mut() {
+                    capture.record_offscreen_review_tick();
+                }
+                None
+            }
         }
     });
     if let Some(category) = failure {
