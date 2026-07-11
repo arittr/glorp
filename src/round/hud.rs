@@ -19,6 +19,75 @@ pub struct GrowthRing {
 pub const COMPANION_GAUGE_GAP_DEG: f64 = 70.0;
 pub const PACE_SOFT_CAP_10M_TOKENS: f64 = 15_000_000.0;
 
+/// The colour the companion tank's depth falloff lifts its opaque core toward.
+/// Backend-neutral: both the AppKit dithered-bitmap path and the retained shader
+/// derive the core tint from this one constant so the two never diverge.
+pub const TANK_DEPTH_TINT: RoundColor = RoundColor(0.10, 0.11, 0.20, 1.0);
+
+/// How much of [`TANK_DEPTH_TINT`] reaches the core. Tuned against the shipping
+/// round accessory panel, which lifts blacks and eats subtle deltas: the falloff
+/// has to survive that tone curve, not merely read on a calibrated Mac display.
+pub const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
+
+/// The opaque core colour the tank falloff runs out from: `background` lifted
+/// toward [`TANK_DEPTH_TINT`] by [`TANK_CORE_TINT_WEIGHT`], alpha preserved. Both
+/// backends consume this identical value so the depth core never diverges.
+pub fn tank_core_color(background: RoundColor) -> RoundColor {
+    let mix = |base: f32, tint: f32| base + (tint - base) * TANK_CORE_TINT_WEIGHT;
+    RoundColor(
+        mix(background.0, TANK_DEPTH_TINT.0),
+        mix(background.1, TANK_DEPTH_TINT.1),
+        mix(background.2, TANK_DEPTH_TINT.2),
+        background.3,
+    )
+}
+
+/// Deterministic per-pixel tank dither in `[-1.5, 1.5]` output levels. A smooth
+/// dark gradient quantised to 8 bits shows its steps as visible bands; dithering
+/// trades them for imperceptible grain. Shared hash so the AppKit bitmap and the
+/// shader grain agree.
+pub fn tank_dither_noise(x: u32, y: u32) -> f32 {
+    let mut h = x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    ((h & 0xFFFF) as f32 / 65535.0 - 0.5) * 3.0
+}
+
+/// One straight-sRGB8 pixel of the tank's radial depth falloff, dithered: the
+/// normalized radius interpolates `core`->`rim` in sRGB space, the dither grain is
+/// added, and the result is quantised to 8 bits. The retained shader reproduces
+/// this exact math per fragment; this is the single Rust source of truth the
+/// AppKit tank bitmap is built from.
+pub fn tank_background_sample(
+    x: u32,
+    y: u32,
+    center: (f32, f32),
+    radius: f32,
+    core: RoundColor,
+    rim: RoundColor,
+) -> [u8; 4] {
+    let dx = x as f32 + 0.5 - center.0;
+    let dy = y as f32 + 0.5 - center.1;
+    let t = if radius > 0.0 {
+        ((dx * dx + dy * dy).sqrt() / radius).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let noise = tank_dither_noise(x, y);
+    let channel = |core_c: f32, rim_c: f32| {
+        ((core_c + (rim_c - core_c) * t) * 255.0 + noise)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    [
+        channel(core.0, rim.0),
+        channel(core.1, rim.1),
+        channel(core.2, rim.2),
+        255,
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineCap {
     Butt,
@@ -141,6 +210,124 @@ pub fn stat_gap_box(cx: f64, cy: f64, radius: f64, gap_deg: f64) -> StatGap {
     }
 }
 
+/// The starting HUD stack size as a multiple of the derived HUD font size.
+pub const HUD_STACK_INITIAL_SCALE: f64 = 1.45;
+/// The smallest HUD stack size the shrink loop will step down to.
+pub const HUD_STACK_MIN: f64 = 6.0;
+/// The big (token total) line's font size as a multiple of the stack size.
+pub const HUD_BIG_LINE_SCALE: f64 = 1.08;
+/// The two sub-lines' font size as a multiple of the stack size.
+pub const HUD_SUB_LINE_SCALE: f64 = 0.68;
+/// Vertical advance between HUD lines as a multiple of a line's own height.
+pub const HUD_LINE_ADVANCE: f64 = 0.82;
+/// How far below the gap top the whole stack starts, as a fraction of its height.
+pub const HUD_STACK_TOP_FRACTION: f64 = 0.38;
+/// The stack must fit within this fraction of the aperture radius, else it shrinks.
+pub const HUD_HEIGHT_LIMIT_FRACTION: f64 = 0.34;
+
+/// The three HUD line font sizes for a stack size: the big token total, then the
+/// two smaller sub-lines. Backend-neutral so both renderers scale identically.
+pub fn hud_line_font_sizes(stack_size: f64) -> [f64; 3] {
+    [
+        stack_size * HUD_BIG_LINE_SCALE,
+        stack_size * HUD_SUB_LINE_SCALE,
+        stack_size * HUD_SUB_LINE_SCALE,
+    ]
+}
+
+/// A single HUD line's measured extent at a given font size, as each backend's own
+/// text engine reports it (AppKit's attributed-string metrics or the retained
+/// glyph atlas). The shared layout consumes these; only the measurement differs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HudLineMetrics {
+    pub width: f64,
+    pub height: f64,
+}
+
+/// One placed HUD line: where its run starts (already centered in the gap), the
+/// baseline it draws at, its measured extent, and the font size it renders at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreparedHudLine {
+    pub origin_x: f64,
+    pub baseline_y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub font_size: f64,
+}
+
+/// The placed HUD stack: three centered lines and the stack size they settled at.
+/// Backend-neutral — both renderers compute this from the same shrink policy and
+/// positioning math, differing only in the measurement closure they supply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreparedHudLayout {
+    pub lines: [PreparedHudLine; 3],
+    pub stack_size: f64,
+}
+
+/// Places the three HUD lines inside the bottom `gap`: the stack starts at
+/// `hud_font_size * HUD_STACK_INITIAL_SCALE` and shrinks a point at a time while
+/// its widest run overflows `gap.max_width` or its height overflows
+/// `aperture_radius * HUD_HEIGHT_LIMIT_FRACTION` (never below `HUD_STACK_MIN`).
+/// Each line is centered in the gap and the stack descends from the gap top.
+///
+/// `measure` reports each line's `(width, height)` at the three font sizes; it is
+/// the only backend-specific input, so two renderers that measure the same runs
+/// the same way place them identically.
+pub fn prepare_hud_layout(
+    gap: StatGap,
+    aperture_radius: f64,
+    view_height: f64,
+    hud_font_size: f64,
+    mut measure: impl FnMut([f64; 3]) -> [HudLineMetrics; 3],
+) -> PreparedHudLayout {
+    let mut stack_size = hud_font_size * HUD_STACK_INITIAL_SCALE;
+    let mut metrics = measure(hud_line_font_sizes(stack_size));
+    let stack_extent = |metrics: &[HudLineMetrics; 3]| {
+        let max_width = metrics
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0_f64, f64::max);
+        let total_height = metrics[0].height
+            + metrics[1].height * HUD_LINE_ADVANCE
+            + metrics[2].height * HUD_LINE_ADVANCE;
+        (max_width, total_height)
+    };
+    let (mut max_width, mut total_height) = stack_extent(&metrics);
+    while (max_width > gap.max_width || total_height > aperture_radius * HUD_HEIGHT_LIMIT_FRACTION)
+        && stack_size > HUD_STACK_MIN
+    {
+        stack_size -= 1.0;
+        metrics = measure(hud_line_font_sizes(stack_size));
+        let extent = stack_extent(&metrics);
+        max_width = extent.0;
+        total_height = extent.1;
+    }
+
+    let font_sizes = hud_line_font_sizes(stack_size);
+    let top = view_height - gap.baseline_y;
+    let mut baseline_y = top + total_height * HUD_STACK_TOP_FRACTION;
+    let mut lines = [PreparedHudLine {
+        origin_x: 0.0,
+        baseline_y: 0.0,
+        width: 0.0,
+        height: 0.0,
+        font_size: 0.0,
+    }; 3];
+    for (index, line) in lines.iter_mut().enumerate() {
+        let width = metrics[index].width;
+        let height = metrics[index].height;
+        *line = PreparedHudLine {
+            origin_x: gap.center_x - width / 2.0,
+            baseline_y,
+            width,
+            height,
+            font_size: font_sizes[index],
+        };
+        baseline_y -= height * HUD_LINE_ADVANCE;
+    }
+    PreparedHudLayout { lines, stack_size }
+}
+
 /// Soft-glow aura hue for the pet's mood. Opaque (alpha 1.0); the renderer
 /// applies its own translucency. Sad and Sleepy are deliberately distinct hues
 /// (different needs: happiness<35 vs energy<20). Starting palette — tuned on device.
@@ -208,6 +395,88 @@ pub fn daily_overage_marker_arc(ring: &GrowthRing, marker_fraction: f64) -> Opti
     ))
 }
 
+/// The four gauge fractions a frame carries, in `[0, 1+]`. `daily_overage` is the
+/// amount past 100% of yesterday; the base lanes are already clamped to `[0, 1]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GaugeFractions {
+    pub xp: f64,
+    pub daily: f64,
+    pub daily_overage: f64,
+    pub pace: f64,
+}
+
+/// One perimeter-gauge arc to stroke: a ring, stroke width, cap, angular span, and
+/// colour. Backend-neutral — both the AppKit painter and the retained GPU prep
+/// consume the identical list from [`prepared_perimeter_gauge_arcs`], so the gauge
+/// geometry is derived in exactly one place.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreparedGaugeArc {
+    pub ring: GrowthRing,
+    pub stroke_width: f64,
+    pub cap: LineCap,
+    pub start_deg: f64,
+    pub end_deg: f64,
+    pub color: RoundColor,
+}
+
+/// The ordered back-to-front list of perimeter-gauge arcs for a frame: each lane's
+/// full track, then its fill (only when its fraction is positive), the daily
+/// overage marker (only when present), and the pace lane last. The order matches
+/// the AppKit painter's historical draw order so both backends composite the same
+/// arcs in the same sequence.
+pub fn prepared_perimeter_gauge_arcs(
+    layout: &PerimeterGaugeLayout,
+    colors: &PerimeterGaugeColors,
+    fractions: GaugeFractions,
+) -> Vec<PreparedGaugeArc> {
+    let mut arcs = Vec::new();
+    push_lane_arcs(&mut arcs, &layout.xp, &colors.xp, fractions.xp);
+    push_lane_arcs(&mut arcs, &layout.daily, &colors.daily, fractions.daily);
+    if let Some((start_deg, end_deg)) =
+        daily_overage_marker_arc(&layout.daily.ring, fractions.daily_overage)
+    {
+        arcs.push(PreparedGaugeArc {
+            ring: layout.daily.ring,
+            stroke_width: layout.daily.stroke_width,
+            cap: layout.daily.cap,
+            start_deg,
+            end_deg,
+            color: daily_overage_color(),
+        });
+    }
+    push_lane_arcs(&mut arcs, &layout.pace, &colors.pace, fractions.pace);
+    arcs
+}
+
+/// Appends a lane's full track and, when `fraction` is positive, its fill arc.
+fn push_lane_arcs(
+    arcs: &mut Vec<PreparedGaugeArc>,
+    lane: &GaugeLane,
+    colors: &GaugeLaneColors,
+    fraction: f64,
+) {
+    let track_end = lane.ring.track_start_deg + lane.ring.track_sweep_deg;
+    arcs.push(PreparedGaugeArc {
+        ring: lane.ring,
+        stroke_width: lane.stroke_width,
+        cap: lane.cap,
+        start_deg: lane.ring.track_start_deg,
+        end_deg: track_end,
+        color: colors.track,
+    });
+    let clamped = fraction.clamp(0.0, 1.0);
+    if clamped > 0.0 {
+        arcs.push(PreparedGaugeArc {
+            ring: lane.ring,
+            stroke_width: lane.stroke_width,
+            cap: lane.cap,
+            start_deg: lane.ring.track_start_deg,
+            end_deg: growth_ring_fill_end_deg(&lane.ring, clamped),
+            color: colors.fill,
+        });
+    }
+}
+
 pub fn format_daily_percent(fraction_of_yesterday: Option<f64>) -> String {
     let Some(fraction) = fraction_of_yesterday else {
         return "--% yday".to_string();
@@ -257,6 +526,213 @@ fn compact_hud_tokens(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tank_core_lifts_the_background_toward_the_depth_tint() {
+        let bg = RoundColor(0.05, 0.05, 0.06, 1.0);
+        let core = tank_core_color(bg);
+        // The core is a blend toward the tint, so it sits strictly between the two.
+        assert!(core.0 > bg.0 && core.0 < TANK_DEPTH_TINT.0);
+        assert!(core.1 > bg.1 && core.1 < TANK_DEPTH_TINT.1);
+        assert!(core.2 > bg.2 && core.2 < TANK_DEPTH_TINT.2);
+        // The porthole is opaque; only the tint's weight varies.
+        assert_eq!(core.3, 1.0);
+    }
+
+    #[test]
+    fn tank_core_reproduces_the_configured_tint_weight() {
+        let bg = RoundColor(0.0, 0.0, 0.0, 1.0);
+        let core = tank_core_color(bg);
+        assert!((core.0 - TANK_DEPTH_TINT.0 * TANK_CORE_TINT_WEIGHT).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tank_dither_noise_is_deterministic_bounded_and_varied() {
+        let mut seen = std::collections::BTreeSet::new();
+        for x in 0..64u32 {
+            for y in 0..64u32 {
+                let n = tank_dither_noise(x, y);
+                assert_eq!(n, tank_dither_noise(x, y));
+                assert!((-1.5..=1.5).contains(&n), "noise {n} out of range");
+                seen.insert((n * 1000.0) as i32);
+            }
+        }
+        assert!(
+            seen.len() > 100,
+            "noise must vary, got {} values",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn tank_background_sample_runs_core_to_rim_within_one_output_level() {
+        // Core, mid, and rim each land within one dither step (<= 2 output levels)
+        // of the analytic core->rim interpolation, so both backends read the same
+        // falloff. A center pixel is t=0 (core); the frame edge is t=1 (rim).
+        let core = RoundColor(0.20, 0.22, 0.30, 1.0);
+        let rim = RoundColor(0.05, 0.05, 0.06, 1.0);
+        let center = (100.0, 100.0);
+
+        let at_core = tank_background_sample(100, 100, center, 100.0, core, rim);
+        let at_mid = tank_background_sample(150, 100, center, 100.0, core, rim);
+        let at_rim = tank_background_sample(199, 100, center, 100.0, core, rim);
+        assert!((f32::from(at_core[0]) - 0.20 * 255.0).abs() <= 2.0);
+        assert!((f32::from(at_rim[0]) - 0.05 * 255.0).abs() <= 2.0);
+        // The midpoint sits between the two endpoints (t≈0.5).
+        let mid_ideal = (0.20 + 0.05) / 2.0 * 255.0;
+        assert!((f32::from(at_mid[0]) - mid_ideal).abs() <= 4.0);
+        assert_eq!(at_core[3], 255);
+
+        // Past the radius the falloff clamps: only the dither grain remains.
+        let beyond = tank_background_sample(390, 100, center, 100.0, core, rim);
+        assert!((f32::from(beyond[0]) - 0.05 * 255.0).abs() <= 2.0);
+    }
+
+    #[test]
+    fn prepared_hud_layout_centers_and_stacks_lines_from_shared_measurements() {
+        let gap = StatGap {
+            center_x: 90.0,
+            baseline_y: 150.0,
+            max_width: 40.0,
+        };
+        // A measurement both backends could produce: each line 2.0 wide, 1.0 tall,
+        // regardless of font size — so nothing forces a shrink.
+        let measure = |_sizes: [f64; 3]| [HudLineMetrics { width: 2.0, height: 1.0 }; 3];
+        let layout = prepare_hud_layout(gap, 100.0, 300.0, 8.0, measure);
+
+        // No shrink: the stack keeps its initial size and per-line scales.
+        assert!((layout.stack_size - 8.0 * HUD_STACK_INITIAL_SCALE).abs() < 1e-9);
+        let sizes = hud_line_font_sizes(layout.stack_size);
+        assert!((layout.lines[0].font_size - sizes[0]).abs() < 1e-9);
+        assert!((layout.lines[1].font_size - sizes[1]).abs() < 1e-9);
+        assert_eq!(layout.lines[1].font_size, layout.lines[2].font_size);
+
+        // Each run is centered in the gap.
+        for line in &layout.lines {
+            assert!((line.origin_x - (gap.center_x - line.width / 2.0)).abs() < 1e-9);
+        }
+
+        // The stack descends from the top of the gap by one advance per line.
+        let total_height = 1.0 + 1.0 * HUD_LINE_ADVANCE + 1.0 * HUD_LINE_ADVANCE;
+        let top = 300.0 - gap.baseline_y;
+        let y0 = top + total_height * HUD_STACK_TOP_FRACTION;
+        assert!((layout.lines[0].baseline_y - y0).abs() < 1e-9);
+        assert!((layout.lines[1].baseline_y - (y0 - HUD_LINE_ADVANCE)).abs() < 1e-9);
+        assert!((layout.lines[2].baseline_y - (y0 - 2.0 * HUD_LINE_ADVANCE)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prepared_hud_layout_shrinks_toward_the_floor_when_runs_overflow_the_gap() {
+        let gap = StatGap {
+            center_x: 90.0,
+            baseline_y: 150.0,
+            max_width: 40.0,
+        };
+        // Runs far wider than the gap force the shrink loop down to its floor.
+        let measure = |_sizes: [f64; 3]| [HudLineMetrics { width: 1.0e9, height: 1.0 }; 3];
+        let layout = prepare_hud_layout(gap, 100.0, 300.0, 8.0, measure);
+        assert!(layout.stack_size < 8.0 * HUD_STACK_INITIAL_SCALE);
+        assert!(layout.stack_size <= HUD_STACK_MIN + 1.0);
+    }
+
+    #[test]
+    fn prepared_hud_layout_is_identical_for_both_backends_on_the_same_measurements() {
+        let gap = StatGap {
+            center_x: 64.0,
+            baseline_y: 120.0,
+            max_width: 30.0,
+        };
+        // Two backends that measure the same run metrics must land the same layout.
+        let smooth_measure =
+            |sizes: [f64; 3]| sizes.map(|size| HudLineMetrics { width: size * 0.6, height: size });
+        let retained_measure =
+            |sizes: [f64; 3]| sizes.map(|size| HudLineMetrics { width: size * 0.6, height: size });
+        let a = prepare_hud_layout(gap, 90.0, 260.0, 7.0, smooth_measure);
+        let b = prepare_hud_layout(gap, 90.0, 260.0, 7.0, retained_measure);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn prepared_gauge_arcs_cover_zero_partial_full_and_overage_identically_for_both_backends() {
+        let layout = perimeter_gauge_layout(180.0, 180.0, 180.0, COMPANION_GAUGE_GAP_DEG);
+        let colors = perimeter_gauge_colors();
+
+        // Zero everywhere: only the three lane tracks are drawn, no fills, no overage.
+        let zero = prepared_perimeter_gauge_arcs(
+            &layout,
+            &colors,
+            GaugeFractions {
+                xp: 0.0,
+                daily: 0.0,
+                daily_overage: 0.0,
+                pace: 0.0,
+            },
+        );
+        assert_eq!(zero.len(), 3);
+        assert!(zero.iter().all(|arc| (arc.end_deg
+            - (arc.ring.track_start_deg + arc.ring.track_sweep_deg))
+            .abs()
+            < 1e-9));
+        assert_eq!(zero[0].color, colors.xp.track);
+        assert_eq!(zero[1].color, colors.daily.track);
+        assert_eq!(zero[2].color, colors.pace.track);
+
+        // Partial fills (no overage): each lane draws track then fill, in order.
+        let partial = prepared_perimeter_gauge_arcs(
+            &layout,
+            &colors,
+            GaugeFractions {
+                xp: 0.5,
+                daily: 0.3,
+                daily_overage: 0.0,
+                pace: 0.7,
+            },
+        );
+        assert_eq!(partial.len(), 6);
+        assert_eq!(partial[1].color, colors.xp.fill);
+        assert!((partial[1].end_deg - growth_ring_fill_end_deg(&layout.xp.ring, 0.5)).abs() < 1e-9);
+        assert_eq!(partial[3].color, colors.daily.fill);
+        assert_eq!(partial[5].color, colors.pace.fill);
+
+        // Full xp fill reaches the track end.
+        let full = prepared_perimeter_gauge_arcs(
+            &layout,
+            &colors,
+            GaugeFractions {
+                xp: 1.0,
+                daily: 0.0,
+                daily_overage: 0.0,
+                pace: 0.0,
+            },
+        );
+        assert!(
+            (full[1].end_deg - (layout.xp.ring.track_start_deg + layout.xp.ring.track_sweep_deg))
+                .abs()
+                < 1e-9
+        );
+
+        // Overage inserts one daily-coloured marker arc after the daily fill and
+        // before the pace lane, matching the Smooth draw order.
+        let overage = prepared_perimeter_gauge_arcs(
+            &layout,
+            &colors,
+            GaugeFractions {
+                xp: 0.0,
+                daily: 1.0,
+                daily_overage: 0.25,
+                pace: 0.0,
+            },
+        );
+        // xp track, daily track, daily fill, daily overage, pace track = 5 arcs.
+        assert_eq!(overage.len(), 5);
+        let marker = overage[3];
+        assert_eq!(marker.color, daily_overage_color());
+        let expected = daily_overage_marker_arc(&layout.daily.ring, 0.25).unwrap();
+        assert!((marker.start_deg - expected.0).abs() < 1e-9);
+        assert!((marker.end_deg - expected.1).abs() < 1e-9);
+        assert_eq!(marker.ring, layout.daily.ring);
+        assert_eq!(marker.stroke_width, layout.daily.stroke_width);
+    }
 
     #[test]
     fn ring_gap_is_centered_at_bottom_and_excluded() {

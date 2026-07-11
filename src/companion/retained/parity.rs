@@ -38,6 +38,33 @@ pub(super) fn linear_channel_to_srgb(channel: f32) -> f32 {
     }
 }
 
+/// The Hermite `smoothstep` interpolation, matching the WGSL built-in of the same
+/// name: 0 below `edge0`, 1 above `edge1`, and a smooth `3t² - 2t³` ramp between.
+/// Shared so the Rust edge-coverage contract and the shader agree bit-for-shape.
+#[cfg(test)]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Antialiased edge coverage in `[0, 1]` for a fragment `signed_distance` from a
+/// shape edge, measured in the same units as `pixel_width` (the size of one
+/// physical pixel in that distance field). The convention: `signed_distance < 0`
+/// is inside the shape, `> 0` is outside, so coverage is **monotonically
+/// decreasing** as distance grows and **continuous** across the one-physical-pixel
+/// transition band centered on the edge.
+///
+/// This is the edge-coverage *contract*: production coverage runs on the GPU,
+/// where [`super::super::retained.wgsl`]'s `analytic_coverage` mirrors this exact
+/// formula with `fwidth` supplying `pixel_width`, turning the shader's former hard
+/// discards into an antialiased ramp that matches Smooth's edges. It lives here as
+/// the testable spec the shader is written against.
+#[cfg(test)]
+fn analytic_coverage(signed_distance: f32, pixel_width: f32) -> f32 {
+    let half = 0.5 * pixel_width.max(f32::MIN_POSITIVE);
+    1.0 - smoothstep(-half, half, signed_distance)
+}
+
 /// Converts an authored straight-sRGB RGBA color into the premultiplied-linear
 /// RGBA the GPU pipeline consumes: each color channel is linearized then scaled
 /// by alpha, and alpha passes through unchanged. This is the single color
@@ -183,6 +210,56 @@ fn unpremultiply_srgb8_pixel(pixel: [u8; 4]) -> [u8; 4] {
 mod tests {
     use super::*;
     use crate::presentation::smooth::SmoothBlendMode;
+
+    #[test]
+    fn analytic_edge_coverage_is_continuous_across_one_physical_pixel() {
+        let samples = [-0.75, -0.25, 0.25, 0.75].map(|distance| analytic_coverage(distance, 1.0));
+        assert!(samples.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(samples[0] > samples[3]);
+    }
+
+    #[test]
+    fn analytic_coverage_saturates_fully_inside_and_outside_the_band() {
+        // A full physical pixel inside the edge is fully covered; a full physical
+        // pixel outside is fully uncovered. The transition is confined to the band.
+        assert_eq!(analytic_coverage(-1.0, 1.0), 1.0);
+        assert_eq!(analytic_coverage(1.0, 1.0), 0.0);
+        assert!((analytic_coverage(0.0, 1.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn analytic_coverage_has_no_hard_step_within_the_band() {
+        // Continuity: sampling densely across the transition, no adjacent pair
+        // jumps by more than a small bound. A hard discard would jump by 1.0.
+        let width = 1.0_f32;
+        let mut previous = analytic_coverage(-1.0, width);
+        let mut worst_jump = 0.0_f32;
+        for step in -200..=200 {
+            let distance = step as f32 / 100.0;
+            let coverage = analytic_coverage(distance, width);
+            worst_jump = worst_jump.max((previous - coverage).abs());
+            previous = coverage;
+        }
+        assert!(
+            worst_jump < 0.05,
+            "coverage must ramp smoothly, worst jump was {worst_jump}"
+        );
+    }
+
+    #[test]
+    fn analytic_coverage_band_widens_with_the_physical_pixel() {
+        // A scale-2 pixel (width 2.0) still transitions but over twice the distance,
+        // so the same signed distance sits earlier in the ramp than at scale 1.
+        let scale_one = analytic_coverage(0.5, 1.0);
+        let scale_two = analytic_coverage(0.5, 2.0);
+        assert_eq!(scale_one, 0.0, "0.5 is the outer edge of a unit-width band");
+        assert!(
+            scale_two > 0.0 && scale_two < 1.0,
+            "0.5 is still inside a width-2 band: {scale_two}"
+        );
+        // Both remain monotonic decreasing at their own scale.
+        assert!(analytic_coverage(-0.4, 2.0) > analytic_coverage(0.4, 2.0));
+    }
 
     #[test]
     fn premultiplied_linear_contract_is_explicit() {
@@ -676,5 +753,327 @@ mod oracle {
             worst <= TOLERANCE,
             "worst translucent delta {worst} exceeds tolerance {TOLERANCE}"
         );
+    }
+
+    // ----- Edge antialiasing (physical-pixel coverage) ----------------------
+
+    /// A surfaceless Metal target of arbitrary size that rasterizes hand-built
+    /// primitives through the real production pipeline and shader, then reads back
+    /// canonical straight-sRGB8. Unlike [`RetainedSwatch`] (a fixed 4x4 center-pixel
+    /// probe) this exposes the whole frame so a scan line can measure the analytic
+    /// edge coverage the shader writes.
+    struct EdgeTarget {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        pipelines: super::super::Pipelines,
+        bind_group: wgpu::BindGroup,
+        _atlas: wgpu::Texture,
+    }
+
+    impl EdgeTarget {
+        fn new() -> Self {
+            let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+            descriptor.backends = wgpu::Backends::METAL;
+            let instance = wgpu::Instance::new(descriptor);
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                    ..Default::default()
+                }))
+                .expect("surfaceless Metal adapter");
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("glorp-parity-edge-device"),
+                    ..Default::default()
+                }))
+                .expect("surfaceless Metal device");
+            let mut counters = super::super::RetainedResourceCounters::default();
+            let atlas_layout = super::super::create_atlas_bind_group_layout(&device);
+            let pipelines = super::super::create_pipelines(
+                &device,
+                SWATCH_FORMAT,
+                &atlas_layout,
+                &mut counters,
+            );
+            let (atlas, bind_group) = dummy_atlas(&device, &atlas_layout);
+            Self {
+                device,
+                queue,
+                pipelines,
+                bind_group,
+                _atlas: atlas,
+            }
+        }
+
+        /// Clears to `background` and draws each primitive with its blend, returning
+        /// the canonical straight-sRGB8 bytes for the whole `size`x`size` frame.
+        fn render(
+            &self,
+            size: u32,
+            primitives: &[super::super::GpuPrimitive],
+            blends: &[SmoothBlendMode],
+            background: [f32; 4],
+        ) -> Vec<u8> {
+            let clear = premultiply_linear_srgb(background);
+            let target = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("glorp-parity-edge-target"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SWATCH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glorp-parity-edge-staging"),
+                size: super::super::capture::staging_buffer_size(size, size),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glorp-parity-edge-instances"),
+                size: std::mem::size_of_val(primitives) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue
+                .write_buffer(&instances, 0, bytemuck::cast_slice(primitives));
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glorp-parity-edge-encoder"),
+                });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("glorp-parity-edge-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: f64::from(clear[0]),
+                                g: f64::from(clear[1]),
+                                b: f64::from(clear[2]),
+                                a: f64::from(clear[3]),
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, instances.slice(..));
+                for (index, blend) in blends.iter().enumerate() {
+                    pass.set_pipeline(self.pipelines.get(*blend));
+                    pass.draw(0..6, index as u32..index as u32 + 1);
+                }
+            }
+            let aligned = super::super::capture::aligned_bytes_per_row(size);
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &target,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(aligned),
+                        rows_per_image: Some(size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let submission = self.queue.submit([encoder.finish()]);
+            staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            self.device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: None,
+                })
+                .expect("edge readback poll");
+            let mapped = staging.slice(..).get_mapped_range().expect("map edge");
+            let premultiplied = super::super::capture::normalize_readback_rows(
+                &mapped,
+                size,
+                size,
+                aligned,
+                super::super::capture::PixelOrder::Bgra,
+            )
+            .expect("normalize edge rows");
+            drop(mapped);
+            staging.unmap();
+            canonical_png_rgba(&premultiplied)
+        }
+    }
+
+    /// An opaque-white primitive filling the whole frame (aperture wide open),
+    /// used as a base for the aperture and clip edge tests.
+    fn full_frame_rect(
+        size: u32,
+        params: [f32; 4],
+        clip_ellipse: [f32; 4],
+        aperture: f32,
+    ) -> super::super::GpuPrimitive {
+        super::super::GpuPrimitive {
+            rect: [0.0, 0.0, size as f32, size as f32],
+            color_a: premultiply_linear_srgb([1.0, 1.0, 1.0, 1.0]),
+            color_b: [0.0; 4],
+            uv: [0.0; 4],
+            params,
+            clip_rect: [0.0; 4],
+            clip_ellipse,
+            viewport_aperture: [
+                size as f32,
+                size as f32,
+                size as f32 / 2.0,
+                size as f32 / 2.0,
+            ],
+            aperture_radius: [aperture, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// How many pixels in the frame carry genuinely partial coverage. A hard
+    /// discard produces exactly zero (every pixel is fully covered or fully
+    /// discarded); analytic coverage lines the curved edge with a rim of partial
+    /// values. Counting over the whole edge is robust to sub-pixel alignment, which
+    /// a single scan line is not (a one-physical-pixel band can slip between two
+    /// pixel centers on any one row).
+    fn partial_pixel_count(frame: &[u8]) -> usize {
+        frame
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 16 && pixel[3] < 239)
+            .count()
+    }
+
+    /// Asserts a curved edge is antialiased, not hard-discarded: its rim carries a
+    /// meaningful population of partial-coverage pixels. A hard edge would yield
+    /// zero; `minimum` is set well below the AA count but far above zero.
+    fn assert_edge_antialiased(frame: &[u8], minimum: usize, label: &str) {
+        let partial = partial_pixel_count(frame);
+        eprintln!("{label}: {partial} partial-coverage pixels (minimum {minimum})");
+        assert!(
+            partial >= minimum,
+            "{label}: only {partial} partial-coverage pixels (need >= {minimum}); \
+             a hard-discarded edge produces zero"
+        );
+    }
+
+    #[test]
+    fn aperture_edge_antialiases_across_one_physical_pixel_at_both_scales() {
+        let target = EdgeTarget::new();
+        // Scale-1 and scale-2 analogs: the same aperture geometry rasterized at two
+        // resolutions. `fwidth` normalizes the band to one physical pixel at each.
+        for size in [48_u32, 96] {
+            let aperture = size as f32 * 0.4;
+            let frame = target.render(
+                size,
+                &[full_frame_rect(
+                    size,
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0; 4],
+                    aperture,
+                )],
+                &[SmoothBlendMode::Normal],
+                [0.0, 0.0, 0.0, 0.0],
+            );
+            assert_edge_antialiased(&frame, size as usize / 4, &format!("aperture size {size}"));
+        }
+    }
+
+    #[test]
+    fn round_primitive_edge_antialiases_across_one_physical_pixel_at_both_scales() {
+        let target = EdgeTarget::new();
+        for size in [48_u32, 96] {
+            let radius = size as f32 * 0.4;
+            let disc = super::super::GpuPrimitive {
+                rect: [
+                    size as f32 / 2.0 - radius,
+                    size as f32 / 2.0 - radius,
+                    radius * 2.0,
+                    radius * 2.0,
+                ],
+                color_a: premultiply_linear_srgb([1.0, 1.0, 1.0, 1.0]),
+                color_b: [0.0; 4],
+                uv: [0.0; 4],
+                // kind 2.0 = solid round primitive.
+                params: [2.0, 0.0, 0.0, 0.0],
+                clip_rect: [0.0; 4],
+                clip_ellipse: [0.0; 4],
+                viewport_aperture: [
+                    size as f32,
+                    size as f32,
+                    size as f32 / 2.0,
+                    size as f32 / 2.0,
+                ],
+                aperture_radius: [1.0e6, 0.0, 0.0, 0.0],
+            };
+            let frame = target.render(size, &[disc], &[SmoothBlendMode::Normal], [0.0; 4]);
+            assert_edge_antialiased(&frame, size as usize / 4, &format!("round size {size}"));
+        }
+    }
+
+    #[test]
+    fn ellipse_clip_edge_antialiases_across_one_physical_pixel() {
+        let target = EdgeTarget::new();
+        let size = 64_u32;
+        let center = size as f32 / 2.0;
+        let radius = size as f32 * 0.35;
+        // A full-frame opaque rect clipped to an ellipse: only the clip's curved
+        // boundary shapes the coverage, so its whole rim is analytic.
+        let clipped = full_frame_rect(
+            size,
+            [1.0, 2.0, 0.0, 0.0],
+            [center, center, radius, radius],
+            1.0e6,
+        );
+        let frame = target.render(size, &[clipped], &[SmoothBlendMode::Normal], [0.0; 4]);
+        assert_edge_antialiased(&frame, size as usize / 4, "ellipse clip");
+    }
+
+    #[test]
+    fn arc_stroke_and_round_cap_edges_antialias_across_one_physical_pixel() {
+        let target = EdgeTarget::new();
+        let size = 160_u32;
+        let center = f64::from(size) / 2.0;
+        let lane = crate::round::hud::perimeter_gauge_layout(
+            center,
+            center,
+            center - 6.0,
+            crate::round::hud::COMPANION_GAUGE_GAP_DEG,
+        )
+        .xp;
+        let mut primitives = Vec::new();
+        let mut blends = Vec::new();
+        // A partial round-capped arc (aperture wide open): both long stroke edges and
+        // the two round caps are analytic, so the rim is populated with partials.
+        super::super::push_analytic_arc(
+            &mut primitives,
+            &mut blends,
+            &lane,
+            crate::round::draw::RoundColor(1.0, 1.0, 1.0, 1.0),
+            lane.ring.track_start_deg,
+            crate::round::hud::growth_ring_fill_end_deg(&lane.ring, 0.5),
+            [size as f32, size as f32, center as f32, center as f32],
+            [1.0e6, 0.0, 0.0, 0.0],
+        );
+        let frame = target.render(size, &primitives, &blends, [0.0; 4]);
+        assert_edge_antialiased(&frame, size as usize / 4, "arc stroke and round cap");
     }
 }

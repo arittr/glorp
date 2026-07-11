@@ -29,10 +29,10 @@ use crate::presentation::smooth::{
     SmoothLayerMotionBinding, SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
 };
 use crate::round::hud::{
-    companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge, daily_overage_color,
-    daily_overage_marker_arc, daily_overage_marker_fraction, growth_ring_fill_end_deg,
-    perimeter_gauge_colors, perimeter_gauge_layout, CompanionHudText, GaugeLane, GaugeLaneColors,
-    LineCap, COMPANION_GAUGE_GAP_DEG,
+    companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
+    daily_overage_marker_fraction, perimeter_gauge_colors, perimeter_gauge_layout,
+    prepare_hud_layout, prepared_perimeter_gauge_arcs, tank_background_sample, tank_core_color,
+    CompanionHudText, GaugeFractions, HudLineMetrics, LineCap, COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
@@ -1630,20 +1630,28 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
         }
 
         // Companion perimeter gauges: XP, today vs yesterday, and live 10m pace.
+        // The arcs (which to draw, their angles, colours, and order) come from the
+        // shared `prepared_perimeter_gauge_arcs`, the same list the retained GPU prep
+        // consumes, so the gauge geometry lives in exactly one place.
         {
             let cx = aperture.center_x as f64;
             let cy = aperture.center_y as f64;
             let layout =
                 perimeter_gauge_layout(cx, cy, aperture.radius as f64, COMPANION_GAUGE_GAP_DEG);
             let colors = perimeter_gauge_colors();
-            draw_gauge_lane(&layout.xp, &colors.xp, frame.gauges.xp_fraction);
-            draw_gauge_lane(&layout.daily, &colors.daily, frame.gauges.daily_fraction);
-            draw_gauge_overfill(
-                &layout.daily,
-                &daily_overage_color(),
-                frame.gauges.daily_overage_fraction,
+            let arcs = prepared_perimeter_gauge_arcs(
+                &layout,
+                &colors,
+                GaugeFractions {
+                    xp: frame.gauges.xp_fraction,
+                    daily: frame.gauges.daily_fraction,
+                    daily_overage: frame.gauges.daily_overage_fraction,
+                    pace: frame.gauges.pace_fraction,
+                },
             );
-            draw_gauge_lane(&layout.pace, &colors.pace, frame.gauges.pace_fraction);
+            for arc in &arcs {
+                draw_prepared_gauge_arc(arc);
+            }
         }
 
         // Halo and trouble indicators drawn on top of the scene blit.
@@ -1826,56 +1834,6 @@ fn fallback_dimension(value: f64) -> f64 {
     }
 }
 
-/// The colour the tank's depth falloff lifts its core toward.
-const TANK_DEPTH_TINT: RoundColor = RoundColor(0.10, 0.11, 0.20, 1.0);
-
-/// How much of the tint reaches the core. Tuned against the shipping round
-/// accessory panel, which lifts blacks and eats subtle deltas: the falloff has to
-/// be strong enough to survive that tone curve, not merely read on a calibrated
-/// Mac display.
-const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
-
-/// Deterministic per-pixel noise in [-1.5, 1.5] output levels. A smooth dark
-/// gradient quantised to 8 bits shows its steps as visible bands; dithering
-/// trades them for imperceptible grain.
-fn dither_noise(x: u32, y: u32) -> f32 {
-    let mut h = x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B);
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x7FEB_352D);
-    h ^= h >> 15;
-    ((h & 0xFFFF) as f32 / 65535.0 - 0.5) * 3.0
-}
-
-/// One RGBA pixel of the tank's radial depth falloff, dithered.
-fn tank_background_pixel(
-    x: u32,
-    y: u32,
-    center: (f32, f32),
-    radius: f32,
-    core: &RoundColor,
-    rim: &RoundColor,
-) -> [u8; 4] {
-    let dx = x as f32 + 0.5 - center.0;
-    let dy = y as f32 + 0.5 - center.1;
-    let t = if radius > 0.0 {
-        ((dx * dx + dy * dy).sqrt() / radius).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let noise = dither_noise(x, y);
-    let channel = |core_c: f32, rim_c: f32| {
-        ((core_c + (rim_c - core_c) * t) * 255.0 + noise)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    [
-        channel(core.0, rim.0),
-        channel(core.1, rim.1),
-        channel(core.2, rim.2),
-        255,
-    ]
-}
-
 /// Render the dithered tank falloff, rebuilding its cached bitmap only when the
 /// aperture size or background colour changes.
 /// One cached background bitmap: its pixel size, its colour key, and the image.
@@ -1936,7 +1894,7 @@ fn build_dithered_tank_image(
     height: u32,
     background: &RoundColor,
 ) -> Option<Retained<NSImage>> {
-    let core = tank_core_color(background);
+    let core = tank_core_color(*background);
     let center = (width as f32 / 2.0, height as f32 / 2.0);
     let radius = width.min(height) as f32 / 2.0;
 
@@ -1960,7 +1918,7 @@ fn build_dithered_tank_image(
         }
         for y in 0..height {
             for x in 0..width {
-                let pixel = tank_background_pixel(x, y, center, radius, &core, background);
+                let pixel = tank_background_sample(x, y, center, radius, core, *background);
                 let offset = ((y * width + x) * 4) as usize;
                 std::ptr::copy_nonoverlapping(pixel.as_ptr(), data.add(offset), 4);
             }
@@ -1973,16 +1931,6 @@ fn build_dithered_tank_image(
         image.addRepresentation(&rep);
         Some(image)
     }
-}
-
-fn tank_core_color(background: &RoundColor) -> RoundColor {
-    let mix = |base: f32, tint: f32| base + (tint - base) * TANK_CORE_TINT_WEIGHT;
-    RoundColor(
-        mix(background.0, TANK_DEPTH_TINT.0),
-        mix(background.1, TANK_DEPTH_TINT.1),
-        mix(background.2, TANK_DEPTH_TINT.2),
-        background.3,
-    )
 }
 
 /// Cell ink attenuated by its layer's opacity. Opacity scales alpha only, so a
@@ -2138,50 +2086,6 @@ fn ns_color(color: &RoundColor) -> Retained<NSColor> {
             })
             .clone()
     })
-}
-
-#[cfg(target_os = "macos")]
-struct CompanionAttributedLine {
-    text: Retained<NSAttributedString>,
-}
-
-#[cfg(target_os = "macos")]
-struct CompanionAttributedStack {
-    lines: Vec<CompanionAttributedLine>,
-    max_width: f64,
-    total_height: f64,
-}
-
-#[cfg(target_os = "macos")]
-fn companion_hud_attributed_lines(
-    text: &CompanionHudText,
-    size: f64,
-    big_color: &RoundColor,
-    sub_color: &RoundColor,
-) -> CompanionAttributedStack {
-    let big = attributed_pet_glyph(&text.today_total, size * 1.08, big_color);
-    let daily = attributed_pet_glyph(&text.daily_percent, size * 0.68, sub_color);
-    let pace = attributed_pet_glyph(&text.pace, size * 0.68, sub_color);
-    let (max_width, total_height) = unsafe {
-        let max_width = big
-            .size()
-            .width
-            .max(daily.size().width)
-            .max(pace.size().width);
-        let total_height =
-            big.size().height + daily.size().height * 0.82 + pace.size().height * 0.82;
-        (max_width, total_height)
-    };
-
-    CompanionAttributedStack {
-        lines: vec![
-            CompanionAttributedLine { text: big },
-            CompanionAttributedLine { text: daily },
-            CompanionAttributedLine { text: pace },
-        ],
-        max_width,
-        total_height,
-    }
 }
 
 /// Metrics needed to map a character-cell grid onto the round AppKit view.
@@ -2726,74 +2630,23 @@ fn ns_line_cap(cap: LineCap) -> NSLineCapStyle {
     }
 }
 
+/// Strokes one shared [`PreparedGaugeArc`]: the same NSBezierPath arc the painter
+/// has always drawn, now sourced from the backend-neutral prepared list so the
+/// geometry is never re-derived here.
 #[cfg(target_os = "macos")]
-fn draw_gauge_lane(lane: &GaugeLane, colors: &GaugeLaneColors, fraction: f64) {
-    let start = lane.ring.track_start_deg;
-    let end = lane.ring.track_start_deg + lane.ring.track_sweep_deg;
-
+fn draw_prepared_gauge_arc(arc: &crate::round::hud::PreparedGaugeArc) {
     unsafe {
-        let track = NSBezierPath::new();
-        track.setLineWidth(lane.stroke_width);
-        track.setLineCapStyle(ns_line_cap(lane.cap));
-        track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
-            NSPoint::new(lane.ring.cx, lane.ring.cy),
-            lane.ring.radius,
-            start,
-            end,
+        let path = NSBezierPath::new();
+        path.setLineWidth(arc.stroke_width);
+        path.setLineCapStyle(ns_line_cap(arc.cap));
+        path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+            NSPoint::new(arc.ring.cx, arc.ring.cy),
+            arc.ring.radius,
+            arc.start_deg,
+            arc.end_deg,
         );
-        ns_color(&colors.track).setStroke();
-        track.stroke();
-    }
-
-    draw_gauge_fill(lane, &colors.fill, fraction);
-}
-
-fn draw_gauge_fill(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
-    let clamped = fraction.clamp(0.0, 1.0);
-    if clamped <= 0.0 {
-        return;
-    }
-
-    let start = lane.ring.track_start_deg;
-    let fill_end = growth_ring_fill_end_deg(&lane.ring, clamped);
-
-    unsafe {
-        let fill = NSBezierPath::new();
-        fill.setLineWidth(lane.stroke_width);
-        fill.setLineCapStyle(ns_line_cap(lane.cap));
-        fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
-            NSPoint::new(lane.ring.cx, lane.ring.cy),
-            lane.ring.radius,
-            start,
-            fill_end,
-        );
-        ns_color(color).setStroke();
-        fill.stroke();
-    }
-}
-
-fn draw_gauge_overfill(lane: &GaugeLane, color: &RoundColor, fraction: f64) {
-    let clamped = fraction.clamp(0.0, 1.0);
-    if clamped <= 0.0 {
-        return;
-    }
-
-    let Some((start, end)) = daily_overage_marker_arc(&lane.ring, clamped) else {
-        return;
-    };
-
-    unsafe {
-        let fill = NSBezierPath::new();
-        fill.setLineWidth(lane.stroke_width);
-        fill.setLineCapStyle(ns_line_cap(lane.cap));
-        fill.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
-            NSPoint::new(lane.ring.cx, lane.ring.cy),
-            lane.ring.radius,
-            start,
-            end,
-        );
-        ns_color(color).setStroke();
-        fill.stroke();
+        ns_color(&arc.color).setStroke();
+        path.stroke();
     }
 }
 
@@ -2829,29 +2682,38 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
         gauge_layout.pace.ring.radius - gauge_layout.pace.stroke_width / 2.0,
         COMPANION_GAUGE_GAP_DEG,
     );
+    let big_color = RoundColor(0.93, 0.93, 0.97, 1.0);
+    let sub_color =
+        crate::round::hud::rate_direction_color(crate::tui::view_model::RateDirection::Neutral);
+    let texts = [
+        (&hud_text.today_total, &big_color),
+        (&hud_text.daily_percent, &sub_color),
+        (&hud_text.pace, &sub_color),
+    ];
+    // The shrink policy and stacking come from the shared `prepare_hud_layout`; the
+    // only backend-specific input is how AppKit measures each attributed run.
+    let layout = prepare_hud_layout(
+        gap,
+        aperture.radius as f64,
+        bounds.size.height,
+        font_size,
+        |sizes| {
+            let mut metrics = [HudLineMetrics { width: 0.0, height: 0.0 }; 3];
+            for (index, metric) in metrics.iter_mut().enumerate() {
+                let size = unsafe {
+                    attributed_pet_glyph(texts[index].0, sizes[index], texts[index].1).size()
+                };
+                *metric = HudLineMetrics { width: size.width, height: size.height };
+            }
+            metrics
+        },
+    );
+
     unsafe {
-        let big_color = RoundColor(0.93, 0.93, 0.97, 1.0);
-        let sub_color =
-            crate::round::hud::rate_direction_color(crate::tui::view_model::RateDirection::Neutral);
-        let mut stack_size = font_size * 1.45;
-        let mut rendered =
-            companion_hud_attributed_lines(hud_text, stack_size, &big_color, &sub_color);
-
-        while (rendered.max_width > gap.max_width
-            || rendered.total_height > aperture.radius as f64 * 0.34)
-            && stack_size > 6.0
-        {
-            stack_size -= 1.0;
-            rendered = companion_hud_attributed_lines(hud_text, stack_size, &big_color, &sub_color);
-        }
-
-        let top = bounds.size.height - gap.baseline_y;
-        let mut y = top + rendered.total_height * 0.38;
-        for line in rendered.lines {
-            let width = line.text.size().width;
-            line.text
-                .drawAtPoint(NSPoint::new(gap.center_x - width / 2.0, y));
-            y -= line.text.size().height * 0.82;
+        for (index, (text, color)) in texts.iter().enumerate() {
+            let line = layout.lines[index];
+            let run = attributed_pet_glyph(text, line.font_size, color);
+            run.drawAtPoint(NSPoint::new(line.origin_x, line.baseline_y));
         }
     }
 }
@@ -3450,31 +3312,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tank_depth_gradient_tests {
-    use super::*;
-
-    #[test]
-    fn tank_core_lifts_the_background_toward_the_depth_tint() {
-        let bg = RoundColor(0.05, 0.05, 0.06, 1.0);
-        let core = tank_core_color(&bg);
-
-        // The core is a blend toward the tint, so it sits strictly between the two.
-        assert!(core.0 > bg.0 && core.0 < TANK_DEPTH_TINT.0);
-        assert!(core.1 > bg.1 && core.1 < TANK_DEPTH_TINT.1);
-        assert!(core.2 > bg.2 && core.2 < TANK_DEPTH_TINT.2);
-        // The porthole is opaque; only the tint's weight varies.
-        assert_eq!(core.3, 1.0);
-    }
-
-    #[test]
-    fn tank_core_reproduces_the_weight_the_stepped_rings_accumulated() {
-        let bg = RoundColor(0.0, 0.0, 0.0, 1.0);
-        let core = tank_core_color(&bg);
-        assert!((core.0 - TANK_DEPTH_TINT.0 * TANK_CORE_TINT_WEIGHT).abs() < 1e-6);
-    }
-}
-
-#[cfg(test)]
 mod smooth_opacity_tests {
     use super::*;
     use crate::pet::palette::Rgb;
@@ -3696,45 +3533,5 @@ mod font_cache_tests {
         // Distinct rendered sizes and weights must not collide.
         assert_ne!(font_cache_key(21.4, false), font_cache_key(24.0, false));
         assert_ne!(font_cache_key(21.4, false), font_cache_key(21.4, true));
-    }
-}
-
-#[cfg(test)]
-mod tank_dither_tests {
-    use super::*;
-
-    #[test]
-    fn dither_noise_is_deterministic_bounded_and_varied() {
-        let mut seen = std::collections::BTreeSet::new();
-        for x in 0..64u32 {
-            for y in 0..64u32 {
-                let n = dither_noise(x, y);
-                assert_eq!(n, dither_noise(x, y));
-                assert!((-1.5..=1.5).contains(&n), "noise {n} out of range");
-                seen.insert((n * 1000.0) as i32);
-            }
-        }
-        assert!(
-            seen.len() > 100,
-            "noise must vary, got {} values",
-            seen.len()
-        );
-    }
-
-    #[test]
-    fn tank_background_pixel_runs_core_to_rim_with_grain_smaller_than_a_band() {
-        let core = RoundColor(0.20, 0.22, 0.30, 1.0);
-        let rim = RoundColor(0.05, 0.05, 0.06, 1.0);
-        let center = (100.0, 100.0);
-
-        let at_core = tank_background_pixel(100, 100, center, 100.0, &core, &rim);
-        let at_rim = tank_background_pixel(199, 100, center, 100.0, &core, &rim);
-        assert!((f32::from(at_core[0]) - 0.20 * 255.0).abs() <= 2.0);
-        assert!((f32::from(at_rim[0]) - 0.05 * 255.0).abs() <= 2.0);
-        assert_eq!(at_core[3], 255);
-
-        // Past the radius the falloff clamps: only the dither grain remains.
-        let beyond = tank_background_pixel(390, 100, center, 100.0, &core, &rim);
-        assert!((f32::from(beyond[0]) - 0.05 * 255.0).abs() <= 2.0);
     }
 }

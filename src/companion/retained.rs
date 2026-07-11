@@ -15,8 +15,9 @@ use crate::presentation::smooth::{
 };
 use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
 use crate::round::hud::{
-    daily_overage_color, growth_ring_fill_end_deg, perimeter_gauge_colors, perimeter_gauge_layout,
-    stat_gap_box, CompanionHudText, GaugeLane, GaugeLaneColors, LineCap, COMPANION_GAUGE_GAP_DEG,
+    perimeter_gauge_colors, perimeter_gauge_layout, prepare_hud_layout,
+    prepared_perimeter_gauge_arcs, stat_gap_box, tank_core_color, CompanionHudText, GaugeFractions,
+    GaugeLane, HudLineMetrics, LineCap, COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::RoundAperture;
 
@@ -43,8 +44,11 @@ use crate::round::smooth::CompanionContentIdentity;
 /// scale divides the display font size by this. Matches the manifest's
 /// production atlas point size.
 const GLYPH_FONT_SIZE: f64 = RETAINED_ATLAS_POINT_SIZE;
-const TANK_CORE_TINT: [f32; 3] = [0.10, 0.11, 0.20];
-const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
+/// Logical-pixel margin the analytic-arc primitive rect extends past the stroke's
+/// outer radius, so the outer edge's one-physical-pixel coverage band has room to
+/// fall off inside the rect instead of being clipped at its boundary. A couple of
+/// logical pixels covers the outer half-band at every backing scale.
+const ARC_AA_MARGIN: f64 = 2.0;
 
 pub(super) struct RetainedChrome<'a> {
     pub(super) mood_aura: [f32; 4],
@@ -1207,13 +1211,14 @@ fn push_tank_background(
     viewport_aperture: [f32; 4],
     aperture_radius: [f32; 4],
 ) {
-    let mix = |base: f32, tint: f32| base + (tint - base) * TANK_CORE_TINT_WEIGHT;
-    let core = [
-        mix(background[0], TANK_CORE_TINT[0]),
-        mix(background[1], TANK_CORE_TINT[1]),
-        mix(background[2], TANK_CORE_TINT[2]),
+    // The opaque depth core is the shared, backend-neutral tank tint (see
+    // `round::hud::tank_core_color`); Smooth derives its bitmap core the same way.
+    let core = tank_core_color(RoundColor(
+        background[0],
+        background[1],
+        background[2],
         background[3],
-    ];
+    ));
     primitives.push(GpuPrimitive {
         rect: [
             aperture.center_x - aperture.radius,
@@ -1221,7 +1226,7 @@ fn push_tank_background(
             aperture.radius * 2.0,
             aperture.radius * 2.0,
         ],
-        color_a: display_rgba(core),
+        color_a: display_round_color(core),
         color_b: display_rgba(background),
         uv: [0.0; 4],
         // Kind 3 reproduces Smooth's output-level radial dither in the shader.
@@ -1287,100 +1292,36 @@ fn push_gauges(
         COMPANION_GAUGE_GAP_DEG,
     );
     let colors = perimeter_gauge_colors();
-    push_gauge_lane(
-        primitives,
-        blends,
-        &layout.xp,
-        &colors.xp,
-        gauges.xp_fraction,
-        viewport_aperture,
-        aperture_radius,
+    // The whole gauge geometry (which arcs, their angles, colours, order) comes
+    // from the shared `prepared_perimeter_gauge_arcs` — the same list the AppKit
+    // painter strokes — so neither backend re-derives the gauge math.
+    let arcs = prepared_perimeter_gauge_arcs(
+        &layout,
+        &colors,
+        GaugeFractions {
+            xp: gauges.xp_fraction,
+            daily: gauges.daily_fraction,
+            daily_overage: gauges.daily_overage_fraction,
+            pace: gauges.pace_fraction,
+        },
     );
-    push_gauge_lane(
-        primitives,
-        blends,
-        &layout.daily,
-        &colors.daily,
-        gauges.daily_fraction,
-        viewport_aperture,
-        aperture_radius,
-    );
-    push_gauge_arc(
-        primitives,
-        blends,
-        &layout.daily,
-        daily_overage_color(),
-        gauges.daily_overage_fraction,
-        viewport_aperture,
-        aperture_radius,
-    );
-    push_gauge_lane(
-        primitives,
-        blends,
-        &layout.pace,
-        &colors.pace,
-        gauges.pace_fraction,
-        viewport_aperture,
-        aperture_radius,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_gauge_lane(
-    primitives: &mut Vec<GpuPrimitive>,
-    blends: &mut Vec<SmoothBlendMode>,
-    lane: &GaugeLane,
-    colors: &GaugeLaneColors,
-    fraction: f64,
-    viewport_aperture: [f32; 4],
-    aperture_radius: [f32; 4],
-) {
-    push_gauge_arc(
-        primitives,
-        blends,
-        lane,
-        colors.track,
-        1.0,
-        viewport_aperture,
-        aperture_radius,
-    );
-    push_gauge_arc(
-        primitives,
-        blends,
-        lane,
-        colors.fill,
-        fraction,
-        viewport_aperture,
-        aperture_radius,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_gauge_arc(
-    primitives: &mut Vec<GpuPrimitive>,
-    blends: &mut Vec<SmoothBlendMode>,
-    lane: &GaugeLane,
-    color: RoundColor,
-    fraction: f64,
-    viewport_aperture: [f32; 4],
-    aperture_radius: [f32; 4],
-) {
-    let fraction = fraction.clamp(0.0, 1.0);
-    if fraction <= 0.0 {
-        return;
+    for arc in &arcs {
+        let lane = GaugeLane {
+            ring: arc.ring,
+            stroke_width: arc.stroke_width,
+            cap: arc.cap,
+        };
+        push_analytic_arc(
+            primitives,
+            blends,
+            &lane,
+            arc.color,
+            arc.start_deg,
+            arc.end_deg,
+            viewport_aperture,
+            aperture_radius,
+        );
     }
-    let start_deg = lane.ring.track_start_deg;
-    let end_deg = growth_ring_fill_end_deg(&lane.ring, fraction);
-    push_analytic_arc(
-        primitives,
-        blends,
-        lane,
-        color,
-        start_deg,
-        end_deg,
-        viewport_aperture,
-        aperture_radius,
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1394,10 +1335,14 @@ fn push_analytic_arc(
     viewport_aperture: [f32; 4],
     aperture_radius: [f32; 4],
 ) {
-    let outer_radius = (lane.ring.radius + lane.stroke_width / 2.0) as f32;
-    if outer_radius <= 0.0 || end_deg <= start_deg {
+    let stroke_outer = lane.ring.radius + lane.stroke_width / 2.0;
+    if stroke_outer <= 0.0 || end_deg <= start_deg {
         return;
     }
+    // The rect extends `ARC_AA_MARGIN` past the stroke so the analytic outer edge
+    // antialiases inside the primitive; centerline and half-width are normalized by
+    // this padded radius, so the stroke stays at the same physical position.
+    let outer_radius = (stroke_outer + ARC_AA_MARGIN) as f32;
     primitives.push(GpuPrimitive {
         rect: [
             lane.ring.cx as f32 - outer_radius,
@@ -1480,35 +1425,45 @@ fn push_hud(
         gauge_layout.pace.ring.radius - gauge_layout.pace.stroke_width / 2.0,
         COMPANION_GAUGE_GAP_DEG,
     );
-    let mut stack_size = hud_font_size * 1.45;
     let big_color = display_rgba([0.93, 0.93, 0.97, 1.0]);
     let sub_color = display_rgba([0.62, 0.63, 0.77, 1.0]);
-    let mut layout = hud_layout(atlas, hud, stack_size as f32);
-    while (f64::from(layout.max_width) > gap.max_width
-        || f64::from(layout.total_height) > f64::from(aperture.radius) * 0.34)
-        && stack_size > 6.0
-    {
-        stack_size -= 1.0;
-        layout = hud_layout(atlas, hud, stack_size as f32);
-    }
+    // The shrink policy and stacking come from the shared `prepare_hud_layout`; the
+    // only backend-specific input is how the glyph atlas measures each run.
+    let layout = prepare_hud_layout(
+        gap,
+        f64::from(aperture.radius),
+        f64::from(aperture.height),
+        hud_font_size,
+        |sizes| {
+            let texts = [&hud.today_total, &hud.daily_percent, &hud.pace];
+            let mut metrics = [HudLineMetrics { width: 0.0, height: 0.0 }; 3];
+            for (index, metric) in metrics.iter_mut().enumerate() {
+                let font_size = sizes[index] as f32;
+                *metric = HudLineMetrics {
+                    width: f64::from(glyph_run_width(atlas, texts[index], font_size)),
+                    height: f64::from(glyph_run_height(atlas, texts[index], font_size)),
+                };
+            }
+            metrics
+        },
+    );
     let lines = [
         (&hud.today_total, layout.lines[0], big_color),
         (&hud.daily_percent, layout.lines[1], sub_color),
         (&hud.pace, layout.lines[2], sub_color),
     ];
-    let top = f64::from(aperture.height) - gap.baseline_y;
-    let mut y = top + f64::from(layout.total_height) * 0.38;
-    for (line, line_layout, color) in lines {
-        debug_assert!(line.is_ascii(), "HUD text is ASCII by contract: {line:?}");
-        let width = f64::from(line_layout.width);
-        let mut x = gap.center_x - width / 2.0;
-        for scalar in line.chars() {
+    for (text, line, color) in lines {
+        debug_assert!(text.is_ascii(), "HUD text is ASCII by contract: {text:?}");
+        let font_size = line.font_size as f32;
+        let y = line.baseline_y;
+        let mut x = line.origin_x;
+        for scalar in text.chars() {
             let entry = atlas
                 .entries
                 .get(&GlyphKey::new(scalar.to_string(), false))
                 .copied()
                 .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-            if let Some(rect) = glyph_ink_rect([x as f32, y as f32], line_layout.font_size, entry) {
+            if let Some(rect) = glyph_ink_rect([x as f32, y as f32], font_size, entry) {
                 let uv = entry
                     .visible_uv
                     .expect("a visible ink rect implies a visible uv");
@@ -1525,9 +1480,8 @@ fn push_hud(
                 });
                 blends.push(SmoothBlendMode::Normal);
             }
-            x += f64::from(glyph_advance(entry, line_layout.font_size));
+            x += f64::from(glyph_advance(entry, font_size));
         }
-        y -= f64::from(line_layout.height * 0.82);
     }
     Ok(())
 }
@@ -1539,41 +1493,6 @@ fn glyph_mode_flag(entry: GlyphAtlasEntry) -> f32 {
     match entry.fragment_mode() {
         FragmentGlyphMode::Mask => 0.0,
         FragmentGlyphMode::NativeColor => 1.0,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct HudLineLayout {
-    font_size: f32,
-    width: f32,
-    height: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct HudLayout {
-    lines: [HudLineLayout; 3],
-    max_width: f32,
-    total_height: f32,
-}
-
-fn hud_layout(atlas: &CompiledGlyphAtlas, hud: &CompanionHudText, stack_size: f32) -> HudLayout {
-    let lines = [
-        hud_line_layout(atlas, &hud.today_total, stack_size * 1.08),
-        hud_line_layout(atlas, &hud.daily_percent, stack_size * 0.68),
-        hud_line_layout(atlas, &hud.pace, stack_size * 0.68),
-    ];
-    HudLayout {
-        max_width: lines.iter().map(|line| line.width).fold(0.0, f32::max),
-        total_height: lines[0].height + lines[1].height * 0.82 + lines[2].height * 0.82,
-        lines,
-    }
-}
-
-fn hud_line_layout(atlas: &CompiledGlyphAtlas, text: &str, font_size: f32) -> HudLineLayout {
-    HudLineLayout {
-        font_size,
-        width: glyph_run_width(atlas, text, font_size),
-        height: glyph_run_height(atlas, text, font_size),
     }
 }
 
@@ -1782,11 +1701,11 @@ mod tests {
     use super::resources::GlyphEntryKind;
     use super::{
         create_atlas_bind_group_layout, create_pipelines, glyph_advance, glyph_ink_rect,
-        hud_layout, physical_dimension, push_analytic_arc, upload_glyph_atlas, CompiledGlyphAtlas,
-        CompiledRetainedResources, GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest,
-        GpuPrimitive, LayerActivationGuard, LayerActivationState, PersistentFrameBuffers,
-        Pipelines, PreparedGpuFrame, RetainedFailureCategory, RetainedResourceCounters,
-        SmoothBlendMode,
+        glyph_run_height, glyph_run_width, physical_dimension, push_analytic_arc,
+        upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry,
+        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
+        LayerActivationState, PersistentFrameBuffers, Pipelines, PreparedGpuFrame,
+        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -2071,7 +1990,7 @@ mod tests {
     }
 
     #[test]
-    fn hud_layout_uses_the_same_big_and_subline_font_policy_as_smooth() {
+    fn retained_hud_measures_runs_at_the_shared_big_and_subline_font_policy() {
         let entry = mask_entry(Some([0.0; 4]), [0.0; 2], [10.0, 20.0], 30.0, 50.0);
         let atlas = CompiledGlyphAtlas {
             width: 1,
@@ -2088,16 +2007,21 @@ mod tests {
             pace: "BB".into(),
         };
 
-        let layout = hud_layout(&atlas, &hud, 20.0);
+        // The retained HUD scales its three lines with the shared font policy, so a
+        // stack of 20 gives the big line 20*1.08 and the sub-lines 20*0.68.
+        let sizes = crate::round::hud::hud_line_font_sizes(20.0);
+        assert!((sizes[0] - 21.6).abs() < 0.001);
+        assert!((sizes[1] - 13.6).abs() < 0.001);
+        assert_eq!(sizes[1], sizes[2]);
 
-        assert!((layout.lines[0].font_size - 21.6).abs() < 0.001);
-        assert!((layout.lines[1].font_size - 13.6).abs() < 0.001);
-        assert_eq!(layout.lines[1].font_size, layout.lines[2].font_size);
-        assert!(layout.lines[0].height > layout.lines[1].height);
-        assert_eq!(
-            layout.max_width,
-            layout.lines[0].width.max(layout.lines[2].width)
-        );
+        // Retained measures each run against the glyph atlas at those shared sizes;
+        // the taller big line and the widest-run policy fall out of the measurement.
+        let big_height = glyph_run_height(&atlas, &hud.today_total, sizes[0] as f32);
+        let sub_height = glyph_run_height(&atlas, &hud.daily_percent, sizes[1] as f32);
+        assert!(big_height > sub_height);
+        let big_width = glyph_run_width(&atlas, &hud.today_total, sizes[0] as f32);
+        let single_width = glyph_run_width(&atlas, &hud.daily_percent, sizes[1] as f32);
+        assert!(big_width > single_width);
     }
 
     #[test]

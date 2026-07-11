@@ -207,9 +207,10 @@ impl GlyphAtlasEntry {
 pub(super) const ATLAS_PACKING_VERSION: u32 = 1;
 
 /// The retained fragment shader revision. Version 1 adds the native-color glyph
-/// path; the mask path is unchanged. A shader change bumps this so entries from
-/// an older shader can be invalidated.
-pub(super) const SHADER_RESOURCE_VERSION: u32 = 1;
+/// path; the mask path is unchanged. Version 2 replaces the hard aperture/ellipse/
+/// arc/round-cap edge discards with analytic `fwidth`/smoothstep coverage. A
+/// shader change bumps this so entries from an older shader can be invalidated.
+pub(super) const SHADER_RESOURCE_VERSION: u32 = 2;
 
 /// Antialiasing the atlas rasterizes under. The retained atlas draws through the
 /// default AppKit grayscale smoothing path, matching Smooth's on-screen text.

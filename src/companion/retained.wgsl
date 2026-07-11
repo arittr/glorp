@@ -80,18 +80,44 @@ fn positive_angle(angle: f32) -> f32 {
     return angle - floor(angle / tau) * tau;
 }
 
+// Antialiased edge coverage in [0, 1] for a fragment `signed_distance` from an
+// edge, over one physical pixel `pixel_width` (supplied by `fwidth` of the same
+// distance field). Mirrors `parity::analytic_coverage`: inside (< 0) is fully
+// covered, outside (> 0) fully uncovered, with a smoothstep ramp across the band.
+fn analytic_coverage(signed_distance: f32, pixel_width: f32) -> f32 {
+    let half = 0.5 * max(pixel_width, 1e-7);
+    return 1.0 - smoothstep(-half, half, signed_distance);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    // Aperture: analytic coverage across one physical pixel at the porthole edge,
+    // replacing the former hard discard so the rim antialiases like Smooth's oval
+    // clip. `fwidth` gives the edge's screen-space width, so the transition band is
+    // one physical pixel at any backing scale. Nested coverages multiply together
+    // (aperture x clip x primitive).
     let aperture_center = in.viewport_aperture.zw;
     let aperture_radius = in.aperture_radius.x;
-    if (distance(in.pixel, aperture_center) > aperture_radius) { discard; }
+    let aperture_sd = distance(in.pixel, aperture_center) - aperture_radius;
+    let aperture_width = fwidth(aperture_sd);
+    var coverage = analytic_coverage(aperture_sd, aperture_width);
+    // Cheap far-outside early-out: a fragment more than a physical pixel beyond the
+    // porthole contributes nothing. The EDGE band above stays analytic; only the
+    // fully-exterior region is discarded.
+    if (aperture_sd > aperture_width) { discard; }
+
     if (in.params.y > 0.5 && in.params.y < 1.5) {
+        // Rect clip stays an axis-aligned hard cut: its edges are horizontal and
+        // vertical, where a box clip shows no meaningful curved-edge aliasing.
         let r = in.clip_rect;
         if (in.pixel.x < r.x || in.pixel.y < r.y || in.pixel.x > r.x + r.z || in.pixel.y > r.y + r.w) { discard; }
     } else if (in.params.y >= 1.5) {
+        // Ellipse clip: analytic coverage on the normalized ellipse field so a
+        // clipped layer's curved boundary antialiases instead of hard-stepping.
         let e = in.clip_ellipse;
         let q = (in.pixel - e.xy) / max(e.zw, vec2<f32>(0.0001));
-        if (dot(q, q) > 1.0) { discard; }
+        let ellipse_sd = length(q) - 1.0;
+        coverage = coverage * analytic_coverage(ellipse_sd, fwidth(ellipse_sd));
     }
 
     let kind = in.params.x;
@@ -112,8 +138,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     } else if (kind >= 1.5) {
         let q = in.local * 2.0 - vec2<f32>(1.0);
         let radius = length(q);
-        if (radius > 1.0) { discard; }
         if (kind > 2.5 && kind < 3.5) {
+            // TANK depth base. Its round edge coincides with the porthole, whose
+            // aperture coverage above already antialiases the rim, so it does NOT
+            // add the round-primitive coverage (that would double-darken the rim).
+            // Invariant: the tank base is always opaque and drawn source-copy
+            // (Replace), so `color_a`/`color_b` premultiplied equal their straight
+            // linear values and the sRGB dither below is exact. Do NOT introduce a
+            // translucent tank base.
+            //
             // Smooth interpolates and dithers in 8-bit sRGB output space. Recreate
             // that quantization, then return linear values for the sRGB surface.
             let t = clamp(radius, 0.0, 1.0);
@@ -140,28 +173,46 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 srgb_to_linear(quantized.b) * a,
                 a,
             );
-        } else if (kind >= 3.5) {
-            if (kind < 4.5) {
-                output = mix(in.color_b, in.color_a, in.local.y);
-            } else {
-                // Exact stroked arc: one analytic primitive, with the same shared
-                // centerline radius, width, angles, and round/butt cap policy as Smooth.
-                let angle = positive_angle(atan2(q.y, q.x));
-                let start = positive_angle(in.uv.x);
-                let along = positive_angle(angle - start);
-                let sweep = in.uv.y;
-                let radial_hit = abs(radius - in.uv.z) <= in.uv.w;
-                var hit = radial_hit && along <= sweep;
-                if (!hit && in.params.w > 0.5) {
-                    let start_point = vec2<f32>(cos(start), sin(start)) * in.uv.z;
-                    let end_angle = start + sweep;
-                    let end_point = vec2<f32>(cos(end_angle), sin(end_angle)) * in.uv.z;
-                    hit = distance(q, start_point) <= in.uv.w || distance(q, end_point) <= in.uv.w;
+        } else if (kind >= 4.5) {
+            // Exact stroked arc: analytic coverage on the arc's signed distance,
+            // with the same shared centerline radius, width, angles, and round/butt
+            // cap policy as Smooth. The primitive rect carries a margin past the
+            // stroke so the outer edge's transition band is not clipped.
+            let center = in.uv.z;
+            let half_width = in.uv.w;
+            let sweep = in.uv.y;
+            let start = positive_angle(in.uv.x);
+            let along = positive_angle(atan2(q.y, q.x) - start);
+            var centerline_distance = abs(radius - center);
+            if (along > sweep) {
+                if (in.params.w > 0.5) {
+                    // Round cap: signed distance falls off from the nearest
+                    // centerline endpoint, so the cap is a smooth half-disc.
+                    let start_point = vec2<f32>(cos(start), sin(start)) * center;
+                    let end_point = vec2<f32>(cos(start + sweep), sin(start + sweep)) * center;
+                    centerline_distance = min(distance(q, start_point), distance(q, end_point));
+                } else {
+                    // Butt cap: a straight radial cut past the sweep.
+                    discard;
                 }
-                if (!hit) { discard; }
+            }
+            let arc_sd = centerline_distance - half_width;
+            coverage = coverage * analytic_coverage(arc_sd, fwidth(arc_sd));
+        } else {
+            // Solid round (kind 2) and linear-gradient round (kind 4): antialias
+            // the circular edge to match AppKit's oval fill.
+            let round_sd = radius - 1.0;
+            coverage = coverage * analytic_coverage(round_sd, fwidth(round_sd));
+            if (kind >= 3.5) {
+                output = mix(in.color_b, in.color_a, in.local.y);
             }
         }
     }
+
+    // Fold the accumulated aperture/clip/primitive coverage into the premultiplied
+    // output: scaling both RGB and alpha keeps it premultiplied, exactly as the
+    // glyph mask path does.
+    output = output * coverage;
     if (output.a <= 0.001) { discard; }
     // Every fragment output is already premultiplied-linear, and every blend
     // pipeline is the premultiplied BlendContract, so no per-mode premultiply
