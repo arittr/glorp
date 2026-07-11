@@ -14,8 +14,6 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use wgpu::util::DeviceExt;
-
 use super::presentation::RetainedFailureCategory;
 use super::{prepare_gpu_frame, RetainedChrome, RetainedHost};
 use crate::companion::paired_review::{PairedReviewFrame, RendererIdentitySource};
@@ -87,11 +85,13 @@ impl ReadbackMetadata {
             pixel_order: pixel_order_for_format(format),
         }
     }
+}
 
-    /// The size of the mappable staging buffer that receives every padded row.
-    fn staging_buffer_size(self) -> u64 {
-        u64::from(self.aligned_bytes_per_row) * u64::from(self.physical_height)
-    }
+/// The mappable staging-buffer size for a physical-size readback, independent of
+/// the surface format (the padded row stride depends only on width). The host
+/// sizes its persistent staging buffer with this.
+pub(super) fn staging_buffer_size(width: u32, height: u32) -> u64 {
+    u64::from(aligned_bytes_per_row(width)) * u64::from(height)
 }
 
 /// Rounds a tightly packed `width * 4` row up to wgpu's copy-row alignment.
@@ -167,9 +167,10 @@ pub(super) fn normalize_readback_rows(
 }
 
 /// A live GPU readback target for the retained renderer. It repaints a frozen
-/// paired-review frame into an off-screen physical-size intermediate and reads
-/// it back as a [`CanonicalRgbaFrame`]. The intermediate and staging buffers are
-/// created per call for correctness; Task 10 makes them persistent and bounded.
+/// paired-review frame into the host's persistent off-screen intermediate and
+/// reads it back as a [`CanonicalRgbaFrame`]. The intermediate, staging buffer,
+/// and instance ring are all host-owned and reused; a same-size capture
+/// allocates nothing.
 pub(super) struct RetainedCaptureTarget<'host> {
     host: &'host mut RetainedHost,
 }
@@ -221,70 +222,66 @@ impl<'host> RetainedCaptureTarget<'host> {
         // Repaint against the live host's active resource generation — the full
         // preflighted repertoire already holds every glyph the frozen scene
         // paints, so the capture needs no per-frame atlas build.
-        let active = self
-            .host
-            .glyph_resources
-            .as_ref()
-            .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-        let atlas_bind_group = &active.bind_group;
-        let gpu_frame = prepare_gpu_frame(
-            plan,
-            draw_order,
-            metrics,
-            aperture,
-            background,
-            &chrome,
-            active.resources.atlas(),
-        )?;
+        let gpu_frame = {
+            let active = self
+                .host
+                .glyph_resources
+                .as_ref()
+                .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
+            prepare_gpu_frame(
+                plan,
+                draw_order,
+                metrics,
+                aperture,
+                background,
+                &chrome,
+                active.resources.atlas(),
+            )?
+        };
 
         let width = self.host.physical_width;
         let height = self.host.physical_height;
         let layout = ReadbackMetadata::for_surface(width, height, self.host.config.format);
-        let device = &self.host.device;
+        // Reuse the host's persistent capture intermediate/staging and instance
+        // ring; a same-size capture allocates nothing.
+        self.host.ensure_capture_resources(width, height);
+        self.host.prepare_frame(&gpu_frame);
+        let capture = self
+            .host
+            .capture_resources
+            .as_ref()
+            .expect("ensure_capture_resources installs the persistent capture target");
 
-        let intermediate = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glorp-retained-capture-intermediate"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.host.config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let intermediate_view = intermediate.create_view(&wgpu::TextureViewDescriptor::default());
-        let primitive_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("glorp-retained-capture-primitives"),
-            contents: bytemuck::cast_slice(&gpu_frame.primitives),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("glorp-retained-capture-staging"),
-            size: layout.staging_buffer_size(),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("glorp-retained-capture-encoder"),
-        });
-        self.host.encode_scene(
-            &mut encoder,
-            &intermediate_view,
-            atlas_bind_group,
-            &primitive_buffer,
-            &gpu_frame.blends,
-            background,
-        );
+        let mut encoder =
+            self.host
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glorp-retained-capture-encoder"),
+                });
+        {
+            let active = self
+                .host
+                .glyph_resources
+                .as_ref()
+                .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
+            self.host.encode_scene(
+                &mut encoder,
+                &capture.intermediate_view,
+                &active.bind_group,
+                self.host.frame_buffers.current_buffer(),
+                &gpu_frame.blends,
+                background,
+            );
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &intermediate,
+                texture: &capture.intermediate,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
+                buffer: &capture.staging,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(layout.aligned_bytes_per_row),
@@ -298,7 +295,8 @@ impl<'host> RetainedCaptureTarget<'host> {
         let submission = self.host.queue.submit([encoder.finish()]);
 
         let (sender, receiver) = mpsc::sync_channel(1);
-        staging
+        capture
+            .staging
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
@@ -314,7 +312,8 @@ impl<'host> RetainedCaptureTarget<'host> {
             .recv_timeout(Duration::from_millis(100))
             .map_err(|_| RetainedFailureCategory::CaptureMapFailed)?
             .map_err(|_| RetainedFailureCategory::CaptureMapFailed)?;
-        let mapped = staging
+        let mapped = capture
+            .staging
             .slice(..)
             .get_mapped_range()
             .map_err(|_| RetainedFailureCategory::CaptureMapFailed)?;
@@ -326,7 +325,7 @@ impl<'host> RetainedCaptureTarget<'host> {
             layout.pixel_order,
         )?;
         drop(mapped);
-        staging.unmap();
+        capture.staging.unmap();
 
         Ok(CanonicalRgbaFrame {
             frame_id: frame.identity.frame_id,
@@ -413,7 +412,7 @@ mod tests {
         );
         assert_eq!(layout.pixel_order, PixelOrder::Bgra);
         assert_eq!(
-            layout.staging_buffer_size(),
+            staging_buffer_size(2, 3),
             u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * 3,
         );
     }

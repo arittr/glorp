@@ -8,7 +8,6 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 use objc2_foundation::NSSize;
 use objc2_quartz_core::CAMetalLayer;
-use wgpu::util::DeviceExt;
 
 use crate::presentation::smooth::{
     SmoothBlendMode, SmoothClip, SmoothCompanionLayer, SmoothCompanionScenePlan, SmoothFill,
@@ -34,7 +33,7 @@ pub(crate) use presentation::{
 };
 use resources::{
     CompiledGlyphAtlas, CompiledRetainedResources, FragmentGlyphMode, GlyphAtlasEntry, GlyphKey,
-    GlyphRepertoireManifest, RETAINED_ATLAS_POINT_SIZE,
+    GlyphRepertoireManifest, RetainedResourceCounters, RETAINED_ATLAS_POINT_SIZE,
 };
 
 use crate::round::smooth::CompanionContentIdentity;
@@ -97,6 +96,106 @@ struct PreparedGpuFrame {
     blends: Vec<SmoothBlendMode>,
 }
 
+/// Instance buffers held in a small ring so a frame writes into a slot the GPU is
+/// unlikely to still be reading from the previous present, avoiding a
+/// write-vs-read stall without CPU-side fences.
+const INSTANCE_RING_LEN: usize = 3;
+
+/// One instance's stride in the persistent buffer.
+const INSTANCE_STRIDE: usize = std::mem::size_of::<GpuPrimitive>();
+
+/// A capacity-bounded ring of persistent `VERTEX | COPY_DST` instance buffers.
+///
+/// A frame writes its instances into the next ring slot with `queue.write_buffer`
+/// and draws only that slot's current instance count. The ring grows — every
+/// buffer reallocated to the larger capacity — only when a frame's instance count
+/// exceeds the current capacity, which is a declared layout/semantic change, not
+/// ordinary motion. Once warmed to the steady-state high-water mark, ordinary
+/// animation reuses the buffers and only writes, so no buffer is ever recreated.
+struct PersistentFrameBuffers {
+    ring: Vec<wgpu::Buffer>,
+    capacity_instances: usize,
+    cursor: usize,
+}
+
+impl PersistentFrameBuffers {
+    fn new() -> Self {
+        Self {
+            ring: Vec::new(),
+            capacity_instances: 0,
+            cursor: 0,
+        }
+    }
+
+    /// Guarantees every ring buffer can hold at least `instances` instances.
+    /// Reallocates the whole ring — counting one buffer creation per slot — only
+    /// when the request exceeds the current capacity; a request at or below the
+    /// current capacity reuses the existing buffers and creates nothing.
+    fn ensure_instance_capacity(
+        &mut self,
+        instances: usize,
+        device: &wgpu::Device,
+        counters: &mut RetainedResourceCounters,
+    ) {
+        if !self.ring.is_empty() && instances <= self.capacity_instances {
+            return;
+        }
+        let capacity = instances.max(1);
+        let size = (capacity * INSTANCE_STRIDE) as wgpu::BufferAddress;
+        self.ring = (0..INSTANCE_RING_LEN)
+            .map(|_| {
+                counters.buffer_creations += 1;
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("glorp-retained-instances"),
+                    size,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        self.capacity_instances = capacity;
+        self.cursor = 0;
+    }
+
+    /// Writes `instances` into the next ring slot and records the write. The
+    /// caller must have called [`Self::ensure_instance_capacity`] for at least
+    /// `instances.len()` first. `instance_writes`/`instance_write_bytes` advance
+    /// only after the queue write is issued.
+    fn write_frame_instances(
+        &mut self,
+        queue: &wgpu::Queue,
+        instances: &[GpuPrimitive],
+        counters: &mut RetainedResourceCounters,
+    ) {
+        debug_assert!(
+            !self.ring.is_empty() && instances.len() <= self.capacity_instances,
+            "write_frame_instances requires ensure_instance_capacity first",
+        );
+        self.cursor = (self.cursor + 1) % self.ring.len();
+        let bytes: &[u8] = bytemuck::cast_slice(instances);
+        queue.write_buffer(&self.ring[self.cursor], 0, bytes);
+        counters.instance_writes += 1;
+        counters.instance_write_bytes += bytes.len() as u64;
+    }
+
+    /// The ring buffer holding the current frame's instances.
+    fn current_buffer(&self) -> &wgpu::Buffer {
+        &self.ring[self.cursor]
+    }
+}
+
+/// The off-screen capture intermediate and its mappable staging buffer, keyed by
+/// the physical size and surface format they were built for. A resize or
+/// backing-scale change replaces them once; ordinary captures reuse them.
+struct PersistentCaptureResources {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    intermediate: wgpu::Texture,
+    intermediate_view: wgpu::TextureView,
+    staging: wgpu::Buffer,
+}
+
 /// The GPU resources for one active resource generation: the compiled atlas plus
 /// the declared-content identity and backing scale it was compiled for, so the
 /// host knows when a generation change requires recompiling, and the uploaded
@@ -119,6 +218,9 @@ pub(super) struct RetainedHost {
     pipelines: Pipelines,
     atlas_layout: wgpu::BindGroupLayout,
     glyph_resources: Option<ActiveGlyphResources>,
+    frame_buffers: PersistentFrameBuffers,
+    capture_resources: Option<PersistentCaptureResources>,
+    counters: RetainedResourceCounters,
     physical_width: u32,
     physical_height: u32,
     backing_scale: f64,
@@ -315,28 +417,9 @@ impl PreparedRetainedHost {
             .get_default_config(&adapter, width, height)
             .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
         surface.configure(&device, &config);
-        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("glorp-retained-atlas-layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let pipelines = create_pipelines(&device, config.format, &atlas_layout);
+        let mut counters = RetainedResourceCounters::default();
+        let atlas_layout = create_atlas_bind_group_layout(&device);
+        let pipelines = create_pipelines(&device, config.format, &atlas_layout, &mut counters);
         Ok(Self {
             host: RetainedHost {
                 surface,
@@ -347,6 +430,9 @@ impl PreparedRetainedHost {
                 pipelines,
                 atlas_layout,
                 glyph_resources: None,
+                frame_buffers: PersistentFrameBuffers::new(),
+                capture_resources: None,
+                counters,
                 physical_width: width,
                 physical_height: height,
                 backing_scale: scale,
@@ -475,30 +561,38 @@ impl RetainedHost {
             fail(&mut progress, category);
             return progress;
         }
-        let Some(active) = self.glyph_resources.as_ref() else {
+        let Some(generation) = self
+            .glyph_resources
+            .as_ref()
+            .map(|active| active.resources.generation().value())
+        else {
             let mut progress = FrameProgress::new(frame_id, 0);
             fail(&mut progress, RetainedFailureCategory::AtlasUnavailable);
             return progress;
         };
-        let mut progress = FrameProgress::new(frame_id, active.resources.generation().value());
-        let atlas = active.resources.atlas();
-        let atlas_bind_group = &active.bind_group;
-        let frame = match prepare_gpu_frame(
-            plan, draw_order, metrics, aperture, background, &chrome, atlas,
-        ) {
-            Ok(frame) => frame,
-            Err(category) => {
-                fail(&mut progress, category);
-                return progress;
+        let mut progress = FrameProgress::new(frame_id, generation);
+        let frame = {
+            let active = self
+                .glyph_resources
+                .as_ref()
+                .expect("an established generation implies active glyph resources");
+            match prepare_gpu_frame(
+                plan,
+                draw_order,
+                metrics,
+                aperture,
+                background,
+                &chrome,
+                active.resources.atlas(),
+            ) {
+                Ok(frame) => frame,
+                Err(category) => {
+                    fail(&mut progress, category);
+                    return progress;
+                }
             }
         };
-        let primitive_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("glorp-retained-primitives"),
-                contents: bytemuck::cast_slice(&frame.primitives),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        self.prepare_frame(&frame);
         progress
             .mark(FrameMilestone::Prepared)
             .expect("prepared opens the frame ladder");
@@ -535,14 +629,20 @@ impl RetainedHost {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("glorp-retained-frame"),
             });
-        self.encode_scene(
-            &mut encoder,
-            &target,
-            atlas_bind_group,
-            &primitive_buffer,
-            &frame.blends,
-            background,
-        );
+        {
+            let active = self
+                .glyph_resources
+                .as_ref()
+                .expect("an established generation implies active glyph resources");
+            self.encode_scene(
+                &mut encoder,
+                &target,
+                &active.bind_group,
+                self.frame_buffers.current_buffer(),
+                &frame.blends,
+                background,
+            );
+        }
         progress
             .mark(FrameMilestone::Encoded)
             .expect("encoded follows prepared");
@@ -555,6 +655,23 @@ impl RetainedHost {
             .finish(FrameDisposition::SurfacePresentCalled)
             .expect("a submitted frame presents exactly once");
         progress
+    }
+
+    /// Stages a prepared frame's instances into the persistent instance ring:
+    /// grows the ring only if the instance count exceeds the current capacity,
+    /// then writes the used prefix into the next slot. Ordinary motion holds the
+    /// count steady, so this only issues a `write_buffer` and never allocates.
+    fn prepare_frame(&mut self, frame: &PreparedGpuFrame) {
+        self.frame_buffers.ensure_instance_capacity(
+            frame.primitives.len(),
+            &self.device,
+            &mut self.counters,
+        );
+        self.frame_buffers.write_frame_instances(
+            &self.queue,
+            &frame.primitives,
+            &mut self.counters,
+        );
     }
 
     /// Encodes the prepared companion scene into `target_view` on `encoder`: one
@@ -616,11 +733,24 @@ impl RetainedHost {
         }
         // The first compile is the activation build; any later one is a
         // legitimate, rare rebuild a resource generation change (e.g. a resize's
-        // backing-scale change) caused — never per-frame animation churn.
+        // backing-scale change) caused — never per-frame animation churn. A
+        // rebuild while a generation is already active is post-activation churn
+        // the counters surface for the churn contract.
+        let rebuilding = self.glyph_resources.is_some();
         let manifest =
             GlyphRepertoireManifest::for_active_pet(identity.clone(), self.backing_scale);
         let resources = CompiledRetainedResources::compile(&manifest)?;
-        let (texture, bind_group) = self.upload_glyph_atlas(resources.atlas());
+        let (texture, bind_group) = upload_glyph_atlas(
+            &self.device,
+            &self.queue,
+            &self.atlas_layout,
+            resources.atlas(),
+            &mut self.counters,
+        );
+        if rebuilding {
+            self.counters.atlas_builds_after_activation += 1;
+            self.counters.atlas_uploads_after_activation += 1;
+        }
         self.glyph_resources = Some(ActiveGlyphResources {
             identity: identity.clone(),
             backing_scale: self.backing_scale,
@@ -631,65 +761,51 @@ impl RetainedHost {
         Ok(())
     }
 
-    /// Uploads a compiled glyph atlas into a GPU texture and builds its bind
-    /// group.
-    fn upload_glyph_atlas(&self, atlas: &CompiledGlyphAtlas) -> (wgpu::Texture, wgpu::BindGroup) {
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glorp-retained-glyph-atlas"),
-            size: wgpu::Extent3d {
-                width: atlas.width,
-                height: atlas.height,
-                depth_or_array_layers: 1,
-            },
+    /// Ensures the persistent capture intermediate and staging buffer match the
+    /// current physical size and surface format, replacing them once on a change.
+    /// Ordinary same-size captures reuse them.
+    fn ensure_capture_resources(&mut self, width: u32, height: u32) {
+        let format = self.config.format;
+        let fits = self.capture_resources.as_ref().is_some_and(|resources| {
+            resources.width == width && resources.height == height && resources.format == format
+        });
+        if fits {
+            return;
+        }
+        let intermediate = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glorp-retained-capture-intermediate"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &atlas.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(atlas.width * 4),
-                rows_per_image: Some(atlas.height),
-            },
-            wgpu::Extent3d {
-                width: atlas.width,
-                height: atlas.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("glorp-retained-atlas-sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
+        self.counters.texture_creations += 1;
+        let intermediate_view = intermediate.create_view(&wgpu::TextureViewDescriptor::default());
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glorp-retained-capture-staging"),
+            size: capture::staging_buffer_size(width, height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
         });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("glorp-retained-atlas-bind-group"),
-            layout: &self.atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
+        self.counters.buffer_creations += 1;
+        self.capture_resources = Some(PersistentCaptureResources {
+            width,
+            height,
+            format,
+            intermediate,
+            intermediate_view,
+            staging,
         });
-        (texture, bind_group)
+    }
+
+    /// The current GPU resource-lifecycle counters. A caller snapshots this,
+    /// drives frames, and subtracts to prove the steady state created nothing.
+    #[allow(dead_code)] // Production resource-counter accessor; the counters are the contract surface.
+    fn counters(&self) -> RetainedResourceCounters {
+        self.counters
     }
 
     fn resize_if_needed(
@@ -741,10 +857,110 @@ fn physical_dimension(logical: f64, scale: f64) -> u32 {
     (logical * scale).round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
+/// Builds the fragment-stage bind-group layout for the glyph atlas texture and
+/// sampler. Shared by the surface-bearing host and the headless resource harness.
+fn create_atlas_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("glorp-retained-atlas-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Uploads a compiled glyph atlas into a GPU texture and builds its bind group,
+/// counting the texture, sampler, bind group, and the one static upload. Shared
+/// by generation activation on the surface-bearing host and the headless resource
+/// harness so both count creations identically.
+fn upload_glyph_atlas(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    atlas_layout: &wgpu::BindGroupLayout,
+    atlas: &CompiledGlyphAtlas,
+    counters: &mut RetainedResourceCounters,
+) -> (wgpu::Texture, wgpu::BindGroup) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glorp-retained-glyph-atlas"),
+        size: wgpu::Extent3d {
+            width: atlas.width,
+            height: atlas.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    counters.texture_creations += 1;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &atlas.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(atlas.width * 4),
+            rows_per_image: Some(atlas.height),
+        },
+        wgpu::Extent3d {
+            width: atlas.width,
+            height: atlas.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    counters.static_uploads += 1;
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("glorp-retained-atlas-sampler"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    counters.sampler_creations += 1;
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("glorp-retained-atlas-bind-group"),
+        layout: atlas_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+    counters.bind_group_creations += 1;
+    (texture, bind_group)
+}
+
 fn create_pipelines(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     atlas_layout: &wgpu::BindGroupLayout,
+    counters: &mut RetainedResourceCounters,
 ) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("glorp-retained-shader"),
@@ -755,7 +971,8 @@ fn create_pipelines(
         bind_group_layouts: &[Some(atlas_layout)],
         immediate_size: 0,
     });
-    let create = |label: &'static str, blend: Option<wgpu::BlendState>| {
+    let mut create = |label: &'static str, blend: Option<wgpu::BlendState>| {
+        counters.pipeline_creations += 1;
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&layout),
@@ -1584,12 +1801,181 @@ fn srgb_channel_to_linear(channel: f32) -> f32 {
 mod tests {
     use super::resources::GlyphEntryKind;
     use super::{
-        glyph_advance, glyph_ink_rect, hud_layout, physical_dimension, push_analytic_arc,
-        srgb_channel_to_linear, CompiledGlyphAtlas, GlyphAtlasEntry, GlyphKey,
-        GlyphRepertoireManifest, LayerActivationGuard, LayerActivationState,
+        create_atlas_bind_group_layout, create_pipelines, glyph_advance, glyph_ink_rect,
+        hud_layout, physical_dimension, push_analytic_arc, srgb_channel_to_linear,
+        upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry,
+        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
+        LayerActivationState, PersistentFrameBuffers, Pipelines, PreparedGpuFrame,
+        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
     };
+    use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
     use std::collections::BTreeMap;
+
+    /// The surface format the headless resource harness builds its pipelines and
+    /// capture intermediate against — Metal's common `Bgra8UnormSrgb`. No surface
+    /// is created, so this only selects the pipeline color-target format.
+    const TEST_SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+    /// The fixed instance count of a synthetic ambient frame. Ambient idle motion
+    /// wobbles a fixed set of primitives, so the count never changes and the
+    /// persistent ring is written but never grown after warmup.
+    const AMBIENT_PRIMITIVE_COUNT: usize = 96;
+
+    /// A deterministic ambient animation strip as prepared GPU frames. Each frame
+    /// carries the same primitive count with per-frame position wobble — the
+    /// resource-lifecycle shape of ordinary idle motion, isolated from scene
+    /// content so the counters measure only buffer reuse.
+    fn deterministic_ambient_frames(count: usize) -> Vec<PreparedGpuFrame> {
+        (0..count)
+            .map(|frame_index| {
+                let phase = frame_index as f32 * 0.05;
+                let primitives = (0..AMBIENT_PRIMITIVE_COUNT)
+                    .map(|i| {
+                        let base = i as f32;
+                        let wobble = (phase + base * 0.1).sin() * 2.0;
+                        GpuPrimitive {
+                            rect: [40.0 + base + wobble, 40.0 + base - wobble, 8.0, 8.0],
+                            color_a: [0.20, 0.30, 0.45, 1.0],
+                            color_b: [0.0; 4],
+                            uv: [0.0; 4],
+                            params: [2.0, 0.0, 0.0, 0.0],
+                            clip_rect: [0.0; 4],
+                            clip_ellipse: [0.0; 4],
+                            viewport_aperture: [360.0, 360.0, 180.0, 180.0],
+                            aperture_radius: [180.0, 0.0, 0.0, 0.0],
+                        }
+                    })
+                    .collect();
+                let blends = vec![SmoothBlendMode::Normal; AMBIENT_PRIMITIVE_COUNT];
+                PreparedGpuFrame { primitives, blends }
+            })
+            .collect()
+    }
+
+    /// A warmed, surfaceless mirror of the retained host's GPU resource surface:
+    /// a headless Metal device, the production pipelines, an uploaded glyph atlas,
+    /// and the persistent instance ring primed to the ambient high-water mark. It
+    /// drives the same production `PersistentFrameBuffers` and
+    /// [`RetainedResourceCounters`] the surface-bearing host does, so it proves the
+    /// steady-state resource contract without a window.
+    struct TestRetainedResources {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        frame_buffers: PersistentFrameBuffers,
+        counters: RetainedResourceCounters,
+        // Held to mirror a warm host's live GPU resources during steady state.
+        _pipelines: Pipelines,
+        _atlas_texture: wgpu::Texture,
+        _atlas_bind_group: wgpu::BindGroup,
+    }
+
+    impl TestRetainedResources {
+        /// Builds a surfaceless device, the production pipelines and glyph atlas,
+        /// and primes the instance ring to the ambient high-water mark. Every GPU
+        /// object created here lands in the warmup baseline.
+        fn warm() -> Self {
+            let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+            descriptor.backends = wgpu::Backends::METAL;
+            let instance = wgpu::Instance::new(descriptor);
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                    ..Default::default()
+                }))
+                .expect("a surfaceless Metal adapter is available on this machine");
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("glorp-retained-test-device"),
+                    ..Default::default()
+                }))
+                .expect("a surfaceless Metal device is available on this machine");
+
+            let mut counters = RetainedResourceCounters::default();
+            let atlas_layout = create_atlas_bind_group_layout(&device);
+            let pipelines =
+                create_pipelines(&device, TEST_SURFACE_FORMAT, &atlas_layout, &mut counters);
+
+            // Compile and upload a real declared repertoire exactly as generation
+            // activation does, so the static upload and atlas objects land in the
+            // warmup baseline.
+            let manifest = GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Crystal),
+                2.0,
+            );
+            let resources = CompiledRetainedResources::compile(&manifest)
+                .expect("the declared repertoire fits the preflighted atlas");
+            let (atlas_texture, atlas_bind_group) = upload_glyph_atlas(
+                &device,
+                &queue,
+                &atlas_layout,
+                resources.atlas(),
+                &mut counters,
+            );
+
+            // Prime the instance ring to the ambient high-water mark so steady-state
+            // frames reuse it without growing.
+            let mut frame_buffers = PersistentFrameBuffers::new();
+            let high_water = deterministic_ambient_frames(1)
+                .iter()
+                .map(|frame| frame.primitives.len())
+                .max()
+                .unwrap_or(0);
+            frame_buffers.ensure_instance_capacity(high_water, &device, &mut counters);
+
+            Self {
+                device,
+                queue,
+                frame_buffers,
+                counters,
+                _pipelines: pipelines,
+                _atlas_texture: atlas_texture,
+                _atlas_bind_group: atlas_bind_group,
+            }
+        }
+
+        fn counters(&self) -> RetainedResourceCounters {
+            self.counters
+        }
+
+        /// Stages a prepared frame's instances into the persistent ring, exactly
+        /// as the surface-bearing host's `prepare_frame` does.
+        fn prepare_frame(
+            &mut self,
+            frame: &PreparedGpuFrame,
+        ) -> std::result::Result<(), RetainedFailureCategory> {
+            self.frame_buffers.ensure_instance_capacity(
+                frame.primitives.len(),
+                &self.device,
+                &mut self.counters,
+            );
+            self.frame_buffers.write_frame_instances(
+                &self.queue,
+                &frame.primitives,
+                &mut self.counters,
+            );
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ambient_strip_allocates_no_gpu_objects_after_warmup() {
+        let mut host = TestRetainedResources::warm();
+        let before = host.counters();
+        for frame in deterministic_ambient_frames(300) {
+            host.prepare_frame(&frame).unwrap();
+        }
+        let delta = host.counters() - before;
+        assert_eq!(delta.buffer_creations, 0);
+        assert_eq!(delta.texture_creations, 0);
+        assert_eq!(delta.sampler_creations, 0);
+        assert_eq!(delta.bind_group_creations, 0);
+        assert_eq!(delta.pipeline_creations, 0);
+        assert_eq!(delta.static_uploads, 0);
+        assert!(delta.instance_writes > 0);
+    }
 
     /// A visible coverage-mask entry with the given ink geometry; the metric
     /// fields the retained layout does not read stay neutral.

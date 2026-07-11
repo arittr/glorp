@@ -751,17 +751,81 @@ impl CompiledRetainedResources {
     }
 }
 
-/// Post-activation resource churn counters the test harness proves the churn
-/// contract with. A companion activated from its full declared repertoire must
-/// run any animation with all three at zero: the atlas is compiled once at the
-/// generation change and never rebuilt, re-uploaded, or missed per frame. (Task
-/// 10 adds buffer/texture counters.)
-#[cfg(test)]
+/// GPU resource-lifecycle counters for the retained host. Every field records
+/// how many times the host actually created a GPU object or wrote instance data,
+/// so a caller can snapshot the counters, run a stretch of frames, and prove the
+/// steady state created nothing: `host.counters() - before` yields the delta.
+///
+/// The atlas fields carry the post-activation churn contract: a companion
+/// activated from its full declared repertoire runs any animation with
+/// `atlas_builds_after_activation`, `atlas_uploads_after_activation`, and
+/// `atlas_misses` all zero — the atlas is compiled once at the generation change
+/// and never rebuilt, re-uploaded, or missed per frame. The creation counters
+/// carry the bounded-buffer contract: after warmup, ordinary motion writes
+/// instances but creates no buffers, textures, samplers, bind groups, or
+/// pipelines, and performs no static uploads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct RetainedResourceCounters {
+pub(crate) struct RetainedResourceCounters {
     pub(super) atlas_builds_after_activation: u32,
     pub(super) atlas_uploads_after_activation: u32,
     pub(super) atlas_misses: u32,
+    /// GPU buffers created (persistent instance-ring growth and the capture
+    /// staging buffer).
+    pub(super) buffer_creations: u32,
+    /// GPU textures created (the glyph atlas and the capture intermediate).
+    pub(super) texture_creations: u32,
+    /// GPU samplers created (the glyph atlas sampler).
+    pub(super) sampler_creations: u32,
+    /// GPU bind groups created (the glyph atlas bind group).
+    pub(super) bind_group_creations: u32,
+    /// GPU render pipelines created (one per blend mode at host construction).
+    pub(super) pipeline_creations: u32,
+    /// Static texture uploads performed (the glyph atlas upload at generation
+    /// activation), never per frame.
+    pub(super) static_uploads: u32,
+    /// Instance-buffer writes performed — one per prepared frame in steady
+    /// state.
+    pub(super) instance_writes: u32,
+    /// Total bytes written into instance buffers across every `instance_writes`.
+    pub(super) instance_write_bytes: u64,
+}
+
+impl std::ops::Sub for RetainedResourceCounters {
+    type Output = Self;
+
+    /// Field-wise delta of two snapshots. Saturating so a delta never wraps if a
+    /// caller subtracts snapshots out of order.
+    fn sub(self, earlier: Self) -> Self {
+        Self {
+            atlas_builds_after_activation: self
+                .atlas_builds_after_activation
+                .saturating_sub(earlier.atlas_builds_after_activation),
+            atlas_uploads_after_activation: self
+                .atlas_uploads_after_activation
+                .saturating_sub(earlier.atlas_uploads_after_activation),
+            atlas_misses: self.atlas_misses.saturating_sub(earlier.atlas_misses),
+            buffer_creations: self
+                .buffer_creations
+                .saturating_sub(earlier.buffer_creations),
+            texture_creations: self
+                .texture_creations
+                .saturating_sub(earlier.texture_creations),
+            sampler_creations: self
+                .sampler_creations
+                .saturating_sub(earlier.sampler_creations),
+            bind_group_creations: self
+                .bind_group_creations
+                .saturating_sub(earlier.bind_group_creations),
+            pipeline_creations: self
+                .pipeline_creations
+                .saturating_sub(earlier.pipeline_creations),
+            static_uploads: self.static_uploads.saturating_sub(earlier.static_uploads),
+            instance_writes: self.instance_writes.saturating_sub(earlier.instance_writes),
+            instance_write_bytes: self
+                .instance_write_bytes
+                .saturating_sub(earlier.instance_write_bytes),
+        }
+    }
 }
 
 #[cfg(test)]
