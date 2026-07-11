@@ -1,6 +1,9 @@
 use clap::ValueEnum;
 use std::path::PathBuf;
 
+#[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+use crate::companion::retained::{FrameDisposition, RetainedFailureCategory};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompanionReviewOptions {
     pub initial_size: Option<CompanionReviewSize>,
@@ -20,6 +23,111 @@ pub struct CompanionReviewOptions {
     /// from the hidden `--review-force-dim` flag (the xtask `--dimmed` matrix
     /// variant); never persisted.
     pub force_dim_overlay: bool,
+    /// Dev/test-only bounded retained fault injection. Threaded from the hidden
+    /// `--review-inject-retained-fault` flag, compiled only with the retained
+    /// renderer plus dev-preview so it never ships in a release build. Drives the
+    /// acknowledged Smooth fallback or a failed capture without any real device
+    /// fault.
+    #[cfg(all(
+        target_os = "macos",
+        feature = "retained-renderer",
+        feature = "dev-preview"
+    ))]
+    pub retained_fault_injection: Option<RetainedFaultInjection>,
+}
+
+/// A bounded, static retained fault the dev/test harness can inject to exercise
+/// the acknowledged Smooth fallback and failed-capture paths without a real GPU
+/// fault. Compiled only with `retained-renderer` plus `dev-preview`, so a release
+/// build has neither the flag nor the injection behavior. Every variant maps to a
+/// static, privacy-safe [`RetainedFailureCategory`].
+#[cfg(all(
+    target_os = "macos",
+    feature = "retained-renderer",
+    feature = "dev-preview"
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RetainedFaultInjection {
+    /// Retained host initialization fails at startup; the app starts on Smooth.
+    Initialization,
+    /// The surface is reported lost mid-run.
+    SurfaceLoss,
+    /// The device reports a validation error mid-run.
+    Validation,
+    /// The device reports an internal error mid-run.
+    Internal,
+    /// The device reports an out-of-memory error mid-run.
+    OutOfMemory,
+    /// The device is reported lost mid-run.
+    DeviceLoss,
+    /// A GPU resource (glyph atlas) is unavailable mid-run.
+    ResourceFailure,
+    /// The frozen scene declares content the raster path cannot serve.
+    UnsupportedRaster,
+    /// Mapping the readback staging buffer fails during a paired capture.
+    MapFailure,
+    /// The readback buffer is too short, yielding a blank capture.
+    BlankCapture,
+    /// Writing a capture artifact to disk fails.
+    WriteFailure,
+}
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "retained-renderer",
+    feature = "dev-preview"
+))]
+impl RetainedFaultInjection {
+    /// The static failure category this fault presents as.
+    const fn category(self) -> RetainedFailureCategory {
+        match self {
+            Self::Initialization => RetainedFailureCategory::DeviceUnavailable,
+            Self::SurfaceLoss => RetainedFailureCategory::SurfaceLost,
+            Self::Validation => RetainedFailureCategory::DeviceValidation,
+            Self::Internal => RetainedFailureCategory::DeviceInternal,
+            Self::OutOfMemory => RetainedFailureCategory::DeviceOutOfMemory,
+            Self::DeviceLoss => RetainedFailureCategory::DeviceUnavailable,
+            Self::ResourceFailure => RetainedFailureCategory::AtlasUnavailable,
+            Self::UnsupportedRaster => RetainedFailureCategory::UnsupportedRaster,
+            Self::MapFailure => RetainedFailureCategory::CaptureMapFailed,
+            Self::BlankCapture => RetainedFailureCategory::CaptureBufferTooShort,
+            Self::WriteFailure => RetainedFailureCategory::CaptureWriteFailed,
+        }
+    }
+
+    /// The category to fail host initialization with, when this fault targets the
+    /// startup path; `None` for every mid-run and capture fault.
+    pub(crate) fn initialization_category(self) -> Option<RetainedFailureCategory> {
+        matches!(self, Self::Initialization).then(|| self.category())
+    }
+
+    /// The category to raise as an asynchronous device fault mid-run, driving the
+    /// acknowledged Smooth fallback; `None` for the initialization and capture
+    /// faults.
+    pub(crate) fn device_fault_category(self) -> Option<RetainedFailureCategory> {
+        matches!(
+            self,
+            Self::SurfaceLoss
+                | Self::Validation
+                | Self::Internal
+                | Self::OutOfMemory
+                | Self::DeviceLoss
+                | Self::ResourceFailure
+                | Self::UnsupportedRaster
+        )
+        .then(|| self.category())
+    }
+
+    /// The category to fail the paired capture with, marking the manifest failed
+    /// without changing the effective renderer; `None` for startup and mid-run
+    /// device faults.
+    pub(crate) fn capture_fault_category(self) -> Option<RetainedFailureCategory> {
+        matches!(
+            self,
+            Self::MapFailure | Self::BlankCapture | Self::WriteFailure
+        )
+        .then(|| self.category())
+    }
 }
 
 /// The three depth planes a review capture can pin, normalized onto the raw depth
@@ -281,6 +389,79 @@ mod tests {
 
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
     #[test]
+    fn initialization_failure_is_labeled_and_smooth_paint_is_acknowledged() {
+        use crate::companion::retained::{FrameDisposition, RetainedFailureCategory};
+
+        let mut state = RendererRuntimeState::fixture_retained();
+        state.request_fallback(RetainedFailureCategory::DeviceUnavailable);
+        assert_eq!(
+            state.disposition(),
+            FrameDisposition::FallbackPending(RetainedFailureCategory::DeviceUnavailable,)
+        );
+        state.acknowledge_smooth_paint();
+        assert_eq!(
+            state.disposition(),
+            FrameDisposition::FallbackPainted(RetainedFailureCategory::DeviceUnavailable,)
+        );
+    }
+
+    #[cfg(all(
+        target_os = "macos",
+        feature = "retained-renderer",
+        feature = "dev-preview"
+    ))]
+    #[test]
+    fn each_injected_fault_routes_to_exactly_one_seam() {
+        use super::RetainedFaultInjection;
+        use crate::companion::retained::RetainedFailureCategory;
+
+        // A startup fault fails initialization only.
+        let init = RetainedFaultInjection::Initialization;
+        assert_eq!(
+            init.initialization_category(),
+            Some(RetainedFailureCategory::DeviceUnavailable)
+        );
+        assert_eq!(init.device_fault_category(), None);
+        assert_eq!(init.capture_fault_category(), None);
+
+        // Mid-run device faults drive the runtime fallback, never a capture failure.
+        for fault in [
+            RetainedFaultInjection::SurfaceLoss,
+            RetainedFaultInjection::Validation,
+            RetainedFaultInjection::Internal,
+            RetainedFaultInjection::OutOfMemory,
+            RetainedFaultInjection::DeviceLoss,
+            RetainedFaultInjection::ResourceFailure,
+            RetainedFaultInjection::UnsupportedRaster,
+        ] {
+            assert!(fault.device_fault_category().is_some(), "{fault:?}");
+            assert_eq!(fault.initialization_category(), None, "{fault:?}");
+            assert_eq!(fault.capture_fault_category(), None, "{fault:?}");
+        }
+
+        // Capture faults fail the paired capture without a runtime fallback.
+        for (fault, expected) in [
+            (
+                RetainedFaultInjection::MapFailure,
+                RetainedFailureCategory::CaptureMapFailed,
+            ),
+            (
+                RetainedFaultInjection::BlankCapture,
+                RetainedFailureCategory::CaptureBufferTooShort,
+            ),
+            (
+                RetainedFaultInjection::WriteFailure,
+                RetainedFailureCategory::CaptureWriteFailed,
+            ),
+        ] {
+            assert_eq!(fault.capture_fault_category(), Some(expected), "{fault:?}");
+            assert_eq!(fault.initialization_category(), None, "{fault:?}");
+            assert_eq!(fault.device_fault_category(), None, "{fault:?}");
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    #[test]
     fn explicit_retained_requires_compiled_support() {
         assert_eq!(
             resolve_renderer(
@@ -497,6 +678,11 @@ pub struct RendererRuntimeState {
     effective: EffectiveCompanionRenderer,
     transition_count: u64,
     last_fallback_reason: Option<&'static str>,
+    /// The acknowledged-fallback disposition. `None` until a runtime or startup
+    /// fault requests a Smooth fallback; then `FallbackPending` until the first
+    /// Smooth paint acknowledges it as `FallbackPainted`.
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    fallback: Option<FrameDisposition>,
 }
 
 impl RendererRuntimeState {
@@ -506,6 +692,8 @@ impl RendererRuntimeState {
             effective,
             transition_count: 0,
             last_fallback_reason: None,
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            fallback: None,
         }
     }
 
@@ -531,5 +719,45 @@ impl RendererRuntimeState {
         self.effective = EffectiveCompanionRenderer::Smooth;
         self.transition_count = self.transition_count.saturating_add(1);
         self.last_fallback_reason = Some(reason);
+    }
+
+    /// Requests the acknowledged Smooth fallback for `category`: degrades the
+    /// effective renderer to Smooth and records a `FallbackPending` disposition.
+    /// The pending disposition is not acknowledged until the first Smooth paint
+    /// lands via [`acknowledge_smooth_paint`](Self::acknowledge_smooth_paint), so
+    /// a review capture can prove the degraded path actually reached the screen.
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    pub(crate) fn request_fallback(&mut self, category: RetainedFailureCategory) {
+        self.fallback_to_smooth(category.category());
+        self.fallback = Some(FrameDisposition::FallbackPending(category));
+    }
+
+    /// Acknowledges that the Smooth fallback has painted a frame. Promotes a
+    /// `FallbackPending` disposition to `FallbackPainted`; a no-op when no
+    /// fallback is pending, so calling it after every Smooth paint is safe.
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    pub(crate) fn acknowledge_smooth_paint(&mut self) {
+        if let Some(FrameDisposition::FallbackPending(category)) = self.fallback {
+            self.fallback = Some(FrameDisposition::FallbackPainted(category));
+        }
+    }
+
+    /// The current acknowledged-fallback disposition. Before any fallback this is
+    /// `SurfacePresentCalled` (the healthy retained terminal); after a fallback it
+    /// reports `FallbackPending` then `FallbackPainted`.
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    pub(crate) fn disposition(&self) -> FrameDisposition {
+        self.fallback
+            .unwrap_or(FrameDisposition::SurfacePresentCalled)
+    }
+
+    /// A retained runtime that has resolved to the Retained renderer, for driving
+    /// the acknowledged-fallback state transitions under test.
+    #[cfg(all(test, target_os = "macos", feature = "retained-renderer"))]
+    pub(crate) fn fixture_retained() -> Self {
+        Self::new(
+            CompanionRendererRequest::Retained,
+            EffectiveCompanionRenderer::Retained,
+        )
     }
 }

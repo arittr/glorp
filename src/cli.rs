@@ -63,6 +63,17 @@ pub enum Command {
         review_capture_live_values: bool,
         #[arg(long, hide = true)]
         review_force_dim: bool,
+        /// Dev/test-only bounded retained fault injection (see
+        /// `RetainedFaultInjection`). Compiled only with retained-renderer plus
+        /// dev-preview, so it is absent from a release build.
+        #[cfg(all(
+            target_os = "macos",
+            feature = "retained-renderer",
+            feature = "dev-preview"
+        ))]
+        #[arg(long, value_enum, hide = true)]
+        review_inject_retained_fault:
+            Option<crate::commands::companion_mode::RetainedFaultInjection>,
     },
     #[command(hide = true)]
     CompanionApp {
@@ -84,6 +95,17 @@ pub enum Command {
         review_capture_live_values: bool,
         #[arg(long, hide = true)]
         review_force_dim: bool,
+        /// Dev/test-only bounded retained fault injection (see
+        /// `RetainedFaultInjection`). Compiled only with retained-renderer plus
+        /// dev-preview, so it is absent from a release build.
+        #[cfg(all(
+            target_os = "macos",
+            feature = "retained-renderer",
+            feature = "dev-preview"
+        ))]
+        #[arg(long, value_enum, hide = true)]
+        review_inject_retained_fault:
+            Option<crate::commands::companion_mode::RetainedFaultInjection>,
     },
     /// Print a compact non-interactive pet and usage summary.
     Status,
@@ -188,6 +210,14 @@ impl Cli {
             depth: review_depth,
             review_capture_live_values,
             force_dim_overlay: review_force_dim,
+            // Fault injection is threaded in by the command dispatcher, not this
+            // shared review-flag builder.
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            retained_fault_injection: None,
         }
     }
 }

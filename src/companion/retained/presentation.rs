@@ -47,11 +47,11 @@ pub(crate) enum FrameDisposition {
     Captured,
     Skipped(SkipReason),
     Failed(RetainedFailureCategory),
-    /// Emitted by the acknowledged-fallback path (Task 13).
-    #[allow(dead_code)]
+    /// The runtime has requested a Smooth fallback but the degraded path has not
+    /// yet painted. Carried on [`RendererRuntimeState`](crate::commands::companion_mode::RendererRuntimeState).
     FallbackPending(RetainedFailureCategory),
-    /// Emitted by the acknowledged-fallback path (Task 13).
-    #[allow(dead_code)]
+    /// The Smooth fallback has painted a frame, acknowledging the degradation is
+    /// on screen. Carried on [`RendererRuntimeState`](crate::commands::companion_mode::RendererRuntimeState).
     FallbackPainted(RetainedFailureCategory),
 }
 
@@ -80,6 +80,10 @@ pub(crate) enum RetainedFailureCategory {
     CaptureMapFailed,
     /// The mapped readback buffer was shorter than the frame's row layout.
     CaptureBufferTooShort,
+    /// Writing a capture artifact (png/manifest) to disk failed. Only produced by
+    /// the dev/test write-failure fault injection.
+    #[cfg(feature = "dev-preview")]
+    CaptureWriteFailed,
 }
 
 impl RetainedFailureCategory {
@@ -100,6 +104,8 @@ impl RetainedFailureCategory {
             Self::CapturePollTimeout => "retained-capture-poll-timeout",
             Self::CaptureMapFailed => "retained-capture-map-failed",
             Self::CaptureBufferTooShort => "retained-capture-buffer-too-short",
+            #[cfg(feature = "dev-preview")]
+            Self::CaptureWriteFailed => "retained-capture-write-failed",
         }
     }
 }

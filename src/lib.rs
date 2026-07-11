@@ -51,9 +51,14 @@ pub fn run() -> Result<()> {
             review_depth,
             review_capture_live_values,
             review_force_dim,
-        } => commands::companion::run(
-            renderer,
-            Cli::companion_review_options(
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            review_inject_retained_fault,
+        } => {
+            let review = Cli::companion_review_options(
                 review_size,
                 review_active_pulse,
                 review_state,
@@ -62,8 +67,19 @@ pub fn run() -> Result<()> {
                 review_depth,
                 review_capture_live_values,
                 review_force_dim,
-            ),
-        )?,
+            );
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            let review = {
+                let mut review = review;
+                review.retained_fault_injection = review_inject_retained_fault;
+                review
+            };
+            commands::companion::run(renderer, review)?
+        }
         Command::CompanionApp {
             renderer,
             review_size,
@@ -74,9 +90,14 @@ pub fn run() -> Result<()> {
             review_depth,
             review_capture_live_values,
             review_force_dim,
-        } => commands::companion_app::run(
-            renderer,
-            Cli::companion_review_options(
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            review_inject_retained_fault,
+        } => {
+            let review = Cli::companion_review_options(
                 review_size,
                 review_active_pulse,
                 review_state,
@@ -85,8 +106,19 @@ pub fn run() -> Result<()> {
                 review_depth,
                 review_capture_live_values,
                 review_force_dim,
-            ),
-        )?,
+            );
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            let review = {
+                let mut review = review;
+                review.retained_fault_injection = review_inject_retained_fault;
+                review
+            };
+            commands::companion_app::run(renderer, review)?
+        }
         #[cfg(feature = "dev-preview")]
         Command::DevPreview { out, scenario } => commands::dev_preview::run(out, scenario)?,
         #[cfg(feature = "renderer-spike")]

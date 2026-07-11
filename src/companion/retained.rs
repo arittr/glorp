@@ -540,6 +540,15 @@ impl RetainedHost {
         self.gpu_errors.drain()
     }
 
+    /// Dev/test-only: posts a static category to this host's own error mailbox so
+    /// the next main-thread [`drain_gpu_error`](Self::drain_gpu_error) observes it
+    /// exactly as it would a real asynchronous device fault. Compiled only with
+    /// dev-preview so a release build cannot inject faults.
+    #[cfg(feature = "dev-preview")]
+    pub(super) fn inject_gpu_fault(&self, category: RetainedFailureCategory) {
+        let _ = self.gpu_errors.sender().send(category);
+    }
+
     #[allow(clippy::too_many_arguments)] // Explicit prepared-frame inputs keep retained independent of AppState.
     pub(super) fn render(
         &mut self,

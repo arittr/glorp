@@ -23,7 +23,9 @@ use crate::commands::companion_mode::{
     CompanionRendererRequest, EffectiveCompanionRenderer, RendererRuntimeState,
 };
 use crate::companion::app::{CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame};
-use crate::companion::retained::{ActiveRetainedHost, FrameDisposition, FrameMilestone};
+use crate::companion::retained::{
+    ActiveRetainedHost, FrameDisposition, FrameMilestone, RetainedFailureCategory,
+};
 use crate::presentation::draw_list::SceneDrawList;
 use crate::presentation::pixel::PixelFrame;
 use crate::presentation::smooth::SmoothCompanionScenePlan;
@@ -799,6 +801,10 @@ pub(super) struct PairedCaptureCoordinator<'a> {
     runtime: &'a RendererRuntimeState,
     privacy: CapturePrivacy,
     out_dir: PathBuf,
+    /// Dev/test-only injected capture fault. When set, the readback is failed with
+    /// this category instead of running, marking the manifest failed without
+    /// touching the effective renderer. Always `None` outside dev-preview builds.
+    injected_capture_fault: Option<RetainedFailureCategory>,
 }
 
 impl<'a> PairedCaptureCoordinator<'a> {
@@ -808,8 +814,16 @@ impl<'a> PairedCaptureCoordinator<'a> {
         runtime: &'a RendererRuntimeState,
         privacy: CapturePrivacy,
         out_dir: PathBuf,
+        injected_capture_fault: Option<RetainedFailureCategory>,
     ) -> Self {
-        Self { frame, host, runtime, privacy, out_dir }
+        Self {
+            frame,
+            host,
+            runtime,
+            privacy,
+            out_dir,
+            injected_capture_fault,
+        }
     }
 
     /// Captures both renderers, writes `smooth.png`, `retained.png`, and
@@ -848,8 +862,15 @@ impl<'a> PairedCaptureCoordinator<'a> {
             png_path: "smooth.png".to_string(),
         };
 
-        // Retained half: GPU readback of the SAME frozen frame.
-        let (retained, status) = match self.host.capture(self.frame) {
+        // Retained half: GPU readback of the SAME frozen frame. A dev/test capture
+        // fault fails the readback with a static category instead of running it,
+        // which flips the manifest to "failed" and returns a process error while
+        // leaving the effective renderer as Retained.
+        let capture_result = match self.injected_capture_fault {
+            Some(category) => Err(category),
+            None => self.host.capture(self.frame),
+        };
+        let (retained, status) = match capture_result {
             Ok(captured) => {
                 write_rgba_png(
                     &self.out_dir.join("retained.png"),

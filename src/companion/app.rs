@@ -587,6 +587,9 @@ struct AppState {
     redacts_live_hud: bool,
     /// Forces the resting dim composition onto the live frame (`--dimmed`).
     force_dim_overlay: bool,
+    /// Dev/test-only bounded fault to inject into the retained capture path.
+    #[cfg(all(feature = "retained-renderer", feature = "dev-preview"))]
+    retained_fault_injection: Option<crate::commands::companion_mode::RetainedFaultInjection>,
     /// The opt-in `--review-capture-live-values` flag, threaded to the paired
     /// capture's privacy mode.
     #[cfg_attr(not(feature = "retained-renderer"), allow(dead_code))]
@@ -762,19 +765,50 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     // renderer.
     #[cfg(feature = "retained-renderer")]
     let retained_host = if renderer_runtime.effective().is_retained() {
-        let mailbox = crate::companion::retained::GpuErrorMailbox::new();
-        let activation =
-            crate::companion::retained::PreparedRetainedHost::prepare(view.as_super(), mailbox)
-                .and_then(|prepared| prepared.activate(view.as_super()));
-        match activation {
-            Ok(host) => Some(host),
-            Err(error) => {
-                write_boundary_diagnostic(format_args!(
-                    "glorp retained renderer initialization failed: {}\n",
-                    error.category()
-                ));
-                renderer_runtime.fallback_to_smooth(error.category());
-                None
+        // Dev/test-only: an injected initialization fault forces the startup path
+        // down the acknowledged Smooth fallback without ever building a host.
+        #[cfg(feature = "dev-preview")]
+        let injected_init_fault = review.retained_fault_injection.and_then(
+            crate::commands::companion_mode::RetainedFaultInjection::initialization_category,
+        );
+        #[cfg(not(feature = "dev-preview"))]
+        let injected_init_fault: Option<
+            crate::companion::retained::RetainedFailureCategory,
+        > = None;
+
+        if let Some(category) = injected_init_fault {
+            write_boundary_diagnostic(format_args!(
+                "glorp retained renderer initialization fault injected: {}\n",
+                category.category()
+            ));
+            renderer_runtime.request_fallback(category);
+            None
+        } else {
+            let mailbox = crate::companion::retained::GpuErrorMailbox::new();
+            let activation =
+                crate::companion::retained::PreparedRetainedHost::prepare(view.as_super(), mailbox)
+                    .and_then(|prepared| prepared.activate(view.as_super()));
+            match activation {
+                Ok(host) => {
+                    // Dev/test-only: an injected mid-run device fault is queued on
+                    // the host's own error mailbox so the first present drains it
+                    // exactly as it would a real asynchronous device fault.
+                    #[cfg(feature = "dev-preview")]
+                    if let Some(category) = review.retained_fault_injection.and_then(
+                        crate::commands::companion_mode::RetainedFaultInjection::device_fault_category,
+                    ) {
+                        host.inject_gpu_fault(category);
+                    }
+                    Some(host)
+                }
+                Err(error) => {
+                    write_boundary_diagnostic(format_args!(
+                        "glorp retained renderer initialization failed: {}\n",
+                        error.category()
+                    ));
+                    renderer_runtime.request_fallback(error);
+                    None
+                }
             }
         }
     } else {
@@ -836,6 +870,8 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             review_capture,
             redacts_live_hud,
             force_dim_overlay: review.force_dim_overlay,
+            #[cfg(all(feature = "retained-renderer", feature = "dev-preview"))]
+            retained_fault_injection: review.retained_fault_injection,
             review_capture_live_values: review.review_capture_live_values,
             metric_cache: CompanionMetricCache::default(),
             last_good_frame: None,
@@ -1044,8 +1080,41 @@ fn ui_tick() {
     }
     animate_pet();
     prepare_current_frame_from_state();
+    drive_smooth_fallback_paint();
     finish_review_capture_if_due();
 }
+
+/// After a runtime fallback tears down the retained host, the reverted
+/// layer-hosting view does not resume automatic `drawRect:` on `setNeedsDisplay`
+/// within the timer callback. Force a synchronous display each tick so the Smooth
+/// paint runs, `draw_scene` records a frame, `acknowledge_smooth_paint` promotes
+/// the disposition to `FallbackPainted`, and a bounded review reaches its capture
+/// budget and terminates — the same render/record cadence a Smooth-from-start run
+/// gets for free.
+#[cfg(feature = "retained-renderer")]
+fn drive_smooth_fallback_paint() {
+    use crate::companion::retained::FrameDisposition;
+
+    let view = APP_STATE.with(|cell| {
+        let state = cell.borrow();
+        let state = state.as_ref()?;
+        match state.renderer_runtime.disposition() {
+            FrameDisposition::FallbackPending(_) | FrameDisposition::FallbackPainted(_) => {
+                Some(state.view.clone())
+            }
+            _ => None,
+        }
+    });
+    if let Some(view) = view {
+        unsafe {
+            view.setNeedsDisplay(true);
+            view.displayIfNeeded();
+        }
+    }
+}
+
+#[cfg(not(feature = "retained-renderer"))]
+fn drive_smooth_fallback_paint() {}
 
 fn companion_view_is_visible() -> bool {
     APP_STATE.with(|cell| {
@@ -1189,14 +1258,23 @@ fn present_retained_frame() {
                 }
                 None
             }
-            Some(FrameDisposition::Failed(category)) => Some(category),
+            // A failed present routes to the Smooth fallback. The fallback
+            // dispositions are carried by RendererRuntimeState, not a per-frame
+            // FrameProgress, so they never originate here; matching them
+            // explicitly keeps them from being silently swallowed by a wildcard
+            // and routes them to the same fallback path if one ever leaks through.
+            Some(
+                FrameDisposition::Failed(category)
+                | FrameDisposition::FallbackPending(category)
+                | FrameDisposition::FallbackPainted(category),
+            ) => Some(category),
             // A Skipped on-screen present dropped nothing to display, but this
             // tick DID prepare a valid frame — which is exactly what the offscreen
             // retained review capture consumes. Advance the review's bounded-run
             // budget so a perpetually-occluded automation window still terminates
             // and produces the paired artifacts. Presented-sample metrics stay on
             // record_frame above, so this never inflates them.
-            _ => {
+            Some(FrameDisposition::Skipped(_)) | None => {
                 if let Some(capture) = state.review_capture.as_mut() {
                     capture.record_offscreen_review_tick();
                 }
@@ -1221,8 +1299,13 @@ fn fallback_from_retained(error: crate::companion::retained::RetainedFailureCate
             return;
         }
         state.retained_host.take();
+        // Restore the AppKit-drawn view (this also requests a display) and record
+        // the pending fallback. The reverted layer-hosting view does not resume
+        // automatic drawRect on setNeedsDisplay alone, so ui_tick drives the
+        // Smooth paint each tick until the review terminates (see
+        // drive_smooth_fallback_paint).
         crate::companion::retained::ActiveRetainedHost::restore_appkit(state.view.as_super());
-        state.renderer_runtime.fallback_to_smooth(error.category());
+        state.renderer_runtime.request_fallback(error);
         write_boundary_diagnostic(format_args!(
             "glorp retained renderer fell back to Smooth: {}\n",
             error.category()
@@ -1424,6 +1507,14 @@ fn run_paired_capture(state: &mut AppState) {
         CapturePrivacy, PairedCaptureCoordinator, PairedReviewFrame, ReviewFrameDimensions,
     };
 
+    // Read the dev/test capture fault (Copy) before borrowing state's fields.
+    #[cfg(feature = "dev-preview")]
+    let injected_capture_fault = state
+        .retained_fault_injection
+        .and_then(crate::commands::companion_mode::RetainedFaultInjection::capture_fault_category);
+    #[cfg(not(feature = "dev-preview"))]
+    let injected_capture_fault: Option<crate::companion::retained::RetainedFailureCategory> = None;
+
     let AppState {
         review_capture,
         retained_host,
@@ -1473,8 +1564,15 @@ fn run_paired_capture(state: &mut AppState) {
         host.current_resource_generation(),
     );
     let privacy = CapturePrivacy::from_live_values(*review_capture_live_values);
-    let result =
-        PairedCaptureCoordinator::new(&frame, host, renderer_runtime, privacy, out_dir).run();
+    let result = PairedCaptureCoordinator::new(
+        &frame,
+        host,
+        renderer_runtime,
+        privacy,
+        out_dir,
+        injected_capture_fault,
+    )
+    .run();
     capture.record_pair_capture_result(result);
 }
 
@@ -1518,6 +1616,12 @@ fn record_review_frame(
 ) {
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
+            // A Smooth paint after a runtime fallback acknowledges the degraded
+            // path reached the screen (no-op unless a fallback is pending). A live
+            // retained host paints via Metal, not this AppKit path, so this only
+            // ever promotes the disposition once the host has been torn down.
+            #[cfg(feature = "retained-renderer")]
+            state.renderer_runtime.acknowledge_smooth_paint();
             if let Some(capture) = state.review_capture.as_mut() {
                 capture.record_frame(smooth_sample);
             }
