@@ -1,5 +1,9 @@
 # Glorp Retained Companion Visual-Parity Pilot - implementation plan
 
+> Historical pilot plan. Execution is superseded by
+> docs/superpowers/plans/2026-07-11-glorp-retained-companion-default-cutover-implementation.md.
+> Keep this document as the record of the initial parity slice.
+
 > Execute this plan in small slices. Smooth stays default. Routine verification is
 > bounded to focused tests and one-shot captures; do not run renderer qualification,
 > energy, release, or multi-minute performance matrices during this pilot.
