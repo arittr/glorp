@@ -29,6 +29,7 @@ use crate::round::layout::RoundAperture;
 
 use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 
+mod capture;
 mod presentation;
 
 use presentation::FrameMilestone;
@@ -503,33 +504,14 @@ impl RetainedHost {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("glorp-retained-frame"),
             });
-        {
-            let attachment = Some(wgpu::RenderPassColorAttachment {
-                view: &target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: f64::from(srgb_channel_to_linear(background[0])),
-                        g: f64::from(srgb_channel_to_linear(background[1])),
-                        b: f64::from(srgb_channel_to_linear(background[2])),
-                        a: f64::from(background[3]),
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("glorp-retained-pass"),
-                color_attachments: &[attachment],
-                ..Default::default()
-            });
-            pass.set_bind_group(0, &cached_atlas.bind_group, &[]);
-            pass.set_vertex_buffer(0, primitive_buffer.slice(..));
-            for (index, blend) in frame.blends.iter().copied().enumerate() {
-                pass.set_pipeline(self.pipelines.get(blend));
-                pass.draw(0..6, index as u32..index as u32 + 1);
-            }
-        }
+        self.encode_scene(
+            &mut encoder,
+            &target,
+            &cached_atlas.bind_group,
+            &primitive_buffer,
+            &frame.blends,
+            background,
+        );
         progress
             .mark(FrameMilestone::Encoded)
             .expect("encoded follows prepared");
@@ -542,6 +524,46 @@ impl RetainedHost {
             .finish(FrameDisposition::SurfacePresentCalled)
             .expect("a submitted frame presents exactly once");
         progress
+    }
+
+    /// Encodes the prepared companion scene into `target_view` on `encoder`: one
+    /// clear-loaded render pass that draws every primitive with its blend
+    /// pipeline. Shared verbatim by the live surface [`Self::render`] path and
+    /// the capture intermediate path so both rasterize identical geometry.
+    fn encode_scene(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        atlas_bind_group: &wgpu::BindGroup,
+        primitive_buffer: &wgpu::Buffer,
+        blends: &[SmoothBlendMode],
+        background: [f32; 4],
+    ) {
+        let attachment = Some(wgpu::RenderPassColorAttachment {
+            view: target_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: f64::from(srgb_channel_to_linear(background[0])),
+                    g: f64::from(srgb_channel_to_linear(background[1])),
+                    b: f64::from(srgb_channel_to_linear(background[2])),
+                    a: f64::from(background[3]),
+                }),
+                store: wgpu::StoreOp::Store,
+            },
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("glorp-retained-pass"),
+            color_attachments: &[attachment],
+            ..Default::default()
+        });
+        pass.set_bind_group(0, atlas_bind_group, &[]);
+        pass.set_vertex_buffer(0, primitive_buffer.slice(..));
+        for (index, blend) in blends.iter().copied().enumerate() {
+            pass.set_pipeline(self.pipelines.get(blend));
+            pass.draw(0..6, index as u32..index as u32 + 1);
+        }
     }
 
     fn ensure_glyph_atlas(

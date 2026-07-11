@@ -72,6 +72,15 @@ pub(crate) enum RetainedFailureCategory {
     DeviceOutOfMemory,
     DeviceValidation,
     DeviceInternal,
+    /// The frozen review frame's renderer is not the Smooth/Retained path, so
+    /// there is no GPU scene to read back.
+    CaptureUnsupportedVariant,
+    /// The bounded device poll did not observe the readback submission finish.
+    CapturePollTimeout,
+    /// Mapping the readback staging buffer failed or its callback never returned.
+    CaptureMapFailed,
+    /// The mapped readback buffer was shorter than the frame's row layout.
+    CaptureBufferTooShort,
 }
 
 impl RetainedFailureCategory {
@@ -88,6 +97,10 @@ impl RetainedFailureCategory {
             Self::DeviceOutOfMemory => "retained-device-out-of-memory",
             Self::DeviceValidation => "retained-device-validation",
             Self::DeviceInternal => "retained-device-internal",
+            Self::CaptureUnsupportedVariant => "retained-capture-unsupported-variant",
+            Self::CapturePollTimeout => "retained-capture-poll-timeout",
+            Self::CaptureMapFailed => "retained-capture-map-failed",
+            Self::CaptureBufferTooShort => "retained-capture-buffer-too-short",
         }
     }
 }

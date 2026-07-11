@@ -33,8 +33,8 @@ use crate::round::layout::RoundAperture;
 #[derive(Debug, Clone)]
 pub struct PairedReviewFrame {
     /// The immutable prepared frame this review row was frozen from. Retained so
-    /// the Task 7 paired-capture coordinator can repaint the exact same frame.
-    #[allow(dead_code)] // Repainted by the Task 7 paired-capture coordinator.
+    /// the GPU readback can repaint the exact same scene into its capture
+    /// intermediate; exposed through [`PairedReviewFrame::prepared`].
     frame: PreparedCompanionFrame,
     pub identity: PairedReviewIdentity,
     pub checksum: String,
@@ -86,6 +86,15 @@ impl PairedReviewFrame {
     /// identity was mutated away from the frozen value.
     pub fn recompute_checksum(&self) -> String {
         canonical_frame_checksum(&self.identity)
+    }
+
+    /// The frozen prepared frame, handed to the GPU readback so it can repaint
+    /// the exact scene this review row was frozen from. The frame/generation
+    /// IDs the readback stamps onto its artifact come from
+    /// [`Self::identity`]`.frame_id` / `.resource_generation`.
+    #[allow(dead_code)] // Consumed by the Task 7 paired-capture coordinator.
+    pub(super) fn prepared(&self) -> &PreparedCompanionFrame {
+        &self.frame
     }
 
     /// A deterministic paired review frame for tests and design review. Built
