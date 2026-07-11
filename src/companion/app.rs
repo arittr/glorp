@@ -130,11 +130,11 @@ enum PreparedRendererFrame {
 
 #[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct PreparedGaugeFrame {
-    xp_fraction: f64,
-    daily_fraction: f64,
-    daily_overage_fraction: f64,
-    pace_fraction: f64,
+pub(super) struct PreparedGaugeFrame {
+    pub(super) xp_fraction: f64,
+    pub(super) daily_fraction: f64,
+    pub(super) daily_overage_fraction: f64,
+    pub(super) pace_fraction: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -295,7 +295,7 @@ fn prepare_companion_frame(
         }
     } else {
         let metrics = metric_cache.metrics_for(prepared_bounds)?;
-        if renderer_mode.is_smooth() {
+        if renderer_mode.uses_smooth_scene() {
             let elapsed_ms = smooth_started_at
                 .map(|started_at| started_at.elapsed().as_millis())
                 .unwrap_or(0)
@@ -453,6 +453,8 @@ struct AppState {
     /// Pins the Smooth pet's depth plane for deterministic review captures.
     review_depth: Option<CompanionReviewDepth>,
     renderer_mode: CompanionRendererMode,
+    #[cfg(feature = "retained-renderer")]
+    retained_host: Option<crate::companion::retained::RetainedHost>,
     pixel_input: Option<PixelPetInput>,
     pixel_state: Option<PixelRendererState>,
     pixel_frame: Option<PixelFrame>,
@@ -542,7 +544,7 @@ declare_class!(
     }
 );
 
-pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions) -> Result<()> {
+pub fn run(mut renderer_mode: CompanionRendererMode, review: CompanionReviewOptions) -> Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| GlorpError::Message("glorp companion must run on the main thread".into()))?;
     let paths = AppPaths::resolve()?;
@@ -560,7 +562,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         now,
         crate::storage::day_axis::LocalDayMapper::System,
     )?;
-    let mut initial_vm = if renderer_mode.is_pixel() || renderer_mode.is_smooth() {
+    let mut initial_vm = if renderer_mode.is_pixel() || renderer_mode.uses_smooth_scene() {
         build_watch_view_model_semantic_at(
             &initial_pet,
             &paths.usage_db,
@@ -578,7 +580,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
     let mut presentation_state = WatchPresentationState::default();
     let review_state = review.resolved_state();
     apply_review_state(review_state, &mut presentation_state, &mut initial_vm, now)?;
-    if renderer_mode.is_smooth() {
+    if renderer_mode.uses_smooth_scene() {
         prepare_smooth_view_model_for_tick(&mut initial_vm, 0, now)?;
     }
     let scene = derive_round_scene_model(&initial_vm, now);
@@ -589,7 +591,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         .as_ref()
         .map(|input| PixelRendererState::new(input, now));
     let pixel_frame = None;
-    let smooth_started_at = renderer_mode.is_smooth().then(Instant::now);
+    let smooth_started_at = renderer_mode.uses_smooth_scene().then(Instant::now);
     let smooth_semantic_clock = smooth_started_at.map(|started_at| {
         crate::companion::smooth_timing::SmoothSemanticClock::new(
             started_at,
@@ -608,11 +610,27 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
         .as_ref()
         .is_some_and(|capture| capture.redacts_live_hud());
     let (window, view) = build_window(mtm, review.initial_size);
+    #[cfg(feature = "retained-renderer")]
+    let retained_host = if renderer_mode.is_retained() {
+        match crate::companion::retained::RetainedHost::new(view.as_super()) {
+            Ok(host) => Some(host),
+            Err(error) => {
+                write_boundary_diagnostic(format_args!(
+                    "glorp retained renderer initialization failed: {}\n",
+                    error.category()
+                ));
+                renderer_mode = CompanionRendererMode::Smooth;
+                None
+            }
+        }
+    } else {
+        None
+    };
     let poll_rx = crate::watch_live::spawn_live_watch_worker(
         paths,
         POLL_INTERVAL,
         "glorp-companion-poll",
-        if renderer_mode.is_pixel() || renderer_mode.is_smooth() {
+        if renderer_mode.is_pixel() || renderer_mode.uses_smooth_scene() {
             LiveWatchRenderMode::Semantic
         } else {
             LiveWatchRenderMode::Rendered
@@ -630,6 +648,8 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
             review_state,
             review_depth: review.depth,
             renderer_mode,
+            #[cfg(feature = "retained-renderer")]
+            retained_host,
             pixel_input,
             pixel_state,
             pixel_frame,
@@ -655,7 +675,7 @@ pub fn run(renderer_mode: CompanionRendererMode, review: CompanionReviewOptions)
     // thirty just doubles the energy bill.
     let tick_interval = if renderer_mode.is_pixel() {
         1.0 / 30.0
-    } else if renderer_mode.is_smooth() {
+    } else if renderer_mode.uses_smooth_scene() {
         1.0 / 15.0
     } else {
         UI_TICK_INTERVAL_SECS
@@ -919,6 +939,89 @@ fn prepare_current_frame_from_state() {
             Err(err) => record_frame_preparation_error(state, err),
         }
     });
+    present_retained_frame();
+}
+
+#[cfg(feature = "retained-renderer")]
+fn present_retained_frame() {
+    let failure = APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let state = state.as_mut()?;
+        let frame = state.last_good_frame.as_ref()?;
+        let PreparedRendererFrame::Smooth {
+            metrics,
+            pet_center_col,
+            pet_center_row,
+            pet_width_cells,
+            plan,
+            draw_order,
+        } = &frame.renderer
+        else {
+            return None;
+        };
+        let review_sample = frame.review_sample;
+        let host = state.retained_host.as_mut()?;
+        let background = [
+            frame.background.0,
+            frame.background.1,
+            frame.background.2,
+            frame.background.3,
+        ];
+        let result = host.render(
+            state.view.as_super(),
+            plan,
+            draw_order,
+            *metrics,
+            frame.aperture,
+            background,
+            crate::companion::retained::RetainedChrome {
+                mood_aura: [
+                    frame.mood_aura_color.0,
+                    frame.mood_aura_color.1,
+                    frame.mood_aura_color.2,
+                    frame.mood_aura_color.3,
+                ],
+                pet_center_col: *pet_center_col,
+                pet_center_row: *pet_center_row,
+                pet_width_cells: *pet_width_cells,
+                gauges: frame.gauges,
+                overlays: &frame.overlay_commands,
+                hud: &frame.hud,
+                hud_font_size: frame.hud_font_size,
+                dim_overlay: frame.dim_overlay,
+            },
+        );
+        if result.is_ok() {
+            if let Some(capture) = state.review_capture.as_mut() {
+                capture.record_frame(review_sample);
+            }
+        }
+        result.err()
+    });
+    if let Some(error) = failure {
+        fallback_from_retained(error);
+    }
+}
+
+#[cfg(not(feature = "retained-renderer"))]
+fn present_retained_frame() {}
+
+#[cfg(feature = "retained-renderer")]
+fn fallback_from_retained(error: crate::companion::retained::RetainedFailure) {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else { return };
+        if state.retained_host.is_none() {
+            return;
+        }
+        state.retained_host.take();
+        crate::companion::retained::RetainedHost::restore_appkit(state.view.as_super());
+        state.renderer_mode = CompanionRendererMode::Smooth;
+        write_boundary_diagnostic(format_args!(
+            "glorp retained renderer fell back to Smooth: {}\n",
+            error.category()
+        ));
+    });
 }
 
 fn record_frame_preparation_error(state: &mut AppState, err: CompanionFramePreparationError) {
@@ -997,7 +1100,7 @@ fn apply_post_poll_update(
         now,
     );
     apply_review_state(review_state, presentation_state, &mut vm, now)?;
-    if renderer_mode.is_smooth() {
+    if renderer_mode.uses_smooth_scene() {
         prepare_smooth_view_model_for_tick(&mut vm, smooth_semantic_art_tick_index, now)?;
     }
     let pixel_input = renderer_mode
@@ -1022,7 +1125,7 @@ fn animate_pet() {
             return Some(state.view.clone());
         }
         let now = time::OffsetDateTime::now_utc();
-        if state.renderer_mode.is_smooth() {
+        if state.renderer_mode.uses_smooth_scene() {
             let due_tick = state
                 .smooth_semantic_clock
                 .as_mut()
@@ -1146,6 +1249,16 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
     // so holding the immutable borrow across paint is both safe and much cheaper.
     let review_sample = APP_STATE.with(|cell| {
         let state = cell.borrow();
+        #[cfg(feature = "retained-renderer")]
+        if state
+            .as_ref()
+            .is_some_and(|state| state.retained_host.is_some())
+        {
+            return state
+                .as_ref()
+                .and_then(|state| state.last_good_frame.as_ref())
+                .and_then(|frame| frame.review_sample);
+        }
         match state
             .as_ref()
             .and_then(|state| state.last_good_frame.as_ref())

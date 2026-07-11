@@ -33,7 +33,8 @@ fn build_open_command(
     review: CompanionReviewOptions,
 ) -> std::process::Command {
     let mut command = std::process::Command::new("open");
-    let needs_args = mode.is_pixel() || mode.is_smooth() || review.has_review_launch_options();
+    let needs_args =
+        mode.is_pixel() || mode.uses_smooth_scene() || review.has_review_launch_options();
     if needs_args {
         command.arg("-n");
     }
@@ -41,7 +42,7 @@ fn build_open_command(
     if needs_args {
         command.arg("--args");
     }
-    if mode.is_pixel() || mode.is_smooth() {
+    if mode.is_pixel() || mode.uses_smooth_scene() {
         command.arg("--renderer").arg(mode.as_str());
     }
     if let Some(size) = review.initial_size {

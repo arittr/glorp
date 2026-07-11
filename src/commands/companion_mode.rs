@@ -174,6 +174,8 @@ mod tests {
 pub enum CompanionRendererMode {
     Classic,
     Pixel,
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    Retained,
     #[default]
     Smooth,
 }
@@ -183,6 +185,8 @@ impl CompanionRendererMode {
         match self {
             CompanionRendererMode::Classic => "classic",
             CompanionRendererMode::Pixel => "pixel",
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            CompanionRendererMode::Retained => "retained",
             CompanionRendererMode::Smooth => "smooth",
         }
     }
@@ -193,5 +197,25 @@ impl CompanionRendererMode {
 
     pub const fn is_smooth(self) -> bool {
         matches!(self, CompanionRendererMode::Smooth)
+    }
+
+    pub const fn uses_smooth_scene(self) -> bool {
+        match self {
+            CompanionRendererMode::Smooth => true,
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            CompanionRendererMode::Retained => true,
+            CompanionRendererMode::Classic | CompanionRendererMode::Pixel => false,
+        }
+    }
+
+    pub const fn is_retained(self) -> bool {
+        #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+        {
+            matches!(self, CompanionRendererMode::Retained)
+        }
+        #[cfg(not(all(target_os = "macos", feature = "retained-renderer")))]
+        {
+            false
+        }
     }
 }

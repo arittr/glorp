@@ -18,6 +18,13 @@ path = "src/main.rs"
 # `--no-default-features` to strip it from the published binary.
 default = ["dev-preview"]
 dev-preview = []
+retained-renderer = [
+    "dep:bytemuck",
+    "dep:objc2-quartz-core",
+    "dep:pollster",
+    "dep:wgpu",
+    "objc2-app-kit/objc2-quartz-core",
+]
 renderer-spike = ["dep:png", "dep:sha2"]
 renderer-spike-wgpu = [
     "renderer-spike",
