@@ -348,7 +348,7 @@ fn prepare_gauge_frame(vm: &WatchViewModel) -> PreparedGaugeFrame {
 
 fn prepare_hud_frame(vm: &WatchViewModel, redacts_live_hud: bool) -> CompanionHudText {
     if redacts_live_hud {
-        review_capture_hud_text()
+        crate::round::hud::review_capture_hud_text()
     } else {
         live_hud_text(vm)
     }
@@ -2660,15 +2660,6 @@ fn live_hud_text(vm: &WatchViewModel) -> CompanionHudText {
 }
 
 #[cfg(target_os = "macos")]
-fn review_capture_hud_text() -> CompanionHudText {
-    CompanionHudText {
-        today_total: "review".into(),
-        daily_percent: "privacy".into(),
-        pace: "redacted".into(),
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudText, font_size: f64) {
     let gauge_layout = perimeter_gauge_layout(
         aperture.center_x as f64,
@@ -2769,7 +2760,10 @@ mod tests {
         vm.daily_comparison.fraction_of_yesterday = Some(0.94);
         vm.rate_momentum.pulse.current_tokens = 31_000_000.0;
 
-        assert_eq!(prepare_hud_frame(&vm, true), review_capture_hud_text());
+        assert_eq!(
+            prepare_hud_frame(&vm, true),
+            crate::round::hud::review_capture_hud_text()
+        );
         assert_eq!(prepare_hud_frame(&vm, false), live_hud_text(&vm));
     }
 
@@ -3004,7 +2998,7 @@ mod tests {
     fn review_capture_hud_text_does_not_echo_live_token_strings() {
         let live_text =
             crate::round::hud::companion_hud_text(842_000_000.0, Some(0.94), 31_000_000.0);
-        let capture_text = review_capture_hud_text();
+        let capture_text = crate::round::hud::review_capture_hud_text();
 
         for live_value in [
             live_text.today_total,

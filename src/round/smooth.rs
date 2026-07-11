@@ -705,6 +705,14 @@ fn declared_hud_glyphs() -> BTreeSet<char> {
     for fraction in [None, Some(0.5), Some(9.99), Some(-1.0)] {
         glyphs.extend(crate::round::hud::format_daily_percent(fraction).chars());
     }
+    // Review-pair captures render the redacted HUD by default (no live token
+    // counts leak into the parity artifacts), whose words ("review"/"privacy"/
+    // "redacted") introduce letters the live charset never shows — enumerate them
+    // from the source function so they cannot drift.
+    let redacted = crate::round::hud::review_capture_hud_text();
+    for line in [redacted.today_total, redacted.daily_percent, redacted.pace] {
+        glyphs.extend(line.chars());
+    }
     glyphs
 }
 

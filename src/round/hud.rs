@@ -505,6 +505,19 @@ pub fn companion_hud_text(
     }
 }
 
+/// The redacted HUD a review-pair capture renders in place of live values so no
+/// token counts leak into the parity artifacts. Review captures render this by
+/// default (`redacts_live_hud`), so its glyphs are part of the companion's
+/// declared HUD charset that the retained atlas preflight must enumerate — even
+/// though a normal live frame never shows them.
+pub fn review_capture_hud_text() -> CompanionHudText {
+    CompanionHudText {
+        today_total: "review".into(),
+        daily_percent: "privacy".into(),
+        pace: "redacted".into(),
+    }
+}
+
 fn compact_hud_tokens(value: f64) -> String {
     let formatted = crate::format::format_tokens(value);
     formatted

@@ -1288,52 +1288,83 @@ mod repertoire_tests {
                 .any(|key| key.sequence.as_str() == glyph && key.bold == bold)
         };
 
+        // The review states the parity gate captures: Normal, ActivePulse,
+        // AsleepCalm, HelperTrouble, approximated by their mood + asleep shape.
+        let review_states = [
+            (Mood::Content, false),
+            (Mood::Ecstatic, false),
+            (Mood::Sleepy, true),
+            (Mood::Sad, false),
+        ];
         let mut saw_bold_tank_foreground = false;
         let mut missing: Vec<(String, bool)> = Vec::new();
         for species in Species::all() {
             vm.pet_render.generated_species = species;
             for stage in [Stage::S3, Stage::S6] {
                 vm.pet_render.stage = stage;
-                for minute in [0_i64, 1] {
-                    let now = base + time::Duration::minutes(minute);
-                    let tick = now.unix_timestamp().max(0) as u64;
-                    crate::commands::watch::rerender_pet_for_view_model(&mut vm, tick, false, now)
+                for &(mood, asleep) in &review_states {
+                    vm.pet_render.mood = mood;
+                    for minute in [0_i64, 1] {
+                        let now = base + time::Duration::minutes(minute);
+                        let tick = now.unix_timestamp().max(0) as u64;
+                        crate::commands::watch::rerender_pet_for_view_model(
+                            &mut vm, tick, asleep, now,
+                        )
                         .expect("pet rerenders");
-                    // Device-like grid (COMPANION_TARGET_COLS square) so the tank
-                    // bed is large enough to place the swimming/foreground cast.
-                    let plan = build_round_smooth_scene_plan(&vm, now, 36, 36, &motion, tick * 250);
-                    for layer in &plan.layers {
-                        for item in &layer.items {
-                            if let SmoothLayerItem::LocalCell(cell) = item {
-                                if let Some(glyph) = cell.glyph.as_ref() {
-                                    if !present(glyph, cell.bold) {
-                                        missing.push((glyph.clone(), cell.bold));
-                                    }
-                                    if cell.bold
-                                        && layer.role == SmoothLayerRole::TankLifeForeground
-                                    {
-                                        saw_bold_tank_foreground = true;
+                        // Device-like grid (COMPANION_TARGET_COLS square) so the
+                        // tank bed is large enough to place the foreground cast.
+                        let plan =
+                            build_round_smooth_scene_plan(&vm, now, 36, 36, &motion, tick * 250);
+                        for layer in &plan.layers {
+                            for item in &layer.items {
+                                if let SmoothLayerItem::LocalCell(cell) = item {
+                                    if let Some(glyph) = cell.glyph.as_ref() {
+                                        if !present(glyph, cell.bold) {
+                                            missing.push((glyph.clone(), cell.bold));
+                                        }
+                                        if cell.bold
+                                            && layer.role == SmoothLayerRole::TankLifeForeground
+                                        {
+                                            saw_bold_tank_foreground = true;
+                                        }
                                     }
                                 }
-                            }
-                        }
-                    }
-                    // The HUD is always regular weight.
-                    let hud = companion_hud_text(1_234_567.0, Some(0.5), 8_900.0);
-                    for line in [&hud.today_total, &hud.daily_percent, &hud.pace] {
-                        for scalar in line.chars() {
-                            if !present(&scalar.to_string(), false) {
-                                missing.push((scalar.to_string(), false));
                             }
                         }
                     }
                 }
             }
         }
+
+        // The render path also looks up every HUD scalar (always regular weight).
+        // A review-pair capture renders the REDACTED HUD by default, not the live
+        // one, so its letters must be covered too.
+        let huds = [
+            companion_hud_text(1_234_567.0, Some(0.5), 8_900.0),
+            crate::round::hud::review_capture_hud_text(),
+        ];
+        for hud in &huds {
+            for line in [&hud.today_total, &hud.daily_percent, &hud.pace] {
+                for scalar in line.chars() {
+                    if !present(&scalar.to_string(), false) {
+                        missing.push((scalar.to_string(), false));
+                    }
+                }
+            }
+        }
+
         assert!(
             saw_bold_tank_foreground,
             "the test must exercise a bold tank-life foreground cell to guard the regression",
         );
+        // The redacted review-capture HUD letters specifically ("review" /
+        // "privacy" / "redacted").
+        for required in ['c', 'e', 'i', 'p', 'r', 't', 'w'] {
+            assert!(
+                present(&required.to_string(), false),
+                "redacted review-capture HUD letter {required:?} is not in the repertoire",
+            );
+        }
         assert!(
             missing.is_empty(),
             "rendered (glyph, bold) pairs absent from the preflighted repertoire: {missing:?}",
