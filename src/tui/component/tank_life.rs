@@ -261,6 +261,35 @@ pub fn host_fish_sprite() -> Vec<SpriteCell> {
     ]
 }
 
+/// Every glyph the earnable tank-life cast can render, driving the real
+/// `sprite_for` across the whole inhabitant catalog, both animation phases, and
+/// every anemone morph, plus the anemone's host fish. Declared content for the
+/// retained atlas preflight.
+pub(crate) fn declared_tank_life_glyphs() -> std::collections::BTreeSet<char> {
+    let morphs = [
+        None,
+        Some(AnemoneMorph::Flower),
+        Some(AnemoneMorph::Comb),
+        Some(AnemoneMorph::Crown),
+        Some(AnemoneMorph::DotColony),
+    ];
+    let mut glyphs = std::collections::BTreeSet::new();
+    for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
+        for phase in [0_u64, 1] {
+            for morph in morphs {
+                for cell in sprite_for(spec.id, phase, morph) {
+                    glyphs.insert(cell.glyph);
+                }
+            }
+        }
+    }
+    for cell in host_fish_sprite() {
+        glyphs.insert(cell.glyph);
+    }
+    glyphs.remove(&' ');
+    glyphs
+}
+
 pub fn validate_tank_life_catalog() -> std::result::Result<(), String> {
     use unicode_width::UnicodeWidthChar;
 

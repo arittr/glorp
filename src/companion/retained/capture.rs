@@ -17,7 +17,7 @@ use std::time::Duration;
 use wgpu::util::DeviceExt;
 
 use super::presentation::RetainedFailureCategory;
-use super::{collect_glyphs, prepare_gpu_frame, RetainedChrome, RetainedHost};
+use super::{prepare_gpu_frame, RetainedChrome, RetainedHost};
 use crate::companion::paired_review::{PairedReviewFrame, RendererIdentitySource};
 use crate::round::draw::RoundColor;
 
@@ -218,14 +218,15 @@ impl<'host> RetainedCaptureTarget<'host> {
             dim_overlay: prepared.review_dim_overlay(),
         };
 
-        // Repaint the frozen glyph repertoire so the intermediate matches the
-        // exact scene the review row was frozen from.
-        self.host.ensure_glyph_atlas(collect_glyphs(plan, hud))?;
-        let cached_atlas = self
+        // Repaint against the live host's active resource generation — the full
+        // preflighted repertoire already holds every glyph the frozen scene
+        // paints, so the capture needs no per-frame atlas build.
+        let active = self
             .host
-            .glyph_atlas
+            .glyph_resources
             .as_ref()
             .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
+        let atlas_bind_group = &active.bind_group;
         let gpu_frame = prepare_gpu_frame(
             plan,
             draw_order,
@@ -233,7 +234,7 @@ impl<'host> RetainedCaptureTarget<'host> {
             aperture,
             background,
             &chrome,
-            &cached_atlas.atlas,
+            active.resources.atlas(),
         )?;
 
         let width = self.host.physical_width;
@@ -270,7 +271,7 @@ impl<'host> RetainedCaptureTarget<'host> {
         self.host.encode_scene(
             &mut encoder,
             &intermediate_view,
-            &cached_atlas.bind_group,
+            atlas_bind_group,
             &primitive_buffer,
             &gpu_frame.blends,
             background,

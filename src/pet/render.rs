@@ -352,10 +352,20 @@ fn close_eyes(eyes: &str, species: Species) -> String {
 /// left or right, or a wink — then settles. Deterministic per pet + tick so renders
 /// stay reproducible. Returns `None` outside a gesture window. The vocabulary is
 /// kept distinct from the mood faces so a gesture reads as behavior, not a mood.
+/// Idle-gaze gesture eyes: a glance left/right or a wink. Module-level so the
+/// glyph-repertoire preflight can enumerate the vocabulary it renders.
+const IDLE_GESTURE_EYES: [&str; 4] = ["<.<", ">.>", "^.-", "-.^"];
+
+/// Work-accent eyes (alert / focused / dreamy) applied to positive moods.
+const WORK_ACCENT_EYES: [&str; 3] = ["^o^", ">.<", "u.u"];
+
+/// Relaxed, heavy-lidded soft eyes for tired/cozy performance.
+const SOFT_EYES: &str = "\u{02d8}.\u{02d8}";
+
 fn idle_gesture_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'static str> {
     const GESTURE_PERIOD: u64 = 32; // ~8s between gestures at 250ms/tick
     const GESTURE_HOLD: u64 = 4; // ~1s holding the gesture
-    const GESTURES: [&str; 4] = ["<.<", ">.>", "^.-", "-.^"];
+    let gestures = IDLE_GESTURE_EYES;
     let seed = u64::from(pet.animation_phase.blink)
         .wrapping_mul(31)
         .wrapping_add(17);
@@ -368,7 +378,7 @@ fn idle_gesture_eyes(pet: &GeneratedPet, frame: AnimationFrame) -> Option<&'stat
     }
     let window = t / GESTURE_PERIOD;
     let h = (window ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
-    Some(GESTURES[(h % GESTURES.len() as u64) as usize])
+    Some(gestures[(h % gestures.len() as u64) as usize])
 }
 
 struct Expression {
@@ -458,22 +468,23 @@ fn expression_for(
     }
     let mut overridden = false;
     if frame.soft_eyes && matches!(mood, Mood::Content | Mood::Happy) {
-        expr.eyes = "\u{02d8}.\u{02d8}".to_string(); // ˘.˘ relaxed, heavy-lidded
+        expr.eyes = SOFT_EYES.to_string(); // ˘.˘ relaxed, heavy-lidded
         overridden = true;
     }
     if matches!(mood, Mood::Happy | Mood::Content) {
+        let [alert, focused, dreamy] = WORK_ACCENT_EYES;
         match frame.work_accent {
             WorkAccent::None => {}
             WorkAccent::Alert => {
-                expr.eyes = "^o^".to_string();
+                expr.eyes = alert.to_string();
                 overridden = true;
             }
             WorkAccent::Focused => {
-                expr.eyes = ">.<".to_string();
+                expr.eyes = focused.to_string();
                 overridden = true;
             }
             WorkAccent::Dreamy => {
-                expr.eyes = "u.u".to_string();
+                expr.eyes = dreamy.to_string();
                 overridden = true;
             }
         }
@@ -1267,10 +1278,223 @@ fn particles_for_species(species: Species, tick: u64) -> Vec<Particle> {
     particles
 }
 
+/// Every stage, low to elder — the pet grows through all of them, so the atlas
+/// preflight enumerates each stage's silhouette.
+const ALL_STAGES: [Stage; 7] = [
+    Stage::S0,
+    Stage::S1,
+    Stage::S2,
+    Stage::S3,
+    Stage::S4,
+    Stage::S5,
+    Stage::S6,
+];
+
+/// The six moods with a per-species expressive face (Content reads from the
+/// per-seed traits instead and is handled separately).
+const EXPRESSIVE_MOODS: [Mood; 6] = [
+    Mood::Happy,
+    Mood::Ecstatic,
+    Mood::Hungry,
+    Mood::Sad,
+    Mood::Sleepy,
+    Mood::Wilted,
+];
+
+/// A tick span wide enough to fire every species' periodic particle gate
+/// (`tick % N < k`, `is_multiple_of(41)`), so enumerating it yields the full
+/// particle vocabulary.
+const PARTICLE_DECLARED_TICK_SPAN: u64 = 64;
+
+/// The literal silhouette chars of one template line, with `{eyes}`/`{mouth}`/
+/// `{pattern}`/`{accent}` slot tokens removed (their glyphs are enumerated from
+/// the slot pools) and blanks dropped.
+fn template_literal_chars(line: &str) -> Vec<char> {
+    let mut chars = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('{') {
+        for ch in rest[..open].chars().filter(|ch| *ch != ' ') {
+            chars.push(ch);
+        }
+        match rest[open..].find('}') {
+            Some(close) => rest = &rest[open + close + 1..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    for ch in rest.chars().filter(|ch| *ch != ' ') {
+        chars.push(ch);
+    }
+    chars
+}
+
+/// Every scalar glyph the `{eyes}` slot can render for `species` across moods,
+/// gestures, work accents, soft eyes, blink, and the per-seed Content eyes. The
+/// eye role is the sole surface role painted bold, so the retained atlas needs a
+/// bold entry for each of these.
+pub(crate) fn declared_pet_eye_glyphs(species: Species) -> std::collections::BTreeSet<char> {
+    let mut eyes = std::collections::BTreeSet::new();
+    for mood in EXPRESSIVE_MOODS {
+        eyes.extend(mood_face(species, mood).eyes.chars());
+    }
+    eyes.extend(crate::pet::generation::declared_eye_trait_glyphs(species));
+    for value in IDLE_GESTURE_EYES
+        .iter()
+        .chain(WORK_ACCENT_EYES.iter())
+        .chain(std::iter::once(&SOFT_EYES))
+    {
+        eyes.extend(value.chars());
+    }
+    eyes.insert(closed_eye_char(species));
+    eyes.extend(closed_blink_eyes(species).chars());
+    eyes.remove(&' ');
+    eyes
+}
+
+/// Every scalar glyph the pet body can render for `species` across all stages,
+/// moods, gestures, blink, glitch corruption, particles, and per-seed trait
+/// slots. Declared content for the retained atlas preflight — the full set a pet
+/// of this species could ever paint, not one frame's pixels. The `#[cfg(test)]`
+/// `declared_pet_glyphs_cover_rendered_faces` guard verifies it is a superset of
+/// real `render_pet` output so the enumeration can never silently drift.
+pub(crate) fn declared_pet_glyphs(species: Species) -> std::collections::BTreeSet<char> {
+    let mut glyphs = declared_pet_eye_glyphs(species);
+    for stage in ALL_STAGES {
+        for line in stage_template_lines(species, stage, 0) {
+            glyphs.extend(template_literal_chars(&line));
+        }
+    }
+    for mood in EXPRESSIVE_MOODS {
+        glyphs.extend(mood_face(species, mood).mouth.chars());
+    }
+    glyphs.extend(crate::pet::generation::declared_trait_glyphs(species));
+    if matches!(species, Species::Glitch) {
+        glyphs.extend(GLITCH_NOISE.iter().copied());
+        glyphs.extend(GLITCH_REPAIR_GLYPHS.iter().copied());
+    }
+    for tick in 0..PARTICLE_DECLARED_TICK_SPAN {
+        for particle in particles_for_species(species, tick) {
+            glyphs.insert(particle.glyph);
+        }
+    }
+    // S6 gutter sparkle.
+    glyphs.insert('\u{2726}');
+    glyphs.remove(&' ');
+    glyphs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pet::generation::generate_pet;
+
+    const ALL_MOODS: [Mood; 7] = [
+        Mood::Content,
+        Mood::Happy,
+        Mood::Ecstatic,
+        Mood::Hungry,
+        Mood::Sad,
+        Mood::Sleepy,
+        Mood::Wilted,
+    ];
+
+    /// The declared pet repertoire must be a true superset of everything
+    /// `render_pet` can actually paint — otherwise the retained atlas preflight
+    /// would miss a glyph and force a rebuild mid-animation. Drives the real
+    /// renderer across every stage, mood, gesture, work accent, blink, glitch
+    /// corruption tier/burst, and particle tick and asserts each rendered scalar
+    /// is declared.
+    #[test]
+    fn declared_pet_glyphs_cover_every_rendered_face_and_particle() {
+        for species in Species::all() {
+            let declared = declared_pet_glyphs(species);
+            let pet = generate_pet("drift-guard").with_species(species);
+            let check = |stage: Stage, mood: Mood, frame: AnimationFrame| {
+                let rendered = render_pet(&pet, stage, mood, frame);
+                for (row, line) in rendered.lines.iter().enumerate() {
+                    for ch in line.chars().filter(|ch| *ch != ' ') {
+                        assert!(
+                            declared.contains(&ch),
+                            "{species:?} {stage:?} {mood:?} row {row}: rendered {ch:?} \
+                             (U+{:04X}) is not in declared_pet_glyphs",
+                            ch as u32,
+                        );
+                    }
+                }
+            };
+            // Every stage silhouette × every mood face × the expression overrides.
+            for stage in ALL_STAGES {
+                for mood in ALL_MOODS {
+                    let base = AnimationFrame {
+                        tick: 5,
+                        blink_suppression_ticks: 1,
+                        ..AnimationFrame::default()
+                    };
+                    check(stage, mood, base);
+                    check(stage, mood, AnimationFrame { soft_eyes: true, ..base });
+                    check(stage, mood, AnimationFrame { feed_reaction: true, ..base });
+                    for work_accent in [WorkAccent::Alert, WorkAccent::Focused, WorkAccent::Dreamy]
+                    {
+                        check(stage, mood, AnimationFrame { work_accent, ..base });
+                    }
+                    check(
+                        stage,
+                        mood,
+                        AnimationFrame {
+                            hold_eyes_closed: true,
+                            blink_suppression_ticks: 0,
+                            ..base
+                        },
+                    );
+                }
+            }
+            // Idle gestures and particles are tick-gated; sweep a full period.
+            for tick in 0..PARTICLE_DECLARED_TICK_SPAN * 2 {
+                check(
+                    Stage::S3,
+                    Mood::Content,
+                    AnimationFrame { tick, ..AnimationFrame::default() },
+                );
+            }
+            // Glitch corruption noise + persistent repair marks.
+            if species == Species::Glitch {
+                for patch_tier in [
+                    GlitchPatchTier::Pristine,
+                    GlitchPatchTier::Quiet,
+                    GlitchPatchTier::Active,
+                    GlitchPatchTier::Heavy,
+                ] {
+                    for burst_level in [
+                        GlitchBurstLevel::None,
+                        GlitchBurstLevel::Small,
+                        GlitchBurstLevel::Strong,
+                    ] {
+                        for calm_mode in [false, true] {
+                            for feed_reaction in [false, true] {
+                                for tick in 0..48u64 {
+                                    let frame = AnimationFrame {
+                                        tick,
+                                        feed_reaction,
+                                        glitch_corruption: Some(GlitchCorruptionFrame {
+                                            day_seed: 7,
+                                            patch_tier,
+                                            burst_level,
+                                            calm_mode,
+                                            feed_reaction,
+                                        }),
+                                        ..AnimationFrame::default()
+                                    };
+                                    check(Stage::S5, Mood::Content, frame);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn work_accent_from_weather_gates_on_live_work() {

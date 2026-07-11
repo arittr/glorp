@@ -142,53 +142,88 @@ fn generated_name(species: Species, rng: &mut StableRng) -> String {
     }
 }
 
+/// The per-species `{eyes}` slot pool the Content mood draws from.
+fn eye_trait_pool(species: Species) -> &'static [&'static str] {
+    match species {
+        Species::Fuzz => &["o o", "^ ^", "* *", "u u"],
+        Species::Blob => &["o o", ". .", "O O", "~ ~"],
+        Species::Ghost => &["o o", ". .", "* *", "v v"],
+        Species::Glitch => &["0 0", "\u{25c9} \u{25c9}", "# #", "1 1"],
+        Species::Crystal => &["o o", "< >", "* *", "v v"],
+        Species::Mech => &["o o", "[ ]", "= =", "0 0"],
+    }
+}
+
+/// The per-species `{mouth}` slot pool the Content mood draws from.
+fn mouth_trait_pool(species: Species) -> &'static [&'static str] {
+    match species {
+        Species::Fuzz | Species::Blob => &["w", "u", "v", "3"],
+        Species::Ghost => &["o", "~", "_", "."],
+        Species::Glitch => &["_", "!", "/", "\\"],
+        Species::Crystal => &["v", "^", "_", "."],
+        Species::Mech => &["-", "_", "=", "v"],
+    }
+}
+
+/// The `{pattern}` slot pool (3 columns wide, matching the template slot).
+const PATTERN_TRAIT_POOL: &[&str] = &[
+    "   ",
+    " . ",
+    " * ",
+    " \u{25c7} ",
+    " + ",
+    " ~ ",
+    "...",
+    " v ",
+    " \u{2027} ",
+    " \u{2726} ",
+    "\u{b7}.\u{b7}",
+    " \u{25d8} ",
+    "\u{2021} \u{2021}",
+    " \u{274d} ",
+    " \u{25e2} ",
+    "\u{2039}\u{b7}\u{203a}",
+];
+
+/// The `{accent}` slot pool.
+const ACCENT_TRAIT_POOL: &[&str] = &[
+    "\u{b7}", ":", "\u{2726}", "*", "+", "\u{25cb}", "\u{25c7}", "\u{2665}", "\u{273f}",
+    "\u{25aa}", "\u{25e6}", "\u{2727}", "\u{25a0}", "\u{25c8}", "\u{274d}",
+];
+
+/// Every scalar the four visible-trait slot pools can place for `species`. This
+/// is declared content: the full set the `{eyes}`/`{mouth}`/`{pattern}`/`{accent}`
+/// slots can ever render, independent of which seed's pick a given pet drew. Used
+/// by the retained glyph-repertoire preflight so the atlas holds every possible
+/// slot glyph up front.
+pub(crate) fn declared_trait_glyphs(species: Species) -> std::collections::BTreeSet<char> {
+    eye_trait_pool(species)
+        .iter()
+        .chain(mouth_trait_pool(species))
+        .chain(PATTERN_TRAIT_POOL)
+        .chain(ACCENT_TRAIT_POOL)
+        .flat_map(|value| value.chars())
+        .filter(|ch| *ch != ' ')
+        .collect()
+}
+
+/// Every scalar the `{eyes}` slot alone can place for `species` (the Content
+/// mood's eyes). The eye role is the one surface role painted bold, so the
+/// retained atlas needs a bold entry for each of these.
+pub(crate) fn declared_eye_trait_glyphs(species: Species) -> std::collections::BTreeSet<char> {
+    eye_trait_pool(species)
+        .iter()
+        .flat_map(|value| value.chars())
+        .filter(|ch| *ch != ' ')
+        .collect()
+}
+
 fn visible_traits(species: Species, rng: &mut StableRng) -> VisibleTraits {
-    let eyes = match species {
-        Species::Fuzz => pick(rng, &["o o", "^ ^", "* *", "u u"]),
-        Species::Blob => pick(rng, &["o o", ". .", "O O", "~ ~"]),
-        Species::Ghost => pick(rng, &["o o", ". .", "* *", "v v"]),
-        Species::Glitch => pick(rng, &["0 0", "\u{25c9} \u{25c9}", "# #", "1 1"]),
-        Species::Crystal => pick(rng, &["o o", "< >", "* *", "v v"]),
-        Species::Mech => pick(rng, &["o o", "[ ]", "= =", "0 0"]),
-    };
-    let mouth = match species {
-        Species::Fuzz | Species::Blob => pick(rng, &["w", "u", "v", "3"]),
-        Species::Ghost => pick(rng, &["o", "~", "_", "."]),
-        Species::Glitch => pick(rng, &["_", "!", "/", "\\"]),
-        Species::Crystal => pick(rng, &["v", "^", "_", "."]),
-        Species::Mech => pick(rng, &["-", "_", "=", "v"]),
-    };
+    let eyes = pick(rng, eye_trait_pool(species));
+    let mouth = pick(rng, mouth_trait_pool(species));
     // 3-char patterns match the `{pattern}` slot width in pet.jsx templates.
-    let pattern = pick(
-        rng,
-        &[
-            "   ",
-            " . ",
-            " * ",
-            " \u{25c7} ",
-            " + ",
-            " ~ ",
-            "...",
-            " v ",
-            " \u{2027} ",
-            " \u{2726} ",
-            "\u{b7}.\u{b7}",
-            " \u{25d8} ",
-            "\u{2021} \u{2021}",
-            " \u{274d} ",
-            " \u{25e2} ",
-            "\u{2039}\u{b7}\u{203a}",
-        ],
-    )
-    .to_string();
-    let accent = pick(
-        rng,
-        &[
-            "\u{b7}", ":", "\u{2726}", "*", "+", "\u{25cb}", "\u{25c7}", "\u{2665}", "\u{273f}",
-            "\u{25aa}", "\u{25e6}", "\u{2727}", "\u{25a0}", "\u{25c8}", "\u{274d}",
-        ],
-    )
-    .to_string();
+    let pattern = pick(rng, PATTERN_TRAIT_POOL).to_string();
+    let accent = pick(rng, ACCENT_TRAIT_POOL).to_string();
     let palette_index = rng.next_usize(8);
     // morph_index / morph_pup_index are retained-dead at the render layer: the
     // per-stage base-template map (pet/art.rs `stage_base_template`) replaced the

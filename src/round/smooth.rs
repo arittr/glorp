@@ -1,5 +1,8 @@
+use std::collections::BTreeSet;
+
 use ratatui::layout::Rect;
 
+use crate::pet::generation::Species;
 use crate::pet::render::{ART_HEIGHT, ART_WIDTH, FRAME_HEIGHT, FRAME_WIDTH};
 use crate::presentation::smooth::{
     smooth_pet_bob, transformed_smooth_bounds, validate_smooth_layer, CompanionChromeReservation,
@@ -25,6 +28,7 @@ use crate::round::tank_bed::{
     smooth_floor_projection_shape, smooth_tank_bed_geometry, SmoothTankBedGeometry,
 };
 use crate::tui::render_context::{RenderContext, WatchClock};
+use crate::tui::room::RoomSpeciesDialect;
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
@@ -612,6 +616,177 @@ fn expand_bounds(bounds: SmoothBounds, pad_x: f32, pad_y: f32) -> SmoothBounds {
             y: bounds.max.y + pad_y,
         },
     }
+}
+
+/// One glyph the companion could ever paint: a whole authored scalar sequence
+/// plus whether it renders bold. Backend-neutral so both the Smooth and retained
+/// renderers can consume the repertoire; the retained atlas maps each to a glyph
+/// key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RepertoireGlyph {
+    pub sequence: String,
+    pub bold: bool,
+}
+
+/// The declared-content identity that determines a companion's glyph atlas: the
+/// set of species the atlas must serve.
+///
+/// Every other axis the companion can paint — all stages, moods, and animation
+/// states; the room dialect's full biome/weather/emitter slices; every day-phase
+/// sky/floor palette; every earnable prop and tank-life sprite; the whole
+/// particle vocabulary — is enumerated into the repertoire in full. So the atlas
+/// only changes when the species set changes (or when the font policy / backing
+/// scale changes, which the generation key tracks separately). In particular the
+/// live room reseeds its random glyph pick every minute, but every candidate is
+/// already in the atlas, so that reshuffle never changes this identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompanionContentIdentity {
+    species: Vec<Species>,
+}
+
+impl CompanionContentIdentity {
+    /// The identity for a set of species, sorted and deduplicated so equal
+    /// content produces equal identity bytes.
+    pub fn for_species(species: impl IntoIterator<Item = Species>) -> Self {
+        let mut species: Vec<Species> = species.into_iter().collect();
+        species.sort_by_key(|species| species.as_str());
+        species.dedup();
+        Self { species }
+    }
+
+    /// The active pet's identity: its one species. Production companions build
+    /// their manifest from this — the pet never changes species, so the atlas is
+    /// stable for the life of the window save a resize.
+    pub fn for_pet(species: Species) -> Self {
+        Self::for_species([species])
+    }
+
+    /// The full-cast identity covering every species — the strongest atlas, used
+    /// by the retained repertoire fixtures.
+    pub fn all_species() -> Self {
+        Self::for_species(Species::all())
+    }
+
+    pub fn species(&self) -> &[Species] {
+        &self.species
+    }
+
+    /// Stable content-identity bytes for hashing into a resource generation key.
+    /// Depends only on the declared content (the sorted species set), never on a
+    /// frame's random glyph pick.
+    pub fn identity_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for species in &self.species {
+            bytes.extend_from_slice(species.as_str().as_bytes());
+            bytes.push(0);
+        }
+        bytes
+    }
+}
+
+/// The HUD's declared character set: every scalar the companion HUD lines can
+/// render. Derived by driving the real formatters across representative values
+/// (so the suffixes/punctuation stay authoritative) plus the full digit range.
+fn declared_hud_glyphs() -> BTreeSet<char> {
+    let mut glyphs = BTreeSet::new();
+    for digit in b'0'..=b'9' {
+        glyphs.insert(digit as char);
+    }
+    let samples = [
+        crate::round::hud::companion_hud_text(12_345.0, Some(0.5), 6_789.0),
+        crate::round::hud::companion_hud_text(1_234_567.0, Some(0.0), 8.0),
+        crate::round::hud::companion_hud_text(9_876_543_210.0, Some(9.99), 0.0),
+    ];
+    for hud in samples {
+        for line in [hud.today_total, hud.daily_percent, hud.pace] {
+            glyphs.extend(line.chars());
+        }
+    }
+    for fraction in [None, Some(0.5), Some(9.99), Some(-1.0)] {
+        glyphs.extend(crate::round::hud::format_daily_percent(fraction).chars());
+    }
+    glyphs
+}
+
+/// Collects the full declared glyph repertoire (sorted, deduplicated) a companion
+/// could ever paint for `identity`: the pet body across every stage/mood/state,
+/// the room dialect's whole biome/weather/emitter slices, the ambient
+/// sky/floor/mote/activity palettes, every earnable prop and tank-life sprite,
+/// the performance cues, the chest bubble, and the HUD charset.
+///
+/// This is declared content, not a frame's pixels — it enumerates the static
+/// content inventories directly rather than sampling the random per-minute scene.
+/// The retained manifest adds the effect/chrome glyphs (the replacement glyph,
+/// bubble emoji, and a composed-mark representative). The `#[cfg(test)]`
+/// `repertoire_covers_a_live_scene_plan` guard proves it is a superset of what a
+/// real scene plan actually paints.
+pub fn collect_companion_glyph_repertoire(
+    identity: &CompanionContentIdentity,
+) -> Vec<RepertoireGlyph> {
+    let mut regular: BTreeSet<char> = BTreeSet::new();
+    let mut bold: BTreeSet<char> = BTreeSet::new();
+
+    // Species-independent inventories.
+    regular.extend(crate::tui::component::tank_life::declared_tank_life_glyphs());
+    regular.extend(crate::tui::panels::pet::declared_performance_cue_glyphs());
+    regular.extend(crate::tui::panels::pet::declared_chest_bubble_glyphs());
+    regular.extend(crate::tui::component::habitat_props::declared_prop_glyphs(
+        identity.species(),
+    ));
+    regular.extend(declared_hud_glyphs());
+
+    // Per-species inventories: pet body, room dialect, ambient palettes.
+    for &species in identity.species() {
+        regular.extend(crate::pet::render::declared_pet_glyphs(species));
+        regular.extend(crate::tui::room::declared_room_glyphs(
+            RoomSpeciesDialect::for_species(species),
+        ));
+        regular.extend(crate::tui::panels::pet::declared_ambient_glyphs(species));
+        // The eye role is the only surface role painted bold.
+        bold.extend(crate::pet::render::declared_pet_eye_glyphs(species));
+    }
+
+    let mut glyphs: Vec<RepertoireGlyph> = regular
+        .into_iter()
+        .map(|ch| RepertoireGlyph { sequence: ch.to_string(), bold: false })
+        .chain(
+            bold.into_iter()
+                .map(|ch| RepertoireGlyph { sequence: ch.to_string(), bold: true }),
+        )
+        .collect();
+    glyphs.sort();
+    glyphs.dedup();
+    glyphs
+}
+
+/// The glyphs one rendered companion frame actually paints: every `LocalCell`
+/// glyph (pet body, room, props, tank life, cues — whole authored scalar
+/// sequences with their weight) plus each HUD line tokenized per ASCII scalar.
+/// Sorted and deduplicated. This is a single frame's *painted* set — a subset of
+/// the declared repertoire the atlas is preflighted from.
+pub fn frame_glyph_sequences(
+    plan: &SmoothCompanionScenePlan,
+    hud: &crate::round::hud::CompanionHudText,
+) -> Vec<RepertoireGlyph> {
+    let mut set: BTreeSet<RepertoireGlyph> = BTreeSet::new();
+    for layer in &plan.layers {
+        for item in &layer.items {
+            if let SmoothLayerItem::LocalCell(cell) = item {
+                if let Some(glyph) = cell.glyph.as_ref() {
+                    set.insert(RepertoireGlyph { sequence: glyph.clone(), bold: cell.bold });
+                }
+            }
+        }
+    }
+    for line in [&hud.today_total, &hud.daily_percent, &hud.pace] {
+        for scalar in line.chars() {
+            set.insert(RepertoireGlyph {
+                sequence: scalar.to_string(),
+                bold: false,
+            });
+        }
+    }
+    set.into_iter().collect()
 }
 
 fn gauge_bounds(grid_cols: u16, grid_rows: u16) -> Vec<SmoothBounds> {

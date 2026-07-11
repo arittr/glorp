@@ -23,14 +23,18 @@ mod props;
 mod tank_life;
 
 pub use ambient::{ambient_glyphs_for, ambient_glyphs_for_phase};
-pub(crate) use ambient::{effective_weekend_softening, pet_silhouette_halo_rects};
+pub(crate) use ambient::{
+    declared_ambient_glyphs, effective_weekend_softening, pet_silhouette_halo_rects,
+};
 #[cfg(feature = "dev-preview")]
 pub(crate) use art_lines::pet_role_spans_for_line;
 use art_lines::render_speech_bubble;
 use blit::blit_draw_list;
+pub(crate) use chest_bubble::declared_chest_bubble_glyphs;
 pub(crate) use colors::pet_role_style;
 pub(crate) use draw::{render_pet_to_draw_list, render_pet_to_draw_list_with_tank_geometry};
 pub(crate) use layered::render_layered_pet_scene_with_tank_geometry;
+pub(crate) use performance::declared_performance_cue_glyphs;
 
 #[cfg(test)]
 use crate::game::evolution::Stage;

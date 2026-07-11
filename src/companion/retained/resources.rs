@@ -7,6 +7,8 @@
 //! capture boundary forbids, so glyph rasterization lives beside the retained
 //! renderer here rather than in `capture.rs`.
 
+use std::collections::BTreeMap;
+
 use objc2::rc::Retained;
 use objc2::ClassType;
 use objc2_app_kit::{
@@ -16,6 +18,9 @@ use objc2_app_kit::{
 use objc2_foundation::{NSMutableAttributedString, NSPoint, NSRange, NSString};
 
 use super::RetainedFailureCategory;
+use crate::round::smooth::{
+    collect_companion_glyph_repertoire, CompanionContentIdentity, RepertoireGlyph,
+};
 
 /// Deterministic FNV-1a so a font-policy id is a stable hash of its inputs,
 /// independent of the standard hasher's seeded internals.
@@ -479,6 +484,286 @@ pub(super) fn rasterize_glyph_entry(
     }
 }
 
+/// Inner drawable box as a multiple of the point size, inside the safe padding.
+/// 1.5 comfortably clears the widest glyph (the bubble emoji measures ~1.42× the
+/// point size) at every size, so the full repertoire fits even the smallest
+/// matrix cell.
+const ATLAS_INNER_RATIO: f64 = 1.5;
+/// Safe padding as a multiple of the point size. At the 48pt device font this is
+/// a 4px margin inside an 80px cell — the historical cell edge.
+const ATLAS_PADDING_RATIO: f64 = 0.08;
+/// Glyphs per atlas row.
+const ATLAS_COLUMNS: u32 = 16;
+/// Row ceiling for the packed atlas. Raised above the pre-preflight 16 rows so
+/// the full declared repertoire (pet × room × props × tank life × ambient × HUD
+/// × chrome, both weights) fits; a repertoire that overflows this fails the
+/// preflight rather than silently rebuilding per frame.
+const MAX_ATLAS_ROWS: u32 = 40;
+
+/// The effect and chrome glyphs the retained renderer guarantees regardless of
+/// pet content: the Unicode replacement glyph a corrupt/unmappable scalar falls
+/// back to, the chest bubble emoji, and a composed-mark representative (kept in
+/// both precomposed and combining forms so a query in either normalization
+/// resolves).
+const CHROME_GLYPHS: &[&str] = &["\u{fffd}", "\u{1fae7}", "\u{00f6}", "o\u{308}"];
+
+/// The point size a production companion atlas rasterizes at — the historical
+/// device font size. The renderer's glyph-quad scale divides the display font
+/// size by this, so keeping it fixed preserves the on-screen glyph geometry
+/// while the atlas now holds the full preflighted repertoire.
+pub(super) const RETAINED_ATLAS_POINT_SIZE: f64 = 48.0;
+
+/// The logical point size the atlas rasterizes at for a companion window of
+/// `logical_size` points. The shipping 960pt device resolves to the historical
+/// 48pt font; smaller and larger windows scale proportionally. Used by the
+/// size/scale test matrix; production uses the fixed [`RETAINED_ATLAS_POINT_SIZE`].
+#[cfg(test)]
+fn atlas_point_size_for_logical(logical_size: u32) -> f64 {
+    (f64::from(logical_size) * 48.0 / 960.0).max(10.0)
+}
+
+/// A rasterized glyph atlas for one resource generation: the packed RGBA pixels
+/// and the per-key metric entries. Rasterized at the manifest's fixed production
+/// point size, which the renderer's glyph scale divides the display font size by.
+pub(super) struct CompiledGlyphAtlas {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) rgba: Vec<u8>,
+    pub(super) entries: BTreeMap<GlyphKey, GlyphAtlasEntry>,
+}
+
+impl CompiledGlyphAtlas {
+    /// Rasterizes every key in `glyphs` into a packed atlas at `point_size`.
+    /// Fails with [`RetainedFailureCategory::AtlasUnavailable`] if the repertoire
+    /// overflows the row ceiling or a glyph does not fit its cell, so a preflight
+    /// that cannot hold the full repertoire falls back rather than rebuilding.
+    fn compile(
+        glyphs: &[GlyphKey],
+        point_size: f64,
+        backing_scale: f64,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
+        let padding = (point_size * ATLAS_PADDING_RATIO).round().max(1.0) as u32;
+        let inner = (point_size * ATLAS_INNER_RATIO).round().max(1.0) as u32;
+        let cell = inner + 2 * padding;
+        let count = glyphs.len().max(1) as u32;
+        let rows = count.div_ceil(ATLAS_COLUMNS);
+        if rows > MAX_ATLAS_ROWS {
+            return Err(RetainedFailureCategory::AtlasUnavailable);
+        }
+        let width = ATLAS_COLUMNS * cell;
+        let height = rows * cell;
+        let mut rgba = vec![0_u8; (width * height * 4) as usize];
+        let target = GlyphRasterTarget { cell, padding, point_size };
+        let regular_id =
+            ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Regular).id();
+        let bold_id =
+            ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Bold).id();
+        let mut entries = BTreeMap::new();
+        for (index, key) in glyphs.iter().enumerate() {
+            let slot_x = index as u32 % ATLAS_COLUMNS;
+            let slot_y = index as u32 / ATLAS_COLUMNS;
+            let font_policy_id = if key.bold { bold_id } else { regular_id };
+            let entry = rasterize_glyph_entry(
+                key,
+                &target,
+                font_policy_id,
+                &mut rgba,
+                width,
+                height,
+                slot_x * cell,
+                slot_y * cell,
+            )?;
+            entries.insert(key.clone(), entry);
+        }
+        Ok(Self { width, height, rgba, entries })
+    }
+}
+
+/// A deterministic hash of a companion's declared-content identity, its full
+/// glyph repertoire, and the resolved font policies (which fold in point size,
+/// backing scale, atlas packing version, and shader resource version). The
+/// retained atlas rebuilds only when this changes — never on a per-frame glyph
+/// set change, and never on the per-minute room reshuffle (which changes only
+/// which repertoire glyph is painted, not the identity).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ResourceGenerationKey(u64);
+
+impl ResourceGenerationKey {
+    fn compute(manifest: &GlyphRepertoireManifest) -> Self {
+        let mut hasher = Fnv1a::new();
+        hasher.write(&manifest.identity.identity_bytes());
+        for key in &manifest.glyphs {
+            hasher.write(key.sequence.as_str().as_bytes());
+            hasher.write_u8(u8::from(key.bold));
+            hasher.write_u8(0xff);
+        }
+        let regular = ResolvedFontPolicy::resolve(
+            manifest.atlas_point_size,
+            manifest.backing_scale,
+            FontWeightPolicy::Regular,
+        )
+        .id();
+        let bold = ResolvedFontPolicy::resolve(
+            manifest.atlas_point_size,
+            manifest.backing_scale,
+            FontWeightPolicy::Bold,
+        )
+        .id();
+        hasher.write_u64(regular);
+        hasher.write_u64(bold);
+        Self(hasher.finish())
+    }
+
+    pub(super) fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// The full glyph repertoire a companion could ever paint, plus the atlas
+/// geometry to rasterize it at. Built from the backend-neutral declared-content
+/// collector and the retained chrome glyphs, then sorted and deduplicated into a
+/// stable key list.
+pub(super) struct GlyphRepertoireManifest {
+    identity: CompanionContentIdentity,
+    glyphs: Vec<GlyphKey>,
+    atlas_point_size: f64,
+    backing_scale: f64,
+}
+
+impl GlyphRepertoireManifest {
+    fn from_repertoire(
+        identity: CompanionContentIdentity,
+        repertoire: Vec<RepertoireGlyph>,
+        atlas_point_size: f64,
+        backing_scale: f64,
+    ) -> Self {
+        let mut glyphs: Vec<GlyphKey> = repertoire
+            .into_iter()
+            .map(|glyph| GlyphKey::new(glyph.sequence, glyph.bold))
+            .collect();
+        for chrome in CHROME_GLYPHS {
+            glyphs.push(GlyphKey::new(*chrome, false));
+        }
+        glyphs.sort();
+        glyphs.dedup();
+        Self {
+            identity,
+            glyphs,
+            atlas_point_size,
+            backing_scale,
+        }
+    }
+
+    /// The manifest for the active pet: its one species across every stage/state,
+    /// its room dialect, and every earnable prop/tank-life glyph. Production uses
+    /// the fixed [`RETAINED_ATLAS_POINT_SIZE`] so on-screen glyph geometry is
+    /// unchanged; the backing scale still feeds the generation key.
+    pub(super) fn for_active_pet(identity: CompanionContentIdentity, backing_scale: f64) -> Self {
+        let repertoire = collect_companion_glyph_repertoire(&identity);
+        Self::from_repertoire(
+            identity,
+            repertoire,
+            RETAINED_ATLAS_POINT_SIZE,
+            backing_scale,
+        )
+    }
+
+    /// The full-cast fixture manifest (every species) at a device-typical size —
+    /// the strongest repertoire, a superset of any single pet's.
+    #[cfg(test)]
+    pub(super) fn for_fixture_pet() -> Self {
+        Self::for_fixture_pet_at(960, 2.0)
+    }
+
+    /// The full-cast fixture manifest at an explicit logical size and backing
+    /// scale, so the size/scale matrix can exercise distinct generations.
+    #[cfg(test)]
+    pub(super) fn for_fixture_pet_at(logical_size: u32, backing_scale: f64) -> Self {
+        let identity = CompanionContentIdentity::all_species();
+        let repertoire = collect_companion_glyph_repertoire(&identity);
+        Self::from_repertoire(
+            identity,
+            repertoire,
+            atlas_point_size_for_logical(logical_size),
+            backing_scale,
+        )
+    }
+
+    /// Whether the repertoire contains a glyph with exactly this scalar sequence
+    /// (in either weight).
+    #[cfg(test)]
+    pub(super) fn contains_sequence(&self, sequence: &str) -> bool {
+        self.glyphs
+            .iter()
+            .any(|key| key.sequence.as_str() == sequence)
+    }
+
+    pub(super) fn glyphs(&self) -> &[GlyphKey] {
+        &self.glyphs
+    }
+
+    pub(super) fn generation_key(&self) -> ResourceGenerationKey {
+        ResourceGenerationKey::compute(self)
+    }
+}
+
+/// Every atlas resource for one resource generation: the compiled glyph atlas and
+/// the generation key it was built for. Compiled in full before it replaces an
+/// active generation, so a failed compile can leave the previous generation in
+/// place.
+pub(super) struct CompiledRetainedResources {
+    generation: ResourceGenerationKey,
+    atlas: CompiledGlyphAtlas,
+}
+
+impl CompiledRetainedResources {
+    /// Compiles the manifest's full repertoire into an atlas. On overflow or a
+    /// glyph that does not fit, returns the failure category so the caller can
+    /// retain the previous generation and fall back.
+    pub(super) fn compile(
+        manifest: &GlyphRepertoireManifest,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
+        let atlas = CompiledGlyphAtlas::compile(
+            manifest.glyphs(),
+            manifest.atlas_point_size,
+            manifest.backing_scale,
+        )?;
+        Ok(Self {
+            generation: manifest.generation_key(),
+            atlas,
+        })
+    }
+
+    pub(super) fn generation(&self) -> ResourceGenerationKey {
+        self.generation
+    }
+
+    pub(super) fn atlas(&self) -> &CompiledGlyphAtlas {
+        &self.atlas
+    }
+
+    /// Whether the compiled atlas holds this glyph. A frame that asks for a glyph
+    /// not present is an atlas miss — which the churn contract forbids after
+    /// activation from the full repertoire.
+    #[cfg(test)]
+    pub(super) fn contains(&self, key: &GlyphKey) -> bool {
+        self.atlas.entries.contains_key(key)
+    }
+}
+
+/// Post-activation resource churn counters the test harness proves the churn
+/// contract with. A companion activated from its full declared repertoire must
+/// run any animation with all three at zero: the atlas is compiled once at the
+/// generation change and never rebuilt, re-uploaded, or missed per frame. (Task
+/// 10 adds buffer/texture counters.)
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct RetainedResourceCounters {
+    pub(super) atlas_builds_after_activation: u32,
+    pub(super) atlas_uploads_after_activation: u32,
+    pub(super) atlas_misses: u32,
+}
+
 #[cfg(test)]
 mod metric_tests {
     use super::*;
@@ -672,5 +957,238 @@ mod glyph_tests {
         let entry = GlyphAtlasEntry::whitespace(24.0, 52.0);
         assert_eq!(entry.advance, 24.0);
         assert_eq!(entry.visible_uv, None);
+    }
+}
+
+#[cfg(test)]
+mod repertoire_tests {
+    use super::*;
+    use crate::game::evolution::Stage;
+    use crate::game::metabolism::Mood;
+    use crate::pet::generation::Species;
+    use crate::round::hud::{companion_hud_text, CompanionHudText};
+    use crate::round::scene::CompanionMotion;
+    use crate::round::smooth::{build_round_smooth_scene_plan, frame_glyph_sequences};
+    use crate::tui::view_model::WatchViewModel;
+    use time::macros::datetime;
+
+    const GRID_COLS: u16 = 44;
+    const GRID_ROWS: u16 = 18;
+
+    /// One rendered companion frame: the scene plan plus its HUD text. The glyph
+    /// keys are extracted with the same backend-neutral collector the production
+    /// renderer uses.
+    struct StripFrame {
+        plan: crate::presentation::smooth::SmoothCompanionScenePlan,
+        hud: CompanionHudText,
+    }
+
+    impl StripFrame {
+        fn glyph_keys(&self) -> Vec<GlyphKey> {
+            frame_glyph_sequences(&self.plan, &self.hud)
+                .into_iter()
+                .map(|glyph| GlyphKey::new(glyph.sequence, glyph.bold))
+                .collect()
+        }
+    }
+
+    /// A resource cache that compiles a manifest's full repertoire once at
+    /// activation, then serves frames from it. It rebuilds only on a resource
+    /// generation change — never per frame — so `prepare` only ever counts atlas
+    /// misses (a frame glyph the compiled atlas lacks), never builds or uploads.
+    struct TestResourceCache {
+        compiled: CompiledRetainedResources,
+        counters: RetainedResourceCounters,
+    }
+
+    impl TestResourceCache {
+        fn activate(manifest: GlyphRepertoireManifest) -> Self {
+            let compiled = CompiledRetainedResources::compile(&manifest)
+                .expect("the full declared repertoire fits the preflighted atlas");
+            Self {
+                compiled,
+                counters: RetainedResourceCounters::default(),
+            }
+        }
+
+        fn prepare(
+            &mut self,
+            frame: &StripFrame,
+        ) -> std::result::Result<(), RetainedFailureCategory> {
+            // The generation is fixed at activation: a frame never rebuilds or
+            // re-uploads the atlas. A missing glyph is the only churn a frame can
+            // cause, and the full-repertoire preflight forbids it.
+            for key in frame.glyph_keys() {
+                if !self.compiled.contains(&key) {
+                    self.counters.atlas_misses += 1;
+                }
+            }
+            Ok(())
+        }
+
+        fn counters(&self) -> RetainedResourceCounters {
+            self.counters
+        }
+    }
+
+    /// One rendered frame for a single species at `now`, used to prove the
+    /// per-minute room reshuffle never misses the compiled atlas.
+    fn single_species_frame(species: Species, now: time::OffsetDateTime) -> StripFrame {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_render.generated_species = species;
+        let tick = now.unix_timestamp().max(0) as u64;
+        crate::commands::watch::rerender_pet_for_view_model(&mut vm, tick, false, now)
+            .expect("pet rerenders");
+        let plan = build_round_smooth_scene_plan(
+            &vm,
+            now,
+            GRID_COLS,
+            GRID_ROWS,
+            &CompanionMotion::default(),
+            tick * 250,
+        );
+        StripFrame {
+            plan,
+            hud: companion_hud_text(1_234_567.0, Some(0.5), 8_900.0),
+        }
+    }
+
+    /// A deterministic animation strip covering every species (→ pet body, room
+    /// dialect, and props), a spread of stages and moods, tick-driven blink and
+    /// particles, changing HUD digits, and a minute boundary so the room reseeds
+    /// its random glyph pick.
+    fn deterministic_full_strip_at(_logical_size: u32, _backing_scale: f64) -> Vec<StripFrame> {
+        let base = datetime!(2026-06-13 18:00:30 UTC);
+        let motion = CompanionMotion::default();
+        let profiles = [
+            (Stage::S0, Mood::Content, false),
+            (Stage::S3, Mood::Happy, false),
+            (Stage::S6, Mood::Sleepy, true),
+        ];
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        let mut frames = Vec::new();
+        for species in Species::all() {
+            vm.pet_render.generated_species = species;
+            for &(stage, mood, asleep) in &profiles {
+                vm.pet_render.stage = stage;
+                vm.pet_render.mood = mood;
+                for minute in [0_i64, 1] {
+                    for tick_step in 0..2_u64 {
+                        let now = base
+                            + time::Duration::minutes(minute)
+                            + time::Duration::seconds((tick_step * 11) as i64);
+                        let tick = now.unix_timestamp().max(0) as u64;
+                        crate::commands::watch::rerender_pet_for_view_model(
+                            &mut vm, tick, asleep, now,
+                        )
+                        .expect("pet rerenders");
+                        let plan = build_round_smooth_scene_plan(
+                            &vm,
+                            now,
+                            GRID_COLS,
+                            GRID_ROWS,
+                            &motion,
+                            tick * 250,
+                        );
+                        let hud = companion_hud_text(
+                            (tick % 9_999_999) as f64,
+                            Some((tick % 200) as f64 / 100.0),
+                            (tick % 88_000) as f64,
+                        );
+                        frames.push(StripFrame { plan, hud });
+                    }
+                }
+            }
+        }
+        frames
+    }
+
+    fn deterministic_full_strip() -> Vec<StripFrame> {
+        deterministic_full_strip_at(960, 2.0)
+    }
+
+    #[test]
+    fn manifest_contains_dynamic_and_chrome_repertoire() {
+        let manifest = GlyphRepertoireManifest::for_fixture_pet();
+        for required in ["-", ".", "0", "9", "\u{fffd}", "\u{f6}", "\u{1fae7}"] {
+            assert!(manifest.contains_sequence(required), "missing {required}");
+        }
+    }
+
+    #[test]
+    fn full_animation_strip_has_no_post_activation_atlas_churn() {
+        let manifest = GlyphRepertoireManifest::for_fixture_pet();
+        let mut cache = TestResourceCache::activate(manifest);
+        for frame in deterministic_full_strip() {
+            cache.prepare(&frame).unwrap();
+        }
+        assert_eq!(cache.counters().atlas_builds_after_activation, 0);
+        assert_eq!(cache.counters().atlas_uploads_after_activation, 0);
+        assert_eq!(cache.counters().atlas_misses, 0);
+    }
+
+    #[test]
+    fn generation_key_is_stable_and_churn_free_across_a_minute_boundary_reshuffle() {
+        let species = Species::Crystal;
+        let identity = crate::round::smooth::CompanionContentIdentity::for_pet(species);
+        let manifest = GlyphRepertoireManifest::for_active_pet(identity, 2.0);
+        let key = manifest.generation_key();
+        let mut cache = TestResourceCache::activate(manifest);
+        // The room reseeds its random glyph pick every minute; step across
+        // several minute boundaries and confirm the atlas serves them all with no
+        // rebuild, upload, or miss.
+        let base = datetime!(2026-06-13 18:00:30 UTC);
+        for minute in [0_i64, 1, 2, 5, 60] {
+            let now = base + time::Duration::minutes(minute);
+            cache.prepare(&single_species_frame(species, now)).unwrap();
+        }
+        assert_eq!(cache.counters().atlas_builds_after_activation, 0);
+        assert_eq!(cache.counters().atlas_uploads_after_activation, 0);
+        assert_eq!(cache.counters().atlas_misses, 0);
+        // The declared-content generation key is unchanged by the reshuffle.
+        assert_eq!(
+            GlyphRepertoireManifest::for_active_pet(
+                crate::round::smooth::CompanionContentIdentity::for_pet(species),
+                2.0,
+            )
+            .generation_key(),
+            key,
+        );
+        // A backing-scale change is a real generation change (Task-8 finding #3).
+        assert_ne!(
+            GlyphRepertoireManifest::for_active_pet(
+                crate::round::smooth::CompanionContentIdentity::for_pet(species),
+                1.0,
+            )
+            .generation_key(),
+            key,
+        );
+    }
+
+    #[test]
+    fn full_strip_has_no_churn_across_the_size_and_scale_matrix() {
+        for logical_size in [260_u32, 360, 480, 720] {
+            for backing_scale in [1.0_f64, 2.0] {
+                let manifest =
+                    GlyphRepertoireManifest::for_fixture_pet_at(logical_size, backing_scale);
+                let mut cache = TestResourceCache::activate(manifest);
+                for frame in deterministic_full_strip_at(logical_size, backing_scale) {
+                    cache.prepare(&frame).unwrap();
+                }
+                let counters = cache.counters();
+                assert_eq!(
+                    counters.atlas_builds_after_activation, 0,
+                    "builds at {logical_size}@{backing_scale}",
+                );
+                assert_eq!(
+                    counters.atlas_uploads_after_activation, 0,
+                    "uploads at {logical_size}@{backing_scale}",
+                );
+                assert_eq!(
+                    counters.atlas_misses, 0,
+                    "misses at {logical_size}@{backing_scale}",
+                );
+            }
+        }
     }
 }

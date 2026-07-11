@@ -1,6 +1,5 @@
 #![cfg(all(target_os = "macos", feature = "retained-renderer"))]
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -34,15 +33,16 @@ pub(crate) use presentation::{
     SkipReason,
 };
 use resources::{
-    rasterize_glyph_entry, FontWeightPolicy, FragmentGlyphMode, GlyphAtlasEntry, GlyphKey,
-    GlyphRasterTarget, ResolvedFontPolicy,
+    CompiledGlyphAtlas, CompiledRetainedResources, FragmentGlyphMode, GlyphAtlasEntry, GlyphKey,
+    GlyphRepertoireManifest, RETAINED_ATLAS_POINT_SIZE,
 };
 
-const ATLAS_CELL: u32 = 80;
-const ATLAS_PADDING: u32 = 6;
-const ATLAS_COLUMNS: u32 = 16;
-const MAX_ATLAS_ROWS: u32 = 16;
-const GLYPH_FONT_SIZE: f64 = 48.0;
+use crate::round::smooth::CompanionContentIdentity;
+
+/// The point size the retained atlas rasterizes glyphs at; the on-screen quad
+/// scale divides the display font size by this. Matches the manifest's
+/// production atlas point size.
+const GLYPH_FONT_SIZE: f64 = RETAINED_ATLAS_POINT_SIZE;
 const TANK_CORE_TINT: [f32; 3] = [0.10, 0.11, 0.20];
 const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
 
@@ -97,16 +97,14 @@ struct PreparedGpuFrame {
     blends: Vec<SmoothBlendMode>,
 }
 
-struct GlyphAtlas {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-    entries: BTreeMap<GlyphKey, GlyphAtlasEntry>,
-}
-
-struct CachedGlyphAtlas {
-    glyphs: Vec<GlyphKey>,
-    atlas: GlyphAtlas,
+/// The GPU resources for one active resource generation: the compiled atlas plus
+/// the declared-content identity and backing scale it was compiled for, so the
+/// host knows when a generation change requires recompiling, and the uploaded
+/// texture + bind group.
+struct ActiveGlyphResources {
+    identity: CompanionContentIdentity,
+    backing_scale: f64,
+    resources: CompiledRetainedResources,
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
 }
@@ -120,7 +118,7 @@ pub(super) struct RetainedHost {
     layer: Retained<CAMetalLayer>,
     pipelines: Pipelines,
     atlas_layout: wgpu::BindGroupLayout,
-    glyph_atlas: Option<CachedGlyphAtlas>,
+    glyph_resources: Option<ActiveGlyphResources>,
     physical_width: u32,
     physical_height: u32,
     backing_scale: f64,
@@ -348,7 +346,7 @@ impl PreparedRetainedHost {
                 layer,
                 pipelines,
                 atlas_layout,
-                glyph_atlas: None,
+                glyph_resources: None,
                 physical_width: width,
                 physical_height: height,
                 backing_scale: scale,
@@ -410,10 +408,15 @@ impl ActiveRetainedHost {
         self.host.frame_counter
     }
 
-    /// The resource generation the host currently renders against. Real
-    /// generations arrive in Task 9; today the host tracks a single generation.
+    /// The resource generation the host currently renders against — the hash of
+    /// the active pet's declared content, repertoire, and font policy. Zero before
+    /// the first generation is compiled.
     pub(crate) fn current_resource_generation(&self) -> u64 {
-        0
+        self.host
+            .glyph_resources
+            .as_ref()
+            .map(|active| active.resources.generation().value())
+            .unwrap_or(0)
     }
 }
 
@@ -433,7 +436,7 @@ impl std::ops::DerefMut for ActiveRetainedHost {
 
 impl RetainedHost {
     /// Advances the monotonic frame counter, returning the id for the frame
-    /// about to be attempted. Real resource generations arrive in Task 9.
+    /// about to be attempted.
     fn next_frame_id(&mut self) -> u64 {
         let id = self.frame_counter;
         self.frame_counter = self.frame_counter.wrapping_add(1);
@@ -456,29 +459,32 @@ impl RetainedHost {
         aperture: RoundAperture,
         background: [f32; 4],
         chrome: RetainedChrome<'_>,
+        identity: &CompanionContentIdentity,
     ) -> FrameProgress {
-        let mut progress = FrameProgress::new(self.next_frame_id(), 0);
+        let frame_id = self.next_frame_id();
         if let Err(category) = self.resize_if_needed(view) {
+            let mut progress = FrameProgress::new(frame_id, 0);
             fail(&mut progress, category);
             return progress;
         }
-        let glyphs = collect_glyphs(plan, chrome.hud);
-        if let Err(category) = self.ensure_glyph_atlas(glyphs) {
+        // Compile the full declared repertoire once per resource generation. A
+        // per-frame glyph-set change never rebuilds; only a generation change
+        // (species, font policy, or backing scale) does.
+        if let Err(category) = self.ensure_resources(identity) {
+            let mut progress = FrameProgress::new(frame_id, 0);
             fail(&mut progress, category);
             return progress;
         }
-        let Some(cached_atlas) = self.glyph_atlas.as_ref() else {
+        let Some(active) = self.glyph_resources.as_ref() else {
+            let mut progress = FrameProgress::new(frame_id, 0);
             fail(&mut progress, RetainedFailureCategory::AtlasUnavailable);
             return progress;
         };
+        let mut progress = FrameProgress::new(frame_id, active.resources.generation().value());
+        let atlas = active.resources.atlas();
+        let atlas_bind_group = &active.bind_group;
         let frame = match prepare_gpu_frame(
-            plan,
-            draw_order,
-            metrics,
-            aperture,
-            background,
-            &chrome,
-            &cached_atlas.atlas,
+            plan, draw_order, metrics, aperture, background, &chrome, atlas,
         ) {
             Ok(frame) => frame,
             Err(category) => {
@@ -532,7 +538,7 @@ impl RetainedHost {
         self.encode_scene(
             &mut encoder,
             &target,
-            &cached_atlas.bind_group,
+            atlas_bind_group,
             &primitive_buffer,
             &frame.blends,
             background,
@@ -591,18 +597,43 @@ impl RetainedHost {
         }
     }
 
-    fn ensure_glyph_atlas(
+    /// Ensures the active glyph resources match the pet's declared-content
+    /// `identity` at the current backing scale. Reuses the active generation when
+    /// nothing changed; otherwise compiles the full declared repertoire into a
+    /// fresh atlas and uploads it. Compile-before-replace: on a compile failure
+    /// the previous generation stays active so the caller can keep rendering it or
+    /// fall back explicitly.
+    fn ensure_resources(
         &mut self,
-        glyphs: Vec<GlyphKey>,
+        identity: &CompanionContentIdentity,
     ) -> std::result::Result<(), RetainedFailureCategory> {
-        if !glyph_atlas_needs_rebuild(
-            self.glyph_atlas.as_ref().map(|cached| &cached.glyphs),
-            &glyphs,
-        ) {
-            return Ok(());
+        if let Some(active) = &self.glyph_resources {
+            if active.identity == *identity
+                && (active.backing_scale - self.backing_scale).abs() < f64::EPSILON
+            {
+                return Ok(());
+            }
         }
+        // The first compile is the activation build; any later one is a
+        // legitimate, rare rebuild a resource generation change (e.g. a resize's
+        // backing-scale change) caused — never per-frame animation churn.
+        let manifest =
+            GlyphRepertoireManifest::for_active_pet(identity.clone(), self.backing_scale);
+        let resources = CompiledRetainedResources::compile(&manifest)?;
+        let (texture, bind_group) = self.upload_glyph_atlas(resources.atlas());
+        self.glyph_resources = Some(ActiveGlyphResources {
+            identity: identity.clone(),
+            backing_scale: self.backing_scale,
+            resources,
+            _texture: texture,
+            bind_group,
+        });
+        Ok(())
+    }
 
-        let atlas = build_glyph_atlas(&glyphs, self.backing_scale)?;
+    /// Uploads a compiled glyph atlas into a GPU texture and builds its bind
+    /// group.
+    fn upload_glyph_atlas(&self, atlas: &CompiledGlyphAtlas) -> (wgpu::Texture, wgpu::BindGroup) {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glorp-retained-glyph-atlas"),
             size: wgpu::Extent3d {
@@ -658,13 +689,7 @@ impl RetainedHost {
                 },
             ],
         });
-        self.glyph_atlas = Some(CachedGlyphAtlas {
-            glyphs,
-            atlas,
-            _texture: texture,
-            bind_group,
-        });
-        Ok(())
+        (texture, bind_group)
     }
 
     fn resize_if_needed(
@@ -798,7 +823,7 @@ fn prepare_gpu_frame(
     aperture: RoundAperture,
     background: [f32; 4],
     chrome: &RetainedChrome<'_>,
-    atlas: &GlyphAtlas,
+    atlas: &CompiledGlyphAtlas,
 ) -> std::result::Result<PreparedGpuFrame, RetainedFailureCategory> {
     let mut primitives = Vec::new();
     let mut blends = Vec::new();
@@ -1230,7 +1255,7 @@ fn push_overlays(
 fn push_hud(
     primitives: &mut Vec<GpuPrimitive>,
     blends: &mut Vec<SmoothBlendMode>,
-    atlas: &GlyphAtlas,
+    atlas: &CompiledGlyphAtlas,
     aperture: RoundAperture,
     hud: &CompanionHudText,
     hud_font_size: f64,
@@ -1325,7 +1350,7 @@ struct HudLayout {
     total_height: f32,
 }
 
-fn hud_layout(atlas: &GlyphAtlas, hud: &CompanionHudText, stack_size: f32) -> HudLayout {
+fn hud_layout(atlas: &CompiledGlyphAtlas, hud: &CompanionHudText, stack_size: f32) -> HudLayout {
     let lines = [
         hud_line_layout(atlas, &hud.today_total, stack_size * 1.08),
         hud_line_layout(atlas, &hud.daily_percent, stack_size * 0.68),
@@ -1338,7 +1363,7 @@ fn hud_layout(atlas: &GlyphAtlas, hud: &CompanionHudText, stack_size: f32) -> Hu
     }
 }
 
-fn hud_line_layout(atlas: &GlyphAtlas, text: &str, font_size: f32) -> HudLineLayout {
+fn hud_line_layout(atlas: &CompiledGlyphAtlas, text: &str, font_size: f32) -> HudLineLayout {
     HudLineLayout {
         font_size,
         width: glyph_run_width(atlas, text, font_size),
@@ -1383,87 +1408,15 @@ fn display_rgba(color: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-fn collect_glyphs(plan: &SmoothCompanionScenePlan, hud: &CompanionHudText) -> Vec<GlyphKey> {
-    let mut glyphs = BTreeSet::new();
-    for layer in &plan.layers {
-        for item in &layer.items {
-            if let SmoothLayerItem::LocalCell(cell) = item {
-                if let Some(glyph) = cell.glyph.as_ref() {
-                    // Cell, pet, room, and prop glyphs are whole authored scalar
-                    // sequences; they are one key each and never split.
-                    glyphs.insert(GlyphKey::new(glyph.clone(), cell.bold));
-                }
-            }
-        }
-    }
-    // The HUD's permitted character set is ASCII, so it — and only it —
-    // tokenizes per scalar into single-scalar keys.
-    for line in [&hud.today_total, &hud.daily_percent, &hud.pace] {
-        debug_assert!(line.is_ascii(), "HUD text is ASCII by contract: {line:?}");
-        for scalar in line.chars() {
-            glyphs.insert(GlyphKey::new(scalar.to_string(), false));
-        }
-    }
-    glyphs.into_iter().collect()
-}
-
-fn build_glyph_atlas(
-    glyphs: &[GlyphKey],
-    backing_scale: f64,
-) -> std::result::Result<GlyphAtlas, RetainedFailureCategory> {
-    let count = glyphs.len().max(1) as u32;
-    let rows = count.div_ceil(ATLAS_COLUMNS).min(MAX_ATLAS_ROWS);
-    if count > ATLAS_COLUMNS * MAX_ATLAS_ROWS {
-        return Err(RetainedFailureCategory::AtlasUnavailable);
-    }
-    let width = ATLAS_COLUMNS * ATLAS_CELL;
-    let height = rows * ATLAS_CELL;
-    let mut rgba = vec![0_u8; (width * height * 4) as usize];
-    let target = GlyphRasterTarget {
-        cell: ATLAS_CELL,
-        padding: ATLAS_PADDING,
-        point_size: GLYPH_FONT_SIZE,
-    };
-    let regular_id =
-        ResolvedFontPolicy::resolve(GLYPH_FONT_SIZE, backing_scale, FontWeightPolicy::Regular).id();
-    let bold_id =
-        ResolvedFontPolicy::resolve(GLYPH_FONT_SIZE, backing_scale, FontWeightPolicy::Bold).id();
-    let mut entries = BTreeMap::new();
-    for (index, key) in glyphs.iter().enumerate() {
-        let slot_x = index as u32 % ATLAS_COLUMNS;
-        let slot_y = index as u32 / ATLAS_COLUMNS;
-        let font_policy_id = if key.bold { bold_id } else { regular_id };
-        let entry = rasterize_glyph_entry(
-            key,
-            &target,
-            font_policy_id,
-            &mut rgba,
-            width,
-            height,
-            slot_x * ATLAS_CELL,
-            slot_y * ATLAS_CELL,
-        )?;
-        entries.insert(key.clone(), entry);
-    }
-    Ok(GlyphAtlas { width, height, rgba, entries })
-}
-
 fn glyph_scale(font_size: f32) -> f32 {
     font_size / GLYPH_FONT_SIZE as f32
-}
-
-fn glyph_atlas_needs_rebuild(
-    cached_glyphs: Option<&Vec<GlyphKey>>,
-    requested_glyphs: &[GlyphKey],
-) -> bool {
-    cached_glyphs.is_none_or(|cached| cached.as_slice() != requested_glyphs)
 }
 
 fn glyph_advance(entry: GlyphAtlasEntry, font_size: f32) -> f32 {
     entry.advance * glyph_scale(font_size)
 }
 
-fn glyph_run_width(atlas: &GlyphAtlas, text: &str, font_size: f32) -> f32 {
+fn glyph_run_width(atlas: &CompiledGlyphAtlas, text: &str, font_size: f32) -> f32 {
     debug_assert!(text.is_ascii(), "HUD text is ASCII by contract: {text:?}");
     text.chars()
         .filter_map(|scalar| {
@@ -1476,7 +1429,7 @@ fn glyph_run_width(atlas: &GlyphAtlas, text: &str, font_size: f32) -> f32 {
         .sum()
 }
 
-fn glyph_run_height(atlas: &GlyphAtlas, text: &str, font_size: f32) -> f32 {
+fn glyph_run_height(atlas: &CompiledGlyphAtlas, text: &str, font_size: f32) -> f32 {
     debug_assert!(text.is_ascii(), "HUD text is ASCII by contract: {text:?}");
     text.chars()
         .filter_map(|scalar| {
@@ -1631,10 +1584,11 @@ fn srgb_channel_to_linear(channel: f32) -> f32 {
 mod tests {
     use super::resources::GlyphEntryKind;
     use super::{
-        glyph_advance, glyph_atlas_needs_rebuild, glyph_ink_rect, hud_layout, physical_dimension,
-        push_analytic_arc, srgb_channel_to_linear, GlyphAtlas, GlyphAtlasEntry, GlyphKey,
-        LayerActivationGuard, LayerActivationState,
+        glyph_advance, glyph_ink_rect, hud_layout, physical_dimension, push_analytic_arc,
+        srgb_channel_to_linear, CompiledGlyphAtlas, GlyphAtlasEntry, GlyphKey,
+        GlyphRepertoireManifest, LayerActivationGuard, LayerActivationState,
     };
+    use crate::round::smooth::CompanionContentIdentity;
     use std::collections::BTreeMap;
 
     /// A visible coverage-mask entry with the given ink geometry; the metric
@@ -1718,20 +1672,42 @@ mod tests {
     }
 
     #[test]
-    fn glyph_atlas_rebuilds_only_when_the_repertoire_changes() {
-        let cached = vec![GlyphKey::new("A", false), GlyphKey::new("B", true)];
-        assert!(!glyph_atlas_needs_rebuild(Some(&cached), &cached));
-        assert!(glyph_atlas_needs_rebuild(None, &cached));
-        assert!(glyph_atlas_needs_rebuild(
-            Some(&cached),
-            &[GlyphKey::new("A", false)]
-        ));
+    fn atlas_generation_keys_on_declared_content_not_the_per_frame_glyph_set() {
+        use crate::pet::generation::Species;
+        let crystal = || {
+            GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Crystal),
+                2.0,
+            )
+            .generation_key()
+        };
+        // Same declared content -> same generation (the per-minute room reshuffle
+        // changes which glyph is painted, never the identity, so no rebuild).
+        assert_eq!(crystal(), crystal());
+        // A different species is a real generation change.
+        assert_ne!(
+            crystal(),
+            GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Mech),
+                2.0,
+            )
+            .generation_key(),
+        );
+        // A backing-scale change is a real generation change (Task-8 finding #3).
+        assert_ne!(
+            crystal(),
+            GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Crystal),
+                1.0,
+            )
+            .generation_key(),
+        );
     }
 
     #[test]
     fn hud_layout_uses_the_same_big_and_subline_font_policy_as_smooth() {
         let entry = mask_entry(Some([0.0; 4]), [0.0; 2], [10.0, 20.0], 30.0, 50.0);
-        let atlas = GlyphAtlas {
+        let atlas = CompiledGlyphAtlas {
             width: 1,
             height: 1,
             rgba: vec![0; 4],

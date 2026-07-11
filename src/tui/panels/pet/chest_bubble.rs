@@ -22,6 +22,13 @@ const POP_LINGER_ROWS: f64 = 2.5;
 /// One bubble in roughly this many carries a treasure sparkle instead of `o`.
 const TREASURE_EVERY: u64 = 5;
 
+/// Every glyph [`chest_bubble_cells`] can place: the rising bubble `o`, its `·`
+/// pop, and the occasional `✦` treasure. Declared content for the retained atlas
+/// preflight; keep in sync with the flight logic below.
+pub(crate) fn declared_chest_bubble_glyphs() -> [char; 3] {
+    ['o', '·', '✦']
+}
+
 fn cycle_hash(cycle: u64, seed: u64) -> u64 {
     cycle
         .wrapping_mul(0x9e37_79b9_7f4a_7c15)

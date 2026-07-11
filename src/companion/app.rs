@@ -1133,6 +1133,13 @@ fn present_retained_frame() {
             return None;
         };
         let review_sample = frame.review_sample;
+        // The pet's declared-content identity drives which resource generation
+        // the atlas is compiled for. It is stable for the pet's lifetime, so the
+        // host reuses the compiled atlas every frame and only rebuilds on a real
+        // generation change (a resize's backing-scale change).
+        let identity = crate::round::smooth::CompanionContentIdentity::for_pet(
+            state.vm.pet_render.generated_species,
+        );
         let host = state.retained_host.as_mut()?;
         let background = [
             frame.background.0,
@@ -1163,6 +1170,7 @@ fn present_retained_frame() {
                 hud_font_size: frame.hud_font_size,
                 dim_overlay: frame.dim_overlay,
             },
+            &identity,
         );
         // A GPU device fault reported asynchronously is a failure even when the
         // frame otherwise presented, so drain the mailbox before recording any

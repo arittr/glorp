@@ -1012,6 +1012,59 @@ fn emitter_symbols(behavior: PropEmitterBehavior) -> &'static [char] {
     }
 }
 
+/// Every biome tag a resting-room layer can render.
+const ALL_ROOM_BIOME_TAGS: [RoomBiomeTag; 6] = [
+    RoomBiomeTag::Starter,
+    RoomBiomeTag::Botanical,
+    RoomBiomeTag::Technical,
+    RoomBiomeTag::Celestial,
+    RoomBiomeTag::Artifact,
+    RoomBiomeTag::Cozy,
+];
+
+/// Every weather layer the resting room can paint.
+const ALL_ROOM_WEATHER_LAYERS: [RoomWeatherLayer; 5] = [
+    RoomWeatherLayer::Clear,
+    RoomWeatherLayer::CacheMist,
+    RoomWeatherLayer::OutputSparks,
+    RoomWeatherLayer::ReasoningPulse,
+    RoomWeatherLayer::Mixed,
+];
+
+/// Every prop-backed emitter behavior an owned prop can drive.
+const ALL_ROOM_EMITTER_BEHAVIORS: [PropEmitterBehavior; 7] = [
+    PropEmitterBehavior::LeafDrift,
+    PropEmitterBehavior::TechnicalPing,
+    PropEmitterBehavior::HopefulSprout,
+    PropEmitterBehavior::WarmHalo,
+    PropEmitterBehavior::CloudDrift,
+    PropEmitterBehavior::OrbitArc,
+    PropEmitterBehavior::ArtifactGlint,
+];
+
+/// The complete resting-room glyph repertoire for a species `dialect`: the whole
+/// biome, weather, and emitter symbol slices across every biome tag, weather
+/// layer, and emitter behavior. The live room reseeds its random pick every
+/// minute (`biome_seed(biome, now/60)`), so the composed frame only ever shows a
+/// subset — this declared set covers every reshuffle outcome so the retained
+/// atlas never rebuilds when the minute rolls over.
+pub(crate) fn declared_room_glyphs(
+    dialect: RoomSpeciesDialect,
+) -> std::collections::BTreeSet<char> {
+    let mut glyphs = std::collections::BTreeSet::new();
+    for tag in ALL_ROOM_BIOME_TAGS {
+        glyphs.extend(biome_symbols(tag, dialect).iter().copied());
+    }
+    for weather in ALL_ROOM_WEATHER_LAYERS {
+        glyphs.extend(weather_symbols(weather).iter().copied());
+    }
+    for behavior in ALL_ROOM_EMITTER_BEHAVIORS {
+        glyphs.extend(emitter_symbols(behavior).iter().copied());
+    }
+    glyphs.remove(&' ');
+    glyphs
+}
+
 fn emitter_zone_for_prop(prop_id: &str) -> RoomZone {
     use crate::game::habitat::HabitatPropZone;
     let Some(spec) = catalog_prop_by_str(prop_id) else {

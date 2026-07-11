@@ -29,6 +29,13 @@ pub(super) fn performance_cue_cells(
     }
 }
 
+/// Every glyph [`performance_cue_cells`] can place (RestedAwake places none).
+/// Declared content for the retained atlas preflight; keep in sync with the
+/// match above.
+pub(crate) fn declared_performance_cue_glyphs() -> [char; 5] {
+    ['˙', '~', 'z', '^', '!']
+}
+
 fn performance_cue_style(color_capability: ColorCapability) -> Style {
     let color = if matches!(color_capability, ColorCapability::Flat) {
         crate::tui::style::tokenpet_palette().faint.rgb

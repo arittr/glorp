@@ -1011,6 +1011,36 @@ fn accent_glyph(id: &str, species: Species, now: time::OffsetDateTime) -> char {
     }
 }
 
+/// A time span (seconds from the epoch) wide enough to exercise every prop
+/// sprite's animation gate — the 8-phase `rem_euclid(8)` twinkle, the
+/// `rem_euclid(12)` accent twinkle, and the treasure-chest lid cycle — so
+/// enumerating it yields the full sprite glyph set for each prop.
+const PROP_DECLARED_NOW_SPAN_SECS: i64 = 256;
+
+/// Every glyph any earnable prop can render, driving the real `trophy_sprite`
+/// and `accent_glyph` across the whole catalog, both bloom states, every listed
+/// `species`, and the full animation-gate time span. Declared content for the
+/// retained atlas preflight — the authoritative superset (unlike the test-only
+/// `prop_visual_glyphs_for_test`, which omits several sprite glyphs).
+pub(crate) fn declared_prop_glyphs(species_scope: &[Species]) -> std::collections::BTreeSet<char> {
+    let mut glyphs = std::collections::BTreeSet::new();
+    for spec in crate::game::habitat::HABITAT_PROP_CATALOG {
+        for &species in species_scope {
+            for bloomed in [false, true] {
+                for second in 0..PROP_DECLARED_NOW_SPAN_SECS {
+                    let now = time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(second);
+                    for cell in trophy_sprite(spec.id, species, bloomed, now) {
+                        glyphs.insert(cell.glyph);
+                    }
+                    glyphs.insert(accent_glyph(spec.id, species, now));
+                }
+            }
+        }
+    }
+    glyphs.remove(&' ');
+    glyphs
+}
+
 #[cfg(test)]
 fn prop_visual_glyphs_for_test() -> &'static [char] {
     &[

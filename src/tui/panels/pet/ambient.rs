@@ -13,6 +13,53 @@ use crate::tui::style::ColorCapability;
 use super::colors::{activity_glyph_color, dim_shift, lerp_color, warm_shift};
 use super::{AmbientGlyph, MOTE_BUDGET_SHARE, MOTE_GLYPHS};
 
+/// The activity-cue glyph palette — drifting sparks placed when work is flowing.
+const ACTIVITY_GLYPHS: [char; 4] = ['\u{2726}', '\u{2727}', '\u{00b7}', '*'];
+
+/// The four day phases the sky/floor palettes cycle through.
+const ALL_DAY_PHASES: [DayPhase; 4] = [
+    DayPhase::Day,
+    DayPhase::Dawn,
+    DayPhase::Dusk,
+    DayPhase::Night,
+];
+
+/// The complete ambient glyph repertoire the pet's habitat can paint for
+/// `species`: sky glyphs across every day phase and authored day-variant, the
+/// per-biome floor texture, the activity-cue sparks, and the drifting motes.
+/// Declared content for the retained atlas preflight — every phase/variant, not
+/// the one the current minute reshuffled to.
+pub(crate) fn declared_ambient_glyphs(species: Species) -> std::collections::BTreeSet<char> {
+    use crate::tui::room::RoomBiomeTag;
+    const ALL_BIOME_TAGS: [RoomBiomeTag; 6] = [
+        RoomBiomeTag::Starter,
+        RoomBiomeTag::Botanical,
+        RoomBiomeTag::Technical,
+        RoomBiomeTag::Celestial,
+        RoomBiomeTag::Artifact,
+        RoomBiomeTag::Cozy,
+    ];
+    let mut glyphs = std::collections::BTreeSet::new();
+    glyphs.extend(sky_palette_for(species).iter().copied());
+    for phase in ALL_DAY_PHASES {
+        // `date_seed % 2` selects between the two authored per-phase variants.
+        for date_seed in [0_u64, 1] {
+            glyphs.extend(
+                sky_palette_for_phase(species, phase, date_seed)
+                    .iter()
+                    .copied(),
+            );
+        }
+    }
+    for tag in ALL_BIOME_TAGS {
+        glyphs.extend(biome_floor_palette(tag).iter().copied());
+    }
+    glyphs.extend(ACTIVITY_GLYPHS);
+    glyphs.extend(MOTE_GLYPHS.iter().copied());
+    glyphs.remove(&' ');
+    glyphs
+}
+
 /// Per-species sky-glyph palette.
 pub(super) fn sky_palette_for(species: Species) -> &'static [char] {
     match species {
@@ -561,7 +608,7 @@ pub(super) fn activity_glyphs_for(
         .wrapping_add(activity_bucket.wrapping_mul(0xE703_7ED1_A0B4_28DB))
         .wrapping_add(work_weather_seed(profile.work_weather).wrapping_mul(0x8EBC_6AF0_9C88_C6E3));
     let mut rng = Pcg32::seed_from_u64(seed);
-    let palette = ['\u{2726}', '\u{2727}', '\u{00b7}', '*'];
+    let palette = ACTIVITY_GLYPHS;
     let color = activity_glyph_color(profile);
     let mut glyphs = Vec::with_capacity(count);
 
