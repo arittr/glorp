@@ -974,6 +974,8 @@ fn prepare_current_frame_from_state() {
 
 #[cfg(feature = "retained-renderer")]
 fn present_retained_frame() {
+    use crate::companion::retained::FrameDisposition;
+
     let failure = APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
@@ -997,7 +999,7 @@ fn present_retained_frame() {
             frame.background.2,
             frame.background.3,
         ];
-        let result = host.render(
+        let progress = host.render(
             state.view.as_super(),
             plan,
             draw_order,
@@ -1021,15 +1023,26 @@ fn present_retained_frame() {
                 dim_overlay: frame.dim_overlay,
             },
         );
-        if result.is_ok() {
-            if let Some(capture) = state.review_capture.as_mut() {
-                capture.record_frame(review_sample);
-            }
+        // A GPU device fault reported asynchronously is a failure even when the
+        // frame otherwise presented, so drain the mailbox before recording any
+        // success.
+        if let Some(category) = host.drain_gpu_error() {
+            return Some(category);
         }
-        result.err()
+        match progress.disposition() {
+            Some(FrameDisposition::SurfacePresentCalled | FrameDisposition::Captured) => {
+                if let Some(capture) = state.review_capture.as_mut() {
+                    capture.record_frame(review_sample);
+                }
+                None
+            }
+            Some(FrameDisposition::Failed(category)) => Some(category),
+            // Skipped frames dropped nothing to present; do not record them.
+            _ => None,
+        }
     });
-    if let Some(error) = failure {
-        fallback_from_retained(error);
+    if let Some(category) = failure {
+        fallback_from_retained(category);
     }
 }
 
@@ -1037,7 +1050,7 @@ fn present_retained_frame() {
 fn present_retained_frame() {}
 
 #[cfg(feature = "retained-renderer")]
-fn fallback_from_retained(error: crate::companion::retained::RetainedFailure) {
+fn fallback_from_retained(error: crate::companion::retained::RetainedFailureCategory) {
     APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let Some(state) = state.as_mut() else { return };

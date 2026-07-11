@@ -29,6 +29,13 @@ use crate::round::layout::RoundAperture;
 
 use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 
+mod presentation;
+
+pub(crate) use presentation::{
+    FrameDisposition, FrameProgress, RetainedFailureCategory, SkipReason,
+};
+use presentation::{FrameMilestone, GpuErrorMailbox};
+
 const ATLAS_CELL: u32 = 80;
 const ATLAS_PADDING: u32 = 6;
 const ATLAS_COLUMNS: u32 = 16;
@@ -47,33 +54,6 @@ pub(super) struct RetainedChrome<'a> {
     pub(super) hud: &'a CompanionHudText,
     pub(super) hud_font_size: f64,
     pub(super) dim_overlay: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RetainedFailure {
-    SurfaceCreate,
-    AdapterUnavailable,
-    DeviceUnavailable,
-    SurfaceUnavailable,
-    AtlasUnavailable,
-    UnsupportedRaster,
-    SurfaceLost,
-    SurfaceValidation,
-}
-
-impl RetainedFailure {
-    pub(super) const fn category(self) -> &'static str {
-        match self {
-            Self::SurfaceCreate => "retained-surface-create",
-            Self::AdapterUnavailable => "retained-adapter-unavailable",
-            Self::DeviceUnavailable => "retained-device-unavailable",
-            Self::SurfaceUnavailable => "retained-surface-unavailable",
-            Self::AtlasUnavailable => "retained-atlas-unavailable",
-            Self::UnsupportedRaster => "retained-unsupported-raster",
-            Self::SurfaceLost => "retained-surface-lost",
-            Self::SurfaceValidation => "retained-surface-validation",
-        }
-    }
 }
 
 #[repr(C)]
@@ -151,6 +131,8 @@ pub(super) struct RetainedHost {
     physical_width: u32,
     physical_height: u32,
     backing_scale: f64,
+    frame_counter: u64,
+    gpu_errors: GpuErrorMailbox,
 }
 
 struct Pipelines {
@@ -174,8 +156,10 @@ impl Pipelines {
 }
 
 impl RetainedHost {
-    pub(super) fn new(view: &NSView) -> std::result::Result<Self, RetainedFailure> {
-        let window = view.window().ok_or(RetainedFailure::SurfaceUnavailable)?;
+    pub(super) fn new(view: &NSView) -> std::result::Result<Self, RetainedFailureCategory> {
+        let window = view
+            .window()
+            .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
         let scale = window.backingScaleFactor();
         let bounds = view.bounds();
         let width = physical_dimension(bounds.size.width, scale);
@@ -197,30 +181,32 @@ impl RetainedHost {
             instance
                 .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_pointer))
         }
-        .map_err(|_| RetainedFailure::SurfaceCreate)?;
+        .map_err(|_| RetainedFailureCategory::SurfaceCreate)?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
-        .map_err(|_| RetainedFailure::AdapterUnavailable)?;
+        .map_err(|_| RetainedFailureCategory::AdapterUnavailable)?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("glorp-retained-device"),
             ..Default::default()
         }))
-        .map_err(|_| RetainedFailure::DeviceUnavailable)?;
-        device.on_uncaptured_error(Arc::new(|error| {
+        .map_err(|_| RetainedFailureCategory::DeviceUnavailable)?;
+        let gpu_errors = GpuErrorMailbox::new();
+        let gpu_error_sender = gpu_errors.sender();
+        device.on_uncaptured_error(Arc::new(move |error| {
             let category = match error {
-                wgpu::Error::OutOfMemory { .. } => "out-of-memory",
-                wgpu::Error::Validation { .. } => "validation",
-                wgpu::Error::Internal { .. } => "internal",
+                wgpu::Error::OutOfMemory { .. } => RetainedFailureCategory::DeviceOutOfMemory,
+                wgpu::Error::Validation { .. } => RetainedFailureCategory::DeviceValidation,
+                wgpu::Error::Internal { .. } => RetainedFailureCategory::DeviceInternal,
             };
-            eprintln!("glorp retained renderer error: {category}: {error}");
+            let _ = gpu_error_sender.send(category);
         }));
         let config = surface
             .get_default_config(&adapter, width, height)
-            .ok_or(RetainedFailure::SurfaceUnavailable)?;
+            .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
         surface.configure(&device, &config);
         let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("glorp-retained-atlas-layout"),
@@ -256,6 +242,8 @@ impl RetainedHost {
             physical_width: width,
             physical_height: height,
             backing_scale: scale,
+            frame_counter: 0,
+            gpu_errors,
         })
     }
 
@@ -263,6 +251,20 @@ impl RetainedHost {
         unsafe { view.setLayer(None) };
         view.setWantsLayer(false);
         unsafe { view.setNeedsDisplay(true) };
+    }
+
+    /// Advances the monotonic frame counter, returning the id for the frame
+    /// about to be attempted. Real resource generations arrive in Task 9.
+    fn next_frame_id(&mut self) -> u64 {
+        let id = self.frame_counter;
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        id
+    }
+
+    /// Drains any GPU device fault reported asynchronously by the wgpu error
+    /// callback. The main thread checks this before treating a present as good.
+    pub(super) fn drain_gpu_error(&self) -> Option<RetainedFailureCategory> {
+        self.gpu_errors.drain()
     }
 
     #[allow(clippy::too_many_arguments)] // Explicit prepared-frame inputs keep retained independent of AppState.
@@ -275,15 +277,22 @@ impl RetainedHost {
         aperture: RoundAperture,
         background: [f32; 4],
         chrome: RetainedChrome<'_>,
-    ) -> std::result::Result<(), RetainedFailure> {
-        self.resize_if_needed(view)?;
+    ) -> FrameProgress {
+        let mut progress = FrameProgress::new(self.next_frame_id(), 0);
+        if let Err(category) = self.resize_if_needed(view) {
+            fail(&mut progress, category);
+            return progress;
+        }
         let glyphs = collect_glyphs(plan, chrome.hud);
-        self.ensure_glyph_atlas(glyphs)?;
-        let cached_atlas = self
-            .glyph_atlas
-            .as_ref()
-            .ok_or(RetainedFailure::AtlasUnavailable)?;
-        let frame = prepare_gpu_frame(
+        if let Err(category) = self.ensure_glyph_atlas(glyphs) {
+            fail(&mut progress, category);
+            return progress;
+        }
+        let Some(cached_atlas) = self.glyph_atlas.as_ref() else {
+            fail(&mut progress, RetainedFailureCategory::AtlasUnavailable);
+            return progress;
+        };
+        let frame = match prepare_gpu_frame(
             plan,
             draw_order,
             metrics,
@@ -291,7 +300,13 @@ impl RetainedHost {
             background,
             &chrome,
             &cached_atlas.atlas,
-        )?;
+        ) {
+            Ok(frame) => frame,
+            Err(category) => {
+                fail(&mut progress, category);
+                return progress;
+            }
+        };
         let primitive_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -299,19 +314,32 @@ impl RetainedHost {
                 contents: bytemuck::cast_slice(&frame.primitives),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        progress
+            .mark(FrameMilestone::Prepared)
+            .expect("prepared opens the frame ladder");
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(());
+                skip(&mut progress, SkipReason::Outdated);
+                return progress;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(())
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                skip(&mut progress, SkipReason::Timeout);
+                return progress;
             }
-            wgpu::CurrentSurfaceTexture::Lost => return Err(RetainedFailure::SurfaceLost),
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                skip(&mut progress, SkipReason::Occluded);
+                return progress;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                fail(&mut progress, RetainedFailureCategory::SurfaceLost);
+                return progress;
+            }
             wgpu::CurrentSurfaceTexture::Validation => {
-                return Err(RetainedFailure::SurfaceValidation)
+                fail(&mut progress, RetainedFailureCategory::SurfaceValidation);
+                return progress;
             }
         };
         let target = surface_texture
@@ -349,15 +377,24 @@ impl RetainedHost {
                 pass.draw(0..6, index as u32..index as u32 + 1);
             }
         }
+        progress
+            .mark(FrameMilestone::Encoded)
+            .expect("encoded follows prepared");
         self.queue.submit([encoder.finish()]);
+        progress
+            .mark(FrameMilestone::Submitted)
+            .expect("submitted follows encoded");
         self.queue.present(surface_texture);
-        Ok(())
+        progress
+            .finish(FrameDisposition::SurfacePresentCalled)
+            .expect("a submitted frame presents exactly once");
+        progress
     }
 
     fn ensure_glyph_atlas(
         &mut self,
         glyphs: Vec<(String, bool)>,
-    ) -> std::result::Result<(), RetainedFailure> {
+    ) -> std::result::Result<(), RetainedFailureCategory> {
         if !glyph_atlas_needs_rebuild(
             self.glyph_atlas.as_ref().map(|cached| &cached.glyphs),
             &glyphs,
@@ -430,8 +467,13 @@ impl RetainedHost {
         Ok(())
     }
 
-    fn resize_if_needed(&mut self, view: &NSView) -> std::result::Result<(), RetainedFailure> {
-        let window = view.window().ok_or(RetainedFailure::SurfaceUnavailable)?;
+    fn resize_if_needed(
+        &mut self,
+        view: &NSView,
+    ) -> std::result::Result<(), RetainedFailureCategory> {
+        let window = view
+            .window()
+            .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
         let scale = window.backingScaleFactor();
         let bounds = view.bounds();
         let width = physical_dimension(bounds.size.width, scale);
@@ -454,6 +496,20 @@ impl RetainedHost {
         self.surface.configure(&self.device, &self.config);
         Ok(())
     }
+}
+
+/// Terminates a frame that could not present because a render resource failed.
+fn fail(progress: &mut FrameProgress, category: RetainedFailureCategory) {
+    progress
+        .finish(FrameDisposition::Failed(category))
+        .expect("a frame reaches its terminal disposition exactly once");
+}
+
+/// Terminates a frame the surface asked us to drop this tick without failing.
+fn skip(progress: &mut FrameProgress, reason: SkipReason) {
+    progress
+        .finish(FrameDisposition::Skipped(reason))
+        .expect("a frame reaches its terminal disposition exactly once");
 }
 
 fn physical_dimension(logical: f64, scale: f64) -> u32 {
@@ -543,7 +599,7 @@ fn prepare_gpu_frame(
     background: [f32; 4],
     chrome: &RetainedChrome<'_>,
     atlas: &GlyphAtlas,
-) -> std::result::Result<PreparedGpuFrame, RetainedFailure> {
+) -> std::result::Result<PreparedGpuFrame, RetainedFailureCategory> {
     let mut primitives = Vec::new();
     let mut blends = Vec::new();
     let viewport_aperture = viewport_aperture(aperture);
@@ -601,7 +657,7 @@ fn prepare_gpu_frame(
                             .entries
                             .get(&(glyph.clone(), cell.bold))
                             .copied()
-                            .ok_or(RetainedFailure::AtlasUnavailable)?;
+                            .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
                         let fg = cell.fg.map_or([1.0, 1.0, 1.0, layer.opacity], |fg| {
                             rgb(fg.r, fg.g, fg.b, layer.opacity)
                         });
@@ -651,7 +707,9 @@ fn prepare_gpu_frame(
                     });
                     blends.push(layer.blend);
                 }
-                SmoothLayerItem::Raster(_) => return Err(RetainedFailure::UnsupportedRaster),
+                SmoothLayerItem::Raster(_) => {
+                    return Err(RetainedFailureCategory::UnsupportedRaster)
+                }
             }
         }
     }
@@ -975,7 +1033,7 @@ fn push_hud(
     hud_font_size: f64,
     viewport_aperture: [f32; 4],
     aperture_radius: [f32; 4],
-) -> std::result::Result<(), RetainedFailure> {
+) -> std::result::Result<(), RetainedFailureCategory> {
     let gauge_layout = perimeter_gauge_layout(
         f64::from(aperture.center_x),
         f64::from(aperture.center_y),
@@ -1014,7 +1072,7 @@ fn push_hud(
                 .entries
                 .get(&(glyph.to_string(), false))
                 .copied()
-                .ok_or(RetainedFailure::AtlasUnavailable)?;
+                .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
             if let Some(rect) = glyph_ink_rect([x as f32, y as f32], line_layout.font_size, entry) {
                 primitives.push(GpuPrimitive {
                     rect,
@@ -1132,11 +1190,11 @@ fn collect_glyphs(plan: &SmoothCompanionScenePlan, hud: &CompanionHudText) -> Ve
 
 fn build_glyph_atlas(
     glyphs: &[(String, bool)],
-) -> std::result::Result<GlyphAtlas, RetainedFailure> {
+) -> std::result::Result<GlyphAtlas, RetainedFailureCategory> {
     let count = glyphs.len().max(1) as u32;
     let rows = count.div_ceil(ATLAS_COLUMNS).min(MAX_ATLAS_ROWS);
     if count > ATLAS_COLUMNS * MAX_ATLAS_ROWS {
-        return Err(RetainedFailure::AtlasUnavailable);
+        return Err(RetainedFailureCategory::AtlasUnavailable);
     }
     let width = ATLAS_COLUMNS * ATLAS_CELL;
     let height = rows * ATLAS_CELL;
@@ -1167,14 +1225,14 @@ fn rasterize_glyph(
     atlas_height: u32,
     x: u32,
     y: u32,
-) -> std::result::Result<GlyphAtlasEntry, RetainedFailure> {
+) -> std::result::Result<GlyphAtlasEntry, RetainedFailureCategory> {
     unsafe {
         let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(), std::ptr::null_mut(), ATLAS_CELL as isize, ATLAS_CELL as isize,
             8, 4, true, false, NSDeviceRGBColorSpace, (ATLAS_CELL * 4) as isize, 32,
-        ).ok_or(RetainedFailure::AtlasUnavailable)?;
+        ).ok_or(RetainedFailureCategory::AtlasUnavailable)?;
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)
-            .ok_or(RetainedFailure::AtlasUnavailable)?;
+            .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
         let previous = NSGraphicsContext::currentContext();
         NSGraphicsContext::setCurrentContext(Some(&context));
         let text = NSString::from_str(glyph);
@@ -1194,7 +1252,7 @@ fn rasterize_glyph(
             || size.height + f64::from(ATLAS_PADDING * 2) > f64::from(ATLAS_CELL)
         {
             NSGraphicsContext::setCurrentContext(previous.as_deref());
-            return Err(RetainedFailure::AtlasUnavailable);
+            return Err(RetainedFailureCategory::AtlasUnavailable);
         }
         let draw_x = f64::from(ATLAS_PADDING);
         let draw_y = f64::from(ATLAS_PADDING);
@@ -1203,7 +1261,7 @@ fn rasterize_glyph(
         NSGraphicsContext::setCurrentContext(previous.as_deref());
         let data = rep.bitmapData();
         if data.is_null() {
-            return Err(RetainedFailure::AtlasUnavailable);
+            return Err(RetainedFailureCategory::AtlasUnavailable);
         }
         let mut ink_min_x = ATLAS_CELL;
         let mut ink_min_y = ATLAS_CELL;
