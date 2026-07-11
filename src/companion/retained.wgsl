@@ -98,7 +98,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var output = in.color_a;
     if (kind < 0.5) {
         let atlas_uv = mix(in.uv.xy, in.uv.zw, vec2<f32>(in.local.x, 1.0 - in.local.y));
-        output.a *= textureSample(atlas, atlas_sampler, atlas_uv).a;
+        let sample = textureSample(atlas, atlas_sampler, atlas_uv);
+        if (in.params.w > 0.5) {
+            // Native-color glyph (emoji): the atlas holds premultiplied RGBA.
+            // Recover straight alpha so the shared alpha blend composites it
+            // correctly, and ignore the authored foreground tint entirely.
+            let a = max(sample.a, 0.0001);
+            output = vec4<f32>(sample.rgb / a, sample.a);
+        } else {
+            // Coverage mask: authored color tinted by the sampled alpha.
+            output.a *= sample.a;
+        }
     } else if (kind >= 1.5) {
         let q = in.local * 2.0 - vec2<f32>(1.0);
         let radius = length(q);

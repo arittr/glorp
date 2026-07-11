@@ -6,13 +6,8 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use objc2::rc::Retained;
-use objc2::ClassType;
-use objc2_app_kit::{
-    NSAttributedStringNSStringDrawing, NSBitmapImageRep, NSColor, NSDeviceRGBColorSpace, NSFont,
-    NSFontAttributeName, NSFontWeightBold, NSForegroundColorAttributeName, NSGraphicsContext,
-    NSView,
-};
-use objc2_foundation::{NSMutableAttributedString, NSPoint, NSRange, NSSize, NSString};
+use objc2_app_kit::NSView;
+use objc2_foundation::NSSize;
 use objc2_quartz_core::CAMetalLayer;
 use wgpu::util::DeviceExt;
 
@@ -31,11 +26,16 @@ use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 
 mod capture;
 mod presentation;
+mod resources;
 
 pub(crate) use capture::CanonicalRgbaFrame;
 pub(crate) use presentation::{
     FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox, RetainedFailureCategory,
     SkipReason,
+};
+use resources::{
+    rasterize_glyph_entry, FontWeightPolicy, FragmentGlyphMode, GlyphAtlasEntry, GlyphKey,
+    GlyphRasterTarget, ResolvedFontPolicy,
 };
 
 const ATLAS_CELL: u32 = 80;
@@ -97,24 +97,15 @@ struct PreparedGpuFrame {
     blends: Vec<SmoothBlendMode>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct GlyphAtlasEntry {
-    uv: [f32; 4],
-    ink_origin: [f32; 2],
-    ink_size: [f32; 2],
-    advance: f32,
-    line_height: f32,
-}
-
 struct GlyphAtlas {
     width: u32,
     height: u32,
     rgba: Vec<u8>,
-    entries: BTreeMap<(String, bool), GlyphAtlasEntry>,
+    entries: BTreeMap<GlyphKey, GlyphAtlasEntry>,
 }
 
 struct CachedGlyphAtlas {
-    glyphs: Vec<(String, bool)>,
+    glyphs: Vec<GlyphKey>,
     atlas: GlyphAtlas,
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
@@ -602,7 +593,7 @@ impl RetainedHost {
 
     fn ensure_glyph_atlas(
         &mut self,
-        glyphs: Vec<(String, bool)>,
+        glyphs: Vec<GlyphKey>,
     ) -> std::result::Result<(), RetainedFailureCategory> {
         if !glyph_atlas_needs_rebuild(
             self.glyph_atlas.as_ref().map(|cached| &cached.glyphs),
@@ -611,7 +602,7 @@ impl RetainedHost {
             return Ok(());
         }
 
-        let atlas = build_glyph_atlas(&glyphs)?;
+        let atlas = build_glyph_atlas(&glyphs, self.backing_scale)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glorp-retained-glyph-atlas"),
             size: wgpu::Extent3d {
@@ -864,7 +855,7 @@ fn prepare_gpu_frame(
                     if let Some(glyph) = cell.glyph.as_ref() {
                         let entry = atlas
                             .entries
-                            .get(&(glyph.clone(), cell.bold))
+                            .get(&GlyphKey::new(glyph.clone(), cell.bold))
                             .copied()
                             .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
                         let fg = cell.fg.map_or([1.0, 1.0, 1.0, layer.opacity], |fg| {
@@ -875,12 +866,15 @@ fn prepare_gpu_frame(
                             metrics.font_size as f32 * layer.transform.scale.x,
                             entry,
                         ) {
+                            let uv = entry
+                                .visible_uv
+                                .expect("a visible ink rect implies a visible uv");
                             primitives.push(GpuPrimitive {
                                 rect: glyph_rect,
                                 color_a: fg,
                                 color_b: [0.0; 4],
-                                uv: entry.uv,
-                                params: [0.0, clip_kind, blend_code, 0.0],
+                                uv,
+                                params: [0.0, clip_kind, blend_code, glyph_mode_flag(entry)],
                                 clip_rect,
                                 clip_ellipse,
                                 viewport_aperture,
@@ -1274,21 +1268,25 @@ fn push_hud(
     let top = f64::from(aperture.height) - gap.baseline_y;
     let mut y = top + f64::from(layout.total_height) * 0.38;
     for (line, line_layout, color) in lines {
+        debug_assert!(line.is_ascii(), "HUD text is ASCII by contract: {line:?}");
         let width = f64::from(line_layout.width);
         let mut x = gap.center_x - width / 2.0;
-        for glyph in line.chars() {
+        for scalar in line.chars() {
             let entry = atlas
                 .entries
-                .get(&(glyph.to_string(), false))
+                .get(&GlyphKey::new(scalar.to_string(), false))
                 .copied()
                 .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
             if let Some(rect) = glyph_ink_rect([x as f32, y as f32], line_layout.font_size, entry) {
+                let uv = entry
+                    .visible_uv
+                    .expect("a visible ink rect implies a visible uv");
                 primitives.push(GpuPrimitive {
                     rect,
                     color_a: color,
                     color_b: [0.0; 4],
-                    uv: entry.uv,
-                    params: [0.0, 0.0, 0.0, 0.0],
+                    uv,
+                    params: [0.0, 0.0, 0.0, glyph_mode_flag(entry)],
                     clip_rect: [0.0; 4],
                     clip_ellipse: [0.0; 4],
                     viewport_aperture,
@@ -1301,6 +1299,16 @@ fn push_hud(
         y -= f64::from(line_layout.height * 0.82);
     }
     Ok(())
+}
+
+/// The glyph-mode flag a glyph primitive carries in `params[3]`: 0.0 for a
+/// coverage mask (tinted by the authored color), 1.0 for native color (the
+/// shader samples the premultiplied RGBA and bypasses the tint).
+fn glyph_mode_flag(entry: GlyphAtlasEntry) -> f32 {
+    match entry.fragment_mode() {
+        FragmentGlyphMode::Mask => 0.0,
+        FragmentGlyphMode::NativeColor => 1.0,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1375,30 +1383,33 @@ fn display_rgba(color: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-fn collect_glyphs(plan: &SmoothCompanionScenePlan, hud: &CompanionHudText) -> Vec<(String, bool)> {
+fn collect_glyphs(plan: &SmoothCompanionScenePlan, hud: &CompanionHudText) -> Vec<GlyphKey> {
     let mut glyphs = BTreeSet::new();
     for layer in &plan.layers {
         for item in &layer.items {
             if let SmoothLayerItem::LocalCell(cell) = item {
                 if let Some(glyph) = cell.glyph.as_ref() {
-                    glyphs.insert((glyph.clone(), cell.bold));
+                    // Cell, pet, room, and prop glyphs are whole authored scalar
+                    // sequences; they are one key each and never split.
+                    glyphs.insert(GlyphKey::new(glyph.clone(), cell.bold));
                 }
             }
         }
     }
-    for glyph in hud
-        .today_total
-        .chars()
-        .chain(hud.daily_percent.chars())
-        .chain(hud.pace.chars())
-    {
-        glyphs.insert((glyph.to_string(), false));
+    // The HUD's permitted character set is ASCII, so it — and only it —
+    // tokenizes per scalar into single-scalar keys.
+    for line in [&hud.today_total, &hud.daily_percent, &hud.pace] {
+        debug_assert!(line.is_ascii(), "HUD text is ASCII by contract: {line:?}");
+        for scalar in line.chars() {
+            glyphs.insert(GlyphKey::new(scalar.to_string(), false));
+        }
     }
     glyphs.into_iter().collect()
 }
 
 fn build_glyph_atlas(
-    glyphs: &[(String, bool)],
+    glyphs: &[GlyphKey],
+    backing_scale: f64,
 ) -> std::result::Result<GlyphAtlas, RetainedFailureCategory> {
     let count = glyphs.len().max(1) as u32;
     let rows = count.div_ceil(ATLAS_COLUMNS).min(MAX_ATLAS_ROWS);
@@ -1408,118 +1419,33 @@ fn build_glyph_atlas(
     let width = ATLAS_COLUMNS * ATLAS_CELL;
     let height = rows * ATLAS_CELL;
     let mut rgba = vec![0_u8; (width * height * 4) as usize];
+    let target = GlyphRasterTarget {
+        cell: ATLAS_CELL,
+        padding: ATLAS_PADDING,
+        point_size: GLYPH_FONT_SIZE,
+    };
+    let regular_id =
+        ResolvedFontPolicy::resolve(GLYPH_FONT_SIZE, backing_scale, FontWeightPolicy::Regular).id();
+    let bold_id =
+        ResolvedFontPolicy::resolve(GLYPH_FONT_SIZE, backing_scale, FontWeightPolicy::Bold).id();
     let mut entries = BTreeMap::new();
-    for (index, (glyph, bold)) in glyphs.iter().enumerate() {
+    for (index, key) in glyphs.iter().enumerate() {
         let slot_x = index as u32 % ATLAS_COLUMNS;
         let slot_y = index as u32 / ATLAS_COLUMNS;
-        let entry = rasterize_glyph(
-            glyph,
-            *bold,
+        let font_policy_id = if key.bold { bold_id } else { regular_id };
+        let entry = rasterize_glyph_entry(
+            key,
+            &target,
+            font_policy_id,
             &mut rgba,
             width,
             height,
             slot_x * ATLAS_CELL,
             slot_y * ATLAS_CELL,
         )?;
-        entries.insert((glyph.clone(), *bold), entry);
+        entries.insert(key.clone(), entry);
     }
     Ok(GlyphAtlas { width, height, rgba, entries })
-}
-
-fn rasterize_glyph(
-    glyph: &str,
-    bold: bool,
-    atlas: &mut [u8],
-    atlas_width: u32,
-    atlas_height: u32,
-    x: u32,
-    y: u32,
-) -> std::result::Result<GlyphAtlasEntry, RetainedFailureCategory> {
-    unsafe {
-        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
-            NSBitmapImageRep::alloc(), std::ptr::null_mut(), ATLAS_CELL as isize, ATLAS_CELL as isize,
-            8, 4, true, false, NSDeviceRGBColorSpace, (ATLAS_CELL * 4) as isize, 32,
-        ).ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)
-            .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-        let previous = NSGraphicsContext::currentContext();
-        NSGraphicsContext::setCurrentContext(Some(&context));
-        let text = NSString::from_str(glyph);
-        let font = NSFont::monospacedSystemFontOfSize_weight(
-            GLYPH_FONT_SIZE,
-            if bold { NSFontWeightBold } else { 0.0 },
-        );
-        let mut attributed = NSMutableAttributedString::from_nsstring(&text);
-        let range = NSRange::from(0..text.length());
-        attributed.addAttribute_value_range(NSFontAttributeName, &font, range);
-        let white = NSColor::whiteColor();
-        attributed.addAttribute_value_range(NSForegroundColorAttributeName, &white, range);
-        let attributed: Retained<objc2_foundation::NSAttributedString> =
-            Retained::into_super(attributed);
-        let size = attributed.size();
-        if size.width + f64::from(ATLAS_PADDING * 2) > f64::from(ATLAS_CELL)
-            || size.height + f64::from(ATLAS_PADDING * 2) > f64::from(ATLAS_CELL)
-        {
-            NSGraphicsContext::setCurrentContext(previous.as_deref());
-            return Err(RetainedFailureCategory::AtlasUnavailable);
-        }
-        let draw_x = f64::from(ATLAS_PADDING);
-        let draw_y = f64::from(ATLAS_PADDING);
-        attributed.drawAtPoint(NSPoint::new(draw_x, draw_y));
-        context.flushGraphics();
-        NSGraphicsContext::setCurrentContext(previous.as_deref());
-        let data = rep.bitmapData();
-        if data.is_null() {
-            return Err(RetainedFailureCategory::AtlasUnavailable);
-        }
-        let mut ink_min_x = ATLAS_CELL;
-        let mut ink_min_y = ATLAS_CELL;
-        let mut ink_max_x = 0;
-        let mut ink_max_y = 0;
-        let mut has_ink = false;
-        for row in 0..ATLAS_CELL {
-            for col in 0..ATLAS_CELL {
-                let src = ((row * ATLAS_CELL + col) * 4) as usize;
-                let dst = (((y + row) * atlas_width + x + col) * 4) as usize;
-                let alpha = *data.add(src + 3);
-                atlas[dst..dst + 4].copy_from_slice(&[255, 255, 255, alpha]);
-                if alpha != 0 {
-                    has_ink = true;
-                    ink_min_x = ink_min_x.min(col);
-                    ink_min_y = ink_min_y.min(row);
-                    ink_max_x = ink_max_x.max(col + 1);
-                    ink_max_y = ink_max_y.max(row + 1);
-                }
-            }
-        }
-        let (uv, ink_origin, ink_size) = if has_ink {
-            (
-                [
-                    (x + ink_min_x) as f32 / atlas_width as f32,
-                    (y + ink_min_y) as f32 / atlas_height as f32,
-                    (x + ink_max_x) as f32 / atlas_width as f32,
-                    (y + ink_max_y) as f32 / atlas_height as f32,
-                ],
-                [
-                    ink_min_x as f32 - draw_x as f32,
-                    ink_min_y as f32 - draw_y as f32,
-                ],
-                [
-                    (ink_max_x - ink_min_x) as f32,
-                    (ink_max_y - ink_min_y) as f32,
-                ],
-            )
-        } else {
-            ([0.0; 4], [0.0; 2], [0.0; 2])
-        };
-        Ok(GlyphAtlasEntry {
-            uv,
-            ink_origin,
-            ink_size,
-            advance: size.width as f32,
-            line_height: size.height as f32,
-        })
-    }
 }
 
 fn glyph_scale(font_size: f32) -> f32 {
@@ -1527,8 +1453,8 @@ fn glyph_scale(font_size: f32) -> f32 {
 }
 
 fn glyph_atlas_needs_rebuild(
-    cached_glyphs: Option<&Vec<(String, bool)>>,
-    requested_glyphs: &[(String, bool)],
+    cached_glyphs: Option<&Vec<GlyphKey>>,
+    requested_glyphs: &[GlyphKey],
 ) -> bool {
     cached_glyphs.is_none_or(|cached| cached.as_slice() != requested_glyphs)
 }
@@ -1538,15 +1464,27 @@ fn glyph_advance(entry: GlyphAtlasEntry, font_size: f32) -> f32 {
 }
 
 fn glyph_run_width(atlas: &GlyphAtlas, text: &str, font_size: f32) -> f32 {
+    debug_assert!(text.is_ascii(), "HUD text is ASCII by contract: {text:?}");
     text.chars()
-        .filter_map(|glyph| atlas.entries.get(&(glyph.to_string(), false)).copied())
+        .filter_map(|scalar| {
+            atlas
+                .entries
+                .get(&GlyphKey::new(scalar.to_string(), false))
+                .copied()
+        })
         .map(|entry| glyph_advance(entry, font_size))
         .sum()
 }
 
 fn glyph_run_height(atlas: &GlyphAtlas, text: &str, font_size: f32) -> f32 {
+    debug_assert!(text.is_ascii(), "HUD text is ASCII by contract: {text:?}");
     text.chars()
-        .filter_map(|glyph| atlas.entries.get(&(glyph.to_string(), false)).copied())
+        .filter_map(|scalar| {
+            atlas
+                .entries
+                .get(&GlyphKey::new(scalar.to_string(), false))
+                .copied()
+        })
         .map(|entry| entry.line_height * glyph_scale(font_size))
         .fold(0.0, f32::max)
 }
@@ -1691,12 +1629,38 @@ fn srgb_channel_to_linear(channel: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::resources::GlyphEntryKind;
     use super::{
         glyph_advance, glyph_atlas_needs_rebuild, glyph_ink_rect, hud_layout, physical_dimension,
-        push_analytic_arc, srgb_channel_to_linear, GlyphAtlas, GlyphAtlasEntry,
+        push_analytic_arc, srgb_channel_to_linear, GlyphAtlas, GlyphAtlasEntry, GlyphKey,
         LayerActivationGuard, LayerActivationState,
     };
     use std::collections::BTreeMap;
+
+    /// A visible coverage-mask entry with the given ink geometry; the metric
+    /// fields the retained layout does not read stay neutral.
+    fn mask_entry(
+        visible_uv: Option<[f32; 4]>,
+        ink_origin: [f32; 2],
+        ink_size: [f32; 2],
+        advance: f32,
+        line_height: f32,
+    ) -> GlyphAtlasEntry {
+        GlyphAtlasEntry {
+            visible_uv,
+            ink_origin,
+            ink_size,
+            baseline: 0.0,
+            ascent: 0.0,
+            descent: 0.0,
+            line_height,
+            advance,
+            raster_size: [80.0, 80.0],
+            safe_padding: 6.0,
+            font_policy_id: 0,
+            kind: GlyphEntryKind::Mask,
+        }
+    }
 
     #[test]
     fn failed_preflight_never_marks_layer_attached() {
@@ -1730,13 +1694,13 @@ mod tests {
 
     #[test]
     fn glyph_quad_uses_ink_bounds_instead_of_filling_the_cell() {
-        let entry = GlyphAtlasEntry {
-            uv: [0.1, 0.2, 0.3, 0.4],
-            ink_origin: [3.0, 7.0],
-            ink_size: [20.0, 31.0],
-            advance: 29.0,
-            line_height: 52.0,
-        };
+        let entry = mask_entry(
+            Some([0.1, 0.2, 0.3, 0.4]),
+            [3.0, 7.0],
+            [20.0, 31.0],
+            29.0,
+            52.0,
+        );
 
         assert_eq!(
             glyph_ink_rect([100.0, 200.0], 24.0, entry),
@@ -1747,13 +1711,7 @@ mod tests {
 
     #[test]
     fn blank_glyph_has_advance_without_a_visible_quad() {
-        let entry = GlyphAtlasEntry {
-            uv: [0.0; 4],
-            ink_origin: [0.0; 2],
-            ink_size: [0.0; 2],
-            advance: 28.0,
-            line_height: 52.0,
-        };
+        let entry = GlyphAtlasEntry::whitespace(28.0, 52.0);
 
         assert_eq!(glyph_ink_rect([12.0, 34.0], 48.0, entry), None);
         assert_eq!(glyph_advance(entry, 48.0), 28.0);
@@ -1761,29 +1719,23 @@ mod tests {
 
     #[test]
     fn glyph_atlas_rebuilds_only_when_the_repertoire_changes() {
-        let cached = vec![("A".to_string(), false), ("B".to_string(), true)];
+        let cached = vec![GlyphKey::new("A", false), GlyphKey::new("B", true)];
         assert!(!glyph_atlas_needs_rebuild(Some(&cached), &cached));
         assert!(glyph_atlas_needs_rebuild(None, &cached));
         assert!(glyph_atlas_needs_rebuild(
             Some(&cached),
-            &[("A".to_string(), false)]
+            &[GlyphKey::new("A", false)]
         ));
     }
 
     #[test]
     fn hud_layout_uses_the_same_big_and_subline_font_policy_as_smooth() {
-        let entry = GlyphAtlasEntry {
-            uv: [0.0; 4],
-            ink_origin: [0.0; 2],
-            ink_size: [10.0, 20.0],
-            advance: 30.0,
-            line_height: 50.0,
-        };
+        let entry = mask_entry(Some([0.0; 4]), [0.0; 2], [10.0, 20.0], 30.0, 50.0);
         let atlas = GlyphAtlas {
             width: 1,
             height: 1,
             rgba: vec![0; 4],
-            entries: [('A'.to_string(), false), ('B'.to_string(), false)]
+            entries: [GlyphKey::new("A", false), GlyphKey::new("B", false)]
                 .into_iter()
                 .map(|key| (key, entry))
                 .collect::<BTreeMap<_, _>>(),
