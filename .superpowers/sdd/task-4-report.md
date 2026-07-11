@@ -1,260 +1,141 @@
-# Task 4 Report: Preview Lab Smooth Scenario
+# Task 4 report: Make retained host activation transactional
 
-status: DONE
+## What I implemented
 
-## Files Changed
+Split the one-shot `RetainedHost::new(view)` (which attached the layer to the
+view *before* the fallible wgpu work) into a two-phase, transactional flow:
 
-- `src/cli.rs`
-- `src/commands/dev_preview.rs`
-- `src/dev_preview/contract.rs`
-- `src/dev_preview/export.rs`
-- `src/dev_preview/mod.rs`
-- `src/dev_preview/pixel.rs`
-- `src/dev_preview/scenarios.rs`
-- `src/dev_preview/smooth.rs`
-- `src/dev_preview/strips.rs`
-- `tests/dev_preview.rs`
-- `.superpowers/sdd/task-4-report.md`
+- **`PreparedRetainedHost::prepare(view: &NSView, mailbox: GpuErrorMailbox)`** —
+  does ALL fallible GPU work against a **detached** `CAMetalLayer`: create the
+  layer, set its drawable size, build the wgpu instance/surface (from the layer
+  pointer)/adapter/device, wire `on_uncaptured_error` to the passed-in mailbox's
+  sender, `get_default_config`, `surface.configure`, the atlas bind-group layout,
+  and `create_pipelines`. It never calls `setWantsLayer`/`setLayer`. The passed-in
+  mailbox is stored on the inner host (`gpu_errors`), so the Task 3 drain path is
+  unchanged. Any failure here leaves the view completely untouched.
+- **`PreparedRetainedHost::activate(self, view: &NSView) -> Result<ActiveRetainedHost, _>`** —
+  the ONLY code that calls `view.setWantsLayer(true)` / `view.setLayer(Some(&layer))`.
+  It installs the layer under a `LayerActivationGuard` (RAII). On success it
+  commits the guard and returns `ActiveRetainedHost`. If a fallible post-attach
+  step is ever added and fails, the dropped-uncommitted guard restores the view's
+  prior AppKit layer state before the error propagates.
 
-`src/dev_preview/pixel.rs` and `src/dev_preview/strips.rs` only changed to populate the new `PreviewStripFrameFiles::smooth_motion` field with `None` for existing strip families.
+Supporting types (all in `retained.rs`):
 
-## RED Evidence
+- **`LayerActivationState`** — models the attach lifecycle (`attached`,
+  `appkit_restored`) with `default()`, `mark_attached()`, `preflight_failed()`,
+  `attached()`, `appkit_restored()`. The production guard uses it as its
+  arm/rollback source of truth; `preflight_failed`/`appkit_restored` carry
+  `#[allow(dead_code)]` (they model the never-attached invariant the Step-1 test
+  pins and are read only by that test — matching the existing
+  `FrameProgress::observed` convention in `presentation.rs`).
+- **`LayerActivationGuard<'a>`** — RAII guard over an `ActivationRollback<'a>`
+  (production `View(&NSView)`; test-only `TestFlag(Rc<Cell<bool>>)` gated
+  `#[cfg(test)]`). Drop-before-commit rolls back: production calls
+  `ActiveRetainedHost::restore_appkit(view)`; test clears the cell. `commit(self)`
+  disarms. `for_test` is `#[cfg(test)]`.
+- **`ActiveRetainedHost`** — owns the built, attached inner `RetainedHost` and
+  derefs to it (via `Deref`/`DerefMut`), so `render` and `drain_gpu_error` read
+  through transparently. `restore_appkit` (idempotent) moved here from
+  `RetainedHost`.
 
-Added the smooth-preview tests first in `tests/dev_preview.rs`, then ran the required red command:
+`RetainedHost` stays the single GPU-holding struct; `PreparedRetainedHost` and
+`ActiveRetainedHost` each wrap one `host: RetainedHost` — no duplicated GPU fields.
 
-- `cargo test --features dev-preview --test dev_preview dev_preview_smooth`
-  - Failed as expected with:
-    - `invalid value 'smooth' for '--scenario <SCENARIO>'`
-    - current possible values were only `all, watch, pets, props, animation, round, tank-life, pixel`
+## app.rs startup reorder (brief Step 4)
 
-That established the first missing seam cleanly at the CLI/scenario plumbing layer before any production changes.
+`build_window` now runs before the retained block, and the retained
+prepare→activate block runs before `review_capture`/`redacts_live_hud`.
+Sequence: `build_window` (get view) → `GpuErrorMailbox::new()` →
+`PreparedRetainedHost::prepare(view, mailbox).and_then(|p| p.activate(view))` →
+on Ok store `ActiveRetainedHost`; on prepare-OR-activate Err write the boundary
+diagnostic + `renderer_runtime.fallback_to_smooth(category)` + `None` → THEN build
+`review_capture` from the now-final `renderer_runtime.effective()`. This ensures a
+failed activation that flips effective to Smooth is what the review capture reads,
+instead of the pre-fallback Retained value.
 
-## GREEN Evidence
+`AppState.retained_host` is now `Option<ActiveRetainedHost>`; the render call
+site (`state.retained_host.as_mut()?.render(...)` + `drain_gpu_error()`) works
+unchanged through `Deref`/`DerefMut`. `fallback_from_retained` now calls
+`ActiveRetainedHost::restore_appkit`.
 
-Required focused test:
+## Files changed (and why)
 
-- `cargo test --features dev-preview --test dev_preview dev_preview_smooth`
-  - Passed: `3 passed; 0 failed`
+- `src/companion/retained.rs` — the split, the guard/state/active types.
+- `src/companion/app.rs` — field type, startup reorder, fallback restore call.
+- `src/companion/retained/presentation.rs` — **justified extra file**: widened
+  `GpuErrorMailbox` struct + `new()` from `pub(super)` to `pub(crate)`. The brief's
+  `prepare(view, mailbox)` signature requires app.rs to construct the mailbox, and
+  `retained.rs` now re-exports `GpuErrorMailbox` via its existing `pub(crate) use`.
+  `sender`/`drain` stay `pub(super)`.
 
-Required bundle generation:
+## TDD evidence
 
-- `cargo run --features dev-preview -- dev-preview --scenario smooth --out target/glorp-preview`
-  - Passed and wrote the smooth preview bundle to `target/glorp-preview`
+RED — added the two verbatim Step-1 tests to `retained.rs` `mod tests`, then:
 
-Required formatting check:
+```
+$ cargo test --features retained-renderer companion::retained::tests::failed_preflight
+error[E0432]: unresolved imports `super::LayerActivationGuard`, `super::LayerActivationState`
+    --> src/companion/retained.rs:1488:9
+     | no `LayerActivationState` in `companion::retained`
+     | no `LayerActivationGuard` in `companion::retained`
+error: could not compile `glorp` (lib test) due to 1 previous error
+```
 
-- `cargo fmt --check`
-  - Failed once on rustfmt wrapping
-  - Ran `cargo fmt`
-  - Re-ran `cargo fmt --check`
-  - Passed
+This is the expected failure (Step 2: "compile failure for missing activation
+types") — the tests reference types that do not exist yet.
 
-Diff hygiene:
+GREEN — after implementing the types + split:
 
-- `git diff --check`
-  - Passed
+```
+$ cargo test --features retained-renderer --lib companion::retained
+test companion::retained::tests::activation_guard_restores_uncommitted_attachment ... ok
+test companion::retained::tests::failed_preflight_never_marks_layer_attached ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 930 filtered out
+```
 
-## Generated Artifact Notes
+The guard test exercises real Drop-before-commit rollback (the cell flips
+true→false); the state test exercises the real `LayerActivationState` transition.
+Neither uses live GPU or an NSView.
 
-Generated smooth frame artifacts:
+## Verification results
 
-- `target/glorp-preview/frames/round-smooth-classic-baseline.txt`
-- `target/glorp-preview/frames/round-smooth-classic-baseline.cells.json`
-- `target/glorp-preview/frames/round-smooth-classic-parity.txt`
-- `target/glorp-preview/frames/round-smooth-classic-parity.cells.json`
-- `target/glorp-preview/frames/round-smooth-classic-parity.smooth-plan.json`
-- `target/glorp-preview/frames/round-smooth-classic-parity.smooth-parity.json`
+Feature-ON:
+- `cargo test --features retained-renderer --lib companion::retained` → 12 passed.
+- `cargo test --features retained-renderer --lib companion::app` → 42 passed.
+- `cargo test --features retained-renderer --lib` → 942 passed, 0 failed.
+- `cargo clippy --lib --features retained-renderer -- -D warnings` → clean.
+- `cargo clippy --all-targets --all-features -- -D warnings` (pre-commit gate) → clean.
 
-Generated smooth strip artifacts:
+Feature-OFF (default):
+- `cargo build` → clean.
+- `cargo clippy --lib -- -D warnings` → clean.
 
-- `target/glorp-preview/strips/round-smooth-motion/frame-000.txt`
-- `target/glorp-preview/strips/round-smooth-motion/frame-000.cells.json`
-- `target/glorp-preview/strips/round-smooth-motion/frame-000.smooth-motion.json`
-- `target/glorp-preview/strips/round-smooth-motion/frame-001..005.{txt,cells.json,smooth-motion.json}`
+Formatting: `cargo fmt --check` → clean.
 
-Bundle behavior verified by tests:
-
-- `manifest.json` now records `kind: "smooth"` scenarios and a `kind: "smooth-motion"` strip
-- parity scenario files expose `smooth_plan` and `smooth_parity`
-- strip frame files expose `smooth_motion`
-- artifact inventory includes `smooth-plan`, `smooth-parity`, and `smooth-motion`
-- `review.md` links the smooth parity and motion sidecars
-
-## Change Summary
-
-- Added hidden `dev-preview --scenario smooth` CLI support and `PreviewSelection::Smooth`
-- Added a new `src/dev_preview/smooth.rs` scenario builder that:
-  - renders `round-smooth-classic-baseline` from `build_round_scene_draw_list(...)`
-  - renders `round-smooth-classic-parity` from `build_round_smooth_scene_plan(...).flatten_classic_cells()`
-  - emits deterministic `round-smooth-motion` strip frames with per-frame `.smooth-motion.json` sidecars
-- Added smooth preview contracts in `src/dev_preview/contract.rs`:
-  - `PreviewSmoothPlanArtifact`
-  - `PreviewSmoothLayerArtifact`
-  - `PreviewSmoothParityArtifact`
-  - `PreviewSmoothMotionArtifact`
-- Added manifest/export support for smooth sidecars and artifact inventory in:
-  - `src/dev_preview/export.rs`
-  - `src/dev_preview/scenarios.rs`
-- Wired smooth bundles into both `Smooth` and `All` preview selection paths
-- Extended `tests/dev_preview.rs` with smooth scenario, parity, privacy, motion, and `all`-bundle coverage
-
-## Self-review
-
-- Kept live TUI/watch behavior untouched; all work is scoped under `src/dev_preview` plus CLI routing for the hidden preview scenario
-- Reused the existing round and smooth scene seams instead of duplicating render logic:
-  - Classic baseline comes from the existing draw-list path
-  - parity comes from the smooth plan's Classic flattening compatibility path
-- Kept the smooth sidecars intentionally narrow:
-  - roles
-  - z order
-  - local bounds
-  - transforms
-  - item counts
-  - chrome reservations
-  - checksums
-  - abstract state buckets
-  - privacy claims
-- Verified the parity contract is exact for the fixed fixture by asserting matching Classic and smooth flatten checksums
-- Verified motion metadata changes across at least five distinct fractional bob/anchor values without changing the underlying Classic cell source seam
+Transactional-invariant audit: the only `setWantsLayer(true)`/`setLayer(Some)`
+callsite in `retained.rs` is inside `activate`; `prepare`'s single view-layer
+touch is `setDrawableSize` on the detached layer object (not the view's layer);
+`restore_appkit` remains the `setLayer(None)`/`setWantsLayer(false)` restore.
 
 ## Concerns
 
-- The motion strip currently proves fractional `PetBody` bob through metadata and repeated parity frames, but because Slice 1 intentionally preserves Classic flattened cells, the text/cells strip itself can look nearly static between adjacent frames. That is expected and is why the `.smooth-motion.json` sidecars are the primary review contract for this task.
-
-## Fix Follow-up: review-blocked Task 4 hardening
-
-### Scope
-
-Reviewer-blocked fixes applied only in:
-
-- `src/dev_preview/contract.rs`
-- `tests/dev_preview.rs`
-- `.superpowers/sdd/task-4-report.md`
-
-No companion/AppKit code changed.
-
-### RED Evidence
-
-Added failing coverage first, then ran the required RED command:
-
-- `cargo test --features dev-preview --test dev_preview dev_preview_smooth`
-  - Failed as expected in `dev_preview_smooth_privacy_scan_covers_motion_sidecars`
-  - Failure showed the privacy scan only covered:
-    - `frames/round-smooth-classic-parity.smooth-plan.json`
-    - `frames/round-smooth-classic-parity.smooth-parity.json`
-  - And missed every motion sidecar:
-    - `strips/round-smooth-motion/frame-000..005.smooth-motion.json`
-
-Added a direct unit test in `src/dev_preview/contract.rs` for missing required-role detection:
-
-- `smooth_parity_artifact_flags_missing_required_roles`
-  - Removes `ambient` and `pet-body` from a generated plan
-  - Asserts fixed Slice 1 `required_roles`
-  - Asserts `missing_roles == ["ambient", "pet-body"]`
-  - Asserts `exact_match == false`
-  - Asserts `review_status == "missing-required-roles"`
-
-This unit test would fail on the previous implementation because parity derived
-`required_roles` from the surviving plan and never reported any missing roles.
-
-### GREEN Evidence
-
-Direct unit coverage after the contract fix:
-
-- `cargo test --features dev-preview smooth_parity_artifact_flags_missing_required_roles`
-  - Passed
-
-Required focused integration test after the test + contract fixes:
-
-- `cargo test --features dev-preview --test dev_preview dev_preview_smooth`
-  - Passed: `4 passed; 0 failed`
-
-Required bundle generation:
-
-- `cargo run --features dev-preview -- dev-preview --scenario smooth --out target/glorp-preview`
-  - Passed and rewrote the smooth preview bundle in `target/glorp-preview`
-
-Required formatting check:
-
-- `cargo fmt --check`
-  - Failed once on rustfmt wrapping
-  - Ran `cargo fmt`
-  - Re-ran `cargo fmt --check`
-  - Passed
-
-### Fix Summary
-
-- `PreviewSmoothParityArtifact` now compares the exported plan against a fixed
-  Slice 1 required-role list from the spec instead of deriving the list from
-  whatever roles happen to survive in the plan.
-- `missing_roles` is now computed from absent plan roles.
-- `exact_match` now fails closed when required roles are missing, even if the
-  provided checksum matches the reduced plan.
-- `review_status` now reports `missing-required-roles` before checksum status.
-- Smooth privacy scanning in `tests/dev_preview.rs` now walks every smooth
-  sidecar type:
-  - `.smooth-plan.json`
-  - `.smooth-parity.json`
-  - `.smooth-motion.json`
-- Smooth dev-preview assertions now verify the live parity artifact exports the
-  full 18-role Slice 1 required-role set and an empty `missing_roles` list.
-- `smooth_abstract_state()` now buckets:
-  - species into `soft-body` / `spectral` / `synthetic`
-  - stage into `early` / `grown` / `veteran`
-  - mood into `settled` / `resting` / `needs-care`
-
-### Generated Artifact Notes
-
-- Verified the regenerated smooth bundle still includes:
-  - `frames/round-smooth-classic-parity.smooth-plan.json`
-  - `frames/round-smooth-classic-parity.smooth-parity.json`
-  - `strips/round-smooth-motion/frame-000..005.smooth-motion.json`
-- The privacy scan now explicitly covers all six motion sidecars instead of
-  only the parity pair.
-
-### Concerns
-
-- None beyond the existing Slice 1 note above about fractional motion being
-  primarily visible in `.smooth-motion.json` sidecars rather than large cell
-  changes in every strip frame.
-
-## Fix Follow-up 2
-
-### Files changed
-
-- `src/dev_preview/contract.rs`
-- `tests/dev_preview.rs`
-- `.superpowers/sdd/task-4-report.md`
-
-### RED evidence
-
-- `cargo test --features dev-preview privacy_value_scan_ignores_allowed_claim_field_names`
-  - Failed as expected in `tests/dev_preview.rs`
-  - Output summary: `smooth sidecar leaked prompt` because the naive string scan matched the allowed `prompt_text_visible` claim key instead of only scanning JSON values
-- `cargo test --features dev-preview smooth_motion_artifact_requires_pet_body_layer`
-  - Failed as expected in `src/dev_preview/contract.rs`
-  - Output summary: `test did not panic as expected` because `PreviewSmoothMotionArtifact::from_scene_plan` still fell back to a non-`pet-body` populated layer
-
-### GREEN evidence
-
-- `cargo test --features dev-preview smooth_motion_artifact_requires_pet_body_layer`
-  - Passed: `1 passed; 0 failed`
-- `cargo test --features dev-preview privacy_value_scan_ignores_allowed_claim_field_names`
-  - Passed: `1 passed; 0 failed`
-- `cargo test --features dev-preview --test dev_preview dev_preview_smooth`
-  - Passed: `4 passed; 0 failed`
-- `cargo fmt --check`
-  - Failed once on rustfmt wrapping in `src/dev_preview/contract.rs` and `tests/dev_preview.rs`
-- `cargo fmt`
-  - Passed
-- `cargo fmt --check`
-  - Passed
-
-### Commit SHA(s)
-
-- `8a9073c`
-
-### Concerns
-
-- Left the optional `item_count` future-proofing note untouched to keep this fix
-  strictly on the two Important reviewer findings and their focused coverage.
+- **Surface validity on a detached layer.** The whole approach rests on the
+  design decision that a `CAMetalLayer` created with `CAMetalLayer::new()` renders
+  fine while detached from its view, and that installing it later (via `setLayer`)
+  only makes it visible without invalidating the wgpu surface (the surface is
+  created from the layer *pointer*, which does not change when the same layer
+  object is attached to the view). I could not exercise this on live GPU in this
+  environment (the guard/state tests are pure). `resize_if_needed` reconfigures the
+  surface on the first `render`, providing a safety net if attachment perturbs the
+  drawable size. This should be confirmed by a real companion launch.
+- **`activate` currently cannot return `Err`.** Because `prepare` performs all
+  fallible GPU work, `activate` has no fallible step after the attach today, so it
+  always returns `Ok`. The `Result` return type and the RAII guard are the
+  future-proofing the brief asked for: they make adding a fallible post-attach step
+  transactional by construction. Clippy is clean on this.
+- **`LayerActivationState::preflight_failed`/`appkit_restored`** are exercised only
+  by the Step-1 test today (`#[allow(dead_code)]`, matching the codebase's
+  `FrameProgress::observed` precedent). They model the by-construction invariant
+  that a failed prepare never touches the view; production maintains that invariant
+  by simply not calling `activate` when `prepare` fails.

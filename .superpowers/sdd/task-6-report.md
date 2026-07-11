@@ -1,286 +1,173 @@
-# Task 6 Report: Smooth AppKit Motion And Review Capture
+# Task 6 Report: Port canonical GPU readback behind production-owned types
 
-## Files Changed
+## Status: COMPLETE
 
-- `Cargo.toml`
-- `src/cli.rs`
-- `src/commands/companion.rs`
-- `src/commands/companion_mode.rs`
-- `src/companion/app.rs`
-- `src/companion/mod.rs`
-- `src/companion/review_capture.rs`
-- `src/lib.rs`
-- `tests/cli_smoke.rs`
+Landed the canonical GPU readback behind production-owned types, per the
+coordinator's two decisions (Option A: `capture(&PairedReviewFrame)` with a
+`prepared()` accessor; return `Result<_, RetainedFailureCategory>` with minimal
+new variants). All gates pass in both feature configs.
 
-## RED Evidence
+## Files changed
 
-Command:
+Staged (5):
 
-```bash
-cargo test --test cli_smoke companion_review -- --nocapture
+- `src/companion/retained/capture.rs` (new) — pure normalization + the live wgpu
+  readback (`RetainedCaptureTarget::capture`).
+- `src/companion/retained.rs` — `mod capture;`, extracted the shared
+  `encode_scene` render-pass helper, and pointed `render()` at it.
+- `src/companion/paired_review.rs` — added `pub(super) fn prepared(&self) ->
+  &PreparedCompanionFrame` (Option A accessor; the frozen `frame` field is no
+  longer `#[allow(dead_code)]`).
+- `src/companion/retained/presentation.rs` — added 4 `RetainedFailureCategory`
+  variants + their static `category()` strings (see "Beyond the 4-file list").
+- `tests/retained_renderer_boundary.rs` (new) — source-boundary text scan.
+
+**Beyond the 4-file list — `presentation.rs`:** Decision 2 told me to add the
+new error paths as `RetainedFailureCategory` variants. That enum lives in
+`src/companion/retained/presentation.rs`, so honoring decision 2 unavoidably
+edits that file — the same "legitimate consequence, not scope creep" principle
+the coordinator applied to `paired_review.rs`. A compiling commit must include
+it, so it is the 5th staged file. It is a retained-module source (the boundary
+test's `renderer_spike::` scan already covers `retained/*.rs`, so it is in the
+guarded set). No other approach keeps capture on the shared enum that Task 13
+extends, which decision 2 explicitly requires.
+
+## TDD evidence (pure normalization)
+
+RED — wrote the two Step-1 tests verbatim in `capture.rs`'s test module with no
+implementation and ran `cargo test --features retained-renderer
+companion::retained::capture`:
+
+```
+error[E0433]: cannot find type `PixelOrder` in this scope
+error[E0425]: cannot find function `normalize_readback_rows` in this scope
+error[E0433]: cannot find type `PixelOrder` in this scope
+error[E0425]: cannot find function `normalize_readback_rows` in this scope
+error: could not compile `glorp` (lib test) due to 4 previous errors
 ```
 
-Result: failed as expected before production changes. All three new focused smoke tests failed because clap rejected the missing hidden review flags:
+Exactly the expected missing-symbol failure (brief Step 2).
 
-- `--review-state` was an unexpected argument for `companion`
-- `--review-state` was an unexpected argument for `companion-app`
-- `--review-duration-ms` was an unexpected argument when using legacy `--review-active-pulse`
+GREEN — after implementing `PixelOrder`, `aligned_bytes_per_row`,
+`normalize_readback_rows`, `CanonicalRgbaFrame`, `ReadbackMetadata`:
 
-Summary from RED run: `0 passed; 3 failed; 20 filtered out`.
-
-## GREEN Evidence
-
-Command:
-
-```bash
-cargo test --test cli_smoke companion_review -- --nocapture
+```
+running 9 tests
+test ...::bgra_rows_are_unpadded_swizzled_and_top_left ... ok
+test ...::row_normalization_rejects_short_mapped_buffer ... ok
+test ...::rgba_rows_pass_through_without_swizzle ... ok
+test ...::unpadded_row_is_copied_when_stride_equals_width_times_four ... ok
+test ...::short_buffer_is_rejected_with_the_buffer_too_short_category ... ok
+test ...::aligned_bytes_per_row_rounds_up_to_the_copy_alignment ... ok
+test ...::readback_metadata_describes_the_padded_row_layout ... ok
+test ...::rgba_surface_formats_are_not_swizzled ... ok
+test ...::capture_failure_categories_are_static_and_hyphenated ... ok
+test result: ok. 9 passed; 0 failed
 ```
 
-Result: passed after implementation. Summary: `3 passed; 0 failed; 20 filtered out`.
+Both mandated tests are byte-exact (the BGRA test asserts the drop-pad + B/R
+swap + top-left order transform; the short-buffer test asserts rejection). The
+added tests harden real transforms (RGBA passthrough, an unpadded row where
+`bytes_per_row == width*4`, the aligned-row rounding boundaries, the padded-row
+`ReadbackMetadata` layout, and the static error categories) — none test mocked
+behavior.
 
-Command:
+## How the readback was ported (no renderer_spike import)
 
-```bash
-cargo build
-```
+`RetainedCaptureTarget::capture` re-derives `renderer_spike/wgpu.rs:812-950` from
+scratch against production types; nothing is imported from `renderer_spike`
+(the boundary test fails the build if it ever is). Sequence:
 
-Result: passed after implementation. Summary: `Finished dev profile`.
+1. Decompose the frozen frame via `frame.prepared()` + the Task-5 accessors
+   (`renderer_source()` matched on `Smooth` for metrics/pet-center/plan/draw
+   order; `review_*` for aperture/background/aura/gauges/hud/overlays/dim). A
+   non-Smooth variant returns `CaptureUnsupportedVariant` rather than guessing.
+2. `ensure_glyph_atlas(collect_glyphs(...))` so the intermediate matches the
+   frozen glyph repertoire, then `prepare_gpu_frame(...)`.
+3. Physical-size sRGB intermediate texture (`config.format`,
+   `RENDER_ATTACHMENT | COPY_SRC`).
+4. `copy_texture_to_buffer` into a `COPY_DST | MAP_READ` staging buffer sized by
+   `ReadbackMetadata::staging_buffer_size()`, `bytes_per_row =
+   aligned_bytes_per_row(width)` (256-byte aligned).
+5. A single `queue.submit`, retaining the submission index.
+6. `map_async(MapMode::Read, ...)` then `device.poll(PollType::Wait {
+   submission_index: Some(idx), timeout: Some(Duration::from_secs(5)) })` — the
+   five-second bounded poll.
+7. Receive the callback result, `get_mapped_range`, `normalize_readback_rows`,
+   `unmap`, and return `CanonicalRgbaFrame`.
+8. **Matching IDs (why Option A is safer):** `frame_id`/`resource_generation`
+   are stamped from `frame.identity.frame_id` / `.resource_generation` — the
+   review row's own IDs — so the "matching IDs" requirement holds structurally
+   rather than via a caller-supplied pair.
 
-Command:
+Channel/row/alpha handling is folded into the pure, tested
+`normalize_readback_rows`: it drops the 256-byte row padding, swaps B/R only for
+`PixelOrder::Bgra` (derived from the surface format via `pixel_order_for_format`,
+covering `Bgra8Unorm`/`Bgra8UnormSrgb`), preserves top-left row order, and
+returns `CaptureBufferTooShort` when the mapped buffer is shorter than
+`bytes_per_row*(height-1) + width*4`. Alpha is straight sRGB today with a
+documented single-spot seam for Task 11's premultiplied-linear convention (the
+Step-1 tests use opaque alpha, so any future unpremultiply must stay a no-op
+there).
 
-```bash
-cargo fmt --check
-```
+## How the render loop was not duplicated
 
-Result: passed after running `cargo fmt`.
+Extracted `RetainedHost::encode_scene(encoder, target_view, atlas_bind_group,
+primitive_buffer, blends, background)` — the clear-loaded render pass +
+per-blend `set_pipeline`/`draw(0..6, i..i+1)` loop. `render()` now calls it
+targeting the surface view; `capture()` calls the same helper targeting the
+intermediate view. There is exactly one render-pass/pipeline loop in the module.
+The extraction is borrow-clean: `encode_scene(&self, ...)` shares `self`
+immutably alongside the immutable `glyph_atlas`/`device` reborrows while the
+`encoder` is a separate `&mut` local.
 
-Additional focused unit checks:
+## New error variants (decision 2)
 
-```bash
-cargo test --lib review_state -- --nocapture
-cargo test --lib legacy_active_pulse -- --nocapture
-```
+`RetainedFailureCategory` gained (each with a static `category()` string):
+`CaptureUnsupportedVariant` (`retained-capture-unsupported-variant`),
+`CapturePollTimeout` (`retained-capture-poll-timeout`), `CaptureMapFailed`
+(`retained-capture-map-failed`), `CaptureBufferTooShort`
+(`retained-capture-buffer-too-short`). No `GlorpError`/`format!` reaches
+`capture.rs`. Task 7 converts a category into a process-level error at its
+boundary.
 
-Result: review-state precedence and legacy active-pulse mapping tests passed.
+## Feature-gating / dead-code discipline
 
-## Native Capture Evidence
+`capture.rs` compiles only under the retained module's `cfg(all(macos,
+retained-renderer))`. `RetainedCaptureTarget` and `capture()` are unused until
+Task 7, so they carry a scoped `#[allow(dead_code)]` (no blanket allow);
+`CanonicalRgbaFrame` carries one too (its fields are read only by Task 7). Every
+pure helper (`normalize_readback_rows`, `aligned_bytes_per_row`,
+`ReadbackMetadata` + all its fields, `PixelOrder`, the 4 new error variants) is
+exercised by unit tests, so none needs an allow. The boundary test is not
+feature-gated (pure `std::fs` text scan) and runs in the default config.
 
-Command:
+## Verification results
 
-```bash
-cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 2000 --review-capture-dir target/glorp-review/smooth-360-active
-```
-
-Result: exited 0.
-
-Artifacts written:
-
-- `target/glorp-review/smooth-360-active/screenshot.png`
-- `target/glorp-review/smooth-360-active/render-log.json`
-
-Fresh `render-log.json` facts:
-
-- `renderer`: `smooth`
-- `review_state`: `active-pulse`
-- `requested_size`: `360x360`
-- `frame_count`: `59`
-- `elapsed_duration_ms`: `2036`
-- `smooth_bob_samples`: `59` samples, `59` unique values
-- first/last bob samples changed from `0.029` to `-0.0679`
-- `panic`: `false`
-
-Fresh screenshot fact:
-
-- `screenshot.png`: PNG image data, `720 x 720`, RGBA
-
-## Self-Review Notes
-
-- Classic remains the default renderer.
-- Pixel remains on its separate renderer path.
-- Smooth still uses `build_round_smooth_scene_plan(...)`.
-- Smooth AppKit rendering now walks smooth layers in z order; non-`PetBody` local cells render at rounded integer cell positions through the same AppKit cell drawing helper, while `PetBody` local cells use fractional `transform.translation.x/y` AppKit coordinates.
-- HUD, gauges, halo/trouble overlays, mood aura, dim overlay, and aperture clipping remain in the existing AppKit composition.
-- Review logs contain renderer, review state, requested size, frame count, elapsed duration, bob samples, and panic flag only. They do not include source names, prompts, diagnostics, raw file paths, or user data.
-- Native capture initially found a real re-entrant AppKit bug: screenshot capture held a mutable `APP_STATE` borrow while `displayIfNeeded()` re-entered `drawRect`. The fix takes the capture session out of state before invoking screenshot/log writes.
-
-## Commit SHA(s)
-
-- Final commit SHA is reported in the final response after commit creation.
+- `cargo test --features retained-renderer companion::retained::capture` — 9
+  passed.
+- `cargo test --test retained_renderer_boundary` — 2 passed.
+- `cargo test --features retained-renderer companion::retained` — 21 passed
+  (render refactor did not regress the ladder/atlas/gauge tests).
+- `cargo test --features retained-renderer companion::paired_review` — 7 passed
+  (accessor did not disturb the checksum/path tests).
+- `cargo clippy --lib --features retained-renderer -- -D warnings` — exit 0.
+- `cargo clippy --lib -- -D warnings` (feature-off) — exit 0.
+- `cargo clippy --all-targets --features retained-renderer -- -D warnings` —
+  exit 0 (lints the boundary test target).
+- `cargo clippy --all-targets -- -D warnings` (feature-off) — exit 0.
+- `cargo build` (feature-off) — exit 0.
+- `cargo fmt --check` — exit 0.
 
 ## Concerns
 
-## Final Review Fix
-
-### Files Changed
-
-- `src/companion/app.rs`
-- `.superpowers/sdd/task-6-report.md`
-
-### RED Evidence
-
-Command:
-
-```bash
-cargo test --lib review_state -- --nocapture
-```
-
-Result before the fix: failed for the targeted drift behavior after post-poll updates. Summary: `2 passed; 3 failed; 831 filtered out`.
-
-Representative failures:
-
-- `post_poll_review_state_active_pulse_reapplies_after_live_update`: `left: None`, `right: Some(2026-07-08 12:00:00.0 +00:00:00)`
-- `post_poll_review_state_asleep_calm_reapplies_after_live_update`: `assertion failed: vm.day_context.asleep`
-- `post_poll_review_state_helper_trouble_reapplies_after_live_update`: `left: Ready`, `right: Diagnostic`
-
-### GREEN Evidence
-
-Focused check:
-
-```bash
-cargo test --lib review_state -- --nocapture
-```
-
-Result after the fix: passed. Summary: `5 passed; 0 failed; 831 filtered out`.
-
-Required checks:
-
-```bash
-cargo build
-cargo fmt --check
-```
-
-Results:
-
-- `cargo build`: passed (`Finished dev profile`)
-- `cargo fmt --check`: passed
-
-Native review checks:
-
-```bash
-cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 2000 --review-capture-dir target/glorp-review/smooth-360-active
-cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 12000 --review-capture-dir target/glorp-review/smooth-360-active-12s
-```
-
-Results:
-
-- Required 2s capture exited 0 with `review_state: active-pulse`, `frame_count: 59`, `elapsed_duration_ms: 2050`, `panic: false`
-- Extra 12s capture exited 0 across the 10s poll boundary with `review_state: active-pulse`, `frame_count: 359`, `elapsed_duration_ms: 12037`, `panic: false`
-
-### Commit SHA
-
-- Placeholder: `PENDING_COMMIT_SHA`
-
-### Concerns
-
-- The focused regression tests directly cover the bug path, but the native capture logs do not expose a fixture-specific boolean for post-poll pulse persistence, so runtime verification here is exit-status plus review-state metadata rather than a stronger artifact assertion.
-
-- No functional concerns from the final checks.
-- The report cannot contain its own final commit SHA without changing the commit hash; final response records the actual commit SHA.
-
-## Fix Follow-up
-
-## Files Changed
-
-- `src/companion/review_capture.rs`
-- `src/companion/app.rs`
-- `src/commands/companion.rs`
-- `.superpowers/sdd/task-6-report.md`
-
-## RED Evidence
-
-Command:
-
-```bash
-cargo test --lib review_open_command_forwards_state_duration_and_capture_dir -- --nocapture
-```
-
-Result before implementation: failed to compile as expected because the new review-capture tests referenced missing `ReviewCapture::writes_artifacts` and `ReviewCapture::redacts_live_hud` methods.
-
-Representative error:
-
-```text
-error[E0599]: no method named `writes_artifacts` found for struct `review_capture::ReviewCapture`
-error[E0599]: no method named `redacts_live_hud` found for struct `review_capture::ReviewCapture`
-```
-
-Additional native RED during verification:
-
-```bash
-cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 2000 --review-capture-dir target/glorp-review/smooth-360-active
-```
-
-Visual screenshot inspection initially showed live HUD token strings (`1.9B`, `79% yday`, `1.8M/10m`). Root cause: `finish_review_capture_if_due` takes the capture session out of `APP_STATE` before `displayIfNeeded()`, so the forced screenshot redraw no longer saw capture mode.
-
-## GREEN Evidence
-
-Focused checks:
-
-```bash
-cargo test --lib review_capture -- --nocapture
-cargo test --lib review_open_command_forwards_state_duration_and_capture_dir -- --nocapture
-```
-
-Result: passed. `review_capture` ran 3 tests covering duration-only sessions, artifact redaction mode, and redacted HUD text; command forwarding ran 1 test covering `--review-state`, `--review-duration-ms`, and `--review-capture-dir`.
-
-Required checks:
-
-```bash
-cargo test --test cli_smoke companion_review -- --nocapture
-cargo build
-cargo fmt --check
-```
-
-Results:
-
-- `cli_smoke companion_review`: `3 passed; 0 failed; 20 filtered out`
-- `cargo build`: passed
-- `cargo fmt --check`: passed after running `cargo fmt`
-
-Duration-only native check:
-
-```bash
-cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 500
-```
-
-Result: exited 0 on its own without `--review-capture-dir`.
-
-## Native Capture Evidence
-
-Command:
-
-```bash
-cargo run -- companion-app --renderer smooth --review-size 360x360 --review-state active-pulse --review-duration-ms 2000 --review-capture-dir target/glorp-review/smooth-360-active
-```
-
-Result: exited 0.
-
-Artifact facts:
-
-- `target/glorp-review/smooth-360-active/screenshot.png` exists, `720 x 720`
-- `target/glorp-review/smooth-360-active/render-log.json` exists
-- `frame_count`: `59`
-- `elapsed_duration_ms`: `2043`
-- `smooth_bob_samples`: `59` samples, `59` unique values
-- first/last bob samples changed from `0.028` to `-0.0679`
-- `panic`: `false`
-
-Privacy verification:
-
-- Final screenshot visual inspection shows deterministic redacted HUD text: `review`, `privacy`, `redacted`.
-- It no longer shows live HUD token strings from the first failed artifact (`1.9B`, `79% yday`, `1.8M/10m`).
-- `render-log.json` remains limited to renderer, review state, requested size, frame count, elapsed duration, bob samples, and panic flag.
-
-## Fix Details
-
-- Duration-only review sessions now create a `ReviewCapture` without artifact output, allowing the app to terminate after `review_duration_ms` even when no capture directory is supplied.
-- Artifact-producing review sessions now request live HUD redaction.
-- The app stores redaction as persistent app state so the final screenshot redraw remains redacted even after the capture session is temporarily taken out of state for safe AppKit screenshot writing.
-- Normal live companion HUD behavior is unchanged when not writing review artifacts.
-
-## Commit SHA(s)
-
-- Pending until commit creation. Final response records the actual commit SHA because adding the SHA to this file before commit would change the SHA.
-
-## Concerns
-
-- No functional concerns from the final checks.
+- The live wgpu readback (`capture()`) cannot be exercised headlessly here; per
+  the brief it is verified live in Task 7/15. This task's gate rests on the pure
+  normalization tests + boundary test + both-config compiles, exactly as the
+  brief specifies. The GPU sequence is a faithful, line-by-line port of the
+  proven spike, but its runtime pixel output is unverified in this task.
+- `presentation.rs` is a 5th staged file — the direct, unavoidable consequence
+  of decision 2 (variants must live on `RetainedFailureCategory`). Flagged above
+  and reflected in the commit's staged set.
+- The pre-existing `.superpowers/sdd/task-4-report.md` modification in the tree
+  is not mine and was left untouched/unstaged.
