@@ -6,11 +6,34 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  macosCargoBuildArgs,
   readAppVersion,
   resolveMacosBinaryPath,
 } from "../build-macos-app-shared.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+function readPublishWorkflow() {
+  return fs.readFileSync(
+    path.join(repoRoot, ".github/workflows/publish.yml"),
+    "utf8",
+  );
+}
+
+// The publish matrix block for one target, from its `- target:` line up to the
+// next target (or the end of the matrix `include:` list), so per-target
+// assertions cannot leak across targets or into the reusable step definitions.
+function targetMatrixBlock(workflow, target, nextTarget) {
+  const matrixSection = workflow.slice(
+    workflow.indexOf("include:"),
+    workflow.indexOf("runs-on: ${{ matrix.runner }}"),
+  );
+  const start = matrixSection.indexOf(`- target: ${target}`);
+  const end = nextTarget
+    ? matrixSection.indexOf(`- target: ${nextTarget}`)
+    : matrixSection.length;
+  return matrixSection.slice(start, end);
+}
 
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -74,6 +97,98 @@ describe("macOS app packaging", () => {
     assert(
       workflow.indexOf("download companion app artifact") <
         workflow.indexOf("stage binary into platform package"),
+    );
+  });
+
+  it("appends the requested cargo features to a local companion build", () => {
+    assert.deepEqual(
+      macosCargoBuildArgs({ profile: "release", features: ["retained-renderer"] }),
+      ["build", "--bin", "glorp", "--release", "--features", "retained-renderer"],
+    );
+    assert.deepEqual(macosCargoBuildArgs({ profile: "release" }), [
+      "build",
+      "--bin",
+      "glorp",
+      "--release",
+    ]);
+  });
+
+  it("ships the retained renderer on Apple Silicon and Smooth-only on Intel", () => {
+    const workflow = readPublishWorkflow();
+
+    // The release build consumes the per-target feature set.
+    assert.match(
+      workflow,
+      /cargo build --release --locked \$\{\{ matrix\.cargo_features \}\} --target \$\{\{ matrix\.rust_target \}\}/,
+    );
+
+    const armBlock = targetMatrixBlock(workflow, "darwin-arm64", "darwin-x64");
+    assert.match(
+      armBlock,
+      /cargo_features: --no-default-features --features retained-renderer/,
+    );
+
+    const intelBlock = targetMatrixBlock(workflow, "darwin-x64", "linux-x64");
+    assert.match(intelBlock, /cargo_features: --no-default-features\b/);
+    assert.doesNotMatch(intelBlock, /retained-renderer/);
+
+    // Non-macOS targets keep the unchanged no-default build.
+    for (const [target, next] of [
+      ["linux-x64", "linux-arm64"],
+      ["linux-arm64", "win32-x64"],
+      ["win32-x64", null],
+    ]) {
+      const block = targetMatrixBlock(workflow, target, next);
+      assert.match(block, /cargo_features: --no-default-features\b/);
+      assert.doesNotMatch(block, /retained-renderer/);
+    }
+  });
+
+  it("runs staged capability smokes proving the shipped matrix before upload", () => {
+    const workflow = readPublishWorkflow();
+
+    // Apple Silicon: retained compiled in, Auto still Smooth (policy off), and
+    // explicit Retained proves the shipped capability.
+    const armSmoke = "staged retained capability smoke (Apple Silicon)";
+    assert(workflow.includes(armSmoke));
+    const armSmokeBlock = workflow.slice(
+      workflow.indexOf(armSmoke),
+      workflow.indexOf("staged smooth-only smoke (Intel)"),
+    );
+    assert.match(armSmokeBlock, /companion-app --print-capabilities/);
+    assert.match(armSmokeBlock, /retained-compiled=true/);
+    assert.match(armSmokeBlock, /auto-retained-on-apple-silicon=false/);
+    assert.match(armSmokeBlock, /effective-renderer=smooth/);
+    assert.match(
+      armSmokeBlock,
+      /companion-app --renderer retained --print-capabilities/,
+    );
+    assert.match(armSmokeBlock, /effective-renderer=retained/);
+
+    // Intel: retained unavailable, Auto Smooth, explicit Retained rejected.
+    const intelSmoke = "staged smooth-only smoke (Intel)";
+    assert(workflow.includes(intelSmoke));
+    const intelSmokeBlock = workflow.slice(
+      workflow.indexOf(intelSmoke),
+      workflow.indexOf("stage binary at workspace root for upload"),
+    );
+    assert.match(intelSmokeBlock, /retained-compiled=false/);
+    assert.match(intelSmokeBlock, /auto-retained-on-apple-silicon=false/);
+    assert.match(intelSmokeBlock, /effective-renderer=smooth/);
+    assert.match(
+      intelSmokeBlock,
+      /if "\$bin" companion-app --renderer retained --print-capabilities; then/,
+    );
+
+    // The smokes must gate the upload: both run before the artifact is staged
+    // for upload.
+    assert(
+      workflow.indexOf(armSmoke) <
+        workflow.indexOf("stage binary at workspace root for upload"),
+    );
+    assert(
+      workflow.indexOf(intelSmoke) <
+        workflow.indexOf("stage binary at workspace root for upload"),
     );
   });
 });

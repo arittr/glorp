@@ -79,6 +79,11 @@ pub enum Command {
     CompanionApp {
         #[arg(long, value_enum, hide = true, default_value_t = CompanionRendererRequest::Auto)]
         renderer: CompanionRendererRequest,
+        /// Print this build's compiled renderer capabilities and Auto policy in a
+        /// stable machine-readable form, then exit without opening a window. Used
+        /// by the staged release smoke to read the shipped capability matrix.
+        #[arg(long, hide = true)]
+        print_capabilities: bool,
         #[arg(long, hide = true)]
         review_size: Option<CompanionReviewSize>,
         #[arg(long, hide = true)]

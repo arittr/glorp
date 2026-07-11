@@ -80,8 +80,15 @@ pub fn run() -> Result<()> {
             };
             commands::companion::run(renderer, review)?
         }
+        Command::CompanionApp { renderer, print_capabilities: true, .. } => {
+            commands::companion_mode::print_companion_capabilities(
+                renderer,
+                &mut std::io::stdout(),
+            )?;
+        }
         Command::CompanionApp {
             renderer,
+            print_capabilities: _,
             review_size,
             review_active_pulse,
             review_state,

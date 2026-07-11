@@ -498,6 +498,38 @@ mod tests {
             Ok(EffectiveCompanionRenderer::Smooth),
         );
     }
+
+    #[test]
+    fn capabilities_metadata_reports_auto_smooth_and_the_disabled_policy() {
+        let mut out = Vec::new();
+        super::print_companion_capabilities(CompanionRendererRequest::Auto, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("glorp-companion-capabilities: v1"), "{text}");
+        assert!(text.contains("requested-renderer=auto"), "{text}");
+        // While the cutover constant is disabled, Auto is Smooth on every target.
+        assert!(text.contains("effective-renderer=smooth"), "{text}");
+        assert!(
+            text.contains("auto-retained-on-apple-silicon=false"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("retained-compiled={}", super::RETAINED_COMPILED)),
+            "{text}"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    #[test]
+    fn capabilities_metadata_reports_explicit_retained_capability() {
+        let mut out = Vec::new();
+        super::print_companion_capabilities(CompanionRendererRequest::Retained, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("requested-renderer=retained"), "{text}");
+        assert!(text.contains("retained-compiled=true"), "{text}");
+        // Explicit Retained resolves to Retained whenever it is compiled in,
+        // proving the shipped capability before the Auto policy flip.
+        assert!(text.contains("effective-renderer=retained"), "{text}");
+    }
 }
 
 /// What the operator asked for on the command line. `Auto` defers the choice to
@@ -525,6 +557,20 @@ impl CompanionRendererRequest {
             #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
             CompanionRendererRequest::Retained => Some("retained"),
             CompanionRendererRequest::Smooth => Some("smooth"),
+        }
+    }
+
+    /// The stable machine-readable label reported by the capabilities metadata
+    /// command. Unlike [`forwarded_arg`](Self::forwarded_arg), `Auto` has a
+    /// concrete label so the smoke can read back the requested renderer.
+    pub const fn label(self) -> &'static str {
+        match self {
+            CompanionRendererRequest::Auto => "auto",
+            CompanionRendererRequest::Classic => "classic",
+            CompanionRendererRequest::Pixel => "pixel",
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            CompanionRendererRequest::Retained => "retained",
+            CompanionRendererRequest::Smooth => "smooth",
         }
     }
 }
@@ -599,6 +645,54 @@ impl CompanionRendererTarget {
             CompanionRendererTarget::Other
         }
     }
+
+    /// The stable machine-readable label reported by the capabilities metadata
+    /// command.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CompanionRendererTarget::AppleSiliconMac => "apple-silicon-mac",
+            CompanionRendererTarget::IntelMac => "intel-mac",
+            CompanionRendererTarget::Other => "other",
+        }
+    }
+}
+
+/// Whether the retained renderer backend is compiled into this build. The staged
+/// release smoke reads this as `retained-compiled=<bool>` to prove the shipped
+/// capability matrix (Apple Silicon ships it; Intel does not).
+pub const RETAINED_COMPILED: bool = cfg!(all(target_os = "macos", feature = "retained-renderer"));
+
+/// Prints the compiled renderer capabilities and Auto policy for this build in a
+/// stable `key=value` form, then returns. Metadata only: it resolves the renderer
+/// through [`resolve_renderer`] but never opens a window or touches pet state, so
+/// the release smoke can read the shipped capabilities and policy from a bounded,
+/// GUI-less process. `request` is the operator's `--renderer` value; the reported
+/// `effective-renderer` is what `Auto` (or that explicit request) resolves to on
+/// the current machine under the current cutover policy.
+pub fn print_companion_capabilities(
+    request: CompanionRendererRequest,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    let target = CompanionRendererTarget::current();
+    let effective = resolve_renderer(
+        request,
+        target,
+        RETAINED_COMPILED,
+        AUTO_RETAINED_ON_APPLE_SILICON,
+    );
+    writeln!(out, "glorp-companion-capabilities: v1")?;
+    writeln!(out, "requested-renderer={}", request.label())?;
+    match effective {
+        Ok(effective) => writeln!(out, "effective-renderer={}", effective.as_str())?,
+        Err(error) => writeln!(out, "effective-renderer=unavailable:{}", error.category())?,
+    }
+    writeln!(out, "retained-compiled={RETAINED_COMPILED}")?;
+    writeln!(
+        out,
+        "auto-retained-on-apple-silicon={AUTO_RETAINED_ON_APPLE_SILICON}"
+    )?;
+    writeln!(out, "target-class={}", target.as_str())?;
+    Ok(())
 }
 
 /// The single cutover switch. While this stays `false`, `Auto` never resolves to

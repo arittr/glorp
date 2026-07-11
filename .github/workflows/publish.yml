@@ -64,24 +64,31 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # Apple Silicon ships the retained renderer backend.
           - target: darwin-arm64
             runner: macos-latest
             rust_target: aarch64-apple-darwin
+            cargo_features: --no-default-features --features retained-renderer
           # Cross-compile darwin-x64 from Apple Silicon — hosted Intel mac
           # runners (macos-13) get throttled hard and can queue indefinitely.
           # `--target x86_64-apple-darwin` from arm64 needs no extra tooling.
+          # Intel is Smooth-only: no retained-renderer.
           - target: darwin-x64
             runner: macos-latest
             rust_target: x86_64-apple-darwin
+            cargo_features: --no-default-features
           - target: linux-x64
             runner: ubuntu-latest
             rust_target: x86_64-unknown-linux-gnu
+            cargo_features: --no-default-features
           - target: linux-arm64
             runner: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
+            cargo_features: --no-default-features
           - target: win32-x64
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
+            cargo_features: --no-default-features
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -92,12 +99,52 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
       - name: cargo build --release
-        # --no-default-features strips the hidden dev-preview command so it
-        # does not ship in the published npm binaries.
-        run: cargo build --release --locked --no-default-features --target ${{ matrix.rust_target }}
+        # --no-default-features strips the hidden dev-preview command so it does
+        # not ship in the published npm binaries. Apple Silicon additionally
+        # compiles `--features retained-renderer`; every other target stays
+        # Smooth-only. See matrix.cargo_features.
+        run: cargo build --release --locked ${{ matrix.cargo_features }} --target ${{ matrix.rust_target }}
       - name: build companion app bundle
         if: startsWith(matrix.target, 'darwin-')
         run: node scripts/build-macos-companion-app.mjs --binary "target/${{ matrix.rust_target }}/release/glorp"
+      - name: staged retained capability smoke (Apple Silicon)
+        # Reads the shipped capability matrix from the freshly built binary's
+        # bounded metadata command. Auto stays Smooth (the cutover constant is
+        # still false — flipped later), while explicit Retained proves the
+        # shipped capability now.
+        if: matrix.target == 'darwin-arm64'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.rust_target }}/release/glorp"
+          auto="$("$bin" companion-app --print-capabilities)"
+          echo "$auto"
+          echo "$auto" | grep -qx "requested-renderer=auto"
+          echo "$auto" | grep -qx "retained-compiled=true"
+          echo "$auto" | grep -qx "auto-retained-on-apple-silicon=false"
+          echo "$auto" | grep -qx "effective-renderer=smooth"
+          retained="$("$bin" companion-app --renderer retained --print-capabilities)"
+          echo "$retained"
+          echo "$retained" | grep -qx "requested-renderer=retained"
+          echo "$retained" | grep -qx "effective-renderer=retained"
+      - name: staged smooth-only smoke (Intel)
+        # The Intel artifact ships without the retained backend: Auto is Smooth
+        # and explicit Retained is rejected outright. Rosetta lets the arm64
+        # runner execute the cross-compiled x86_64 binary.
+        if: matrix.target == 'darwin-x64'
+        shell: bash
+        run: |
+          softwareupdate --install-rosetta --agree-to-license
+          bin="target/${{ matrix.rust_target }}/release/glorp"
+          auto="$("$bin" companion-app --print-capabilities)"
+          echo "$auto"
+          echo "$auto" | grep -qx "requested-renderer=auto"
+          echo "$auto" | grep -qx "retained-compiled=false"
+          echo "$auto" | grep -qx "auto-retained-on-apple-silicon=false"
+          echo "$auto" | grep -qx "effective-renderer=smooth"
+          if "$bin" companion-app --renderer retained --print-capabilities; then
+            echo "explicit retained must be rejected on the Intel build" >&2
+            exit 1
+          fi
       - name: stage binary at workspace root for upload
         # Upload-artifact preserves paths relative to the workspace, and the
         # publish-platforms job downloads into `target/release/`. Copy the

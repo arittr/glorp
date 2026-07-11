@@ -298,16 +298,23 @@ fn require_owned_relative_path(value: &str, prefix: &str, label: &str) -> Result
     Ok(())
 }
 
-pub fn companion_fresh_steps(release: bool) -> Vec<ProcessStep> {
+pub fn companion_fresh_steps(release: bool, retained: bool) -> Vec<ProcessStep> {
     let profile = if release { "release" } else { "debug" };
+    let mut build_args = vec![
+        "scripts/build-macos-companion-app.mjs".to_string(),
+        "--profile".to_string(),
+        profile.to_string(),
+    ];
+    // Apple Silicon compiles the retained backend into the fresh dev bundle so
+    // an explicit `--renderer retained` has an ActiveRetainedHost to drive.
+    if retained {
+        build_args.push("--features".to_string());
+        build_args.push("retained-renderer".to_string());
+    }
     vec![
         ProcessStep {
             program: "node".to_string(),
-            args: vec![
-                "scripts/build-macos-companion-app.mjs".to_string(),
-                "--profile".to_string(),
-                profile.to_string(),
-            ],
+            args: build_args,
             best_effort: false,
         },
         ProcessStep {
@@ -343,7 +350,8 @@ where
             if std::env::consts::OS != "macos" {
                 return Err("cargo xtask companion fresh is only supported on macOS".to_string());
             }
-            run_steps(&companion_fresh_steps(release), repo_root)
+            let retained = cfg!(target_arch = "aarch64");
+            run_steps(&companion_fresh_steps(release, retained), repo_root)
         }
         XtaskCommand::CompanionReviewPair { size, state, dimmed, live_values, out } => {
             run_companion_review_pair(repo_root, size, state.as_deref(), dimmed, live_values, &out)
@@ -1164,7 +1172,7 @@ mod tests {
 
     #[test]
     fn companion_fresh_builds_release_bundle_by_default() {
-        let steps = companion_fresh_steps(true);
+        let steps = companion_fresh_steps(true, false);
         assert_eq!(
             steps.first(),
             Some(&ProcessStep {
@@ -1181,7 +1189,7 @@ mod tests {
 
     #[test]
     fn companion_fresh_uses_release_profile_when_requested() {
-        let steps = companion_fresh_steps(true);
+        let steps = companion_fresh_steps(true, false);
         assert_eq!(
             steps.first(),
             Some(&ProcessStep {
@@ -1197,8 +1205,40 @@ mod tests {
     }
 
     #[test]
+    fn companion_fresh_compiles_retained_backend_on_apple_silicon() {
+        let steps = companion_fresh_steps(true, true);
+        assert_eq!(
+            steps.first(),
+            Some(&ProcessStep {
+                program: "node".to_string(),
+                args: vec![
+                    "scripts/build-macos-companion-app.mjs".to_string(),
+                    "--profile".to_string(),
+                    "release".to_string(),
+                    "--features".to_string(),
+                    "retained-renderer".to_string(),
+                ],
+                best_effort: false,
+            })
+        );
+    }
+
+    #[test]
+    fn companion_fresh_omits_retained_backend_on_intel() {
+        let steps = companion_fresh_steps(true, false);
+        let node_step = steps
+            .first()
+            .expect("companion fresh must build the bundle first");
+        assert!(
+            !node_step.args.iter().any(|arg| arg == "retained-renderer"),
+            "Intel fresh bundle must not compile the retained backend: {:?}",
+            node_step.args,
+        );
+    }
+
+    #[test]
     fn companion_fresh_relaunches_the_fresh_bundle() {
-        let steps = companion_fresh_steps(false);
+        let steps = companion_fresh_steps(false, false);
         assert_eq!(
             steps.last(),
             Some(&ProcessStep {

@@ -36,6 +36,7 @@ impl PixelPetScene {
         Self::from_elapsed_ms_and_reference(input, art_reference, elapsed_ms)
     }
 
+    #[cfg(feature = "dev-preview")]
     pub(crate) fn from_elapsed_ms(input: &PixelPetInput, elapsed_ms: i64) -> Self {
         Self::from_elapsed_ms_and_reference(input, &fallback_reference(input), elapsed_ms)
     }
@@ -118,6 +119,7 @@ fn reference_geometry(
     )
 }
 
+#[cfg(feature = "dev-preview")]
 fn fallback_reference(input: &PixelPetInput) -> PixelPetArtReference {
     PixelPetArtReference {
         species: input.identity.species,

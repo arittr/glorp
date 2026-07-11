@@ -22,6 +22,7 @@ export function buildMacosApp({
   out,
   profile,
   binary,
+  features = [],
 }) {
   const scriptName = `build-macos-${mode}-app`;
 
@@ -41,9 +42,12 @@ export function buildMacosApp({
     : path.join(repoRoot, "target", "macos", "Glorp.app");
   const binaryPath = resolveMacosBinaryPath({ repoRoot, profile, binary });
 
+  // An externally supplied binary is never rebuilt: its capabilities are a
+  // property of the already-compiled artifact, read back via the bounded
+  // `companion-app --print-capabilities` metadata command. Only a local build
+  // compiles feature-selected code, so `--features` applies here alone.
   if (!binary) {
-    const cargoArgs = ["build", "--bin", "glorp"];
-    if (profile === "release") cargoArgs.push("--release");
+    const cargoArgs = macosCargoBuildArgs({ profile, features });
     console.log(`${scriptName}: cargo ${cargoArgs.join(" ")}`);
     execFileSync("cargo", cargoArgs, { cwd: repoRoot, stdio: "inherit" });
   }
@@ -102,6 +106,16 @@ ${lsuiElementPlist}  <key>NSHumanReadableCopyright</key><string>MIT-licensed. Se
   console.log(
     `  install: cp -R '${outAppPath}' /Applications && open /Applications/Glorp.app`,
   );
+}
+
+// The `cargo build` argument vector for a local companion/app build. The
+// requested feature set is appended as a single comma-joined `--features`
+// argument so callers can opt Apple Silicon into `retained-renderer`.
+export function macosCargoBuildArgs({ profile, features = [] }) {
+  const cargoArgs = ["build", "--bin", "glorp"];
+  if (profile === "release") cargoArgs.push("--release");
+  if (features.length > 0) cargoArgs.push("--features", features.join(","));
+  return cargoArgs;
 }
 
 export function resolveMacosBinaryPath({ repoRoot, profile, binary }) {
