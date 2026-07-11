@@ -1583,9 +1583,19 @@ fn glyph_ink_rect(
         return None;
     }
     let scale = glyph_scale(font_size);
+    // `draw_origin` is the run/cell box bottom, matching where Smooth's unflipped
+    // `drawAtPoint` places a glyph's layout box. `ink_origin[1]`/`ink_size[1]` are
+    // measured top-down from the cell top, while the GPU rect's y is the y-up
+    // bottom edge, so the ink bottom's height above the box bottom is the top-down
+    // span from the box bottom row (`raster_size[1] - safe_padding`) up to the ink
+    // bottom (`ink_origin[1] + safe_padding + ink_size[1]`). Placing the ink by its
+    // baseline this way — rather than by the raw top-down `ink_origin[1]` — keeps
+    // decimals, unit letters, and descenders on the same baseline Smooth draws.
+    let ink_bottom_above_box =
+        entry.raster_size[1] - 2.0 * entry.safe_padding - entry.ink_origin[1] - entry.ink_size[1];
     Some([
         draw_origin[0] + entry.ink_origin[0] * scale,
-        draw_origin[1] + entry.ink_origin[1] * scale,
+        draw_origin[1] + ink_bottom_above_box * scale,
         entry.ink_size[0] * scale,
         entry.ink_size[1] * scale,
     ])
@@ -1714,7 +1724,8 @@ mod tests {
         upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry,
         GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
         LayerActivationState, PersistentFrameBuffers, Pipelines, PreparedGpuFrame,
-        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
+        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode, GLYPH_FONT_SIZE,
+        RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -1950,9 +1961,12 @@ mod tests {
             52.0,
         );
 
+        // The quad matches the ink bounds, and its y is the baseline-relative
+        // bottom edge: `(raster_size - 2*padding - ink_origin_y - ink_size_y)`
+        // above the box-bottom `draw_origin`, i.e. (80 - 12 - 7 - 31) * 0.5 = 15.
         assert_eq!(
             glyph_ink_rect([100.0, 200.0], 24.0, entry),
-            Some([101.5, 203.5, 10.0, 15.5])
+            Some([101.5, 215.0, 10.0, 15.5])
         );
         assert_eq!(glyph_advance(entry, 24.0), 14.5);
     }
@@ -1963,6 +1977,85 @@ mod tests {
 
         assert_eq!(glyph_ink_rect([12.0, 34.0], 48.0, entry), None);
         assert_eq!(glyph_advance(entry, 48.0), 28.0);
+    }
+
+    /// Rasterizes one HUD glyph through the production atlas rasterizer at the
+    /// fixed device point size, so its `GlyphAtlasEntry` carries the real
+    /// attributed-measured ink geometry the renderer reads back.
+    fn rasterize_hud_glyph(text: &str) -> GlyphAtlasEntry {
+        let cell = 80u32;
+        let padding = 6u32;
+        let key = GlyphKey::new(text, false);
+        let target = super::resources::GlyphRasterTarget {
+            cell,
+            padding,
+            point_size: RETAINED_ATLAS_POINT_SIZE,
+        };
+        let mut atlas = vec![0u8; (cell * cell * 4) as usize];
+        super::resources::rasterize_glyph_entry(&key, &target, 0, &mut atlas, cell, cell, 0, 0)
+            .expect("offscreen HUD glyph rasterization succeeds")
+    }
+
+    #[test]
+    fn hud_decimal_point_rests_on_the_digit_baseline_like_smooth() {
+        // Smooth paints each HUD line as one attributed run, so the decimal point
+        // sits on the text baseline exactly like the digits around it. The retained
+        // per-glyph placement must land the '.' ink on that same baseline, not
+        // raised to a middle-dot (·) height.
+        let draw_origin = [100.0_f32, 200.0_f32];
+        let font_size = RETAINED_ATLAS_POINT_SIZE as f32; // atlas point size -> scale 1
+        let scale = font_size / GLYPH_FONT_SIZE as f32;
+
+        let digit = rasterize_hud_glyph("6");
+        let dot = rasterize_hud_glyph(".");
+        let digit_bottom = glyph_ink_rect(draw_origin, font_size, digit).expect("visible digit")[1];
+        let dot_bottom = glyph_ink_rect(draw_origin, font_size, dot).expect("visible dot")[1];
+
+        // Typographic baseline (the Smooth oracle): the run box bottom sits at
+        // `draw_origin`, so a baseline-resting glyph's ink bottom lands `descent`
+        // above it in the y-up render.
+        let baseline = draw_origin[1] + digit.descent * scale;
+        assert!(
+            (digit_bottom - baseline).abs() <= 1.5,
+            "digit ink rests on the baseline: bottom {digit_bottom} vs baseline {baseline}",
+        );
+        assert!(
+            (dot_bottom - digit_bottom).abs() <= 1.5,
+            "the decimal point shares the digit baseline (a period, not a raised \
+             middle dot): dot bottom {dot_bottom} vs digit bottom {digit_bottom}",
+        );
+    }
+
+    #[test]
+    fn hud_unit_glyphs_share_the_digit_baseline_and_are_not_superscripted() {
+        // The compact HUD's unit/label glyphs (k, M, m, d, a, ...) are drawn at the
+        // same size and baseline as the digits in Smooth's single attributed run.
+        // The retained per-glyph placement must rest them on the same baseline, not
+        // shift them up into a smaller/raised superscript-looking position.
+        let draw_origin = [100.0_f32, 200.0_f32];
+        let font_size = RETAINED_ATLAS_POINT_SIZE as f32;
+
+        let digit_bottom =
+            glyph_ink_rect(draw_origin, font_size, rasterize_hud_glyph("6")).expect("digit")[1];
+        for unit in ["k", "M", "m", "d", "a"] {
+            let bottom = glyph_ink_rect(draw_origin, font_size, rasterize_hud_glyph(unit))
+                .expect("visible unit glyph")[1];
+            assert!(
+                (bottom - digit_bottom).abs() <= 2.0,
+                "unit {unit:?} rests on the digit baseline (not raised): bottom {bottom} \
+                 vs digit bottom {digit_bottom}",
+            );
+        }
+
+        // A descender still drops below the shared baseline, proving glyphs align by
+        // baseline rather than being flattened to a common bottom edge.
+        let descender_bottom =
+            glyph_ink_rect(draw_origin, font_size, rasterize_hud_glyph("y")).expect("descender")[1];
+        assert!(
+            descender_bottom < digit_bottom - 2.0,
+            "a descender drops below the baseline: bottom {descender_bottom} vs digit \
+             bottom {digit_bottom}",
+        );
     }
 
     #[test]
