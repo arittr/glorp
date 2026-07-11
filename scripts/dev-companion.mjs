@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Compatibility shim for the Rust xtask companion runner.
 //
-//   npm run companion            # debug build (fast), rebuild + restart
-//   npm run companion -- --release
+//   npm run companion            # release build, rebuild + restart
+//   npm run companion -- --debug # debug-only diagnostics
 //
 import { execFileSync } from "node:child_process";
 import path from "node:path";

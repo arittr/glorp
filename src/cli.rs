@@ -1,3 +1,4 @@
+#[cfg(feature = "dev-preview")]
 use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -100,6 +101,22 @@ pub enum Command {
 
         #[arg(long, value_enum, default_value_t = PreviewScenarioArg::All)]
         scenario: PreviewScenarioArg,
+    },
+    #[cfg(feature = "renderer-spike")]
+    #[command(hide = true)]
+    RendererSpikeApp {
+        #[arg(long, value_enum)]
+        candidate: crate::renderer_spike::RendererSpikeCandidate,
+        #[arg(long, value_enum)]
+        track: crate::renderer_spike::RendererSpikeTrack,
+        #[arg(long, value_parser = crate::renderer_spike::parse_logical_size)]
+        logical_size: u16,
+        #[arg(long, default_value_t = 2_000)]
+        duration_ms: u64,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, value_enum)]
+        inject_fault: Option<crate::renderer_spike::RendererSpikeFault>,
     },
 }
 

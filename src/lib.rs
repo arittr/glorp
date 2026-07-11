@@ -13,6 +13,8 @@ pub mod menubar;
 pub mod paths;
 pub mod pet;
 pub mod presentation;
+#[cfg(feature = "renderer-spike")]
+pub mod renderer_spike;
 pub mod round;
 pub mod storage;
 pub mod time;
@@ -79,6 +81,28 @@ pub fn run() -> Result<()> {
         )?,
         #[cfg(feature = "dev-preview")]
         Command::DevPreview { out, scenario } => commands::dev_preview::run(out, scenario)?,
+        #[cfg(feature = "renderer-spike")]
+        Command::RendererSpikeApp {
+            candidate,
+            track,
+            logical_size,
+            duration_ms,
+            out,
+            inject_fault,
+        } => {
+            let runner_entry_micros = std::env::var("GLORP_RENDERER_SPIKE_RUNNER_ENTRY_MICROS")
+                .ok()
+                .and_then(|value| value.parse().ok());
+            renderer_spike::run(renderer_spike::RendererSpikeOptions {
+                candidate,
+                track,
+                logical_size,
+                duration_ms,
+                out,
+                inject_fault,
+                runner_entry_micros,
+            })?
+        }
         Command::Help => {
             Cli::command().print_help()?;
             println!();

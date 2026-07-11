@@ -67,13 +67,14 @@ otherwise become shell snippets.
 
 ```bash
 cargo xtask companion fresh
-cargo xtask companion fresh --release
+cargo xtask companion fresh --debug
 ```
 
 `cargo xtask companion fresh` builds the macOS companion app bundle, quits any
 running Glorp companion, waits briefly for macOS to release the process, and
-opens the freshly built `target/macos/Glorp.app`. `npm run companion` delegates
-to the same command.
+opens the freshly built optimized `target/macos/Glorp.app`. `npm run companion`
+delegates to the same command. Use `--debug` only when runtime Objective-C
+diagnostics are needed; the debug binary is too expensive for an always-on app.
 
 ## Release Procedure
 
