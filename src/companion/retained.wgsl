@@ -100,14 +100,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let atlas_uv = mix(in.uv.xy, in.uv.zw, vec2<f32>(in.local.x, 1.0 - in.local.y));
         let sample = textureSample(atlas, atlas_sampler, atlas_uv);
         if (in.params.w > 0.5) {
-            // Native-color glyph (emoji): the atlas holds premultiplied RGBA.
-            // Recover straight alpha so the shared alpha blend composites it
-            // correctly, and ignore the authored foreground tint entirely.
-            let a = max(sample.a, 0.0001);
-            output = vec4<f32>(sample.rgb / a, sample.a);
+            // Native-color glyph (emoji): the atlas already holds premultiplied
+            // RGBA, which is exactly the fragment output convention, so it passes
+            // through and the authored foreground tint is ignored entirely.
+            output = sample;
         } else {
-            // Coverage mask: authored color tinted by the sampled alpha.
-            output.a *= sample.a;
+            // Coverage mask: the authored premultiplied color scaled by coverage,
+            // multiplying both RGB and alpha so the result stays premultiplied.
+            output = output * sample.a;
         }
     } else if (kind >= 1.5) {
         let q = in.local * 2.0 - vec2<f32>(1.0);
@@ -130,11 +130,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let local_pixel = vec2<u32>(floor(in.local * in.rect.zw));
             let noise = dither_noise(local_pixel);
             let quantized = clamp(round(mix(core, rim, t) * 255.0 + vec3<f32>(noise)) / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
+            let a = in.color_a.a;
+            // Premultiplied-linear output: the tank falloff keeps its output-space
+            // dither, then premultiplies the linear result by alpha like every
+            // other primitive.
             output = vec4<f32>(
-                srgb_to_linear(quantized.r),
-                srgb_to_linear(quantized.g),
-                srgb_to_linear(quantized.b),
-                in.color_a.a,
+                srgb_to_linear(quantized.r) * a,
+                srgb_to_linear(quantized.g) * a,
+                srgb_to_linear(quantized.b) * a,
+                a,
             );
         } else if (kind >= 3.5) {
             if (kind < 4.5) {
@@ -159,8 +163,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
     if (output.a <= 0.001) { discard; }
-    if (in.params.z > 0.5) {
-        output = vec4<f32>(output.rgb * output.a, output.a);
-    }
+    // Every fragment output is already premultiplied-linear, and every blend
+    // pipeline is the premultiplied BlendContract, so no per-mode premultiply
+    // step is needed here.
     return output;
 }

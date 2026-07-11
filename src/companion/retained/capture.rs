@@ -121,10 +121,11 @@ fn pixel_order_for_format(format: wgpu::TextureFormat) -> PixelOrder {
 /// source is BGRA, and returns [`RetainedFailureCategory::CaptureBufferTooShort`]
 /// when the mapped buffer cannot even hold the last row's real span.
 ///
-/// Alpha is treated as **straight** (the current sRGB intermediate convention):
-/// no unpremultiply is applied. Task 11 introduces the premultiplied-linear GPU
-/// convention and will add the single unpremultiply pass at the marked seam
-/// below; it must remain a no-op for opaque pixels so this stays canonical.
+/// This is a pure **row-layout** step: it drops padding and swizzles channel
+/// order but never touches color. The premultiplied-linear → straight-sRGB
+/// unpremultiply is a separate color seam applied by [`RetainedCaptureTarget`]
+/// via [`super::parity::canonical_png_rgba`] once the rows are assembled, so the
+/// two concerns (layout vs color convention) stay independently testable.
 pub(super) fn normalize_readback_rows(
     source: &[u8],
     width: u32,
@@ -158,10 +159,6 @@ pub(super) fn normalize_readback_rows(
             pixel.swap(0, 2);
         }
     }
-
-    // Alpha convention seam: source is straight-alpha sRGB today, so RGB is left
-    // untouched. Task 11 flips the convention to premultiplied-linear and adds a
-    // per-pixel unpremultiply here that is a no-op when alpha is 0 or 255.
 
     Ok(rgba)
 }
@@ -317,7 +314,7 @@ impl<'host> RetainedCaptureTarget<'host> {
             .slice(..)
             .get_mapped_range()
             .map_err(|_| RetainedFailureCategory::CaptureMapFailed)?;
-        let rgba = normalize_readback_rows(
+        let premultiplied = normalize_readback_rows(
             &mapped,
             width,
             height,
@@ -326,6 +323,10 @@ impl<'host> RetainedCaptureTarget<'host> {
         )?;
         drop(mapped);
         capture.staging.unmap();
+        // Color seam: the sRGB target stored premultiplied-linear color; the
+        // canonical artifact is straight sRGB. Unpremultiply once here (a no-op
+        // for opaque/transparent pixels).
+        let rgba = super::parity::canonical_png_rgba(&premultiplied);
 
         Ok(CanonicalRgbaFrame {
             frame_id: frame.identity.frame_id,

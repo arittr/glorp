@@ -23,6 +23,7 @@ use crate::round::layout::RoundAperture;
 use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 
 mod capture;
+mod parity;
 mod presentation;
 mod resources;
 
@@ -692,11 +693,16 @@ impl RetainedHost {
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color {
-                    r: f64::from(srgb_channel_to_linear(background[0])),
-                    g: f64::from(srgb_channel_to_linear(background[1])),
-                    b: f64::from(srgb_channel_to_linear(background[2])),
-                    a: f64::from(background[3]),
+                load: wgpu::LoadOp::Clear({
+                    // The premultiplied-linear convention: the sRGB target wants a
+                    // linear clear value, premultiplied by the background alpha.
+                    let clear = parity::premultiply_linear_srgb(background);
+                    wgpu::Color {
+                        r: f64::from(clear[0]),
+                        g: f64::from(clear[1]),
+                        b: f64::from(clear[2]),
+                        a: f64::from(clear[3]),
+                    }
                 }),
                 store: wgpu::StoreOp::Store,
             },
@@ -999,37 +1005,19 @@ fn create_pipelines(
             cache: None,
         })
     };
-    let normal = Some(wgpu::BlendState::ALPHA_BLENDING);
-    let multiply = Some(wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::Dst,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent::OVER,
-    });
-    let screen = Some(wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrc,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent::OVER,
-    });
-    let add = Some(wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::SrcAlpha,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent::OVER,
-    });
+    // Every pipeline's blend equation comes from the premultiplied-linear
+    // BlendContract, so the color convention lives in exactly one place.
+    let blend = |mode: SmoothBlendMode| {
+        parity::BlendContract::for_mode(mode)
+            .expect("BlendContract covers every SmoothBlendMode")
+            .blend_state()
+    };
     Pipelines {
-        normal: create("glorp-retained-normal", normal),
-        multiply: create("glorp-retained-multiply", multiply),
-        screen: create("glorp-retained-screen", screen),
-        add: create("glorp-retained-add", add),
-        replace: create("glorp-retained-replace", None),
+        normal: create("glorp-retained-normal", blend(SmoothBlendMode::Normal)),
+        multiply: create("glorp-retained-multiply", blend(SmoothBlendMode::Multiply)),
+        screen: create("glorp-retained-screen", blend(SmoothBlendMode::Screen)),
+        add: create("glorp-retained-add", blend(SmoothBlendMode::Add)),
+        replace: create("glorp-retained-replace", blend(SmoothBlendMode::Replace)),
     }
 }
 
@@ -1100,9 +1088,10 @@ fn prepare_gpu_frame(
                             .get(&GlyphKey::new(glyph.clone(), cell.bold))
                             .copied()
                             .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-                        let fg = cell.fg.map_or([1.0, 1.0, 1.0, layer.opacity], |fg| {
-                            rgb(fg.r, fg.g, fg.b, layer.opacity)
-                        });
+                        let fg = cell.fg.map_or_else(
+                            || parity::premultiply_linear_srgb([1.0, 1.0, 1.0, layer.opacity]),
+                            |fg| rgb(fg.r, fg.g, fg.b, layer.opacity),
+                        );
                         if let Some(glyph_rect) = glyph_ink_rect(
                             [rect[0], rect[1]],
                             metrics.font_size as f32 * layer.transform.scale.x,
@@ -1616,13 +1605,11 @@ fn display_round_color(color: RoundColor) -> [f32; 4] {
     display_rgba([color.0, color.1, color.2, color.3])
 }
 
+/// Projects an authored straight-sRGB RGBA color into the premultiplied-linear
+/// RGBA every GPU primitive carries. This is the single color convention; see
+/// [`parity::premultiply_linear_srgb`].
 fn display_rgba(color: [f32; 4]) -> [f32; 4] {
-    [
-        srgb_channel_to_linear(color[0]),
-        srgb_channel_to_linear(color[1]),
-        srgb_channel_to_linear(color[2]),
-        color[3],
-    ]
+    parity::premultiply_linear_srgb(color)
 }
 
 fn glyph_scale(font_size: f32) -> f32 {
@@ -1772,41 +1759,34 @@ fn clip_params(clip: SmoothClip, metrics: CompanionGridMetrics) -> ([f32; 4], [f
 }
 
 fn rgba(color: SmoothRgba8, opacity: f32) -> [f32; 4] {
-    [
-        srgb_channel_to_linear(color.r as f32 / 255.0),
-        srgb_channel_to_linear(color.g as f32 / 255.0),
-        srgb_channel_to_linear(color.b as f32 / 255.0),
+    parity::premultiply_linear_srgb([
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
         color.a as f32 / 255.0 * opacity,
-    ]
+    ])
 }
 
 fn rgb(r: u8, g: u8, b: u8, opacity: f32) -> [f32; 4] {
-    [
-        srgb_channel_to_linear(r as f32 / 255.0),
-        srgb_channel_to_linear(g as f32 / 255.0),
-        srgb_channel_to_linear(b as f32 / 255.0),
+    parity::premultiply_linear_srgb([
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
         opacity,
-    ]
-}
-
-fn srgb_channel_to_linear(channel: f32) -> f32 {
-    if channel <= 0.04045 {
-        channel / 12.92
-    } else {
-        ((channel + 0.055) / 1.055).powf(2.4)
-    }
+    ])
 }
 
 #[cfg(test)]
 mod tests {
+    use super::parity::srgb_channel_to_linear;
     use super::resources::GlyphEntryKind;
     use super::{
         create_atlas_bind_group_layout, create_pipelines, glyph_advance, glyph_ink_rect,
-        hud_layout, physical_dimension, push_analytic_arc, srgb_channel_to_linear,
-        upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry,
-        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
-        LayerActivationState, PersistentFrameBuffers, Pipelines, PreparedGpuFrame,
-        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
+        hud_layout, physical_dimension, push_analytic_arc, upload_glyph_atlas, CompiledGlyphAtlas,
+        CompiledRetainedResources, GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest,
+        GpuPrimitive, LayerActivationGuard, LayerActivationState, PersistentFrameBuffers,
+        Pipelines, PreparedGpuFrame, RetainedFailureCategory, RetainedResourceCounters,
+        SmoothBlendMode,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;

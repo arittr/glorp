@@ -56,6 +56,10 @@ use objc2_app_kit::{
     NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
 };
+// Used only by the retained-gated paired Smooth capture, which normalizes its
+// output to a faithful sRGB color space.
+#[cfg(feature = "retained-renderer")]
+use objc2_app_kit::{NSColorRenderingIntent, NSColorSpace};
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSMutableAttributedString, NSPoint, NSRect, NSSize,
     NSString, NSTimer,
@@ -1723,14 +1727,37 @@ pub(super) fn render_prepared_frame_to_rgba(
         context.flushGraphics();
         NSGraphicsContext::setCurrentContext(previous.as_deref());
 
-        let data = rep.bitmapData();
+        // Composite happens in the offscreen bitmap, then the captured bytes are
+        // normalized to a faithful straight-sRGB color space. `NSCalibratedRGBColorSpace`
+        // is gamma 1.8 on macOS, so reading it directly would store e.g. sRGB 128
+        // as 108 and make `smooth.png` an unfaithful sRGB reference that corrupts
+        // the parity comparison even for opaque content. Only the stored color
+        // space is normalized; the compositing is unchanged.
+        let srgb_rep = rep
+            .bitmapImageRepByConvertingToColorSpace_renderingIntent(
+                &NSColorSpace::sRGBColorSpace(),
+                NSColorRenderingIntent::Default,
+            )
+            .ok_or_else(|| {
+                GlorpError::Message("failed to convert paired smooth capture to sRGB".into())
+            })?;
+
+        let data = srgb_rep.bitmapData();
         if data.is_null() {
             return Err(GlorpError::Message(
                 "paired smooth capture bitmap has no backing store".into(),
             ));
         }
-        let len = (physical_width * physical_height * 4) as usize;
-        Ok(std::slice::from_raw_parts(data, len).to_vec())
+        // Drop any per-row padding the converted rep may carry, packing into the
+        // tight `width * 4` layout the retained artifact overlays against.
+        let source_stride = srgb_rep.bytesPerRow() as usize;
+        let packed_stride = (physical_width * 4) as usize;
+        let mut rgba = vec![0_u8; packed_stride * physical_height as usize];
+        for row in 0..physical_height as usize {
+            let source = std::slice::from_raw_parts(data.add(row * source_stride), packed_stride);
+            rgba[row * packed_stride..(row + 1) * packed_stride].copy_from_slice(source);
+        }
+        Ok(rgba)
     }
 }
 

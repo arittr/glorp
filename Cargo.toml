@@ -89,6 +89,7 @@ objc2-app-kit = { version = "0.2", features = [
     "NSBezierPath",
     "NSButton",
     "NSColor",
+    "NSColorSpace",
     "NSControl",
     "NSFont",
     "NSFontDescriptor",
