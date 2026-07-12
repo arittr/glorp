@@ -1,141 +1,172 @@
-# Task 4 report: Make retained host activation transactional
+# Task 4 Report: Scene Revision and Activation Runtime
 
-## What I implemented
+Status: DONE
 
-Split the one-shot `RetainedHost::new(view)` (which attached the layer to the
-view *before* the fallible wgpu work) into a two-phase, transactional flow:
+Baseline: `f72080652b976770aa03643357764d67dfd3213a`
 
-- **`PreparedRetainedHost::prepare(view: &NSView, mailbox: GpuErrorMailbox)`** —
-  does ALL fallible GPU work against a **detached** `CAMetalLayer`: create the
-  layer, set its drawable size, build the wgpu instance/surface (from the layer
-  pointer)/adapter/device, wire `on_uncaptured_error` to the passed-in mailbox's
-  sender, `get_default_config`, `surface.configure`, the atlas bind-group layout,
-  and `create_pipelines`. It never calls `setWantsLayer`/`setLayer`. The passed-in
-  mailbox is stored on the inner host (`gpu_errors`), so the Task 3 drain path is
-  unchanged. Any failure here leaves the view completely untouched.
-- **`PreparedRetainedHost::activate(self, view: &NSView) -> Result<ActiveRetainedHost, _>`** —
-  the ONLY code that calls `view.setWantsLayer(true)` / `view.setLayer(Some(&layer))`.
-  It installs the layer under a `LayerActivationGuard` (RAII). On success it
-  commits the guard and returns `ActiveRetainedHost`. If a fallible post-attach
-  step is ever added and fails, the dropped-uncommitted guard restores the view's
-  prior AppKit layer state before the error propagates.
+## Outcome
 
-Supporting types (all in `retained.rs`):
+Added the renderer-neutral, Glorp-specific runtime in
+`src/presentation/companion_scene/runtime.rs` and wired its public evidence
+identities through `companion_scene/mod.rs`.
 
-- **`LayerActivationState`** — models the attach lifecycle (`attached`,
-  `appkit_restored`) with `default()`, `mark_attached()`, `preflight_failed()`,
-  `attached()`, `appkit_restored()`. The production guard uses it as its
-  arm/rollback source of truth; `preflight_failed`/`appkit_restored` carry
-  `#[allow(dead_code)]` (they model the never-attached invariant the Step-1 test
-  pins and are read only by that test — matching the existing
-  `FrameProgress::observed` convention in `presentation.rs`).
-- **`LayerActivationGuard<'a>`** — RAII guard over an `ActivationRollback<'a>`
-  (production `View(&NSView)`; test-only `TestFlag(Rc<Cell<bool>>)` gated
-  `#[cfg(test)]`). Drop-before-commit rolls back: production calls
-  `ActiveRetainedHost::restore_appkit(view)`; test clears the cell. `commit(self)`
-  disarms. `for_test` is `#[cfg(test)]`.
-- **`ActiveRetainedHost`** — owns the built, attached inner `RetainedHost` and
-  derefs to it (via `Deref`/`DerefMut`), so `render` and `drain_gpu_error` read
-  through transparently. `restore_appkit` (idempotent) moved here from
-  `RetainedHost`.
+The runtime now owns:
 
-`RetainedHost` stays the single GPU-holding struct; `PreparedRetainedHost` and
-`ActiveRetainedHost` each wrap one `host: RetainedHost` — no duplicated GPU fields.
+- separate `SceneGenerationKey { device, layout, resources }` and
+  `SurfaceEpoch` identity in `SceneVersion`;
+- transactional layout, semantic, frame, resource, request, device, surface,
+  and activation-attempt counters using checked increments;
+- leaf-field snapshot validation/classification with fixed 32-byte change masks;
+- one retained active generation, one newest desired pending generation, and at
+  most one running/cancelling worker;
+- exact request/key/revision candidate acceptance and exact typed activation;
+- an owned `AcceptedGenerationCandidate` containing Task 3's
+  `AcceptedSceneState`, with no raw-template constructor;
+- borrow-scoped capture leases tied to one exact active `SceneVersion`;
+- hidden latest-only snapshot coalescing and reveal-once reconciliation;
+- fail-closed fixed-capacity, schema, privacy, finite-value, and identity checks.
 
-## app.rs startup reorder (brief Step 4)
+No renderer, GPU, host, AppKit, TUI, Smooth, Task 5 scene construction, generic
+engine, generic scheduler, or compatibility abstraction was added.
 
-`build_window` now runs before the retained block, and the retained
-prepare→activate block runs before `review_capture`/`redacts_live_hud`.
-Sequence: `build_window` (get view) → `GpuErrorMailbox::new()` →
-`PreparedRetainedHost::prepare(view, mailbox).and_then(|p| p.activate(view))` →
-on Ok store `ActiveRetainedHost`; on prepare-OR-activate Err write the boundary
-diagnostic + `renderer_runtime.fallback_to_smooth(category)` + `None` → THEN build
-`review_capture` from the now-final `renderer_runtime.effective()`. This ensures a
-failed activation that flips effective to Smooth is what the review capture reads,
-instead of the pre-fallback Retained value.
+## Binding architecture corrections
 
-`AppState.retained_host` is now `Option<ActiveRetainedHost>`; the render call
-site (`state.retained_host.as_mut()?.render(...)` + `drain_gpu_error()`) works
-unchanged through `Deref`/`DerefMut`. `fallback_from_retained` now calls
-`ActiveRetainedHost::restore_appkit`.
+- Task 4 emits `SnapshotChangeSet`, revisions, and
+  `Arc<CompanionSceneSnapshot>` only. It does not emit `ContentDelta` or
+  `FrameDelta`; Task 5 owns semantic-slot/node projection.
+- Snapshot nesting is not treated as lifetime. Prop motion is frame state while
+  sprite/twinkle/lid are semantic. Tank glyph/variant/morph are semantic while
+  visibility/origin/side/layer/cell placement/bounds are frame state.
+- `elapsed_ms`, tank `cadence_ms`, and tank `calm` are ignored when their
+  already-derived render fields do not change.
+- Layout/resource, semantic, and frame changes can coexist; each affected
+  reconciler counter advances exactly once and the generation request carries
+  the complete resulting source revisions.
+- Surface rebind updates the presentation version without changing layout or
+  resource generation. Device recreation invalidates the old active unit and
+  queues a replacement generation under the new device epoch.
+- Preparing, Ready, and Activating remain pending-slot phases. The active slot
+  stays structurally separate until exact clean presentation commits.
+- A cancelling worker completion and a separate cancellation acknowledgement
+  both release the only worker slot and start only the newest queued request.
+- Hidden state blocks activation, replaces one validated latest snapshot, and
+  performs no reconciliation/revision/request work until reveal.
 
-## Files changed (and why)
+## Task 5 additive seam
 
-- `src/companion/retained.rs` — the split, the guard/state/active types.
-- `src/companion/app.rs` — field type, startup reorder, fallback restore call.
-- `src/companion/retained/presentation.rs` — **justified extra file**: widened
-  `GpuErrorMailbox` struct + `new()` from `pub(super)` to `pub(crate)`. The brief's
-  `prepare(view, mailbox)` signature requires app.rs to construct the mailbox, and
-  `retained.rs` now re-exports `GpuErrorMailbox` via its existing `pub(crate) use`.
-  `sender`/`drain` stay `pub(super)`.
+The fixed named masks are crate-visible for additive Task 5 mapping:
+
+- layout/resources: logical extent, pet topology/art, room authored resources,
+  prop cast/resources, tank cast/resources, reserved ambient/material families;
+- semantic: pet art, palette, mood/weather, props, tanks, ambient, HUD;
+- frame: camera, pet transform, prop transforms, tank instances, ambient
+  instances, status visibility, gauges, dim, lights.
+
+`GenerationRequest` exposes crate-private accessors for request ID, scene key,
+surface, complete source revisions, and the newest shared snapshot.
+
+The following are deliberately not inferred in Task 4 and remain explicit Task
+5 snapshot/contract additions: ambient semantic/frame slots, resolved point-space
+prop base placement, bloom state, fixed empty prop/tank content encodings,
+palette storage in `SceneContent`, instance frame mirrors, and active light data.
+They must come from renderer-neutral authored/domain data, never TUI output,
+Smooth output, or a pet seed.
+
+## Snapshot lifetime repair
+
+No snapshot struct was modified. The existing mixed `TankAnimationSnapshot` and
+`FrameSnapshot::hud_lines` nesting can be classified correctly at leaf level, so
+a physical split would have been unrelated churn. Tests pin the corrected
+semantic/frame interpretation.
 
 ## TDD evidence
 
-RED — added the two verbatim Step-1 tests to `retained.rs` `mod tests`, then:
+Initial RED:
 
-```
-$ cargo test --features retained-renderer companion::retained::tests::failed_preflight
-error[E0432]: unresolved imports `super::LayerActivationGuard`, `super::LayerActivationState`
-    --> src/companion/retained.rs:1488:9
-     | no `LayerActivationState` in `companion::retained`
-     | no `LayerActivationGuard` in `companion::retained`
-error: could not compile `glorp` (lib test) due to 1 previous error
-```
+- `cargo test --lib presentation::companion_scene::runtime`
+- Exit 101 with 68 expected missing-runtime errors, including
+  `SnapshotChangeSet`, `CompanionSceneReconciler`, generation/revision identities,
+  runtime state, candidate proof, activation outcomes, capture lease, and worker
+  transitions.
 
-This is the expected failure (Step 2: "compile failure for missing activation
-types") — the tests reference types that do not exist yet.
+Focused GREEN:
 
-GREEN — after implementing the types + split:
+- `cargo test --lib presentation::companion_scene::runtime`
+- 31 passed, 0 failed.
 
-```
-$ cargo test --features retained-renderer --lib companion::retained
-test companion::retained::tests::activation_guard_restores_uncommitted_attachment ... ok
-test companion::retained::tests::failed_preflight_never_marks_layer_attached ... ok
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 930 filtered out
-```
+Additional RED/GREEN slices pinned:
 
-The guard test exercises real Drop-before-commit rollback (the cell flips
-true→false); the state test exercises the real `LayerActivationState` transition.
-Neither uses live GPU or an NSView.
+- cancelling-worker completion auto-starting the newest queued request;
+- named Task 5 mask families and accessors;
+- surface-unavailable activation after device recreation;
+- hidden Ready/Activating deferral;
+- immutable worker-source versus mutable desired-state rebasing;
+- resource-only generation without layout advancement;
+- stale activation attempts that remain failure-actionable but commit-ineligible;
+- topology supersession with capture deferral and one newest request;
+- old-surface and retired-device fatal scoping;
+- unusable active/capture state after delayed GPU failure;
+- delayed current-device errors cancelling Preparing and Activating work.
 
-## Verification results
+## Test coverage
 
-Feature-ON:
-- `cargo test --features retained-renderer --lib companion::retained` → 12 passed.
-- `cargo test --features retained-renderer --lib companion::app` → 42 passed.
-- `cargo test --features retained-renderer --lib` → 942 passed, 0 failed.
-- `cargo clippy --lib --features retained-renderer -- -D warnings` → clean.
-- `cargo clippy --all-targets --all-features -- -D warnings` (pre-commit gate) → clean.
+The 31 focused tests cover:
 
-Feature-OFF (default):
-- `cargo build` → clean.
-- `cargo clippy --lib -- -D warnings` → clean.
+- every current snapshot leaf and every mixed lifetime;
+- transactional invalid schema, renderer schema, privacy, non-finite,
+  inconsistent identity, and capacity rejection;
+- counter starts/ownership/overflow;
+- mixed revision advancement;
+- surface/device separation;
+- rapid topology storms and both cancellation completion orders;
+- Preparing/Ready compatible revision rebasing;
+- exact candidate proof and owned validation state;
+- every acquire deferral, candidate rejection, and epoch failure family;
+- exact activation attempt/key/surface/revision commit conditions;
+- immediate/delayed GPU error behavior;
+- capture lease identity and activation deferral;
+- hidden coalescing/reveal, shutdown races, and fixed-capacity no-loop behavior;
+- `Arc` snapshot sharing and the fixed-size, allocation-free change set.
 
-Formatting: `cargo fmt --check` → clean.
+## Size and scope
 
-Transactional-invariant audit: the only `setWantsLayer(true)`/`setLayer(Some)`
-callsite in `retained.rs` is inside `activate`; `prepare`'s single view-layer
-touch is `setDrawableSize` on the detached layer object (not the view's layer);
-`restore_appkit` remains the `setLayer(None)`/`setWantsLayer(false)` restore.
+`runtime.rs` is approximately 1,517 production lines plus 1,271 in-module test
+lines. The production code is intentionally kept in one initial ownership module
+per the accepted design. Its types are closed and companion-specific; the size is
+driven by explicit validation, exact state transitions, and exhaustive typed
+failure policy rather than reusable engine machinery.
 
-## Concerns
+## Verification
 
-- **Surface validity on a detached layer.** The whole approach rests on the
-  design decision that a `CAMetalLayer` created with `CAMetalLayer::new()` renders
-  fine while detached from its view, and that installing it later (via `setLayer`)
-  only makes it visible without invalidating the wgpu surface (the surface is
-  created from the layer *pointer*, which does not change when the same layer
-  object is attached to the view). I could not exercise this on live GPU in this
-  environment (the guard/state tests are pure). `resize_if_needed` reconfigures the
-  surface on the first `render`, providing a safety net if attachment perturbs the
-  drawable size. This should be confirmed by a real companion launch.
-- **`activate` currently cannot return `Err`.** Because `prepare` performs all
-  fallible GPU work, `activate` has no fallible step after the attach today, so it
-  always returns `Ok`. The `Result` return type and the RAII guard are the
-  future-proofing the brief asked for: they make adding a fallible post-attach step
-  transactional by construction. Clippy is clean on this.
-- **`LayerActivationState::preflight_failed`/`appkit_restored`** are exercised only
-  by the Step-1 test today (`#[allow(dead_code)]`, matching the codebase's
-  `FrameProgress::observed` precedent). They model the by-construction invariant
-  that a failed prepare never touches the view; production maintains that invariant
-  by simply not calling `activate` when `prepare` fails.
+Fresh final gate after the review/fix loop:
+
+- `cargo test --lib presentation::companion_scene::runtime`: 31 passed;
+- `cargo test --lib presentation::companion_scene`: 83 passed;
+- `cargo test --lib --features retained-renderer presentation::companion_scene`:
+  83 passed;
+- `cargo test --test companion_scene_boundary`: 10 passed;
+- `cargo clippy --all-targets --all-features -- -D warnings`: clean;
+- `cargo fmt --check`: clean;
+- `git diff --check`: clean.
+
+## Independent review
+
+The independent precommit reviewer found several Important lifecycle and identity
+issues across repeated passes: stranded activation after compatible updates,
+mutable in-flight worker source identity, resource-only layout churn, lost late
+fatal outcomes, and incorrectly scoped/retained surface and device errors. Each
+actionable issue was reproduced with a failing test and fixed.
+
+Final verdict:
+
+- Spec compliance: **PASS**
+- Code quality: **APPROVED**
+- Remaining Critical/Important findings: none.
+
+## Files
+
+- `src/presentation/companion_scene/runtime.rs`
+- `src/presentation/companion_scene/mod.rs`
+- `.superpowers/sdd/task-4-report.md`
+
+This report path was already tracked and is updated as part of the Task 4 commit.

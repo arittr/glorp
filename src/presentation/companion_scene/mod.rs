@@ -1,8 +1,14 @@
 pub mod contract;
 pub(crate) mod input;
+#[allow(dead_code)]
+pub(crate) mod runtime;
 pub mod scene;
 pub mod validate;
 
+pub use runtime::{
+    AppliedRevisions, DeviceEpoch, FrameRevision, LayoutGeneration, ResourceGeneration,
+    SceneGenerationKey, SceneVersion, SemanticRevision, SurfaceEpoch,
+};
 pub use scene::{MAX_ROUND_TANK_INHABITANTS as MAX_VISIBLE_TANK_INHABITANTS, MAX_VISIBLE_PROPS};
 
 use crate::game::evolution::Stage;
