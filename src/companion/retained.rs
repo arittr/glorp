@@ -568,7 +568,7 @@ impl ActiveRetainedHost {
     /// virtual time while queue work is submitted as fast as the device allows.
     pub(crate) fn run_virtual_lifetime_audit(&mut self, frames: u64) {
         const CADENCE_MS: u64 = 250;
-        const DRIVER_WARMUP_FRAMES: u64 = 4_500;
+        const DRIVER_WARMUP_FRAMES: u64 = 18_000;
         let instances = vec![GpuPrimitive::zeroed(); FIXED_INSTANCE_RING_MIN];
         let submit = |host: &mut RetainedHost| {
             host.frame_buffers
