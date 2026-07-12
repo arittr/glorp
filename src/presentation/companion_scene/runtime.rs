@@ -87,6 +87,8 @@ impl ResourceChangeMask {
     // changing the reconciliation result shape.
     pub(crate) const AMBIENT_AUTHORED: Self = Self(1 << 4);
     pub(crate) const MATERIAL_CONTRACT: Self = Self(1 << 5);
+    pub(crate) const BACKING_SCALE_ATLAS: Self = Self(1 << 6);
+    pub(crate) const SURFACE_RECOVERY: Self = Self(1 << 7);
 
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -598,6 +600,7 @@ pub(crate) enum CounterKind {
 pub(crate) enum RuntimeError {
     SnapshotRejected(SnapshotRejection),
     CounterOverflow(CounterKind),
+    Shutdown,
 }
 
 impl From<SnapshotRejection> for RuntimeError {
@@ -610,28 +613,6 @@ fn increment(value: u64, counter: CounterKind) -> Result<u64, RuntimeError> {
     value
         .checked_add(1)
         .ok_or(RuntimeError::CounterOverflow(counter))
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ReconcileDecision {
-    Unchanged {
-        snapshot: Arc<CompanionSceneSnapshot>,
-    },
-    Changed {
-        snapshot: Arc<CompanionSceneSnapshot>,
-        changes: SnapshotChangeSet,
-        layout: LayoutGeneration,
-        applied: AppliedRevisions,
-    },
-}
-
-impl ReconcileDecision {
-    pub(crate) fn changes(&self) -> SnapshotChangeSet {
-        match self {
-            Self::Unchanged { .. } => SnapshotChangeSet::NONE,
-            Self::Changed { changes, .. } => *changes,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -653,64 +634,6 @@ impl CompanionSceneReconciler {
         })
     }
 
-    pub(crate) fn reconcile(
-        &mut self,
-        snapshot: Arc<CompanionSceneSnapshot>,
-    ) -> Result<ReconcileDecision, RuntimeError> {
-        validate_snapshot(&snapshot)?;
-        let changes = classify_snapshot_changes(&self.snapshot, &snapshot);
-        self.reconcile_validated(snapshot, changes)
-    }
-
-    fn reconcile_validated(
-        &mut self,
-        snapshot: Arc<CompanionSceneSnapshot>,
-        changes: SnapshotChangeSet,
-    ) -> Result<ReconcileDecision, RuntimeError> {
-        let next_layout = if !changes.layout.is_empty() {
-            LayoutGeneration(increment(
-                self.layout_generation.0,
-                CounterKind::LayoutGeneration,
-            )?)
-        } else {
-            self.layout_generation
-        };
-        let next_semantic = if changes.has_semantic() {
-            SemanticRevision(increment(
-                self.semantic_revision.0,
-                CounterKind::SemanticRevision,
-            )?)
-        } else {
-            self.semantic_revision
-        };
-        let next_frame = if changes.has_frame() {
-            FrameRevision(increment(
-                self.frame_revision.0,
-                CounterKind::FrameRevision,
-            )?)
-        } else {
-            self.frame_revision
-        };
-
-        self.snapshot = Arc::clone(&snapshot);
-        self.layout_generation = next_layout;
-        self.semantic_revision = next_semantic;
-        self.frame_revision = next_frame;
-        if changes == SnapshotChangeSet::NONE {
-            Ok(ReconcileDecision::Unchanged { snapshot })
-        } else {
-            Ok(ReconcileDecision::Changed {
-                snapshot,
-                changes,
-                layout: next_layout,
-                applied: AppliedRevisions {
-                    semantic: next_semantic,
-                    frame: next_frame,
-                },
-            })
-        }
-    }
-
     pub(crate) fn snapshot(&self) -> &Arc<CompanionSceneSnapshot> {
         &self.snapshot
     }
@@ -725,12 +648,83 @@ impl CompanionSceneReconciler {
             frame: self.frame_revision,
         }
     }
+
+    fn commit_prepared(&mut self, prepared: &PreparedSnapshotUpdate) {
+        self.snapshot = Arc::clone(&prepared.snapshot);
+        self.layout_generation = prepared.layout_generation;
+        self.semantic_revision = prepared.applied.semantic;
+        self.frame_revision = prepared.applied.frame;
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedSnapshotUpdate {
+    expected_snapshot: Arc<CompanionSceneSnapshot>,
+    expected_layout: LayoutGeneration,
+    expected_applied: AppliedRevisions,
+    expected_resources: ResourceGeneration,
+    expected_next_request: RequestId,
+    expected_device: DeviceEpoch,
+    expected_surface: SurfaceEpoch,
+    expected_visibility: RuntimeVisibility,
+    expected_worker: WorkerState,
+    expected_pending_request: Option<RequestId>,
+    expected_recovery: RecoveryState,
+    expected_hidden_latest: Option<Arc<CompanionSceneSnapshot>>,
+    snapshot: Arc<CompanionSceneSnapshot>,
+    changes: SnapshotChangeSet,
+    layout_generation: LayoutGeneration,
+    applied: AppliedRevisions,
+    generation: Option<PreparedGenerationRequest>,
+    hidden_origin: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedReveal {
+    update: PreparedSnapshotUpdate,
+}
+
+impl PreparedReveal {
+    pub(crate) const fn update(&self) -> &PreparedSnapshotUpdate {
+        &self.update
+    }
+}
+
+impl PreparedSnapshotUpdate {
+    pub(crate) const fn changes(&self) -> SnapshotChangeSet {
+        self.changes
+    }
+
+    pub(crate) fn snapshot(&self) -> &Arc<CompanionSceneSnapshot> {
+        &self.snapshot
+    }
+
+    pub(crate) const fn semantic_revision(&self) -> SemanticRevision {
+        self.applied.semantic
+    }
+
+    pub(crate) const fn frame_revision(&self) -> FrameRevision {
+        self.applied.frame
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparedGenerationRequest {
+    request_id: RequestId,
+    next_request_id: RequestId,
+    resources: ResourceGeneration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparedCommitError {
+    StaleBase,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RequestId(pub u64);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct GenerationRequest {
     request_id: RequestId,
     key: SceneGenerationKey,
@@ -740,6 +734,16 @@ pub(crate) struct GenerationRequest {
 }
 
 impl GenerationRequest {
+    fn duplicate_for_start(&self) -> Self {
+        Self {
+            request_id: self.request_id,
+            key: self.key,
+            surface: self.surface,
+            source: self.source,
+            snapshot: Arc::clone(&self.snapshot),
+        }
+    }
+
     pub(crate) const fn request_id(&self) -> RequestId {
         self.request_id
     }
@@ -760,11 +764,12 @@ impl GenerationRequest {
         &self.snapshot
     }
 
-    fn version(&self, surface: SurfaceEpoch) -> SceneVersion {
-        SceneVersion {
-            generation: self.key,
-            surface,
+    pub(crate) fn accept(&self, accepted: AcceptedSceneState) -> AcceptedGenerationCandidate {
+        AcceptedGenerationCandidate {
+            request_id: self.request_id,
+            key: self.key,
             applied: self.source,
+            accepted,
         }
     }
 }
@@ -777,14 +782,70 @@ pub(crate) struct AcceptedGenerationCandidate {
     accepted: AcceptedSceneState,
 }
 
-impl AcceptedGenerationCandidate {
-    pub(crate) fn new(
-        request_id: RequestId,
-        key: SceneGenerationKey,
-        applied: AppliedRevisions,
-        accepted: AcceptedSceneState,
-    ) -> Self {
-        Self { request_id, key, applied, accepted }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeDisposition {
+    Unchanged,
+    SnapshotCommitted(SnapshotChangeSet),
+    GenerationQueued(RequestId),
+    GenerationStarted(RequestId),
+    CandidateReady(RequestId),
+    CandidateDropped(RequestId),
+    Activation(ActivationTransition),
+    HiddenCoalesced,
+    Revealed,
+    Shutdown,
+    DroppedStale,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct RuntimeEffects {
+    disposition: RuntimeDisposition,
+    cancel_worker: Option<RequestId>,
+    start_worker: Option<GenerationRequest>,
+    drop_candidate: Option<RequestId>,
+}
+
+impl RuntimeEffects {
+    fn new(disposition: RuntimeDisposition) -> Self {
+        Self {
+            disposition,
+            cancel_worker: None,
+            start_worker: None,
+            drop_candidate: None,
+        }
+    }
+
+    pub(crate) const fn disposition(&self) -> RuntimeDisposition {
+        self.disposition
+    }
+
+    pub(crate) const fn cancel_worker(&self) -> Option<RequestId> {
+        self.cancel_worker
+    }
+
+    pub(crate) fn take_start_worker(&mut self) -> Option<GenerationRequest> {
+        self.start_worker.take()
+    }
+
+    pub(crate) const fn drop_candidate(&self) -> Option<RequestId> {
+        self.drop_candidate
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceInvalidation {
+    BackingScaleAtlas,
+    SurfaceRecovery,
+    MaterialContract,
+}
+
+impl ResourceInvalidation {
+    const fn mask(self) -> ResourceChangeMask {
+        match self {
+            Self::BackingScaleAtlas => ResourceChangeMask::BACKING_SCALE_ATLAS,
+            Self::SurfaceRecovery => ResourceChangeMask::SURFACE_RECOVERY,
+            Self::MaterialContract => ResourceChangeMask::MATERIAL_CONTRACT,
+        }
     }
 }
 
@@ -816,6 +877,7 @@ struct PendingGeneration {
     desired_surface: SurfaceEpoch,
     desired_source: AppliedRevisions,
     desired_snapshot: Arc<CompanionSceneSnapshot>,
+    accepted_snapshot: Arc<CompanionSceneSnapshot>,
     phase: PendingPhase,
 }
 
@@ -832,34 +894,31 @@ enum RuntimeVisibility {
     Hidden,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SnapshotSubmission {
-    Unchanged,
-    Updated(SnapshotChangeSet),
-    GenerationRequested(GenerationRequest),
-    HiddenCoalesced,
-}
-
-impl SnapshotSubmission {
-    pub(crate) fn request(&self) -> Option<GenerationRequest> {
-        match self {
-            Self::GenerationRequested(request) => Some(request.clone()),
-            _ => None,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeLifecycle {
+    Running,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CandidateCompletion {
-    Ready,
-    DroppedStale,
+pub(crate) enum RecoveryState {
+    Operational,
+    FallbackPending {
+        device: DeviceEpoch,
+        surface: SurfaceEpoch,
+    },
+    Recovering {
+        device: DeviceEpoch,
+        surface: SurfaceEpoch,
+        request: RequestId,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkerTransition {
-    Started(RequestId),
-    Idle,
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CandidateRebaseError<E> {
     DroppedStale,
+    Projection(E),
+    StaleFrameProof,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -880,6 +939,7 @@ pub(crate) enum ActivationStartError {
     CandidateNeedsRebase,
     Hidden,
     SurfaceUnavailable,
+    Shutdown,
     CounterOverflow(CounterKind),
 }
 
@@ -930,6 +990,8 @@ pub(crate) enum ActivationTransition {
 pub(crate) enum CaptureDefer {
     NoActiveGeneration,
     ActivationInProgress,
+    RecoveryInProgress,
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -956,13 +1018,8 @@ pub(crate) struct CompanionSceneRuntimeState {
     resource_generation: ResourceGeneration,
     next_request_id: RequestId,
     next_activation_attempt_id: ActivationAttemptId,
-    host_fallback_pending: bool,
-    device_valid: bool,
-    surface_valid: bool,
-    cancelled_build_count: u64,
-    request_count: u64,
-    reconcile_count: u64,
-    max_workers_observed: u8,
+    recovery: RecoveryState,
+    lifecycle: RuntimeLifecycle,
 }
 
 impl CompanionSceneRuntimeState {
@@ -995,13 +1052,8 @@ impl CompanionSceneRuntimeState {
             resource_generation: ResourceGeneration(1),
             next_request_id: RequestId(1),
             next_activation_attempt_id: ActivationAttemptId(1),
-            host_fallback_pending: false,
-            device_valid: true,
-            surface_valid: true,
-            cancelled_build_count: 0,
-            request_count: 0,
-            reconcile_count: 0,
-            max_workers_observed: 0,
+            recovery: RecoveryState::Operational,
+            lifecycle: RuntimeLifecycle::Running,
         })
     }
 
@@ -1027,142 +1079,306 @@ impl CompanionSceneRuntimeState {
             .map(|pending| &pending.desired_snapshot)
     }
 
-    fn preflight_generation_counters(&self) -> Result<(), RuntimeError> {
-        increment(self.resource_generation.0, CounterKind::ResourceGeneration)?;
-        increment(self.next_request_id.0, CounterKind::RequestId)?;
-        Ok(())
+    fn ensure_running(&self) -> Result<(), RuntimeError> {
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            Err(RuntimeError::Shutdown)
+        } else {
+            Ok(())
+        }
     }
 
-    pub(crate) fn submit_snapshot(
-        &mut self,
+    pub(crate) fn prepare_snapshot(
+        &self,
         snapshot: Arc<CompanionSceneSnapshot>,
-    ) -> Result<SnapshotSubmission, RuntimeError> {
-        validate_snapshot(&snapshot)?;
+    ) -> Result<PreparedSnapshotUpdate, RuntimeError> {
+        self.ensure_running()?;
         if self.visibility == RuntimeVisibility::Hidden {
-            self.hidden_latest = Some(snapshot);
-            return Ok(SnapshotSubmission::HiddenCoalesced);
+            return Err(RuntimeError::SnapshotRejected(
+                SnapshotRejection::InvalidValue,
+            ));
         }
-        let preview = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
-        if preview.requires_generation() {
-            self.preflight_generation_counters()?;
-        }
-        let decision = self.reconciler.reconcile(snapshot)?;
-        self.reconcile_count += 1;
-        let changes = decision.changes();
-        if changes == SnapshotChangeSet::NONE {
-            return Ok(SnapshotSubmission::Unchanged);
-        }
-        if changes.requires_generation() {
-            return self.queue_generation();
-        }
-
-        let applied = self.reconciler.applied_revisions();
-        if let Some(active) = &mut self.active {
-            active.version.applied = applied;
-        }
-        if let Some(pending) = &mut self.pending {
-            pending.desired_source = applied;
-            pending.desired_snapshot = Arc::clone(self.reconciler.snapshot());
-            let placeholder = PendingPhase::Queued;
-            let phase = std::mem::replace(&mut pending.phase, placeholder);
-            pending.phase = match phase {
-                PendingPhase::Activating { candidate, attempt, .. } => PendingPhase::Activating {
-                    candidate,
-                    attempt,
-                    commit_eligible: false,
-                },
-                other => other,
-            };
-        }
-        Ok(SnapshotSubmission::Updated(changes))
+        validate_snapshot(&snapshot)?;
+        let changes = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
+        self.prepare_with_changes(snapshot, changes, false)
     }
 
-    fn queue_generation(&mut self) -> Result<SnapshotSubmission, RuntimeError> {
-        let resources = ResourceGeneration(increment(
-            self.resource_generation.0,
-            CounterKind::ResourceGeneration,
-        )?);
-        let request_id = self.next_request_id;
-        let next_request_id = RequestId(increment(request_id.0, CounterKind::RequestId)?);
-        let request = GenerationRequest {
-            request_id,
-            key: SceneGenerationKey {
-                device: self.device_epoch,
-                layout: self.reconciler.layout_generation(),
-                resources,
-            },
-            surface: self.surface_epoch,
-            source: self.reconciler.applied_revisions(),
-            snapshot: Arc::clone(self.reconciler.snapshot()),
+    fn prepare_hidden_latest(&self) -> Result<Option<PreparedSnapshotUpdate>, RuntimeError> {
+        self.ensure_running()?;
+        let Some(snapshot) = &self.hidden_latest else {
+            return Ok(None);
         };
+        validate_snapshot(snapshot)?;
+        let changes = classify_snapshot_changes(self.reconciler.snapshot(), snapshot);
+        self.prepare_with_changes(Arc::clone(snapshot), changes, true)
+            .map(Some)
+    }
 
+    fn prepare_with_changes(
+        &self,
+        snapshot: Arc<CompanionSceneSnapshot>,
+        changes: SnapshotChangeSet,
+        hidden_origin: bool,
+    ) -> Result<PreparedSnapshotUpdate, RuntimeError> {
+        let layout_generation = if !changes.layout.is_empty() {
+            LayoutGeneration(increment(
+                self.reconciler.layout_generation.0,
+                CounterKind::LayoutGeneration,
+            )?)
+        } else {
+            self.reconciler.layout_generation
+        };
+        let semantic = if changes.has_semantic() {
+            SemanticRevision(increment(
+                self.reconciler.semantic_revision.0,
+                CounterKind::SemanticRevision,
+            )?)
+        } else {
+            self.reconciler.semantic_revision
+        };
+        let frame = if changes.has_frame() {
+            FrameRevision(increment(
+                self.reconciler.frame_revision.0,
+                CounterKind::FrameRevision,
+            )?)
+        } else {
+            self.reconciler.frame_revision
+        };
+        let generation = if changes.requires_generation() {
+            let resources = if changes.resources.is_empty() {
+                self.resource_generation
+            } else {
+                ResourceGeneration(increment(
+                    self.resource_generation.0,
+                    CounterKind::ResourceGeneration,
+                )?)
+            };
+            Some(PreparedGenerationRequest {
+                request_id: self.next_request_id,
+                next_request_id: RequestId(increment(
+                    self.next_request_id.0,
+                    CounterKind::RequestId,
+                )?),
+                resources,
+            })
+        } else {
+            None
+        };
+        Ok(PreparedSnapshotUpdate {
+            expected_snapshot: Arc::clone(self.reconciler.snapshot()),
+            expected_layout: self.reconciler.layout_generation,
+            expected_applied: self.reconciler.applied_revisions(),
+            expected_resources: self.resource_generation,
+            expected_next_request: self.next_request_id,
+            expected_device: self.device_epoch,
+            expected_surface: self.surface_epoch,
+            expected_visibility: self.visibility,
+            expected_worker: self.worker,
+            expected_pending_request: self.pending_request().map(GenerationRequest::request_id),
+            expected_recovery: self.recovery,
+            expected_hidden_latest: self.hidden_latest.as_ref().map(Arc::clone),
+            snapshot,
+            changes,
+            layout_generation,
+            applied: AppliedRevisions { semantic, frame },
+            generation,
+            hidden_origin,
+        })
+    }
+
+    pub(crate) fn commit_prepared(
+        &mut self,
+        prepared: PreparedSnapshotUpdate,
+    ) -> Result<RuntimeEffects, PreparedCommitError> {
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return Err(PreparedCommitError::Shutdown);
+        }
+        let base_matches = Arc::ptr_eq(&prepared.expected_snapshot, self.reconciler.snapshot())
+            && prepared.expected_layout == self.reconciler.layout_generation
+            && prepared.expected_applied == self.reconciler.applied_revisions()
+            && prepared.expected_resources == self.resource_generation
+            && prepared.expected_next_request == self.next_request_id
+            && prepared.expected_device == self.device_epoch
+            && prepared.expected_surface == self.surface_epoch
+            && prepared.expected_visibility == self.visibility
+            && prepared.expected_worker == self.worker
+            && prepared.expected_pending_request
+                == self.pending_request().map(GenerationRequest::request_id)
+            && prepared.expected_recovery == self.recovery;
+        let hidden_matches = match (
+            prepared.expected_hidden_latest.as_ref(),
+            self.hidden_latest.as_ref(),
+        ) {
+            (None, None) => true,
+            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+            _ => false,
+        };
+        if !base_matches || !hidden_matches {
+            return Err(PreparedCommitError::StaleBase);
+        }
+
+        self.reconciler.commit_prepared(&prepared);
+        if prepared.hidden_origin {
+            self.hidden_latest = None;
+        }
+        if let Some(generation) = prepared.generation {
+            self.resource_generation = generation.resources;
+            self.next_request_id = generation.next_request_id;
+            let request = GenerationRequest {
+                request_id: generation.request_id,
+                key: SceneGenerationKey {
+                    device: self.device_epoch,
+                    layout: prepared.layout_generation,
+                    resources: generation.resources,
+                },
+                surface: self.surface_epoch,
+                source: prepared.applied,
+                snapshot: Arc::clone(&prepared.snapshot),
+            };
+            return Ok(self.queue_request(request));
+        }
+
+        if prepared.changes != SnapshotChangeSet::NONE {
+            if let Some(active) = &mut self.active {
+                active.version.applied = prepared.applied;
+            }
+            if let Some(pending) = &mut self.pending {
+                pending.desired_source = prepared.applied;
+                pending.desired_snapshot = Arc::clone(&prepared.snapshot);
+                if let PendingPhase::Activating { commit_eligible, .. } = &mut pending.phase {
+                    *commit_eligible = false;
+                }
+            }
+            Ok(RuntimeEffects::new(RuntimeDisposition::SnapshotCommitted(
+                prepared.changes,
+            )))
+        } else {
+            Ok(RuntimeEffects::new(RuntimeDisposition::Unchanged))
+        }
+    }
+
+    fn start_pending_worker(&mut self, effects: &mut RuntimeEffects) {
+        if self.lifecycle != RuntimeLifecycle::Running
+            || self.visibility != RuntimeVisibility::Visible
+            || self.worker != WorkerState::Idle
+        {
+            return;
+        }
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
+        if !matches!(pending.phase, PendingPhase::Queued) {
+            return;
+        }
+        pending.phase = PendingPhase::Preparing;
+        self.worker = WorkerState::Running(pending.request.request_id);
+        effects.start_worker = Some(pending.request.duplicate_for_start());
+        effects.disposition = RuntimeDisposition::GenerationStarted(pending.request.request_id);
+    }
+
+    fn queue_request(&mut self, request: GenerationRequest) -> RuntimeEffects {
+        let mut effects =
+            RuntimeEffects::new(RuntimeDisposition::GenerationQueued(request.request_id));
         let mut superseded_activation = None;
         if let Some(old) = self.pending.take() {
             match old.phase {
                 PendingPhase::Activating { candidate, attempt, .. }
                 | PendingPhase::SupersedingActivation { candidate, attempt } => {
                     superseded_activation = Some((candidate, attempt));
-                    self.worker = WorkerState::Idle;
                 }
-                _ => match self.worker {
-                    WorkerState::Running(id) if id == old.request.request_id => {
-                        self.worker = WorkerState::Cancelling(id);
-                        self.cancelled_build_count += 1;
+                PendingPhase::Ready(candidate) => {
+                    effects.drop_candidate = Some(candidate.request_id);
+                }
+                _ => {
+                    if self.worker == WorkerState::Running(old.request.request_id) {
+                        self.worker = WorkerState::Cancelling(old.request.request_id);
+                        effects.cancel_worker = Some(old.request.request_id);
                     }
-                    WorkerState::Cancelling(_) => {}
-                    _ => self.worker = WorkerState::Idle,
-                },
+                }
             }
         }
-
         let phase = if let Some((candidate, attempt)) = superseded_activation {
             PendingPhase::SupersedingActivation { candidate, attempt }
-        } else if self.worker == WorkerState::Idle {
-            self.worker = WorkerState::Running(request_id);
-            self.max_workers_observed = self.max_workers_observed.max(1);
-            PendingPhase::Preparing
         } else {
             PendingPhase::Queued
         };
+        if let RecoveryState::Recovering { .. } = self.recovery {
+            self.recovery = RecoveryState::Recovering {
+                device: request.key.device,
+                surface: request.surface,
+                request: request.request_id,
+            };
+        }
         self.pending = Some(PendingGeneration {
             desired_surface: request.surface,
             desired_source: request.source,
             desired_snapshot: Arc::clone(&request.snapshot),
-            request: request.clone(),
+            accepted_snapshot: Arc::clone(&request.snapshot),
+            request,
             phase,
         });
-        self.resource_generation = resources;
-        self.next_request_id = next_request_id;
-        self.request_count += 1;
-        Ok(SnapshotSubmission::GenerationRequested(request))
+        self.start_pending_worker(&mut effects);
+        effects
     }
 
-    pub(crate) fn acknowledge_worker_cancelled(&mut self, id: RequestId) -> WorkerTransition {
-        if self.worker != WorkerState::Cancelling(id) {
-            return WorkerTransition::DroppedStale;
-        }
-        if let Some(pending) = &mut self.pending {
-            if matches!(pending.phase, PendingPhase::Queued) {
-                pending.phase = PendingPhase::Preparing;
-                self.worker = WorkerState::Running(pending.request.request_id);
-                self.max_workers_observed = self.max_workers_observed.max(1);
-                return WorkerTransition::Started(pending.request.request_id);
+    pub(crate) fn invalidate_resources(
+        &mut self,
+        invalidation: ResourceInvalidation,
+    ) -> Result<RuntimeEffects, RuntimeError> {
+        self.ensure_running()?;
+        let prepared = self.prepare_with_changes(
+            Arc::clone(self.reconciler.snapshot()),
+            SnapshotChangeSet {
+                resources: invalidation.mask(),
+                ..SnapshotChangeSet::NONE
+            },
+            false,
+        )?;
+        let effects = self
+            .commit_prepared(prepared)
+            .map_err(|_| RuntimeError::SnapshotRejected(SnapshotRejection::InvalidValue))?;
+        if matches!(invalidation, ResourceInvalidation::SurfaceRecovery) {
+            if let Some(request) = self.pending_request() {
+                self.recovery = RecoveryState::Recovering {
+                    device: self.device_epoch,
+                    surface: self.surface_epoch,
+                    request: request.request_id,
+                };
             }
         }
-        self.worker = WorkerState::Idle;
-        WorkerTransition::Idle
+        Ok(effects)
     }
 
-    pub(crate) fn complete_cpu_candidate(
+    pub(crate) fn acknowledge_worker_cancelled(&mut self, id: RequestId) -> RuntimeEffects {
+        let mut effects = RuntimeEffects::new(RuntimeDisposition::DroppedStale);
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return effects;
+        }
+        if self.worker != WorkerState::Cancelling(id) {
+            return effects;
+        }
+        self.worker = WorkerState::Idle;
+        self.start_pending_worker(&mut effects);
+        effects
+    }
+
+    pub(crate) fn complete_candidate(
         &mut self,
         candidate: AcceptedGenerationCandidate,
-    ) -> CandidateCompletion {
+    ) -> RuntimeEffects {
+        let mut effects = RuntimeEffects::new(RuntimeDisposition::DroppedStale);
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            effects.drop_candidate = Some(candidate.request_id);
+            return effects;
+        }
         if self.worker == WorkerState::Cancelling(candidate.request_id) {
-            self.acknowledge_worker_cancelled(candidate.request_id);
-            return CandidateCompletion::DroppedStale;
+            self.worker = WorkerState::Idle;
+            effects.drop_candidate = Some(candidate.request_id);
+            self.start_pending_worker(&mut effects);
+            return effects;
         }
         let Some(pending) = &mut self.pending else {
-            return CandidateCompletion::DroppedStale;
+            effects.drop_candidate = Some(candidate.request_id);
+            return effects;
         };
         if self.worker != WorkerState::Running(candidate.request_id)
             || pending.request.request_id != candidate.request_id
@@ -1170,36 +1386,56 @@ impl CompanionSceneRuntimeState {
             || pending.request.source != candidate.applied
             || !matches!(pending.phase, PendingPhase::Preparing)
         {
-            return CandidateCompletion::DroppedStale;
+            effects.drop_candidate = Some(candidate.request_id);
+            return effects;
         }
+        let request_id = candidate.request_id;
         pending.phase = PendingPhase::Ready(candidate);
         self.worker = WorkerState::Idle;
-        CandidateCompletion::Ready
+        effects.disposition = RuntimeDisposition::CandidateReady(request_id);
+        effects
     }
 
-    pub(crate) fn replace_ready_candidate(
+    pub(crate) fn rebase_ready_candidate<E>(
         &mut self,
-        candidate: AcceptedGenerationCandidate,
-    ) -> CandidateCompletion {
+        project: impl FnOnce(
+            &Arc<CompanionSceneSnapshot>,
+            SnapshotChangeSet,
+            &mut AcceptedSceneState,
+        ) -> Result<(), E>,
+    ) -> Result<(), CandidateRebaseError<E>> {
         let Some(pending) = &mut self.pending else {
-            return CandidateCompletion::DroppedStale;
+            return Err(CandidateRebaseError::DroppedStale);
         };
-        if pending.request.request_id != candidate.request_id
-            || pending.request.key != candidate.key
-            || pending.desired_source != candidate.applied
-            || !matches!(pending.phase, PendingPhase::Ready(_))
-        {
-            return CandidateCompletion::DroppedStale;
+        let PendingPhase::Ready(candidate) = &pending.phase else {
+            return Err(CandidateRebaseError::DroppedStale);
+        };
+        let changes =
+            classify_snapshot_changes(&pending.accepted_snapshot, &pending.desired_snapshot);
+        let mut accepted = candidate.accepted.clone();
+        project(&pending.desired_snapshot, changes, &mut accepted)
+            .map_err(CandidateRebaseError::Projection)?;
+        if changes.has_frame() && accepted == candidate.accepted {
+            return Err(CandidateRebaseError::StaleFrameProof);
         }
-        pending.phase = PendingPhase::Ready(candidate);
-        CandidateCompletion::Ready
+        pending.accepted_snapshot = Arc::clone(&pending.desired_snapshot);
+        pending.phase = PendingPhase::Ready(AcceptedGenerationCandidate {
+            request_id: pending.request.request_id,
+            key: pending.request.key,
+            applied: pending.desired_source,
+            accepted,
+        });
+        Ok(())
     }
 
     pub(crate) fn begin_activation(&mut self) -> Result<ActivationAttempt, ActivationStartError> {
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return Err(ActivationStartError::Shutdown);
+        }
         if self.visibility == RuntimeVisibility::Hidden {
             return Err(ActivationStartError::Hidden);
         }
-        if !self.device_valid || !self.surface_valid {
+        if matches!(self.recovery, RecoveryState::FallbackPending { .. }) {
             return Err(ActivationStartError::SurfaceUnavailable);
         }
         let pending = self
@@ -1243,9 +1479,13 @@ impl CompanionSceneRuntimeState {
         &mut self,
         attempt: ActivationAttempt,
         outcome: ActivationAttemptOutcome,
-    ) -> ActivationTransition {
+    ) -> RuntimeEffects {
+        let mut effects = RuntimeEffects::new(RuntimeDisposition::DroppedStale);
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return effects;
+        }
         let Some(pending) = &mut self.pending else {
-            return ActivationTransition::DroppedStale;
+            return effects;
         };
         let placeholder = PendingPhase::Queued;
         let phase = std::mem::replace(&mut pending.phase, placeholder);
@@ -1258,7 +1498,7 @@ impl CompanionSceneRuntimeState {
             }
             other => {
                 pending.phase = other;
-                return ActivationTransition::DroppedStale;
+                return effects;
             }
         };
         if current != attempt
@@ -1275,7 +1515,7 @@ impl CompanionSceneRuntimeState {
                     commit_eligible,
                 }
             };
-            return ActivationTransition::DroppedStale;
+            return effects;
         }
 
         if let ActivationAttemptOutcome::Fatal(failure) = outcome {
@@ -1294,18 +1534,13 @@ impl CompanionSceneRuntimeState {
             ) && attempt.key.device != self.device_epoch;
             if stale_surface_failure || stale_device_failure {
                 if superseding {
-                    if self.visibility == RuntimeVisibility::Visible {
-                        self.worker = WorkerState::Running(pending.request.request_id);
-                        self.max_workers_observed = self.max_workers_observed.max(1);
-                        pending.phase = PendingPhase::Preparing;
-                    } else {
-                        self.worker = WorkerState::Idle;
-                        pending.phase = PendingPhase::Queued;
-                    }
+                    effects.drop_candidate = Some(candidate.request_id);
+                    pending.phase = PendingPhase::Queued;
                 } else {
                     pending.phase = PendingPhase::Ready(candidate);
                 }
-                return ActivationTransition::DroppedStale;
+                self.start_pending_worker(&mut effects);
+                return effects;
             }
             let invalidates_device = matches!(
                 failure,
@@ -1317,18 +1552,17 @@ impl CompanionSceneRuntimeState {
                     | EpochFailure::DelayedGpuError
             );
             if invalidates_device {
-                self.device_valid = false;
                 self.active = None;
             }
-            if matches!(
-                failure,
-                EpochFailure::SurfaceLost | EpochFailure::SurfaceValidation
-            ) {
-                self.surface_valid = false;
-            }
             self.pending = None;
-            self.host_fallback_pending = true;
-            return ActivationTransition::HostFallbackPending;
+            self.recovery = RecoveryState::FallbackPending {
+                device: self.device_epoch,
+                surface: self.surface_epoch,
+            };
+            effects.disposition =
+                RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending);
+            effects.drop_candidate = Some(candidate.request_id);
+            return effects;
         }
 
         if superseding {
@@ -1342,24 +1576,30 @@ impl CompanionSceneRuntimeState {
                 }
                 ActivationAttemptOutcome::Fatal(_) => unreachable!("handled above"),
             };
-            if self.visibility == RuntimeVisibility::Visible {
-                self.worker = WorkerState::Running(pending.request.request_id);
-                self.max_workers_observed = self.max_workers_observed.max(1);
-                pending.phase = PendingPhase::Preparing;
-            } else {
-                self.worker = WorkerState::Idle;
-                pending.phase = PendingPhase::Queued;
+            effects.drop_candidate = Some(candidate.request_id);
+            pending.phase = PendingPhase::Queued;
+            self.start_pending_worker(&mut effects);
+            if effects.start_worker.is_none() {
+                effects.disposition = RuntimeDisposition::Activation(transition);
             }
-            return transition;
+            return effects;
         }
 
-        match outcome {
+        let transition = match outcome {
             ActivationAttemptOutcome::Deferred(_) => {
                 pending.phase = PendingPhase::Ready(candidate);
                 ActivationTransition::RetryLater
             }
             ActivationAttemptOutcome::CandidateRejected(_) => {
+                let dropped = candidate.request_id;
                 self.pending = None;
+                effects.drop_candidate = Some(dropped);
+                if matches!(self.recovery, RecoveryState::Recovering { .. }) {
+                    self.recovery = RecoveryState::FallbackPending {
+                        device: self.device_epoch,
+                        surface: self.surface_epoch,
+                    };
+                }
                 ActivationTransition::CandidateDestroyedRetainingActive
             }
             ActivationAttemptOutcome::PresentedClean { surface }
@@ -1369,7 +1609,20 @@ impl CompanionSceneRuntimeState {
                     && attempt.applied == pending.desired_source
                     && candidate.request_id == pending.request.request_id
                     && candidate.key == pending.request.key
-                    && candidate.applied == pending.desired_source =>
+                    && candidate.applied == pending.desired_source
+                    && match self.recovery {
+                        RecoveryState::Operational => true,
+                        RecoveryState::Recovering {
+                            device,
+                            surface: recovery_surface,
+                            request,
+                        } => {
+                            device == candidate.key.device
+                                && recovery_surface == surface
+                                && request == candidate.request_id
+                        }
+                        RecoveryState::FallbackPending { .. } => false,
+                    } =>
             {
                 self.active = Some(ActiveGeneration {
                     version: SceneVersion {
@@ -1380,7 +1633,7 @@ impl CompanionSceneRuntimeState {
                     accepted: candidate.accepted,
                 });
                 self.pending = None;
-                self.host_fallback_pending = false;
+                self.recovery = RecoveryState::Operational;
                 ActivationTransition::Committed
             }
             ActivationAttemptOutcome::PresentedClean { .. } => {
@@ -1388,50 +1641,49 @@ impl CompanionSceneRuntimeState {
                 ActivationTransition::DroppedStale
             }
             ActivationAttemptOutcome::Fatal(_) => unreachable!("handled above"),
-        }
+        };
+        effects.disposition = RuntimeDisposition::Activation(transition);
+        effects
     }
 
-    pub(crate) fn advance_surface_epoch(&mut self) -> Result<SurfaceEpoch, RuntimeError> {
+    pub(crate) fn acknowledge_surface_rebound(&mut self) -> Result<RuntimeEffects, RuntimeError> {
+        self.ensure_running()?;
         let next = SurfaceEpoch(increment(self.surface_epoch.0, CounterKind::SurfaceEpoch)?);
+        increment(self.resource_generation.0, CounterKind::ResourceGeneration)?;
+        increment(self.next_request_id.0, CounterKind::RequestId)?;
         self.surface_epoch = next;
-        self.surface_valid = true;
-        if let Some(active) = &mut self.active {
-            active.version.surface = next;
-        }
+        let effects = self.invalidate_resources(ResourceInvalidation::SurfaceRecovery)?;
         if let Some(pending) = &mut self.pending {
             pending.desired_surface = next;
-            let placeholder = PendingPhase::Queued;
-            let phase = std::mem::replace(&mut pending.phase, placeholder);
-            pending.phase = match phase {
-                PendingPhase::Activating { candidate, attempt, .. } => PendingPhase::Activating {
-                    candidate,
-                    attempt,
-                    commit_eligible: false,
-                },
-                other => other,
-            };
+            if let PendingPhase::Activating { commit_eligible, .. } = &mut pending.phase {
+                *commit_eligible = false;
+            }
         }
-        Ok(next)
+        Ok(effects)
     }
 
-    pub(crate) fn advance_device_epoch(&mut self) -> Result<DeviceEpoch, RuntimeError> {
+    pub(crate) fn acknowledge_device_recreated(&mut self) -> Result<RuntimeEffects, RuntimeError> {
+        self.ensure_running()?;
         let next = DeviceEpoch(increment(self.device_epoch.0, CounterKind::DeviceEpoch)?);
-        self.preflight_generation_counters()?;
-        if let WorkerState::Running(id) = self.worker {
-            self.worker = WorkerState::Cancelling(id);
-            self.cancelled_build_count += 1;
-        }
+        increment(self.resource_generation.0, CounterKind::ResourceGeneration)?;
+        increment(self.next_request_id.0, CounterKind::RequestId)?;
         self.device_epoch = next;
-        self.device_valid = true;
-        self.surface_valid = false;
         self.active = None;
-        self.pending = None;
-        self.host_fallback_pending = true;
-        self.queue_generation()?;
-        Ok(next)
+        let effects = self.invalidate_resources(ResourceInvalidation::SurfaceRecovery)?;
+        if let Some(request) = self.pending_request() {
+            self.recovery = RecoveryState::Recovering {
+                device: next,
+                surface: self.surface_epoch,
+                request: request.request_id,
+            };
+        }
+        Ok(effects)
     }
 
     pub(crate) fn capture_lease(&self) -> Result<CaptureLease<'_>, CaptureDefer> {
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return Err(CaptureDefer::Shutdown);
+        }
         if self.pending.as_ref().is_some_and(|pending| {
             matches!(
                 pending.phase,
@@ -1440,8 +1692,8 @@ impl CompanionSceneRuntimeState {
         }) {
             return Err(CaptureDefer::ActivationInProgress);
         }
-        if !self.device_valid || !self.surface_valid {
-            return Err(CaptureDefer::NoActiveGeneration);
+        if self.recovery != RecoveryState::Operational {
+            return Err(CaptureDefer::RecoveryInProgress);
         }
         self.active
             .as_ref()
@@ -1449,7 +1701,10 @@ impl CompanionSceneRuntimeState {
             .ok_or(CaptureDefer::NoActiveGeneration)
     }
 
-    pub(crate) fn set_hidden(&mut self) {
+    pub(crate) fn set_hidden(&mut self) -> RuntimeEffects {
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return RuntimeEffects::new(RuntimeDisposition::Shutdown);
+        }
         self.visibility = RuntimeVisibility::Hidden;
         if let Some(pending) = &mut self.pending {
             let placeholder = PendingPhase::Queued;
@@ -1463,55 +1718,115 @@ impl CompanionSceneRuntimeState {
                 other => other,
             };
         }
+        RuntimeEffects::new(RuntimeDisposition::HiddenCoalesced)
     }
 
-    pub(crate) fn set_visible(&mut self) -> Result<SnapshotSubmission, RuntimeError> {
-        self.visibility = RuntimeVisibility::Visible;
-        let submission = match self.hidden_latest.take() {
-            Some(snapshot) => self.submit_snapshot(snapshot),
-            None => Ok(SnapshotSubmission::Unchanged),
-        }?;
-        if self.worker == WorkerState::Idle {
-            if let Some(pending) = &mut self.pending {
-                if matches!(pending.phase, PendingPhase::Queued) {
-                    pending.phase = PendingPhase::Preparing;
-                    self.worker = WorkerState::Running(pending.request.request_id);
-                    self.max_workers_observed = self.max_workers_observed.max(1);
-                }
-            }
-        }
-        Ok(submission)
-    }
-
-    pub(crate) const fn host_fallback_pending(&self) -> bool {
-        self.host_fallback_pending
-    }
-
-    pub(crate) fn observe_delayed_gpu_error(
+    pub(crate) fn coalesce_hidden_snapshot(
         &mut self,
-        device: DeviceEpoch,
-    ) -> ActivationTransition {
-        if device != self.device_epoch {
-            return ActivationTransition::DroppedStale;
+        snapshot: Arc<CompanionSceneSnapshot>,
+    ) -> Result<RuntimeEffects, RuntimeError> {
+        self.ensure_running()?;
+        validate_snapshot(&snapshot)?;
+        if self.visibility != RuntimeVisibility::Hidden {
+            return Err(RuntimeError::SnapshotRejected(
+                SnapshotRejection::InvalidValue,
+            ));
         }
-        self.device_valid = false;
+        self.hidden_latest = Some(snapshot);
+        Ok(RuntimeEffects::new(RuntimeDisposition::HiddenCoalesced))
+    }
+
+    pub(crate) fn prepare_reveal(&self) -> Result<PreparedReveal, RuntimeError> {
+        self.ensure_running()?;
+        if self.visibility != RuntimeVisibility::Hidden {
+            return Err(RuntimeError::SnapshotRejected(
+                SnapshotRejection::InvalidValue,
+            ));
+        }
+        let update = if let Some(prepared) = self.prepare_hidden_latest()? {
+            prepared
+        } else {
+            self.prepare_with_changes(
+                Arc::clone(self.reconciler.snapshot()),
+                SnapshotChangeSet::NONE,
+                false,
+            )?
+        };
+        Ok(PreparedReveal { update })
+    }
+
+    pub(crate) fn commit_reveal(
+        &mut self,
+        prepared: PreparedReveal,
+    ) -> Result<RuntimeEffects, PreparedCommitError> {
+        if self.visibility != RuntimeVisibility::Hidden {
+            return Err(PreparedCommitError::StaleBase);
+        }
+        let mut effects = self.commit_prepared(prepared.update)?;
+        self.visibility = RuntimeVisibility::Visible;
+        self.start_pending_worker(&mut effects);
+        if effects.start_worker.is_none()
+            && effects.cancel_worker.is_none()
+            && matches!(effects.disposition, RuntimeDisposition::Unchanged)
+        {
+            effects.disposition = RuntimeDisposition::Revealed;
+        }
+        Ok(effects)
+    }
+
+    pub(crate) fn observe_delayed_gpu_error(&mut self, device: DeviceEpoch) -> RuntimeEffects {
+        let mut effects = RuntimeEffects::new(RuntimeDisposition::DroppedStale);
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return effects;
+        }
+        if device != self.device_epoch {
+            return effects;
+        }
         self.active = None;
+        if let Some(pending) = &self.pending {
+            effects.drop_candidate = match &pending.phase {
+                PendingPhase::Ready(candidate)
+                | PendingPhase::Activating { candidate, .. }
+                | PendingPhase::SupersedingActivation { candidate, .. } => {
+                    Some(candidate.request_id)
+                }
+                _ => None,
+            };
+        }
         self.pending = None;
         if let WorkerState::Running(id) = self.worker {
             self.worker = WorkerState::Cancelling(id);
-            self.cancelled_build_count += 1;
+            effects.cancel_worker = Some(id);
         }
-        self.host_fallback_pending = true;
-        ActivationTransition::HostFallbackPending
+        self.recovery = RecoveryState::FallbackPending { device, surface: self.surface_epoch };
+        effects.disposition =
+            RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending);
+        effects
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) -> RuntimeEffects {
+        if self.lifecycle == RuntimeLifecycle::Shutdown {
+            return RuntimeEffects::new(RuntimeDisposition::Shutdown);
+        }
+        let mut effects = RuntimeEffects::new(RuntimeDisposition::Shutdown);
+        self.lifecycle = RuntimeLifecycle::Shutdown;
+        if let WorkerState::Running(id) = self.worker {
+            self.worker = WorkerState::Cancelling(id);
+            effects.cancel_worker = Some(id);
+        }
+        if let Some(pending) = &self.pending {
+            effects.drop_candidate = match &pending.phase {
+                PendingPhase::Ready(candidate)
+                | PendingPhase::Activating { candidate, .. }
+                | PendingPhase::SupersedingActivation { candidate, .. } => {
+                    Some(candidate.request_id)
+                }
+                _ => None,
+            };
+        }
         self.pending = None;
         self.hidden_latest = None;
-        self.worker = match self.worker {
-            WorkerState::Running(id) => WorkerState::Cancelling(id),
-            state => state,
-        };
+        effects
     }
 }
 
@@ -1856,25 +2171,398 @@ mod tests {
         assert!(ResourceChangeMask::AMBIENT_AUTHORED.is_named());
     }
 
-    #[test]
-    fn mixed_change_advances_each_relevant_counter_once() {
-        let initial = snapshot();
-        let mut reconciler = CompanionSceneReconciler::new(Arc::clone(&initial)).unwrap();
-        let mut mixed = (*initial).clone();
-        mixed.topology.layout.width_points += 1.0;
-        mixed.content.palette.eye[0] += 1;
-        mixed.frame.pet_depth += 0.1;
-        let decision = reconciler.reconcile(Arc::new(mixed)).unwrap();
-        assert!(decision.changes().requires_generation());
-        assert_eq!(reconciler.layout_generation(), LayoutGeneration(2));
-        assert_eq!(reconciler.applied_revisions(), AppliedRevisions::new(2, 2));
+    fn accepted_state() -> crate::presentation::companion_scene::validate::AcceptedSceneState {
+        let fixture = SceneFixture::valid();
+        validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap()
+    }
+
+    fn changed_accepted_frame() -> crate::presentation::companion_scene::validate::AcceptedSceneState
+    {
+        let mut fixture = SceneFixture::valid();
+        fixture.frame.dim_amount = 0.25;
+        validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap()
+    }
+
+    fn runtime() -> CompanionSceneRuntimeState {
+        CompanionSceneRuntimeState::with_active(snapshot(), accepted_state()).unwrap()
+    }
+
+    fn topology_update(
+        base: &Arc<CompanionSceneSnapshot>,
+        stage: Stage,
+    ) -> Arc<CompanionSceneSnapshot> {
+        let mut next = (**base).clone();
+        next.topology.pet.stage = stage;
+        Arc::new(next)
+    }
+
+    #[derive(Default)]
+    struct FakeWorkerDispatcher {
+        live: Option<RequestId>,
+        cancelling: Option<RequestId>,
+        starts: Vec<RequestId>,
+    }
+
+    impl FakeWorkerDispatcher {
+        fn apply(&mut self, effects: &mut RuntimeEffects) -> Option<GenerationRequest> {
+            if let Some(cancel) = effects.cancel_worker() {
+                assert_eq!(self.live, Some(cancel));
+                self.live = None;
+                self.cancelling = Some(cancel);
+            }
+            let request = effects.take_start_worker();
+            if let Some(request) = &request {
+                assert!(self.live.is_none(), "a second worker was started");
+                assert!(self.cancelling.is_none(), "start preceded cancellation ack");
+                self.live = Some(request.request_id());
+                self.starts.push(request.request_id());
+            }
+            request
+        }
+
+        fn acknowledge_cancel(&mut self, id: RequestId) {
+            assert_eq!(self.cancelling.take(), Some(id));
+        }
+
+        fn complete(&mut self, id: RequestId) {
+            if self.live == Some(id) {
+                self.live = None;
+            } else {
+                assert_eq!(self.cancelling.take(), Some(id));
+            }
+        }
+    }
+
+    fn commit_snapshot(
+        runtime: &mut CompanionSceneRuntimeState,
+        snapshot: Arc<CompanionSceneSnapshot>,
+    ) -> RuntimeEffects {
+        let prepared = runtime.prepare_snapshot(snapshot).unwrap();
+        runtime.commit_prepared(prepared).unwrap()
+    }
+
+    fn take_start(mut effects: RuntimeEffects) -> GenerationRequest {
+        effects
+            .take_start_worker()
+            .expect("expected owned start action")
+    }
+
+    fn reveal(runtime: &mut CompanionSceneRuntimeState) -> RuntimeEffects {
+        let prepared = runtime.prepare_reveal().unwrap();
+        runtime.commit_reveal(prepared).unwrap()
     }
 
     #[test]
-    fn invalid_snapshots_are_transactionally_rejected() {
-        type SnapshotMutation = Box<dyn Fn(&mut CompanionSceneSnapshot)>;
+    fn running_worker_transitions_emit_exactly_one_owned_start_action() {
+        let mut runtime = runtime();
+        let mut dispatcher = FakeWorkerDispatcher::default();
+        let first_snapshot = topology_update(runtime.snapshot(), Stage::S4);
+        let mut first_effects = commit_snapshot(&mut runtime, first_snapshot);
+        assert!(matches!(
+            first_effects.disposition(),
+            RuntimeDisposition::GenerationStarted(_)
+        ));
+        let first = dispatcher.apply(&mut first_effects).unwrap();
+        assert!(first_effects.take_start_worker().is_none());
 
-        let initial = snapshot();
+        let second_snapshot = topology_update(runtime.snapshot(), Stage::S5);
+        let mut second_effects = commit_snapshot(&mut runtime, second_snapshot);
+        assert!(matches!(
+            second_effects.disposition(),
+            RuntimeDisposition::GenerationQueued(_)
+        ));
+        assert!(second_effects.take_start_worker().is_none());
+        dispatcher.apply(&mut second_effects);
+        dispatcher.acknowledge_cancel(first.request_id());
+        let mut ack = runtime.acknowledge_worker_cancelled(first.request_id());
+        dispatcher.apply(&mut ack);
+        assert_eq!(dispatcher.starts.len(), 2);
+        assert_eq!(
+            runtime.worker,
+            WorkerState::Running(dispatcher.live.unwrap())
+        );
+
+        let mut alternate =
+            CompanionSceneRuntimeState::with_active(snapshot(), accepted_state()).unwrap();
+        let first_snapshot = topology_update(alternate.snapshot(), Stage::S4);
+        let mut first_effects = commit_snapshot(&mut alternate, first_snapshot);
+        let mut dispatcher = FakeWorkerDispatcher::default();
+        let first = dispatcher.apply(&mut first_effects).unwrap();
+        let second_snapshot = topology_update(alternate.snapshot(), Stage::S5);
+        let mut queued = commit_snapshot(&mut alternate, second_snapshot);
+        dispatcher.apply(&mut queued);
+        dispatcher.complete(first.request_id());
+        let mut completion = alternate.complete_candidate(first.accept(accepted_state()));
+        dispatcher.apply(&mut completion);
+        assert_eq!(dispatcher.starts.len(), 2);
+    }
+
+    #[test]
+    fn prepared_updates_publish_only_after_exact_commit() {
+        let mut runtime = runtime();
+        let initial_version = runtime.active_version().unwrap();
+        let initial_snapshot = Arc::clone(runtime.snapshot());
+        let mut next = (*initial_snapshot).clone();
+        next.content.mood = Mood::Content;
+        let rejected = runtime.prepare_snapshot(Arc::new(next)).unwrap();
+        assert_eq!(runtime.capture_lease().unwrap().version(), initial_version);
+        drop(rejected);
+        assert!(Arc::ptr_eq(runtime.snapshot(), &initial_snapshot));
+        assert_eq!(runtime.active_version(), Some(initial_version));
+
+        let mut first = (*initial_snapshot).clone();
+        first.content.mood = Mood::Content;
+        let stale = runtime.prepare_snapshot(Arc::new(first)).unwrap();
+        let mut latest = (*initial_snapshot).clone();
+        latest.content.palette.eye[0] += 1;
+        latest.frame.pet_depth += 0.1;
+        let latest = runtime.prepare_snapshot(Arc::new(latest)).unwrap();
+        assert!(latest
+            .changes()
+            .semantic()
+            .contains(SemanticChangeMask::PALETTE));
+        assert!(latest.frame_revision().0 > initial_version.applied.frame.0);
+        runtime.commit_prepared(latest).unwrap();
+        assert_eq!(
+            runtime.commit_prepared(stale),
+            Err(PreparedCommitError::StaleBase)
+        );
+    }
+
+    #[test]
+    fn accepted_candidate_metadata_is_bound_by_runtime_authority() {
+        let mut runtime = runtime();
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        let candidate = request.accept(accepted_state());
+        assert_eq!(candidate.request_id, request.request_id());
+        assert_eq!(candidate.key, request.key());
+        assert_eq!(candidate.applied, request.source());
+        runtime.complete_candidate(candidate);
+
+        let mut semantic = (**runtime.snapshot()).clone();
+        semantic.content.mood = Mood::Content;
+        commit_snapshot(&mut runtime, Arc::new(semantic));
+        runtime
+            .rebase_ready_candidate(|_, _, _| Ok::<_, ()>(()))
+            .unwrap();
+    }
+
+    #[test]
+    fn compatible_updates_require_runtime_owned_exact_rebase() {
+        let mut runtime = runtime();
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        let original_source = request.source();
+        let mut semantic = (**runtime.snapshot()).clone();
+        semantic.content.mood = Mood::Content;
+        commit_snapshot(&mut runtime, Arc::new(semantic));
+        assert_eq!(
+            request.source(),
+            original_source,
+            "worker request is immutable"
+        );
+        assert_ne!(runtime.pending_desired_source(), Some(original_source));
+        runtime.complete_candidate(request.accept(accepted_state()));
+        assert_eq!(
+            runtime.begin_activation(),
+            Err(ActivationStartError::CandidateNeedsRebase)
+        );
+        runtime
+            .rebase_ready_candidate(|_, _, accepted| {
+                *accepted = accepted_state();
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(runtime.begin_activation().is_ok());
+    }
+
+    #[test]
+    fn frame_rebase_cannot_relabel_unchanged_accepted_proof() {
+        let mut runtime = runtime();
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        runtime.complete_candidate(request.accept(accepted_state()));
+        let mut frame = (**runtime.snapshot()).clone();
+        frame.frame.pet_depth += 0.1;
+        commit_snapshot(&mut runtime, Arc::new(frame));
+
+        assert_eq!(
+            runtime.rebase_ready_candidate(|_, changes, _| {
+                assert!(changes.has_frame());
+                Ok::<_, ()>(())
+            }),
+            Err(CandidateRebaseError::StaleFrameProof)
+        );
+        assert_eq!(
+            runtime.begin_activation(),
+            Err(ActivationStartError::CandidateNeedsRebase)
+        );
+        runtime
+            .rebase_ready_candidate(|_, _, accepted| {
+                *accepted = changed_accepted_frame();
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(runtime.begin_activation().is_ok());
+    }
+
+    #[test]
+    fn repeated_rebase_diffs_from_last_accepted_projection() {
+        let mut runtime = runtime();
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        runtime.complete_candidate(request.accept(accepted_state()));
+        let original_depth = runtime.snapshot().frame.pet_depth;
+
+        let mut forward = (**runtime.snapshot()).clone();
+        forward.frame.pet_depth += 0.1;
+        commit_snapshot(&mut runtime, Arc::new(forward));
+        runtime
+            .rebase_ready_candidate(|_, changes, accepted| {
+                assert!(changes.has_frame());
+                *accepted = changed_accepted_frame();
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        let mut backward = (**runtime.snapshot()).clone();
+        backward.frame.pet_depth = original_depth;
+        commit_snapshot(&mut runtime, Arc::new(backward));
+        assert_eq!(
+            runtime.rebase_ready_candidate(|_, changes, _| {
+                assert!(changes.has_frame());
+                Ok::<_, ()>(())
+            }),
+            Err(CandidateRebaseError::StaleFrameProof)
+        );
+    }
+
+    #[test]
+    fn production_resource_invalidation_preserves_layout_and_emits_work() {
+        let mut runtime = runtime();
+        let before = runtime.active_version().unwrap();
+        let effects = runtime
+            .invalidate_resources(ResourceInvalidation::MaterialContract)
+            .unwrap();
+        let request = take_start(effects);
+        assert_eq!(request.key().layout, before.generation.layout);
+        assert_eq!(request.key().resources, ResourceGeneration(2));
+        assert_eq!(runtime.active_version(), Some(before));
+    }
+
+    #[test]
+    fn surface_recovery_advances_surface_and_resources_without_layout_relabel() {
+        let mut runtime = runtime();
+        let before = runtime.active_version().unwrap();
+        let request = take_start(runtime.acknowledge_surface_rebound().unwrap());
+        assert_eq!(request.surface(), SurfaceEpoch(before.surface.0 + 1));
+        assert_eq!(request.key().layout, before.generation.layout);
+        assert_eq!(
+            request.key().resources,
+            ResourceGeneration(before.generation.resources.0 + 1)
+        );
+        assert_eq!(runtime.active_version(), Some(before));
+        assert_eq!(
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::RecoveryInProgress
+        );
+    }
+
+    #[test]
+    fn prepared_snapshot_shares_arc_and_change_masks_remain_fixed_size() {
+        assert_eq!(std::mem::size_of::<SnapshotChangeSet>(), 32);
+        let mut runtime = runtime();
+        let mut frame = (**runtime.snapshot()).clone();
+        frame.frame.pet_depth += 0.1;
+        let next = Arc::new(frame);
+        let prepared = runtime.prepare_snapshot(Arc::clone(&next)).unwrap();
+        assert!(Arc::ptr_eq(prepared.snapshot(), &next));
+        runtime.commit_prepared(prepared).unwrap();
+        assert!(Arc::ptr_eq(runtime.snapshot(), &next));
+        assert_eq!(Arc::strong_count(&next), 2);
+    }
+
+    #[test]
+    fn layout_and_resource_generations_advance_only_for_their_own_lifetimes() {
+        let mut runtime = runtime();
+        let before = runtime.active_version().unwrap();
+        let mut layout = (**runtime.snapshot()).clone();
+        layout.topology.layout.width_points += 1.0;
+        let request = take_start(commit_snapshot(&mut runtime, Arc::new(layout)));
+        assert_eq!(
+            request.key().layout,
+            LayoutGeneration(before.generation.layout.0 + 1)
+        );
+        assert_eq!(request.key().resources, before.generation.resources);
+
+        let mut mixed = (**runtime.snapshot()).clone();
+        mixed.topology.layout.height_points += 1.0;
+        let mixed = Arc::new(mixed);
+        let mut changes = classify_snapshot_changes(runtime.snapshot(), &mixed);
+        changes.resources = ResourceChangeMask::MATERIAL_CONTRACT;
+        let prepared = runtime.prepare_with_changes(mixed, changes, false).unwrap();
+        let effects = runtime.commit_prepared(prepared).unwrap();
+        let request = runtime.pending_request().unwrap();
+        assert_eq!(
+            request.key().layout,
+            LayoutGeneration(before.generation.layout.0 + 2)
+        );
+        assert_eq!(
+            request.key().resources,
+            ResourceGeneration(before.generation.resources.0 + 1)
+        );
+        assert!(effects.start_worker.is_none());
+        assert!(effects.cancel_worker().is_some());
+    }
+
+    #[test]
+    fn rejected_and_overflowed_preparation_leave_published_state_untouched() {
+        let mut runtime = runtime();
+        let base = Arc::clone(runtime.snapshot());
+        let version = runtime.active_version();
+        let request_id = runtime.next_request_id;
+
+        let mut invalid = (*base).clone();
+        invalid.topology.layout.width_points = f32::NAN;
+        assert!(matches!(
+            runtime.prepare_snapshot(Arc::new(invalid)),
+            Err(RuntimeError::SnapshotRejected(_))
+        ));
+        assert!(Arc::ptr_eq(runtime.snapshot(), &base));
+        assert_eq!(runtime.active_version(), version);
+        assert_eq!(runtime.next_request_id, request_id);
+
+        let mut over_capacity = (*base).clone();
+        let prop = over_capacity.topology.visible_props[0].clone();
+        over_capacity.topology.visible_props.resize(
+            crate::presentation::companion_scene::MAX_VISIBLE_PROPS + 1,
+            prop,
+        );
+        assert!(matches!(
+            runtime.prepare_snapshot(Arc::new(over_capacity)),
+            Err(RuntimeError::SnapshotRejected(
+                SnapshotRejection::FixedCapacity
+            ))
+        ));
+        assert!(runtime.pending.is_none());
+
+        runtime.reconciler.semantic_revision = SemanticRevision(u64::MAX);
+        let mut semantic = (*base).clone();
+        semantic.content.mood = Mood::Content;
+        assert_eq!(
+            runtime.prepare_snapshot(Arc::new(semantic)).unwrap_err(),
+            RuntimeError::CounterOverflow(CounterKind::SemanticRevision)
+        );
+        assert!(Arc::ptr_eq(runtime.snapshot(), &base));
+        assert_eq!(runtime.active_version(), version);
+        assert_eq!(runtime.next_request_id, request_id);
+    }
+
+    #[test]
+    fn every_invalid_snapshot_family_is_transactionally_rejected() {
+        type SnapshotMutation = Box<dyn Fn(&mut CompanionSceneSnapshot)>;
+        let base = snapshot();
         let invalids: Vec<SnapshotMutation> = vec![
             Box::new(|s| s.schema_version += 1),
             Box::new(|s| s.topology.renderer_schema += 1),
@@ -1892,604 +2580,81 @@ mod tests {
             }),
         ];
         for mutate in invalids {
-            let mut reconciler = CompanionSceneReconciler::new(Arc::clone(&initial)).unwrap();
-            let mut invalid = (*initial).clone();
+            let runtime =
+                CompanionSceneRuntimeState::with_active(Arc::clone(&base), accepted_state())
+                    .unwrap();
+            let before = runtime.active_version();
+            let mut invalid = (*base).clone();
             mutate(&mut invalid);
-            assert!(reconciler.reconcile(Arc::new(invalid)).is_err());
-            assert!(Arc::ptr_eq(reconciler.snapshot(), &initial));
-            assert_eq!(reconciler.layout_generation(), LayoutGeneration(1));
-            assert_eq!(reconciler.applied_revisions(), AppliedRevisions::new(1, 1));
+            assert!(runtime.prepare_snapshot(Arc::new(invalid)).is_err());
+            assert!(Arc::ptr_eq(runtime.snapshot(), &base));
+            assert_eq!(runtime.active_version(), before);
+            assert!(runtime.pending.is_none());
+            assert_eq!(runtime.next_request_id, RequestId(1));
         }
     }
 
     #[test]
-    fn counter_overflow_is_typed_and_fail_closed() {
-        let initial = snapshot();
-        let mut reconciler = CompanionSceneReconciler::new(Arc::clone(&initial)).unwrap();
-        reconciler.layout_generation = LayoutGeneration(u64::MAX);
-        let mut changed = (*initial).clone();
-        changed.topology.layout.width_points += 1.0;
+    fn every_owned_counter_overflow_is_typed_and_non_mutating() {
+        let mut layout_runtime = runtime();
+        let initial = layout_runtime.active_version().unwrap();
+        assert_eq!(initial.generation.device, DeviceEpoch(1));
+        assert_eq!(initial.surface, SurfaceEpoch(1));
+        assert_eq!(initial.generation.layout, LayoutGeneration(1));
+        assert_eq!(initial.generation.resources, ResourceGeneration(1));
+        assert_eq!(initial.applied, AppliedRevisions::new(1, 1));
+        assert_eq!(layout_runtime.next_request_id, RequestId(1));
         assert_eq!(
-            reconciler.reconcile(Arc::new(changed)),
-            Err(RuntimeError::CounterOverflow(CounterKind::LayoutGeneration))
+            layout_runtime.next_activation_attempt_id,
+            ActivationAttemptId(1)
         );
-        assert!(Arc::ptr_eq(reconciler.snapshot(), &initial));
+        let base = Arc::clone(layout_runtime.snapshot());
+        layout_runtime.reconciler.layout_generation = LayoutGeneration(u64::MAX);
+        let mut layout = (*base).clone();
+        layout.topology.layout.width_points += 1.0;
+        assert_eq!(
+            layout_runtime
+                .prepare_snapshot(Arc::new(layout))
+                .unwrap_err(),
+            RuntimeError::CounterOverflow(CounterKind::LayoutGeneration)
+        );
+        assert!(Arc::ptr_eq(layout_runtime.snapshot(), &base));
 
-        let accepted = accepted_state();
-        let mut runtime = CompanionSceneRuntimeState::with_active(initial, accepted).unwrap();
-        runtime.next_request_id = RequestId(u64::MAX);
-        let mut changed = (*snapshot()).clone();
-        changed.topology.pet.stage = Stage::S4;
-        assert_eq!(
-            runtime.submit_snapshot(Arc::new(changed)),
-            Err(RuntimeError::CounterOverflow(CounterKind::RequestId))
-        );
-        assert!(runtime.pending.is_none());
-    }
-
-    fn accepted_state() -> crate::presentation::companion_scene::validate::AcceptedSceneState {
-        let fixture = SceneFixture::valid();
-        validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap()
-    }
-
-    fn runtime() -> CompanionSceneRuntimeState {
-        CompanionSceneRuntimeState::with_active(snapshot(), accepted_state()).unwrap()
-    }
-
-    fn topology_update(
-        base: &Arc<CompanionSceneSnapshot>,
-        stage: Stage,
-    ) -> Arc<CompanionSceneSnapshot> {
-        let mut next = (**base).clone();
-        next.topology.pet.stage = stage;
-        Arc::new(next)
-    }
-
-    #[test]
-    fn rapid_topology_storm_has_one_worker_and_only_newest_request() {
-        let mut runtime = runtime();
-        let first = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        assert_eq!(runtime.worker, WorkerState::Running(first.request_id));
-        let second = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S5))
-            .unwrap()
-            .request()
-            .unwrap();
-        assert_eq!(runtime.worker, WorkerState::Cancelling(first.request_id));
-        assert_eq!(
-            runtime.pending_request().unwrap().request_id,
-            second.request_id
-        );
-        assert_ne!(first.request_id, second.request_id);
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&first)),
-            CandidateCompletion::DroppedStale
-        );
-        assert_eq!(runtime.worker, WorkerState::Running(second.request_id),);
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&first)),
-            CandidateCompletion::DroppedStale
-        );
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&second)),
-            CandidateCompletion::Ready
-        );
-        assert_eq!(runtime.cancelled_build_count, 1);
-        assert_eq!(runtime.max_workers_observed, 1);
-    }
-
-    #[test]
-    fn cancellation_ack_then_late_old_completion_also_starts_only_newest() {
-        let mut runtime = runtime();
-        let first = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        let second = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S5))
-            .unwrap()
-            .request()
-            .unwrap();
-        assert_eq!(
-            runtime.acknowledge_worker_cancelled(first.request_id),
-            WorkerTransition::Started(second.request_id)
-        );
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&first)),
-            CandidateCompletion::DroppedStale
-        );
-        assert_eq!(runtime.worker, WorkerState::Running(second.request_id));
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&second)),
-            CandidateCompletion::Ready
-        );
-    }
-
-    fn candidate(request: &GenerationRequest) -> AcceptedGenerationCandidate {
-        candidate_at(request, request.source)
-    }
-
-    fn candidate_at(
-        request: &GenerationRequest,
-        applied: AppliedRevisions,
-    ) -> AcceptedGenerationCandidate {
-        AcceptedGenerationCandidate::new(request.request_id, request.key, applied, accepted_state())
-    }
-
-    #[test]
-    fn compatible_updates_rebase_pending_and_require_exact_candidate_proof() {
-        let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        let mut semantic = (**runtime.snapshot()).clone();
-        semantic.content.mood = Mood::Content;
-        runtime.submit_snapshot(Arc::new(semantic)).unwrap();
-        assert_eq!(
-            runtime.pending_request().unwrap().source,
-            request.source,
-            "the worker request remains immutable"
-        );
-        assert_eq!(
-            runtime.pending_desired_source().unwrap().semantic,
-            SemanticRevision(2)
-        );
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&request)),
-            CandidateCompletion::Ready
-        );
-        assert_eq!(
-            runtime.begin_activation(),
-            Err(ActivationStartError::CandidateNeedsRebase)
-        );
-        let rebased = candidate_at(&request, runtime.pending_desired_source().unwrap());
-        assert_eq!(
-            runtime.replace_ready_candidate(rebased),
-            CandidateCompletion::Ready
-        );
-
-        let mut frame = (**runtime.snapshot()).clone();
+        let mut frame_runtime = runtime();
+        frame_runtime.reconciler.frame_revision = FrameRevision(u64::MAX);
+        let mut frame = (**frame_runtime.snapshot()).clone();
         frame.frame.pet_depth += 0.1;
-        runtime.submit_snapshot(Arc::new(frame)).unwrap();
         assert_eq!(
-            runtime.begin_activation(),
-            Err(ActivationStartError::CandidateNeedsRebase)
-        );
-        let rebased = candidate_at(&request, runtime.pending_desired_source().unwrap());
-        assert_eq!(
-            runtime.replace_ready_candidate(rebased),
-            CandidateCompletion::Ready
-        );
-        assert!(runtime.begin_activation().is_ok());
-    }
-
-    #[test]
-    fn compatible_update_during_activation_defers_old_attempt_for_exact_rebase() {
-        let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
-        let old_attempt = runtime.begin_activation().unwrap();
-
-        let mut newest = (**runtime.snapshot()).clone();
-        newest.frame.pet_depth += 0.1;
-        runtime.submit_snapshot(Arc::new(newest)).unwrap();
-        assert_eq!(
-            runtime.finish_activation(
-                old_attempt,
-                ActivationAttemptOutcome::PresentedClean { surface: old_attempt.surface },
-            ),
-            ActivationTransition::DroppedStale
-        );
-        assert_eq!(
-            runtime.begin_activation(),
-            Err(ActivationStartError::CandidateNeedsRebase)
-        );
-        let rebased = candidate_at(&request, runtime.pending_desired_source().unwrap());
-        runtime.replace_ready_candidate(rebased);
-        let newest_attempt = runtime.begin_activation().unwrap();
-        assert_eq!(
-            runtime.finish_activation(
-                newest_attempt,
-                ActivationAttemptOutcome::PresentedClean { surface: newest_attempt.surface },
-            ),
-            ActivationTransition::Committed
-        );
-    }
-
-    #[test]
-    fn stale_in_flight_activation_still_honors_rejection_and_fatal_outcomes() {
-        let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
-        let attempt = runtime.begin_activation().unwrap();
-        let mut newest = (**runtime.snapshot()).clone();
-        newest.frame.pet_depth += 0.1;
-        runtime.submit_snapshot(Arc::new(newest)).unwrap();
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::Fatal(EpochFailure::ImmediateGpuError),
-            ),
-            ActivationTransition::HostFallbackPending
-        );
-        assert_eq!(runtime.active_version(), None);
-
-        let mut rejected_runtime =
-            CompanionSceneRuntimeState::with_active(snapshot(), accepted_state()).unwrap();
-        let request = rejected_runtime
-            .submit_snapshot(topology_update(rejected_runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        rejected_runtime.complete_cpu_candidate(candidate(&request));
-        let attempt = rejected_runtime.begin_activation().unwrap();
-        rejected_runtime.set_hidden();
-        assert_eq!(
-            rejected_runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource),
-            ),
-            ActivationTransition::CandidateDestroyedRetainingActive
-        );
-        assert!(rejected_runtime.pending.is_none());
-        assert!(rejected_runtime.active_version().is_some());
-    }
-
-    #[test]
-    fn topology_supersession_keeps_old_attempt_failures_actionable() {
-        let mut runtime = runtime();
-        let first = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&first));
-        let attempt = runtime.begin_activation().unwrap();
-        let second = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S5))
-            .unwrap()
-            .request()
-            .unwrap();
-        assert_ne!(first.request_id, second.request_id);
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::Fatal(EpochFailure::DeviceLost),
-            ),
-            ActivationTransition::HostFallbackPending
-        );
-        assert_eq!(runtime.active_version(), None);
-        assert!(runtime.pending.is_none());
-    }
-
-    #[test]
-    fn topology_supersession_defers_capture_until_old_attempt_finishes() {
-        let mut runtime = runtime();
-        let first = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&first));
-        let attempt = runtime.begin_activation().unwrap();
-        runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S5))
-            .unwrap();
-        assert_eq!(
-            runtime.capture_lease().unwrap_err(),
-            CaptureDefer::ActivationInProgress
-        );
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
-            ),
-            ActivationTransition::DroppedStale
-        );
-    }
-
-    #[test]
-    fn old_surface_failure_cannot_invalidate_new_surface_epoch() {
-        let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
-        let old_attempt = runtime.begin_activation().unwrap();
-        assert_eq!(runtime.advance_surface_epoch().unwrap(), SurfaceEpoch(2));
-        assert_eq!(
-            runtime.finish_activation(
-                old_attempt,
-                ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
-            ),
-            ActivationTransition::DroppedStale
-        );
-        assert!(!runtime.host_fallback_pending());
-        assert!(runtime.capture_lease().is_ok());
-        assert!(runtime.begin_activation().is_ok());
-    }
-
-    #[test]
-    fn resource_only_change_requests_generation_without_advancing_layout() {
-        let initial = snapshot();
-        let mut reconciler = CompanionSceneReconciler::new(Arc::clone(&initial)).unwrap();
-        let changes = SnapshotChangeSet {
-            resources: ResourceChangeMask::MATERIAL_CONTRACT,
-            ..SnapshotChangeSet::NONE
-        };
-        let decision = reconciler
-            .reconcile_validated(Arc::clone(&initial), changes)
-            .unwrap();
-        assert!(decision.changes().requires_generation());
-        assert_eq!(reconciler.layout_generation(), LayoutGeneration(1));
-    }
-
-    #[test]
-    fn surface_rebind_does_not_allocate_scene_generation_and_device_change_stales_work() {
-        let mut runtime = runtime();
-        let before = runtime.active_version().unwrap();
-        assert_eq!(runtime.advance_surface_epoch().unwrap(), SurfaceEpoch(2));
-        let after = runtime.active_version().unwrap();
-        assert_eq!(before.generation, after.generation);
-        assert_eq!(after.surface, SurfaceEpoch(2));
-
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        assert_eq!(runtime.advance_device_epoch().unwrap(), DeviceEpoch(2));
-        let replacement = runtime.pending_request().unwrap().clone();
-        assert_eq!(replacement.key.device, DeviceEpoch(2));
-        assert_ne!(replacement.request_id, request.request_id);
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&request)),
-            CandidateCompletion::DroppedStale
-        );
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&replacement)),
-            CandidateCompletion::Ready
-        );
-        assert_eq!(
-            runtime.begin_activation(),
-            Err(ActivationStartError::SurfaceUnavailable)
-        );
-        runtime.advance_surface_epoch().unwrap();
-        assert!(runtime.begin_activation().is_ok());
-        assert!(runtime.host_fallback_pending());
-    }
-
-    #[test]
-    fn activation_is_exact_typed_and_retains_active_until_clean_present() {
-        let mut runtime = runtime();
-        let previous = runtime.active_version().unwrap();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&request)),
-            CandidateCompletion::Ready
+            frame_runtime.prepare_snapshot(Arc::new(frame)).unwrap_err(),
+            RuntimeError::CounterOverflow(CounterKind::FrameRevision)
         );
 
-        let attempt = runtime.begin_activation().unwrap();
-        assert_eq!(runtime.active_version(), Some(previous));
+        let mut request_runtime = runtime();
+        request_runtime.next_request_id = RequestId(u64::MAX);
+        let topology = topology_update(request_runtime.snapshot(), Stage::S4);
         assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::Deferred(AcquireDeferral::Timeout)
-            ),
-            ActivationTransition::RetryLater
+            request_runtime.prepare_snapshot(topology).unwrap_err(),
+            RuntimeError::CounterOverflow(CounterKind::RequestId)
         );
-        assert_eq!(runtime.active_version(), Some(previous));
+        assert!(request_runtime.pending.is_none());
 
-        let attempt = runtime.begin_activation().unwrap();
-        let wrong = ActivationAttempt {
-            attempt_id: ActivationAttemptId(attempt.attempt_id.0 + 1),
-            ..attempt
-        };
+        let mut surface_runtime = runtime();
+        surface_runtime.surface_epoch = SurfaceEpoch(u64::MAX);
         assert_eq!(
-            runtime.finish_activation(
-                wrong,
-                ActivationAttemptOutcome::PresentedClean { surface: attempt.surface }
-            ),
-            ActivationTransition::DroppedStale
-        );
-        assert_eq!(runtime.active_version(), Some(previous));
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::Fatal(EpochFailure::ImmediateGpuError)
-            ),
-            ActivationTransition::HostFallbackPending
-        );
-        assert_ne!(
-            runtime.active_version(),
-            Some(request.version(SurfaceEpoch(1)))
-        );
-    }
-
-    #[test]
-    fn every_typed_deferral_and_candidate_failure_retains_active() {
-        for deferral in [
-            AcquireDeferral::OutdatedReconfigured,
-            AcquireDeferral::Timeout,
-            AcquireDeferral::Occluded,
-        ] {
-            let mut runtime = runtime();
-            let previous = runtime.active_version().unwrap();
-            let request = runtime
-                .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-                .unwrap()
-                .request()
-                .unwrap();
-            runtime.complete_cpu_candidate(candidate(&request));
-            let attempt = runtime.begin_activation().unwrap();
-            assert_eq!(
-                runtime.finish_activation(attempt, ActivationAttemptOutcome::Deferred(deferral)),
-                ActivationTransition::RetryLater
-            );
-            assert_eq!(runtime.active_version(), Some(previous));
-        }
-
-        for failure in [
-            CandidateFailure::Validation,
-            CandidateFailure::Resource,
-            CandidateFailure::PreSubmitEncode,
-        ] {
-            let mut runtime = runtime();
-            let previous = runtime.active_version().unwrap();
-            let request = runtime
-                .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-                .unwrap()
-                .request()
-                .unwrap();
-            runtime.complete_cpu_candidate(candidate(&request));
-            let attempt = runtime.begin_activation().unwrap();
-            assert_eq!(
-                runtime.finish_activation(
-                    attempt,
-                    ActivationAttemptOutcome::CandidateRejected(failure)
-                ),
-                ActivationTransition::CandidateDestroyedRetainingActive
-            );
-            assert_eq!(runtime.active_version(), Some(previous));
-        }
-    }
-
-    #[test]
-    fn every_epoch_failure_falls_back_and_wrong_exact_identity_cannot_commit() {
-        for failure in [
-            EpochFailure::SurfaceLost,
-            EpochFailure::SurfaceValidation,
-            EpochFailure::DeviceLost,
-            EpochFailure::Internal,
-            EpochFailure::OutOfMemory,
-            EpochFailure::UncertainPostSubmit,
-            EpochFailure::ImmediateGpuError,
-            EpochFailure::DelayedGpuError,
-        ] {
-            let mut runtime = runtime();
-            let request = runtime
-                .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-                .unwrap()
-                .request()
-                .unwrap();
-            runtime.complete_cpu_candidate(candidate(&request));
-            let attempt = runtime.begin_activation().unwrap();
-            assert_eq!(
-                runtime.finish_activation(attempt, ActivationAttemptOutcome::Fatal(failure)),
-                ActivationTransition::HostFallbackPending
-            );
-            assert!(runtime.host_fallback_pending());
-        }
-
-        let mut runtime = runtime();
-        let previous = runtime.active_version().unwrap();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        let mut wrong_candidate = candidate(&request);
-        wrong_candidate.key.resources.0 += 1;
-        assert_eq!(
-            runtime.complete_cpu_candidate(wrong_candidate),
-            CandidateCompletion::DroppedStale
-        );
-        runtime.complete_cpu_candidate(candidate(&request));
-        let attempt = runtime.begin_activation().unwrap();
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::PresentedClean {
-                    surface: SurfaceEpoch(attempt.surface.0 + 1),
-                },
-            ),
-            ActivationTransition::DroppedStale
-        );
-        assert_eq!(runtime.active_version(), Some(previous));
-    }
-
-    #[test]
-    fn every_owned_counter_starts_at_one_and_overflows_without_mutation() {
-        let initial = snapshot();
-        let accepted = accepted_state();
-        let mut runtime = CompanionSceneRuntimeState::with_active(initial, accepted).unwrap();
-        let version = runtime.active_version().unwrap();
-        assert_eq!(version.generation.device, DeviceEpoch(1));
-        assert_eq!(version.surface, SurfaceEpoch(1));
-        assert_eq!(version.generation.layout, LayoutGeneration(1));
-        assert_eq!(version.generation.resources, ResourceGeneration(1));
-        assert_eq!(version.applied, AppliedRevisions::new(1, 1));
-        assert_eq!(runtime.next_request_id, RequestId(1));
-        assert_eq!(runtime.next_activation_attempt_id, ActivationAttemptId(1));
-
-        runtime.resource_generation = ResourceGeneration(u64::MAX);
-        let mut changed = (**runtime.snapshot()).clone();
-        changed.topology.pet.stage = Stage::S4;
-        assert_eq!(
-            runtime.submit_snapshot(Arc::new(changed)),
-            Err(RuntimeError::CounterOverflow(
-                CounterKind::ResourceGeneration
-            ))
-        );
-        assert!(runtime.pending.is_none());
-
-        runtime.surface_epoch = SurfaceEpoch(u64::MAX);
-        assert_eq!(
-            runtime.advance_surface_epoch(),
+            surface_runtime.acknowledge_surface_rebound(),
             Err(RuntimeError::CounterOverflow(CounterKind::SurfaceEpoch))
         );
-        runtime.device_epoch = DeviceEpoch(u64::MAX);
+        let mut device_runtime = runtime();
+        device_runtime.device_epoch = DeviceEpoch(u64::MAX);
         assert_eq!(
-            runtime.advance_device_epoch(),
+            device_runtime.acknowledge_device_recreated(),
             Err(RuntimeError::CounterOverflow(CounterKind::DeviceEpoch))
         );
 
-        let mut reconciler = CompanionSceneReconciler::new(snapshot()).unwrap();
-        reconciler.semantic_revision = SemanticRevision(u64::MAX);
-        let mut semantic = (**reconciler.snapshot()).clone();
-        semantic.content.mood = Mood::Content;
-        assert_eq!(
-            reconciler.reconcile(Arc::new(semantic)),
-            Err(RuntimeError::CounterOverflow(CounterKind::SemanticRevision))
-        );
-        let mut reconciler = CompanionSceneReconciler::new(snapshot()).unwrap();
-        reconciler.frame_revision = FrameRevision(u64::MAX);
-        let mut frame = (**reconciler.snapshot()).clone();
-        frame.frame.pet_depth += 0.1;
-        assert_eq!(
-            reconciler.reconcile(Arc::new(frame)),
-            Err(RuntimeError::CounterOverflow(CounterKind::FrameRevision))
-        );
-
-        let mut activation_runtime =
-            CompanionSceneRuntimeState::with_active(snapshot(), accepted_state()).unwrap();
-        let request = activation_runtime
-            .submit_snapshot(topology_update(activation_runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        activation_runtime.complete_cpu_candidate(candidate(&request));
+        let mut activation_runtime = runtime();
+        let topology = topology_update(activation_runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut activation_runtime, topology));
+        activation_runtime.complete_candidate(request.accept(accepted_state()));
         activation_runtime.next_activation_attempt_id = ActivationAttemptId(u64::MAX);
         assert_eq!(
             activation_runtime.begin_activation(),
@@ -2500,187 +2665,420 @@ mod tests {
     }
 
     #[test]
-    fn candidate_rejection_retains_previous_and_clean_present_commits_exact_candidate() {
+    fn prepared_token_is_invalidated_by_runtime_boundary_changes() {
         let mut runtime = runtime();
-        let previous = runtime.active_version().unwrap();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
-        let attempt = runtime.begin_activation().unwrap();
+        let mut semantic = (**runtime.snapshot()).clone();
+        semantic.content.mood = Mood::Content;
+        let prepared = runtime.prepare_snapshot(Arc::new(semantic)).unwrap();
+        runtime.set_hidden();
         assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::CandidateRejected(CandidateFailure::PreSubmitEncode)
-            ),
-            ActivationTransition::CandidateDestroyedRetainingActive
-        );
-        assert_eq!(runtime.active_version(), Some(previous));
-
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S5))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
-        let attempt = runtime.begin_activation().unwrap();
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::PresentedClean { surface: attempt.surface }
-            ),
-            ActivationTransition::Committed
-        );
-        assert_eq!(
-            runtime.active_version(),
-            Some(request.version(attempt.surface))
+            runtime.commit_prepared(prepared),
+            Err(PreparedCommitError::StaleBase)
         );
     }
 
     #[test]
-    fn accepted_candidate_owns_validation_proof_after_source_drop() {
+    fn fallback_and_recovery_gate_capture_until_exact_present() {
         let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        let accepted = {
-            let fixture = SceneFixture::valid();
-            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap()
-        };
-        let checksum = accepted.template().template().generation_checksum;
-        let candidate = AcceptedGenerationCandidate::new(
-            request.request_id,
-            request.key,
-            request.source,
-            accepted,
-        );
-        assert_eq!(
-            candidate.accepted.template().template().generation_checksum,
-            checksum
-        );
-    }
-
-    #[test]
-    fn delayed_post_commit_error_falls_back_without_resurrecting_previous() {
-        let mut runtime = runtime();
-        let previous = runtime.active_version().unwrap();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        runtime.complete_candidate(request.accept(accepted_state()));
         let attempt = runtime.begin_activation().unwrap();
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
-            ),
-            ActivationTransition::Committed
+        runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
         );
-        let committed = runtime.active_version().unwrap();
-        assert_ne!(committed, previous);
-        assert_eq!(
-            runtime.observe_delayed_gpu_error(committed.generation.device),
-            ActivationTransition::HostFallbackPending
-        );
-        assert!(runtime.host_fallback_pending());
-        assert_eq!(runtime.active_version(), None);
-        assert_ne!(runtime.active_version(), Some(previous));
+        assert!(matches!(
+            runtime.recovery,
+            RecoveryState::FallbackPending { .. }
+        ));
         assert_eq!(
             runtime.capture_lease().unwrap_err(),
-            CaptureDefer::NoActiveGeneration
+            CaptureDefer::RecoveryInProgress
         );
-    }
 
-    #[test]
-    fn delayed_error_from_retired_device_cannot_invalidate_new_device() {
-        let mut runtime = runtime();
-        let retired = runtime.active_version().unwrap().generation.device;
-        runtime.advance_device_epoch().unwrap();
-        runtime.advance_surface_epoch().unwrap();
-        let replacement = runtime.pending_request().unwrap().clone();
-        runtime.complete_cpu_candidate(candidate(&replacement));
+        let request = take_start(runtime.acknowledge_surface_rebound().unwrap());
+        assert!(matches!(runtime.recovery, RecoveryState::Recovering { .. }));
+        assert_eq!(
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::RecoveryInProgress
+        );
+        runtime.complete_candidate(request.accept(accepted_state()));
         let attempt = runtime.begin_activation().unwrap();
         runtime.finish_activation(
             attempt,
             ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
         );
-        let current = runtime.active_version().unwrap();
-        assert_ne!(current.generation.device, retired);
-        assert_eq!(
-            runtime.observe_delayed_gpu_error(retired),
-            ActivationTransition::DroppedStale
-        );
-        assert_eq!(runtime.active_version(), Some(current));
-        assert!(!runtime.host_fallback_pending());
+        assert_eq!(runtime.recovery, RecoveryState::Operational);
+        assert!(runtime.capture_lease().is_ok());
     }
 
     #[test]
-    fn delayed_current_device_error_cannot_be_resurrected_by_in_flight_activation() {
+    fn superseding_activation_drops_old_candidate_and_starts_exact_new_request() {
         let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
+        let first_snapshot = topology_update(runtime.snapshot(), Stage::S4);
+        let first = take_start(commit_snapshot(&mut runtime, first_snapshot));
+        runtime.complete_candidate(first.accept(accepted_state()));
         let attempt = runtime.begin_activation().unwrap();
+
+        let second_snapshot = topology_update(runtime.snapshot(), Stage::S5);
+        let second_effects = commit_snapshot(&mut runtime, second_snapshot);
+        let second_id = runtime.pending_request().unwrap().request_id();
+        assert!(second_effects.start_worker.is_none());
         assert_eq!(
-            runtime.observe_delayed_gpu_error(attempt.key.device),
-            ActivationTransition::HostFallbackPending
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::ActivationInProgress
+        );
+
+        let mut completion = runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
+        );
+        assert_eq!(completion.drop_candidate(), Some(first.request_id()));
+        assert_eq!(
+            completion
+                .take_start_worker()
+                .map(|request| request.request_id()),
+            Some(second_id)
+        );
+        assert_eq!(runtime.worker, WorkerState::Running(second_id));
+    }
+
+    fn runtime_with_activation() -> (
+        CompanionSceneRuntimeState,
+        GenerationRequest,
+        ActivationAttempt,
+    ) {
+        let mut runtime = runtime();
+        let topology = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, topology));
+        runtime.complete_candidate(request.accept(accepted_state()));
+        let attempt = runtime.begin_activation().unwrap();
+        (runtime, request, attempt)
+    }
+
+    #[test]
+    fn superseding_activation_late_rejection_and_current_fatal_remain_actionable() {
+        let (mut rejected, first, attempt) = runtime_with_activation();
+        let next = topology_update(rejected.snapshot(), Stage::S5);
+        commit_snapshot(&mut rejected, next);
+        let replacement = rejected.pending_request().unwrap().request_id();
+        let mut effects = rejected.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource),
+        );
+        assert_eq!(effects.drop_candidate(), Some(first.request_id()));
+        assert_eq!(
+            effects
+                .take_start_worker()
+                .map(|request| request.request_id()),
+            Some(replacement)
+        );
+        assert!(rejected.active_version().is_some());
+
+        let (mut fatal, first, attempt) = runtime_with_activation();
+        let next = topology_update(fatal.snapshot(), Stage::S5);
+        commit_snapshot(&mut fatal, next);
+        let effects = fatal.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::DeviceLost),
+        );
+        assert_eq!(effects.drop_candidate(), Some(first.request_id()));
+        assert!(effects.start_worker.is_none());
+        assert!(fatal.active_version().is_none());
+        assert!(matches!(
+            fatal.recovery,
+            RecoveryState::FallbackPending { .. }
+        ));
+    }
+
+    #[test]
+    fn retired_surface_and_device_failures_cannot_poison_recovery() {
+        let (mut surface, old_surface, attempt) = runtime_with_activation();
+        let recovery = surface.acknowledge_surface_rebound().unwrap();
+        let replacement = surface.pending_request().unwrap().request_id();
+        assert!(recovery.start_worker.is_none());
+        let mut late = surface.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
+        );
+        assert_eq!(late.drop_candidate(), Some(old_surface.request_id()));
+        assert_eq!(
+            late.take_start_worker().map(|request| request.request_id()),
+            Some(replacement)
+        );
+        assert!(matches!(surface.recovery, RecoveryState::Recovering { .. }));
+        assert!(surface.active_version().is_some());
+
+        let (mut device, old_device, attempt) = runtime_with_activation();
+        device.acknowledge_device_recreated().unwrap();
+        let replacement = device.pending_request().unwrap().request_id();
+        let mut late = device.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::DeviceLost),
+        );
+        assert_eq!(late.drop_candidate(), Some(old_device.request_id()));
+        assert_eq!(
+            late.take_start_worker().map(|request| request.request_id()),
+            Some(replacement)
+        );
+        assert!(matches!(device.recovery, RecoveryState::Recovering { .. }));
+    }
+
+    #[test]
+    fn activation_guards_retain_active_until_exact_clean_present() {
+        for deferral in [
+            AcquireDeferral::OutdatedReconfigured,
+            AcquireDeferral::Timeout,
+            AcquireDeferral::Occluded,
+        ] {
+            let (mut runtime, _, attempt) = runtime_with_activation();
+            let previous = runtime.active_version();
+            let effects =
+                runtime.finish_activation(attempt, ActivationAttemptOutcome::Deferred(deferral));
+            assert_eq!(
+                effects.disposition(),
+                RuntimeDisposition::Activation(ActivationTransition::RetryLater)
+            );
+            assert_eq!(runtime.active_version(), previous);
+        }
+        for failure in [
+            CandidateFailure::Validation,
+            CandidateFailure::Resource,
+            CandidateFailure::PreSubmitEncode,
+        ] {
+            let (mut runtime, _, attempt) = runtime_with_activation();
+            let previous = runtime.active_version();
+            runtime.finish_activation(
+                attempt,
+                ActivationAttemptOutcome::CandidateRejected(failure),
+            );
+            assert_eq!(runtime.active_version(), previous);
+        }
+
+        let (mut runtime, request, attempt) = runtime_with_activation();
+        let previous = runtime.active_version();
+        let wrong = ActivationAttempt {
+            attempt_id: ActivationAttemptId(attempt.attempt_id.0 + 1),
+            ..attempt
+        };
+        runtime.finish_activation(
+            wrong,
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
+        );
+        assert_eq!(runtime.active_version(), previous);
+        let effects = runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::PresentedClean {
+                surface: SurfaceEpoch(attempt.surface.0 + 1),
+            },
         );
         assert_eq!(
+            effects.disposition(),
+            RuntimeDisposition::Activation(ActivationTransition::DroppedStale)
+        );
+        assert_ne!(runtime.active_version().unwrap().generation, request.key());
+    }
+
+    #[test]
+    fn every_epoch_failure_enters_typed_fallback() {
+        for failure in [
+            EpochFailure::SurfaceLost,
+            EpochFailure::SurfaceValidation,
+            EpochFailure::DeviceLost,
+            EpochFailure::Internal,
+            EpochFailure::OutOfMemory,
+            EpochFailure::UncertainPostSubmit,
+            EpochFailure::ImmediateGpuError,
+            EpochFailure::DelayedGpuError,
+        ] {
+            let (mut runtime, _, attempt) = runtime_with_activation();
+            let effects =
+                runtime.finish_activation(attempt, ActivationAttemptOutcome::Fatal(failure));
+            assert_eq!(
+                effects.disposition(),
+                RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending)
+            );
+            assert!(matches!(
+                runtime.recovery,
+                RecoveryState::FallbackPending { .. }
+            ));
+            assert_eq!(
+                runtime.capture_lease().unwrap_err(),
+                CaptureDefer::RecoveryInProgress
+            );
+        }
+    }
+
+    #[test]
+    fn device_recreation_and_resource_work_stay_queued_while_hidden() {
+        let mut runtime = runtime();
+        runtime.set_hidden();
+        let device = runtime.acknowledge_device_recreated().unwrap();
+        assert!(device.start_worker.is_none());
+        assert_eq!(runtime.device_epoch, DeviceEpoch(2));
+        assert!(matches!(runtime.recovery, RecoveryState::Recovering { .. }));
+
+        let resource = runtime
+            .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
+            .unwrap();
+        assert!(resource.start_worker.is_none());
+        assert_eq!(resource.cancel_worker(), None);
+        let expected = runtime.pending_request().unwrap().request_id();
+        assert!(matches!(
+            runtime.recovery,
+            RecoveryState::Recovering { request, .. } if request == expected
+        ));
+        let mut reveal = reveal(&mut runtime);
+        assert_eq!(
+            reveal
+                .take_start_worker()
+                .map(|request| request.request_id()),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn recovery_authority_follows_newest_request_in_both_cancellation_orders() {
+        for acknowledge_first in [true, false] {
+            let mut runtime = runtime();
+            let topology = topology_update(runtime.snapshot(), Stage::S4);
+            let initial = take_start(commit_snapshot(&mut runtime, topology));
+            runtime.complete_candidate(initial.accept(accepted_state()));
+            let attempt = runtime.begin_activation().unwrap();
+            runtime.finish_activation(
+                attempt,
+                ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
+            );
+            let recovery = take_start(runtime.acknowledge_surface_rebound().unwrap());
+            let newest_snapshot = topology_update(runtime.snapshot(), Stage::S5);
+            let superseding = commit_snapshot(&mut runtime, newest_snapshot);
+            assert_eq!(superseding.cancel_worker(), Some(recovery.request_id()));
+            let newest = runtime.pending_request().unwrap().request_id();
+            assert!(matches!(
+                runtime.recovery,
+                RecoveryState::Recovering { request, .. } if request == newest
+            ));
+
+            let mut start = if acknowledge_first {
+                runtime.acknowledge_worker_cancelled(recovery.request_id())
+            } else {
+                runtime.complete_candidate(recovery.accept(accepted_state()))
+            };
+            let newest_request = start.take_start_worker().unwrap();
+            assert_eq!(newest_request.request_id(), newest);
+            runtime.complete_candidate(newest_request.accept(accepted_state()));
+            let attempt = runtime.begin_activation().unwrap();
             runtime.finish_activation(
                 attempt,
                 ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
-            ),
-            ActivationTransition::DroppedStale
-        );
-        assert_eq!(runtime.active_version(), None);
-        assert!(runtime.host_fallback_pending());
+            );
+            assert_eq!(runtime.recovery, RecoveryState::Operational);
+        }
     }
 
     #[test]
-    fn delayed_current_device_error_cancels_preparing_worker() {
+    fn hidden_snapshot_storm_commits_only_latest_and_emits_one_reveal_start() {
         let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
+        runtime.set_hidden();
+        let mut latest = None;
+        for step in 0..10 {
+            let mut next = (**runtime.snapshot()).clone();
+            next.frame.pet_depth = 0.5 + step as f32 * 0.01;
+            if step == 9 {
+                next.topology.pet.stage = Stage::S4;
+            }
+            let next = Arc::new(next);
+            latest = Some(Arc::clone(&next));
+            runtime.coalesce_hidden_snapshot(next).unwrap();
+            assert!(runtime.pending.is_none());
+        }
+        let prepared = runtime.prepare_reveal().unwrap();
+        assert!(Arc::ptr_eq(
+            prepared.update().snapshot(),
+            latest.as_ref().unwrap()
+        ));
+        let mut effects = runtime.commit_reveal(prepared).unwrap();
+        assert!(Arc::ptr_eq(runtime.snapshot(), latest.as_ref().unwrap()));
+        assert!(runtime.hidden_latest.is_none());
+        assert!(effects.take_start_worker().is_some());
+        assert!(effects.cancel_worker().is_none());
+    }
+
+    #[test]
+    fn dropped_reveal_projection_retains_hidden_snapshot_and_publishes_nothing() {
+        let mut runtime = runtime();
+        runtime.set_hidden();
+        let before = runtime.active_version();
+        let before_snapshot = Arc::clone(runtime.snapshot());
+        let mut hidden = (*before_snapshot).clone();
+        hidden.frame.pet_depth += 0.1;
+        let hidden = Arc::new(hidden);
+        runtime
+            .coalesce_hidden_snapshot(Arc::clone(&hidden))
             .unwrap();
-        assert_eq!(runtime.worker, WorkerState::Running(request.request_id));
-        assert_eq!(
-            runtime.observe_delayed_gpu_error(request.key.device),
-            ActivationTransition::HostFallbackPending
-        );
+
+        let prepared = runtime.prepare_reveal().unwrap();
+        assert!(Arc::ptr_eq(prepared.update().snapshot(), &hidden));
+        drop(prepared); // Task 5 projection failed.
+        assert!(Arc::ptr_eq(runtime.snapshot(), &before_snapshot));
+        assert_eq!(runtime.active_version(), before);
         assert!(runtime.pending.is_none());
-        assert_eq!(runtime.worker, WorkerState::Cancelling(request.request_id));
-        assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&request)),
-            CandidateCompletion::DroppedStale
-        );
-        assert_eq!(runtime.worker, WorkerState::Idle);
-        assert_eq!(runtime.active_version(), None);
+        assert!(runtime.hidden_latest.is_some());
+        assert_eq!(runtime.visibility, RuntimeVisibility::Hidden);
     }
 
     #[test]
-    fn capture_lease_binds_exact_active_version_and_defers_while_activating() {
+    fn reveal_token_binds_absence_of_hidden_snapshot() {
         let mut runtime = runtime();
-        let leased_version = {
-            let lease = runtime.capture_lease().unwrap();
-            lease.version()
-        };
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
+        runtime.set_hidden();
+        let prepared = runtime.prepare_reveal().unwrap();
+        let mut late = (**runtime.snapshot()).clone();
+        late.frame.pet_depth += 0.1;
+        let late = Arc::new(late);
+        runtime.coalesce_hidden_snapshot(Arc::clone(&late)).unwrap();
+
+        assert_eq!(
+            runtime.commit_reveal(prepared),
+            Err(PreparedCommitError::StaleBase)
+        );
+        assert_eq!(runtime.visibility, RuntimeVisibility::Hidden);
+        assert!(runtime
+            .hidden_latest
+            .as_ref()
+            .is_some_and(|hidden| Arc::ptr_eq(hidden, &late)));
+    }
+
+    #[test]
+    fn hiding_ready_or_in_flight_activation_never_commits_while_hidden() {
+        let mut ready = runtime();
+        let topology = topology_update(ready.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut ready, topology));
+        ready.complete_candidate(request.accept(accepted_state()));
+        ready.set_hidden();
+        assert_eq!(ready.begin_activation(), Err(ActivationStartError::Hidden));
+
+        let (mut activating, _, attempt) = runtime_with_activation();
+        let previous = activating.active_version();
+        activating.set_hidden();
+        let effects = activating.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
+        );
+        assert_eq!(
+            effects.disposition(),
+            RuntimeDisposition::Activation(ActivationTransition::DroppedStale)
+        );
+        assert_eq!(activating.active_version(), previous);
+    }
+
+    #[test]
+    fn capture_lease_binds_exact_active_and_defers_during_activation() {
+        let mut runtime = runtime();
+        let leased = runtime.capture_lease().unwrap().version();
+        let topology = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, topology));
+        runtime.complete_candidate(request.accept(accepted_state()));
         let attempt = runtime.begin_activation().unwrap();
         assert_eq!(
             runtime.capture_lease().unwrap_err(),
@@ -2690,99 +3088,101 @@ mod tests {
             attempt,
             ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
         );
-        assert_ne!(runtime.active_version().unwrap(), leased_version);
+        assert_ne!(runtime.capture_lease().unwrap().version(), leased);
     }
 
     #[test]
-    fn hidden_snapshots_coalesce_without_work_and_reveal_reconciles_once() {
+    fn delayed_errors_are_device_scoped_and_cannot_resurrect_state() {
+        let mut preparing = runtime();
+        let topology = topology_update(preparing.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut preparing, topology));
+        let effects = preparing.observe_delayed_gpu_error(request.key().device);
+        assert_eq!(effects.cancel_worker(), Some(request.request_id()));
+        assert!(preparing.active_version().is_none());
+        let completion = preparing.complete_candidate(request.accept(accepted_state()));
+        assert_eq!(completion.drop_candidate(), Some(request.request_id()));
+        assert_eq!(preparing.worker, WorkerState::Idle);
+
+        let (mut activating, _, attempt) = runtime_with_activation();
+        activating.observe_delayed_gpu_error(attempt.key.device);
+        activating.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
+        );
+        assert!(activating.active_version().is_none());
+        assert!(matches!(
+            activating.recovery,
+            RecoveryState::FallbackPending { .. }
+        ));
+
+        let mut retired = runtime();
+        let old_device = retired.device_epoch;
+        let replacement = take_start(retired.acknowledge_device_recreated().unwrap());
+        retired.complete_candidate(replacement.accept(accepted_state()));
+        let attempt = retired.begin_activation().unwrap();
+        retired.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
+        );
+        let current = retired.active_version();
+        let stale = retired.observe_delayed_gpu_error(old_device);
+        assert_eq!(stale.disposition(), RuntimeDisposition::DroppedStale);
+        assert_eq!(retired.active_version(), current);
+    }
+
+    #[test]
+    fn hidden_reveal_and_shutdown_are_fail_closed() {
         let mut runtime = runtime();
         runtime.set_hidden();
-        for step in 0..10 {
-            let mut next = (**runtime.snapshot()).clone();
-            next.frame.pet_depth = 0.5 + step as f32 * 0.01;
-            if step == 9 {
-                next.topology.pet.stage = Stage::S4;
-            }
-            assert_eq!(
-                runtime.submit_snapshot(Arc::new(next)).unwrap(),
-                SnapshotSubmission::HiddenCoalesced
-            );
-        }
-        assert_eq!(runtime.reconcile_count, 0);
-        assert!(runtime.pending.is_none());
-        let reveal = runtime.set_visible().unwrap();
-        assert!(reveal.request().is_some());
-        assert_eq!(runtime.reconcile_count, 1);
-        assert_eq!(runtime.request_count, 1);
-    }
-
-    #[test]
-    fn hidden_state_defers_ready_or_in_flight_activation() {
-        let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
+        let queued = runtime
+            .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
             .unwrap();
-        runtime.complete_cpu_candidate(candidate(&request));
+        assert!(queued.start_worker.is_none());
+        assert!(matches!(
+            queued.disposition(),
+            RuntimeDisposition::GenerationQueued(_)
+        ));
+        let mut reveal_effects = reveal(&mut runtime);
+        assert!(reveal_effects.take_start_worker().is_some());
+
         runtime.set_hidden();
-        assert_eq!(
-            runtime.begin_activation(),
-            Err(ActivationStartError::Hidden)
-        );
-        runtime.set_visible().unwrap();
-        let attempt = runtime.begin_activation().unwrap();
-        runtime.set_hidden();
-        assert_eq!(
-            runtime.finish_activation(
-                attempt,
-                ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
-            ),
-            ActivationTransition::DroppedStale
-        );
-        assert!(runtime.active_version().is_some());
-    }
+        let mut hidden = (**runtime.snapshot()).clone();
+        hidden.topology.pet.stage = Stage::S5;
+        runtime.coalesce_hidden_snapshot(Arc::new(hidden)).unwrap();
+        runtime.resource_generation = ResourceGeneration(u64::MAX);
+        assert!(matches!(
+            runtime.prepare_reveal(),
+            Err(RuntimeError::CounterOverflow(
+                CounterKind::ResourceGeneration
+            ))
+        ));
+        assert!(runtime.hidden_latest.is_some());
+        assert_eq!(runtime.visibility, RuntimeVisibility::Hidden);
 
-    #[test]
-    fn shutdown_cancels_the_only_worker_and_late_completion_drops() {
-        let mut runtime = runtime();
-        let request = runtime
-            .submit_snapshot(topology_update(runtime.snapshot(), Stage::S4))
-            .unwrap()
-            .request()
-            .unwrap();
-        runtime.shutdown();
-        assert_eq!(runtime.worker, WorkerState::Cancelling(request.request_id));
+        let shutdown = runtime.shutdown();
+        assert!(matches!(
+            shutdown.disposition(),
+            RuntimeDisposition::Shutdown
+        ));
+        assert_eq!(runtime.lifecycle, RuntimeLifecycle::Shutdown);
+        assert_eq!(runtime.capture_lease().unwrap_err(), CaptureDefer::Shutdown);
         assert_eq!(
-            runtime.complete_cpu_candidate(candidate(&request)),
-            CandidateCompletion::DroppedStale
+            runtime.invalidate_resources(ResourceInvalidation::SurfaceRecovery),
+            Err(RuntimeError::Shutdown)
         );
-    }
-
-    #[test]
-    fn fixed_capacity_overflow_never_requests_a_generation() {
-        let mut runtime = runtime();
-        let mut invalid = (**runtime.snapshot()).clone();
-        let prop = invalid.topology.visible_props[0].clone();
-        invalid.topology.visible_props.resize(
-            crate::presentation::companion_scene::MAX_VISIBLE_PROPS + 1,
-            prop,
+        assert_eq!(
+            runtime.acknowledge_surface_rebound(),
+            Err(RuntimeError::Shutdown)
         );
-        assert!(runtime.submit_snapshot(Arc::new(invalid)).is_err());
-        assert!(runtime.pending.is_none());
-        assert_eq!(runtime.request_count, 0);
-    }
-
-    #[test]
-    fn ordinary_reconciliation_shares_snapshots_and_uses_fixed_masks() {
-        assert_eq!(std::mem::size_of::<SnapshotChangeSet>(), 32);
-        let initial = snapshot();
-        let mut reconciler = CompanionSceneReconciler::new(Arc::clone(&initial)).unwrap();
-        let mut frame = (*initial).clone();
-        frame.frame.pet_depth += 0.1;
-        let next = Arc::new(frame);
-        reconciler.reconcile(Arc::clone(&next)).unwrap();
-        assert!(Arc::ptr_eq(reconciler.snapshot(), &next));
-        assert_eq!(Arc::strong_count(&next), 2);
+        assert_eq!(
+            runtime.acknowledge_device_recreated(),
+            Err(RuntimeError::Shutdown)
+        );
+        assert!(matches!(
+            runtime.prepare_reveal(),
+            Err(RuntimeError::Shutdown)
+        ));
+        let late = runtime.acknowledge_worker_cancelled(RequestId(1));
+        assert!(late.start_worker.is_none());
     }
 }
