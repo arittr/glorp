@@ -261,6 +261,8 @@ pub(super) struct RetainedHost {
     physical_height: u32,
     backing_scale: f64,
     frame_counter: u64,
+    activation_render_owner_us: u64,
+    activation_recorded: bool,
     gpu_errors: GpuErrorMailbox,
     metrics: CompanionRuntimeMetrics,
     surface_epoch: u64,
@@ -484,6 +486,8 @@ impl PreparedRetainedHost {
                 physical_height: height,
                 backing_scale: scale,
                 frame_counter: 0,
+                activation_render_owner_us: 0,
+                activation_recorded: false,
                 gpu_errors: mailbox,
                 metrics,
                 surface_epoch: 1,
@@ -776,137 +780,145 @@ impl RetainedHost {
         chrome: RetainedChrome<'_>,
         identity: &CompanionContentIdentity,
     ) -> FrameProgress {
-        let activation_started_at = (self.frame_counter == 0).then(Instant::now);
-        let frame_id = self.next_frame_id();
-        if let Err(category) = self.resize_if_needed(view) {
-            let mut progress = FrameProgress::new(frame_id, 0);
-            fail(&mut progress, category);
-            return progress;
-        }
-        // Compile the full declared repertoire once per resource generation. A
-        // per-frame glyph-set change never rebuilds; only a generation change
-        // (species, font policy, or backing scale) does.
-        if let Err(category) = self.ensure_resources(identity) {
-            let mut progress = FrameProgress::new(frame_id, 0);
-            fail(&mut progress, category);
-            return progress;
-        }
-        let Some(generation) = self
-            .glyph_resources
-            .as_ref()
-            .map(|active| active.resources.generation().value())
-        else {
-            let mut progress = FrameProgress::new(frame_id, 0);
-            fail(&mut progress, RetainedFailureCategory::AtlasUnavailable);
-            return progress;
-        };
-        let mut progress = FrameProgress::new(frame_id, generation);
-        let frame = {
-            let active = self
+        let activation_attempt_started = (!self.activation_recorded).then(Instant::now);
+        let progress = (|| {
+            let frame_id = self.next_frame_id();
+            if let Err(category) = self.resize_if_needed(view) {
+                let mut progress = FrameProgress::new(frame_id, 0);
+                fail(&mut progress, category);
+                return progress;
+            }
+            // Compile the full declared repertoire once per resource generation. A
+            // per-frame glyph-set change never rebuilds; only a generation change
+            // (species, font policy, or backing scale) does.
+            if let Err(category) = self.ensure_resources(identity) {
+                let mut progress = FrameProgress::new(frame_id, 0);
+                fail(&mut progress, category);
+                return progress;
+            }
+            let Some(generation) = self
                 .glyph_resources
                 .as_ref()
-                .expect("an established generation implies active glyph resources");
-            let started_at = Instant::now();
-            let result = prepare_gpu_frame(
-                plan,
-                draw_order,
-                metrics,
-                aperture,
-                background,
-                &chrome,
-                active.resources.atlas(),
-            );
-            let elapsed = duration_us(started_at.elapsed());
-            self.record_metrics(|metrics| metrics.record_gpu_translate_us(elapsed));
-            match result {
-                Ok(frame) => frame,
-                Err(category) => {
-                    fail(&mut progress, category);
+                .map(|active| active.resources.generation().value())
+            else {
+                let mut progress = FrameProgress::new(frame_id, 0);
+                fail(&mut progress, RetainedFailureCategory::AtlasUnavailable);
+                return progress;
+            };
+            let mut progress = FrameProgress::new(frame_id, generation);
+            let frame = {
+                let active = self
+                    .glyph_resources
+                    .as_ref()
+                    .expect("an established generation implies active glyph resources");
+                let started_at = Instant::now();
+                let result = prepare_gpu_frame(
+                    plan,
+                    draw_order,
+                    metrics,
+                    aperture,
+                    background,
+                    &chrome,
+                    active.resources.atlas(),
+                );
+                let elapsed = duration_us(started_at.elapsed());
+                self.record_metrics(|metrics| metrics.record_gpu_translate_us(elapsed));
+                match result {
+                    Ok(frame) => frame,
+                    Err(category) => {
+                        fail(&mut progress, category);
+                        return progress;
+                    }
+                }
+            };
+            self.prepare_frame(&frame);
+            progress
+                .mark(FrameMilestone::Prepared)
+                .expect("prepared opens the frame ladder");
+            self.record_metrics(CompanionRuntimeMetrics::record_surface_acquire);
+            let surface_texture = match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(texture)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+                wgpu::CurrentSurfaceTexture::Outdated => {
+                    self.surface.configure(&self.device, &self.config);
+                    self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                    skip(&mut progress, SkipReason::Outdated);
                     return progress;
                 }
+                wgpu::CurrentSurfaceTexture::Timeout => {
+                    self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                    skip(&mut progress, SkipReason::Timeout);
+                    return progress;
+                }
+                wgpu::CurrentSurfaceTexture::Occluded => {
+                    self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                    skip(&mut progress, SkipReason::Occluded);
+                    return progress;
+                }
+                wgpu::CurrentSurfaceTexture::Lost => {
+                    fail(&mut progress, RetainedFailureCategory::SurfaceLost);
+                    return progress;
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    fail(&mut progress, RetainedFailureCategory::SurfaceValidation);
+                    return progress;
+                }
+            };
+            let target = surface_texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let encode_started_at = Instant::now();
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glorp-retained-frame"),
+                });
+            {
+                let active = self
+                    .glyph_resources
+                    .as_ref()
+                    .expect("an established generation implies active glyph resources");
+                self.encode_scene(
+                    &mut encoder,
+                    &target,
+                    &active.bind_group,
+                    self.frame_buffers.current_buffer(),
+                    &frame.blends,
+                    background,
+                );
             }
-        };
-        self.prepare_frame(&frame);
-        progress
-            .mark(FrameMilestone::Prepared)
-            .expect("prepared opens the frame ladder");
-        self.record_metrics(CompanionRuntimeMetrics::record_surface_acquire);
-        let surface_texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                self.record_metrics(CompanionRuntimeMetrics::record_skip);
-                skip(&mut progress, SkipReason::Outdated);
-                return progress;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout => {
-                self.record_metrics(CompanionRuntimeMetrics::record_skip);
-                skip(&mut progress, SkipReason::Timeout);
-                return progress;
-            }
-            wgpu::CurrentSurfaceTexture::Occluded => {
-                self.record_metrics(CompanionRuntimeMetrics::record_skip);
-                skip(&mut progress, SkipReason::Occluded);
-                return progress;
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                fail(&mut progress, RetainedFailureCategory::SurfaceLost);
-                return progress;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                fail(&mut progress, RetainedFailureCategory::SurfaceValidation);
-                return progress;
-            }
-        };
-        let target = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let encode_started_at = Instant::now();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("glorp-retained-frame"),
-            });
-        {
-            let active = self
-                .glyph_resources
-                .as_ref()
-                .expect("an established generation implies active glyph resources");
-            self.encode_scene(
-                &mut encoder,
-                &target,
-                &active.bind_group,
-                self.frame_buffers.current_buffer(),
-                &frame.blends,
-                background,
-            );
-        }
-        progress
-            .mark(FrameMilestone::Encoded)
-            .expect("encoded follows prepared");
-        let encode_us = duration_us(encode_started_at.elapsed());
-        self.record_metrics(|metrics| metrics.record_encode_us(encode_us));
-        let submit_started_at = Instant::now();
-        self.queue.submit([encoder.finish()]);
-        let queue_wait_us = duration_us(submit_started_at.elapsed());
-        let draws = frame.blends.len() as u64;
-        self.record_metrics(|metrics| {
-            metrics.record_queue_wait_us(queue_wait_us);
-            metrics.record_submit();
-            metrics.record_draws(draws);
-        });
-        progress
-            .mark(FrameMilestone::Submitted)
-            .expect("submitted follows encoded");
-        self.queue.present(surface_texture);
-        progress
-            .finish(FrameDisposition::SurfacePresentCalled)
-            .expect("a submitted frame presents exactly once");
-        if let Some(started_at) = activation_started_at {
+            progress
+                .mark(FrameMilestone::Encoded)
+                .expect("encoded follows prepared");
+            let encode_us = duration_us(encode_started_at.elapsed());
+            self.record_metrics(|metrics| metrics.record_encode_us(encode_us));
+            let submit_started_at = Instant::now();
+            self.queue.submit([encoder.finish()]);
+            let queue_wait_us = duration_us(submit_started_at.elapsed());
+            let draws = frame.blends.len() as u64;
             self.record_metrics(|metrics| {
-                metrics.record_activation_us(duration_us(started_at.elapsed()))
+                metrics.record_queue_wait_us(queue_wait_us);
+                metrics.record_submit();
+                metrics.record_draws(draws);
             });
+            progress
+                .mark(FrameMilestone::Submitted)
+                .expect("submitted follows encoded");
+            self.queue.present(surface_texture);
+            progress
+                .finish(FrameDisposition::SurfacePresentCalled)
+                .expect("a submitted frame presents exactly once");
+            progress
+        })();
+        if let Some(started_at) = activation_attempt_started {
+            self.activation_render_owner_us = self
+                .activation_render_owner_us
+                .saturating_add(u64::from(duration_us(started_at.elapsed())));
+            if progress.disposition() == Some(FrameDisposition::SurfacePresentCalled) {
+                let activation_us = self.activation_render_owner_us.min(u64::from(u32::MAX)) as u32;
+                self.record_metrics(|metrics| metrics.record_activation_us(activation_us));
+                self.activation_recorded = true;
+            }
         }
         progress
     }
