@@ -52,7 +52,18 @@ use crate::round::smooth::CompanionContentIdentity;
 /// scale divides the display font size by this. Matches the manifest's
 /// production atlas point size.
 const GLYPH_FONT_SIZE: f64 = RETAINED_ATLAS_POINT_SIZE;
-const APPKIT_RASTER_SLICE_BUDGET: Duration = Duration::from_micros(4_000);
+/// Stop starting native glyph work after this much of the AppKit tick. The
+/// remaining time is reserved for the final non-preemptible glyph and lane
+/// overhead; the hard deadline and acceptance gate remain 4 ms.
+const APPKIT_RASTER_WORK_START_BUDGET: Duration = Duration::from_micros(1_500);
+const APPKIT_RASTER_SLICE_DEADLINE: Duration = Duration::from_micros(4_000);
+
+fn appkit_raster_budgets(setup_elapsed: Duration) -> (Duration, Duration) {
+    (
+        APPKIT_RASTER_WORK_START_BUDGET.saturating_sub(setup_elapsed),
+        APPKIT_RASTER_SLICE_DEADLINE.saturating_sub(setup_elapsed),
+    )
+}
 /// Logical-pixel margin the analytic-arc primitive rect extends past the stroke's
 /// outer radius, so the outer edge's one-physical-pixel coverage band has room to
 /// fall off inside the rect instead of being clipped at its boundary. A couple of
@@ -1526,8 +1537,11 @@ impl RetainedHost {
             pending.first_slice_started = true;
         }
         let before_raster = slice_started_at.elapsed();
-        let remaining = APPKIT_RASTER_SLICE_BUDGET.saturating_sub(before_raster);
-        let progress = match pending.preparation.advance(remaining) {
+        let (work_start_remaining, hard_deadline_remaining) = appkit_raster_budgets(before_raster);
+        let progress = match pending
+            .preparation
+            .advance(work_start_remaining, hard_deadline_remaining)
+        {
             Ok(progress) => progress,
             Err(category) => {
                 let key = pending.key;
@@ -1537,7 +1551,7 @@ impl RetainedHost {
         let slice_elapsed = slice_started_at.elapsed();
         let slice_us = duration_us(slice_elapsed);
         let deadline_missed =
-            progress.deadline_missed || slice_elapsed > APPKIT_RASTER_SLICE_BUDGET;
+            progress.deadline_missed || slice_elapsed > APPKIT_RASTER_SLICE_DEADLINE;
         pending.active_raster_us = pending.active_raster_us.saturating_add(u64::from(slice_us));
         self.metrics
             .record_appkit_raster_slice_us(slice_us, deadline_missed);
@@ -1563,7 +1577,7 @@ impl RetainedHost {
         if !publish_is_allowed_in_slice(
             progress.complete,
             slice_elapsed,
-            APPKIT_RASTER_SLICE_BUDGET,
+            APPKIT_RASTER_SLICE_DEADLINE,
         ) {
             self.pending_glyph_resources = Some(pending);
             return if self.glyph_resources.is_some() {
@@ -2596,13 +2610,13 @@ mod tests {
     use super::parity::srgb_channel_to_linear;
     use super::resources::GlyphEntryKind;
     use super::{
-        classify_resource_request, create_atlas_bind_group_layout, create_pipelines,
-        current_process_rss_bytes, glyph_advance, glyph_ink_rect, glyph_run_height,
-        glyph_run_width, persistent_instance_capacity, physical_dimension, preparation_wall_us,
-        publish_is_allowed_in_slice, push_analytic_arc, run_lifetime_schedule, upload_glyph_atlas,
-        CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry, GlyphKey,
-        GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard, LayerActivationState,
-        LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
+        appkit_raster_budgets, classify_resource_request, create_atlas_bind_group_layout,
+        create_pipelines, current_process_rss_bytes, glyph_advance, glyph_ink_rect,
+        glyph_run_height, glyph_run_width, persistent_instance_capacity, physical_dimension,
+        preparation_wall_us, publish_is_allowed_in_slice, push_analytic_arc, run_lifetime_schedule,
+        upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry,
+        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
+        LayerActivationState, LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
         PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationKey,
         ResourceRequestAction, RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
         FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE, RETAINED_ATLAS_POINT_SIZE,
@@ -2621,6 +2635,31 @@ mod tests {
     /// wobbles a fixed set of primitives, so the count never changes and the
     /// persistent ring is written but never grown after warmup.
     const AMBIENT_PRIMITIVE_COUNT: usize = 96;
+
+    #[test]
+    fn appkit_raster_budgets_reserve_measured_guard_and_charge_setup() {
+        assert_eq!(
+            appkit_raster_budgets(std::time::Duration::ZERO),
+            (
+                std::time::Duration::from_micros(1_500),
+                std::time::Duration::from_micros(4_000),
+            )
+        );
+        assert_eq!(
+            appkit_raster_budgets(std::time::Duration::from_micros(1_000)),
+            (
+                std::time::Duration::from_micros(500),
+                std::time::Duration::from_micros(3_000),
+            )
+        );
+        assert_eq!(
+            appkit_raster_budgets(std::time::Duration::from_micros(2_000)),
+            (
+                std::time::Duration::ZERO,
+                std::time::Duration::from_micros(2_000),
+            )
+        );
+    }
 
     #[test]
     fn resource_request_coalesces_same_identity_and_replaces_stale_before_work() {

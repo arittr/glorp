@@ -38,7 +38,8 @@ pub(super) struct RasterSliceProgress {
 fn run_resumable_slice<E>(
     cursor: &mut usize,
     item_count: usize,
-    budget: Duration,
+    work_start_budget: Duration,
+    hard_deadline: Duration,
     mut elapsed: impl FnMut() -> Duration,
     mut work: impl FnMut(usize) -> Result<Duration, E>,
 ) -> Result<RasterSliceProgress, E> {
@@ -47,7 +48,7 @@ fn run_resumable_slice<E>(
     let mut max_item_elapsed = Duration::ZERO;
     let mut max_item_index = None;
     let mut observed_elapsed = elapsed();
-    while *cursor < item_count && observed_elapsed < budget {
+    while *cursor < item_count && observed_elapsed < work_start_budget {
         let index = *cursor;
         let item_elapsed = work(index)?;
         *cursor += 1;
@@ -57,7 +58,7 @@ fn run_resumable_slice<E>(
             max_item_elapsed = item_elapsed;
             max_item_index = Some(index);
         }
-        if observed_elapsed >= budget {
+        if observed_elapsed >= work_start_budget {
             break;
         }
     }
@@ -66,7 +67,7 @@ fn run_resumable_slice<E>(
         end_cursor: *cursor,
         completed_items,
         complete: *cursor == item_count,
-        deadline_missed: completed_items > 0 && observed_elapsed > budget,
+        deadline_missed: completed_items > 0 && observed_elapsed > hard_deadline,
         elapsed: observed_elapsed,
         max_item_elapsed,
         max_item_index,
@@ -634,7 +635,8 @@ impl GlyphAtlasPreparation {
 
     fn advance(
         &mut self,
-        budget: Duration,
+        work_start_budget: Duration,
+        hard_deadline: Duration,
     ) -> std::result::Result<RasterSliceProgress, RetainedFailureCategory> {
         let started_at = std::time::Instant::now();
         let glyphs = &self.glyphs;
@@ -645,7 +647,8 @@ impl GlyphAtlasPreparation {
         run_resumable_slice(
             &mut self.next_index,
             glyphs.len(),
-            budget,
+            work_start_budget,
+            hard_deadline,
             || started_at.elapsed(),
             |index| {
                 let item_started_at = std::time::Instant::now();
@@ -843,9 +846,10 @@ impl CompiledRetainedResourcesPreparation {
 
     pub(super) fn advance(
         &mut self,
-        budget: Duration,
+        work_start_budget: Duration,
+        hard_deadline: Duration,
     ) -> std::result::Result<RasterSliceProgress, RetainedFailureCategory> {
-        self.atlas.advance(budget)
+        self.atlas.advance(work_start_budget, hard_deadline)
     }
 
     pub(super) fn finish(
@@ -867,7 +871,7 @@ impl CompiledRetainedResources {
         manifest: &GlyphRepertoireManifest,
     ) -> std::result::Result<Self, RetainedFailureCategory> {
         let mut preparation = CompiledRetainedResourcesPreparation::new(manifest)?;
-        let progress = preparation.advance(Duration::MAX)?;
+        let progress = preparation.advance(Duration::MAX, Duration::MAX)?;
         if !progress.complete {
             return Err(RetainedFailureCategory::AtlasUnavailable);
         }
@@ -1170,18 +1174,19 @@ mod glyph_tests {
     use super::*;
 
     #[test]
-    fn raster_slice_stops_at_deadline_and_resumes_at_exact_next_item() {
+    fn raster_slice_stops_at_soft_cutoff_and_resumes_at_exact_next_item() {
         let mut cursor = 0;
         let mut visited = Vec::new();
         let mut times = [
             std::time::Duration::ZERO,
-            std::time::Duration::from_micros(2_000),
-            std::time::Duration::from_micros(4_000),
+            std::time::Duration::from_micros(1_000),
+            std::time::Duration::from_micros(1_500),
         ]
         .into_iter();
         let first = run_resumable_slice(
             &mut cursor,
             4,
+            std::time::Duration::from_micros(1_500),
             std::time::Duration::from_micros(4_000),
             || times.next().expect("clock sample"),
             |index| {
@@ -1205,6 +1210,7 @@ mod glyph_tests {
         let second = run_resumable_slice(
             &mut cursor,
             4,
+            std::time::Duration::from_micros(1_500),
             std::time::Duration::from_micros(4_000),
             || times.next().expect("clock sample"),
             |index| {
@@ -1221,6 +1227,35 @@ mod glyph_tests {
     }
 
     #[test]
+    fn crossing_soft_cutoff_below_hard_deadline_is_not_a_deadline_miss() {
+        let mut cursor = 0;
+        let mut visited = Vec::new();
+        let mut times = [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_micros(1_400),
+            std::time::Duration::from_micros(1_800),
+        ]
+        .into_iter();
+        let slice = run_resumable_slice(
+            &mut cursor,
+            3,
+            std::time::Duration::from_micros(1_500),
+            std::time::Duration::from_micros(4_000),
+            || times.next().expect("clock sample"),
+            |index| {
+                visited.push(index);
+                Ok::<_, ()>(std::time::Duration::from_micros(400))
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, [0, 1]);
+        assert_eq!(cursor, 2);
+        assert_eq!(slice.completed_items, 2);
+        assert!(!slice.complete);
+        assert!(!slice.deadline_missed);
+    }
+
+    #[test]
     fn one_nonpreemptible_item_overrun_records_miss_and_yields_before_next_item() {
         let mut cursor = 0;
         let mut visited = Vec::new();
@@ -1232,6 +1267,7 @@ mod glyph_tests {
         let slice = run_resumable_slice(
             &mut cursor,
             3,
+            std::time::Duration::from_micros(1_500),
             std::time::Duration::from_micros(4_000),
             || times.next().expect("clock sample"),
             |index| {
@@ -1264,6 +1300,7 @@ mod glyph_tests {
         let slice = run_resumable_slice(
             &mut cursor,
             2,
+            std::time::Duration::from_micros(1_500),
             std::time::Duration::from_micros(4_000),
             || lane_times.next().expect("lane clock sample"),
             |index| Ok::<_, ()>(item_times[index]),
@@ -1287,7 +1324,9 @@ mod glyph_tests {
         let rgba_pointer = preparation.atlas.rgba.as_ptr();
         let rgba_capacity = preparation.atlas.rgba.capacity();
 
-        let paused = preparation.advance(std::time::Duration::ZERO).unwrap();
+        let paused = preparation
+            .advance(std::time::Duration::ZERO, std::time::Duration::MAX)
+            .unwrap();
         assert_eq!(paused.completed_items, 0);
         assert!(!paused.complete);
         assert_eq!(preparation.next_index, 0);
@@ -1295,7 +1334,9 @@ mod glyph_tests {
         assert_eq!(preparation.atlas.rgba.as_ptr(), rgba_pointer);
         assert_eq!(preparation.atlas.rgba.capacity(), rgba_capacity);
 
-        let completed = preparation.advance(std::time::Duration::MAX).unwrap();
+        let completed = preparation
+            .advance(std::time::Duration::MAX, std::time::Duration::MAX)
+            .unwrap();
         assert!(completed.complete);
         assert_eq!(preparation.next_index, glyphs.len());
         assert_eq!(preparation.atlas.entries.len(), glyphs.len());
