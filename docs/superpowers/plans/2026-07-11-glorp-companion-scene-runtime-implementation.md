@@ -66,7 +66,7 @@
 
 1. Stop after Task 1 if current safety or baseline instrumentation cannot remain deterministic without changing live behavior.
 2. Stop after Task 6 if a full neutral companion fixture cannot be built without TUI/Smooth types.
-3. After Task 6, close the explicit AppKit preparation prerequisite below. Tasks 2-6 may proceed under the bounded `stage0-appkit-raster-v1` disposition, but Task 7 and later work are blocked until the measured slice p95 is <=4000 us.
+3. After Task 6, close the evidence-amended raster-worker prerequisite below. Tasks 2-6 may proceed under the bounded `stage0-appkit-raster-v1` disposition, but Task 7 and later work are blocked until main-thread raster calls are zero, generation-service UI work is <=4000 us max, and the native worker/parity gates pass.
 4. Stop after Task 13 if native depth, alpha, color, capture, or atomic activation evidence is wrong.
 5. Stop after Task 15 for any frozen performance breach, leak, hidden work, or fault failure.
 6. Task 16 requires Drew's explicit approval before changing Auto.
@@ -184,10 +184,12 @@ Collect maxima across every species/stage, normal/active/asleep/helper-trouble/d
 cargo xtask companion scene-baseline --duration-ms 120000 --out PATH must build release retained-renderer, run a redacted 360x360 fixture for 120 seconds, discard the first 20 visible ticks, read the JSON snapshot, and generate the measurement report with hardware/OS/build identity and these frozen gates:
 
 ~~~text
-ui tick p95 <= min(8000us, max(baseline p95 * 1.10, baseline p95 + 500us))
-ui tick p99 <= min(16000us, max(baseline p99 * 1.15, baseline p99 + 1000us))
-encode p95 <= max(baseline p95 * 1.10, baseline p95 + 250us)
-AppKit raster slice <= 4000us
+ui tick p95 <= 1422us
+ui tick p99 <= 2070us
+encode p95 <= 282us
+main-thread raster calls = 0
+generation-service UI work max <= 4000us
+GPU materialize/upload/publish max <= 16000us
 activation render-owner slice <= 16000us
 metrics overhead <= 2% of baseline ui-tick p95
 hidden steady state after one transition tick = zero prepare/write/acquire/encode/submit
@@ -196,11 +198,11 @@ ordinary post-warmup static upload bytes = 0
 RSS and accounted GPU bytes after 4500 virtual frames <= warmup high-water + 1%
 ~~~
 
-The target remains <=4000 us. Until the post-Task-6 prerequisite closes it, only
-the versioned `stage0-appkit-raster-v1` disposition may be accepted, and only up
-to the frozen 20000 us ceiling derived from the observed Stage-0 range. A value
-above 20000 us is a regression and fails Task 1. A value at or below 4000 us is
-PASS and does not use the exception.
+The original target was an AppKit raster slice <=4000 us. Native phase evidence
+later proved that one non-preemptible fallback text setup call can exceed 8 ms,
+so the post-Task-6 amendment closes the same UI-safety intent with zero
+main-thread raster calls and <=4000 us max generation-service UI work. Worker
+raster time is reported separately and cannot satisfy or fail the UI gate.
 
 - [ ] **Step 7: Run Stage 0 verification**
 
@@ -810,20 +812,28 @@ git commit -m "refactor(companion): neutralize capture identity"
 
 ---
 
-### Post-Task-6 prerequisite: close the AppKit preparation slice gate
+### Post-Task-6 prerequisite: close the raster-worker UI-safety gate
 
 This prerequisite executes after Task 6 and before Task 7. It is not deferred to
 Task 12: Tasks 2-6 may proceed while the bounded `stage0-appkit-raster-v1`
-disposition remains in effect, but Task 7 is blocked until this section passes.
+disposition remains in effect, but Task 7 is blocked until this evidence-amended
+section passes.
 
-- [ ] Add failing tests for a resumable AppKit-only raster preparation lane that
-      stops at the <=4000 us deadline, preserves the active generation, and
-      resumes from the exact next work item.
-- [ ] Move current glyph/AppKit raster preparation out of the presentation
-      callback into that lane. Record queue wait, slice count, total raster time,
-      and deadline misses; yield to the run loop after every exhausted slice.
+- [ ] Add failing tests proving one dedicated serial `NSThread` worker produces
+      a byte-for-byte identical full atlas while every Cocoa object stays
+      worker-local and only Rust pixels/entries cross bounded mailboxes. Require
+      an unwind-safe current-graphics-context guard and an Objective-C exception
+      boundary that terminates the worker without unwinding through Rust.
+- [ ] Add one-running/one-latest-pending lifecycle coverage for cancellation
+      between glyphs, hidden cancellation/reveal restart, stale rejection before
+      GPU materialization, disconnect/panic failure, and shutdown.
+- [ ] Replace production UI raster scheduling with nonblocking enqueue/poll/state
+      transition work. Require zero main-thread raster calls, generation-service
+      UI max <=4000 us, and render-owner-only GPU materialization/upload/publish
+      max <=16000 us. Report worker time separately.
 - [ ] Run the clean 120-second Task 1 baseline protocol and require
-      `appkit-raster-slice` PASS at <=4000 us. The 20000 us exception ceiling is
+      the raster-worker UI-safety, parity, lifecycle, materialization, hidden,
+      memory, and frozen UI/encode gates to pass. The old Stage-0 exception is
       not sufficient to unlock Task 7.
 - [ ] Commit the implementation and refreshed measurement before starting Task 7.
 
@@ -1215,7 +1225,7 @@ git commit -m "feat(renderer): order blended world content by depth"
 - Modify: tests/retained_scene.rs
 
 **Interfaces:**
-- Consumes: GenerationRequest, CPU compiler, the completed post-Task-6 bounded AppKit preparation lane, render-owner materialization, FrameProgress/GpuErrorMailbox.
+- Consumes: GenerationRequest, CPU compiler, the completed post-Task-6 raster-worker proof, render-owner materialization, FrameProgress/GpuErrorMailbox.
 - Produces: SceneBuildWorker, CpuCandidateMailbox, ActiveSceneGeneration, ReadyGpuCandidate, and activate_candidate.
 
 - [ ] **Step 1: Write failing atomic-lifecycle tests**
@@ -1262,15 +1272,21 @@ Expected: compile failure for missing lifecycle harness/runtime wiring.
 
 - [ ] **Step 3: Implement one coalesced CPU worker**
 
-The UI thread sends immutable GenerationRequest values through a one-active/one-pending owner. The worker checks cancellation between validation, geometry compile, atlas packing, and mirror creation. It returns CpuSceneCandidate plus request ID/generation/source revisions. It never receives Device, Queue, Surface, AppKit objects, or live AppState references.
+The UI thread sends immutable GenerationRequest values through a one-active/one-pending owner. The worker checks cancellation between validation, geometry compile, atlas packing, worker-local offscreen rasterization, and mirror creation. It returns CpuSceneCandidate plus request ID/generation/source revisions. It never receives Device, Queue, Surface, Cocoa objects, or live AppState references; it creates and destroys any offscreen raster Cocoa objects locally.
 
-- [ ] **Step 4: Integrate the already-gated AppKit preparation lane**
+- [ ] **Step 4: Integrate the evidence-gated raster worker**
 
-Feed scene-generation raster work into the post-Task-6 lane without changing its
-<=4000 us slice contract. Verify the active generation remains visible across
-yields and that Task 12 activation consumes completed raster output rather than
-performing AppKit rasterization in the presentation callback. Do not redefine or
-retroactively close the prerequisite here.
+Fold scene-generation raster work into the same dedicated serial
+`SceneBuildWorker` from Step 3; do not create a second worker, nested mailbox, or
+second coalescer. The worker
+creates and destroys all offscreen Cocoa objects locally under autorelease pools
+and returns only owned Rust atlas pixels, entries, identities, and timings. The
+existing UI-owned one-running/one-latest-pending lifecycle checks cancellation
+between glyphs, polls without blocking, and rejects stale results before any GPU
+materialization. Verify the active generation remains visible
+while work is pending, main-thread raster call count is exactly zero, generation
+service UI work remains <=4000 us max, and Task 12 activation uploads completed
+raster output only on the render owner.
 
 - [ ] **Step 5: Materialize and activate atomically**
 

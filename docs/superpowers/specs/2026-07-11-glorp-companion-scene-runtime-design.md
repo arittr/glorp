@@ -599,11 +599,12 @@ mathematically defined.
 
 ### Persistent resources, mirrors, and draws
 
-Generation preparation has two explicit products. The worker builds a CPU
-candidate:
+Generation preparation has two explicit products. The dedicated serial CPU
+worker builds a candidate:
 
 1. validates the complete template and fixed capacities;
-2. resolves resource manifests and performs pure atlas packing;
+2. resolves resource manifests, performs pure atlas packing, and rasterizes the
+   packed glyph repertoire into worker-owned offscreen bitmap contexts;
 3. builds immutable vertices/indices, private dense node/slot maps, and fixed
    blended-draw record templates/scratch;
 4. compiles opaque/chrome batch ranges and initial blended stream order;
@@ -611,10 +612,25 @@ candidate:
 6. prepares initial content/frame mirrors from the newest snapshot;
 7. returns one immutable CPU candidate.
 
-AppKit-only raster work is added through the bounded preparation lane. The render
+The raster worker creates, uses, and destroys every Cocoa object on that worker
+thread and returns only owned Rust pixels, entries, identities, and timings.
+No `NSFont`, `NSGraphicsContext`, `NSBitmapImageRep`, raw bitmap pointer, wgpu
+object, or live `AppState` reference crosses the mailbox boundary. The render
 owner then materializes pipelines, textures, bind groups, fixed GPU buffers,
 depth/intermediate targets, and initial uploads into a GPU candidate. Nothing is
 published to the active slot until the activation state machine commits it.
+
+This is an evidence-driven amendment to the original bounded-AppKit-lane design.
+Native phase timing proved that fallback text setup/measurement can consume more
+than 8 ms in one non-preemptible AppKit call, so a 4 ms UI-thread slice cannot be
+made truthful by changing glyph-boundary scheduling. Apple permits offscreen
+bitmap drawing on a secondary thread when that thread owns its graphics context,
+flushes explicitly, and drains its own autorelease pools. The worker restores the
+thread-local graphics context through an RAII guard on success, failure, or Rust
+unwind. Objective-C message exceptions are converted at the `objc2` boundary and
+feed the same typed terminal worker-failure path instead of unwinding through
+Rust. The worker boundary preserves current raster output while removing AppKit
+raster calls from the UI thread.
 
 After warmup, an ordinary visible tick performs no atlas growth, pipeline
 creation, shader compilation, full-template validation, heap-capacity growth, or
@@ -675,9 +691,9 @@ This feature follows the base scene cutover. It does not add production bubbles.
 |---|---|
 | Capture privacy-projected state and create snapshot | AppKit/UI thread |
 | Reconcile current snapshot and coalesce pending request | AppKit/UI thread, bounded |
-| Full template validation and CPU compilation | worker |
-| Pure atlas packing and activation candidate assembly | worker |
-| AppKit-dependent rasterization | bounded generation-preparation tasks on the AppKit thread |
+| Full template validation and CPU compilation | dedicated serial worker |
+| Pure atlas packing and activation candidate assembly | dedicated serial worker |
+| Offscreen AppKit-dependent glyph rasterization | dedicated serial worker; worker-local Cocoa objects and autorelease pools |
 | GPU resource/pipeline creation, upload, and destruction | AppKit/render owner |
 | Atomic activation and persistent GPU writes | AppKit/render owner |
 | Acquire, encode, submit, present, acknowledge | AppKit/render owner |
@@ -685,19 +701,21 @@ This feature follows the base scene cutover. It does not add production bubbles.
 
 No atlas construction, pipeline creation, full-template validation, unbounded
 allocation, or blocking worker wait occurs in the ordinary presentation tick.
-AppKit-only rasterization is scheduled as explicit, budgeted generation work while
-the last good generation remains visible; it is never performed from a render-pass
-callback. Workers produce immutable CPU descriptors, pixels, geometry, draw
-records, and initial buffer bytes only. In V1, every wgpu device call, resource or
-pipeline creation, upload, destruction, and activation occurs on the render owner.
+The UI owns one running request plus one replaceable latest pending request and
+polls bounded mailboxes without waiting while the last good generation remains
+visible. The raster worker checks cancellation between glyphs and returns only a
+complete immutable CPU candidate. Workers produce immutable CPU descriptors,
+pixels, geometry, draw records, and initial buffer bytes only. In V1, every wgpu
+device call, resource or pipeline creation, upload, destruction, and activation
+occurs on the render owner.
 Parallel GPU materialization is a separate future optimization that requires
 profiling evidence and a new ownership decision.
 
-Stage 0 must freeze numeric p95/p99 UI-thread budgets and a maximum AppKit
-rasterization slice before implementation proceeds beyond pure contracts. A
-preparation slice that exhausts its budget yields to the run loop while the last
-good generation stays visible; activation itself performs only the pre-measured
-bounded swap, initial writes, and first-frame encode.
+Stage 0 freezes numeric p95/p99 UI-thread budgets and requires zero main-thread
+raster calls. Generation-service enqueue, nonblocking poll, and state transition
+work has a 4 ms maximum. Worker raster time is reported separately and is never
+relabelled as a passing UI slice. Activation itself performs only the pre-measured
+bounded materialization/swap, initial writes, and first-frame encode.
 
 The initial visible cadence may remain 15 FPS. Hidden, minimized, or occluded
 windows suspend presentation and semantic animation work. New snapshots may
@@ -900,9 +918,9 @@ compatibility architecture.
 
 - Record the current host/fallback/capture invariants as executable tests.
 - Freeze the numeric baseline protocol and gates.
-- Freeze p95/p99 ordinary UI-thread budgets, the maximum AppKit rasterization
-  slice, activation budget, and metrics-overhead gate before scene implementation
-  proceeds.
+- Freeze p95/p99 ordinary UI-thread budgets, require zero main-thread raster
+  calls plus a maximum generation-service UI slice, and freeze activation and
+  metrics-overhead gates before scene implementation proceeds.
 - Inventory maximum production-derived nodes, art lattices, props, tank life,
   particles, resources, and current failure dispositions.
 
