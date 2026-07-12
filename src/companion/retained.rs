@@ -128,8 +128,8 @@ const INSTANCE_STRIDE: usize = std::mem::size_of::<GpuPrimitive>();
 /// Maximum primitive count observed by the deterministic full current-renderer
 /// fixture matrix. The fixed minimum ring adds explicit non-growth headroom;
 /// larger generation requests remain possible but are not ordinary frames.
-const FULL_FIXTURE_INSTANCE_MAX: usize = 774;
-const FULL_FIXTURE_INSTANCE_HEADROOM: usize = 32;
+const FULL_FIXTURE_INSTANCE_MAX: usize = 782;
+const FULL_FIXTURE_INSTANCE_HEADROOM: usize = 242;
 const FIXED_INSTANCE_RING_MIN: usize = FULL_FIXTURE_INSTANCE_MAX + FULL_FIXTURE_INSTANCE_HEADROOM;
 
 /// A capacity-bounded ring of persistent `VERTEX | COPY_DST` instance buffers.
@@ -2244,17 +2244,17 @@ mod tests {
 
     #[test]
     fn first_instance_ring_allocation_has_bounded_fixture_headroom() {
-        assert_eq!(FULL_FIXTURE_INSTANCE_MAX, 774);
-        assert_eq!(FULL_FIXTURE_INSTANCE_HEADROOM, 32);
-        assert_eq!(persistent_instance_capacity(1), 806);
-        assert_eq!(persistent_instance_capacity(774), 806);
+        assert_eq!(FULL_FIXTURE_INSTANCE_MAX, 782);
+        assert_eq!(FULL_FIXTURE_INSTANCE_HEADROOM, 242);
+        assert_eq!(persistent_instance_capacity(1), 1_024);
+        assert_eq!(persistent_instance_capacity(782), 1_024);
     }
 
     #[test]
     fn varying_full_fixture_counts_never_recreate_the_instance_ring() {
         let mut host = TestRetainedResources::warm();
         let before = host.counters();
-        for count in [1, 96, 774, 12, 773, 0, 512, 774] {
+        for count in [1, 96, 782, 12, 781, 0, 512, 782] {
             host.prepare_frame(&prepared_frame_with_count(count))
                 .unwrap();
         }

@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::commands::companion_mode::{
-    CompanionRendererRequest, EffectiveCompanionRenderer, RendererRuntimeState,
+    CompanionRendererRequest, CompanionReviewState, EffectiveCompanionRenderer,
+    RendererRuntimeState,
 };
 use crate::companion::app::{CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame};
 use crate::companion::retained::{
@@ -39,7 +40,8 @@ use crate::round::hud::CompanionHudText;
 use crate::round::layout::RoundAperture;
 use crate::storage::state::{HabitatPropId, HabitatPropSource};
 use crate::tui::component::habitat_props::{visible_accent_ids, visible_trophy_ids};
-use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
+use crate::tui::identity::SourceDiversity;
+use crate::tui::view_model::{EarnedHabitatPropView, SourceStatus, WatchViewModel};
 
 /// Traverses the deterministic current-source fixture matrix. Categories that
 /// do not have renderer-neutral Task 2 owners yet are explicit reservations,
@@ -54,26 +56,57 @@ pub(crate) fn full_preview_capacity_inventory() -> CompanionCapacityInventory {
         Stage::S5,
         Stage::S6,
     ];
-    const STATES: [(Mood, bool, bool); 5] = [
-        (Mood::Content, false, false),
-        (Mood::Ecstatic, false, false),
-        (Mood::Sleepy, true, false),
-        (Mood::Sad, false, false),
-        (Mood::Content, false, true),
+    const STATES: [(CompanionReviewState, bool); 5] = [
+        (CompanionReviewState::Normal, false),
+        (CompanionReviewState::ActivePulse, false),
+        (CompanionReviewState::AsleepCalm, false),
+        (CompanionReviewState::HelperTrouble, false),
+        (CompanionReviewState::Normal, true),
     ];
     const DEPTHS: [f32; 3] = [-1.0, 0.0, 1.0];
     let now = time::macros::datetime!(2026-06-13 18:00 UTC);
     let mut max_pet_slots = 0_u32;
     for species in Species::all() {
         for stage in STAGES {
-            for (mood, asleep, _dimmed) in STATES {
-                for _depth in DEPTHS {
+            for (state, _dimmed) in STATES {
+                for depth in DEPTHS {
                     let mut vm = WatchViewModel::fixture_with_habitat_props();
                     vm.pet_render.generated_species = species;
                     vm.pet_render.stage = stage;
-                    vm.pet_render.mood = mood;
+                    let asleep = match state {
+                        CompanionReviewState::Normal => false,
+                        CompanionReviewState::ActivePulse => {
+                            vm.pet_render.mood = Mood::Ecstatic;
+                            vm.activity_identity.source_diversity = SourceDiversity::DualLane;
+                            vm.last_feed_pulse_at = Some(now - time::Duration::milliseconds(400));
+                            false
+                        }
+                        CompanionReviewState::AsleepCalm => {
+                            vm.pet_render.mood = Mood::Sleepy;
+                            vm.day_context.asleep = true;
+                            vm.life_profile.calm_mode = true;
+                            true
+                        }
+                        CompanionReviewState::HelperTrouble => {
+                            vm.pet_render.mood = Mood::Sad;
+                            vm.source_health[0].status = SourceStatus::Diagnostic;
+                            false
+                        }
+                    };
                     crate::commands::watch::rerender_pet_for_view_model(&mut vm, 0, asleep, now)
                         .expect("deterministic inventory pet rerenders");
+                    crate::round::smooth::try_build_round_smooth_scene_plan_with_options(
+                        &vm,
+                        now,
+                        36,
+                        36,
+                        &crate::round::scene::CompanionMotion::default(),
+                        0,
+                        crate::round::smooth::SmoothSceneBuildOptions {
+                            depth_override: Some(depth),
+                        },
+                    )
+                    .expect("deterministic inventory scene builds for every state/depth");
                     let slots = vm
                         .pet_art
                         .iter()
