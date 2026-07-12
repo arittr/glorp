@@ -80,6 +80,12 @@ pub(crate) enum RetainedFailureCategory {
     CaptureMapFailed,
     /// The mapped readback buffer was shorter than the frame's row layout.
     CaptureBufferTooShort,
+    /// The bounded lifetime harness could not complete a submitted GPU frame.
+    LifetimeGpuPoll,
+    /// The bounded lifetime harness could not obtain a nonzero current RSS sample.
+    LifetimeRssUnavailable,
+    /// The deterministic lifetime fixture failed production frame preparation.
+    LifetimeFramePreparation,
     /// Writing a capture artifact (png/manifest) to disk failed. Only produced by
     /// the dev/test write-failure fault injection.
     #[cfg(feature = "dev-preview")]
@@ -104,6 +110,9 @@ impl RetainedFailureCategory {
             Self::CapturePollTimeout => "retained-capture-poll-timeout",
             Self::CaptureMapFailed => "retained-capture-map-failed",
             Self::CaptureBufferTooShort => "retained-capture-buffer-too-short",
+            Self::LifetimeGpuPoll => "retained-lifetime-gpu-poll",
+            Self::LifetimeRssUnavailable => "retained-lifetime-rss-unavailable",
+            Self::LifetimeFramePreparation => "retained-lifetime-frame-preparation",
             #[cfg(feature = "dev-preview")]
             Self::CaptureWriteFailed => "retained-capture-write-failed",
         }

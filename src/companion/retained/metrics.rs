@@ -129,6 +129,10 @@ impl CapacityContract {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub(crate) struct CompanionCapacityInventory {
+    pub matrix_fixture_count: u32,
+    pub dimmed_fixture_count: u32,
+    pub full_props_tank_fixture_count: u32,
+    pub max_prepared_gpu_primitives: CapacityContract,
     pub max_nodes: CapacityContract,
     pub max_static_primitives: CapacityContract,
     pub max_pet_slots: CapacityContract,
@@ -144,6 +148,10 @@ impl CompanionCapacityInventory {
     #[cfg(test)]
     pub(crate) const fn contract_fixture() -> Self {
         Self {
+            matrix_fixture_count: 630,
+            dimmed_fixture_count: 126,
+            full_props_tank_fixture_count: 630,
+            max_prepared_gpu_primitives: CapacityContract::observed(782, 242, 1_024),
             max_nodes: CapacityContract::reserved(96, 32, 128),
             max_static_primitives: CapacityContract::reserved(640, 128, 768),
             max_pet_slots: CapacityContract::observed(96, 34, 130),
@@ -157,7 +165,8 @@ impl CompanionCapacityInventory {
     }
 
     pub(crate) const fn fits_global_constraints(self) -> bool {
-        self.max_nodes.fits()
+        self.max_prepared_gpu_primitives.fits()
+            && self.max_nodes.fits()
             && self.max_static_primitives.fits()
             && self.max_pet_slots.fits()
             && self.max_visible_props.fits()
@@ -214,7 +223,6 @@ pub(crate) struct GpuByteBreakdown {
     pub atlas_bytes: u64,
     pub instance_ring_bytes: u64,
     pub capture_bytes: u64,
-    pub other_persistent_bytes: u64,
     pub total_bytes: u64,
 }
 
@@ -223,20 +231,44 @@ impl GpuByteBreakdown {
         self.total_bytes = self
             .atlas_bytes
             .saturating_add(self.instance_ring_bytes)
-            .saturating_add(self.capture_bytes)
-            .saturating_add(self.other_persistent_bytes);
+            .saturating_add(self.capture_bytes);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct GpuObjectBreakdown {
+    pub host_infrastructure: u64,
+    pub atlas: u64,
+    pub instance_ring: u64,
+    pub capture: u64,
+    pub total_objects: u64,
+}
+
+impl GpuObjectBreakdown {
+    fn with_total(mut self) -> Self {
+        self.total_objects = self
+            .host_infrastructure
+            .saturating_add(self.atlas)
+            .saturating_add(self.instance_ring)
+            .saturating_add(self.capture);
         self
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub(crate) struct GpuAccountingSnapshot {
-    pub current: GpuByteBreakdown,
+    pub current_bytes: GpuByteBreakdown,
     pub peak_total_bytes: u64,
+    pub current_objects: GpuObjectBreakdown,
+    pub peak_total_objects: u64,
+    pub objects_created_total: u64,
+    pub objects_destroyed_total: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum GpuAllocationKind {
+    HostInfrastructure,
     Atlas,
     InstanceRing,
     Capture,
@@ -245,8 +277,15 @@ pub(crate) enum GpuAllocationKind {
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub(crate) struct LifetimeAuditSnapshot {
     pub frames: u64,
+    pub warmup_frames: u64,
     pub cadence_ms: u64,
     pub virtual_elapsed_ms: u64,
+    pub prepared_frames: u64,
+    pub encoded_frames: u64,
+    pub semantic_frame_changes: u64,
+    pub gpu_frame_hash_changes: u64,
+    pub draw_calls: u64,
+    pub poll_count: u64,
     pub rss_warmup_bytes: u64,
     pub rss_warmup_peak_bytes: u64,
     pub rss_final_bytes: u64,
@@ -261,6 +300,8 @@ pub(crate) struct LifetimeAuditSnapshot {
 pub(crate) struct MetricsOverheadAudit {
     pub iterations: u64,
     pub trials: u32,
+    pub control_ticks: u64,
+    pub instrumented_ticks: u64,
     pub control_ns_per_tick: u64,
     pub instrumented_ns_per_tick: u64,
     pub net_ns_per_tick: u64,
@@ -310,7 +351,9 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub submit_count: u64,
     pub skipped_frames: u64,
     pub fallback_count: u64,
-    pub capture_count: u64,
+    pub capture_attempted: u64,
+    pub capture_succeeded: u64,
+    pub capture_failed: u64,
     pub node_high_water: u32,
     pub primitive_high_water: u32,
     pub blended_draw_high_water: u32,
@@ -350,7 +393,9 @@ pub(crate) struct CompanionRuntimeMetrics {
     submit_count: u64,
     skipped_frames: u64,
     fallback_count: u64,
-    capture_count: u64,
+    capture_attempted: u64,
+    capture_succeeded: u64,
+    capture_failed: u64,
     node_high_water: u32,
     primitive_high_water: u32,
     blended_draw_high_water: u32,
@@ -366,6 +411,10 @@ pub(crate) struct CompanionRuntimeMetrics {
     hidden_steady_delta: RuntimeWorkCounters,
     gpu_current: GpuByteBreakdown,
     gpu_peak_total_bytes: u64,
+    gpu_objects_current: GpuObjectBreakdown,
+    gpu_peak_total_objects: u64,
+    gpu_objects_created_total: u64,
+    gpu_objects_destroyed_total: u64,
     lifetime_audit: Option<LifetimeAuditSnapshot>,
 }
 
@@ -396,7 +445,9 @@ impl Default for CompanionRuntimeMetrics {
             submit_count: 0,
             skipped_frames: 0,
             fallback_count: 0,
-            capture_count: 0,
+            capture_attempted: 0,
+            capture_succeeded: 0,
+            capture_failed: 0,
             node_high_water: 0,
             primitive_high_water: 0,
             blended_draw_high_water: 0,
@@ -412,6 +463,10 @@ impl Default for CompanionRuntimeMetrics {
             hidden_steady_delta: RuntimeWorkCounters::default(),
             gpu_current: GpuByteBreakdown::default(),
             gpu_peak_total_bytes: 0,
+            gpu_objects_current: GpuObjectBreakdown::default(),
+            gpu_peak_total_objects: 0,
+            gpu_objects_created_total: 0,
+            gpu_objects_destroyed_total: 0,
             lifetime_audit: None,
         }
     }
@@ -446,7 +501,9 @@ impl CompanionRuntimeMetrics {
                 self.submit_count = 0;
                 self.skipped_frames = 0;
                 self.fallback_count = 0;
-                self.capture_count = 0;
+                self.capture_attempted = 0;
+                self.capture_succeeded = 0;
+                self.capture_failed = 0;
                 self.reset_steady_state_after_warmup = false;
             }
             self.sample_current_tick = true;
@@ -553,8 +610,16 @@ impl CompanionRuntimeMetrics {
         increment(&mut self.fallback_count, 1);
     }
 
-    pub(crate) fn record_capture(&mut self) {
-        increment(&mut self.capture_count, 1);
+    pub(crate) fn record_capture_attempt(&mut self) {
+        increment(&mut self.capture_attempted, 1);
+    }
+
+    pub(crate) fn record_capture_success(&mut self) {
+        increment(&mut self.capture_succeeded, 1);
+    }
+
+    pub(crate) fn record_capture_failure(&mut self) {
+        increment(&mut self.capture_failed, 1);
     }
 
     pub(crate) fn record_metrics_overhead(&mut self, duration: Duration) {
@@ -601,23 +666,63 @@ impl CompanionRuntimeMetrics {
         }
     }
 
-    pub(crate) fn replace_gpu_allocation(&mut self, kind: GpuAllocationKind, bytes: u64) {
+    pub(crate) fn replace_gpu_allocation(
+        &mut self,
+        kind: GpuAllocationKind,
+        bytes: u64,
+        objects: u64,
+    ) {
         let overlap_peak = self.gpu_current.total_bytes.saturating_add(bytes);
         self.gpu_peak_total_bytes = self.gpu_peak_total_bytes.max(overlap_peak);
+        let object_overlap_peak = self
+            .gpu_objects_current
+            .total_objects
+            .saturating_add(objects);
+        self.gpu_peak_total_objects = self.gpu_peak_total_objects.max(object_overlap_peak);
+        let replaced_objects = match kind {
+            GpuAllocationKind::HostInfrastructure => self.gpu_objects_current.host_infrastructure,
+            GpuAllocationKind::Atlas => self.gpu_objects_current.atlas,
+            GpuAllocationKind::InstanceRing => self.gpu_objects_current.instance_ring,
+            GpuAllocationKind::Capture => self.gpu_objects_current.capture,
+        };
+        self.record_persistent_gpu_create(objects);
+        self.record_persistent_gpu_destroy(replaced_objects);
+        increment(&mut self.gpu_objects_created_total, objects);
+        increment(&mut self.gpu_objects_destroyed_total, replaced_objects);
         match kind {
-            GpuAllocationKind::Atlas => self.gpu_current.atlas_bytes = bytes,
-            GpuAllocationKind::InstanceRing => self.gpu_current.instance_ring_bytes = bytes,
-            GpuAllocationKind::Capture => self.gpu_current.capture_bytes = bytes,
+            GpuAllocationKind::HostInfrastructure => {
+                self.gpu_objects_current.host_infrastructure = objects;
+            }
+            GpuAllocationKind::Atlas => {
+                self.gpu_current.atlas_bytes = bytes;
+                self.gpu_objects_current.atlas = objects;
+            }
+            GpuAllocationKind::InstanceRing => {
+                self.gpu_current.instance_ring_bytes = bytes;
+                self.gpu_objects_current.instance_ring = objects;
+            }
+            GpuAllocationKind::Capture => {
+                self.gpu_current.capture_bytes = bytes;
+                self.gpu_objects_current.capture = objects;
+            }
         }
         self.gpu_current = self.gpu_current.with_total();
+        self.gpu_objects_current = self.gpu_objects_current.with_total();
         self.gpu_peak_total_bytes = self.gpu_peak_total_bytes.max(self.gpu_current.total_bytes);
+        self.gpu_peak_total_objects = self
+            .gpu_peak_total_objects
+            .max(self.gpu_objects_current.total_objects);
         self.observe_gpu_bytes(self.gpu_peak_total_bytes);
     }
 
     pub(crate) fn gpu_accounting_snapshot(&self) -> GpuAccountingSnapshot {
         GpuAccountingSnapshot {
-            current: self.gpu_current,
+            current_bytes: self.gpu_current,
             peak_total_bytes: self.gpu_peak_total_bytes,
+            current_objects: self.gpu_objects_current,
+            peak_total_objects: self.gpu_peak_total_objects,
+            objects_created_total: self.gpu_objects_created_total,
+            objects_destroyed_total: self.gpu_objects_destroyed_total,
         }
     }
 
@@ -661,7 +766,9 @@ impl CompanionRuntimeMetrics {
             submit_count: self.submit_count,
             skipped_frames: self.skipped_frames,
             fallback_count: self.fallback_count,
-            capture_count: self.capture_count,
+            capture_attempted: self.capture_attempted,
+            capture_succeeded: self.capture_succeeded,
+            capture_failed: self.capture_failed,
             node_high_water: self.node_high_water,
             primitive_high_water: self.primitive_high_water,
             blended_draw_high_water: self.blended_draw_high_water,
@@ -687,50 +794,83 @@ fn measure_metrics_overhead_control() -> MetricsOverheadAudit {
     let mut best_control = u64::MAX;
     let mut best_instrumented = u64::MAX;
     for _ in 0..TRIALS {
-        let control_started = std::time::Instant::now();
-        let mut control = 0_u64;
+        METRICS_OVERHEAD_AUDIT_STATE.with(|cell| {
+            *cell.borrow_mut() = CompanionRuntimeMetrics::default();
+        });
+        let mut control_ns = 0_u64;
+        let mut instrumented_ns = 0_u64;
+        let mut state = 0_u64;
         for tick in 0..ITERATIONS {
-            control = std::hint::black_box(control.saturating_add(tick).rotate_left(3));
+            let instrumented = tick % 2 == 0;
+            let started = std::time::Instant::now();
+            representative_metric_tick(instrumented, &mut state, tick);
+            let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            if instrumented {
+                instrumented_ns = instrumented_ns.saturating_add(elapsed);
+            } else {
+                control_ns = control_ns.saturating_add(elapsed);
+            }
         }
-        std::hint::black_box(control);
-        let control_ns = control_started
-            .elapsed()
-            .as_nanos()
-            .min(u128::from(u64::MAX)) as u64;
-
-        let instrumented_started = std::time::Instant::now();
-        let mut work = 0_u64;
-        let mut metrics = CompanionRuntimeMetrics::default();
-        for tick in 0..ITERATIONS {
-            work = std::hint::black_box(work.saturating_add(tick).rotate_left(3));
-            metrics.begin_visible_tick();
-            metrics.record_state_prepare_us(100);
-            metrics.record_gpu_translate_us(25);
-            metrics.record_queue_write(256);
-            metrics.record_surface_acquire();
-            metrics.record_encode_us(20);
-            metrics.record_queue_wait_us(5);
-            metrics.record_submit();
-            metrics.record_draws(4);
-            metrics.record_ui_tick_us(250);
-        }
-        std::hint::black_box((work, metrics.work_counters()));
-        let instrumented_ns = instrumented_started
-            .elapsed()
-            .as_nanos()
-            .min(u128::from(u64::MAX)) as u64;
+        METRICS_OVERHEAD_AUDIT_STATE.with(|cell| {
+            std::hint::black_box((&*cell.borrow(), state));
+        });
         best_control = best_control.min(control_ns);
         best_instrumented = best_instrumented.min(instrumented_ns);
     }
-    let control_ns_per_tick = best_control.div_ceil(ITERATIONS);
-    let instrumented_ns_per_tick = best_instrumented.div_ceil(ITERATIONS);
+    let control_ticks = ITERATIONS / 2;
+    let instrumented_ticks = ITERATIONS - control_ticks;
+    let control_ns_per_tick = best_control.div_ceil(control_ticks);
+    let instrumented_ns_per_tick = best_instrumented.div_ceil(instrumented_ticks);
     MetricsOverheadAudit {
         iterations: ITERATIONS,
         trials: TRIALS,
+        control_ticks,
+        instrumented_ticks,
         control_ns_per_tick,
         instrumented_ns_per_tick,
         net_ns_per_tick: instrumented_ns_per_tick.saturating_sub(control_ns_per_tick),
     }
+}
+
+thread_local! {
+    static METRICS_OVERHEAD_AUDIT_STATE: std::cell::RefCell<CompanionRuntimeMetrics> =
+        std::cell::RefCell::new(CompanionRuntimeMetrics::default());
+}
+
+fn representative_metric_tick(instrumented: bool, state: &mut u64, tick: u64) {
+    if instrumented {
+        METRICS_OVERHEAD_AUDIT_STATE.with(|cell| cell.borrow_mut().begin_visible_tick());
+    }
+    let mut timed = |record: fn(&mut CompanionRuntimeMetrics, u32), salt: u64| {
+        let started = std::time::Instant::now();
+        *state = std::hint::black_box(
+            state
+                .saturating_add(tick ^ salt)
+                .rotate_left((salt % 31) as u32),
+        );
+        let elapsed = duration_us(started.elapsed());
+        if instrumented {
+            METRICS_OVERHEAD_AUDIT_STATE.with(|cell| {
+                let closure = |metrics: &mut CompanionRuntimeMetrics| record(metrics, elapsed);
+                closure(&mut cell.borrow_mut());
+            });
+        }
+    };
+    timed(CompanionRuntimeMetrics::record_state_prepare_us, 3);
+    timed(CompanionRuntimeMetrics::record_gpu_translate_us, 7);
+    timed(CompanionRuntimeMetrics::record_encode_us, 11);
+    timed(CompanionRuntimeMetrics::record_queue_wait_us, 13);
+    if instrumented {
+        METRICS_OVERHEAD_AUDIT_STATE.with(|cell| {
+            let mut metrics = cell.borrow_mut();
+            metrics.record_queue_write(256);
+            metrics.record_surface_acquire();
+            metrics.record_submit();
+            metrics.record_draws(4);
+            metrics.record_ui_tick_us(250);
+        });
+    }
+    std::hint::black_box(*state);
 }
 
 pub(crate) fn duration_us(duration: Duration) -> u32 {
@@ -797,6 +937,10 @@ mod tests {
     fn capacity_contract_distinguishes_observations_reservations_headroom_and_limits() {
         let inventory = CompanionCapacityInventory::contract_fixture();
         assert_eq!(inventory.max_pet_slots.observed, Some(96));
+        assert_eq!(inventory.matrix_fixture_count, 630);
+        assert_eq!(inventory.dimmed_fixture_count, 126);
+        assert_eq!(inventory.full_props_tank_fixture_count, 630);
+        assert_eq!(inventory.max_prepared_gpu_primitives.limit, 1_024);
         assert_eq!(inventory.max_pet_slots.reservation, 0);
         assert_eq!(inventory.max_pet_slots.headroom, 34);
         assert_eq!(inventory.max_pet_slots.limit, 130);
@@ -824,16 +968,36 @@ mod tests {
     #[test]
     fn gpu_accounting_includes_concurrent_replacement_peak() {
         let mut metrics = CompanionRuntimeMetrics::default();
-        metrics.replace_gpu_allocation(GpuAllocationKind::Atlas, 100);
-        metrics.replace_gpu_allocation(GpuAllocationKind::InstanceRing, 60);
-        metrics.replace_gpu_allocation(GpuAllocationKind::Capture, 80);
-        metrics.replace_gpu_allocation(GpuAllocationKind::Atlas, 120);
+        metrics.replace_gpu_allocation(GpuAllocationKind::HostInfrastructure, 0, 4);
+        metrics.replace_gpu_allocation(GpuAllocationKind::Atlas, 100, 2);
+        metrics.replace_gpu_allocation(GpuAllocationKind::InstanceRing, 60, 3);
+        metrics.replace_gpu_allocation(GpuAllocationKind::Capture, 80, 2);
+        metrics.replace_gpu_allocation(GpuAllocationKind::Atlas, 120, 2);
         let accounting = metrics.gpu_accounting_snapshot();
-        assert_eq!(accounting.current.atlas_bytes, 120);
-        assert_eq!(accounting.current.instance_ring_bytes, 60);
-        assert_eq!(accounting.current.capture_bytes, 80);
-        assert_eq!(accounting.current.total_bytes, 260);
+        assert_eq!(accounting.current_bytes.atlas_bytes, 120);
+        assert_eq!(accounting.current_bytes.instance_ring_bytes, 60);
+        assert_eq!(accounting.current_bytes.capture_bytes, 80);
+        assert_eq!(accounting.current_bytes.total_bytes, 260);
         assert_eq!(accounting.peak_total_bytes, 360);
+        assert_eq!(accounting.current_objects.host_infrastructure, 4);
+        assert_eq!(accounting.current_objects.total_objects, 11);
+        assert_eq!(accounting.peak_total_objects, 13);
+        assert_eq!(accounting.objects_created_total, 13);
+        assert_eq!(accounting.objects_destroyed_total, 2);
+        assert_eq!(metrics.persistent_gpu_objects_created, 13);
+        assert_eq!(metrics.persistent_gpu_objects_destroyed, 2);
+    }
+
+    #[test]
+    fn capture_metrics_distinguish_attempt_success_and_failure() {
+        let mut metrics = CompanionRuntimeMetrics::default();
+        metrics.record_capture_attempt();
+        metrics.record_capture_success();
+        metrics.record_capture_attempt();
+        metrics.record_capture_failure();
+        assert_eq!(metrics.capture_attempted, 2);
+        assert_eq!(metrics.capture_succeeded, 1);
+        assert_eq!(metrics.capture_failed, 1);
     }
 
     #[test]
@@ -841,6 +1005,10 @@ mod tests {
         let audit = measure_metrics_overhead_control();
         assert_eq!(audit.iterations, 100_000);
         assert_eq!(audit.trials, 5);
+        assert_eq!(audit.control_ticks, audit.instrumented_ticks);
+        assert_eq!(audit.control_ticks, 50_000);
+        assert!(audit.control_ns_per_tick > 0);
+        assert!(audit.instrumented_ns_per_tick > 0);
         assert!(audit.instrumented_ns_per_tick >= audit.net_ns_per_tick);
     }
 }

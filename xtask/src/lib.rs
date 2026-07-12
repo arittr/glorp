@@ -683,7 +683,29 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
     let inventory = snapshot
         .get("inventory")
         .ok_or_else(|| "runtime metrics snapshot missing inventory".to_string())?;
+    let fixture = snapshot
+        .get("fixture")
+        .ok_or_else(|| "runtime metrics snapshot missing fixture".to_string())?;
+    if fixture
+        .get("fixture_id")
+        .and_then(serde_json::Value::as_str)
+        != Some("glorp-scene-baseline-v2")
+    {
+        return Err(
+            "runtime metrics snapshot has unknown baseline fixture disposition".to_string(),
+        );
+    }
+    for (field, expected) in [
+        ("matrix_fixture_count", 630),
+        ("dimmed_fixture_count", 126),
+        ("full_props_tank_fixture_count", 630),
+    ] {
+        if value_u64(inventory, field)? != expected {
+            return Err(format!("runtime inventory {field} is not {expected}"));
+        }
+    }
     for (field, limit) in [
+        ("max_prepared_gpu_primitives", 1_024),
         ("max_nodes", 128),
         ("max_static_primitives", 768),
         ("max_pet_slots", 130),
@@ -726,6 +748,45 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
         {
             return Err(format!("runtime metrics snapshot missing {field}"));
         }
+    }
+    for field in ["capture_attempted", "capture_succeeded", "capture_failed"] {
+        snapshot_u64(snapshot, &[field])?;
+    }
+    let gpu_accounting = snapshot
+        .get("gpu_accounting")
+        .ok_or_else(|| "runtime metrics snapshot missing gpu_accounting".to_string())?;
+    for field in [
+        "peak_total_bytes",
+        "peak_total_objects",
+        "objects_created_total",
+        "objects_destroyed_total",
+    ] {
+        value_u64(gpu_accounting, field)?;
+    }
+    let lifetime = snapshot
+        .get("lifetime_audit")
+        .ok_or_else(|| "runtime metrics snapshot missing lifetime_audit".to_string())?;
+    for field in [
+        "frames",
+        "warmup_frames",
+        "cadence_ms",
+        "virtual_elapsed_ms",
+        "prepared_frames",
+        "encoded_frames",
+        "semantic_frame_changes",
+        "gpu_frame_hash_changes",
+        "draw_calls",
+        "poll_count",
+        "rss_warmup_bytes",
+        "rss_warmup_peak_bytes",
+        "rss_final_bytes",
+        "rss_peak_bytes",
+        "gpu_warmup_bytes",
+        "gpu_warmup_peak_bytes",
+        "gpu_final_bytes",
+        "gpu_peak_bytes",
+    ] {
+        value_u64(lifetime, field)?;
     }
     Ok(())
 }
@@ -778,6 +839,9 @@ fn gate(
 fn evaluate_baseline_gates(
     snapshot: &serde_json::Value,
 ) -> Result<Vec<BaselineGateResult>, String> {
+    const APPKIT_TARGET_US: u64 = 4_000;
+    const APPKIT_STAGE0_EXCEPTION_CEILING_US: u64 = 20_000;
+    const APPKIT_STAGE0_DISPOSITION: &str = "stage0-appkit-raster-v1";
     let ui_p95 = snapshot_u64(snapshot, &["ui_tick_us", "p95"])?;
     let ui_p99 = snapshot_u64(snapshot, &["ui_tick_us", "p99"])?;
     let encode_p95 = snapshot_u64(snapshot, &["encode_us", "p95"])?;
@@ -821,13 +885,15 @@ fn evaluate_baseline_gates(
 
     let mut appkit = gate(
         "appkit-raster-slice",
-        compile_p95 <= 4_000,
+        compile_p95 <= APPKIT_TARGET_US,
         format!("{compile_p95} us"),
-        "4000 us",
+        format!("{APPKIT_TARGET_US} us target; {APPKIT_STAGE0_EXCEPTION_CEILING_US} us frozen exception ceiling"),
     );
-    if appkit.status == GateStatus::Fail {
+    if compile_p95 > APPKIT_TARGET_US && compile_p95 <= APPKIT_STAGE0_EXCEPTION_CEILING_US {
         appkit.status = GateStatus::AcceptedPreexisting;
-        appkit.disposition = "pre-existing Stage-0 miss at unchanged 4000us limit; Task 12 must implement <=4000us sliced AppKit preparation before Task 7 begins".into();
+        appkit.disposition = format!(
+            "{APPKIT_STAGE0_DISPOSITION}: bounded pre-existing Stage-0 miss; post-Task-6 <=4000us sliced AppKit preparation prerequisite must pass before Task 7"
+        );
     }
 
     Ok(vec![
@@ -882,13 +948,50 @@ fn evaluate_baseline_gates(
         ),
         gate(
             "lifetime-frame-count-and-cadence",
-            value_u64(lifetime, "frames")? == 4_500 && value_u64(lifetime, "cadence_ms")? == 250,
+            value_u64(lifetime, "frames")? == 4_500
+                && value_u64(lifetime, "warmup_frames")? == 4_500
+                && value_u64(lifetime, "cadence_ms")? == 250
+                && value_u64(lifetime, "virtual_elapsed_ms")? == 1_125_000,
             format!(
-                "{} frames @ {} ms",
+                "{} warmup + {} measured frames @ {} ms; {} ms elapsed",
+                value_u64(lifetime, "warmup_frames")?,
                 value_u64(lifetime, "frames")?,
-                value_u64(lifetime, "cadence_ms")?
+                value_u64(lifetime, "cadence_ms")?,
+                value_u64(lifetime, "virtual_elapsed_ms")?,
             ),
-            "4500 frames @ 250 ms virtual cadence",
+            "identical 4500 warmup + measured schedules @ 250 ms; 1125000 ms elapsed",
+        ),
+        gate(
+            "lifetime-production-work",
+            value_u64(lifetime, "prepared_frames")? == 4_500
+                && value_u64(lifetime, "encoded_frames")? == 4_500
+                && value_u64(lifetime, "semantic_frame_changes")? > 0
+                && value_u64(lifetime, "gpu_frame_hash_changes")? > 0
+                && value_u64(lifetime, "draw_calls")? > 0
+                && value_u64(lifetime, "poll_count")? > 0,
+            format!(
+                "prepared={} encoded={} semantic-changes={} gpu-hash-changes={} draws={} polls={}",
+                value_u64(lifetime, "prepared_frames")?,
+                value_u64(lifetime, "encoded_frames")?,
+                value_u64(lifetime, "semantic_frame_changes")?,
+                value_u64(lifetime, "gpu_frame_hash_changes")?,
+                value_u64(lifetime, "draw_calls")?,
+                value_u64(lifetime, "poll_count")?,
+            ),
+            "4500 actual prepares/encodes, varying semantic/GPU hashes, nonzero draws/polls",
+        ),
+        gate(
+            "terminal-capture",
+            snapshot_u64(snapshot, &["capture_attempted"])? == 1
+                && snapshot_u64(snapshot, &["capture_succeeded"])? == 1
+                && snapshot_u64(snapshot, &["capture_failed"])? == 0,
+            format!(
+                "attempted={} succeeded={} failed={}",
+                snapshot_u64(snapshot, &["capture_attempted"])? ,
+                snapshot_u64(snapshot, &["capture_succeeded"])? ,
+                snapshot_u64(snapshot, &["capture_failed"])? ,
+            ),
+            "exactly one attempted and successful terminal GPU capture; zero failures",
         ),
         gate(
             "lifetime-rss",
@@ -947,8 +1050,11 @@ fn render_scene_baseline_report(
         .get("gpu_accounting")
         .ok_or_else(|| "runtime snapshot missing gpu_accounting".to_string())?;
     let current_gpu = gpu
-        .get("current")
-        .ok_or_else(|| "runtime snapshot missing gpu_accounting.current".to_string())?;
+        .get("current_bytes")
+        .ok_or_else(|| "runtime snapshot missing gpu_accounting.current_bytes".to_string())?;
+    let current_gpu_objects = gpu
+        .get("current_objects")
+        .ok_or_else(|| "runtime snapshot missing gpu_accounting.current_objects".to_string())?;
     let overhead = snapshot
         .get("metrics_overhead_control")
         .ok_or_else(|| "runtime snapshot missing metrics_overhead_control".to_string())?;
@@ -971,6 +1077,7 @@ fn render_scene_baseline_report(
         .collect::<Vec<_>>()
         .join("\n");
     let capacity_rows = [
+        ("Prepared legacy GPU primitives", "max_prepared_gpu_primitives", "observed by compiling every production-prepared matrix frame through the retained GPU translator"),
         ("Nodes", "max_nodes", "Task 2 scene nodes unavailable; versioned contract reservation"),
         ("Static primitives", "max_static_primitives", "Task 2 scene primitives unavailable; versioned contract reservation"),
         ("Pet art slots", "max_pet_slots", "observed across 6 species x 7 stages x 5 states x 3 depths"),
@@ -1025,21 +1132,24 @@ The first 20 visible ticks are discarded before steady-state sampling.\n\n\
 | Queue submit wait | {} | {} | {} |\n\
 | AppKit raster/compile slice | {} | {} | {} |\n\
 | First-present activation render-owner boundary (excluding separately measured AppKit raster) | {} | {} | {} |\n\n\
-Metrics overhead uses {} alternating on/off-control trials of {} representative complete metric ticks; \
+Metrics overhead uses {} alternating on/off-control trials of {} representative complete metric ticks ({} control / {} instrumented); \
 control {} ns/tick, instrumented {} ns/tick, net {} ns/tick.\n\n\
-Accounted persistent GPU bytes: atlas {}, instance ring {}, capture {}, other {}, current total {}, concurrent-replacement peak {}. \
+Accounted persistent GPU bytes: atlas {}, instance ring {}, capture {}, current total {}, concurrent-replacement peak {}. \
+Persistent GPU objects: host {}, atlas {}, instance ring {}, capture {}, current total {}, concurrent-replacement peak {}; lifecycle created/destroyed {}/{}. \
 Opaque driver allocations are covered by process RSS, not guessed into GPU byte accounting.\n\n\
-Lifetime segment: {} real GPU queue frames at {} ms virtual cadence ({} ms semantic time); \
+Lifetime segment: {} warmup + {} measured real prepared/encoded GPU frames at {} ms virtual cadence ({} ms semantic time); \
+prepared {}, encoded {}, semantic changes {}, GPU hash changes {}, draws {}, polls {}; \
 RSS warmup-end/warmup-high-water/final/peak {}/{}/{}/{}, accounted GPU warmup-end/warmup-high-water/final/peak {}/{}/{}/{}.\n\n\
 ## Structured gate results\n\n\
 | Gate | Status | Measured | Limit | Disposition |\n\
 |---|---|---|---|---|\n\
 {gate_rows}\n\n\
-The AppKit result is a versioned pre-existing Stage-0 disposition, not a pass. Task 12's <=4000 us sliced AppKit preparation is required before Task 7 begins. Stage 0 is therefore not globally green. Every other failed or unmeasured gate makes the command fail.\n\n\
+The AppKit result is a versioned, bounded pre-existing Stage-0 disposition, not a pass. The explicit post-Task-6 <=4000 us sliced AppKit preparation prerequisite must pass before Task 7 begins. Stage 0 is therefore not globally green. Every other failed or unmeasured gate makes the command fail.\n\n\
 ## Capacity inventory\n\n\
 | Capacity | Observed | Reservation | Headroom | Limit | Evidence |\n\
 |---|---:|---:|---:|---:|---|\n\
 {capacity_rows}\n\n\
+Matrix construction prepared {} actual frames, including {} dimmed frames and {} frames carrying the full prop catalog plus full tank cast. \
 An em dash means the future renderer-neutral category does not exist yet and is represented by an explicit contract reservation. Each observed value plus reservation plus explicit headroom fits its frozen limit. Zero headroom is intentional for the already-full pet lattice, visible prop budget, and round tank cast; expanding any requires measured evidence and a spec amendment.\n",
         source.commit,
         source.tracked_tree_state,
@@ -1076,18 +1186,34 @@ An em dash means the future renderer-neutral category does not exist yet and is 
         snapshot_u64(snapshot, &["activation_render_owner_us", "p99"])? ,
         value_u64(overhead, "trials")?,
         value_u64(overhead, "iterations")?,
+        value_u64(overhead, "control_ticks")?,
+        value_u64(overhead, "instrumented_ticks")?,
         value_u64(overhead, "control_ns_per_tick")?,
         value_u64(overhead, "instrumented_ns_per_tick")?,
         value_u64(overhead, "net_ns_per_tick")?,
         value_u64(current_gpu, "atlas_bytes")?,
         value_u64(current_gpu, "instance_ring_bytes")?,
         value_u64(current_gpu, "capture_bytes")?,
-        value_u64(current_gpu, "other_persistent_bytes")?,
         value_u64(current_gpu, "total_bytes")?,
         value_u64(gpu, "peak_total_bytes")?,
+        value_u64(current_gpu_objects, "host_infrastructure")?,
+        value_u64(current_gpu_objects, "atlas")?,
+        value_u64(current_gpu_objects, "instance_ring")?,
+        value_u64(current_gpu_objects, "capture")?,
+        value_u64(current_gpu_objects, "total_objects")?,
+        value_u64(gpu, "peak_total_objects")?,
+        value_u64(gpu, "objects_created_total")?,
+        value_u64(gpu, "objects_destroyed_total")?,
+        value_u64(lifetime, "warmup_frames")?,
         value_u64(lifetime, "frames")?,
         value_u64(lifetime, "cadence_ms")?,
         value_u64(lifetime, "virtual_elapsed_ms")?,
+        value_u64(lifetime, "prepared_frames")?,
+        value_u64(lifetime, "encoded_frames")?,
+        value_u64(lifetime, "semantic_frame_changes")?,
+        value_u64(lifetime, "gpu_frame_hash_changes")?,
+        value_u64(lifetime, "draw_calls")?,
+        value_u64(lifetime, "poll_count")?,
         value_u64(lifetime, "rss_warmup_bytes")?,
         value_u64(lifetime, "rss_warmup_peak_bytes")?,
         value_u64(lifetime, "rss_final_bytes")?,
@@ -1096,6 +1222,9 @@ An em dash means the future renderer-neutral category does not exist yet and is 
         value_u64(lifetime, "gpu_warmup_peak_bytes")?,
         value_u64(lifetime, "gpu_final_bytes")?,
         value_u64(lifetime, "gpu_peak_bytes")?,
+        value_u64(inventory, "matrix_fixture_count")?,
+        value_u64(inventory, "dimmed_fixture_count")?,
+        value_u64(inventory, "full_props_tank_fixture_count")?,
     ))
 }
 
@@ -1979,15 +2108,29 @@ mod tests {
     #[test]
     fn baseline_gates_keep_appkit_miss_as_non_pass_at_unchanged_limit() {
         let mut snapshot = baseline_gate_fixture();
-        snapshot["compile_us"]["p95"] = serde_json::json!(30_000);
+        snapshot["compile_us"]["p95"] = serde_json::json!(12_000);
         let gates = evaluate_baseline_gates(&snapshot).unwrap();
         let appkit = gates
             .iter()
             .find(|gate| gate.id == "appkit-raster-slice")
             .unwrap();
-        assert_eq!(appkit.limit, "4000 us");
+        assert!(appkit.limit.contains("4000 us target"));
+        assert!(appkit.limit.contains("20000 us frozen exception ceiling"));
         assert_eq!(appkit.status, GateStatus::AcceptedPreexisting);
         assert!(validate_gate_results(&gates).is_ok());
+    }
+
+    #[test]
+    fn baseline_gates_reject_appkit_regressions_above_versioned_stage0_ceiling() {
+        let mut snapshot = baseline_gate_fixture();
+        snapshot["compile_us"]["p95"] = serde_json::json!(20_001);
+        let gates = evaluate_baseline_gates(&snapshot).unwrap();
+        let appkit = gates
+            .iter()
+            .find(|gate| gate.id == "appkit-raster-slice")
+            .unwrap();
+        assert_eq!(appkit.status, GateStatus::Fail);
+        assert!(validate_gate_results(&gates).is_err());
     }
 
     fn baseline_gate_fixture() -> serde_json::Value {
@@ -1997,6 +2140,9 @@ mod tests {
             "compile_us": {"p95": 12000},
             "activation_render_owner_us": {"p95": 8000},
             "metrics_overhead_control": {"net_ns_per_tick": 1000},
+            "capture_attempted": 1,
+            "capture_succeeded": 1,
+            "capture_failed": 0,
             "persistent_gpu_objects_created": 0,
             "static_upload_bytes": 0,
             "hidden_segment": {
@@ -2006,7 +2152,15 @@ mod tests {
             },
             "lifetime_audit": {
                 "frames": 4500,
+                "warmup_frames": 4500,
                 "cadence_ms": 250,
+                "virtual_elapsed_ms": 1125000,
+                "prepared_frames": 4500,
+                "encoded_frames": 4500,
+                "semantic_frame_changes": 10,
+                "gpu_frame_hash_changes": 10,
+                "draw_calls": 10000,
+                "poll_count": 10,
                 "rss_warmup_bytes": 1000000,
                 "rss_warmup_peak_bytes": 1000000,
                 "rss_final_bytes": 1005000,

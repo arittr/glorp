@@ -66,11 +66,32 @@ pub(crate) fn full_preview_capacity_inventory() -> CompanionCapacityInventory {
     const DEPTHS: [f32; 3] = [-1.0, 0.0, 1.0];
     let now = time::macros::datetime!(2026-06-13 18:00 UTC);
     let mut max_pet_slots = 0_u32;
+    let mut max_prepared_gpu_primitives = 0_u32;
+    let mut matrix_fixture_count = 0_u32;
+    let mut dimmed_fixture_count = 0_u32;
+    let mut full_props_tank_fixture_count = 0_u32;
     for species in Species::all() {
+        let collector =
+            crate::companion::retained::PreparedGpuPrimitiveCollector::for_species(species)
+                .expect("deterministic inventory atlas compiles");
         for stage in STAGES {
-            for (state, _dimmed) in STATES {
+            for (state, dimmed) in STATES {
                 for depth in DEPTHS {
-                    let mut vm = WatchViewModel::fixture_with_habitat_props();
+                    let mut vm =
+                        WatchViewModel::fixture_with_tank_inhabitants_for_age(120, now.date());
+                    vm.habitat.earned_props = HABITAT_PROP_CATALOG
+                        .iter()
+                        .map(|prop| EarnedHabitatPropView {
+                            id: HabitatPropId::new(prop.id),
+                            earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                            kind: prop.kind,
+                            display_priority: prop.display_priority,
+                            source: match prop.lifetime_threshold {
+                                Some(threshold) => HabitatPropSource::LifetimeTokens { threshold },
+                                None => HabitatPropSource::HeavySession,
+                            },
+                        })
+                        .collect();
                     vm.pet_render.generated_species = species;
                     vm.pet_render.stage = stage;
                     let asleep = match state {
@@ -95,18 +116,19 @@ pub(crate) fn full_preview_capacity_inventory() -> CompanionCapacityInventory {
                     };
                     crate::commands::watch::rerender_pet_for_view_model(&mut vm, 0, asleep, now)
                         .expect("deterministic inventory pet rerenders");
-                    crate::round::smooth::try_build_round_smooth_scene_plan_with_options(
-                        &vm,
-                        now,
-                        36,
-                        36,
-                        &crate::round::scene::CompanionMotion::default(),
-                        0,
-                        crate::round::smooth::SmoothSceneBuildOptions {
-                            depth_override: Some(depth),
-                        },
+                    let frame = crate::companion::app::prepare_capacity_fixture_frame(
+                        &vm, depth, dimmed, now,
                     )
-                    .expect("deterministic inventory scene builds for every state/depth");
+                    .expect("deterministic inventory frame builds through production projection");
+                    let primitive_count = collector
+                        .observe(&frame)
+                        .expect("deterministic inventory frame compiles through GPU translator");
+                    max_prepared_gpu_primitives = max_prepared_gpu_primitives.max(primitive_count);
+                    matrix_fixture_count = matrix_fixture_count.saturating_add(1);
+                    if dimmed {
+                        dimmed_fixture_count = dimmed_fixture_count.saturating_add(1);
+                    }
+                    full_props_tank_fixture_count = full_props_tank_fixture_count.saturating_add(1);
                     let slots = vm
                         .pet_art
                         .iter()
@@ -148,6 +170,14 @@ pub(crate) fn full_preview_capacity_inventory() -> CompanionCapacityInventory {
     );
 
     let inventory = CompanionCapacityInventory {
+        matrix_fixture_count,
+        dimmed_fixture_count,
+        full_props_tank_fixture_count,
+        max_prepared_gpu_primitives: CapacityContract::observed(
+            max_prepared_gpu_primitives,
+            1_024_u32.saturating_sub(max_prepared_gpu_primitives),
+            1_024,
+        ),
         max_nodes: CapacityContract::reserved(96, 32, 128),
         max_static_primitives: CapacityContract::reserved(640, 128, 768),
         // The current fixed pet-art lattice exactly occupies the frozen V1
@@ -1005,7 +1035,10 @@ impl<'a> PairedCaptureCoordinator<'a> {
         // which flips the manifest to "failed" and returns a process error while
         // leaving the effective renderer as Retained.
         let capture_result = match self.injected_capture_fault {
-            Some(category) => Err(category),
+            Some(category) => {
+                self.host.record_injected_capture_failure();
+                Err(category)
+            }
             None => self.host.capture(self.frame),
         };
         let (retained, status) = match capture_result {
@@ -1119,6 +1152,19 @@ mod tests {
         assert_eq!(inventory.max_pet_slots.reservation, 0);
         assert_eq!(inventory.max_visible_props.observed, Some(10));
         assert_eq!(inventory.max_round_tank_inhabitants.observed, Some(2));
+        assert_eq!(inventory.matrix_fixture_count, 630);
+        assert_eq!(inventory.dimmed_fixture_count, 126);
+        assert_eq!(inventory.full_props_tank_fixture_count, 630);
+        let prepared_max = inventory
+            .max_prepared_gpu_primitives
+            .observed
+            .expect("the production translator produced executable primitive evidence");
+        assert!(prepared_max > 0);
+        assert_eq!(
+            prepared_max + inventory.max_prepared_gpu_primitives.headroom,
+            1_024
+        );
+        assert_eq!(inventory.max_prepared_gpu_primitives.limit, 1_024);
         assert_eq!(inventory.max_nodes.observed, None);
         assert!(inventory.max_nodes.reservation > 0);
     }

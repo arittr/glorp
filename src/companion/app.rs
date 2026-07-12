@@ -389,6 +389,42 @@ fn prepare_companion_frame(
     bounds: NSRect,
     metric_cache: &mut CompanionMetricCache,
 ) -> std::result::Result<PreparedCompanionFrame, CompanionFramePreparationError> {
+    let now = time::OffsetDateTime::now_utc();
+    let elapsed_ms = smooth_started_at
+        .map(|started_at| started_at.elapsed().as_millis())
+        .unwrap_or(0)
+        .min(u128::from(u64::MAX)) as u64;
+    prepare_companion_frame_at(
+        vm,
+        scene,
+        renderer_mode,
+        review_depth.map(CompanionReviewDepth::normalized),
+        pixel_frame,
+        smooth_semantic_art_tick_index,
+        redacts_live_hud,
+        force_dim_overlay,
+        bounds,
+        metric_cache,
+        now,
+        elapsed_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Injected clock makes review/lifetime evidence deterministic.
+fn prepare_companion_frame_at(
+    vm: &WatchViewModel,
+    scene: &RoundSceneModel,
+    renderer_mode: EffectiveCompanionRenderer,
+    depth_override: Option<f32>,
+    pixel_frame: Option<&PixelFrame>,
+    smooth_semantic_art_tick_index: u64,
+    redacts_live_hud: bool,
+    force_dim_overlay: bool,
+    bounds: NSRect,
+    metric_cache: &mut CompanionMetricCache,
+    now: time::OffsetDateTime,
+    elapsed_ms: u64,
+) -> std::result::Result<PreparedCompanionFrame, CompanionFramePreparationError> {
     let prepared_bounds = prepare_bounds(bounds)?;
     let aperture = RoundAperture::new(prepared_bounds.width_px, prepared_bounds.height_px);
     let layout = layout_round_scene(
@@ -417,21 +453,15 @@ fn prepare_companion_frame(
     } else {
         let metrics = metric_cache.metrics_for(prepared_bounds)?;
         if renderer_mode.uses_smooth_scene() {
-            let elapsed_ms = smooth_started_at
-                .map(|started_at| started_at.elapsed().as_millis())
-                .unwrap_or(0)
-                .min(u128::from(u64::MAX)) as u64;
             // Normal runs pass None here and keep their roam-driven depth.
             let plan = crate::round::smooth::try_build_round_smooth_scene_plan_with_options(
                 vm,
-                time::OffsetDateTime::now_utc(),
+                now,
                 metrics.grid_cols,
                 metrics.grid_rows,
                 &companion_motion(),
                 elapsed_ms,
-                crate::round::smooth::SmoothSceneBuildOptions {
-                    depth_override: review_depth.map(CompanionReviewDepth::normalized),
-                },
+                crate::round::smooth::SmoothSceneBuildOptions { depth_override },
             )
             .map_err(|err| match err {
                 SmoothScenePlanError::MissingPetBody => {
@@ -467,7 +497,7 @@ fn prepare_companion_frame(
         } else {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
                 vm,
-                time::OffsetDateTime::now_utc(),
+                now,
                 metrics.grid_cols,
                 metrics.grid_rows,
                 &companion_motion(),
@@ -561,6 +591,103 @@ fn prepare_companion_frame(
     })
 }
 
+#[cfg(feature = "retained-renderer")]
+pub(super) fn prepare_capacity_fixture_frame(
+    vm: &WatchViewModel,
+    depth: f32,
+    dimmed: bool,
+    now: time::OffsetDateTime,
+) -> std::result::Result<PreparedCompanionFrame, &'static str> {
+    let scene = derive_round_scene_model(vm, now);
+    let mut metric_cache = CompanionMetricCache::default();
+    prepare_companion_frame_at(
+        vm,
+        &scene,
+        EffectiveCompanionRenderer::Retained,
+        Some(depth),
+        None,
+        0,
+        true,
+        dimmed,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
+        &mut metric_cache,
+        now,
+        0,
+    )
+    .map_err(CompanionFramePreparationError::category)
+}
+
+#[cfg(feature = "retained-renderer")]
+fn prepare_lifetime_fixture_frame(
+    species: crate::pet::generation::Species,
+    frame: u64,
+    now: time::OffsetDateTime,
+) -> std::result::Result<
+    (PreparedCompanionFrame, u64),
+    crate::companion::retained::RetainedFailureCategory,
+> {
+    use crate::commands::companion_mode::CompanionReviewState;
+    use crate::game::evolution::Stage;
+    use crate::game::metabolism::Mood;
+
+    let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, now.date());
+    vm.pet_render.generated_species = species;
+    let stages = [Stage::S2, Stage::S3, Stage::S4, Stage::S5];
+    let stage = stages[((frame / 600) as usize) % stages.len()];
+    vm.pet_render.stage = stage;
+    if (frame / 300) % 2 == 1 {
+        vm.habitat.earned_props.pop();
+    }
+    let state_index = ((frame / 900) % 5) as u8;
+    let (review_state, dimmed) = match state_index {
+        0 => (CompanionReviewState::Normal, false),
+        1 => (CompanionReviewState::ActivePulse, false),
+        2 => (CompanionReviewState::AsleepCalm, false),
+        3 => (CompanionReviewState::HelperTrouble, false),
+        _ => (CompanionReviewState::Normal, true),
+    };
+    let mut presentation_state = WatchPresentationState::default();
+    apply_review_state(review_state, &mut presentation_state, &mut vm, now).map_err(|_| {
+        crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
+    })?;
+    let asleep = review_state == CompanionReviewState::AsleepCalm;
+    rerender_pet_for_view_model(&mut vm, frame, asleep, now).map_err(|_| {
+        crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
+    })?;
+    if review_state == CompanionReviewState::ActivePulse {
+        vm.pet_render.mood = Mood::Ecstatic;
+    }
+    let scene = derive_round_scene_model(&vm, now);
+    let mut metric_cache = CompanionMetricCache::default();
+    let base = time::macros::datetime!(2026-06-13 18:00 UTC);
+    let elapsed_ms = (now - base)
+        .whole_milliseconds()
+        .max(0)
+        .min(i128::from(u64::MAX)) as u64;
+    let prepared = prepare_companion_frame_at(
+        &vm,
+        &scene,
+        EffectiveCompanionRenderer::Retained,
+        None,
+        None,
+        frame,
+        true,
+        dimmed,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
+        &mut metric_cache,
+        now,
+        elapsed_ms,
+    )
+    .map_err(|_| crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation)?;
+    let semantic_hash =
+        crate::presentation::smooth::pet_visual_checksum(&vm.pet_art, &vm.pet_spans)
+            ^ ((stage.index() as u64) << 56)
+            ^ (u64::from(state_index) << 48)
+            ^ ((vm.habitat.earned_props.len() as u64) << 32)
+            ^ (vm.habitat.earned_inhabitants.len() as u64);
+    Ok((prepared, semantic_hash))
+}
+
 struct AppState {
     /// Retained to keep the window alive after makeKeyAndOrderFront.
     #[allow(dead_code)]
@@ -597,6 +724,8 @@ struct AppState {
     #[cfg(feature = "retained-renderer")]
     runtime_metrics_out: Option<std::path::PathBuf>,
     #[cfg(feature = "retained-renderer")]
+    runtime_baseline_visibility: RuntimeBaselineVisibilityPhase,
+    #[cfg(feature = "retained-renderer")]
     terminal_runtime_metrics: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
     metric_cache: CompanionMetricCache,
     last_good_frame: Option<PreparedCompanionFrame>,
@@ -606,6 +735,44 @@ struct AppState {
     callback_panic_count: u64,
     #[allow(dead_code)] // Updated by the Task 5 callback guard.
     last_callback_panic_label: Option<&'static str>,
+}
+
+#[cfg(feature = "retained-renderer")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeBaselineVisibilityPhase {
+    Inactive,
+    Visible,
+    HiddenTransition,
+    HiddenSteady { completed: u8 },
+    Complete,
+}
+
+#[cfg(feature = "retained-renderer")]
+impl RuntimeBaselineVisibilityPhase {
+    fn begin_hidden_segment(&mut self) -> bool {
+        if *self != Self::Visible {
+            return false;
+        }
+        *self = Self::HiddenTransition;
+        true
+    }
+
+    fn forces_hidden(self) -> bool {
+        matches!(self, Self::HiddenTransition | Self::HiddenSteady { .. })
+    }
+
+    fn record_hidden_ui_tick(&mut self) {
+        *self = match *self {
+            Self::HiddenTransition => Self::HiddenSteady { completed: 0 },
+            Self::HiddenSteady { completed: 0 } => Self::HiddenSteady { completed: 1 },
+            Self::HiddenSteady { .. } => Self::Complete,
+            other => other,
+        };
+    }
+
+    fn ready_for_terminal_work(self) -> bool {
+        matches!(self, Self::Inactive | Self::Complete)
+    }
 }
 
 thread_local! {
@@ -772,7 +939,7 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     // retained layer, so the review capture below reads the true post-fallback
     // renderer.
     #[cfg(feature = "retained-renderer")]
-    let retained_host = if renderer_runtime.effective().is_retained() {
+    let mut retained_host = if renderer_runtime.effective().is_retained() {
         // Dev/test-only: an injected initialization fault forces the startup path
         // down the acknowledged Smooth fallback without ever building a host.
         #[cfg(feature = "dev-preview")]
@@ -822,6 +989,12 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     } else {
         None
     };
+    #[cfg(feature = "retained-renderer")]
+    if review.runtime_metrics_out.is_some() {
+        if let Some(host) = retained_host.as_mut() {
+            host.prewarm_capture_resources();
+        }
+    }
     let review_capture = crate::companion::review_capture::ReviewCapture::from_options(
         renderer_runtime.effective(),
         &review,
@@ -892,6 +1065,12 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             review_capture_live_values: review.review_capture_live_values,
             #[cfg(feature = "retained-renderer")]
             runtime_metrics_out: review.runtime_metrics_out.clone(),
+            #[cfg(feature = "retained-renderer")]
+            runtime_baseline_visibility: if review.runtime_metrics_out.is_some() {
+                RuntimeBaselineVisibilityPhase::Visible
+            } else {
+                RuntimeBaselineVisibilityPhase::Inactive
+            },
             #[cfg(feature = "retained-renderer")]
             terminal_runtime_metrics: None,
             metric_cache: CompanionMetricCache::default(),
@@ -1107,12 +1286,11 @@ fn ui_tick() {
     if !companion_view_is_visible() {
         #[cfg(feature = "retained-renderer")]
         APP_STATE.with(|cell| {
-            if let Some(host) = cell
-                .borrow_mut()
-                .as_mut()
-                .and_then(|state| state.retained_host.as_mut())
-            {
-                host.record_hidden_tick(hidden_work_start.unwrap_or_default());
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                if let Some(host) = state.retained_host.as_mut() {
+                    host.record_hidden_tick(hidden_work_start.unwrap_or_default());
+                }
+                state.runtime_baseline_visibility.record_hidden_ui_tick();
             }
         });
         finish_review_capture_if_due();
@@ -1184,6 +1362,10 @@ fn companion_view_is_visible() -> bool {
         let Some(state) = state.as_ref() else {
             return false;
         };
+        #[cfg(feature = "retained-renderer")]
+        if state.runtime_baseline_visibility.forces_hidden() {
+            return false;
+        }
         // Review runs are bounded automation, not an idle background window.
         // They must keep painting even when another app covers the companion or
         // the capture can never reach MIN_CAPTURE_FRAMES and terminate.
@@ -1370,9 +1552,11 @@ fn fallback_from_retained(error: crate::companion::retained::RetainedFailureCate
         }
         if let Some(host) = state.retained_host.as_mut() {
             host.record_fallback();
-            state.terminal_runtime_metrics = Some(host.runtime_metrics_snapshot(
-                crate::companion::paired_review::full_preview_capacity_inventory(),
-            ));
+            if state.runtime_metrics_out.is_some() {
+                state.terminal_runtime_metrics = Some(host.runtime_metrics_snapshot(
+                    crate::companion::paired_review::full_preview_capacity_inventory(),
+                ));
+            }
         }
         state.retained_host.take();
         // Restore the AppKit-drawn view (this also requests a display) and record
@@ -1546,19 +1730,30 @@ fn finish_review_capture_if_due() {
         {
             return None;
         }
+        #[cfg(feature = "retained-renderer")]
+        if state.runtime_metrics_out.is_some() {
+            if state.runtime_baseline_visibility.begin_hidden_segment() {
+                return None;
+            }
+            if !state.runtime_baseline_visibility.ready_for_terminal_work() {
+                return None;
+            }
+        }
         // Produce the paired Smooth/Retained artifacts from the frozen last-good
         // frame before the capture session is torn down.
         #[cfg(feature = "retained-renderer")]
         if state.runtime_metrics_out.is_some() {
+            let species = state.vm.pet_render.generated_species;
             if let Some(host) = state.retained_host.as_mut() {
-                // Exercise the exact hidden-tick metrics boundary. The first is
-                // the transition tick; the following two are the measured
-                // steady segment and must record zero renderer work.
-                for _ in 0..3 {
-                    let start = host.runtime_work_counters();
-                    host.record_hidden_tick(start);
+                if let Err(error) = host.run_virtual_lifetime_audit(4_500, |_phase, frame, now| {
+                    prepare_lifetime_fixture_frame(species, frame, now)
+                }) {
+                    write_boundary_diagnostic(format_args!(
+                        "glorp runtime lifetime audit failed: {}\n",
+                        error.category()
+                    ));
+                    std::process::exit(1);
                 }
-                host.run_virtual_lifetime_audit(4_500);
             }
         }
         #[cfg(feature = "retained-renderer")]
@@ -1627,17 +1822,25 @@ fn write_runtime_metrics_if_requested(state: &mut AppState) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let snapshot = if let Some(host) = state.retained_host.as_ref() {
-        host.runtime_metrics_snapshot(inventory)
-    } else {
-        state.terminal_runtime_metrics.clone().ok_or_else(|| {
-            GlorpError::Message(
-                "retained runtime metrics requested without live or terminal evidence".into(),
-            )
-        })?
-    };
+    let live = state
+        .retained_host
+        .as_ref()
+        .map(|host| host.runtime_metrics_snapshot(inventory));
+    let snapshot = select_terminal_runtime_metrics(live, state.terminal_runtime_metrics.clone())?;
     std::fs::write(path, serde_json::to_vec_pretty(&snapshot)?)?;
     Ok(())
+}
+
+#[cfg(feature = "retained-renderer")]
+fn select_terminal_runtime_metrics(
+    live: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
+    terminal: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
+) -> Result<crate::companion::retained::CompanionRuntimeMetricsSnapshot> {
+    live.or(terminal).ok_or_else(|| {
+        GlorpError::Message(
+            "retained runtime metrics requested without live or terminal evidence".into(),
+        )
+    })
 }
 
 /// Freezes the last-good frame and produces the paired Smooth/Retained capture.
@@ -2977,6 +3180,59 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_baseline_visibility_requires_three_real_hidden_ui_ticks() {
+        let mut phase = RuntimeBaselineVisibilityPhase::Visible;
+        assert!(!phase.forces_hidden());
+        assert!(!phase.ready_for_terminal_work());
+
+        assert!(phase.begin_hidden_segment());
+        assert_eq!(phase, RuntimeBaselineVisibilityPhase::HiddenTransition);
+        assert!(phase.forces_hidden());
+
+        phase.record_hidden_ui_tick();
+        assert_eq!(
+            phase,
+            RuntimeBaselineVisibilityPhase::HiddenSteady { completed: 0 }
+        );
+        assert!(!phase.ready_for_terminal_work());
+        phase.record_hidden_ui_tick();
+        assert_eq!(
+            phase,
+            RuntimeBaselineVisibilityPhase::HiddenSteady { completed: 1 }
+        );
+        assert!(!phase.ready_for_terminal_work());
+        phase.record_hidden_ui_tick();
+        assert_eq!(phase, RuntimeBaselineVisibilityPhase::Complete);
+        assert!(phase.ready_for_terminal_work());
+    }
+
+    #[test]
+    fn terminal_capture_snapshot_survives_live_host_teardown() {
+        let mut metrics = crate::companion::retained::CompanionRuntimeMetrics::default();
+        metrics.record_capture_attempt();
+        metrics.record_capture_success();
+        let terminal = metrics.snapshot(
+            crate::companion::retained::RuntimeIdentity::baseline(),
+            crate::companion::retained::CompanionCapacityInventory::contract_fixture(),
+            crate::companion::retained::RuntimeFixtureIdentity {
+                fixture_id: "glorp-scene-baseline-v2",
+                seed: "test",
+                update_source: "fixed",
+                cadence_ms: 250,
+                logical_width: 360.0,
+                logical_height: 360.0,
+                physical_width: 720,
+                physical_height: 720,
+                backing_scale: 2.0,
+            },
+        );
+        let selected = select_terminal_runtime_metrics(None, Some(terminal)).unwrap();
+        assert_eq!(selected.capture_attempted, 1);
+        assert_eq!(selected.capture_succeeded, 1);
+        assert_eq!(selected.capture_failed, 0);
+    }
 
     #[test]
     fn objc_callback_guard_catches_unwind() {

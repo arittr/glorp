@@ -117,6 +117,66 @@ struct PreparedGpuFrame {
     blends: Vec<SmoothBlendMode>,
 }
 
+pub(super) struct PreparedGpuPrimitiveCollector {
+    resources: CompiledRetainedResources,
+}
+
+impl PreparedGpuPrimitiveCollector {
+    pub(super) fn for_species(
+        species: crate::pet::generation::Species,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
+        let manifest = GlyphRepertoireManifest::for_active_pet(
+            CompanionContentIdentity::for_pet(species),
+            2.0,
+        );
+        Ok(Self {
+            resources: CompiledRetainedResources::compile(&manifest)?,
+        })
+    }
+
+    pub(super) fn observe(
+        &self,
+        frame: &crate::companion::app::PreparedCompanionFrame,
+    ) -> std::result::Result<u32, RetainedFailureCategory> {
+        use crate::companion::paired_review::RendererIdentitySource;
+
+        let RendererIdentitySource::Smooth {
+            metrics,
+            pet_center_col,
+            pet_center_row,
+            pet_width_cells,
+            plan,
+            draw_order,
+        } = frame.renderer_source()
+        else {
+            return Err(RetainedFailureCategory::CaptureUnsupportedVariant);
+        };
+        let background = frame.review_background();
+        let mood_aura = frame.review_mood_aura();
+        let chrome = RetainedChrome {
+            mood_aura: [mood_aura.0, mood_aura.1, mood_aura.2, mood_aura.3],
+            pet_center_col,
+            pet_center_row,
+            pet_width_cells,
+            gauges: frame.review_gauges(),
+            overlays: frame.review_overlays(),
+            hud: frame.review_hud(),
+            hud_font_size: frame.review_hud_font_size(),
+            dim_overlay: frame.review_dim_overlay(),
+        };
+        let prepared = prepare_gpu_frame(
+            plan,
+            draw_order,
+            metrics,
+            frame.review_aperture(),
+            [background.0, background.1, background.2, background.3],
+            &chrome,
+            self.resources.atlas(),
+        )?;
+        Ok(prepared.primitives.len().min(u32::MAX as usize) as u32)
+    }
+}
+
 /// Instance buffers held in a small ring so a frame writes into a slot the GPU is
 /// unlikely to still be reading from the previous present, avoiding a
 /// write-vs-read stall without CPU-side fences.
@@ -128,9 +188,7 @@ const INSTANCE_STRIDE: usize = std::mem::size_of::<GpuPrimitive>();
 /// Maximum primitive count observed by the deterministic full current-renderer
 /// fixture matrix. The fixed minimum ring adds explicit non-growth headroom;
 /// larger generation requests remain possible but are not ordinary frames.
-const FULL_FIXTURE_INSTANCE_MAX: usize = 782;
-const FULL_FIXTURE_INSTANCE_HEADROOM: usize = 242;
-const FIXED_INSTANCE_RING_MIN: usize = FULL_FIXTURE_INSTANCE_MAX + FULL_FIXTURE_INSTANCE_HEADROOM;
+const FIXED_INSTANCE_RING_MIN: usize = 1_024;
 
 /// A capacity-bounded ring of persistent `VERTEX | COPY_DST` instance buffers.
 ///
@@ -469,7 +527,11 @@ impl PreparedRetainedHost {
         let pipelines = create_pipelines(&device, config.format, &atlas_layout, &mut counters);
         let mut metrics = CompanionRuntimeMetrics::default();
         metrics.discard_initial_visible_ticks(20);
-        metrics.record_persistent_gpu_create(resource_object_count(counters));
+        metrics.replace_gpu_allocation(
+            GpuAllocationKind::HostInfrastructure,
+            0,
+            resource_object_count(counters),
+        );
         Ok(Self {
             host: RetainedHost {
                 surface,
@@ -530,9 +592,24 @@ impl ActiveRetainedHost {
         &mut self,
         frame: &crate::companion::paired_review::PairedReviewFrame,
     ) -> std::result::Result<CanonicalRgbaFrame, RetainedFailureCategory> {
+        self.host.metrics.record_capture_attempt();
         let result = capture::RetainedCaptureTarget::new(&mut self.host).capture(frame);
-        self.host.metrics.record_capture();
+        if result.is_ok() {
+            self.host.metrics.record_capture_success();
+        } else {
+            self.host.metrics.record_capture_failure();
+        }
         result
+    }
+
+    pub(crate) fn record_injected_capture_failure(&mut self) {
+        self.host.metrics.record_capture_attempt();
+        self.host.metrics.record_capture_failure();
+    }
+
+    pub(crate) fn prewarm_capture_resources(&mut self) {
+        let (width, height) = self.physical_size();
+        self.host.ensure_capture_resources(width, height);
     }
 
     /// The physical-pixel drawable size the retained surface is configured for.
@@ -566,109 +643,26 @@ impl ActiveRetainedHost {
     /// 4,500-frame virtual-time segment. Wall time is intentionally decoupled
     /// from the fixed 4 Hz semantic cadence; each iteration advances 250 ms of
     /// virtual time while queue work is submitted as fast as the device allows.
-    pub(crate) fn run_virtual_lifetime_audit(&mut self, frames: u64) {
-        const CADENCE_MS: u64 = 250;
-        const DRIVER_WARMUP_FRAMES: u64 = 4_500;
-        let instances = vec![GpuPrimitive::zeroed(); FIXED_INSTANCE_RING_MIN];
-        let submit = |host: &mut RetainedHost| {
-            host.frame_buffers
-                .write_frame_instances(&host.queue, &instances, &mut host.counters);
-            let encoder = host
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("glorp-retained-lifetime-audit"),
-                });
-            host.queue.submit([encoder.finish()])
+    pub(crate) fn run_virtual_lifetime_audit(
+        &mut self,
+        frames: u64,
+        prepare: impl FnMut(
+            LifetimeAuditPhase,
+            u64,
+            time::OffsetDateTime,
+        ) -> std::result::Result<
+            (crate::companion::app::PreparedCompanionFrame, u64),
+            RetainedFailureCategory,
+        >,
+    ) -> std::result::Result<(), RetainedFailureCategory> {
+        let mut executor = GpuLifetimeAuditExecutor {
+            host: &mut self.host,
+            prepare,
+            last_submission: None,
         };
-        let mut last_submission = None;
-        let mut rss_warmup_peak_bytes = 0_u64;
-        let mut gpu_warmup_peak_bytes = 0_u64;
-        for frame in 0..DRIVER_WARMUP_FRAMES {
-            last_submission = Some(submit(&mut self.host));
-            if (frame + 1) % 64 == 0 {
-                if let Some(submission) = last_submission.take() {
-                    let _ = self.host.device.poll(wgpu::PollType::Wait {
-                        submission_index: Some(submission),
-                        timeout: Some(Duration::from_secs(5)),
-                    });
-                }
-            }
-            if (frame + 1) % 256 == 0 {
-                rss_warmup_peak_bytes =
-                    rss_warmup_peak_bytes.max(current_process_rss_bytes().unwrap_or(0));
-                gpu_warmup_peak_bytes = gpu_warmup_peak_bytes.max(
-                    self.host
-                        .metrics
-                        .gpu_accounting_snapshot()
-                        .current
-                        .total_bytes,
-                );
-            }
-        }
-        if let Some(submission) = last_submission.take() {
-            let _ = self.host.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(Duration::from_secs(5)),
-            });
-        }
-        let rss_warmup_bytes = current_process_rss_bytes().unwrap_or(0);
-        let gpu_warmup_bytes = self
-            .host
-            .metrics
-            .gpu_accounting_snapshot()
-            .current
-            .total_bytes;
-        rss_warmup_peak_bytes = rss_warmup_peak_bytes.max(rss_warmup_bytes);
-        gpu_warmup_peak_bytes = gpu_warmup_peak_bytes.max(gpu_warmup_bytes);
-        let mut rss_peak_bytes = rss_warmup_bytes;
-        let mut gpu_peak_bytes = gpu_warmup_bytes;
-        for frame in 0..frames {
-            last_submission = Some(submit(&mut self.host));
-            if (frame + 1) % 256 == 0 {
-                if let Some(submission) = last_submission.take() {
-                    let _ = self.host.device.poll(wgpu::PollType::Wait {
-                        submission_index: Some(submission),
-                        timeout: Some(Duration::from_secs(5)),
-                    });
-                }
-                rss_peak_bytes = rss_peak_bytes.max(current_process_rss_bytes().unwrap_or(0));
-                gpu_peak_bytes = gpu_peak_bytes.max(
-                    self.host
-                        .metrics
-                        .gpu_accounting_snapshot()
-                        .current
-                        .total_bytes,
-                );
-            }
-        }
-        if let Some(submission) = last_submission {
-            let _ = self.host.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(Duration::from_secs(5)),
-            });
-        }
-        let rss_final_bytes = current_process_rss_bytes().unwrap_or(0);
-        let gpu_final_bytes = self
-            .host
-            .metrics
-            .gpu_accounting_snapshot()
-            .current
-            .total_bytes;
-        self.host
-            .metrics
-            .record_lifetime_audit(LifetimeAuditSnapshot {
-                frames,
-                cadence_ms: CADENCE_MS,
-                virtual_elapsed_ms: frames.saturating_mul(CADENCE_MS),
-                rss_warmup_bytes,
-                rss_warmup_peak_bytes,
-                rss_final_bytes,
-                rss_peak_bytes: rss_peak_bytes.max(rss_final_bytes),
-                gpu_warmup_bytes,
-                gpu_warmup_peak_bytes,
-                gpu_final_bytes,
-                gpu_peak_bytes: gpu_peak_bytes.max(gpu_final_bytes),
-            });
+        let audit = run_lifetime_schedule(&mut executor, frames)?;
+        executor.host.metrics.record_lifetime_audit(audit);
+        Ok(())
     }
 
     pub(crate) fn record_ui_tick_us(&mut self, value: u32) {
@@ -734,7 +728,285 @@ impl ActiveRetainedHost {
     }
 }
 
-fn current_process_rss_bytes() -> Option<u64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LifetimeAuditPhase {
+    Warmup,
+    Measured,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LifetimeFrameObservation {
+    semantic_hash: u64,
+    gpu_frame_hash: u64,
+    draw_calls: u64,
+    gpu_bytes: u64,
+}
+
+trait LifetimeAuditExecutor {
+    fn render_frame(
+        &mut self,
+        phase: LifetimeAuditPhase,
+        frame: u64,
+        now: time::OffsetDateTime,
+    ) -> std::result::Result<LifetimeFrameObservation, RetainedFailureCategory>;
+
+    fn poll(&mut self) -> std::result::Result<(), RetainedFailureCategory>;
+
+    fn rss_bytes(&mut self) -> std::result::Result<u64, RetainedFailureCategory>;
+}
+
+struct GpuLifetimeAuditExecutor<'host, Prepare> {
+    host: &'host mut RetainedHost,
+    prepare: Prepare,
+    last_submission: Option<wgpu::SubmissionIndex>,
+}
+
+impl<Prepare> LifetimeAuditExecutor for GpuLifetimeAuditExecutor<'_, Prepare>
+where
+    Prepare: FnMut(
+        LifetimeAuditPhase,
+        u64,
+        time::OffsetDateTime,
+    ) -> std::result::Result<
+        (crate::companion::app::PreparedCompanionFrame, u64),
+        RetainedFailureCategory,
+    >,
+{
+    fn render_frame(
+        &mut self,
+        phase: LifetimeAuditPhase,
+        frame: u64,
+        now: time::OffsetDateTime,
+    ) -> std::result::Result<LifetimeFrameObservation, RetainedFailureCategory> {
+        use crate::companion::paired_review::RendererIdentitySource;
+
+        let (prepared, semantic_hash) = (self.prepare)(phase, frame, now)?;
+        let RendererIdentitySource::Smooth {
+            metrics,
+            pet_center_col,
+            pet_center_row,
+            pet_width_cells,
+            plan,
+            draw_order,
+        } = prepared.renderer_source()
+        else {
+            return Err(RetainedFailureCategory::LifetimeFramePreparation);
+        };
+        let background_color = prepared.review_background();
+        let background = [
+            background_color.0,
+            background_color.1,
+            background_color.2,
+            background_color.3,
+        ];
+        let mood_aura = prepared.review_mood_aura();
+        let chrome = RetainedChrome {
+            mood_aura: [mood_aura.0, mood_aura.1, mood_aura.2, mood_aura.3],
+            pet_center_col,
+            pet_center_row,
+            pet_width_cells,
+            gauges: prepared.review_gauges(),
+            overlays: prepared.review_overlays(),
+            hud: prepared.review_hud(),
+            hud_font_size: prepared.review_hud_font_size(),
+            dim_overlay: prepared.review_dim_overlay(),
+        };
+        let gpu_frame = {
+            let active = self
+                .host
+                .glyph_resources
+                .as_ref()
+                .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
+            prepare_gpu_frame(
+                plan,
+                draw_order,
+                metrics,
+                prepared.review_aperture(),
+                background,
+                &chrome,
+                active.resources.atlas(),
+            )?
+        };
+        let gpu_frame_hash = hash_prepared_gpu_frame(&gpu_frame);
+        let draw_calls = gpu_frame.blends.len() as u64;
+        let width = self.host.physical_width;
+        let height = self.host.physical_height;
+        self.host.ensure_capture_resources(width, height);
+        self.host.prepare_frame(&gpu_frame);
+        let mut encoder =
+            self.host
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glorp-retained-lifetime-audit"),
+                });
+        {
+            let active = self
+                .host
+                .glyph_resources
+                .as_ref()
+                .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
+            let capture = self
+                .host
+                .capture_resources
+                .as_ref()
+                .expect("lifetime capture target is prewarmed");
+            self.host.encode_scene(
+                &mut encoder,
+                &capture.intermediate_view,
+                &active.bind_group,
+                self.host.frame_buffers.current_buffer(),
+                &gpu_frame.blends,
+                background,
+            );
+        }
+        self.last_submission = Some(self.host.queue.submit([encoder.finish()]));
+        let gpu_bytes = self
+            .host
+            .metrics
+            .gpu_accounting_snapshot()
+            .current_bytes
+            .total_bytes;
+        Ok(LifetimeFrameObservation {
+            semantic_hash,
+            gpu_frame_hash,
+            draw_calls,
+            gpu_bytes,
+        })
+    }
+
+    fn poll(&mut self) -> std::result::Result<(), RetainedFailureCategory> {
+        let Some(submission) = self.last_submission.take() else {
+            return Ok(());
+        };
+        self.host
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .map(|_| ())
+            .map_err(|_| RetainedFailureCategory::LifetimeGpuPoll)
+    }
+
+    fn rss_bytes(&mut self) -> std::result::Result<u64, RetainedFailureCategory> {
+        current_process_rss_bytes()
+    }
+}
+
+fn hash_prepared_gpu_frame(frame: &PreparedGpuFrame) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in bytemuck::cast_slice::<GpuPrimitive, u8>(&frame.primitives) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    for blend in &frame.blends {
+        let byte = match blend {
+            SmoothBlendMode::Normal => 0,
+            SmoothBlendMode::Multiply => 1,
+            SmoothBlendMode::Screen => 2,
+            SmoothBlendMode::Add => 3,
+            SmoothBlendMode::Replace => 4,
+        };
+        hash ^= byte;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+fn run_lifetime_schedule(
+    executor: &mut impl LifetimeAuditExecutor,
+    frames: u64,
+) -> std::result::Result<LifetimeAuditSnapshot, RetainedFailureCategory> {
+    const CADENCE_MS: i64 = 250;
+    const POLL_INTERVAL: u64 = 64;
+    const SAMPLE_INTERVAL: u64 = 256;
+    let base = time::macros::datetime!(2026-06-13 18:00 UTC);
+    let mut audit = LifetimeAuditSnapshot {
+        frames,
+        warmup_frames: frames,
+        cadence_ms: CADENCE_MS as u64,
+        ..LifetimeAuditSnapshot::default()
+    };
+    let mut previous_semantic = None;
+    let mut previous_gpu = None;
+
+    for phase in [LifetimeAuditPhase::Warmup, LifetimeAuditPhase::Measured] {
+        let mut now = base;
+        let mut phase_gpu_final = 0_u64;
+        for frame in 0..frames {
+            let observation = executor.render_frame(phase, frame, now)?;
+            phase_gpu_final = observation.gpu_bytes;
+            match phase {
+                LifetimeAuditPhase::Warmup => {
+                    audit.gpu_warmup_peak_bytes =
+                        audit.gpu_warmup_peak_bytes.max(observation.gpu_bytes);
+                }
+                LifetimeAuditPhase::Measured => {
+                    audit.prepared_frames = audit.prepared_frames.saturating_add(1);
+                    audit.encoded_frames = audit.encoded_frames.saturating_add(1);
+                    audit.draw_calls = audit.draw_calls.saturating_add(observation.draw_calls);
+                    if previous_semantic
+                        .replace(observation.semantic_hash)
+                        .is_some_and(|previous| previous != observation.semantic_hash)
+                    {
+                        audit.semantic_frame_changes =
+                            audit.semantic_frame_changes.saturating_add(1);
+                    }
+                    if previous_gpu
+                        .replace(observation.gpu_frame_hash)
+                        .is_some_and(|previous| previous != observation.gpu_frame_hash)
+                    {
+                        audit.gpu_frame_hash_changes =
+                            audit.gpu_frame_hash_changes.saturating_add(1);
+                    }
+                    audit.gpu_peak_bytes = audit.gpu_peak_bytes.max(observation.gpu_bytes);
+                }
+            }
+            if (frame + 1) % POLL_INTERVAL == 0 {
+                executor.poll()?;
+                audit.poll_count = audit.poll_count.saturating_add(1);
+            }
+            if (frame + 1) % SAMPLE_INTERVAL == 0 {
+                let rss = executor.rss_bytes()?;
+                match phase {
+                    LifetimeAuditPhase::Warmup => {
+                        audit.rss_warmup_peak_bytes = audit.rss_warmup_peak_bytes.max(rss)
+                    }
+                    LifetimeAuditPhase::Measured => {
+                        audit.rss_peak_bytes = audit.rss_peak_bytes.max(rss)
+                    }
+                }
+            }
+            now += time::Duration::milliseconds(CADENCE_MS);
+        }
+        executor.poll()?;
+        audit.poll_count = audit.poll_count.saturating_add(1);
+        let rss_final = executor.rss_bytes()?;
+        match phase {
+            LifetimeAuditPhase::Warmup => {
+                audit.rss_warmup_bytes = rss_final;
+                audit.rss_warmup_peak_bytes = audit.rss_warmup_peak_bytes.max(rss_final);
+                audit.gpu_warmup_bytes = phase_gpu_final;
+                audit.gpu_warmup_peak_bytes = audit.gpu_warmup_peak_bytes.max(phase_gpu_final);
+            }
+            LifetimeAuditPhase::Measured => {
+                audit.rss_final_bytes = rss_final;
+                audit.rss_peak_bytes = audit.rss_peak_bytes.max(rss_final);
+                audit.gpu_final_bytes = phase_gpu_final;
+                audit.gpu_peak_bytes = audit.gpu_peak_bytes.max(phase_gpu_final);
+                audit.virtual_elapsed_ms = (now - base)
+                    .whole_milliseconds()
+                    .max(0)
+                    .min(i128::from(u64::MAX)) as u64;
+            }
+        }
+    }
+    Ok(audit)
+}
+
+fn current_process_rss_bytes() -> std::result::Result<u64, RetainedFailureCategory> {
     #[repr(C)]
     #[derive(Default)]
     struct RUsageInfoV0 {
@@ -767,7 +1039,11 @@ fn current_process_rss_bytes() -> Option<u64> {
             std::ptr::from_mut(&mut usage).cast(),
         )
     };
-    (rc == 0 && usage.resident_size > 0).then_some(usage.resident_size)
+    if rc == 0 && usage.resident_size > 0 {
+        Ok(usage.resident_size)
+    } else {
+        Err(RetainedFailureCategory::LifetimeRssUnavailable)
+    }
 }
 
 impl std::ops::Deref for ActiveRetainedHost {
@@ -997,12 +1273,17 @@ impl RetainedHost {
         let gpu_bytes =
             (self.frame_buffers.capacity_instances * INSTANCE_RING_LEN * INSTANCE_STRIDE) as u64;
         self.record_metrics(|metrics| {
-            metrics.record_persistent_gpu_create(resource_object_count(delta));
+            if delta.buffer_creations > 0 {
+                metrics.replace_gpu_allocation(
+                    GpuAllocationKind::InstanceRing,
+                    gpu_bytes,
+                    INSTANCE_RING_LEN as u64,
+                );
+            }
             metrics.record_queue_write(delta.instance_write_bytes);
             metrics.observe_primitives(primitives);
             metrics.observe_blended_draws(blended_draws);
             metrics.observe_cpu_bytes(cpu_bytes);
-            metrics.replace_gpu_allocation(GpuAllocationKind::InstanceRing, gpu_bytes);
         });
     }
 
@@ -1095,12 +1376,10 @@ impl RetainedHost {
             resources.atlas(),
             &mut self.counters,
         );
-        let delta = self.counters - before;
-        self.metrics
-            .record_persistent_gpu_create(resource_object_count(delta));
+        let _delta = self.counters - before;
         self.metrics.record_static_upload(static_bytes);
         self.metrics
-            .replace_gpu_allocation(GpuAllocationKind::Atlas, static_bytes);
+            .replace_gpu_allocation(GpuAllocationKind::Atlas, static_bytes, 2);
         if rebuilding {
             self.counters.atlas_builds_after_activation += 1;
             self.counters.atlas_uploads_after_activation += 1;
@@ -1150,7 +1429,7 @@ impl RetainedHost {
             .saturating_mul(4)
             .saturating_add(capture::staging_buffer_size(width, height));
         self.metrics
-            .replace_gpu_allocation(GpuAllocationKind::Capture, capture_bytes);
+            .replace_gpu_allocation(GpuAllocationKind::Capture, capture_bytes, 2);
         self.capture_resources = Some(PersistentCaptureResources {
             width,
             height,
@@ -2078,12 +2357,13 @@ mod tests {
     use super::{
         create_atlas_bind_group_layout, create_pipelines, current_process_rss_bytes, glyph_advance,
         glyph_ink_rect, glyph_run_height, glyph_run_width, persistent_instance_capacity,
-        physical_dimension, push_analytic_arc, upload_glyph_atlas, CompiledGlyphAtlas,
-        CompiledRetainedResources, GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest,
-        GpuPrimitive, LayerActivationGuard, LayerActivationState, PersistentFrameBuffers,
-        Pipelines, PreparedGpuFrame, RetainedFailureCategory, RetainedResourceCounters,
-        SmoothBlendMode, FULL_FIXTURE_INSTANCE_HEADROOM, FULL_FIXTURE_INSTANCE_MAX,
-        GLYPH_FONT_SIZE, RETAINED_ATLAS_POINT_SIZE,
+        physical_dimension, push_analytic_arc, run_lifetime_schedule, upload_glyph_atlas,
+        CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry, GlyphKey,
+        GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard, LayerActivationState,
+        LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
+        PersistentFrameBuffers, Pipelines, PreparedGpuFrame, RetainedFailureCategory,
+        RetainedResourceCounters, SmoothBlendMode, FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE,
+        RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -2275,17 +2555,40 @@ mod tests {
 
     #[test]
     fn first_instance_ring_allocation_has_bounded_fixture_headroom() {
-        assert_eq!(FULL_FIXTURE_INSTANCE_MAX, 782);
-        assert_eq!(FULL_FIXTURE_INSTANCE_HEADROOM, 242);
+        let inventory = crate::companion::paired_review::full_preview_capacity_inventory();
+        let observed = inventory
+            .max_prepared_gpu_primitives
+            .observed
+            .expect("the production matrix observes prepared primitives")
+            as usize;
+        assert_eq!(FIXED_INSTANCE_RING_MIN, 1_024);
+        assert_eq!(
+            inventory.max_prepared_gpu_primitives.headroom as usize,
+            FIXED_INSTANCE_RING_MIN - observed,
+        );
         assert_eq!(persistent_instance_capacity(1), 1_024);
-        assert_eq!(persistent_instance_capacity(782), 1_024);
+        assert_eq!(persistent_instance_capacity(observed), 1_024);
     }
 
     #[test]
     fn varying_full_fixture_counts_never_recreate_the_instance_ring() {
         let mut host = TestRetainedResources::warm();
         let before = host.counters();
-        for count in [1, 96, 782, 12, 781, 0, 512, 782] {
+        let observed = crate::companion::paired_review::full_preview_capacity_inventory()
+            .max_prepared_gpu_primitives
+            .observed
+            .expect("the production matrix observes prepared primitives")
+            as usize;
+        for count in [
+            1,
+            96,
+            observed,
+            12,
+            observed.saturating_sub(1),
+            0,
+            512,
+            observed,
+        ] {
             host.prepare_frame(&prepared_frame_with_count(count))
                 .unwrap();
         }
@@ -2295,7 +2598,86 @@ mod tests {
 
     #[test]
     fn process_rss_sampler_reads_current_process_without_spawning() {
-        assert!(current_process_rss_bytes().is_some_and(|bytes| bytes > 0));
+        assert!(current_process_rss_bytes().is_ok_and(|bytes| bytes > 0));
+    }
+
+    #[derive(Default)]
+    struct FakeLifetimeExecutor {
+        calls: Vec<(LifetimeAuditPhase, u64, i128)>,
+        polls: u64,
+        rss_calls: u64,
+        fail_poll: bool,
+        fail_rss: bool,
+    }
+
+    impl LifetimeAuditExecutor for FakeLifetimeExecutor {
+        fn render_frame(
+            &mut self,
+            phase: LifetimeAuditPhase,
+            frame: u64,
+            now: time::OffsetDateTime,
+        ) -> std::result::Result<LifetimeFrameObservation, RetainedFailureCategory> {
+            self.calls.push((phase, frame, now.unix_timestamp_nanos()));
+            Ok(LifetimeFrameObservation {
+                semantic_hash: frame % 2,
+                gpu_frame_hash: frame % 3,
+                draw_calls: frame + 1,
+                gpu_bytes: 1_000,
+            })
+        }
+
+        fn poll(&mut self) -> std::result::Result<(), RetainedFailureCategory> {
+            self.polls += 1;
+            if self.fail_poll {
+                Err(RetainedFailureCategory::LifetimeGpuPoll)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn rss_bytes(&mut self) -> std::result::Result<u64, RetainedFailureCategory> {
+            self.rss_calls += 1;
+            if self.fail_rss {
+                Err(RetainedFailureCategory::LifetimeRssUnavailable)
+            } else {
+                Ok(10_000)
+            }
+        }
+    }
+
+    #[test]
+    fn lifetime_schedule_repeats_identical_warmup_and_measured_virtual_clocks() {
+        let mut executor = FakeLifetimeExecutor::default();
+        let audit = run_lifetime_schedule(&mut executor, 4).unwrap();
+        assert_eq!(executor.calls.len(), 8);
+        let warmup = &executor.calls[..4];
+        let measured = &executor.calls[4..];
+        for (warm, measured) in warmup.iter().zip(measured) {
+            assert_eq!(warm.1, measured.1);
+            assert_eq!(warm.2, measured.2);
+        }
+        assert_eq!(audit.frames, 4);
+        assert_eq!(audit.warmup_frames, 4);
+        assert_eq!(audit.prepared_frames, 4);
+        assert_eq!(audit.encoded_frames, 4);
+        assert!(audit.semantic_frame_changes > 0);
+        assert!(audit.gpu_frame_hash_changes > 0);
+        assert!(audit.draw_calls > 0);
+        assert_eq!(audit.virtual_elapsed_ms, 1_000);
+    }
+
+    #[test]
+    fn lifetime_schedule_fails_closed_on_poll_or_rss_errors() {
+        let mut poll_failure = FakeLifetimeExecutor { fail_poll: true, ..Default::default() };
+        assert_eq!(
+            run_lifetime_schedule(&mut poll_failure, 1),
+            Err(RetainedFailureCategory::LifetimeGpuPoll)
+        );
+        let mut rss_failure = FakeLifetimeExecutor { fail_rss: true, ..Default::default() };
+        assert_eq!(
+            run_lifetime_schedule(&mut rss_failure, 1),
+            Err(RetainedFailureCategory::LifetimeRssUnavailable)
+        );
     }
 
     /// A visible coverage-mask entry with the given ink geometry; the metric

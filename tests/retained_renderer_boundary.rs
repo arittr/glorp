@@ -128,7 +128,7 @@ fn terminal_metrics_survive_fallback_and_follow_paired_capture() {
         .expect("terminal metrics are written");
     assert!(
         capture < snapshot,
-        "terminal snapshot must be emitted after paired capture increments capture_count"
+        "terminal snapshot must be emitted after paired capture records its attempted/succeeded/failed outcome"
     );
 }
 

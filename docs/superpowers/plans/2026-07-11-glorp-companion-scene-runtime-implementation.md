@@ -66,11 +66,12 @@
 
 1. Stop after Task 1 if current safety or baseline instrumentation cannot remain deterministic without changing live behavior.
 2. Stop after Task 6 if a full neutral companion fixture cannot be built without TUI/Smooth types.
-3. Stop after Task 13 if native depth, alpha, color, capture, or atomic activation evidence is wrong.
-4. Stop after Task 15 for any frozen performance breach, leak, hidden work, or fault failure.
-5. Task 16 requires Drew's explicit approval before changing Auto.
-6. Task 17 requires the completed canary hold before deleting translation.
-7. Task 18 begins only after one retained scene-generation path remains.
+3. After Task 6, close the explicit AppKit preparation prerequisite below. Tasks 2-6 may proceed under the bounded `stage0-appkit-raster-v1` disposition, but Task 7 and later work are blocked until the measured slice p95 is <=4000 us.
+4. Stop after Task 13 if native depth, alpha, color, capture, or atomic activation evidence is wrong.
+5. Stop after Task 15 for any frozen performance breach, leak, hidden work, or fault failure.
+6. Task 16 requires Drew's explicit approval before changing Auto.
+7. Task 17 requires the completed canary hold before deleting translation.
+8. Task 18 begins only after one retained scene-generation path remains.
 
 ---
 
@@ -194,6 +195,12 @@ ordinary post-warmup persistent GPU creations = 0
 ordinary post-warmup static upload bytes = 0
 RSS and accounted GPU bytes after 4500 virtual frames <= warmup high-water + 1%
 ~~~
+
+The target remains <=4000 us. Until the post-Task-6 prerequisite closes it, only
+the versioned `stage0-appkit-raster-v1` disposition may be accepted, and only up
+to the frozen 20000 us ceiling derived from the observed Stage-0 range. A value
+above 20000 us is a regression and fails Task 1. A value at or below 4000 us is
+PASS and does not use the exception.
 
 - [ ] **Step 7: Run Stage 0 verification**
 
@@ -803,6 +810,25 @@ git commit -m "refactor(companion): neutralize capture identity"
 
 ---
 
+### Post-Task-6 prerequisite: close the AppKit preparation slice gate
+
+This prerequisite executes after Task 6 and before Task 7. It is not deferred to
+Task 12: Tasks 2-6 may proceed while the bounded `stage0-appkit-raster-v1`
+disposition remains in effect, but Task 7 is blocked until this section passes.
+
+- [ ] Add failing tests for a resumable AppKit-only raster preparation lane that
+      stops at the <=4000 us deadline, preserves the active generation, and
+      resumes from the exact next work item.
+- [ ] Move current glyph/AppKit raster preparation out of the presentation
+      callback into that lane. Record queue wait, slice count, total raster time,
+      and deadline misses; yield to the run loop after every exhausted slice.
+- [ ] Run the clean 120-second Task 1 baseline protocol and require
+      `appkit-raster-slice` PASS at <=4000 us. The 20000 us exception ceiling is
+      not sufficient to unlock Task 7.
+- [ ] Commit the implementation and refreshed measurement before starting Task 7.
+
+---
+
 ### Task 7: Split retained host ownership without changing rendering
 
 **Files:**
@@ -1189,7 +1215,7 @@ git commit -m "feat(renderer): order blended world content by depth"
 - Modify: tests/retained_scene.rs
 
 **Interfaces:**
-- Consumes: GenerationRequest, CPU compiler, render-owner materialization, FrameProgress/GpuErrorMailbox.
+- Consumes: GenerationRequest, CPU compiler, the completed post-Task-6 bounded AppKit preparation lane, render-owner materialization, FrameProgress/GpuErrorMailbox.
 - Produces: SceneBuildWorker, CpuCandidateMailbox, ActiveSceneGeneration, ReadyGpuCandidate, and activate_candidate.
 
 - [ ] **Step 1: Write failing atomic-lifecycle tests**
@@ -1238,9 +1264,13 @@ Expected: compile failure for missing lifecycle harness/runtime wiring.
 
 The UI thread sends immutable GenerationRequest values through a one-active/one-pending owner. The worker checks cancellation between validation, geometry compile, atlas packing, and mirror creation. It returns CpuSceneCandidate plus request ID/generation/source revisions. It never receives Device, Queue, Surface, AppKit objects, or live AppState references.
 
-- [ ] **Step 4: Budget AppKit raster preparation**
+- [ ] **Step 4: Integrate the already-gated AppKit preparation lane**
 
-Schedule AppKit-only rasterization in <= 4000us slices outside the presentation callback. Yield to the run loop when the slice expires. The active generation remains visible. Record queue wait, slice count, total raster time, and deadline misses.
+Feed scene-generation raster work into the post-Task-6 lane without changing its
+<=4000 us slice contract. Verify the active generation remains visible across
+yields and that Task 12 activation consumes completed raster output rather than
+performing AppKit rasterization in the presentation callback. Do not redefine or
+retroactively close the prerequisite here.
 
 - [ ] **Step 5: Materialize and activate atomically**
 
