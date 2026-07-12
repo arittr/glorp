@@ -61,6 +61,11 @@ pub(crate) struct AppkitRasterSliceDiagnostic {
     pub setup_us: u32,
     pub max_item_us: u32,
     pub max_item_index: Option<u32>,
+    pub max_item_scratch_setup_us: u32,
+    pub max_item_text_setup_measure_us: u32,
+    pub max_item_draw_flush_us: u32,
+    pub max_item_pixel_copy_classify_us: u32,
+    pub max_item_mask_normalize_finalize_us: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -868,7 +873,7 @@ impl CompanionRuntimeMetrics {
         fixture: RuntimeFixtureIdentity,
     ) -> CompanionRuntimeMetricsSnapshot {
         CompanionRuntimeMetricsSnapshot {
-            schema_version: 4,
+            schema_version: 5,
             identity,
             fixture,
             sample_capacity: METRIC_SAMPLE_CAPACITY,
@@ -1071,7 +1076,7 @@ mod tests {
                 backing_scale: 2.0,
             },
         );
-        assert_eq!(snapshot.schema_version, 4);
+        assert_eq!(snapshot.schema_version, 5);
         assert_eq!(snapshot.ui_tick_us.p95, Some(1_500));
         assert_eq!(snapshot.state_prepare_us.p95, Some(900));
         assert_eq!(snapshot.gpu_translate_us.p95, Some(300));
@@ -1102,6 +1107,11 @@ mod tests {
                 setup_us: 100,
                 max_item_us: 900,
                 max_item_index: Some(index as u32),
+                max_item_scratch_setup_us: 100,
+                max_item_text_setup_measure_us: 200,
+                max_item_draw_flush_us: 300,
+                max_item_pixel_copy_classify_us: 150,
+                max_item_mask_normalize_finalize_us: 100,
             });
         }
 
@@ -1121,7 +1131,7 @@ mod tests {
             },
         );
 
-        assert_eq!(snapshot.schema_version, 4);
+        assert_eq!(snapshot.schema_version, 5);
         assert_eq!(snapshot.appkit_raster_diagnostic_capacity, 256);
         assert_eq!(snapshot.appkit_raster_slice_diagnostics.len(), 256);
         assert_eq!(snapshot.appkit_raster_slice_diagnostics[0].start_cursor, 1);
@@ -1137,6 +1147,12 @@ mod tests {
             snapshot.appkit_raster_slice_diagnostics[255].elapsed_us,
             1_200
         );
+        let diagnostic = snapshot.appkit_raster_slice_diagnostics[255];
+        assert_eq!(diagnostic.max_item_scratch_setup_us, 100);
+        assert_eq!(diagnostic.max_item_text_setup_measure_us, 200);
+        assert_eq!(diagnostic.max_item_draw_flush_us, 300);
+        assert_eq!(diagnostic.max_item_pixel_copy_classify_us, 150);
+        assert_eq!(diagnostic.max_item_mask_normalize_finalize_us, 100);
         let json = serde_json::to_value(&snapshot.appkit_raster_slice_diagnostics).unwrap();
         let text = json.to_string();
         assert!(!text.contains("glyph"));

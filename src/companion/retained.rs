@@ -1566,6 +1566,17 @@ impl RetainedHost {
                 max_item_index: progress
                     .max_item_index
                     .map(|index| u32::try_from(index).unwrap_or(u32::MAX)),
+                max_item_scratch_setup_us: duration_us(progress.max_item_phases.scratch_setup),
+                max_item_text_setup_measure_us: duration_us(
+                    progress.max_item_phases.text_setup_measure,
+                ),
+                max_item_draw_flush_us: duration_us(progress.max_item_phases.draw_flush),
+                max_item_pixel_copy_classify_us: duration_us(
+                    progress.max_item_phases.pixel_copy_classify,
+                ),
+                max_item_mask_normalize_finalize_us: duration_us(
+                    progress.max_item_phases.mask_normalize_finalize,
+                ),
             });
         if progress.complete {
             pending.cpu_complete = true;

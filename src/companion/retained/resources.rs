@@ -23,6 +23,42 @@ use crate::round::smooth::{
     collect_companion_glyph_repertoire, CompanionContentIdentity, RepertoireGlyph,
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct RasterItemPhases {
+    pub(super) scratch_setup: Duration,
+    pub(super) text_setup_measure: Duration,
+    pub(super) draw_flush: Duration,
+    pub(super) pixel_copy_classify: Duration,
+    pub(super) mask_normalize_finalize: Duration,
+}
+
+impl RasterItemPhases {
+    #[cfg(test)]
+    pub(super) fn total(self) -> Duration {
+        self.scratch_setup
+            .saturating_add(self.text_setup_measure)
+            .saturating_add(self.draw_flush)
+            .saturating_add(self.pixel_copy_classify)
+            .saturating_add(self.mask_normalize_finalize)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RasterItemProgress {
+    elapsed: Duration,
+    phases: RasterItemPhases,
+}
+
+impl RasterItemProgress {
+    #[cfg(test)]
+    fn unclassified(elapsed: Duration) -> Self {
+        Self {
+            elapsed,
+            phases: RasterItemPhases::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RasterSliceProgress {
     pub(super) start_cursor: usize,
@@ -33,6 +69,7 @@ pub(super) struct RasterSliceProgress {
     pub(super) elapsed: Duration,
     pub(super) max_item_elapsed: Duration,
     pub(super) max_item_index: Option<usize>,
+    pub(super) max_item_phases: RasterItemPhases,
 }
 
 fn run_resumable_slice<E>(
@@ -41,22 +78,24 @@ fn run_resumable_slice<E>(
     work_start_budget: Duration,
     hard_deadline: Duration,
     mut elapsed: impl FnMut() -> Duration,
-    mut work: impl FnMut(usize) -> Result<Duration, E>,
+    mut work: impl FnMut(usize) -> Result<RasterItemProgress, E>,
 ) -> Result<RasterSliceProgress, E> {
     let start_cursor = *cursor;
     let mut completed_items = 0;
     let mut max_item_elapsed = Duration::ZERO;
     let mut max_item_index = None;
+    let mut max_item_phases = RasterItemPhases::default();
     let mut observed_elapsed = elapsed();
     while *cursor < item_count && observed_elapsed < work_start_budget {
         let index = *cursor;
-        let item_elapsed = work(index)?;
+        let item = work(index)?;
         *cursor += 1;
         completed_items += 1;
         observed_elapsed = elapsed();
-        if max_item_index.is_none() || item_elapsed > max_item_elapsed {
-            max_item_elapsed = item_elapsed;
+        if max_item_index.is_none() || item.elapsed > max_item_elapsed {
+            max_item_elapsed = item.elapsed;
             max_item_index = Some(index);
+            max_item_phases = item.phases;
         }
         if observed_elapsed >= work_start_budget {
             break;
@@ -71,6 +110,7 @@ fn run_resumable_slice<E>(
         elapsed: observed_elapsed,
         max_item_elapsed,
         max_item_index,
+        max_item_phases,
     })
 }
 
@@ -396,6 +436,11 @@ pub(super) struct GlyphRasterTarget {
 /// white text stays at spread zero; emoji cross it decisively.
 const CHROMA_THRESHOLD: u8 = 16;
 
+struct ProfiledGlyphEntry {
+    entry: GlyphAtlasEntry,
+    phases: RasterItemPhases,
+}
+
 /// Rasterizes one glyph into `atlas` at `(x, y)` and returns its complete entry.
 ///
 /// The glyph is drawn white so mask glyphs carry pure coverage. If the
@@ -404,6 +449,7 @@ const CHROMA_THRESHOLD: u8 = 16;
 /// [`GlyphEntryKind::PremultipliedColorRgba`]; otherwise it is stored as white
 /// RGB plus coverage alpha ([`GlyphEntryKind::Mask`]).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn rasterize_glyph_entry(
     key: &GlyphKey,
     target: &GlyphRasterTarget,
@@ -414,9 +460,34 @@ pub(super) fn rasterize_glyph_entry(
     x: u32,
     y: u32,
 ) -> std::result::Result<GlyphAtlasEntry, RetainedFailureCategory> {
+    rasterize_glyph_entry_profiled(
+        key,
+        target,
+        font_policy_id,
+        atlas,
+        atlas_width,
+        atlas_height,
+        x,
+        y,
+    )
+    .map(|profiled| profiled.entry)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_glyph_entry_profiled(
+    key: &GlyphKey,
+    target: &GlyphRasterTarget,
+    font_policy_id: u64,
+    atlas: &mut [u8],
+    atlas_width: u32,
+    atlas_height: u32,
+    x: u32,
+    y: u32,
+) -> std::result::Result<ProfiledGlyphEntry, RetainedFailureCategory> {
     let cell = target.cell;
     let padding = target.padding;
     unsafe {
+        let phase_started_at = std::time::Instant::now();
         let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(), std::ptr::null_mut(), cell as isize, cell as isize,
             8, 4, true, false, NSDeviceRGBColorSpace, (cell * 4) as isize, 32,
@@ -425,6 +496,9 @@ pub(super) fn rasterize_glyph_entry(
             .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
         let previous = NSGraphicsContext::currentContext();
         NSGraphicsContext::setCurrentContext(Some(&context));
+        let scratch_setup = phase_started_at.elapsed();
+
+        let phase_started_at = std::time::Instant::now();
         let text = NSString::from_str(key.sequence.as_str());
         let font = resolve_font(target.point_size, FontWeightPolicy::from_bold(key.bold));
         let mut attributed = NSMutableAttributedString::from_nsstring(&text);
@@ -441,11 +515,17 @@ pub(super) fn rasterize_glyph_entry(
             NSGraphicsContext::setCurrentContext(previous.as_deref());
             return Err(RetainedFailureCategory::AtlasUnavailable);
         }
+        let text_setup_measure = phase_started_at.elapsed();
+
+        let phase_started_at = std::time::Instant::now();
         let draw_x = f64::from(padding);
         let draw_y = f64::from(padding);
         attributed.drawAtPoint(NSPoint::new(draw_x, draw_y));
         context.flushGraphics();
         NSGraphicsContext::setCurrentContext(previous.as_deref());
+        let draw_flush = phase_started_at.elapsed();
+
+        let phase_started_at = std::time::Instant::now();
         let data = rep.bitmapData();
         if data.is_null() {
             return Err(RetainedFailureCategory::AtlasUnavailable);
@@ -481,13 +561,24 @@ pub(super) fn rasterize_glyph_entry(
                 }
             }
         }
+        let pixel_copy_classify = phase_started_at.elapsed();
+
+        let phase_started_at = std::time::Instant::now();
 
         // An inkless glyph (whitespace) still advances the pen but has no quad.
         if !has_ink {
-            return Ok(GlyphAtlasEntry::whitespace(
-                size.width as f32,
-                size.height as f32,
-            ));
+            let entry = GlyphAtlasEntry::whitespace(size.width as f32, size.height as f32);
+            let mask_normalize_finalize = phase_started_at.elapsed();
+            return Ok(ProfiledGlyphEntry {
+                entry,
+                phases: RasterItemPhases {
+                    scratch_setup,
+                    text_setup_measure,
+                    draw_flush,
+                    pixel_copy_classify,
+                    mask_normalize_finalize,
+                },
+            });
         }
 
         let kind = if has_chroma {
@@ -512,7 +603,7 @@ pub(super) fn rasterize_glyph_entry(
         // sits `descent` above it; converted to top-down rows from the cell top.
         let baseline = cell as f32 - draw_y as f32 - descent;
 
-        Ok(GlyphAtlasEntry {
+        let entry = GlyphAtlasEntry {
             visible_uv: Some([
                 (x + ink_min_x) as f32 / atlas_width as f32,
                 (y + ink_min_y) as f32 / atlas_height as f32,
@@ -536,6 +627,17 @@ pub(super) fn rasterize_glyph_entry(
             safe_padding: padding as f32,
             font_policy_id,
             kind,
+        };
+        let mask_normalize_finalize = phase_started_at.elapsed();
+        Ok(ProfiledGlyphEntry {
+            entry,
+            phases: RasterItemPhases {
+                scratch_setup,
+                text_setup_measure,
+                draw_flush,
+                pixel_copy_classify,
+                mask_normalize_finalize,
+            },
         })
     }
 }
@@ -660,7 +762,7 @@ impl GlyphAtlasPreparation {
                 } else {
                     regular_font_policy_id
                 };
-                let entry = rasterize_glyph_entry(
+                let profiled = rasterize_glyph_entry_profiled(
                     key,
                     target,
                     font_policy_id,
@@ -670,9 +772,12 @@ impl GlyphAtlasPreparation {
                     slot_x * target.cell,
                     slot_y * target.cell,
                 )?;
-                atlas.entries.insert(key.clone(), entry);
+                atlas.entries.insert(key.clone(), profiled.entry);
                 let item_elapsed = item_started_at.elapsed();
-                Ok(item_elapsed)
+                Ok(RasterItemProgress {
+                    elapsed: item_elapsed,
+                    phases: profiled.phases,
+                })
             },
         )
     }
@@ -1191,7 +1296,7 @@ mod glyph_tests {
             || times.next().expect("clock sample"),
             |index| {
                 visited.push(index);
-                Ok::<_, ()>(std::time::Duration::ZERO)
+                Ok::<_, ()>(RasterItemProgress::unclassified(std::time::Duration::ZERO))
             },
         )
         .unwrap();
@@ -1215,7 +1320,7 @@ mod glyph_tests {
             || times.next().expect("clock sample"),
             |index| {
                 visited.push(index);
-                Ok::<_, ()>(std::time::Duration::ZERO)
+                Ok::<_, ()>(RasterItemProgress::unclassified(std::time::Duration::ZERO))
             },
         )
         .unwrap();
@@ -1244,7 +1349,9 @@ mod glyph_tests {
             || times.next().expect("clock sample"),
             |index| {
                 visited.push(index);
-                Ok::<_, ()>(std::time::Duration::from_micros(400))
+                Ok::<_, ()>(RasterItemProgress::unclassified(
+                    std::time::Duration::from_micros(400),
+                ))
             },
         )
         .unwrap();
@@ -1272,7 +1379,9 @@ mod glyph_tests {
             || times.next().expect("clock sample"),
             |index| {
                 visited.push(index);
-                Ok::<_, ()>(std::time::Duration::from_micros(4_001))
+                Ok::<_, ()>(RasterItemProgress::unclassified(
+                    std::time::Duration::from_micros(4_001),
+                ))
             },
         )
         .unwrap();
@@ -1292,9 +1401,27 @@ mod glyph_tests {
             std::time::Duration::from_micros(2_000),
         ]
         .into_iter();
-        let item_times = [
-            std::time::Duration::from_micros(900),
-            std::time::Duration::from_micros(500),
+        let item_progress = [
+            RasterItemProgress {
+                elapsed: std::time::Duration::from_micros(900),
+                phases: RasterItemPhases {
+                    scratch_setup: std::time::Duration::from_micros(100),
+                    text_setup_measure: std::time::Duration::from_micros(200),
+                    draw_flush: std::time::Duration::from_micros(300),
+                    pixel_copy_classify: std::time::Duration::from_micros(150),
+                    mask_normalize_finalize: std::time::Duration::from_micros(100),
+                },
+            },
+            RasterItemProgress {
+                elapsed: std::time::Duration::from_micros(500),
+                phases: RasterItemPhases {
+                    scratch_setup: std::time::Duration::from_micros(50),
+                    text_setup_measure: std::time::Duration::from_micros(100),
+                    draw_flush: std::time::Duration::from_micros(150),
+                    pixel_copy_classify: std::time::Duration::from_micros(100),
+                    mask_normalize_finalize: std::time::Duration::from_micros(50),
+                },
+            },
         ];
 
         let slice = run_resumable_slice(
@@ -1303,7 +1430,7 @@ mod glyph_tests {
             std::time::Duration::from_micros(1_500),
             std::time::Duration::from_micros(4_000),
             || lane_times.next().expect("lane clock sample"),
-            |index| Ok::<_, ()>(item_times[index]),
+            |index| Ok::<_, ()>(item_progress[index]),
         )
         .unwrap();
 
@@ -1314,6 +1441,8 @@ mod glyph_tests {
             std::time::Duration::from_micros(900)
         );
         assert_eq!(slice.max_item_index, Some(0));
+        assert_eq!(slice.max_item_phases, item_progress[0].phases);
+        assert!(slice.max_item_phases.total() <= slice.max_item_elapsed);
         assert_eq!(slice.elapsed, std::time::Duration::from_micros(2_000));
     }
 
