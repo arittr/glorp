@@ -29,6 +29,8 @@ mod metrics;
 mod parity;
 mod presentation;
 mod resources;
+#[allow(dead_code)] // Integrated with RetainedHost in the follow-up activation change.
+mod worker;
 
 pub(crate) use capture::CanonicalRgbaFrame;
 pub(crate) use metrics::{

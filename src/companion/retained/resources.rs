@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use objc2::rc::Retained;
+use objc2::rc::{autoreleasepool, Retained};
 use objc2::ClassType;
 use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSBitmapImageRep, NSColor, NSDeviceRGBColorSpace, NSFont,
@@ -441,6 +441,28 @@ struct ProfiledGlyphEntry {
     phases: RasterItemPhases,
 }
 
+struct CurrentGraphicsContextGuard {
+    previous: Option<Retained<NSGraphicsContext>>,
+}
+
+impl CurrentGraphicsContextGuard {
+    fn install(context: &NSGraphicsContext) -> Self {
+        // SAFETY: NSGraphicsContext's current context is thread-local. The
+        // retained previous value remains valid until this guard restores it.
+        let previous = unsafe { NSGraphicsContext::currentContext() };
+        unsafe { NSGraphicsContext::setCurrentContext(Some(context)) };
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentGraphicsContextGuard {
+    fn drop(&mut self) {
+        // SAFETY: The guard is dropped on the same thread where it was created,
+        // and `previous` retains the context being restored.
+        unsafe { NSGraphicsContext::setCurrentContext(self.previous.as_deref()) };
+    }
+}
+
 /// Rasterizes one glyph into `atlas` at `(x, y)` and returns its complete entry.
 ///
 /// The glyph is drawn white so mask glyphs carry pure coverage. If the
@@ -494,8 +516,7 @@ fn rasterize_glyph_entry_profiled(
         ).ok_or(RetainedFailureCategory::AtlasUnavailable)?;
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)
             .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-        let previous = NSGraphicsContext::currentContext();
-        NSGraphicsContext::setCurrentContext(Some(&context));
+        let current_context_guard = CurrentGraphicsContextGuard::install(&context);
         let scratch_setup = phase_started_at.elapsed();
 
         let phase_started_at = std::time::Instant::now();
@@ -512,7 +533,6 @@ fn rasterize_glyph_entry_profiled(
         if size.width + f64::from(padding * 2) > f64::from(cell)
             || size.height + f64::from(padding * 2) > f64::from(cell)
         {
-            NSGraphicsContext::setCurrentContext(previous.as_deref());
             return Err(RetainedFailureCategory::AtlasUnavailable);
         }
         let text_setup_measure = phase_started_at.elapsed();
@@ -522,7 +542,7 @@ fn rasterize_glyph_entry_profiled(
         let draw_y = f64::from(padding);
         attributed.drawAtPoint(NSPoint::new(draw_x, draw_y));
         context.flushGraphics();
-        NSGraphicsContext::setCurrentContext(previous.as_deref());
+        drop(current_context_guard);
         let draw_flush = phase_started_at.elapsed();
 
         let phase_started_at = std::time::Instant::now();
@@ -716,10 +736,13 @@ impl GlyphAtlasPreparation {
         let width = ATLAS_COLUMNS * cell;
         let height = rows * cell;
         let target = GlyphRasterTarget { cell, padding, point_size };
-        let regular_font_policy_id =
-            ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Regular).id();
-        let bold_font_policy_id =
-            ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Bold).id();
+        let (regular_font_policy_id, bold_font_policy_id) = autoreleasepool(|_| {
+            (
+                ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Regular)
+                    .id(),
+                ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Bold).id(),
+            )
+        });
         Ok(Self {
             glyphs: glyphs.to_vec(),
             target,
@@ -753,33 +776,32 @@ impl GlyphAtlasPreparation {
             hard_deadline,
             || started_at.elapsed(),
             |index| {
-                let item_started_at = std::time::Instant::now();
-                let key = &glyphs[index];
-                let slot_x = index as u32 % ATLAS_COLUMNS;
-                let slot_y = index as u32 / ATLAS_COLUMNS;
-                let font_policy_id = if key.bold {
-                    bold_font_policy_id
-                } else {
-                    regular_font_policy_id
-                };
-                let profiled = rasterize_glyph_entry_profiled(
-                    key,
+                rasterize_prepared_glyph(
+                    glyphs,
                     target,
-                    font_policy_id,
-                    &mut atlas.rgba,
-                    atlas.width,
-                    atlas.height,
-                    slot_x * target.cell,
-                    slot_y * target.cell,
-                )?;
-                atlas.entries.insert(key.clone(), profiled.entry);
-                let item_elapsed = item_started_at.elapsed();
-                Ok(RasterItemProgress {
-                    elapsed: item_elapsed,
-                    phases: profiled.phases,
-                })
+                    regular_font_policy_id,
+                    bold_font_policy_id,
+                    atlas,
+                    index,
+                )
             },
         )
+    }
+
+    fn advance_one(&mut self) -> std::result::Result<bool, RetainedFailureCategory> {
+        if self.next_index == self.glyphs.len() {
+            return Ok(true);
+        }
+        rasterize_prepared_glyph(
+            &self.glyphs,
+            &self.target,
+            self.regular_font_policy_id,
+            self.bold_font_policy_id,
+            &mut self.atlas,
+            self.next_index,
+        )?;
+        self.next_index += 1;
+        Ok(self.next_index == self.glyphs.len())
     }
 
     fn finish(self) -> std::result::Result<CompiledGlyphAtlas, RetainedFailureCategory> {
@@ -788,6 +810,42 @@ impl GlyphAtlasPreparation {
         }
         Ok(self.atlas)
     }
+}
+
+fn rasterize_prepared_glyph(
+    glyphs: &[GlyphKey],
+    target: &GlyphRasterTarget,
+    regular_font_policy_id: u64,
+    bold_font_policy_id: u64,
+    atlas: &mut CompiledGlyphAtlas,
+    index: usize,
+) -> std::result::Result<RasterItemProgress, RetainedFailureCategory> {
+    let key = &glyphs[index];
+    let slot_x = index as u32 % ATLAS_COLUMNS;
+    let slot_y = index as u32 / ATLAS_COLUMNS;
+    let font_policy_id = if key.bold {
+        bold_font_policy_id
+    } else {
+        regular_font_policy_id
+    };
+    let item_started_at = std::time::Instant::now();
+    let profiled = autoreleasepool(|_| {
+        rasterize_glyph_entry_profiled(
+            key,
+            target,
+            font_policy_id,
+            &mut atlas.rgba,
+            atlas.width,
+            atlas.height,
+            slot_x * target.cell,
+            slot_y * target.cell,
+        )
+    })?;
+    atlas.entries.insert(key.clone(), profiled.entry);
+    Ok(RasterItemProgress {
+        elapsed: item_started_at.elapsed(),
+        phases: profiled.phases,
+    })
 }
 
 /// A deterministic hash of a companion's declared-content identity, its full
@@ -940,7 +998,7 @@ impl CompiledRetainedResourcesPreparation {
         manifest: &GlyphRepertoireManifest,
     ) -> std::result::Result<Self, RetainedFailureCategory> {
         Ok(Self {
-            generation: manifest.generation_key(),
+            generation: autoreleasepool(|_| manifest.generation_key()),
             atlas: GlyphAtlasPreparation::new(
                 manifest.glyphs(),
                 manifest.atlas_point_size,
@@ -955,6 +1013,10 @@ impl CompiledRetainedResourcesPreparation {
         hard_deadline: Duration,
     ) -> std::result::Result<RasterSliceProgress, RetainedFailureCategory> {
         self.atlas.advance(work_start_budget, hard_deadline)
+    }
+
+    pub(super) fn advance_one(&mut self) -> std::result::Result<bool, RetainedFailureCategory> {
+        self.atlas.advance_one()
     }
 
     pub(super) fn finish(
@@ -1277,6 +1339,33 @@ mod metric_tests {
 #[cfg(test)]
 mod glyph_tests {
     use super::*;
+
+    fn bitmap_context() -> Retained<NSGraphicsContext> {
+        unsafe {
+            let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(), std::ptr::null_mut(), 8, 8, 8, 4, true, false,
+                NSDeviceRGBColorSpace, 32, 32,
+            ).expect("test bitmap representation");
+            NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep).expect("test bitmap context")
+        }
+    }
+
+    #[test]
+    fn current_graphics_context_guard_restores_after_unwind() {
+        autoreleasepool(|_| {
+            let sentinel = bitmap_context();
+            let replacement = bitmap_context();
+            let _sentinel_guard = CurrentGraphicsContextGuard::install(&sentinel);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _replacement_guard = CurrentGraphicsContextGuard::install(&replacement);
+                panic!("exercise context restoration");
+            }));
+            assert!(caught.is_err());
+            let current =
+                unsafe { NSGraphicsContext::currentContext() }.expect("sentinel context restored");
+            assert!(std::ptr::eq(&*current, &*sentinel));
+        });
+    }
 
     #[test]
     fn raster_slice_stops_at_soft_cutoff_and_resumes_at_exact_next_item() {
