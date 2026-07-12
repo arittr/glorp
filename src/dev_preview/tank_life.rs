@@ -474,6 +474,8 @@ fn tank_life_placement_from_cells(
     let max_row = cells.iter().map(|cell| cell.row).max().unwrap_or(min_row);
     TankLifePlacement {
         inhabitant_id: id,
+        origin_col: min_col,
+        origin_row: min_row,
         bounds: Rect::new(
             min_col,
             min_row,

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FORBIDDEN_IDENTIFIERS: &[&str] = &[
+const FORBIDDEN_RENDERER_IDENTIFIERS: &[&str] = &[
     "ratatui",
     "drawcell",
     "scenedrawlist",
@@ -17,6 +17,10 @@ const FORBIDDEN_IDENTIFIERS: &[&str] = &[
     "surfaceconfiguration",
     "surfacetexture",
 ];
+
+const FORBIDDEN_ADAPTER_DEPENDENCIES: &[&str] = &["WatchViewModel", "crate::tui"];
+
+const ALLOWED_INPUT_TUI_MODULES: &[&str] = &["life", "room", "view_model", "wander"];
 
 const FORBIDDEN_IMPORT_ROOTS: &[&str] = &[
     "crate::presentation::smooth",
@@ -37,6 +41,18 @@ const FORBIDDEN_NEUTRAL_DEPENDENCIES: &[&str] = &[
     "AppKit",
 ];
 
+const NEUTRAL_DEPENDENCY_MANIFEST: &[(&str, &str)] = &[
+    ("src/round/motion.rs", "crate::round::motion"),
+    (
+        "src/presentation/habitat_inventory.rs",
+        "crate::presentation::habitat_inventory",
+    ),
+    (
+        "src/presentation/tank_life.rs",
+        "crate::presentation::tank_life",
+    ),
+];
+
 #[test]
 fn companion_scene_tree_is_renderer_and_host_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation/companion_scene");
@@ -49,7 +65,10 @@ fn companion_scene_tree_is_renderer_and_host_neutral() {
     let mut violations = Vec::new();
     for file in files {
         let source = fs::read_to_string(&file).expect("read companion scene source");
-        for violation in boundary_violations(&source) {
+        let relative = file
+            .strip_prefix(&root)
+            .expect("companion source below root");
+        for violation in companion_source_violations(relative, &source) {
             violations.push(format!("{} contains {violation}", file.display()));
         }
     }
@@ -64,16 +83,13 @@ fn companion_scene_tree_is_renderer_and_host_neutral() {
 #[test]
 fn companion_scene_neutral_dependency_closure_has_no_view_or_renderer_ownership() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let paths = [
-        root.join("src/round/motion.rs"),
-        root.join("src/presentation/habitat_inventory.rs"),
-        root.join("src/presentation/tank_life.rs"),
-    ];
     let mut violations = Vec::new();
-    for path in paths {
-        if !path.is_file() {
-            continue;
-        }
+    for (relative_path, _) in NEUTRAL_DEPENDENCY_MANIFEST {
+        let path = root.join(relative_path);
+        assert!(
+            path.is_file(),
+            "neutral dependency manifest file is missing: {relative_path}"
+        );
         let source = fs::read_to_string(&path).expect("read neutral dependency source");
         for forbidden in neutral_dependency_violations(&source) {
             violations.push(format!("{} contains {forbidden}", path.display()));
@@ -84,6 +100,26 @@ fn companion_scene_neutral_dependency_closure_has_no_view_or_renderer_ownership(
         "neutral dependency closure violations:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn companion_scene_neutral_imports_are_listed_in_the_enforced_manifest() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation/companion_scene");
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    let combined = files
+        .iter()
+        .map(|path| fs::read_to_string(path).expect("read companion scene source"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let normalized = normalize_boundary_text(&combined);
+
+    for (_, module_path) in NEUTRAL_DEPENDENCY_MANIFEST {
+        assert!(
+            normalized.contains(&normalize_boundary_text(module_path)),
+            "neutral companion dependency is not referenced: {module_path}"
+        );
+    }
 }
 
 fn neutral_dependency_violations(source: &str) -> Vec<&'static str> {
@@ -98,7 +134,7 @@ fn neutral_dependency_violations(source: &str) -> Vec<&'static str> {
 fn boundary_violations(source: &str) -> Vec<&'static str> {
     let normalized_source = normalize_boundary_text(source);
     let mut violations = Vec::new();
-    for forbidden in FORBIDDEN_IDENTIFIERS {
+    for forbidden in FORBIDDEN_RENDERER_IDENTIFIERS {
         let normalized_forbidden = normalize_boundary_text(forbidden);
         if normalized_source.contains(&normalized_forbidden) {
             violations.push(*forbidden);
@@ -111,6 +147,50 @@ fn boundary_violations(source: &str) -> Vec<&'static str> {
         }
     }
     violations
+}
+
+fn companion_source_violations(relative_path: &Path, source: &str) -> Vec<String> {
+    let mut violations = boundary_violations(source)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if relative_path == Path::new("input.rs") {
+        for module in referenced_tui_modules(source) {
+            if !ALLOWED_INPUT_TUI_MODULES.contains(&module.as_str()) {
+                violations.push(format!("crate::tui::{module}"));
+            }
+        }
+    } else {
+        let normalized = normalize_boundary_text(source);
+        for forbidden in FORBIDDEN_ADAPTER_DEPENDENCIES {
+            if normalized.contains(&normalize_boundary_text(forbidden)) {
+                violations.push((*forbidden).to_owned());
+            }
+        }
+    }
+    violations
+}
+
+fn referenced_tui_modules(source: &str) -> Vec<String> {
+    let compact = source
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let marker = "crate::tui";
+    compact
+        .match_indices(marker)
+        .map(|(index, _)| {
+            let suffix = &compact[index + marker.len()..];
+            let Some(suffix) = suffix.strip_prefix("::") else {
+                return "<root>".to_owned();
+            };
+            suffix
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                .collect::<String>()
+        })
+        .collect()
 }
 
 fn normalize_boundary_text(source: &str) -> String {
@@ -182,4 +262,32 @@ fn neutral_dependency_scan_rejects_alias_case_and_separator_bypasses() {
             "neutral dependency bypass was accepted: {source}"
         );
     }
+}
+
+#[test]
+fn only_input_rs_may_use_the_tui_adapter_boundary() {
+    for source in [
+        "use crate::tui::view_model::WatchViewModel;",
+        "use crate::tui::room::RoomLifeProfile;",
+        "use crate::tui::wander::resolve_wander_offset;",
+    ] {
+        assert!(
+            !companion_source_violations(Path::new("scene.rs"), source).is_empty(),
+            "non-input companion source accepted adapter import: {source}"
+        );
+        assert!(
+            companion_source_violations(Path::new("input.rs"), source).is_empty(),
+            "input adapter rejected its precise import: {source}"
+        );
+    }
+
+    assert!(!companion_source_violations(
+        Path::new("input.rs"),
+        "use crate::tui::component::TankLifeSurfaceGeometry;",
+    )
+    .is_empty());
+    assert!(
+        !companion_source_violations(Path::new("input.rs"), "use crate::tui as adapter;",)
+            .is_empty()
+    );
 }

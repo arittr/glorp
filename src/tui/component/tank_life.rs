@@ -3,7 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
 };
 
-use crate::game::habitat::{HabitatPetLayer, TankLifeRouteFamily};
+use crate::game::habitat::HabitatPetLayer;
 pub use crate::presentation::habitat_inventory::canonical_target_count;
 use crate::storage::state::TankInhabitantId;
 
@@ -82,6 +82,8 @@ pub struct TankLifeCell {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TankLifePlacement {
     pub inhabitant_id: TankInhabitantId,
+    pub origin_col: u16,
+    pub origin_row: u16,
     pub cells: Vec<TankLifeCell>,
     pub bounds: Rect,
 }
@@ -168,12 +170,15 @@ pub fn watch_tank_life_geometry(
 }
 
 pub fn pet_face_protected_regions(pet_art: Rect) -> Vec<Rect> {
-    vec![Rect::new(
-        pet_art.x + pet_art.width / 4,
-        pet_art.y + 1,
-        pet_art.width / 2,
-        4.min(pet_art.height),
-    )]
+    let region = crate::presentation::tank_life::pet_face_reserved_region(
+        crate::presentation::tank_life::TankRouteRect {
+            x: pet_art.x,
+            y: pet_art.y,
+            width: pet_art.width,
+            height: pet_art.height,
+        },
+    );
+    vec![Rect::new(region.x, region.y, region.width, region.height)]
 }
 
 pub fn anemone_morph_for_day(pet_seed: &str, local_date: time::Date) -> AnemoneMorph {
@@ -186,42 +191,34 @@ pub fn anemone_morph_for_day(pet_seed: &str, local_date: time::Date) -> AnemoneM
 }
 
 pub fn anemone_anchor_sprite(morph: AnemoneMorph) -> Vec<SpriteCell> {
-    match morph {
-        AnemoneMorph::Flower => vec![
-            SpriteCell { row: 0, col: 1, glyph: '✺' },
-            SpriteCell { row: 1, col: 0, glyph: '╰' },
-            SpriteCell { row: 1, col: 1, glyph: '╯' },
-        ],
-        AnemoneMorph::Comb => vec![
-            SpriteCell { row: 0, col: 0, glyph: '╵' },
-            SpriteCell { row: 0, col: 1, glyph: '╷' },
-            SpriteCell { row: 0, col: 2, glyph: '╵' },
-            SpriteCell { row: 1, col: 0, glyph: '╰' },
-            SpriteCell { row: 1, col: 1, glyph: '┬' },
-            SpriteCell { row: 1, col: 2, glyph: '╯' },
-        ],
-        AnemoneMorph::Crown => vec![
-            SpriteCell { row: 0, col: 0, glyph: '⌁' },
-            SpriteCell { row: 0, col: 1, glyph: '⌁' },
-            SpriteCell { row: 1, col: 0, glyph: '╰' },
-            SpriteCell { row: 1, col: 1, glyph: '╮' },
-            SpriteCell { row: 2, col: 0, glyph: '╱' },
-            SpriteCell { row: 2, col: 1, glyph: '╲' },
-        ],
-        AnemoneMorph::DotColony => vec![
-            SpriteCell { row: 0, col: 0, glyph: '⁙' },
-            SpriteCell { row: 0, col: 1, glyph: '⁙' },
-            SpriteCell { row: 1, col: 0, glyph: '╰' },
-            SpriteCell { row: 1, col: 1, glyph: '╯' },
-        ],
-    }
+    let morph = match morph {
+        AnemoneMorph::Flower => 0,
+        AnemoneMorph::Comb => 1,
+        AnemoneMorph::Crown => 2,
+        AnemoneMorph::DotColony => 3,
+    };
+    route_sprite_cells(crate::presentation::tank_life::tank_sprite_cells(
+        crate::game::habitat::ANEMONE_HOST,
+        0,
+        Some(morph),
+    ))
 }
 
 pub fn host_fish_sprite() -> Vec<SpriteCell> {
-    vec![
-        SpriteCell { row: 0, col: 0, glyph: '›' },
-        SpriteCell { row: 0, col: 1, glyph: '·' },
-    ]
+    route_sprite_cells(crate::presentation::tank_life::tank_host_fish_sprite())
+}
+
+fn route_sprite_cells(
+    cells: Vec<crate::presentation::tank_life::TankRouteSpriteCell>,
+) -> Vec<SpriteCell> {
+    cells
+        .into_iter()
+        .map(|cell| SpriteCell {
+            row: cell.row,
+            col: cell.col,
+            glyph: cell.glyph,
+        })
+        .collect()
 }
 
 /// Every glyph the earnable tank-life cast can render, driving the real
@@ -376,48 +373,16 @@ fn footprint_can_fit(id: &str, geometry: &TankLifeSurfaceGeometry) -> bool {
 }
 
 fn sprite_for(id: &str, phase: u64, morph: Option<AnemoneMorph>) -> Vec<SpriteCell> {
-    match id {
-        crate::game::habitat::GLASS_SHRIMP => {
-            if phase.is_multiple_of(2) {
-                vec![
-                    SpriteCell { row: 0, col: 0, glyph: '╭' },
-                    SpriteCell { row: 0, col: 1, glyph: '~' },
-                    SpriteCell { row: 0, col: 2, glyph: '╯' },
-                ]
-            } else {
-                vec![
-                    SpriteCell { row: 0, col: 0, glyph: '╭' },
-                    SpriteCell { row: 0, col: 1, glyph: '≈' },
-                    SpriteCell { row: 0, col: 2, glyph: '╯' },
-                ]
-            }
-        }
-        crate::game::habitat::NEEDLEFISH => vec![
-            SpriteCell { row: 0, col: 0, glyph: '‹' },
-            SpriteCell { row: 0, col: 1, glyph: '─' },
-            SpriteCell { row: 0, col: 2, glyph: '•' },
-        ],
-        crate::game::habitat::GLASS_SNAIL => {
-            vec![SpriteCell { row: 0, col: 0, glyph: '◔' }]
-        }
-        crate::game::habitat::BURROWER => {
-            vec![SpriteCell { row: 0, col: 0, glyph: '▴' }]
-        }
-        crate::game::habitat::RIM_SKIMMER => {
-            vec![SpriteCell { row: 0, col: 0, glyph: '◜' }]
-        }
-        crate::game::habitat::SAND_RAY => {
-            vec![SpriteCell { row: 0, col: 0, glyph: '▱' }]
-        }
-        crate::game::habitat::SCHOOLLET => vec![
-            SpriteCell { row: 0, col: 0, glyph: '‹' },
-            SpriteCell { row: 0, col: 2, glyph: '‹' },
-        ],
-        crate::game::habitat::ANEMONE_HOST => {
-            anemone_anchor_sprite(morph.unwrap_or(AnemoneMorph::Flower))
-        }
-        _ => Vec::new(),
-    }
+    route_sprite_cells(crate::presentation::tank_life::tank_sprite_cells(
+        id,
+        (phase & 1) as u8,
+        morph.map(|morph| match morph {
+            AnemoneMorph::Flower => 0,
+            AnemoneMorph::Comb => 1,
+            AnemoneMorph::Crown => 2,
+            AnemoneMorph::DotColony => 3,
+        }),
+    ))
 }
 
 fn placement_for_id(
@@ -425,7 +390,7 @@ fn placement_for_id(
     input: &TankLifeRenderInput<'_>,
 ) -> Option<TankLifePlacement> {
     let spec = crate::game::habitat::tank_inhabitant_spec(id)?;
-    let route_geometry = neutral_route_geometry(input.geometry);
+    let route_geometry = neutral_route_geometry(input);
     let outcome = crate::presentation::tank_life::resolve_tank_route(
         crate::presentation::tank_life::TankRouteInput {
             catalog_id: id.as_str(),
@@ -439,41 +404,32 @@ fn placement_for_id(
     if !outcome.visible {
         return None;
     }
-    let morph = if id.as_str() == crate::game::habitat::ANEMONE_HOST {
-        Some(match outcome.anemone_morph.unwrap_or(0) {
-            0 => AnemoneMorph::Flower,
-            1 => AnemoneMorph::Comb,
-            2 => AnemoneMorph::Crown,
-            _ => AnemoneMorph::DotColony,
-        })
-    } else {
-        None
-    };
-    let sprite = sprite_for(id.as_str(), u64::from(outcome.sprite_variant), morph);
-    if sprite.is_empty() {
-        return None;
-    }
     let style = tank_life_style(spec.low_color_key, input.color_capability);
-
-    match spec.route_family {
-        TankLifeRouteFamily::CrossTankSwimmer => {
-            cross_tank_placement(id, input, &sprite, style, outcome)
-        }
-        TankLifeRouteFamily::LowerLaneResident => {
-            lower_lane_placement(id, input, &sprite, style, outcome)
-        }
-        TankLifeRouteFamily::GlassResident => glass_placement(id, input, &sprite, style, outcome),
-        TankLifeRouteFamily::RimResident => rim_placement(id, input, &sprite, style, outcome),
-        TankLifeRouteFamily::LowerEdgeResident => {
-            lower_edge_placement(id, input, &sprite, style, outcome)
-        }
-        TankLifeRouteFamily::HostCombo => host_combo_placement(id, input, &sprite, style, outcome),
-    }
+    let bounds = outcome.bounds?;
+    Some(TankLifePlacement {
+        inhabitant_id: id.clone(),
+        origin_col: outcome.origin_col,
+        origin_row: outcome.origin_row,
+        cells: outcome
+            .cells
+            .into_iter()
+            .map(|cell| TankLifeCell {
+                inhabitant_id: id.clone(),
+                row: cell.row,
+                col: cell.col,
+                glyph: cell.glyph,
+                style,
+                pet_layer: route_layer(cell.layer),
+            })
+            .collect(),
+        bounds: Rect::new(bounds.x, bounds.y, bounds.width, bounds.height),
+    })
 }
 
 fn neutral_route_geometry(
-    geometry: &TankLifeSurfaceGeometry,
+    input: &TankLifeRenderInput<'_>,
 ) -> crate::presentation::tank_life::TankRouteGeometry {
+    let geometry = input.geometry;
     crate::presentation::tank_life::TankRouteGeometry {
         habitat: crate::presentation::tank_life::TankRouteRect {
             x: geometry.habitat.x,
@@ -489,266 +445,38 @@ fn neutral_route_geometry(
                 radius_rows: mask.radius_rows,
             }
         }),
+        reserved_regions: geometry
+            .reserved_regions
+            .iter()
+            .map(|rect| crate::presentation::tank_life::TankRouteRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            })
+            .collect(),
+        foreground_reserved_regions: input
+            .pet_protected_regions
+            .iter()
+            .map(|rect| crate::presentation::tank_life::TankRouteRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            })
+            .collect(),
         literal_floor_allowed: geometry.literal_floor_allowed,
     }
-}
-
-fn cross_tank_placement(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    sprite: &[SpriteCell],
-    style: Style,
-    outcome: crate::presentation::tank_life::TankRouteOutcome,
-) -> Option<TankLifePlacement> {
-    let layer = route_layer(outcome.layer);
-    build_placement(
-        id,
-        input,
-        sprite,
-        outcome.origin_col,
-        outcome.origin_row,
-        style,
-        move |_| layer,
-    )
-}
-
-fn lower_lane_placement(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    sprite: &[SpriteCell],
-    style: Style,
-    outcome: crate::presentation::tank_life::TankRouteOutcome,
-) -> Option<TankLifePlacement> {
-    build_placement(
-        id,
-        input,
-        sprite,
-        outcome.origin_col,
-        outcome.origin_row,
-        style,
-        |_| HabitatPetLayer::Foreground,
-    )
-}
-
-fn glass_placement(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    sprite: &[SpriteCell],
-    style: Style,
-    outcome: crate::presentation::tank_life::TankRouteOutcome,
-) -> Option<TankLifePlacement> {
-    build_placement(
-        id,
-        input,
-        sprite,
-        outcome.origin_col,
-        outcome.origin_row,
-        style,
-        |_| HabitatPetLayer::Foreground,
-    )
-}
-
-fn rim_placement(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    sprite: &[SpriteCell],
-    style: Style,
-    outcome: crate::presentation::tank_life::TankRouteOutcome,
-) -> Option<TankLifePlacement> {
-    let layer = route_layer(outcome.layer);
-    build_placement(
-        id,
-        input,
-        sprite,
-        outcome.origin_col,
-        outcome.origin_row,
-        style,
-        move |_| layer,
-    )
-}
-
-fn lower_edge_placement(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    sprite: &[SpriteCell],
-    style: Style,
-    outcome: crate::presentation::tank_life::TankRouteOutcome,
-) -> Option<TankLifePlacement> {
-    let mut burrow_sprite = Vec::new();
-    for row in 0..u16::from(outcome.visible_rows) {
-        burrow_sprite.extend(sprite.iter().map(|cell| SpriteCell {
-            row: cell.row - row as i16,
-            col: cell.col,
-            glyph: cell.glyph,
-        }));
-    }
-    build_placement(
-        id,
-        input,
-        &burrow_sprite,
-        outcome.origin_col,
-        outcome.origin_row,
-        style,
-        |_| HabitatPetLayer::Foreground,
-    )
-}
-
-fn host_combo_placement(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    anchor_sprite: &[SpriteCell],
-    style: Style,
-    outcome: crate::presentation::tank_life::TankRouteOutcome,
-) -> Option<TankLifePlacement> {
-    let anchor_width = sprite_width(anchor_sprite).max(1);
-    let anchor_col = outcome.origin_col;
-    let anchor_row = outcome.origin_row;
-    let mut cells = placement_cells(
-        id,
-        input,
-        anchor_sprite,
-        anchor_col,
-        anchor_row,
-        style,
-        |_| HabitatPetLayer::Behind,
-    );
-
-    let host_sprite = host_fish_sprite();
-    let host_on_right = matches!(
-        outcome.side,
-        Some(crate::presentation::tank_life::TankRouteSide::Right)
-    );
-    let host_col = if host_on_right {
-        anchor_col.saturating_add(anchor_width).saturating_add(1)
-    } else {
-        anchor_col.saturating_sub(3)
-    };
-    let host_row = anchor_row.saturating_sub(1);
-    cells.extend(placement_cells(
-        id,
-        input,
-        &host_sprite,
-        host_col,
-        host_row,
-        style,
-        |_| HabitatPetLayer::Foreground,
-    ));
-    placement_from_cells(id, cells)
 }
 
 fn route_layer(layer: crate::presentation::tank_life::TankRouteLayer) -> HabitatPetLayer {
     match layer {
         crate::presentation::tank_life::TankRouteLayer::Behind => HabitatPetLayer::Behind,
-        crate::presentation::tank_life::TankRouteLayer::Foreground
-        | crate::presentation::tank_life::TankRouteLayer::BehindAnchorForegroundHost => {
-            HabitatPetLayer::Foreground
+        crate::presentation::tank_life::TankRouteLayer::Foreground => HabitatPetLayer::Foreground,
+        crate::presentation::tank_life::TankRouteLayer::BehindAnchorForegroundHost => {
+            unreachable!("combined route layer is never assigned to a resolved cell")
         }
     }
-}
-
-fn build_placement<F>(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    sprite: &[SpriteCell],
-    base_col: u16,
-    base_row: u16,
-    style: Style,
-    layer_for: F,
-) -> Option<TankLifePlacement>
-where
-    F: Fn(SpriteCell) -> HabitatPetLayer,
-{
-    let cells = placement_cells(id, input, sprite, base_col, base_row, style, layer_for);
-    placement_from_cells(id, cells)
-}
-
-fn placement_cells<F>(
-    id: &TankInhabitantId,
-    input: &TankLifeRenderInput<'_>,
-    sprite: &[SpriteCell],
-    base_col: u16,
-    base_row: u16,
-    style: Style,
-    layer_for: F,
-) -> Vec<TankLifeCell>
-where
-    F: Fn(SpriteCell) -> HabitatPetLayer,
-{
-    sprite
-        .iter()
-        .filter_map(|cell| {
-            let col = i32::from(base_col) + i32::from(cell.col);
-            let row = i32::from(base_row) + i32::from(cell.row);
-            if col < 0 || row < 0 {
-                return None;
-            }
-            let col = u16::try_from(col).ok()?;
-            let row = u16::try_from(row).ok()?;
-            let pet_layer = layer_for(*cell);
-            if !cell_allowed(input, col, row, pet_layer) {
-                return None;
-            }
-            Some(TankLifeCell {
-                inhabitant_id: id.clone(),
-                row,
-                col,
-                glyph: cell.glyph,
-                style,
-                pet_layer,
-            })
-        })
-        .collect()
-}
-
-fn placement_from_cells(
-    id: &TankInhabitantId,
-    cells: Vec<TankLifeCell>,
-) -> Option<TankLifePlacement> {
-    if cells.is_empty() {
-        return None;
-    }
-    let min_col = cells.iter().map(|cell| cell.col).min()?;
-    let max_col = cells.iter().map(|cell| cell.col).max()?;
-    let min_row = cells.iter().map(|cell| cell.row).min()?;
-    let max_row = cells.iter().map(|cell| cell.row).max()?;
-    Some(TankLifePlacement {
-        inhabitant_id: id.clone(),
-        bounds: Rect::new(
-            min_col,
-            min_row,
-            max_col.saturating_sub(min_col).saturating_add(1),
-            max_row.saturating_sub(min_row).saturating_add(1),
-        ),
-        cells,
-    })
-}
-
-fn cell_allowed(
-    input: &TankLifeRenderInput<'_>,
-    col: u16,
-    row: u16,
-    layer: HabitatPetLayer,
-) -> bool {
-    rect_contains(input.geometry.habitat, col, row)
-        && input.geometry.cell_inside_aperture(col, row)
-        && !input
-            .geometry
-            .reserved_regions
-            .iter()
-            .any(|region| rect_contains(*region, col, row))
-        && !(layer == HabitatPetLayer::Foreground
-            && input
-                .pet_protected_regions
-                .iter()
-                .any(|region| rect_contains(*region, col, row)))
-}
-
-fn sprite_width(sprite: &[SpriteCell]) -> u16 {
-    sprite
-        .iter()
-        .filter_map(|cell| u16::try_from(i32::from(cell.col) + 1).ok())
-        .max()
-        .unwrap_or(0)
 }
 
 fn tank_life_style(
@@ -1060,16 +788,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_route_outcomes_match_tui_placements_across_catalog_geometry_and_cadence() {
+    fn shared_route_outcomes_exactly_match_round_tui_geometry_and_cadence() {
+        let mut saw_hud_reserve_clip = false;
+        let mut saw_aperture_clip = false;
         for (width, height) in [(20, 12), (44, 18), (72, 24)] {
-            let geometry = TankLifeSurfaceGeometry {
-                surface: TankLifeSurface::Round,
-                habitat: Rect::new(0, 0, width, height),
-                aperture_mask: None,
-                reserved_regions: Vec::new(),
-                max_moving_slots: crate::game::habitat::TANK_INHABITANT_CATALOG.len(),
-                literal_floor_allowed: false,
-            };
+            let geometry = crate::round::scene::round_tank_life_geometry(width, height);
             for elapsed_seconds in [0, 4, 8, 32] {
                 for (calm, asleep) in [(false, false), (true, false), (false, true)] {
                     for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
@@ -1081,7 +804,7 @@ mod tests {
                         );
                         input.life_profile.calm_mode = calm;
                         input.asleep = asleep;
-                        let neutral_geometry = neutral_route_geometry(&geometry);
+                        let neutral_geometry = neutral_route_geometry(&input);
                         let outcome = crate::presentation::tank_life::resolve_tank_route(
                             crate::presentation::tank_life::TankRouteInput {
                                 catalog_id: spec.id,
@@ -1102,33 +825,103 @@ mod tests {
                         );
                         assert_eq!(placements.is_empty(), !outcome.visible, "{}", spec.id);
                         if let Some(placement) = placements.first() {
-                            assert!(
-                                placement.cells.iter().any(|cell| {
-                                    cell.row == outcome.origin_row
-                                        && cell.col >= outcome.origin_col.saturating_sub(3)
-                                        && cell.col <= outcome.origin_col.saturating_add(4)
-                                }),
-                                "{} placement diverged from resolved origin",
+                            assert_eq!(
+                                (placement.origin_col, placement.origin_row),
+                                (outcome.origin_col, outcome.origin_row),
+                                "{} origin diverged",
                                 spec.id
                             );
-                            assert!(placement.bounds.x < width && placement.bounds.y < height);
-                            match outcome.layer {
-                                crate::presentation::tank_life::TankRouteLayer::Behind => assert!(
-                                    placement.cells.iter().all(|cell| cell.pet_layer == HabitatPetLayer::Behind)
+                            let expected_bounds = outcome.bounds.expect("visible outcome bounds");
+                            assert_eq!(
+                                placement.bounds,
+                                Rect::new(
+                                    expected_bounds.x,
+                                    expected_bounds.y,
+                                    expected_bounds.width,
+                                    expected_bounds.height,
                                 ),
-                                crate::presentation::tank_life::TankRouteLayer::Foreground => assert!(
-                                    placement.cells.iter().all(|cell| cell.pet_layer == HabitatPetLayer::Foreground)
-                                ),
-                                crate::presentation::tank_life::TankRouteLayer::BehindAnchorForegroundHost => {
-                                    assert!(placement.cells.iter().any(|cell| cell.pet_layer == HabitatPetLayer::Behind));
-                                    assert!(placement.cells.iter().any(|cell| cell.pet_layer == HabitatPetLayer::Foreground));
-                                }
-                            }
+                                "{} bounds diverged",
+                                spec.id
+                            );
+                            let actual_cells = placement
+                                .cells
+                                .iter()
+                                .map(|cell| (cell.col, cell.row, cell.glyph, cell.pet_layer))
+                                .collect::<Vec<_>>();
+                            let expected_cells = outcome
+                                .cells
+                                .iter()
+                                .map(|cell| {
+                                    (
+                                        cell.col,
+                                        cell.row,
+                                        cell.glyph,
+                                        match cell.layer {
+                                            crate::presentation::tank_life::TankRouteLayer::Behind => HabitatPetLayer::Behind,
+                                            crate::presentation::tank_life::TankRouteLayer::Foreground => HabitatPetLayer::Foreground,
+                                            crate::presentation::tank_life::TankRouteLayer::BehindAnchorForegroundHost => unreachable!("combined layer is not a cell layer"),
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            assert_eq!(actual_cells, expected_cells, "{} cells diverged", spec.id);
+                        } else {
+                            assert!(outcome.bounds.is_none(), "{} invisible bounds", spec.id);
+                            assert!(outcome.cells.is_empty(), "{} invisible cells", spec.id);
                         }
+
+                        let origin_in_hud = geometry.reserved_regions.iter().any(|region| {
+                            rect_contains(*region, outcome.origin_col, outcome.origin_row)
+                        });
+                        saw_hud_reserve_clip |= origin_in_hud && !outcome.visible;
+                        saw_aperture_clip |= !geometry
+                            .cell_inside_aperture(outcome.origin_col, outcome.origin_row)
+                            && !outcome.visible;
+                    }
+
+                    let catalog = crate::game::habitat::TANK_INHABITANT_CATALOG
+                        .iter()
+                        .map(|spec| TankInhabitantId::new(spec.id))
+                        .collect::<Vec<_>>();
+                    let mut reversed = catalog.clone();
+                    reversed.reverse();
+                    let mut forward_input = TankLifeRenderInput::for_test(
+                        catalog,
+                        &geometry,
+                        time::macros::date!(2026 - 07 - 08),
+                        elapsed_seconds,
+                    );
+                    forward_input.life_profile.calm_mode = calm;
+                    forward_input.asleep = asleep;
+                    let mut reversed_input = TankLifeRenderInput::for_test(
+                        reversed,
+                        &geometry,
+                        time::macros::date!(2026 - 07 - 08),
+                        elapsed_seconds,
+                    );
+                    reversed_input.life_profile.calm_mode = calm;
+                    reversed_input.asleep = asleep;
+                    let forward = tank_life_placements_for(&forward_input);
+                    let reversed = tank_life_placements_for(&reversed_input);
+                    assert_eq!(forward.len(), reversed.len());
+                    for placement in forward {
+                        assert_eq!(
+                            reversed.iter().find(
+                                |candidate| candidate.inhabitant_id == placement.inhabitant_id
+                            ),
+                            Some(&placement),
+                            "{} changed under input reorder",
+                            placement.inhabitant_id.as_str()
+                        );
                     }
                 }
             }
         }
+        assert!(saw_hud_reserve_clip, "matrix did not exercise HUD clipping");
+        assert!(
+            saw_aperture_clip,
+            "matrix did not exercise aperture clipping"
+        );
     }
 
     #[test]

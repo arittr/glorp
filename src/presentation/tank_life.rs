@@ -16,15 +16,18 @@ pub(crate) struct TankRouteAperture {
     pub(crate) radius_rows: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TankRouteGeometry {
     pub(crate) habitat: TankRouteRect,
     pub(crate) aperture: Option<TankRouteAperture>,
+    pub(crate) reserved_regions: Vec<TankRouteRect>,
+    pub(crate) foreground_reserved_regions: Vec<TankRouteRect>,
     pub(crate) literal_floor_allowed: bool,
 }
 
 impl TankRouteGeometry {
-    pub(crate) const fn round(cols: u16, rows: u16, _bottom_reserved_rows: u16) -> Self {
+    pub(crate) fn round(cols: u16, rows: u16, bottom_reserved_rows: u16) -> Self {
+        let bottom_reserved_rows = bottom_reserved_rows.min(rows);
         Self {
             habitat: TankRouteRect { x: 0, y: 0, width: cols, height: rows },
             aperture: Some(TankRouteAperture {
@@ -33,8 +36,31 @@ impl TankRouteGeometry {
                 radius_cols: cols / 2,
                 radius_rows: rows / 2,
             }),
+            reserved_regions: (bottom_reserved_rows > 0)
+                .then(|| TankRouteRect {
+                    x: 0,
+                    y: rows.saturating_sub(bottom_reserved_rows),
+                    width: cols,
+                    height: bottom_reserved_rows,
+                })
+                .into_iter()
+                .collect(),
+            foreground_reserved_regions: Vec::new(),
             literal_floor_allowed: false,
         }
+    }
+}
+
+pub(crate) const fn pet_face_reserved_region(pet_rect: TankRouteRect) -> TankRouteRect {
+    TankRouteRect {
+        x: pet_rect.x + pet_rect.width / 4,
+        y: pet_rect.y.saturating_add(1),
+        width: pet_rect.width / 2,
+        height: if pet_rect.height < 4 {
+            pet_rect.height
+        } else {
+            4
+        },
     }
 }
 
@@ -74,7 +100,15 @@ impl From<HabitatPetLayer> for TankRouteLayer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct TankRouteCell {
+    pub(crate) row: u16,
+    pub(crate) col: u16,
+    pub(crate) glyph: char,
+    pub(crate) layer: TankRouteLayer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TankRouteOutcome {
     pub(crate) route: TankLifeRouteFamily,
     pub(crate) visible: bool,
@@ -87,12 +121,15 @@ pub(crate) struct TankRouteOutcome {
     pub(crate) anemone_morph: Option<u8>,
     pub(crate) cadence_ms: u16,
     pub(crate) calm: bool,
+    pub(crate) cells: Vec<TankRouteCell>,
+    pub(crate) bounds: Option<TankRouteRect>,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CellOffset {
-    row: i16,
-    col: i16,
+pub(crate) struct TankRouteSpriteCell {
+    pub(crate) row: i16,
+    pub(crate) col: i16,
+    pub(crate) glyph: char,
 }
 
 pub(crate) fn resolve_tank_route(input: TankRouteInput<'_>) -> Option<TankRouteOutcome> {
@@ -109,7 +146,7 @@ pub(crate) fn resolve_tank_route(input: TankRouteInput<'_>) -> Option<TankRouteO
     let sprite_variant = (private_route & 1) as u8;
     let anemone_morph = (input.catalog_id == crate::game::habitat::ANEMONE_HOST)
         .then(|| anemone_morph_index(input.pet_seed, input.local_date));
-    let sprite = sprite_offsets(input.catalog_id, anemone_morph);
+    let sprite = tank_sprite_cells(input.catalog_id, sprite_variant, anemone_morph);
     let habitat = input.geometry.habitat;
 
     let (visible, origin_col, origin_row, side, layer, visible_rows) = match spec.route_family {
@@ -228,9 +265,22 @@ pub(crate) fn resolve_tank_route(input: TankRouteInput<'_>) -> Option<TankRouteO
         }
     };
 
+    let cells = resolve_visible_cells(
+        input.geometry,
+        spec.route_family,
+        &sprite,
+        visible,
+        origin_col,
+        origin_row,
+        side,
+        layer,
+        visible_rows,
+    );
+    let bounds = route_bounds(&cells);
+
     Some(TankRouteOutcome {
         route: spec.route_family,
-        visible,
+        visible: !cells.is_empty(),
         origin_col,
         origin_row,
         side,
@@ -240,41 +290,75 @@ pub(crate) fn resolve_tank_route(input: TankRouteInput<'_>) -> Option<TankRouteO
         anemone_morph,
         cadence_ms: (cadence_seconds * 1_000) as u16,
         calm: input.calm,
+        cells,
+        bounds,
     })
 }
 
-fn sprite_offsets(id: &str, morph: Option<u8>) -> Vec<CellOffset> {
-    let cells = |cols: &[i16], rows: &[i16]| {
+pub(crate) fn tank_sprite_cells(
+    id: &str,
+    sprite_variant: u8,
+    morph: Option<u8>,
+) -> Vec<TankRouteSpriteCell> {
+    let cells = |cols: &[i16], rows: &[i16], glyphs: &[char]| {
         cols.iter()
             .zip(rows)
-            .map(|(&col, &row)| CellOffset { row, col })
+            .zip(glyphs)
+            .map(|((&col, &row), &glyph)| TankRouteSpriteCell { row, col, glyph })
             .collect()
     };
     match id {
-        crate::game::habitat::GLASS_SHRIMP | crate::game::habitat::NEEDLEFISH => {
-            cells(&[0, 1, 2], &[0, 0, 0])
-        }
-        crate::game::habitat::GLASS_SNAIL
-        | crate::game::habitat::BURROWER
-        | crate::game::habitat::RIM_SKIMMER
-        | crate::game::habitat::SAND_RAY => cells(&[0], &[0]),
-        crate::game::habitat::SCHOOLLET => cells(&[0, 2], &[0, 0]),
+        crate::game::habitat::GLASS_SHRIMP => cells(
+            &[0, 1, 2],
+            &[0, 0, 0],
+            &[
+                '╭',
+                if sprite_variant.is_multiple_of(2) {
+                    '~'
+                } else {
+                    '≈'
+                },
+                '╯',
+            ],
+        ),
+        crate::game::habitat::NEEDLEFISH => cells(&[0, 1, 2], &[0, 0, 0], &['‹', '─', '•']),
+        crate::game::habitat::GLASS_SNAIL => cells(&[0], &[0], &['◔']),
+        crate::game::habitat::BURROWER => cells(&[0], &[0], &['▴']),
+        crate::game::habitat::RIM_SKIMMER => cells(&[0], &[0], &['◜']),
+        crate::game::habitat::SAND_RAY => cells(&[0], &[0], &['▱']),
+        crate::game::habitat::SCHOOLLET => cells(&[0, 2], &[0, 0], &['‹', '‹']),
         crate::game::habitat::ANEMONE_HOST => match morph.unwrap_or(0) % 4 {
-            0 => cells(&[1, 0, 1], &[0, 1, 1]),
-            1 => cells(&[0, 1, 2, 0, 1, 2], &[0, 0, 0, 1, 1, 1]),
-            2 => cells(&[0, 1, 0, 1, 0, 1], &[0, 0, 1, 1, 2, 2]),
-            _ => cells(&[0, 1, 0, 1], &[0, 0, 1, 1]),
+            0 => cells(&[1, 0, 1], &[0, 1, 1], &['✺', '╰', '╯']),
+            1 => cells(
+                &[0, 1, 2, 0, 1, 2],
+                &[0, 0, 0, 1, 1, 1],
+                &['╵', '╷', '╵', '╰', '┬', '╯'],
+            ),
+            2 => cells(
+                &[0, 1, 0, 1, 0, 1],
+                &[0, 0, 1, 1, 2, 2],
+                &['⌁', '⌁', '╰', '╮', '╱', '╲'],
+            ),
+            _ => cells(&[0, 1, 0, 1], &[0, 0, 1, 1], &['⁙', '⁙', '╰', '╯']),
         },
         _ => Vec::new(),
     }
 }
 
-fn expanded_offsets(sprite: &[CellOffset], rows: u8) -> Vec<CellOffset> {
+pub(crate) fn tank_host_fish_sprite() -> Vec<TankRouteSpriteCell> {
+    vec![
+        TankRouteSpriteCell { row: 0, col: 0, glyph: '›' },
+        TankRouteSpriteCell { row: 0, col: 1, glyph: '·' },
+    ]
+}
+
+fn expanded_offsets(sprite: &[TankRouteSpriteCell], rows: u8) -> Vec<TankRouteSpriteCell> {
     (0..rows)
         .flat_map(|row| {
-            sprite.iter().map(move |cell| CellOffset {
+            sprite.iter().map(move |cell| TankRouteSpriteCell {
                 row: cell.row - i16::from(row),
                 col: cell.col,
+                glyph: cell.glyph,
             })
         })
         .collect()
@@ -289,10 +373,124 @@ fn lower_lane_row(geometry: &TankRouteGeometry) -> u16 {
         .max(geometry.habitat.y)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_visible_cells(
+    geometry: &TankRouteGeometry,
+    route: TankLifeRouteFamily,
+    sprite: &[TankRouteSpriteCell],
+    route_visible: bool,
+    origin_col: u16,
+    origin_row: u16,
+    side: Option<TankRouteSide>,
+    layer: TankRouteLayer,
+    visible_rows: u8,
+) -> Vec<TankRouteCell> {
+    if !route_visible {
+        return Vec::new();
+    }
+
+    let (resolved_sprite, sprite_layer) = match route {
+        TankLifeRouteFamily::LowerEdgeResident => (
+            expanded_offsets(sprite, visible_rows),
+            TankRouteLayer::Foreground,
+        ),
+        TankLifeRouteFamily::CrossTankSwimmer | TankLifeRouteFamily::RimResident => {
+            (sprite.to_vec(), layer)
+        }
+        TankLifeRouteFamily::LowerLaneResident | TankLifeRouteFamily::GlassResident => {
+            (sprite.to_vec(), TankRouteLayer::Foreground)
+        }
+        TankLifeRouteFamily::HostCombo => (sprite.to_vec(), TankRouteLayer::Behind),
+    };
+    let mut cells = visible_sprite_cells(
+        geometry,
+        &resolved_sprite,
+        origin_col,
+        origin_row,
+        sprite_layer,
+    );
+
+    if route == TankLifeRouteFamily::HostCombo {
+        let host_col = if side == Some(TankRouteSide::Right) {
+            origin_col
+                .saturating_add(sprite_width(sprite).max(1))
+                .saturating_add(1)
+        } else {
+            origin_col.saturating_sub(3)
+        };
+        cells.extend(visible_sprite_cells(
+            geometry,
+            &tank_host_fish_sprite(),
+            host_col,
+            origin_row.saturating_sub(1),
+            TankRouteLayer::Foreground,
+        ));
+    }
+    cells
+}
+
+fn visible_sprite_cells(
+    geometry: &TankRouteGeometry,
+    sprite: &[TankRouteSpriteCell],
+    base_col: u16,
+    base_row: u16,
+    layer: TankRouteLayer,
+) -> Vec<TankRouteCell> {
+    sprite
+        .iter()
+        .filter_map(|cell| {
+            let col = i32::from(base_col) + i32::from(cell.col);
+            let row = i32::from(base_row) + i32::from(cell.row);
+            let col = u16::try_from(col).ok()?;
+            let row = u16::try_from(row).ok()?;
+            cell_allowed(geometry, col, row, layer).then_some(TankRouteCell {
+                row,
+                col,
+                glyph: cell.glyph,
+                layer,
+            })
+        })
+        .collect()
+}
+
+fn cell_allowed(geometry: &TankRouteGeometry, col: u16, row: u16, layer: TankRouteLayer) -> bool {
+    rect_contains(geometry.habitat, col, row)
+        && inside_aperture(geometry, col, row)
+        && !geometry
+            .reserved_regions
+            .iter()
+            .any(|region| rect_contains(*region, col, row))
+        && !(layer == TankRouteLayer::Foreground
+            && geometry
+                .foreground_reserved_regions
+                .iter()
+                .any(|region| rect_contains(*region, col, row)))
+}
+
+fn route_bounds(cells: &[TankRouteCell]) -> Option<TankRouteRect> {
+    let min_col = cells.iter().map(|cell| cell.col).min()?;
+    let max_col = cells.iter().map(|cell| cell.col).max()?;
+    let min_row = cells.iter().map(|cell| cell.row).min()?;
+    let max_row = cells.iter().map(|cell| cell.row).max()?;
+    Some(TankRouteRect {
+        x: min_col,
+        y: min_row,
+        width: max_col.saturating_sub(min_col).saturating_add(1),
+        height: max_row.saturating_sub(min_row).saturating_add(1),
+    })
+}
+
+fn rect_contains(rect: TankRouteRect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
 fn oscillating_bounds(
     geometry: &TankRouteGeometry,
     row: u16,
-    sprite: &[CellOffset],
+    sprite: &[TankRouteSpriteCell],
     padding: u16,
 ) -> (u16, u16) {
     let habitat = geometry.habitat;
@@ -338,7 +536,7 @@ fn cross_tank_layer(start: u16, end: u16, col: u16) -> HabitatPetLayer {
 
 fn origin_inside_aperture(
     geometry: &TankRouteGeometry,
-    sprite: &[CellOffset],
+    sprite: &[TankRouteSpriteCell],
     base_col: u16,
     base_row: u16,
 ) -> bool {
@@ -365,7 +563,7 @@ fn inside_aperture(geometry: &TankRouteGeometry, col: u16, row: u16) -> bool {
     (dx * dx * ry * ry + dy * dy * rx * rx) <= rx * rx * ry * ry
 }
 
-fn sprite_width(sprite: &[CellOffset]) -> u16 {
+fn sprite_width(sprite: &[TankRouteSpriteCell]) -> u16 {
     sprite
         .iter()
         .filter_map(|cell| u16::try_from(i32::from(cell.col) + 1).ok())
@@ -373,7 +571,7 @@ fn sprite_width(sprite: &[CellOffset]) -> u16 {
         .unwrap_or(0)
 }
 
-fn sprite_height(sprite: &[CellOffset]) -> u16 {
+fn sprite_height(sprite: &[TankRouteSpriteCell]) -> u16 {
     sprite
         .iter()
         .filter_map(|cell| u16::try_from(i32::from(cell.row) + 1).ok())
@@ -392,4 +590,79 @@ fn stable_hash(input: &str) -> u64 {
         hash ^= u64::from(byte);
         hash.wrapping_mul(PRIME)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::{date, datetime};
+
+    #[test]
+    fn round_resolver_returns_only_final_cells_outside_hud_and_aperture_clips() {
+        let geometry = TankRouteGeometry::round(44, 18, 5);
+        let mut saw_hidden_route = false;
+
+        for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
+            for now in [
+                datetime!(2026-07-08 00:00 UTC),
+                datetime!(2026-07-08 00:00:04 UTC),
+                datetime!(2026-07-08 00:00:08 UTC),
+                datetime!(2026-07-08 00:00:32 UTC),
+            ] {
+                let outcome = resolve_tank_route(TankRouteInput {
+                    catalog_id: spec.id,
+                    pet_seed: "private-resolver-test-seed",
+                    local_date: date!(2026 - 07 - 08),
+                    now,
+                    calm: false,
+                    geometry: &geometry,
+                })
+                .expect("known tank route");
+
+                assert_eq!(outcome.visible, !outcome.cells.is_empty());
+                assert_eq!(outcome.bounds.is_some(), outcome.visible);
+                for cell in &outcome.cells {
+                    assert!(rect_contains(geometry.habitat, cell.col, cell.row));
+                    assert!(inside_aperture(&geometry, cell.col, cell.row));
+                    assert!(!geometry
+                        .reserved_regions
+                        .iter()
+                        .any(|region| rect_contains(*region, cell.col, cell.row)));
+                }
+                saw_hidden_route |= !outcome.visible;
+            }
+        }
+
+        assert!(saw_hidden_route, "fixture did not exercise final clipping");
+    }
+
+    #[test]
+    fn foreground_pet_reserve_is_layer_specific() {
+        let mut geometry = TankRouteGeometry::round(44, 18, 5);
+        geometry.foreground_reserved_regions.push(TankRouteRect {
+            x: 0,
+            y: 0,
+            width: 44,
+            height: 18,
+        });
+
+        let outcome = resolve_tank_route(TankRouteInput {
+            catalog_id: crate::game::habitat::NEEDLEFISH,
+            pet_seed: "private-resolver-test-seed",
+            local_date: date!(2026 - 07 - 08),
+            now: datetime!(2026-07-08 00:00 UTC),
+            calm: false,
+            geometry: &geometry,
+        })
+        .expect("known tank route");
+
+        assert!(
+            outcome.visible,
+            "behind route should survive foreground reserve"
+        );
+        assert!(outcome
+            .cells
+            .iter()
+            .all(|cell| cell.layer == TankRouteLayer::Behind));
+    }
 }
