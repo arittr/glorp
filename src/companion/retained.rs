@@ -877,7 +877,8 @@ impl ActiveRetainedHost {
     /// Drives a real retained GPU instance ring and queue through a bounded
     /// 4,500-frame virtual-time segment. Wall time is intentionally decoupled
     /// from the fixed 4 Hz semantic cadence; each iteration advances 250 ms of
-    /// virtual time while queue work is submitted as fast as the device allows.
+    /// virtual time and waits for its GPU submission to complete without sleeping,
+    /// measuring steady-state lifetime without manufacturing an in-flight backlog.
     pub(crate) fn run_virtual_lifetime_audit(
         &mut self,
         frames: u64,
@@ -1157,7 +1158,6 @@ fn run_lifetime_schedule(
     frames: u64,
 ) -> std::result::Result<LifetimeAuditSnapshot, RetainedFailureCategory> {
     const CADENCE_MS: i64 = 250;
-    const POLL_INTERVAL: u64 = 64;
     const SAMPLE_INTERVAL: u64 = 256;
     let base = time::macros::datetime!(2026-06-13 18:00 UTC);
     let mut audit = LifetimeAuditSnapshot {
@@ -1201,10 +1201,11 @@ fn run_lifetime_schedule(
                     audit.gpu_peak_bytes = audit.gpu_peak_bytes.max(observation.gpu_bytes);
                 }
             }
-            if (frame + 1) % POLL_INTERVAL == 0 {
-                executor.poll()?;
-                audit.poll_count = audit.poll_count.saturating_add(1);
-            }
+            // This audit measures resource lifetime, not burst throughput. Waiting once per
+            // virtual frame bounds macOS frame-pacing bookkeeping that the zero-delay synthetic
+            // loop would otherwise accumulate between the companion's modeled 4 Hz frames.
+            executor.poll()?;
+            audit.poll_count = audit.poll_count.saturating_add(1);
             if (frame + 1) % SAMPLE_INTERVAL == 0 {
                 let rss = executor.rss_bytes()?;
                 match phase {
@@ -3298,6 +3299,8 @@ mod tests {
         assert!(audit.gpu_frame_hash_changes > 0);
         assert!(audit.draw_calls > 0);
         assert_eq!(audit.virtual_elapsed_ms, 1_000);
+        assert_eq!(audit.poll_count, 10);
+        assert_eq!(executor.polls, 10);
     }
 
     #[test]
