@@ -51,7 +51,7 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
     NSBackingStoreType, NSBezierPath, NSBitmapImageRep, NSButtLineCapStyle,
     NSCalibratedRGBColorSpace, NSColor, NSCommandKeyMask, NSCompositingOperation, NSControlKeyMask,
-    NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightBold,
+    NSEventModifierFlags, NSFloatingWindowLevel, NSFont, NSFontAttributeName, NSFontWeightBold,
     NSForegroundColorAttributeName, NSGradient, NSGraphicsContext, NSImage, NSLineCapStyle, NSMenu,
     NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
@@ -932,6 +932,13 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     if review.runtime_metrics_out.is_some() {
         #[allow(deprecated)] // Required for deterministic bounded AppKit review automation.
         app.activateIgnoringOtherApps(true);
+        // A baseline that is fully covered by the controlling Codex window gets
+        // no CAMetalLayer drawable and can only report skipped frames. Keep this
+        // bounded review window above ordinary app windows so the 120-second
+        // visible phase measures actual acquire/encode/submit/present work.
+        window.setLevel(NSFloatingWindowLevel);
+        unsafe { window.orderFrontRegardless() };
+        window.makeKeyAndOrderFront(None);
     }
     // Prepare all fallible GPU work on a detached layer, then activate (install
     // the layer on the view) only on success. A failure in either phase falls the

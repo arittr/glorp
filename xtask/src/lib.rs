@@ -571,6 +571,12 @@ fn run_companion_scene_baseline(
     std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
     let config_dir = work.join("config");
     let metrics_path = work.join("runtime-metrics.json");
+    let capture_dir = repo_root.join("target/glorp-review/scene-baseline");
+    match std::fs::remove_dir_all(&capture_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
 
     run_steps(
         &[ProcessStep {
@@ -605,19 +611,10 @@ fn run_companion_scene_baseline(
         Duration::from_secs(30),
         environment,
     )?;
+    let companion_args = scene_baseline_companion_args(duration_ms, &metrics_path);
     run_bounded_process_with_env(
         &binary,
-        &[
-            "companion-app".into(),
-            "--renderer".into(),
-            "retained".into(),
-            "--review-size".into(),
-            "360x360".into(),
-            "--review-duration-ms".into(),
-            duration_ms.to_string(),
-            "--review-runtime-metrics-out".into(),
-            metrics_path.to_string_lossy().into_owned(),
-        ],
+        &companion_args,
         repo_root,
         Duration::from_millis(duration_ms.saturating_add(60_000)),
         environment,
@@ -643,6 +640,22 @@ fn run_companion_scene_baseline(
     std::fs::write(&out_path, report).map_err(|error| error.to_string())?;
     println!("xtask: wrote {}", out_path.display());
     Ok(())
+}
+
+fn scene_baseline_companion_args(duration_ms: u64, metrics_path: &Path) -> Vec<String> {
+    vec![
+        "companion-app".into(),
+        "--renderer".into(),
+        "retained".into(),
+        "--review-size".into(),
+        "360x360".into(),
+        "--review-duration-ms".into(),
+        duration_ms.to_string(),
+        "--review-capture-dir".into(),
+        "target/glorp-review/scene-baseline".into(),
+        "--review-runtime-metrics-out".into(),
+        metrics_path.to_string_lossy().into_owned(),
+    ]
 }
 
 struct BaselineSourceIdentity {
@@ -2082,6 +2095,20 @@ mod tests {
                 out: "docs/superpowers/measurements/baseline.md".into(),
             })
         );
+    }
+
+    #[test]
+    fn scene_baseline_requests_a_real_paired_gpu_capture() {
+        let args = scene_baseline_companion_args(
+            120_000,
+            std::path::Path::new("target/glorp-scene-baseline/runtime-metrics.json"),
+        );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--review-capture-dir".to_string(),
+                "target/glorp-review/scene-baseline".to_string(),
+            ]
+        }));
     }
 
     #[test]
