@@ -294,6 +294,58 @@ fn production_and_evidence_paths_never_use_monolithic_appkit_atlas_compile() {
 }
 
 #[test]
+fn instance_uploads_use_one_host_owned_staging_belt_on_every_submission_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let retained = read(&root.join("src/companion/retained.rs"));
+    let production = retained
+        .split("\n#[cfg(test)]\nmod tests {")
+        .next()
+        .unwrap_or(&retained);
+    assert!(!production.contains("queue.write_buffer"));
+    let buffers_start = production.find("struct PersistentFrameBuffers {").unwrap();
+    let buffers_end = production[buffers_start..].find("\n}").unwrap() + buffers_start;
+    assert_eq!(
+        production[buffers_start..buffers_end]
+            .matches("staging_belt: wgpu::util::StagingBelt")
+            .count(),
+        1
+    );
+    assert!(production.contains("FIXED_INSTANCE_RING_MIN * INSTANCE_STRIDE"));
+
+    let render_start = production.find("    pub(super) fn render(").unwrap();
+    let render = &production[render_start..];
+    let acquire = render.find("self.surface.get_current_texture()").unwrap();
+    let stage = render
+        .find("self.prepare_frame(&mut encoder, &frame)")
+        .unwrap();
+    let finish = render.find("self.frame_buffers.finish_uploads()").unwrap();
+    let submit = render
+        .find("self.queue.submit([encoder.finish()])")
+        .unwrap();
+    let recall = render.find("self.frame_buffers.recall_uploads()").unwrap();
+    assert!(acquire < stage && stage < finish && finish < submit && submit < recall);
+
+    let lifetime_start = production
+        .find("impl<Prepare> LifetimeAuditExecutor for GpuLifetimeAuditExecutor")
+        .unwrap();
+    let lifetime = &production[lifetime_start..render_start];
+    assert!(
+        lifetime.find("prepare_frame(&mut encoder").unwrap()
+            < lifetime.find("finish_uploads()").unwrap()
+    );
+    assert!(lifetime.find("finish_uploads()").unwrap() < lifetime.find("queue.submit").unwrap());
+    assert!(lifetime.find("queue.submit").unwrap() < lifetime.find("recall_uploads()").unwrap());
+
+    let capture = read(&root.join("src/companion/retained/capture.rs"));
+    assert!(
+        capture.find("prepare_frame(&mut encoder").unwrap()
+            < capture.find("finish_uploads()").unwrap()
+    );
+    assert!(capture.find("finish_uploads()").unwrap() < capture.find("queue.submit").unwrap());
+    assert!(capture.find("queue.submit").unwrap() < capture.find("recall_uploads()").unwrap());
+}
+
+#[test]
 fn retained_startup_waits_for_first_visibility_guarded_worker_service() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
     let text = read(&path);

@@ -195,24 +195,29 @@ const FIXED_INSTANCE_RING_MIN: usize = 1_024;
 
 /// A capacity-bounded ring of persistent `VERTEX | COPY_DST` instance buffers.
 ///
-/// A frame writes its instances into the next ring slot with `queue.write_buffer`
-/// and draws only that slot's current instance count. The ring grows — every
-/// buffer reallocated to the larger capacity — only when a frame's instance count
-/// exceeds the current capacity, which is a declared layout/semantic change, not
-/// ordinary motion. Once warmed to the steady-state high-water mark, ordinary
+/// A frame stages its instances into the next ring slot through the reusable
+/// upload belt and draws only that slot's current instance count. The ring grows —
+/// every buffer reallocated to the larger capacity — only when a frame's instance
+/// count exceeds the current capacity, which is a declared layout/semantic change,
+/// not ordinary motion. Once warmed to the steady-state high-water mark, ordinary
 /// animation reuses the buffers and only writes, so no buffer is ever recreated.
 struct PersistentFrameBuffers {
     ring: Vec<wgpu::Buffer>,
     capacity_instances: usize,
     cursor: usize,
+    staging_belt: wgpu::util::StagingBelt,
 }
 
 impl PersistentFrameBuffers {
-    fn new() -> Self {
+    fn new(device: &wgpu::Device) -> Self {
         Self {
             ring: Vec::new(),
             capacity_instances: 0,
             cursor: 0,
+            staging_belt: wgpu::util::StagingBelt::new(
+                device.clone(),
+                (FIXED_INSTANCE_RING_MIN * INSTANCE_STRIDE) as wgpu::BufferAddress,
+            ),
         }
     }
 
@@ -249,10 +254,10 @@ impl PersistentFrameBuffers {
     /// Writes `instances` into the next ring slot and records the write. The
     /// caller must have called [`Self::ensure_instance_capacity`] for at least
     /// `instances.len()` first. `instance_writes`/`instance_write_bytes` advance
-    /// only after the queue write is issued.
+    /// only after the staging copy is encoded.
     fn write_frame_instances(
         &mut self,
-        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
         instances: &[GpuPrimitive],
         counters: &mut RetainedResourceCounters,
     ) {
@@ -262,9 +267,26 @@ impl PersistentFrameBuffers {
         );
         self.cursor = (self.cursor + 1) % self.ring.len();
         let bytes: &[u8] = bytemuck::cast_slice(instances);
-        queue.write_buffer(&self.ring[self.cursor], 0, bytes);
         counters.instance_writes += 1;
         counters.instance_write_bytes += bytes.len() as u64;
+        if bytes.is_empty() {
+            return;
+        }
+        assert_eq!(bytes.len() as u64 % wgpu::COPY_BUFFER_ALIGNMENT, 0);
+        let size = wgpu::BufferSize::new(bytes.len() as u64).expect("nonzero instance upload");
+        let mut view = self
+            .staging_belt
+            .write_buffer(encoder, &self.ring[self.cursor], 0, size);
+        view.copy_from_slice(bytes);
+        drop(view);
+    }
+
+    fn finish_uploads(&mut self) {
+        self.staging_belt.finish();
+    }
+
+    fn recall_uploads(&mut self) {
+        self.staging_belt.recall();
     }
 
     /// The ring buffer holding the current frame's instances.
@@ -693,6 +715,7 @@ impl PreparedRetainedHost {
         let mut counters = RetainedResourceCounters::default();
         let atlas_layout = create_atlas_bind_group_layout(&device);
         let pipelines = create_pipelines(&device, config.format, &atlas_layout, &mut counters);
+        let frame_buffers = PersistentFrameBuffers::new(&device);
         let mut metrics = CompanionRuntimeMetrics::default();
         metrics.discard_initial_visible_ticks(20);
         metrics.replace_gpu_allocation(
@@ -713,7 +736,7 @@ impl PreparedRetainedHost {
                 raster_worker,
                 resource_preparation: ResourcePreparationController::new(),
                 failed_glyph_preparation: None,
-                frame_buffers: PersistentFrameBuffers::new(),
+                frame_buffers,
                 capture_resources: None,
                 counters,
                 physical_width: width,
@@ -1044,13 +1067,13 @@ where
         let width = self.host.physical_width;
         let height = self.host.physical_height;
         self.host.ensure_capture_resources(width, height);
-        self.host.prepare_frame(&gpu_frame);
         let mut encoder =
             self.host
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("glorp-retained-lifetime-audit"),
                 });
+        self.host.prepare_frame(&mut encoder, &gpu_frame);
         {
             let active = self
                 .host
@@ -1071,7 +1094,9 @@ where
                 background,
             );
         }
+        self.host.frame_buffers.finish_uploads();
         self.last_submission = Some(self.host.queue.submit([encoder.finish()]));
+        self.host.frame_buffers.recall_uploads();
         let gpu_bytes = self
             .host
             .metrics
@@ -1365,7 +1390,6 @@ impl RetainedHost {
                     }
                 }
             };
-            self.prepare_frame(&frame);
             progress
                 .mark(FrameMilestone::Prepared)
                 .expect("prepared opens the frame ladder");
@@ -1407,6 +1431,7 @@ impl RetainedHost {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("glorp-retained-frame"),
                 });
+            self.prepare_frame(&mut encoder, &frame);
             {
                 let active = self
                     .glyph_resources
@@ -1427,7 +1452,9 @@ impl RetainedHost {
             let encode_us = duration_us(encode_started_at.elapsed());
             self.record_metrics(|metrics| metrics.record_encode_us(encode_us));
             let submit_started_at = Instant::now();
+            self.frame_buffers.finish_uploads();
             self.queue.submit([encoder.finish()]);
+            self.frame_buffers.recall_uploads();
             let queue_wait_us = duration_us(submit_started_at.elapsed());
             let draws = frame.blends.len() as u64;
             self.record_metrics(|metrics| {
@@ -1462,19 +1489,16 @@ impl RetainedHost {
     /// Stages a prepared frame's instances into the persistent instance ring:
     /// grows the ring only if the instance count exceeds the current capacity,
     /// then writes the used prefix into the next slot. Ordinary motion holds the
-    /// count steady, so this only issues a `write_buffer` and never allocates.
-    fn prepare_frame(&mut self, frame: &PreparedGpuFrame) {
+    /// count steady, so this only stages a copy and never grows persistent resources.
+    fn prepare_frame(&mut self, encoder: &mut wgpu::CommandEncoder, frame: &PreparedGpuFrame) {
         let before = self.counters;
         self.frame_buffers.ensure_instance_capacity(
             frame.primitives.len(),
             &self.device,
             &mut self.counters,
         );
-        self.frame_buffers.write_frame_instances(
-            &self.queue,
-            &frame.primitives,
-            &mut self.counters,
-        );
+        self.frame_buffers
+            .write_frame_instances(encoder, &frame.primitives, &mut self.counters);
         let delta = self.counters - before;
         let primitives = frame.primitives.len() as u32;
         let blended_draws = frame.blends.len() as u32;
@@ -2787,7 +2811,7 @@ mod tests {
         PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationController,
         ResourcePreparationKey, ResourcePreparationTick, RetainedFailureCategory,
         RetainedResourceCounters, SmoothBlendMode, FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE,
-        RETAINED_ATLAS_POINT_SIZE,
+        INSTANCE_RING_LEN, INSTANCE_STRIDE, RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -3067,7 +3091,7 @@ mod tests {
 
             // Prime the instance ring to the ambient high-water mark so steady-state
             // frames reuse it without growing.
-            let mut frame_buffers = PersistentFrameBuffers::new();
+            let mut frame_buffers = PersistentFrameBuffers::new(&device);
             let high_water = deterministic_ambient_frames(1)
                 .iter()
                 .map(|frame| frame.primitives.len())
@@ -3096,16 +3120,24 @@ mod tests {
             &mut self,
             frame: &PreparedGpuFrame,
         ) -> std::result::Result<(), RetainedFailureCategory> {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glorp-retained-test-instance-upload"),
+                });
             self.frame_buffers.ensure_instance_capacity(
                 frame.primitives.len(),
                 &self.device,
                 &mut self.counters,
             );
             self.frame_buffers.write_frame_instances(
-                &self.queue,
+                &mut encoder,
                 &frame.primitives,
                 &mut self.counters,
             );
+            self.frame_buffers.finish_uploads();
+            self.queue.submit([encoder.finish()]);
+            self.frame_buffers.recall_uploads();
             Ok(())
         }
     }
@@ -3168,6 +3200,34 @@ mod tests {
         }
         let delta = host.counters() - before;
         assert_eq!(delta.buffer_creations, 0);
+        assert_eq!(delta.instance_writes, 8);
+        let expected_bytes = [
+            1,
+            96,
+            observed,
+            12,
+            observed.saturating_sub(1),
+            0,
+            512,
+            observed,
+        ]
+        .into_iter()
+        .sum::<usize>()
+            * INSTANCE_STRIDE;
+        assert_eq!(delta.instance_write_bytes, expected_bytes as u64);
+    }
+
+    #[test]
+    fn zero_instance_frame_advances_ring_and_records_one_zero_byte_write() {
+        let mut host = TestRetainedResources::warm();
+        let before = host.counters();
+        let cursor = host.frame_buffers.cursor;
+        host.prepare_frame(&prepared_frame_with_count(0)).unwrap();
+        let delta = host.counters() - before;
+        assert_eq!(delta.instance_writes, 1);
+        assert_eq!(delta.instance_write_bytes, 0);
+        assert_eq!(delta.buffer_creations, 0);
+        assert_eq!(host.frame_buffers.cursor, (cursor + 1) % INSTANCE_RING_LEN);
     }
 
     #[test]

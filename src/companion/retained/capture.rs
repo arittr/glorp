@@ -242,19 +242,18 @@ impl<'host> RetainedCaptureTarget<'host> {
         // Reuse the host's persistent capture intermediate/staging and instance
         // ring; a same-size capture allocates nothing.
         self.host.ensure_capture_resources(width, height);
-        self.host.prepare_frame(&gpu_frame);
-        let capture = self
-            .host
-            .capture_resources
-            .as_ref()
-            .expect("ensure_capture_resources installs the persistent capture target");
-
         let mut encoder =
             self.host
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("glorp-retained-capture-encoder"),
                 });
+        self.host.prepare_frame(&mut encoder, &gpu_frame);
+        let capture = self
+            .host
+            .capture_resources
+            .as_ref()
+            .expect("ensure_capture_resources installs the persistent capture target");
         {
             let active = self
                 .host
@@ -289,7 +288,9 @@ impl<'host> RetainedCaptureTarget<'host> {
         );
         // One submission, one retained index: the bounded poll below waits on
         // exactly this work to finish before mapping.
+        self.host.frame_buffers.finish_uploads();
         let submission = self.host.queue.submit([encoder.finish()]);
+        self.host.frame_buffers.recall_uploads();
 
         let (sender, receiver) = mpsc::sync_channel(1);
         capture
