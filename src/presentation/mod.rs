@@ -14,6 +14,7 @@ pub mod room;
 pub mod scene;
 pub mod smooth;
 pub mod surface;
+pub(crate) mod tank_life;
 pub mod target;
 
 pub use draw_list::{DrawCell, SceneDrawList};

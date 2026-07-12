@@ -239,6 +239,7 @@ pub(crate) fn render_legacy_pet_scene_draw_list_parity_oracle_with_tank_geometry
             pet_protected_regions: &pet_protected,
             color_capability: ctx.color_capability,
             life_profile: life_profile.clone(),
+            asleep: vm.day_context.asleep,
         },
     );
     let tank_life_cells = tank_life_placements

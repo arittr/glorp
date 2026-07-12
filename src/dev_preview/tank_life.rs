@@ -184,6 +184,7 @@ fn render_tank_life_fixture(
                 pet_protected_regions: &pet_protected_regions,
                 color_capability: render.color_capability,
                 life_profile: vm.life_profile.clone(),
+                asleep: vm.day_context.asleep,
             });
             let (frame, pet_protected_regions, placements, projected) = match fixture.visual {
                 TankLifeFixtureVisual::Scene => {
@@ -240,6 +241,7 @@ fn render_tank_life_fixture(
                 pet_protected_regions: &pet_protected_regions,
                 color_capability: ColorCapability::Truecolor,
                 life_profile: vm.life_profile.clone(),
+                asleep: vm.day_context.asleep,
             });
             let frame = crate::dev_preview::round::render_round_preview_frame(
                 fixture.id,

@@ -1,14 +1,20 @@
 use crate::game::habitat::HabitatPropKind;
 use crate::storage::state::TankInhabitantId;
-use crate::tui::view_model::{EarnedTankInhabitantView, HabitatView};
 
 const MAX_TROPHIES: usize = 6;
 const MAX_ACCENTS: usize = 4;
 const ACCENT_ROTATION_SECS: i64 = 600;
 
-pub(crate) fn visible_trophy_ids(habitat: &HabitatView) -> Vec<&str> {
-    let mut props = habitat
-        .earned_props
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HabitatPropRecord<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) earned_at: time::OffsetDateTime,
+    pub(crate) kind: HabitatPropKind,
+    pub(crate) display_priority: i16,
+}
+
+pub(crate) fn visible_trophy_ids<'a>(props: &[HabitatPropRecord<'a>]) -> Vec<&'a str> {
+    let mut props = props
         .iter()
         .filter(|prop| prop.kind == HabitatPropKind::Trophy)
         .collect::<Vec<_>>();
@@ -16,17 +22,20 @@ pub(crate) fn visible_trophy_ids(habitat: &HabitatView) -> Vec<&str> {
         b.display_priority
             .cmp(&a.display_priority)
             .then_with(|| a.earned_at.cmp(&b.earned_at))
-            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+            .then_with(|| a.id.cmp(b.id))
     });
     props
         .into_iter()
         .take(MAX_TROPHIES)
-        .map(|prop| prop.id.as_str())
+        .map(|prop| prop.id)
         .collect()
 }
 
-pub(crate) fn visible_accent_ids(habitat: &HabitatView, now: time::OffsetDateTime) -> Vec<&str> {
-    let props = sorted_accent_ids(habitat);
+pub(crate) fn visible_accent_ids<'a>(
+    props: &[HabitatPropRecord<'a>],
+    now: time::OffsetDateTime,
+) -> Vec<&'a str> {
+    let props = sorted_accent_ids(props);
     if props.len() <= MAX_ACCENTS {
         return props;
     }
@@ -37,43 +46,38 @@ pub(crate) fn visible_accent_ids(habitat: &HabitatView, now: time::OffsetDateTim
         .collect()
 }
 
-pub(crate) fn sorted_accent_ids(habitat: &HabitatView) -> Vec<&str> {
-    let mut props = habitat
-        .earned_props
+pub(crate) fn sorted_accent_ids<'a>(props: &[HabitatPropRecord<'a>]) -> Vec<&'a str> {
+    let mut props = props
         .iter()
         .filter(|prop| prop.kind == HabitatPropKind::Accent)
         .collect::<Vec<_>>();
-    props.sort_by(|a, b| {
-        a.earned_at
-            .cmp(&b.earned_at)
-            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-    });
-    props.into_iter().map(|prop| prop.id.as_str()).collect()
+    props.sort_by(|a, b| a.earned_at.cmp(&b.earned_at).then_with(|| a.id.cmp(b.id)));
+    props.into_iter().map(|prop| prop.id).collect()
 }
 
 pub fn canonical_daily_cast(
-    unlocked: &[EarnedTankInhabitantView],
+    unlocked: &[TankInhabitantId],
     pet_seed: &str,
     local_date: time::Date,
     calendar_age_days: i64,
 ) -> Vec<TankInhabitantId> {
     let mut known = unlocked
         .iter()
-        .filter(|earned| crate::game::habitat::tank_inhabitant_spec(&earned.id).is_some())
+        .filter(|id| crate::game::habitat::tank_inhabitant_spec(id).is_some())
         .collect::<Vec<_>>();
-    known.sort_by(|a, b| a.id.cmp(&b.id));
+    known.sort();
     let target = canonical_target_count(known.len(), pet_seed, local_date, calendar_age_days);
     if target == 0 {
         return Vec::new();
     }
     let mut scored = known
         .into_iter()
-        .map(|earned| {
+        .map(|id| {
             let score = stable_hash(&format!(
                 "tank-life-cast-v1|{pet_seed}|{local_date}|{}",
-                earned.id.as_str()
+                id.as_str()
             ));
-            (score, earned.id.clone())
+            (score, id.clone())
         })
         .collect::<Vec<_>>();
     scored.sort_by_key(|(score, id)| (*score, id.clone()));

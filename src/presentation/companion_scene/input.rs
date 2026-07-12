@@ -1,9 +1,10 @@
 use super::{
     AuthoredDepthSnapshot, CompanionSceneProjectionError, CompanionSceneProjectionInput,
-    CompanionSceneSnapshot, ContentSnapshot, FrameSnapshot, PaletteSnapshot, PetLatticeSnapshot,
-    PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
-    PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot, TankAnimationSnapshot,
-    TankRouteSnapshot, TankTopologySnapshot, TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION,
+    CompanionSceneSnapshot, ContentSnapshot, FrameSnapshot, GaugeLevelSnapshot, PaletteSnapshot,
+    PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
+    PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
+    TankAnimationSnapshot, TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot,
+    TankTopologySnapshot, TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION,
     COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS, MAX_VISIBLE_TANK_INHABITANTS,
     PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
 };
@@ -12,8 +13,7 @@ use crate::pet::palette::{body_glow, ResolvedPalette, Rgb};
 use crate::pet::render::{PaletteRoleName, StyledSegment};
 use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
 use crate::round::hud::{
-    companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
-    daily_overage_marker_fraction,
+    companion_pace_fraction, daily_fraction_for_gauge, daily_overage_marker_fraction,
 };
 use crate::tui::room::{derive_room_life_profile, RoomBiomeTag, RoomLifeProfile, RoomWeatherLayer};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
@@ -97,8 +97,21 @@ pub(crate) fn derive_room_profile(vm: &WatchViewModel, now: OffsetDateTime) -> R
 }
 
 fn derive_visible_prop_catalog_ids(vm: &WatchViewModel, now: OffsetDateTime) -> Vec<&'static str> {
-    let trophy_ids = crate::presentation::habitat_inventory::visible_trophy_ids(&vm.habitat);
-    let accent_ids = crate::presentation::habitat_inventory::visible_accent_ids(&vm.habitat, now);
+    let props = vm
+        .habitat
+        .earned_props
+        .iter()
+        .map(
+            |prop| crate::presentation::habitat_inventory::HabitatPropRecord {
+                id: prop.id.as_str(),
+                earned_at: prop.earned_at,
+                kind: prop.kind,
+                display_priority: prop.display_priority,
+            },
+        )
+        .collect::<Vec<_>>();
+    let trophy_ids = crate::presentation::habitat_inventory::visible_trophy_ids(&props);
+    let accent_ids = crate::presentation::habitat_inventory::visible_accent_ids(&props, now);
 
     trophy_ids
         .into_iter()
@@ -109,8 +122,14 @@ fn derive_visible_prop_catalog_ids(vm: &WatchViewModel, now: OffsetDateTime) -> 
 }
 
 fn derive_visible_round_tank_catalog_ids(vm: &WatchViewModel) -> Vec<&'static str> {
+    let unlocked = vm
+        .habitat
+        .earned_inhabitants
+        .iter()
+        .map(|earned| earned.id.clone())
+        .collect::<Vec<_>>();
     crate::presentation::habitat_inventory::canonical_daily_cast(
-        &vm.habitat.earned_inhabitants,
+        &unlocked,
         &vm.pet_render.seed,
         vm.habitat.tank_life_local_date,
         vm.habitat.tank_life_calendar_age_days,
@@ -135,12 +154,14 @@ impl CompanionSceneSnapshot {
         let pet_lines = normalize_pet_lattice(vm)?;
         let pet_roles = project_pet_roles(&vm.pet_art, &vm.pet_spans)?;
         let elapsed_ms = input.clock.elapsed_ms;
+        let roam_motion = crate::round::motion::companion_roam_motion();
+        let motion_input = companion_motion_input(vm, now, &roam_motion);
         let motion = crate::round::motion::project_round_companion_motion_with_options(
-            vm,
+            motion_input,
             now,
             elapsed_ms,
             input.motion_viewport(),
-            &crate::round::motion::companion_roam_motion(),
+            &roam_motion,
             crate::round::motion::RoundMotionProjectionOptions {
                 depth_override: input.depth_override,
             },
@@ -149,12 +170,8 @@ impl CompanionSceneSnapshot {
         let visible_tank_inhabitants = project_tank_inhabitants(vm);
         let prop_animation_states = project_prop_animation_states(&visible_props, now);
         let tank_animation_states =
-            project_tank_animation_states(vm, &visible_tank_inhabitants, now);
-        let hud = companion_hud_text(
-            vm.today_effective_tokens,
-            vm.daily_comparison.fraction_of_yesterday,
-            vm.rate_momentum.pulse.current_tokens,
-        );
+            project_tank_animation_states(vm, &visible_tank_inhabitants, input);
+        let hud = crate::round::hud::review_capture_hud_text();
         let asleep = vm.day_context.asleep;
         let dimmed = asleep || vm.life_profile.calm_mode;
 
@@ -198,19 +215,63 @@ impl CompanionSceneSnapshot {
                 asleep,
                 helper_trouble: helper_health == SemanticHelperHealth::Trouble,
                 gauges: [
-                    if vm.progress.is_max_stage {
+                    gauge_level(if vm.progress.is_max_stage {
                         1.0
                     } else {
-                        vm.progress.fraction.clamp(0.0, 1.0)
-                    },
-                    daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday) as f32,
-                    daily_overage_marker_fraction(vm.daily_comparison.fraction_of_yesterday) as f32,
-                    companion_pace_fraction(vm.rate_momentum.pulse.current_tokens) as f32,
+                        f64::from(vm.progress.fraction)
+                    }),
+                    gauge_level(daily_fraction_for_gauge(
+                        vm.daily_comparison.fraction_of_yesterday,
+                    )),
+                    gauge_level(daily_overage_marker_fraction(
+                        vm.daily_comparison.fraction_of_yesterday,
+                    )),
+                    gauge_level(companion_pace_fraction(
+                        vm.rate_momentum.pulse.current_tokens,
+                    )),
                 ],
                 dim_amount: if dimmed { 0.35 } else { 0.0 },
                 hud_lines: [hud.today_total, hud.daily_percent, hud.pace],
             },
         })
+    }
+}
+
+fn gauge_level(value: f64) -> GaugeLevelSnapshot {
+    let value = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if value == 0.0 {
+        GaugeLevelSnapshot::Empty
+    } else if value < 0.25 {
+        GaugeLevelSnapshot::Low
+    } else if value < 0.5 {
+        GaugeLevelSnapshot::Medium
+    } else if value < 1.0 {
+        GaugeLevelSnapshot::High
+    } else {
+        GaugeLevelSnapshot::Full
+    }
+}
+
+pub(super) fn companion_motion_input(
+    vm: &WatchViewModel,
+    now: OffsetDateTime,
+    motion: &crate::round::motion::CompanionMotion,
+) -> crate::round::motion::CompanionMotionInput {
+    let wander_width = PET_LATTICE_WIDTH + 2 * motion.wander_half;
+    let (resolved_wander_offset_x, resolved_wander_facing) =
+        crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
+    crate::round::motion::CompanionMotionInput {
+        asleep: vm.day_context.asleep,
+        calm: vm.life_profile.calm_mode,
+        rate_per_hour: vm.progress.rate_per_hour,
+        current_facing: vm.facing,
+        resolved_wander_offset_x,
+        resolved_wander_facing,
+        breath_offset_y_cells: vm.breath_offset_y,
     }
 }
 
@@ -354,27 +415,57 @@ fn project_prop_animation_states(
 fn project_tank_animation_states(
     vm: &WatchViewModel,
     visible_tank_inhabitants: &[TankTopologySnapshot],
-    now: OffsetDateTime,
+    input: CompanionSceneProjectionInput,
 ) -> Vec<TankAnimationSnapshot> {
     let calm = vm.life_profile.calm_mode || vm.day_context.asleep;
+    let geometry = crate::presentation::tank_life::TankRouteGeometry::round(
+        input.grid_columns,
+        input.grid_rows,
+        input.motion_clearance.bottom_reserved_rows,
+    );
     visible_tank_inhabitants
         .iter()
-        .map(|inhabitant| {
-            let state = crate::game::habitat::tank_life_animation_state(
-                inhabitant.catalog_id,
-                &vm.pet_render.seed,
-                vm.habitat.tank_life_local_date,
-                now,
-                calm,
-            );
-            TankAnimationSnapshot {
+        .filter_map(|inhabitant| {
+            let outcome = crate::presentation::tank_life::resolve_tank_route(
+                crate::presentation::tank_life::TankRouteInput {
+                    catalog_id: inhabitant.catalog_id,
+                    pet_seed: &vm.pet_render.seed,
+                    local_date: vm.habitat.tank_life_local_date,
+                    now: input.clock.wall_time,
+                    calm,
+                    geometry: &geometry,
+                },
+            )?;
+            Some(TankAnimationSnapshot {
                 catalog_id: inhabitant.catalog_id,
                 stable_order: inhabitant.stable_order,
-                sprite_phase: state.sprite_phase(),
-                route_phase: state.privacy_safe_route_phase(),
-                cadence_ms: state.cadence_ms,
-                calm: state.calm,
-            }
+                route: outcome.route.into(),
+                visible: outcome.visible,
+                origin_col: outcome.origin_col,
+                origin_row: outcome.origin_row,
+                side: outcome.side.map(|side| match side {
+                    crate::presentation::tank_life::TankRouteSide::Left => TankSideSnapshot::Left,
+                    crate::presentation::tank_life::TankRouteSide::Right => TankSideSnapshot::Right,
+                    crate::presentation::tank_life::TankRouteSide::Rear => TankSideSnapshot::Rear,
+                    crate::presentation::tank_life::TankRouteSide::Front => TankSideSnapshot::Front,
+                }),
+                layer: match outcome.layer {
+                    crate::presentation::tank_life::TankRouteLayer::Behind => {
+                        TankLayerSnapshot::Behind
+                    }
+                    crate::presentation::tank_life::TankRouteLayer::Foreground => {
+                        TankLayerSnapshot::Foreground
+                    }
+                    crate::presentation::tank_life::TankRouteLayer::BehindAnchorForegroundHost => {
+                        TankLayerSnapshot::BehindAnchorForegroundHost
+                    }
+                },
+                sprite_variant: outcome.sprite_variant,
+                visible_rows: outcome.visible_rows,
+                anemone_morph: outcome.anemone_morph,
+                cadence_ms: outcome.cadence_ms,
+                calm: outcome.calm,
+            })
         })
         .collect()
 }

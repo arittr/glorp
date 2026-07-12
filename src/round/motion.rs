@@ -1,6 +1,3 @@
-use crate::round::depth::{SMOOTH_PERSPECTIVE_Y_MAX, SMOOTH_PET_NEAR_SCALE};
-use crate::tui::view_model::WatchViewModel;
-
 const PET_WIDTH_CELLS: u16 = 13;
 const PET_HEIGHT_CELLS: u16 = 10;
 const PET_INK_WIDTH_CELLS: u16 = 11;
@@ -52,6 +49,25 @@ pub struct RoundCompanionMotionViewport {
     pub grid_rows: u16,
     pub width_points: f32,
     pub height_points: f32,
+    pub clearance: CompanionMotionClearance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompanionMotionClearance {
+    pub near_scale: f32,
+    pub perspective_y_max: f32,
+    pub bottom_reserved_rows: u16,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct CompanionMotionInput {
+    pub asleep: bool,
+    pub calm: bool,
+    pub rate_per_hour: f64,
+    pub current_facing: i8,
+    pub resolved_wander_offset_x: i16,
+    pub resolved_wander_facing: i8,
+    pub breath_offset_y_cells: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,14 +89,14 @@ pub struct RoundMotionProjectionOptions {
 }
 
 pub fn project_round_companion_motion(
-    vm: &WatchViewModel,
+    input: CompanionMotionInput,
     wall_time: time::OffsetDateTime,
     elapsed_ms: u64,
     viewport: RoundCompanionMotionViewport,
     motion: &CompanionMotion,
 ) -> RoundCompanionMotionProjection {
     project_round_companion_motion_with_options(
-        vm,
+        input,
         wall_time,
         elapsed_ms,
         viewport,
@@ -90,25 +106,27 @@ pub fn project_round_companion_motion(
 }
 
 pub fn project_round_companion_motion_with_options(
-    vm: &WatchViewModel,
+    input: CompanionMotionInput,
     wall_time: time::OffsetDateTime,
     elapsed_ms: u64,
     viewport: RoundCompanionMotionViewport,
     motion: &CompanionMotion,
     options: RoundMotionProjectionOptions,
 ) -> RoundCompanionMotionProjection {
-    let energy = companion_motion_energy(vm);
-    let wander_width = PET_WIDTH_CELLS + 2 * motion.wander_half;
-    let (wander_offset_x, terminal_facing) =
-        crate::tui::wander::resolve_wander_offset(vm, wall_time, wander_width);
+    let energy = companion_motion_energy(input);
     let facing = if motion.wander {
-        companion_wander_facing(wall_time, motion.drift_period_secs, energy, vm.facing)
+        companion_wander_facing(
+            wall_time,
+            motion.drift_period_secs,
+            energy,
+            input.current_facing,
+        )
     } else {
-        terminal_facing
+        input.resolved_wander_facing
     };
     let (fx, fy, fz) = companion_motion_offsets(wall_time, motion, energy);
     project_round_companion_motion_from_offsets(
-        vm,
+        input,
         elapsed_ms,
         viewport,
         motion,
@@ -116,13 +134,13 @@ pub fn project_round_companion_motion_with_options(
         fy,
         normalized_depth(options.depth_override.unwrap_or(fz)),
         facing,
-        wander_offset_x,
+        input.resolved_wander_offset_x,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn project_round_companion_motion_from_offsets(
-    vm: &WatchViewModel,
+    input: CompanionMotionInput,
     elapsed_ms: u64,
     viewport: RoundCompanionMotionViewport,
     motion: &CompanionMotion,
@@ -152,9 +170,9 @@ pub(crate) fn project_round_companion_motion_from_offsets(
 
     let classic_x = (base_x + offset_x as i32).clamp(0, max_x as i32) as u16;
     let classic_drift_y = (base_y - bias as i32 + offset_y as i32).clamp(0, max_y as i32) as u16;
-    let classic_y = (classic_drift_y + u16::from(vm.breath_offset_y)).min(max_y);
+    let classic_y = (classic_drift_y + u16::from(input.breath_offset_y_cells)).min(max_y);
 
-    let envelope = smooth_roam_envelope(grid_columns, grid_rows);
+    let envelope = companion_roam_envelope(viewport);
     let motion_origin = MotionPoint {
         x: clamp_within(base_x as f32, envelope.min_x, envelope.max_x),
         y: clamp_within(base_y as f32 - bias, envelope.min_y, envelope.max_y),
@@ -185,7 +203,7 @@ pub(crate) fn project_round_companion_motion_from_offsets(
         normalized_depth,
         facing: normalize_facing(facing),
         wander_offset_x,
-        breath_offset_y_cells: vm.breath_offset_y,
+        breath_offset_y_cells: input.breath_offset_y_cells,
         bob_offset_y_cells: round_companion_bob(elapsed_ms),
     }
 }
@@ -265,14 +283,14 @@ pub(crate) fn companion_wander_facing(
     }
 }
 
-pub(crate) fn companion_motion_energy(vm: &WatchViewModel) -> f32 {
+pub(crate) fn companion_motion_energy(input: CompanionMotionInput) -> f32 {
     const IDLE_FLOOR: f32 = 0.25;
     const RESTING_ENERGY: f32 = 0.12;
     const RATE_FULL: f64 = 50_000_000.0;
-    if vm.day_context.asleep || vm.life_profile.calm_mode {
+    if input.asleep || input.calm {
         return RESTING_ENERGY;
     }
-    (IDLE_FLOOR + (vm.progress.rate_per_hour.max(0.0) / RATE_FULL) as f32).clamp(IDLE_FLOOR, 1.0)
+    (IDLE_FLOOR + (input.rate_per_hour.max(0.0) / RATE_FULL) as f32).clamp(IDLE_FLOOR, 1.0)
 }
 
 fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32, f32) {
@@ -314,32 +332,35 @@ fn companion_wander_depth(now: time::OffsetDateTime, period_secs: u64) -> f32 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct SmoothRoamEnvelope {
+pub(crate) struct CompanionRoamEnvelope {
     pub(crate) min_x: f32,
     pub(crate) max_x: f32,
     pub(crate) min_y: f32,
     pub(crate) max_y: f32,
 }
 
-pub(crate) fn smooth_roam_envelope(grid_columns: u16, grid_rows: u16) -> SmoothRoamEnvelope {
+pub(crate) fn companion_roam_envelope(
+    viewport: RoundCompanionMotionViewport,
+) -> CompanionRoamEnvelope {
+    let grid_columns = viewport.grid_columns;
+    let grid_rows = viewport.grid_rows;
     let frame_half_width = f32::from(PET_WIDTH_CELLS) / 2.0;
     let frame_half_height = f32::from(PET_HEIGHT_CELLS) / 2.0;
-    let scaled_ink_half_width = f32::from(PET_INK_WIDTH_CELLS) / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    let scaled_ink_half_height = f32::from(PET_INK_HEIGHT_CELLS) / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    let protected_bottom = f32::from(grid_rows.saturating_sub(round_hud_reserve_rows(grid_rows)));
-    SmoothRoamEnvelope {
+    let scaled_ink_half_width =
+        f32::from(PET_INK_WIDTH_CELLS) / 2.0 * viewport.clearance.near_scale;
+    let scaled_ink_half_height =
+        f32::from(PET_INK_HEIGHT_CELLS) / 2.0 * viewport.clearance.near_scale;
+    let protected_bottom =
+        f32::from(grid_rows.saturating_sub(viewport.clearance.bottom_reserved_rows));
+    CompanionRoamEnvelope {
         min_x: scaled_ink_half_width - frame_half_width,
         max_x: f32::from(grid_columns) - scaled_ink_half_width - frame_half_width,
-        min_y: scaled_ink_half_height - frame_half_height + SMOOTH_PERSPECTIVE_Y_MAX,
+        min_y: scaled_ink_half_height - frame_half_height + viewport.clearance.perspective_y_max,
         max_y: protected_bottom
             - scaled_ink_half_height
             - frame_half_height
-            - SMOOTH_PERSPECTIVE_Y_MAX,
+            - viewport.clearance.perspective_y_max,
     }
-}
-
-pub(crate) fn round_hud_reserve_rows(grid_rows: u16) -> u16 {
-    5.min(grid_rows / 3)
 }
 
 fn clamp_within(value: f32, min: f32, max: f32) -> f32 {

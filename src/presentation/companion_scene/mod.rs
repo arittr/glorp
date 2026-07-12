@@ -94,6 +94,7 @@ pub struct CompanionSceneProjectionInput {
     pub grid_columns: u16,
     pub grid_rows: u16,
     pub depth_override: Option<f32>,
+    pub motion_clearance: crate::round::motion::CompanionMotionClearance,
 }
 
 impl CompanionSceneProjectionInput {
@@ -102,6 +103,7 @@ impl CompanionSceneProjectionInput {
         layout: CompanionLogicalLayout,
         grid_columns: u16,
         grid_rows: u16,
+        motion_clearance: crate::round::motion::CompanionMotionClearance,
     ) -> Self {
         Self {
             clock,
@@ -109,6 +111,7 @@ impl CompanionSceneProjectionInput {
             grid_columns,
             grid_rows,
             depth_override: None,
+            motion_clearance,
         }
     }
 
@@ -124,6 +127,7 @@ impl CompanionSceneProjectionInput {
             grid_rows: self.grid_rows,
             width_points: self.layout.width_points,
             height_points: self.layout.height_points,
+            clearance: self.motion_clearance,
         }
     }
 }
@@ -258,10 +262,34 @@ pub enum PropAnimationKindSnapshot {
 pub struct TankAnimationSnapshot {
     pub catalog_id: &'static str,
     pub stable_order: u8,
-    pub sprite_phase: u8,
-    pub route_phase: u8,
+    pub route: TankRouteSnapshot,
+    pub visible: bool,
+    pub origin_col: u16,
+    pub origin_row: u16,
+    pub side: Option<TankSideSnapshot>,
+    pub layer: TankLayerSnapshot,
+    pub sprite_variant: u8,
+    pub visible_rows: u8,
+    pub anemone_morph: Option<u8>,
     pub cadence_ms: u16,
     pub calm: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TankSideSnapshot {
+    Left,
+    Right,
+    Rear,
+    Front,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TankLayerSnapshot {
+    Behind,
+    Foreground,
+    BehindAnchorForegroundHost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -294,9 +322,19 @@ pub struct FrameSnapshot {
     pub bob_offset_y_cells: f32,
     pub asleep: bool,
     pub helper_trouble: bool,
-    pub gauges: [f32; 4],
+    pub gauges: [GaugeLevelSnapshot; 4],
     pub dim_amount: f32,
     pub hud_lines: [String; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GaugeLevelSnapshot {
+    Empty,
+    Low,
+    Medium,
+    High,
+    Full,
 }
 
 #[cfg(test)]
@@ -340,6 +378,7 @@ mod tests {
                 layout,
                 44,
                 18,
+                crate::round::scene::current_round_motion_clearance(18),
             ),
         )
     }
@@ -477,6 +516,79 @@ mod tests {
             !json.contains("\"seed\""),
             "snapshot exposed a seed field: {json}"
         );
+    }
+
+    #[test]
+    fn privacy_projection_redacts_formatted_live_hud_telemetry_everywhere() {
+        let mut vm = fixture_with_real_pet_art();
+        vm.today_effective_tokens = 842_000_000.0;
+        vm.daily_comparison.fraction_of_yesterday = Some(0.94);
+        vm.rate_momentum.pulse.current_tokens = 31_000_000.0;
+        let live = crate::round::hud::companion_hud_text(
+            vm.today_effective_tokens,
+            vm.daily_comparison.fraction_of_yesterday,
+            vm.rate_momentum.pulse.current_tokens,
+        );
+
+        let snapshot = project_snapshot(
+            &vm,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .expect("privacy-aware projection");
+        let json = serde_json::to_string(&snapshot).expect("serialize privacy projection");
+        let debug = format!("{snapshot:?}");
+        let mut invalid = vm.clone();
+        invalid.pet_art[0] = "private/path".to_string();
+        let error = project_snapshot(
+            &invalid,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .expect_err("invalid private art fails closed");
+        let error_text = format!("{error} {error:?}");
+
+        assert!(!snapshot.privacy.exact_counts_visible);
+        assert!(!snapshot.privacy.source_names_visible);
+        assert_eq!(snapshot.frame.hud_lines, ["review", "privacy", "redacted"]);
+        for private in [live.today_total, live.daily_percent, live.pace] {
+            assert!(!json.contains(&private), "JSON leaked {private}: {json}");
+            assert!(!debug.contains(&private), "Debug leaked {private}: {debug}");
+            assert!(
+                !error_text.contains(&private),
+                "public error text leaked {private}: {error_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn privacy_projection_quantizes_live_gauges_instead_of_serializing_exact_ratios() {
+        let mut vm = fixture_with_real_pet_art();
+        vm.progress.fraction = 0.432_109;
+        vm.daily_comparison.fraction_of_yesterday = Some(0.943_217);
+        vm.rate_momentum.pulse.current_tokens = 31_234_567.0;
+        let exact_daily =
+            crate::round::hud::daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday)
+                as f32;
+        let exact_pace =
+            crate::round::hud::companion_pace_fraction(vm.rate_momentum.pulse.current_tokens)
+                as f32;
+
+        let snapshot = project_snapshot(
+            &vm,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .expect("privacy-aware gauges");
+        let json = serde_json::to_string(&snapshot).expect("serialize privacy-aware gauges");
+
+        for exact in [vm.progress.fraction, exact_daily, exact_pace] {
+            let exact = serde_json::to_string(&exact).unwrap();
+            assert!(
+                !json.contains(&exact),
+                "serialized exact live gauge {exact}: {json}"
+            );
+        }
     }
 
     #[test]
@@ -657,12 +769,17 @@ mod tests {
             layout,
             44,
             18,
+            crate::round::scene::current_round_motion_clearance(18),
         );
 
         let snapshot = CompanionSceneSnapshot::project_with_input(&vm, input)
             .expect("project shared round motion");
         let shared = crate::round::motion::project_round_companion_motion(
-            &vm,
+            super::input::companion_motion_input(
+                &vm,
+                wall_time,
+                &crate::round::motion::companion_roam_motion(),
+            ),
             wall_time,
             elapsed_ms,
             input.motion_viewport(),
@@ -786,7 +903,7 @@ mod tests {
 
         assert_eq!(normal.content.tank_animation_states.len(), 2);
         for state in &normal.content.tank_animation_states {
-            assert!(state.sprite_phase <= 1);
+            assert!(state.sprite_variant <= 1);
             assert_eq!(state.cadence_ms, 4_000);
         }
         assert!(calm
@@ -807,6 +924,77 @@ mod tests {
             calm.content.tank_animation_states,
             reordered.content.tank_animation_states
         );
+    }
+
+    #[test]
+    fn tank_state_serializes_visible_route_outcomes_not_seed_tokens() {
+        let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(
+            120,
+            time::macros::date!(2026 - 07 - 11),
+        );
+        let canonical = fixture_with_real_pet_art();
+        vm.pet_art = canonical.pet_art;
+        vm.pet_spans = canonical.pet_spans;
+
+        let snapshot = project_snapshot(
+            &vm,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .expect("tank route projection");
+        let json = serde_json::to_string(&snapshot.content.tank_animation_states)
+            .expect("serialize tank outcomes");
+
+        assert!(
+            !json.contains("route_phase"),
+            "serialized a seed-derived phase: {json}"
+        );
+        assert!(!json.contains("token"), "serialized a token: {json}");
+        assert!(!json.contains("hash"), "serialized a hash: {json}");
+        assert!(
+            json.contains("origin_col"),
+            "missing visible route column: {json}"
+        );
+        assert!(
+            json.contains("origin_row"),
+            "missing visible route row: {json}"
+        );
+        assert!(
+            json.contains("sprite_variant"),
+            "missing bounded sprite variant: {json}"
+        );
+    }
+
+    #[test]
+    fn shared_tank_route_resolver_fails_closed_and_bounds_catalog_outcomes() {
+        let geometry = crate::presentation::tank_life::TankRouteGeometry::round(44, 18, 5);
+        for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
+            let outcome = crate::presentation::tank_life::resolve_tank_route(
+                crate::presentation::tank_life::TankRouteInput {
+                    catalog_id: spec.id,
+                    pet_seed: "private-route-seed",
+                    local_date: time::macros::date!(2026 - 07 - 11),
+                    now: datetime!(2026-07-11 12:00 UTC),
+                    calm: false,
+                    geometry: &geometry,
+                },
+            )
+            .expect("known catalog route");
+            assert!(outcome.sprite_variant <= 1);
+            assert!(outcome.origin_col < 44);
+            assert!(outcome.origin_row < 18);
+        }
+        assert!(crate::presentation::tank_life::resolve_tank_route(
+            crate::presentation::tank_life::TankRouteInput {
+                catalog_id: "private-unknown-inhabitant",
+                pet_seed: "private-route-seed",
+                local_date: time::macros::date!(2026 - 07 - 11),
+                now: datetime!(2026-07-11 12:00 UTC),
+                calm: false,
+                geometry: &geometry,
+            },
+        )
+        .is_none());
     }
 
     #[test]
@@ -838,12 +1026,17 @@ mod tests {
                 CompanionLogicalLayout::round(360.0, 360.0),
                 44,
                 18,
+                crate::round::scene::current_round_motion_clearance(18),
             )
             .with_depth_override(depth);
             let snapshot = CompanionSceneSnapshot::project_with_input(&vm, input)
                 .expect("depth fixture projection");
             let shared = crate::round::motion::project_round_companion_motion_with_options(
-                &vm,
+                super::input::companion_motion_input(
+                    &vm,
+                    now,
+                    &crate::round::motion::companion_roam_motion(),
+                ),
                 now,
                 500,
                 input.motion_viewport(),
@@ -872,20 +1065,29 @@ mod tests {
             CompanionLogicalLayout::round(360.0, 360.0),
             44,
             18,
+            crate::round::scene::current_round_motion_clearance(18),
         );
         let active_snapshot = CompanionSceneSnapshot::project_with_input(&active, input)
             .expect("active motion projection");
         let resting_snapshot = CompanionSceneSnapshot::project_with_input(&resting, input)
             .expect("resting motion projection");
         let active_shared = crate::round::motion::project_round_companion_motion(
-            &active,
+            super::input::companion_motion_input(
+                &active,
+                now,
+                &crate::round::motion::companion_roam_motion(),
+            ),
             now,
             750,
             input.motion_viewport(),
             &crate::round::motion::companion_roam_motion(),
         );
         let resting_shared = crate::round::motion::project_round_companion_motion(
-            &resting,
+            super::input::companion_motion_input(
+                &resting,
+                now,
+                &crate::round::motion::companion_roam_motion(),
+            ),
             now,
             750,
             input.motion_viewport(),

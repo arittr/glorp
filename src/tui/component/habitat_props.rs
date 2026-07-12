@@ -7,8 +7,10 @@ use crate::game::habitat::{
     WILT_RECOVERY_SPROUT,
 };
 use crate::pet::generation::Species;
-use crate::presentation::habitat_inventory::sorted_accent_ids;
-pub(crate) use crate::presentation::habitat_inventory::{visible_accent_ids, visible_trophy_ids};
+use crate::presentation::habitat_inventory::{
+    sorted_accent_ids as select_sorted_accent_ids, visible_accent_ids as select_visible_accent_ids,
+    visible_trophy_ids as select_visible_trophy_ids, HabitatPropRecord,
+};
 use crate::storage::state::HabitatPropId;
 use crate::tui::component::{PetSceneLayout, TargetPath};
 use crate::tui::render_context::RenderContext;
@@ -19,6 +21,34 @@ use ratatui::style::{Color, Style};
 use std::collections::HashMap;
 
 const ACCENT_CANDIDATES: u16 = 16;
+
+fn habitat_prop_records(habitat: &HabitatView) -> Vec<HabitatPropRecord<'_>> {
+    habitat
+        .earned_props
+        .iter()
+        .map(|prop| HabitatPropRecord {
+            id: prop.id.as_str(),
+            earned_at: prop.earned_at,
+            kind: prop.kind,
+            display_priority: prop.display_priority,
+        })
+        .collect()
+}
+
+pub(crate) fn visible_trophy_ids(habitat: &HabitatView) -> Vec<&str> {
+    let records = habitat_prop_records(habitat);
+    select_visible_trophy_ids(&records)
+}
+
+pub(crate) fn visible_accent_ids(habitat: &HabitatView, now: time::OffsetDateTime) -> Vec<&str> {
+    let records = habitat_prop_records(habitat);
+    select_visible_accent_ids(&records, now)
+}
+
+fn sorted_accent_ids(habitat: &HabitatView) -> Vec<&str> {
+    let records = habitat_prop_records(habitat);
+    select_sorted_accent_ids(&records)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HabitatPropCell {

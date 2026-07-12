@@ -27,6 +27,16 @@ const FORBIDDEN_IMPORT_ROOTS: &[&str] = &[
     "crate::tui::panels",
 ];
 
+const FORBIDDEN_NEUTRAL_DEPENDENCIES: &[&str] = &[
+    "WatchViewModel",
+    "crate::tui",
+    "Smooth",
+    "ratatui",
+    "wgpu",
+    "objc2",
+    "AppKit",
+];
+
 #[test]
 fn companion_scene_tree_is_renderer_and_host_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation/companion_scene");
@@ -49,6 +59,40 @@ fn companion_scene_tree_is_renderer_and_host_neutral() {
         "renderer-neutral boundary violations:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn companion_scene_neutral_dependency_closure_has_no_view_or_renderer_ownership() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let paths = [
+        root.join("src/round/motion.rs"),
+        root.join("src/presentation/habitat_inventory.rs"),
+        root.join("src/presentation/tank_life.rs"),
+    ];
+    let mut violations = Vec::new();
+    for path in paths {
+        if !path.is_file() {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read neutral dependency source");
+        for forbidden in neutral_dependency_violations(&source) {
+            violations.push(format!("{} contains {forbidden}", path.display()));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "neutral dependency closure violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+fn neutral_dependency_violations(source: &str) -> Vec<&'static str> {
+    let normalized = normalize_boundary_text(source);
+    FORBIDDEN_NEUTRAL_DEPENDENCIES
+        .iter()
+        .copied()
+        .filter(|forbidden| normalized.contains(&normalize_boundary_text(forbidden)))
+        .collect()
 }
 
 fn boundary_violations(source: &str) -> Vec<&'static str> {
@@ -121,6 +165,21 @@ fn boundary_scan_rejects_aliased_renderer_and_terminal_painter_imports() {
         assert!(
             !boundary_violations(source).is_empty(),
             "aliased renderer import was accepted: {source}"
+        );
+    }
+}
+
+#[test]
+fn neutral_dependency_scan_rejects_alias_case_and_separator_bypasses() {
+    for source in [
+        "use crate :: tui :: view_model :: Watch_View_Model as Input;",
+        "use crate::presentation::Smo_oth as neutral;",
+        "use RaTaTuI as geometry;",
+        "use ObJc_2 as domain;",
+    ] {
+        assert!(
+            !neutral_dependency_violations(source).is_empty(),
+            "neutral dependency bypass was accepted: {source}"
         );
     }
 }

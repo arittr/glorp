@@ -4,13 +4,13 @@ use ratatui::layout::Rect;
 
 use crate::presentation::{PetSceneModel, SceneDrawList};
 use crate::round::motion::{
-    companion_drift_position, project_round_companion_motion, round_hud_reserve_rows,
-    RoundCompanionMotionProjection, RoundCompanionMotionViewport,
+    companion_drift_position, project_round_companion_motion, CompanionMotionClearance,
+    CompanionMotionInput, RoundCompanionMotionProjection, RoundCompanionMotionViewport,
 };
 #[cfg(test)]
 use crate::round::motion::{
-    companion_motion_energy, companion_motion_offsets, companion_wander_facing,
-    companion_wander_offsets, project_round_companion_motion_from_offsets, smooth_roam_envelope,
+    companion_motion_energy, companion_motion_offsets, companion_roam_envelope,
+    companion_wander_facing, companion_wander_offsets, project_round_companion_motion_from_offsets,
 };
 pub use crate::round::motion::{companion_roam_motion, CompanionMotion};
 use crate::tui::component::PetScene;
@@ -58,6 +58,10 @@ pub struct RoundTankLifeProtectedRegions {
     pub bottom_hud: Vec<Rect>,
 }
 
+fn round_hud_reserve_rows(grid_rows: u16) -> u16 {
+    5.min(grid_rows / 3)
+}
+
 pub fn round_tank_life_geometry(
     grid_cols: u16,
     grid_rows: u16,
@@ -102,8 +106,13 @@ pub fn companion_pet_placement(
     grid_rows: u16,
     motion: &CompanionMotion,
 ) -> CompanionPetPlacement {
-    let projection =
-        project_round_companion_motion(vm, now, 0, motion_viewport(grid_cols, grid_rows), motion);
+    let projection = project_round_companion_motion(
+        companion_motion_input(vm, now, motion),
+        now,
+        0,
+        motion_viewport(grid_cols, grid_rows),
+        motion,
+    );
     placement_from_projection(vm, grid_cols, grid_rows, projection)
 }
 
@@ -117,7 +126,7 @@ fn companion_pet_placement_from_offsets_for_test(
     fy: f32,
 ) -> CompanionPetPlacement {
     let projection = project_round_companion_motion_from_offsets(
-        vm,
+        companion_motion_input(vm, time::OffsetDateTime::UNIX_EPOCH, motion),
         0,
         motion_viewport(grid_cols, grid_rows),
         motion,
@@ -136,6 +145,34 @@ fn motion_viewport(grid_cols: u16, grid_rows: u16) -> RoundCompanionMotionViewpo
         grid_rows,
         width_points: f32::from(grid_cols),
         height_points: f32::from(grid_rows),
+        clearance: current_round_motion_clearance(grid_rows),
+    }
+}
+
+pub fn current_round_motion_clearance(grid_rows: u16) -> CompanionMotionClearance {
+    CompanionMotionClearance {
+        near_scale: crate::round::depth::SMOOTH_PET_NEAR_SCALE,
+        perspective_y_max: crate::round::depth::SMOOTH_PERSPECTIVE_Y_MAX,
+        bottom_reserved_rows: 5.min(grid_rows / 3),
+    }
+}
+
+fn companion_motion_input(
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+    motion: &CompanionMotion,
+) -> CompanionMotionInput {
+    let wander_width = PET_W + 2 * motion.wander_half;
+    let (resolved_wander_offset_x, resolved_wander_facing) =
+        crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
+    CompanionMotionInput {
+        asleep: vm.day_context.asleep,
+        calm: vm.life_profile.calm_mode,
+        rate_per_hour: vm.progress.rate_per_hour,
+        current_facing: vm.facing,
+        resolved_wander_offset_x,
+        resolved_wander_facing,
+        breath_offset_y_cells: vm.breath_offset_y,
     }
 }
 
@@ -285,8 +322,13 @@ pub(crate) fn build_round_pet_layout_with_placement<'a>(
     CompanionPetPlacement,
 ) {
     let area = Rect::new(0, 0, grid_cols, grid_rows);
-    let projection =
-        project_round_companion_motion(vm, now, 0, motion_viewport(grid_cols, grid_rows), motion);
+    let projection = project_round_companion_motion(
+        companion_motion_input(vm, now, motion),
+        now,
+        0,
+        motion_viewport(grid_cols, grid_rows),
+        motion,
+    );
     let wx = projection.wander_offset_x;
     let facing = projection.facing;
     let vm: Cow<WatchViewModel> = if wx != vm.wander_offset_x || facing != vm.facing {
@@ -350,7 +392,7 @@ mod tests {
         grid_rows: u16,
         motion: &CompanionMotion,
     ) -> Rect {
-        let energy = companion_motion_energy(vm);
+        let energy = companion_motion_energy(companion_motion_input(vm, now, motion));
         let (fx, fy, _) = companion_motion_offsets(now, motion, energy);
         let (drift_x, drift_y) = companion_drift_position(motion, grid_cols, grid_rows, fx, fy);
         let breathed_y =
@@ -489,7 +531,7 @@ mod tests {
         // the ink inverted this band at 16 rows and left 1.8 cells at 18, pinning
         // the pet against an invisible ceiling for most of its cycle.
         for grid_rows in 16..=24 {
-            let envelope = smooth_roam_envelope(36, grid_rows);
+            let envelope = companion_roam_envelope(motion_viewport(36, grid_rows));
             assert!(
                 envelope.max_y >= envelope.min_y,
                 "{grid_rows}-row grid inverted the vertical roam band"
@@ -500,7 +542,7 @@ mod tests {
         // The shipping companion is 36x18 (`COMPANION_TARGET_COLS`, and square-view
         // rows). Non-inversion alone would be satisfied by a hairline band, so pin
         // the grid the pet actually swims in.
-        let live = smooth_roam_envelope(36, 18);
+        let live = companion_roam_envelope(motion_viewport(36, 18));
         assert!(
             live.max_y - live.min_y >= 3.0,
             "live 36x18 companion grid left only {:.2} cells of vertical roam",
@@ -519,7 +561,7 @@ mod tests {
         let scaled_ink_half_h = f32::from(PET_INK_H) / 2.0 * SMOOTH_PET_NEAR_SCALE;
 
         for grid_rows in 16..=24 {
-            let envelope = smooth_roam_envelope(36, grid_rows);
+            let envelope = companion_roam_envelope(motion_viewport(36, grid_rows));
             let protected_bottom =
                 f32::from(grid_rows.saturating_sub(round_hud_reserve_rows(grid_rows)));
 
@@ -769,13 +811,14 @@ mod tests {
 
     #[test]
     fn motion_energy_tracks_activity() {
+        let motion = companion_roam_motion();
         let mut vm = WatchViewModel::fixture_with_habitat_props();
         vm.day_context.asleep = false;
         vm.life_profile.calm_mode = false;
         vm.progress.rate_per_hour = 0.0;
-        let idle = companion_motion_energy(&vm);
+        let idle = companion_motion_energy(companion_motion_input(&vm, GOLDEN_NOW, &motion));
         vm.progress.rate_per_hour = 80_000_000.0;
-        let busy = companion_motion_energy(&vm);
+        let busy = companion_motion_energy(companion_motion_input(&vm, GOLDEN_NOW, &motion));
         assert!(
             busy > idle,
             "busy pet moves more than idle (idle={idle}, busy={busy})"
@@ -785,7 +828,7 @@ mod tests {
             "high burn saturates near full, got {busy}"
         );
         vm.day_context.asleep = true;
-        let asleep = companion_motion_energy(&vm);
+        let asleep = companion_motion_energy(companion_motion_input(&vm, GOLDEN_NOW, &motion));
         assert!(
             asleep < idle,
             "a sleeping pet barely drifts (asleep={asleep}, idle={idle})"

@@ -188,57 +188,6 @@ pub fn habitat_prop_animation_state(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TankLifeAnimationState {
-    route_token: u64,
-    pub cadence_ms: u16,
-    pub calm: bool,
-}
-
-impl TankLifeAnimationState {
-    pub const fn route_phase(self) -> u64 {
-        self.route_token
-    }
-
-    pub const fn sprite_phase(self) -> u8 {
-        (self.route_token & 1) as u8
-    }
-
-    pub const fn privacy_safe_route_phase(self) -> u8 {
-        (self.route_token & 0xff) as u8
-    }
-}
-
-pub fn tank_life_animation_state(
-    catalog_id: &str,
-    pet_seed: &str,
-    local_date: time::Date,
-    now: OffsetDateTime,
-    calm: bool,
-) -> TankLifeAnimationState {
-    let timing_scalar = if calm { 2 } else { 1 };
-    let tick = now.unix_timestamp().max(0) as u64 / (4 * timing_scalar);
-    let route_token = stable_animation_hash(&format!(
-        "tank-life-route-v1|{pet_seed}|{local_date}|{catalog_id}"
-    ))
-    .wrapping_add(tick);
-    TankLifeAnimationState {
-        route_token,
-        cadence_ms: (4_000 * timing_scalar) as u16,
-        calm,
-    }
-}
-
-fn stable_animation_hash(input: &str) -> u64 {
-    const OFFSET: u64 = 1_469_598_103_934_665_603;
-    const PRIME: u64 = 1_099_511_628_211;
-    input.bytes().fold(OFFSET, |mut hash, byte| {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
-        hash
-    })
-}
-
 pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
         id: TOKEN_PEBBLE_25K,

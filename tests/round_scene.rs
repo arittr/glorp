@@ -230,6 +230,7 @@ fn round_scene_tank_life_foreground_avoids_pet_face_and_bottom_hud() {
             pet_protected_regions: &protected.pet_face,
             color_capability: glorp::tui::style::ColorCapability::Truecolor,
             life_profile: vm.life_profile.clone(),
+            asleep: vm.day_context.asleep,
         },
     );
 
