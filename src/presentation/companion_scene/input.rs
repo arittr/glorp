@@ -1,8 +1,9 @@
 use super::{
-    AuthoredDepthSnapshot, CompanionLogicalLayout, CompanionSceneSnapshot, ContentSnapshot,
-    FrameSnapshot, PaletteSnapshot, PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot,
-    PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot, TankRouteSnapshot,
-    TankTopologySnapshot, TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION,
+    AuthoredDepthSnapshot, CompanionSceneProjectionError, CompanionSceneProjectionInput,
+    CompanionSceneSnapshot, ContentSnapshot, FrameSnapshot, PaletteSnapshot, PetLatticeSnapshot,
+    PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
+    PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot, TankAnimationSnapshot,
+    TankRouteSnapshot, TankTopologySnapshot, TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION,
     COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS, MAX_VISIBLE_TANK_INHABITANTS,
     PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
 };
@@ -96,8 +97,8 @@ pub(crate) fn derive_room_profile(vm: &WatchViewModel, now: OffsetDateTime) -> R
 }
 
 fn derive_visible_prop_catalog_ids(vm: &WatchViewModel, now: OffsetDateTime) -> Vec<&'static str> {
-    let trophy_ids = crate::tui::component::habitat_props::visible_trophy_ids(&vm.habitat);
-    let accent_ids = crate::tui::component::habitat_props::visible_accent_ids(&vm.habitat, now);
+    let trophy_ids = crate::presentation::habitat_inventory::visible_trophy_ids(&vm.habitat);
+    let accent_ids = crate::presentation::habitat_inventory::visible_accent_ids(&vm.habitat, now);
 
     trophy_ids
         .into_iter()
@@ -108,7 +109,7 @@ fn derive_visible_prop_catalog_ids(vm: &WatchViewModel, now: OffsetDateTime) -> 
 }
 
 fn derive_visible_round_tank_catalog_ids(vm: &WatchViewModel) -> Vec<&'static str> {
-    crate::tui::component::canonical_daily_cast(
+    crate::presentation::habitat_inventory::canonical_daily_cast(
         &vm.habitat.earned_inhabitants,
         &vm.pet_render.seed,
         vm.habitat.tank_life_local_date,
@@ -122,19 +123,33 @@ fn derive_visible_round_tank_catalog_ids(vm: &WatchViewModel) -> Vec<&'static st
 }
 
 impl CompanionSceneSnapshot {
-    pub fn project(
+    pub fn project_with_input(
         vm: &WatchViewModel,
-        now: OffsetDateTime,
-        layout: CompanionLogicalLayout,
-    ) -> Self {
+        input: CompanionSceneProjectionInput,
+    ) -> Result<Self, CompanionSceneProjectionError> {
+        let now = input.clock.wall_time;
+        let layout = input.layout;
         let room_profile = derive_room_profile(vm, now);
         let activity_pulse = derive_activity_pulse(vm, now);
         let helper_health = derive_helper_health(vm);
-        let elapsed_ms = elapsed_ms(now);
+        let pet_lines = normalize_pet_lattice(vm)?;
+        let pet_roles = project_pet_roles(&vm.pet_art, &vm.pet_spans)?;
+        let elapsed_ms = input.clock.elapsed_ms;
+        let motion = crate::round::motion::project_round_companion_motion_with_options(
+            vm,
+            now,
+            elapsed_ms,
+            input.motion_viewport(),
+            &crate::round::motion::companion_roam_motion(),
+            crate::round::motion::RoundMotionProjectionOptions {
+                depth_override: input.depth_override,
+            },
+        );
         let visible_props = project_props(vm, now);
         let visible_tank_inhabitants = project_tank_inhabitants(vm);
-        let prop_animation_phases = animation_phases(visible_props.len(), elapsed_ms);
-        let tank_animation_phases = animation_phases(visible_tank_inhabitants.len(), elapsed_ms);
+        let prop_animation_states = project_prop_animation_states(&visible_props, now);
+        let tank_animation_states =
+            project_tank_animation_states(vm, &visible_tank_inhabitants, now);
         let hud = companion_hud_text(
             vm.today_effective_tokens,
             vm.daily_comparison.fraction_of_yesterday,
@@ -143,7 +158,7 @@ impl CompanionSceneSnapshot {
         let asleep = vm.day_context.asleep;
         let dimmed = asleep || vm.life_profile.calm_mode;
 
-        Self {
+        Ok(Self {
             schema_version: COMPANION_SCENE_SCHEMA_VERSION,
             privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
             topology: TopologySnapshot {
@@ -165,22 +180,21 @@ impl CompanionSceneSnapshot {
             },
             content: ContentSnapshot {
                 mood: vm.pet_render.mood,
-                pet_lines: vm.pet_art.clone(),
-                pet_roles: project_pet_roles(&vm.pet_spans),
+                room_weather: room_weather_alias(room_profile.room_weather),
+                pet_lines,
+                pet_roles,
                 palette: PaletteSnapshot::from(vm.pet_palette),
-                prop_animation_phases,
-                tank_animation_phases,
+                prop_animation_states,
+                tank_animation_states,
                 activity_pulse_age_ms: activity_pulse.age_ms(),
             },
             frame: FrameSnapshot {
                 elapsed_ms,
-                pet_xy_depth: [
-                    layout.width_points * 0.5 + f32::from(vm.wander_offset_x),
-                    layout.height_points * 0.5 + f32::from(vm.breath_offset_y),
-                    0.0,
-                ],
-                facing: if vm.facing < 0 { -1 } else { 1 },
-                breath_offset_y: vm.breath_offset_y,
+                pet_anchor_points: motion.motion_top_left_points,
+                pet_depth: motion.normalized_depth,
+                facing: motion.facing,
+                breath_offset_y_cells: motion.breath_offset_y_cells,
+                bob_offset_y_cells: motion.bob_offset_y_cells,
                 asleep,
                 helper_trouble: helper_health == SemanticHelperHealth::Trouble,
                 gauges: [
@@ -196,7 +210,7 @@ impl CompanionSceneSnapshot {
                 dim_amount: if dimmed { 0.35 } else { 0.0 },
                 hud_lines: [hud.today_total, hud.daily_percent, hud.pace],
             },
-        }
+        })
     }
 }
 
@@ -205,7 +219,6 @@ fn project_room(profile: &RoomLifeProfile) -> RoomTopologySnapshot {
         primary_biome: biome_alias(profile.biome.primary),
         secondary_biome: profile.biome.secondary.map(biome_alias),
         species_dialect: profile.species_dialect.key.as_str(),
-        room_weather: room_weather_alias(profile.room_weather),
     }
 }
 
@@ -243,35 +256,127 @@ fn project_tank_inhabitants(vm: &WatchViewModel) -> Vec<TankTopologySnapshot> {
         .collect()
 }
 
-fn project_pet_roles(spans: &[StyledSegment]) -> Vec<PetRoleSpanSnapshot> {
+fn normalize_pet_lattice(
+    vm: &WatchViewModel,
+) -> Result<Vec<String>, CompanionSceneProjectionError> {
+    if vm.pet_art.len() > usize::from(PET_LATTICE_HEIGHT) {
+        return Err(CompanionSceneProjectionError::PetArtTooTall { row_count: vm.pet_art.len() });
+    }
+
+    let declared = crate::pet::render::declared_pet_glyphs(vm.pet_render.generated_species);
+    let mut rows = Vec::with_capacity(usize::from(PET_LATTICE_HEIGHT));
+    for (line_index, source) in vm.pet_art.iter().enumerate() {
+        let chars = source.chars().collect::<Vec<_>>();
+        if chars.len() > usize::from(PET_LATTICE_WIDTH) {
+            return Err(CompanionSceneProjectionError::PetArtTooWide {
+                line_index,
+                char_count: chars.len(),
+            });
+        }
+        for (char_index, glyph) in chars.iter().copied().enumerate() {
+            if glyph != ' ' && !declared.contains(&glyph) {
+                return Err(CompanionSceneProjectionError::DisallowedPetGlyph {
+                    line_index,
+                    char_index,
+                });
+            }
+        }
+        let mut row = chars;
+        row.resize(usize::from(PET_LATTICE_WIDTH), ' ');
+        rows.push(row.into_iter().collect());
+    }
+    rows.resize(
+        usize::from(PET_LATTICE_HEIGHT),
+        " ".repeat(usize::from(PET_LATTICE_WIDTH)),
+    );
+    Ok(rows)
+}
+
+fn project_pet_roles(
+    source_lines: &[String],
+    spans: &[StyledSegment],
+) -> Result<Vec<PetRoleSpanSnapshot>, CompanionSceneProjectionError> {
     spans
         .iter()
-        .filter(|span| {
-            span.line < usize::from(PET_LATTICE_HEIGHT)
-                && span.start < span.end
-                && span.end <= usize::from(PET_LATTICE_WIDTH)
-        })
-        .map(|span| PetRoleSpanSnapshot {
-            line: span.line as u16,
-            start: span.start as u16,
-            end: span.end as u16,
-            role: role_alias(span.role),
+        .enumerate()
+        .map(|(span_index, span)| {
+            let source_char_count = source_lines
+                .get(span.line)
+                .map_or(0, |line| line.chars().count());
+            if span.line >= usize::from(PET_LATTICE_HEIGHT)
+                || span.line >= source_lines.len()
+                || span.start >= span.end
+                || span.end > source_char_count
+            {
+                return Err(CompanionSceneProjectionError::InvalidPetRoleSpan {
+                    span_index,
+                    line_index: span.line,
+                    start_char: span.start,
+                    end_char: span.end,
+                    source_char_count,
+                });
+            }
+            Ok(PetRoleSpanSnapshot {
+                line_index: span.line as u16,
+                start_char: span.start as u16,
+                end_char: span.end as u16,
+                role: role_alias(span.role),
+            })
         })
         .collect()
 }
 
-fn animation_phases(count: usize, elapsed_ms: u64) -> Vec<u8> {
-    let base = ((elapsed_ms / 500) % 2) as usize;
-    (0..count).map(|index| ((base + index) % 2) as u8).collect()
+fn project_prop_animation_states(
+    visible_props: &[PropTopologySnapshot],
+    now: OffsetDateTime,
+) -> Vec<PropAnimationSnapshot> {
+    visible_props
+        .iter()
+        .map(|prop| {
+            let state = crate::game::habitat::habitat_prop_animation_state(prop.catalog_id, now);
+            PropAnimationSnapshot {
+                catalog_id: prop.catalog_id,
+                stable_order: prop.stable_order,
+                kind: if state.is_static() {
+                    PropAnimationKindSnapshot::Static
+                } else {
+                    PropAnimationKindSnapshot::Animated
+                },
+                sprite_phase: state.sprite_phase,
+                twinkle_active: state.twinkle_active,
+                motion_phase: state.motion_phase,
+                chest_lid_open: state.chest_lid_open,
+            }
+        })
+        .collect()
 }
 
-fn elapsed_ms(now: OffsetDateTime) -> u64 {
-    let value = now.unix_timestamp_nanos().div_euclid(1_000_000);
-    if value <= 0 {
-        0
-    } else {
-        value.min(i128::from(u64::MAX)) as u64
-    }
+fn project_tank_animation_states(
+    vm: &WatchViewModel,
+    visible_tank_inhabitants: &[TankTopologySnapshot],
+    now: OffsetDateTime,
+) -> Vec<TankAnimationSnapshot> {
+    let calm = vm.life_profile.calm_mode || vm.day_context.asleep;
+    visible_tank_inhabitants
+        .iter()
+        .map(|inhabitant| {
+            let state = crate::game::habitat::tank_life_animation_state(
+                inhabitant.catalog_id,
+                &vm.pet_render.seed,
+                vm.habitat.tank_life_local_date,
+                now,
+                calm,
+            );
+            TankAnimationSnapshot {
+                catalog_id: inhabitant.catalog_id,
+                stable_order: inhabitant.stable_order,
+                sprite_phase: state.sprite_phase(),
+                route_phase: state.privacy_safe_route_phase(),
+                cadence_ms: state.cadence_ms,
+                calm: state.calm,
+            }
+        })
+        .collect()
 }
 
 fn biome_alias(biome: RoomBiomeTag) -> &'static str {

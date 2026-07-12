@@ -132,6 +132,113 @@ pub const SAND_RAY: &str = "sand_ray";
 pub const SCHOOLLET: &str = "schoollet";
 pub const ANEMONE_HOST: &str = "anemone_host";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HabitatPropAnimationState {
+    pub sprite_phase: Option<u8>,
+    pub twinkle_active: Option<bool>,
+    pub motion_phase: Option<u8>,
+    pub chest_lid_open: Option<bool>,
+}
+
+impl HabitatPropAnimationState {
+    pub const fn is_static(self) -> bool {
+        self.sprite_phase.is_none()
+            && self.twinkle_active.is_none()
+            && self.motion_phase.is_none()
+            && self.chest_lid_open.is_none()
+    }
+}
+
+pub fn habitat_prop_animation_state(
+    catalog_id: &str,
+    now: OffsetDateTime,
+) -> HabitatPropAnimationState {
+    let sprite_phase = match catalog_id {
+        TOKEN_MOSS_TUFT_250K
+        | TOKEN_FRIENDLY_CLOUD_750K
+        | TOKEN_HANGING_VINE_25M
+        | TOKEN_REEDS_5M
+        | CODEX_SIGNAL_LAMP
+        | HEAVY_SESSION_PLANTER
+        | WILT_RECOVERY_SPROUT
+        | TOKEN_GEODE_50M
+        | TOKEN_BONSAI_100M
+        | TOKEN_CONSTELLATION_250M
+        | TOKEN_AURORA_500M
+        | TOKEN_MOON_1B => Some(u8::from(now.unix_timestamp().rem_euclid(8) >= 4)),
+        _ => None,
+    };
+    let twinkle_active = match catalog_id {
+        TOKEN_SPARK_500K | TOKEN_LANTERN_10M => Some(now.unix_timestamp().rem_euclid(12) < 2),
+        _ => None,
+    };
+    let motion_phase = match catalog_id {
+        TOKEN_PEBBLE_25K | TOKEN_SHELL_100K | TOKEN_ORBIT_5M | TOKEN_LANTERN_10M => {
+            Some(u8::from(now.unix_timestamp().rem_euclid(20) >= 10))
+        }
+        _ => None,
+    };
+    let chest_lid_open =
+        (catalog_id == TOKEN_TREASURE_CHEST_2M).then(|| crate::pet::animator::chest_lid_open(now));
+    HabitatPropAnimationState {
+        sprite_phase,
+        twinkle_active,
+        motion_phase,
+        chest_lid_open,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TankLifeAnimationState {
+    route_token: u64,
+    pub cadence_ms: u16,
+    pub calm: bool,
+}
+
+impl TankLifeAnimationState {
+    pub const fn route_phase(self) -> u64 {
+        self.route_token
+    }
+
+    pub const fn sprite_phase(self) -> u8 {
+        (self.route_token & 1) as u8
+    }
+
+    pub const fn privacy_safe_route_phase(self) -> u8 {
+        (self.route_token & 0xff) as u8
+    }
+}
+
+pub fn tank_life_animation_state(
+    catalog_id: &str,
+    pet_seed: &str,
+    local_date: time::Date,
+    now: OffsetDateTime,
+    calm: bool,
+) -> TankLifeAnimationState {
+    let timing_scalar = if calm { 2 } else { 1 };
+    let tick = now.unix_timestamp().max(0) as u64 / (4 * timing_scalar);
+    let route_token = stable_animation_hash(&format!(
+        "tank-life-route-v1|{pet_seed}|{local_date}|{catalog_id}"
+    ))
+    .wrapping_add(tick);
+    TankLifeAnimationState {
+        route_token,
+        cadence_ms: (4_000 * timing_scalar) as u16,
+        calm,
+    }
+}
+
+fn stable_animation_hash(input: &str) -> u64 {
+    const OFFSET: u64 = 1_469_598_103_934_665_603;
+    const PRIME: u64 = 1_099_511_628_211;
+    input.bytes().fold(OFFSET, |mut hash, byte| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+        hash
+    })
+}
+
 pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
     HabitatPropSpec {
         id: TOKEN_PEBBLE_25K,

@@ -4,6 +4,7 @@ use ratatui::{
 };
 
 use crate::game::habitat::{HabitatPetLayer, TankLifeRouteFamily};
+pub use crate::presentation::habitat_inventory::{canonical_daily_cast, canonical_target_count};
 use crate::storage::state::TankInhabitantId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,63 +155,6 @@ pub fn pet_face_protected_regions(pet_art: Rect) -> Vec<Rect> {
         pet_art.width / 2,
         4.min(pet_art.height),
     )]
-}
-
-pub fn canonical_daily_cast(
-    unlocked: &[crate::tui::view_model::EarnedTankInhabitantView],
-    pet_seed: &str,
-    local_date: time::Date,
-    calendar_age_days: i64,
-) -> Vec<TankInhabitantId> {
-    let mut known = unlocked
-        .iter()
-        .filter(|earned| crate::game::habitat::tank_inhabitant_spec(&earned.id).is_some())
-        .collect::<Vec<_>>();
-    known.sort_by(|a, b| a.id.cmp(&b.id));
-
-    let target = canonical_target_count(known.len(), pet_seed, local_date, calendar_age_days);
-    if target == 0 {
-        return Vec::new();
-    }
-
-    let mut scored = known
-        .into_iter()
-        .map(|earned| {
-            let score = stable_hash(&format!(
-                "tank-life-cast-v1|{pet_seed}|{local_date}|{}",
-                earned.id.as_str()
-            ));
-            (score, earned.id.clone())
-        })
-        .collect::<Vec<_>>();
-    scored.sort_by_key(|(score, id)| (*score, id.clone()));
-    scored
-        .into_iter()
-        .take(target.min(5))
-        .map(|(_, id)| id)
-        .collect()
-}
-
-pub fn canonical_target_count(
-    unlocked_len: usize,
-    pet_seed: &str,
-    local_date: time::Date,
-    calendar_age_days: i64,
-) -> usize {
-    if unlocked_len <= 2 {
-        return unlocked_len;
-    }
-    let flip = (stable_hash(&format!(
-        "tank-life-target-v1|{pet_seed}|{local_date}|{calendar_age_days}"
-    )) & 1) as usize;
-    let target = if calendar_age_days < 21 {
-        2 + flip
-    } else if calendar_age_days < 60 {
-        3 + flip
-    } else {
-        4 + flip
-    };
-    target.min(unlocked_len).min(5)
 }
 
 pub fn anemone_morph_for_day(pet_seed: &str, local_date: time::Date) -> AnemoneMorph {
@@ -842,13 +786,14 @@ fn sprite_height(sprite: &[SpriteCell]) -> u16 {
 }
 
 fn route_phase(id: &str, input: &TankLifeRenderInput<'_>) -> u64 {
-    let timing_scalar = if input.life_profile.calm_mode { 2 } else { 1 };
-    let tick = input.now.unix_timestamp().max(0) as u64 / (4 * timing_scalar);
-    stable_hash(&format!(
-        "tank-life-route-v1|{}|{}|{}",
-        input.pet_seed, input.local_date, id
-    ))
-    .wrapping_add(tick)
+    crate::game::habitat::tank_life_animation_state(
+        id,
+        input.pet_seed,
+        input.local_date,
+        input.now,
+        input.life_profile.calm_mode,
+    )
+    .route_phase()
 }
 
 fn tank_life_style(

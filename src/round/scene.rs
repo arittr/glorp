@@ -3,7 +3,16 @@ use std::borrow::Cow;
 use ratatui::layout::Rect;
 
 use crate::presentation::{PetSceneModel, SceneDrawList};
-use crate::round::depth::{SMOOTH_PERSPECTIVE_Y_MAX, SMOOTH_PET_NEAR_SCALE};
+use crate::round::motion::{
+    companion_drift_position, project_round_companion_motion, round_hud_reserve_rows,
+    RoundCompanionMotionProjection, RoundCompanionMotionViewport,
+};
+#[cfg(test)]
+use crate::round::motion::{
+    companion_motion_energy, companion_motion_offsets, companion_wander_facing,
+    companion_wander_offsets, project_round_companion_motion_from_offsets, smooth_roam_envelope,
+};
+pub use crate::round::motion::{companion_roam_motion, CompanionMotion};
 use crate::tui::component::PetScene;
 use crate::tui::render_context::{RenderContext, WatchClock};
 use crate::tui::style::ColorCapability;
@@ -21,37 +30,10 @@ pub struct CompanionScene {
 const PET_W: u16 = 13;
 /// Pet art height (must match `PET_H` in `src/tui/panels/pet.rs`).
 const PET_H: u16 = 10;
-/// The creature art inside the particle frame. `PET_W`/`PET_H` carry a one-cell
-/// particle gutter on every side, so the ink is 11x8 and concentric with the
-/// frame. Depth clearance is reserved against the ink: reserving against the
-/// ambient gutter too would crush the roam envelope on a companion-sized grid.
+#[cfg(test)]
 const PET_INK_W: u16 = 11;
+#[cfg(test)]
 const PET_INK_H: u16 = 8;
-
-/// Companion motion config. Defaults reproduce the historical drift exactly, so
-/// the shared menubar / preview / goldens are byte-identical; only the companion
-/// call site passes tuned values.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CompanionMotion {
-    /// Half-width of the pet's wander range, in cells (`PET_W + 2*wander_half`).
-    pub wander_half: u16,
-    /// Fraction of the safe horizontal radius used for drift. Keep modest
-    /// (~0.45); higher values clip the pixel rim on a smaller grid.
-    pub drift_x_frac: f32,
-    /// Fraction of the safe vertical radius used for drift. Cells are ~2:1, so
-    /// vertical headroom is tiny — keep gentle.
-    pub drift_y_frac: f32,
-    /// Drift cadence: the target changes every this many seconds.
-    pub drift_period_secs: u64,
-    /// Fraction of the safe vertical radius to shift the roam center UP, reserving
-    /// the bottom band for the stat. 0.0 = centered.
-    pub upward_bias: f32,
-    /// When true, use a smooth sinusoidal wander (organic, non-repeating, reaching
-    /// the grid edges so the pet swims partly in/out of the round porthole) instead
-    /// of the eased waypoint drift. The menubar/goldens keep `false` (waypoint).
-    pub wander: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothPetAnchor {
     pub x: f32,
@@ -71,44 +53,9 @@ pub struct CompanionPetPlacement {
     pub raw_depth: f32,
 }
 
-impl Default for CompanionMotion {
-    fn default() -> Self {
-        Self {
-            wander_half: 8,
-            drift_x_frac: 0.45,
-            drift_y_frac: 0.30,
-            drift_period_secs: 20,
-            upward_bias: 0.0,
-            wander: false,
-        }
-    }
-}
-
-/// The companion surface's motion — an organic sinusoidal wander that reaches the
-/// grid edges, so the pet swims around the tank and partly in/out of the round
-/// porthole (the aperture clip crops it at the rim). Horizontal-dominant; a gentle
-/// upward bias keeps it mostly clear of the bottom stat. Companion-only.
-pub fn companion_roam_motion() -> CompanionMotion {
-    CompanionMotion {
-        wander_half: 8,
-        drift_x_frac: 0.92,
-        drift_y_frac: 0.6,
-        drift_period_secs: 22,
-        upward_bias: 0.5,
-        wander: true,
-    }
-}
-
 pub struct RoundTankLifeProtectedRegions {
     pub pet_face: Vec<Rect>,
     pub bottom_hud: Vec<Rect>,
-}
-
-/// Rows reserved at the bottom of the round aperture for the native HUD. The
-/// tank-life surface geometry and the Smooth roam envelope must agree on this
-/// boundary, so both read it from here.
-fn round_hud_reserve_rows(grid_rows: u16) -> u16 {
-    5.min(grid_rows / 3)
 }
 
 pub fn round_tank_life_geometry(
@@ -148,283 +95,6 @@ pub fn round_tank_life_protected_regions_for_test(
     }
 }
 
-/// Deterministic normalized drift offsets in [-1, 1] per axis for `now`, eased
-/// (smoothstep) between per-epoch targets. Depth shares the epoch and easing with
-/// X/Y — so it stays continuous across waypoint boundaries — but draws its target
-/// from a separately salted hash, so the pet's forward/backward swim never traces
-/// its horizontal or vertical path.
-fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32, f32) {
-    let unix = now.unix_timestamp() as u64;
-    let period = period_secs.max(1);
-    let epoch = unix / period;
-    let phase = (unix % period) as f32 / period as f32;
-
-    let target_for_epoch = |e: u64| -> (f32, f32, f32) {
-        let h1 = e
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .wrapping_add(0x6c62_272e_07bb_0142);
-        let h2 = h1
-            .wrapping_mul(0x517c_c1b7_2722_0a95)
-            .wrapping_add(0xbf87_8c2f_a7a4_c6a5);
-        let h3 = h2
-            .wrapping_mul(0x2545_f491_4f6c_dd1d)
-            .wrapping_add(0x1405_7b7e_f767_814f);
-        let nx = ((h1 >> 32) as i32 as f32) / (i32::MAX as f32);
-        let ny = ((h2 >> 32) as i32 as f32) / (i32::MAX as f32);
-        let nz = ((h3 >> 32) as i32 as f32) / (i32::MAX as f32);
-        (nx, ny, nz)
-    };
-
-    let (px, py, pz) = target_for_epoch(epoch.saturating_sub(1));
-    let (nx, ny, nz) = target_for_epoch(epoch);
-    let t = phase * phase * (3.0 - 2.0 * phase);
-    (px + (nx - px) * t, py + (ny - py) * t, pz + (nz - pz) * t)
-}
-
-/// Smooth, deterministic, non-repeating organic wander in ~[-1, 1] per axis.
-/// A slowly-precessing elliptical base (cos on X, sin on Y at a slightly different
-/// rate) keeps the velocity vector always rotating, so the path can never flatten
-/// into a strict horizontal/vertical line — it always wobbles. A smaller
-/// incommensurate term per axis breaks the clean-orbit feel. Sub-second time keeps
-/// it smooth at the companion's redraw cadence.
-fn companion_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
-    use std::f64::consts::TAU;
-    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
-        / period_secs.max(1) as f64;
-    let fx = 0.72 * (TAU * t).cos() + 0.28 * (TAU * t * 1.93 + 0.6).sin();
-    let fy = 0.72 * (TAU * t * 1.21 + 0.3).sin() + 0.28 * (TAU * t * 2.41 + 1.5).cos();
-    (fx as f32, fy as f32)
-}
-
-/// Smooth, deterministic organic depth wander in ~[-1, 1] for `now`. Two
-/// incommensurate terms whose frequencies and phases are shared by neither the X
-/// nor the Y wander, so the pet's forward/backward swim reads as its own motion
-/// rather than a restatement of its travel across the tank. Unit amplitudes sum
-/// to 1.0, keeping the channel inside the normalized depth contract.
-fn companion_wander_depth(now: time::OffsetDateTime, period_secs: u64) -> f32 {
-    use std::f64::consts::TAU;
-    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
-        / period_secs.max(1) as f64;
-    let fz = 0.70 * (TAU * t * 1.37 + 0.9).sin() + 0.30 * (TAU * t * 0.61 + 2.0).cos();
-    fz as f32
-}
-
-/// Which way the wandering pet faces: the sign of its NET horizontal travel over a
-/// short window, so facing always agrees with the movement actually on screen —
-/// it samples the SAME wander offset that drives the position (full base + wobble),
-/// scaled by `energy`. A deadzone holds `current` when the pet is barely moving
-/// (idle/asleep, or pausing at a turnaround), so facing never flips without a
-/// matching change of direction. `-1` mirrors the authored art; because the
-/// companion's unmirrored artwork faces left, right-moving → `-1` and
-/// left-moving → `1`. This is intentionally local to the round companion:
-/// terminal wander keeps `compute_facing`'s convention.
-fn companion_wander_facing(
-    now: time::OffsetDateTime,
-    period_secs: u64,
-    energy: f32,
-    current: i8,
-) -> i8 {
-    const WINDOW_SECS: i64 = 1;
-    const DEADZONE: f32 = 0.04;
-    let (fx_now, _) = companion_wander_offsets(now, period_secs);
-    let (fx_prev, _) =
-        companion_wander_offsets(now - time::Duration::seconds(WINDOW_SECS), period_secs);
-    // Proportional to the on-screen horizontal distance moved over the window.
-    let visible_dx = (fx_now - fx_prev) * energy;
-    if visible_dx > DEADZONE {
-        -1
-    } else if visible_dx < -DEADZONE {
-        1
-    } else {
-        current
-    }
-}
-
-/// Map normalized offsets `(fx, fy)` to the pet art's top-left grid cell, applying
-/// the motion config's radii, upward bias, and the rectangular grid clamp.
-fn companion_drift_position(
-    motion: &CompanionMotion,
-    grid_cols: u16,
-    grid_rows: u16,
-    fx: f32,
-    fy: f32,
-) -> (u16, u16) {
-    let cx = grid_cols / 2;
-    let cy = grid_rows / 2;
-    let half_w = PET_W / 2;
-    let half_h = PET_H / 2;
-    let safe_x = cx.saturating_sub(half_w) as f32;
-    let safe_y = cy.saturating_sub(half_h) as f32;
-    let x_radius = safe_x * motion.drift_x_frac;
-    let y_radius = safe_y * motion.drift_y_frac;
-    let bias = motion.upward_bias * safe_y;
-
-    let art_x = cx as i32 - half_w as i32 + (fx * x_radius) as i32;
-    let art_y = cy as i32 - half_h as i32 - bias as i32 + (fy * y_radius) as i32;
-
-    let art_x = art_x.clamp(0, (grid_cols.saturating_sub(PET_W)) as i32) as u16;
-    let art_y = art_y.clamp(0, (grid_rows.saturating_sub(PET_H)) as i32) as u16;
-    (art_x, art_y)
-}
-
-/// Normalized `(x, y, z)` motion offsets for `now`. Depth follows the same
-/// energy treatment as the horizontal/vertical channels of its mode, so a barely
-/// moving pet does not lunge toward the glass.
-fn companion_motion_offsets(
-    now: time::OffsetDateTime,
-    motion: &CompanionMotion,
-    energy: f32,
-) -> (f32, f32, f32) {
-    if motion.wander {
-        let (wx, wy) = companion_wander_offsets(now, motion.drift_period_secs);
-        let wz = companion_wander_depth(now, motion.drift_period_secs);
-        (wx * energy, wy * energy, wz * energy)
-    } else {
-        companion_drift_offsets(now, motion.drift_period_secs)
-    }
-}
-
-/// Top-left bounds for the Smooth pet anchor. Reserved against the pet's
-/// *maximum* depth scale, not the current frame's, so a pet swimming toward the
-/// near glass can never grow into the aperture edge or the bottom HUD reserve.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct SmoothRoamEnvelope {
-    min_x: f32,
-    max_x: f32,
-    min_y: f32,
-    max_y: f32,
-}
-
-/// Derive the safe Smooth anchor envelope from the protected regions:
-///
-/// ```text
-/// scaled_ink_half = ink_half * SMOOTH_PET_NEAR_SCALE
-/// safe_center_min = protected_min + scaled_ink_half + SMOOTH_PERSPECTIVE_Y_MAX
-/// safe_center_max = protected_max - scaled_ink_half - SMOOTH_PERSPECTIVE_Y_MAX
-/// ```
-///
-/// The anchor is the particle frame's top-left and the ink is concentric with the
-/// frame, so a center is converted back to an anchor by subtracting the *frame*
-/// half extent. Uses true fractional halves, not Classic's integer ones.
-///
-/// Clearance is reserved against the creature ink, not the particle frame: the
-/// frame carries a one-cell ambient gutter per side, and reserving that too makes
-/// the band inconsistent with a `1.12x` near scale on a companion-sized grid (it
-/// inverts at 16 rows). The gutter's sparse glyphs may therefore graze the HUD
-/// reserve, which is sound because the native HUD draws above the scene.
-///
-/// Depth also *translates* the pet — near is down by `SMOOTH_PERSPECTIVE_Y_MAX`,
-/// far is up — and that translation is composed after this clamp, so it is
-/// reserved on both edges. Pairing it with the near scale on the top edge
-/// over-reserves slightly (far poses are drawn at `0.88x`), which is the safe
-/// direction and keeps one envelope rather than one per depth.
-fn smooth_roam_envelope(grid_cols: u16, grid_rows: u16) -> SmoothRoamEnvelope {
-    let frame_half_w = f32::from(PET_W) / 2.0;
-    let frame_half_h = f32::from(PET_H) / 2.0;
-    let scaled_ink_half_w = f32::from(PET_INK_W) / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    let scaled_ink_half_h = f32::from(PET_INK_H) / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    let protected_bottom = f32::from(grid_rows.saturating_sub(round_hud_reserve_rows(grid_rows)));
-
-    SmoothRoamEnvelope {
-        min_x: scaled_ink_half_w - frame_half_w,
-        max_x: f32::from(grid_cols) - scaled_ink_half_w - frame_half_w,
-        min_y: scaled_ink_half_h - frame_half_h + SMOOTH_PERSPECTIVE_Y_MAX,
-        max_y: protected_bottom - scaled_ink_half_h - frame_half_h - SMOOTH_PERSPECTIVE_Y_MAX,
-    }
-}
-
-/// Clamp into an envelope that may be degenerate. When the protected region is
-/// too small to hold the maximum-scale pet the bounds invert; their midpoint is
-/// then exactly the centered top-left (`protected_extent / 2 - half`), which is
-/// the right answer for a viewport that cannot satisfy the clearance.
-fn clamp_within(value: f32, min: f32, max: f32) -> f32 {
-    if min > max {
-        (min + max) * 0.5
-    } else {
-        value.clamp(min, max)
-    }
-}
-
-/// Clamp the raw depth channel into the `[-1, 1]` contract, collapsing a
-/// degenerate value onto the neutral plane rather than poisoning the frame.
-fn normalized_depth(raw: f32) -> f32 {
-    if raw.is_finite() {
-        raw.clamp(-1.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
-fn companion_pet_placement_from_offsets(
-    vm: &WatchViewModel,
-    grid_cols: u16,
-    grid_rows: u16,
-    motion: &CompanionMotion,
-    fx: f32,
-    fy: f32,
-) -> CompanionPetPlacement {
-    let cx = grid_cols / 2;
-    let cy = grid_rows / 2;
-    let half_w = PET_W / 2;
-    let half_h = PET_H / 2;
-    let safe_x = cx.saturating_sub(half_w) as f32;
-    let safe_y = cy.saturating_sub(half_h) as f32;
-    let x_radius = safe_x * motion.drift_x_frac;
-    let y_radius = safe_y * motion.drift_y_frac;
-    let bias = motion.upward_bias * safe_y;
-    let max_x = grid_cols.saturating_sub(PET_W);
-    let max_y = grid_rows.saturating_sub(PET_H);
-
-    let base_x = cx as i32 - half_w as i32;
-    let base_y = cy as i32 - half_h as i32;
-    let offset_x = fx * x_radius;
-    let offset_y = fy * y_radius;
-
-    // Classic snapped placement: integer clamp to the raw grid, unchanged by depth.
-    let classic_x = (base_x + offset_x as i32).clamp(0, max_x as i32) as u16;
-    let classic_drift_y = (base_y - bias as i32 + offset_y as i32).clamp(0, max_y as i32) as u16;
-    let classic_y = (classic_drift_y + u16::from(vm.breath_offset_y)).min(max_y);
-
-    // Smooth fractional placement: clamped to the maximum-scale-safe envelope so
-    // the pet keeps its clearance at 1.12x, not merely at the current frame's scale.
-    //
-    // The neutral pose is settled into the envelope first, and the roam excursion
-    // is measured from there. Clamping the composite against the raw base instead
-    // would collapse the excursion to zero for any motion whose neutral pose sits
-    // outside the band (an unbiased motion on a HUD-reserved grid), taking the
-    // parallax focus offset down with it.
-    let envelope = smooth_roam_envelope(grid_cols, grid_rows);
-    let fractional_motion_origin_top_left = SmoothPetAnchor {
-        x: clamp_within(base_x as f32, envelope.min_x, envelope.max_x),
-        y: clamp_within(base_y as f32 - bias, envelope.min_y, envelope.max_y),
-    };
-    let fractional_drift_x = clamp_within(
-        fractional_motion_origin_top_left.x + offset_x,
-        envelope.min_x,
-        envelope.max_x,
-    );
-    let fractional_drift_y = clamp_within(
-        fractional_motion_origin_top_left.y + offset_y,
-        envelope.min_y,
-        envelope.max_y,
-    );
-    let fractional_y = (fractional_drift_y + f32::from(vm.breath_offset_y)).min(max_y as f32);
-
-    CompanionPetPlacement {
-        fractional_motion_top_left: SmoothPetAnchor {
-            x: fractional_drift_x,
-            y: fractional_drift_y,
-        },
-        fractional_motion_origin_top_left,
-        fractional_top_left: SmoothPetAnchor { x: fractional_drift_x, y: fractional_y },
-        classic_snap_top_left: (classic_x, classic_y),
-        classic_rect: Rect::new(classic_x, classic_y, PET_W, PET_H),
-        // Offsets carry no time basis; the depth channel is resolved by the
-        // `now`-aware caller. A neutral plane is the correct default here.
-        raw_depth: 0.0,
-    }
-}
-
 pub fn companion_pet_placement(
     vm: &WatchViewModel,
     now: time::OffsetDateTime,
@@ -432,12 +102,9 @@ pub fn companion_pet_placement(
     grid_rows: u16,
     motion: &CompanionMotion,
 ) -> CompanionPetPlacement {
-    let energy = companion_motion_energy(vm);
-    let (fx, fy, fz) = companion_motion_offsets(now, motion, energy);
-    let mut placement =
-        companion_pet_placement_from_offsets(vm, grid_cols, grid_rows, motion, fx, fy);
-    placement.raw_depth = normalized_depth(fz);
-    placement
+    let projection =
+        project_round_companion_motion(vm, now, 0, motion_viewport(grid_cols, grid_rows), motion);
+    placement_from_projection(vm, grid_cols, grid_rows, projection)
 }
 
 #[cfg(test)]
@@ -449,21 +116,52 @@ fn companion_pet_placement_from_offsets_for_test(
     fx: f32,
     fy: f32,
 ) -> CompanionPetPlacement {
-    companion_pet_placement_from_offsets(vm, grid_cols, grid_rows, motion, fx, fy)
+    let projection = project_round_companion_motion_from_offsets(
+        vm,
+        0,
+        motion_viewport(grid_cols, grid_rows),
+        motion,
+        fx,
+        fy,
+        0.0,
+        vm.facing,
+        vm.wander_offset_x,
+    );
+    placement_from_projection(vm, grid_cols, grid_rows, projection)
 }
 
-/// Movement energy in [0, 1] from real activity: a sleeping or faint (calm) pet
-/// barely drifts; an idle-awake pet keeps a gentle wobble; a busy pet roams the
-/// whole tank. Tied to the live burn rate so liveliness reflects real usage.
-fn companion_motion_energy(vm: &WatchViewModel) -> f32 {
-    const IDLE_FLOOR: f32 = 0.25;
-    const RESTING_ENERGY: f32 = 0.12;
-    const RATE_FULL: f64 = 50_000_000.0; // tokens/hr at which the pet roams full-tilt
-    if vm.day_context.asleep || vm.life_profile.calm_mode {
-        return RESTING_ENERGY;
+fn motion_viewport(grid_cols: u16, grid_rows: u16) -> RoundCompanionMotionViewport {
+    RoundCompanionMotionViewport {
+        grid_columns: grid_cols,
+        grid_rows,
+        width_points: f32::from(grid_cols),
+        height_points: f32::from(grid_rows),
     }
-    let rate = vm.progress.rate_per_hour.max(0.0);
-    (IDLE_FLOOR + (rate / RATE_FULL) as f32).clamp(IDLE_FLOOR, 1.0)
+}
+
+fn placement_from_projection(
+    _vm: &WatchViewModel,
+    _grid_cols: u16,
+    grid_rows: u16,
+    projection: RoundCompanionMotionProjection,
+) -> CompanionPetPlacement {
+    let x = projection.motion_top_left_cells.x;
+    let y = projection.motion_top_left_cells.y;
+    let breathed_y = (y + f32::from(projection.breath_offset_y_cells))
+        .min(f32::from(grid_rows.saturating_sub(PET_H)));
+    let classic_x = projection.classic_top_left_cells[0];
+    let classic_y = projection.classic_top_left_cells[1];
+    CompanionPetPlacement {
+        fractional_motion_top_left: SmoothPetAnchor { x, y },
+        fractional_motion_origin_top_left: SmoothPetAnchor {
+            x: projection.motion_origin_top_left_cells.x,
+            y: projection.motion_origin_top_left_cells.y,
+        },
+        fractional_top_left: SmoothPetAnchor { x, y: breathed_y },
+        classic_snap_top_left: (classic_x, classic_y),
+        classic_rect: Rect::new(classic_x, classic_y, PET_W, PET_H),
+        raw_depth: projection.normalized_depth,
+    }
 }
 
 /// Conservative bounded-drift check. Samples the drift at every box corner
@@ -587,14 +285,10 @@ pub(crate) fn build_round_pet_layout_with_placement<'a>(
     CompanionPetPlacement,
 ) {
     let area = Rect::new(0, 0, grid_cols, grid_rows);
-    let energy = companion_motion_energy(vm);
-    let wander_width = PET_W + 2 * motion.wander_half;
-    let (wx, fc) = crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
-    let facing = if motion.wander {
-        companion_wander_facing(now, motion.drift_period_secs, energy, vm.facing)
-    } else {
-        fc
-    };
+    let projection =
+        project_round_companion_motion(vm, now, 0, motion_viewport(grid_cols, grid_rows), motion);
+    let wx = projection.wander_offset_x;
+    let facing = projection.facing;
     let vm: Cow<WatchViewModel> = if wx != vm.wander_offset_x || facing != vm.facing {
         Cow::Owned({
             let mut v = vm.clone();
@@ -609,7 +303,7 @@ pub(crate) fn build_round_pet_layout_with_placement<'a>(
     let ctx = RenderContext::with_clock(ColorCapability::Truecolor, WatchClock::fixed(now));
     let mut layout = PetScene::compute_layout(area, vm.as_ref(), &ctx);
     let old_pet_art = layout.pet_art;
-    let placement = companion_pet_placement(vm.as_ref(), now, grid_cols, grid_rows, motion);
+    let placement = placement_from_projection(vm.as_ref(), grid_cols, grid_rows, projection);
     layout.pet_art = placement.classic_rect;
     for excl in &mut layout.exclusions {
         if *excl == old_pet_art {
@@ -639,6 +333,7 @@ pub(crate) fn apply_uniform_porthole_recolor(draw_list: &mut SceneDrawList, grid
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::round::depth::{SMOOTH_PERSPECTIVE_Y_MAX, SMOOTH_PET_NEAR_SCALE};
     use time::macros::datetime;
 
     /// Canonical pinned fixture for the content-lock golden.

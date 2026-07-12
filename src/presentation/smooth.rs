@@ -688,10 +688,7 @@ pub fn pet_visual_checksum(
 }
 
 pub fn smooth_pet_bob(elapsed_ms: u64) -> f32 {
-    const AMPLITUDE: f32 = 0.33;
-    const PERIOD_MS: f32 = 2_000.0;
-    let phase = (elapsed_ms as f32 / PERIOD_MS) * std::f32::consts::TAU;
-    phase.sin() * AMPLITUDE
+    crate::round::motion::round_companion_bob(elapsed_ms)
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
