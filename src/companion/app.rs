@@ -3188,6 +3188,7 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 mod tests {
     use super::*;
 
+    #[cfg(feature = "retained-renderer")]
     #[test]
     fn runtime_baseline_visibility_requires_three_real_hidden_ui_ticks() {
         let mut phase = RuntimeBaselineVisibilityPhase::Visible;
@@ -3215,6 +3216,7 @@ mod tests {
         assert!(phase.ready_for_terminal_work());
     }
 
+    #[cfg(feature = "retained-renderer")]
     #[test]
     fn terminal_capture_snapshot_survives_live_host_teardown() {
         let mut metrics = crate::companion::retained::CompanionRuntimeMetrics::default();
