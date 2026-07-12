@@ -255,7 +255,6 @@ pub(crate) fn render_legacy_pet_scene_draw_list_parity_oracle_with_tank_geometry
     ));
     list.extend(super::tank_life::tank_life_layer_cells(
         &tank_life_cells,
-        scene,
         &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
     ));
 
@@ -334,7 +333,6 @@ pub(crate) fn render_legacy_pet_scene_draw_list_parity_oracle_with_tank_geometry
     ));
     list.extend(super::tank_life::tank_life_layer_cells(
         &tank_life_cells,
-        scene,
         &[HabitatPetLayer::Foreground],
     ));
 

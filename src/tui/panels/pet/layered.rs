@@ -229,7 +229,6 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
     );
     let tank_life_behind = tank_life_layer_cells(
         &tank_life_cells,
-        scene,
         &[HabitatPetLayer::Background, HabitatPetLayer::Behind],
     );
     let chest_bubble = treasure_chest_bubble_cells(&prop_cells, scene.habitat, now, vm);
@@ -251,7 +250,7 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
         &[HabitatPetLayer::Foreground],
     );
     let tank_life_foreground =
-        tank_life_layer_cells(&tank_life_cells, scene, &[HabitatPetLayer::Foreground]);
+        tank_life_layer_cells(&tank_life_cells, &[HabitatPetLayer::Foreground]);
 
     LayeredPetScene {
         layers: vec![

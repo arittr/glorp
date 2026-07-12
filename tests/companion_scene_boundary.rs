@@ -172,25 +172,100 @@ fn companion_source_violations(relative_path: &Path, source: &str) -> Vec<String
 }
 
 fn referenced_tui_modules(source: &str) -> Vec<String> {
-    let compact = source
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    let marker = "crate::tui";
-    compact
-        .match_indices(marker)
-        .map(|(index, _)| {
-            let suffix = &compact[index + marker.len()..];
-            let Some(suffix) = suffix.strip_prefix("::") else {
-                return "<root>".to_owned();
-            };
-            suffix
-                .chars()
-                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
-                .collect::<String>()
-        })
-        .collect()
+    let tokens = boundary_tokens(source);
+    let mut modules = Vec::new();
+    for index in 0..tokens.len() {
+        if !matches!(tokens.get(index), Some(BoundaryToken::Ident(root)) if root == "crate")
+            || !matches!(tokens.get(index + 1), Some(BoundaryToken::PathSeparator))
+        {
+            continue;
+        }
+        match tokens.get(index + 2) {
+            Some(BoundaryToken::Ident(root)) if root == "tui" => {
+                let module = match (tokens.get(index + 3), tokens.get(index + 4)) {
+                    (Some(BoundaryToken::PathSeparator), Some(BoundaryToken::Ident(module))) => {
+                        module.clone()
+                    }
+                    _ => "<root>".to_owned(),
+                };
+                modules.push(module);
+            }
+            Some(BoundaryToken::OpenBrace)
+                if grouped_use_tree_contains_tui_root(&tokens, index + 2) =>
+            {
+                modules.push("<grouped-root>".to_owned());
+            }
+            _ => {}
+        }
+    }
+    modules
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundaryToken {
+    Ident(String),
+    PathSeparator,
+    OpenBrace,
+    CloseBrace,
+    Comma,
+}
+
+fn boundary_tokens(source: &str) -> Vec<BoundaryToken> {
+    let mut tokens = Vec::new();
+    let mut chars = source.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            let mut identifier = String::from(character.to_ascii_lowercase());
+            while let Some(next) = chars.peek() {
+                if !next.is_ascii_alphanumeric() && *next != '_' {
+                    break;
+                }
+                identifier.push(
+                    chars
+                        .next()
+                        .expect("peeked identifier character")
+                        .to_ascii_lowercase(),
+                );
+            }
+            tokens.push(BoundaryToken::Ident(identifier));
+        } else if character == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            tokens.push(BoundaryToken::PathSeparator);
+        } else {
+            match character {
+                '{' => tokens.push(BoundaryToken::OpenBrace),
+                '}' => tokens.push(BoundaryToken::CloseBrace),
+                ',' => tokens.push(BoundaryToken::Comma),
+                _ => {}
+            }
+        }
+    }
+    tokens
+}
+
+fn grouped_use_tree_contains_tui_root(tokens: &[BoundaryToken], open_brace: usize) -> bool {
+    let mut depth = 0usize;
+    let mut at_item_start = true;
+    let mut index = open_brace + 1;
+    while let Some(token) = tokens.get(index) {
+        match token {
+            BoundaryToken::OpenBrace => depth += 1,
+            BoundaryToken::CloseBrace if depth == 0 => return false,
+            BoundaryToken::CloseBrace => depth -= 1,
+            BoundaryToken::Comma if depth == 0 => at_item_start = true,
+            BoundaryToken::Ident(identifier) if depth == 0 && at_item_start => {
+                if identifier == "tui" {
+                    return true;
+                }
+                at_item_start = false;
+            }
+            BoundaryToken::PathSeparator if depth == 0 && at_item_start => {}
+            _ if depth == 0 && at_item_start => at_item_start = false,
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 fn normalize_boundary_text(source: &str) -> String {
@@ -270,6 +345,7 @@ fn only_input_rs_may_use_the_tui_adapter_boundary() {
         "use crate::tui::view_model::WatchViewModel;",
         "use crate::tui::room::RoomLifeProfile;",
         "use crate::tui::wander::resolve_wander_offset;",
+        "use crate::tui::life::PetLifeProfile;",
     ] {
         assert!(
             !companion_source_violations(Path::new("scene.rs"), source).is_empty(),
@@ -290,4 +366,21 @@ fn only_input_rs_may_use_the_tui_adapter_boundary() {
         !companion_source_violations(Path::new("input.rs"), "use crate::tui as adapter;",)
             .is_empty()
     );
+}
+
+#[test]
+fn input_rs_rejects_grouped_tui_root_import_bypasses() {
+    for source in [
+        "use crate::{tui as adapter};",
+        "use crate::{tui};",
+        "use crate::{tui::{view_model::WatchViewModel}};",
+        "use crate::{tui::{view_model::WatchViewModel as Input}};",
+        "use crate::{tui::{self as adapter}};",
+        "use crate::{tui::{view_model::{WatchViewModel as Input}}};",
+    ] {
+        assert!(
+            !companion_source_violations(Path::new("input.rs"), source).is_empty(),
+            "input adapter accepted grouped TUI import: {source}"
+        );
+    }
 }

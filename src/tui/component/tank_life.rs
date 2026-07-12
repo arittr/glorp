@@ -791,8 +791,19 @@ mod tests {
     fn shared_route_outcomes_exactly_match_round_tui_geometry_and_cadence() {
         let mut saw_hud_reserve_clip = false;
         let mut saw_aperture_clip = false;
+        let mut saw_foreground_pet_reserve_clip = false;
+        let mut saw_behind_pet_reserve_survival = false;
         for (width, height) in [(20, 12), (44, 18), (72, 24)] {
             let geometry = crate::round::scene::round_tank_life_geometry(width, height);
+            let pet_rect = Rect::new(
+                width.saturating_sub(13) / 2,
+                height.saturating_sub(10) / 2,
+                13.min(width),
+                10.min(height),
+            );
+            let protected = crate::round::scene::round_tank_life_protected_regions_for_test(
+                pet_rect, width, height,
+            );
             for elapsed_seconds in [0, 4, 8, 32] {
                 for (calm, asleep) in [(false, false), (true, false), (false, true)] {
                     for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
@@ -804,6 +815,7 @@ mod tests {
                         );
                         input.life_profile.calm_mode = calm;
                         input.asleep = asleep;
+                        input.pet_protected_regions = &protected.pet_face;
                         let neutral_geometry = neutral_route_geometry(&input);
                         let outcome = crate::presentation::tank_life::resolve_tank_route(
                             crate::presentation::tank_life::TankRouteInput {
@@ -816,6 +828,22 @@ mod tests {
                             },
                         )
                         .expect("known route outcome");
+                        let mut geometry_without_pet_reserve = neutral_geometry.clone();
+                        geometry_without_pet_reserve
+                            .foreground_reserved_regions
+                            .clear();
+                        let outcome_without_pet_reserve =
+                            crate::presentation::tank_life::resolve_tank_route(
+                                crate::presentation::tank_life::TankRouteInput {
+                                    catalog_id: spec.id,
+                                    pet_seed: input.pet_seed,
+                                    local_date: input.local_date,
+                                    now: input.now,
+                                    calm: calm || asleep,
+                                    geometry: &geometry_without_pet_reserve,
+                                },
+                            )
+                            .expect("known unprotected route outcome");
                         let placements = tank_life_placements_for(&input);
 
                         assert_eq!(outcome.calm, calm || asleep);
@@ -870,6 +898,34 @@ mod tests {
                             assert!(outcome.cells.is_empty(), "{} invisible cells", spec.id);
                         }
 
+                        for cell in &outcome_without_pet_reserve.cells {
+                            let inside_pet_reserve = protected
+                                .pet_face
+                                .iter()
+                                .any(|region| rect_contains(*region, cell.col, cell.row));
+                            let preserved = outcome.cells.contains(cell);
+                            if cell.layer
+                                == crate::presentation::tank_life::TankRouteLayer::Foreground
+                                && inside_pet_reserve
+                            {
+                                assert!(
+                                    !preserved,
+                                    "{} foreground cell survived pet-face reserve",
+                                    spec.id
+                                );
+                                saw_foreground_pet_reserve_clip = true;
+                            } else {
+                                assert!(
+                                    preserved,
+                                    "{} cell outside foreground pet-face clipping diverged",
+                                    spec.id
+                                );
+                                saw_behind_pet_reserve_survival |= inside_pet_reserve
+                                    && cell.layer
+                                        == crate::presentation::tank_life::TankRouteLayer::Behind;
+                            }
+                        }
+
                         let origin_in_hud = geometry.reserved_regions.iter().any(|region| {
                             rect_contains(*region, outcome.origin_col, outcome.origin_row)
                         });
@@ -893,6 +949,7 @@ mod tests {
                     );
                     forward_input.life_profile.calm_mode = calm;
                     forward_input.asleep = asleep;
+                    forward_input.pet_protected_regions = &protected.pet_face;
                     let mut reversed_input = TankLifeRenderInput::for_test(
                         reversed,
                         &geometry,
@@ -901,6 +958,7 @@ mod tests {
                     );
                     reversed_input.life_profile.calm_mode = calm;
                     reversed_input.asleep = asleep;
+                    reversed_input.pet_protected_regions = &protected.pet_face;
                     let forward = tank_life_placements_for(&forward_input);
                     let reversed = tank_life_placements_for(&reversed_input);
                     assert_eq!(forward.len(), reversed.len());
@@ -921,6 +979,14 @@ mod tests {
         assert!(
             saw_aperture_clip,
             "matrix did not exercise aperture clipping"
+        );
+        assert!(
+            saw_foreground_pet_reserve_clip,
+            "matrix did not exercise foreground pet-face clipping"
+        );
+        assert!(
+            saw_behind_pet_reserve_survival,
+            "matrix did not exercise behind-layer survival through the pet-face reserve"
         );
     }
 
