@@ -101,8 +101,13 @@ pub struct AcceptedSceneState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameDeltaValidation {
+    /// Number of changed node records validated from the delta.
     pub node_slots_checked: usize,
+    /// Number of changed node records committed in place.
     pub node_slots_applied: usize,
+    /// Number of affected-path indices consumed from fixed scratch.
+    pub lit_path_indices_visited: usize,
+    /// Number of affected lit paths whose candidate transform was validated.
     pub lit_paths_checked: usize,
 }
 
@@ -267,8 +272,8 @@ pub fn validate_content_delta(delta: &ContentDelta) -> Result<(), SceneValidatio
     )
 }
 
-/// Merges bounded mutable fields over an accepted current frame, then validates
-/// the complete resulting frame against precomputed accepted-template metadata.
+/// Validates changed fields and affected lit paths over an accepted current
+/// frame, then transactionally applies only those changed slots.
 /// It deliberately does not re-run full template validation or rescan primitives.
 pub fn validate_frame_delta(
     delta: &FrameDelta,
@@ -302,7 +307,9 @@ pub fn validate_frame_delta(
 
     let mut node_overlay = [None; MAX_SCENE_NODES];
     let mut changed_dense_indices = [None; MAX_SCENE_NODES];
-    let mut affected_paths = [false; MAX_STATIC_PRIMITIVES];
+    let mut affected_path_seen = [false; MAX_STATIC_PRIMITIVES];
+    let mut affected_path_indices = [0; MAX_STATIC_PRIMITIVES];
+    let mut affected_path_count = 0;
     for (change_index, node) in delta.nodes.iter().enumerate() {
         let dense_index = *accepted_template
             .node_dense_indices
@@ -315,7 +322,11 @@ pub fn validate_frame_delta(
         validate_transform(node.local_transform)?;
         validate_unit_interval(node.opacity)?;
         for path_index in &accepted_template.node_lit_paths[dense_index] {
-            affected_paths[*path_index] = true;
+            if !affected_path_seen[*path_index] {
+                affected_path_seen[*path_index] = true;
+                affected_path_indices[affected_path_count] = *path_index;
+                affected_path_count += 1;
+            }
         }
     }
 
@@ -332,15 +343,7 @@ pub fn validate_frame_delta(
     }
 
     let mut lit_paths_checked = 0;
-    for (path_index, affected) in affected_paths
-        .iter()
-        .copied()
-        .enumerate()
-        .take(accepted_template.lit_paths.len())
-    {
-        if !affected {
-            continue;
-        }
+    for path_index in affected_path_indices[..affected_path_count].iter().copied() {
         validate_lit_card_path_overlay(
             &accepted_template.lit_paths[path_index],
             &current_frame.frame,
@@ -381,6 +384,7 @@ pub fn validate_frame_delta(
     Ok(FrameDeltaValidation {
         node_slots_checked: delta.nodes.len(),
         node_slots_applied,
+        lit_path_indices_visited: affected_path_count,
         lit_paths_checked,
     })
 }
@@ -1417,14 +1421,34 @@ mod tests {
         let audit = validate_frame_delta(&delta, &unlit_template, &mut unlit_frame).unwrap();
         assert_eq!(audit.node_slots_checked, 1);
         assert_eq!(audit.node_slots_applied, 1);
+        assert_eq!(audit.lit_path_indices_visited, 0);
         assert_eq!(audit.lit_paths_checked, 0);
 
-        let lit_fixture = SceneFixture::valid();
-        let lit_template = validate_template(&SceneFixture::valid_lit_card()).unwrap();
-        let mut lit_frame = validate_frame(&lit_fixture.frame, &lit_template).unwrap();
+        let mut lit_source = SceneFixture::valid_lit_card();
+        let sibling_alias = CanonicalAlias::new("pet.sibling").unwrap();
+        let sibling = NodeId::from_alias(&sibling_alias);
+        let mut sibling_node = lit_source.nodes[1].clone();
+        sibling_node.id = sibling;
+        sibling_node.alias = sibling_alias;
+        lit_source.nodes.push(sibling_node);
+        let mut sibling_primitive = lit_source.primitives[0].clone();
+        sibling_primitive.node = sibling;
+        lit_source.primitives.push(sibling_primitive);
+        let lit_template = validate_template(&lit_source).unwrap();
+        assert_eq!(lit_template.lit_paths.len(), 2);
+        let mut lit_frame_source = SceneFixture::valid().frame;
+        lit_frame_source.nodes.push(NodeFrameState {
+            node: sibling,
+            local_transform: Transform3::IDENTITY,
+            visible: true,
+            opacity: 1.0,
+        });
+        let mut lit_frame = validate_frame(&lit_frame_source, &lit_template).unwrap();
+        delta.nodes[0].node = lit_source.nodes[1].id;
         let audit = validate_frame_delta(&delta, &lit_template, &mut lit_frame).unwrap();
         assert_eq!(audit.node_slots_checked, 1);
         assert_eq!(audit.node_slots_applied, 1);
+        assert_eq!(audit.lit_path_indices_visited, 1);
         assert_eq!(audit.lit_paths_checked, 1);
     }
 
