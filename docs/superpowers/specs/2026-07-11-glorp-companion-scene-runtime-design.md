@@ -1,8 +1,8 @@
 # Glorp Companion 2.5D Scene Runtime — design
 
 **Date:** 2026-07-11
-**Status:** Revised after adversarial architecture and rendering review; awaiting
-written-spec confirmation
+**Status:** Adversarial architecture/rendering review passed; ready for
+implementation planning
 **Scope:** The native macOS round companion and its wgpu renderer only
 
 ## Decision
@@ -97,8 +97,8 @@ The engine remains Glorp-shaped:
    state without cloning the complete scene on ordinary ticks.
 4. Give meaningful elements stable identities, parent/child transforms, real
    world Z, explicit depth cues, and reusable attachments.
-5. Compile immutable geometry, resources, batch order, and fixed capacities once
-   per resource generation.
+5. Compile immutable geometry, resources, opaque/chrome batches, fixed blended
+   draw records, and capacities once per resource generation.
 6. Update only bounded CPU mirrors and GPU byte ranges during ordinary content or
    motion changes.
 7. Batch compatible opaque content globally and transparent content without
@@ -213,7 +213,7 @@ src/presentation/companion_scene/
   input.rs          # domain projection and authored inventories
   scene.rs          # nodes, transforms, materials, capacities, attachments
   runtime.rs        # reconciler, revisions, invalidation, activation state
-  contract.rs       # fixed render enums and serialized evidence
+  contract.rs       # fixed render enums, neutral capture snapshot, evidence
   validate.rs       # pure full-generation and delta validation
 
 src/companion/retained/
@@ -222,7 +222,7 @@ src/companion/retained/
   resources.rs      # atlases, textures, depth attachment, pipelines
   buffers.rs        # persistent CPU mirrors and GPU buffers
   render.rs         # phase order, batch compilation, encoding
-  capture.rs        # renderer-neutral capture snapshot and GPU readback
+  capture.rs        # GPU capture request, readback, renderer-specific evidence
   presentation.rs   # progress, dispositions, activation acknowledgement
 ```
 
@@ -242,6 +242,23 @@ pub struct LayoutGeneration(pub u64);
 pub struct ResourceGeneration(pub u64);
 pub struct SemanticRevision(pub u64);
 pub struct FrameRevision(pub u64);
+
+pub struct GenerationKey {
+    pub device: DeviceEpoch,
+    pub surface: SurfaceEpoch,
+    pub layout: LayoutGeneration,
+    pub resources: ResourceGeneration,
+}
+
+pub struct AppliedRevisions {
+    pub semantic: SemanticRevision,
+    pub frame: FrameRevision,
+}
+
+pub struct SceneVersion {
+    pub generation: GenerationKey,
+    pub applied: AppliedRevisions,
+}
 ```
 
 - `DeviceEpoch` changes after device loss/recreation.
@@ -251,26 +268,50 @@ pub struct FrameRevision(pub u64);
 - `SemanticRevision` advances for accepted content meaning.
 - `FrameRevision` advances for accepted presentation state.
 
+The host alone advances device and surface epochs. The reconciler alone advances
+layout, semantic, and frame values and requests a resource rebuild. The runtime
+alone allocates the next `ResourceGeneration`; a compiler result never chooses its
+own identity. `GenerationKey` is immutable for one compiled GPU unit.
+`AppliedRevisions` changes as bounded ordinary deltas are accepted without
+activating a generation. `SceneVersion` identifies the exact state used by a
+presentation, capture, or metrics snapshot.
+
 Backing-scale changes do not automatically imply scene-topology changes. Logical
 layout is expressed in companion points. Surface extent, scale, format, sample
 count, and device epoch independently govern attachments and surface resources.
 
-Every asynchronous request/result carries the exact epochs, generations, and
-revisions from which it was derived. Comparisons are monotonic and stale results
-are rejected; they are never applied speculatively.
+Every asynchronous request/result carries its immutable `GenerationKey` and the
+source `AppliedRevisions` from which it was derived. Comparisons are monotonic and
+stale results are rejected; they are never applied speculatively. Before
+activation, the reconciler reapplies newer compatible semantic/frame deltas to the
+candidate mirrors and records the resulting applied revisions.
+
+Invalidation is exhaustive:
+
+| Change | Owner and effect |
+|---|---|
+| Device recreation/loss | host advances `DeviceEpoch`; every GPU generation is invalid |
+| Surface format, color space, alpha mode, sample count, or physical extent | host advances `SurfaceEpoch`; recreate only surface-dependent targets, and rebind a candidate before activation |
+| Logical dimensions, hierarchy, art lattice, cast topology, or capacity | reconciler advances `LayoutGeneration` and requests a `ResourceGeneration` |
+| Atlas repertoire/scale, material schema, shader, or pipeline schema | reconciler requests a `ResourceGeneration`; layout may remain unchanged |
+| Semantic slot value | reconciler advances `SemanticRevision` |
+| Camera, transform, visibility, opacity, light, gauge, or dim value | reconciler advances `FrameRevision` |
+
+A field-classification test covers every projected snapshot field. Backing scale
+can change raster resources without changing logical layout.
 
 ### Generation activation state machine
 
 ```text
-Active(Gn)
-  -> Preparing(Gn+1, newest_request)
-  -> Ready(Gn+1, resources + template + initial mirrors)
-  -> Activating(Gn+1)
-  -> Active(Gn+1)
+Active(Gn, Rn)
+  -> Preparing(Gn+1, source = Rm, newest_request)
+  -> Ready(Gn+1, applied = newest_compatible_R, resources + template + mirrors)
+  -> Activating(previous = Gn, candidate = Gn+1)
+  -> Active(Gn+1, newest_compatible_R)
 
 Preparing/Ready/Activating
   -> FailedRetaining(Gn, sanitized_reason)
-  -> Active(Gn)
+  -> Active(Gn, current_R)
 
 No usable active generation or unrecoverable device/surface failure
   -> HostFallbackPending
@@ -279,8 +320,21 @@ No usable active generation or unrecoverable device/surface failure
 
 Activation swaps the compiled template, complete resources, persistent buffer
 set, initial content mirror, initial frame mirror, and capture metadata as one
-unit. The host acknowledges activation only after a frame from the new generation
-has actually been submitted/presented. No mixed-generation frame is encodable.
+candidate unit. `Activating` retains the previous unit while it acquires, encodes,
+submits, calls `SurfaceTexture::present`, and drains the immediately available GPU
+error mailbox for the candidate's first frame. The exact commit milestone is
+`SurfacePresentCalled` with an empty immediate mailbox; only then does the runtime
+publish the candidate as `Active` and release the previous unit. No mixed-key
+frame is encodable.
+
+An `Outdated`, `Timeout`, or `Occluded` acquire leaves the candidate ready for a
+later visible tick. A pre-submit validation/resource failure destroys the
+candidate and retains the previous unit when its device/surface epochs remain
+usable. `SurfaceLost`, surface validation failure, device loss, or OOM follows the
+host fallback policy because neither candidate nor previous GPU resources are
+trusted. A delayed asynchronous validation/device error discovered after the
+commit invalidates the whole `DeviceEpoch` and enters fallback; it does not try to
+restore the previous generation on the same device.
 
 Only one pending generation request is retained. Newer requests coalesce and
 cancel or supersede older worker work at safe checkpoints. A completed stale
@@ -388,21 +442,30 @@ fixture; no ordinary tick grows a `Vec`, atlas, CPU mirror, or GPU buffer.
 
 ### Coordinate contract
 
-- Scene X/Y are logical companion points, independent of backing scale.
-- X increases right and Y increases down.
-- World Z increases toward the camera; the neutral pet plane is `0.0`.
+- Snapshot/layout X/Y are logical companion points, independent of backing scale,
+  with X right and Y down.
+- Scene world space is right-handed: X increases right, Y increases up, and Z
+  increases toward the camera. Projection converts snapshot Y-down to world Y-up
+  exactly once.
+- The neutral pet plane is world Z `0.0`.
 - World Z remains shallow and is mapped into the camera's documented near/far
   interval.
 - WebGPU clip-space depth is `[0, 1]`.
 
-The first camera is orthographic. World Z determines occlusion only; it must not
+The first camera is orthographic. Let `near_z` be the greatest permitted authored
+world Z and `far_z` the least. The locked depth mapping is
+`clip_z = (near_z - world_z) / (near_z - far_z)`: nearest maps to `0.0`, farthest
+maps to `1.0`, the depth clear is `1.0`, and comparison is `LessEqual`. Fixtures
+lock the near, neutral, and far matrix outputs numerically.
+
+World Z determines occlusion only; it must not
 implicitly change scale, Y position, opacity, saturation, haze, or light. Those
 artistic effects are explicit `DepthCue` parameters derived from authored depth:
 
 ```rust
 pub struct DepthCue {
     pub scale: f32,
-    pub y_offset_points: f32,
+    pub y_offset_points_up: f32,
     pub opacity: f32,
     pub saturation: f32,
 }
@@ -420,9 +483,10 @@ ordinary layout, semantic, or frame revisions.
 
 ### Transform contract
 
-Transforms use column vectors and right-handed local 3D coordinates, with scene
-Y-down converted once in the camera/view projection. Quaternions are stored
-`[x, y, z, w]`, normalized during full-generation validation, and composed as:
+Transforms use column vectors and right-handed local/world coordinates. Snapshot
+Y-down is converted during projection before any local transform is built.
+Quaternions are right-handed active rotations stored `[x, y, z, w]`, normalized
+during full-generation validation, and composed as:
 
 ```text
 local = translate(position)
@@ -436,9 +500,10 @@ clip = projection * view * world * local_vertex
 ```
 
 Parent visibility is ANDed with child visibility. Parent opacity multiplies child
-opacity. A negative or non-uniform scale is invalid for `LitShallowCard` in the
-first version; the compiler therefore uses the rotation component for card
-normals without requiring a general inverse-transpose path.
+opacity. A negative or non-uniform effective scale anywhere in a
+`LitShallowCard` node's ancestor chain is invalid in the first version; the
+compiler therefore uses the composed rotation for card normals without requiring
+a general inverse-transpose path.
 
 The CPU resolves world matrices only for dirty shallow subtrees and writes those
 matrices to the persistent frame mirror. The vertex shader applies world and
@@ -461,9 +526,7 @@ The fixed phases are pipeline/depth/blend phases:
 | Phase | Blend | Depth test | Depth write | Ordering |
 |---|---|---:|---:|---|
 | World opaque/cutout | replace or cutout | yes | yes | batch-compatible |
-| World premultiplied alpha | source-over | yes | no | back-to-front |
-| World multiply | multiply | yes | no | back-to-front |
-| World additive | additive | yes | no | batch-compatible |
+| World ordered blend | source-over, multiply, or additive | yes | no | one back-to-front stream |
 | Screen chrome | source-over | no | no | authored stable order |
 
 Pet, room, props, tank life, projections, and world effects participate according
@@ -472,59 +535,86 @@ remains a host/output concern after world and chrome rendering.
 
 ### Transparency and batching
 
-Opaque/cutout and additive items may be globally regrouped by compatible
-pipeline, material, resource page, and depth policy. Premultiplied-alpha and
-multiply items are first sorted back-to-front by stable depth key; the compiler
-may merge only adjacent compatible runs. It cannot pull compatible transparent
-items across an intervening item.
+Opaque/cutout items may be globally regrouped by compatible pipeline, material,
+resource page, and depth policy. Every world item using source-over, multiply, or
+additive blending enters one camera-depth-ordered stream because those blend modes
+do not commute with one another. Items sort back-to-front by current camera-space
+depth and a stable semantic tie-breaker. The renderer may merge only adjacent
+compatible runs; it cannot pull compatible items across an intervening item.
 
-Dynamic transparent instance groups choose one declared policy:
+Blended draw records and sort scratch have fixed capacities. The compiler emits
+immutable record templates; when a blended node/instance or camera depth changes,
+the CPU updates keys and stable-sorts the active records in the reusable scratch
+arena. Frames with no blended-depth changes reuse the previous order. This bounded
+sort is the deliberate exception to immutable opaque batch order and performs no
+heap or GPU-object allocation.
+
+Dynamic blended instance groups choose one declared policy:
 
 - CPU-sort active instances back-to-front into a fixed mirror; or
 - use authored non-crossing depth buckets whose relative order cannot change.
 
 The first implementation does not claim order-independent transparency. Future
-bubbles default to CPU sorting because they may cross in depth. Additive motes do
-not require sorting.
+bubbles default to the shared CPU-ordered stream because they may cross other
+blended world content in depth. A separate unsorted additive pass is permitted
+only for an explicitly screen-local effect that makes no cross-world-Z ordering
+claim.
 
 ### Linear-light and alpha contract
 
-The renderer queries adapter/surface capabilities and selects
-`Bgra8UnormSrgb` for the SDR surface when available. The chosen format and color
-space are recorded in metrics and capture metadata; no suffix stripping is used
-to preserve gamma-space parity.
+The renderer queries adapter/surface capabilities and requires
+`Bgra8UnormSrgb`, `SurfaceColorSpace::Srgb`, and
+`CompositeAlphaMode::PostMultiplied` for the transparent SDR companion surface.
+Pinned wgpu 30 Metal exposes `Opaque` and `PostMultiplied`, not
+`PreMultiplied`. If the required combination is unavailable, the new retained
+path is unavailable and host fallback remains active. The chosen format, color
+space, and alpha mode are recorded in metrics and capture metadata; no suffix
+stripping is used to preserve gamma-space parity.
 
 The contract is:
 
 1. Authored scalar sRGB colors are decoded to linear exactly once.
 2. Coverage-only glyph data uses `R8Unorm` and modulates a linear color.
-3. Color atlas data uses straight-alpha `Rgba8UnormSrgb`.
+3. Color atlas data uses straight-alpha `Rgba8UnormSrgb` with linear filtering,
+   per-entry padding, and edge-dilated RGB in zero-alpha gutter texels.
 4. Fragment shaders operate in linear light and emit premultiplied-linear RGB.
 5. Source-over blending uses `One`, `OneMinusSrcAlpha`.
-6. The sRGB render target performs the final SDR encoding.
+6. World and chrome render into a persistent transparent sRGB intermediate whose
+   stored RGB represents encoded premultiplied-linear output.
+7. A final surface pass samples/decodes that intermediate, unpremultiplies in
+   linear light with a zero-alpha guard, and emits straight-linear RGB plus alpha
+   to the `PostMultiplied` sRGB surface.
 
 AppKit-produced glyph/color pixels are premultiplied sRGB. Before upload to a
 straight-alpha color atlas they are unpremultiplied in sRGB with a zero-alpha
 guard; sampling then performs the sRGB-to-linear decode and the shader
 premultiplies in linear light. Coverage-only glyphs bypass color unpremultiplying.
 
-Canonical transparent captures are normalized in the inverse domain: decode
-captured RGB from sRGB, unpremultiply in linear light with a zero-alpha guard, then
-re-encode straight RGB to sRGB for the PNG contract. Tests lock transparent-edge,
-blend, and readback samples so the capture is not “visually close” but
+Canonical transparent capture reads the persistent premultiplied intermediate
+before the final surface conversion. Normalization decodes captured RGB from
+sRGB, unpremultiplies in linear light with a zero-alpha guard, then re-encodes
+straight RGB to sRGB for the PNG contract. Tests lock transparent-edge, blend,
+surface-pass, and readback samples so the capture is not “visually close” but
 mathematically defined.
 
 ### Persistent resources, mirrors, and draws
 
-At generation preparation the worker/compiler:
+Generation preparation has two explicit products. The worker builds a CPU
+candidate:
 
 1. validates the complete template and fixed capacities;
-2. resolves and builds complete atlases/resources;
-3. builds immutable vertices/indices and private dense node/slot maps;
-4. compiles phase order and compatible batch ranges;
-5. allocates fixed-layout content/frame CPU mirrors and GPU buffers;
+2. resolves resource manifests and performs pure atlas packing;
+3. builds immutable vertices/indices, private dense node/slot maps, and fixed
+   blended-draw record templates/scratch;
+4. compiles opaque/chrome batch ranges and initial blended stream order;
+5. allocates fixed-layout content/frame CPU mirrors;
 6. prepares initial content/frame mirrors from the newest snapshot;
-7. returns one activation candidate.
+7. returns one immutable CPU candidate.
+
+AppKit-only raster work is added through the bounded preparation lane. The render
+owner then materializes pipelines, textures, bind groups, fixed GPU buffers,
+depth/intermediate targets, and initial uploads into a GPU candidate. Nothing is
+published to the active slot until the activation state machine commits it.
 
 After warmup, an ordinary visible tick performs no atlas growth, pipeline
 creation, shader compilation, full-template validation, heap-capacity growth, or
@@ -532,27 +622,44 @@ persistent GPU-object creation. “Zero GPU objects per frame” means zero pers
 textures, buffers, bind groups, pipelines, samplers, or depth attachments; a
 frame-scoped command encoder, render pass, and acquired surface view are expected.
 
-The UI thread applies bounded mirror deltas, coalesces dirty byte ranges, issues
-bounded queue writes, encodes compiled batch ranges, submits, and records a
-disposition. Static geometry and batch order are not uploaded or re-sorted during
+The UI thread applies bounded mirror deltas, coalesces dirty byte ranges, updates
+the fixed blended stream only when a blended depth key changed, issues bounded
+queue writes, encodes compiled batch ranges, submits, and records a disposition.
+Static geometry and opaque/chrome batch order are not uploaded or re-sorted during
 ordinary motion.
 
 ## First Renderer-Native Feature: Lit Treasure Chest
 
-The proof prop preserves the existing authored treasure-chest identity and palette
-rather than replacing it with a generic box. Its existing generated silhouette is
-the front card source. The compiler adds shallow authored side/bevel faces:
+The proof prop preserves the existing 3×2 authored treasure-chest glyph sprite and
+warm palette rather than replacing it with a generic box. Version 1 pairs the
+open/closed sprite texture with one closed, convex local outline in chest-cell
+units, listed counter-clockwise when viewed from `+Z`:
 
-- front normal is local `+Z`;
-- extrusion proceeds along local `-Z`;
-- a small fixed yaw and pitch expose the top/right depth under the orthographic
-  camera;
-- front, side, and bevel normals are flat and deterministic;
-- scale is uniform, as required by the first normal contract;
+```text
+(-1.50, -1.00), (1.50, -1.00), (1.50, 0.65),
+(1.25,  1.00), (-1.25, 1.00), (-1.50, 0.65)
+```
+
+The compiler constructs `ChestCardGeometryV1` deterministically:
+
+- UVs map the outline's 3×2 bounding box onto the current generated sprite;
+- the front face is the outline inset by `0.08` cell units at Z `0.0`, triangulated
+  as a convex fan, with local normal `+Z`;
+- a bevel ring connects that inset face to the authored outline at Z `-0.08`;
+- side quads connect the outer outline to a reversed back outline at Z `-0.28`;
+- edge-offset intersection defines inset vertices with a `2.0×` miter cap;
+- front winding is counter-clockwise from `+Z`, the back is reversed, side winding
+  faces outward, and back-face culling is enabled;
+- front albedo combines the current open/closed glyph raster with the authored
+  amber base; bevel/side/back albedo use named darker palette roles;
+- flat per-face normals make the depth legible; there is no alpha-mask extrusion;
+- a fixed local yaw of `+12°` and pitch of `-6°` expose top/right depth under the
+  orthographic camera;
+- the full ancestor chain has positive uniform scale, as required by the first
+  normal contract;
 - ambient, clamped Lambert diffuse, and a bounded view/key rim term operate in
   linear light;
-- the authored palette remains the base color source;
-- `bubble_origin` sits just above the lid in local space.
+- `bubble_origin` is local `[0.0, 1.25, 0.0]`, above the lid.
 
 Preview Lab includes far, neutral, near, unlit-control, lit-key-left,
 lit-key-right, and attachment-transform fixtures. The pet, HUD, and gauges remain
@@ -571,7 +678,7 @@ This feature follows the base scene cutover. It does not add production bubbles.
 | Full template validation and CPU compilation | worker |
 | Pure atlas packing and activation candidate assembly | worker |
 | AppKit-dependent rasterization | bounded generation-preparation tasks on the AppKit thread |
-| GPU resource/pipeline creation | render owner, or worker only after wgpu 30 thread safety is proven |
+| GPU resource/pipeline creation, upload, and destruction | AppKit/render owner |
 | Atomic activation and persistent GPU writes | AppKit/render owner |
 | Acquire, encode, submit, present, acknowledge | AppKit/render owner |
 | Capture request scheduling and result publication | host/render owner |
@@ -580,10 +687,17 @@ No atlas construction, pipeline creation, full-template validation, unbounded
 allocation, or blocking worker wait occurs in the ordinary presentation tick.
 AppKit-only rasterization is scheduled as explicit, budgeted generation work while
 the last good generation remains visible; it is never performed from a render-pass
-callback. Work that calls device APIs is prepared off-thread where wgpu permits
-and finalized in a bounded activation step on the render owner. The implementation
-plan must prove actual thread safety for the wgpu 30 types used rather than assume
-it.
+callback. Workers produce immutable CPU descriptors, pixels, geometry, draw
+records, and initial buffer bytes only. In V1, every wgpu device call, resource or
+pipeline creation, upload, destruction, and activation occurs on the render owner.
+Parallel GPU materialization is a separate future optimization that requires
+profiling evidence and a new ownership decision.
+
+Stage 0 must freeze numeric p95/p99 UI-thread budgets and a maximum AppKit
+rasterization slice before implementation proceeds beyond pure contracts. A
+preparation slice that exhausts its budget yields to the run loop while the last
+good generation stays visible; activation itself performs only the pre-measured
+bounded swap, initial writes, and first-frame encode.
 
 The initial visible cadence may remain 15 FPS. Hidden, minimized, or occluded
 windows suspend presentation and semantic animation work. New snapshots may
@@ -603,9 +717,11 @@ not semantic topology unless the logical companion layout itself changes.
 
 ## Capture and Fallback Transition
 
-Introduce a renderer-neutral `CompanionCaptureSnapshot` before live cutover. It
-contains the selected generation/revisions, logical state alias, privacy claims,
-surface/color metadata, canonical readback request, and scene metrics. During the
+Introduce a renderer-neutral `CompanionCaptureSnapshot` in
+`presentation::companion_scene::contract` before live cutover. It contains the
+selected `SceneVersion`, logical state alias, privacy claims, surface/color
+metadata, canonical readback request, and scene metrics. Retained `capture.rs`
+owns only GPU request/readback and renderer-specific evidence. During the
 temporary shadow period, both Smooth and scene-runtime evidence are derived from
 the same projected semantic snapshot.
 
@@ -631,10 +747,14 @@ Smooth plan warm every tick.
 |---|---|
 | Invalid/superseded pending generation | drop it, retain active generation |
 | Capacity overflow | request/coalesce new generation; retain active generation |
-| Activation failure before first submit | destroy candidate, retain active generation |
+| Candidate validation/resource failure before acquire | destroy candidate, retain active generation |
+| Acquire `Outdated` | reconfigure once and skip this tick; retry candidate on a later tick, with no loop in one tick |
+| Acquire `Timeout` or `Occluded` | skip this tick; retain ready candidate and active generation |
+| Candidate encode failure before submit | destroy candidate; retain previous generation if its epochs remain usable |
 | Stale content/frame update | reject and count; never mutate mirrors |
-| Surface outdated/lost | follow bounded host reconfigure/retry policy |
-| Device lost or no usable active generation | enter host fallback pending |
+| `SurfaceLost` or surface validation failure | no retry loop; immediately enter host fallback pending, matching current policy |
+| Device validation/loss, OOM, or no usable active generation | invalidate `DeviceEpoch`; immediately enter host fallback pending |
+| Delayed GPU error after activation commit | invalidate `DeviceEpoch`; enter fallback rather than restore prior GPU resources |
 | Fallback paint succeeds | acknowledge fallback painted |
 | Capture during generation swap | bind request to one active generation or defer |
 
@@ -736,9 +856,10 @@ counts, and next permitted transition.
 
 - world pipelines always have the specified depth state;
 - opaque/cutout elements occlude by Z across semantic categories;
-- alpha/multiply order remains back-to-front and batches only contiguous runs;
-- CPU-sorted dynamic alpha instances cross correctly in depth;
-- additive instances remain order-independent within the declared contract;
+- source-over/multiply/additive world items share one back-to-front order and
+  batch only contiguous compatible runs;
+- CPU-sorted dynamic blended instances cross static and dynamic blended content
+  correctly in depth;
 - sRGB decode/output, premultiplied-linear blending, AppKit upload conversion,
   and transparent capture normalization match locked samples;
 - camera/node transforms reach the shader and produce nonzero clip depth;
@@ -779,6 +900,9 @@ compatibility architecture.
 
 - Record the current host/fallback/capture invariants as executable tests.
 - Freeze the numeric baseline protocol and gates.
+- Freeze p95/p99 ordinary UI-thread budgets, the maximum AppKit rasterization
+  slice, activation budget, and metrics-overhead gate before scene implementation
+  proceeds.
 - Inventory maximum production-derived nodes, art lattices, props, tank life,
   particles, resources, and current failure dispositions.
 
@@ -787,6 +911,9 @@ Exit: current safety contracts and capacity inputs are measured and versioned.
 ### Stage 1: extract neutral semantics
 
 - Extract shared pure pet/habitat/activity/helper inventories and projection.
+- Make the ownership of existing `PresentationScene`, `RoundSceneModel`, and
+  `PetSceneModel` explicit: reuse pure semantic helpers or retire redundant
+  projections so none remains a second companion-scene authority.
 - Add immutable `CompanionSceneSnapshot` fixtures.
 - Keep TUI and live retained rendering behavior unchanged.
 
@@ -878,8 +1005,12 @@ generation is fixed.
 - One immutable snapshot is the semantic authority for each reconciliation.
 - One stateful reconciler owns invalidation, revisions, generations, and stale
   result rejection.
-- Activation atomically swaps template, resources, initial mirrors, and capture
-  metadata.
+- `GenerationKey` is immutable for a compiled GPU unit, `AppliedRevisions` advances
+  for compatible ordinary updates, and `SceneVersion` identifies each
+  presentation, capture, and metric sample.
+- Activation retains the previous unit and atomically commits template, resources,
+  initial mirrors, and capture metadata only at the specified first-present
+  milestone.
 - The retained live path does not construct or consume
   `SmoothCompanionScenePlan`, `SmoothCompanionLayer`, `SceneDrawList`, `DrawCell`,
   or Ratatui geometry after Stage 8.
@@ -953,9 +1084,9 @@ buffer-reuse tests alone do not satisfy the gate.
 
 ### Incorrect transparency under real depth
 
-Use depth writes only for opaque/cutout content, sort alpha/multiply back-to-front,
-merge only contiguous compatible runs, and require explicit dynamic-instance
-ordering policy.
+Use depth writes only for opaque/cutout content, sort all cross-world blended
+items back-to-front in one fixed-capacity stream, merge only contiguous compatible
+runs, and require explicit dynamic-instance ordering policy.
 
 ### Linear-light changes Glorp's look
 
