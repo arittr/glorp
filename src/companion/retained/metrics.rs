@@ -248,9 +248,11 @@ pub(crate) struct LifetimeAuditSnapshot {
     pub cadence_ms: u64,
     pub virtual_elapsed_ms: u64,
     pub rss_warmup_bytes: u64,
+    pub rss_warmup_peak_bytes: u64,
     pub rss_final_bytes: u64,
     pub rss_peak_bytes: u64,
     pub gpu_warmup_bytes: u64,
+    pub gpu_warmup_peak_bytes: u64,
     pub gpu_final_bytes: u64,
     pub gpu_peak_bytes: u64,
 }

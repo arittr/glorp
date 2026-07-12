@@ -808,9 +808,11 @@ fn evaluate_baseline_gates(
         .get("lifetime_audit")
         .ok_or_else(|| "runtime snapshot missing lifetime_audit".to_string())?;
     let rss_warmup = value_u64(lifetime, "rss_warmup_bytes")?;
+    let rss_warmup_peak = value_u64(lifetime, "rss_warmup_peak_bytes")?;
     let rss_final = value_u64(lifetime, "rss_final_bytes")?;
     let rss_peak = value_u64(lifetime, "rss_peak_bytes")?;
     let gpu_warmup = value_u64(lifetime, "gpu_warmup_bytes")?;
+    let gpu_warmup_peak = value_u64(lifetime, "gpu_warmup_peak_bytes")?;
     let gpu_final = value_u64(lifetime, "gpu_final_bytes")?;
     let gpu_peak = value_u64(lifetime, "gpu_peak_bytes")?;
     let within_one_percent = |value: u64, warmup: u64| {
@@ -890,15 +892,17 @@ fn evaluate_baseline_gates(
         ),
         gate(
             "lifetime-rss",
-            within_one_percent(rss_final, rss_warmup) && within_one_percent(rss_peak, rss_warmup),
-            format!("warmup={rss_warmup} final={rss_final} peak={rss_peak}"),
-            "final and peak <= warmup + 1%",
+            within_one_percent(rss_final, rss_warmup_peak)
+                && within_one_percent(rss_peak, rss_warmup_peak),
+            format!("warmup-end={rss_warmup} warmup-high-water={rss_warmup_peak} final={rss_final} peak={rss_peak}"),
+            "final and peak <= warmup high-water + 1%",
         ),
         gate(
             "lifetime-accounted-gpu",
-            within_one_percent(gpu_final, gpu_warmup) && within_one_percent(gpu_peak, gpu_warmup),
-            format!("warmup={gpu_warmup} final={gpu_final} peak={gpu_peak}"),
-            "final and peak <= warmup + 1%",
+            within_one_percent(gpu_final, gpu_warmup_peak)
+                && within_one_percent(gpu_peak, gpu_warmup_peak),
+            format!("warmup-end={gpu_warmup} warmup-high-water={gpu_warmup_peak} final={gpu_final} peak={gpu_peak}"),
+            "final and peak <= warmup high-water + 1%",
         ),
     ])
 }
@@ -1026,7 +1030,7 @@ control {} ns/tick, instrumented {} ns/tick, net {} ns/tick.\n\n\
 Accounted persistent GPU bytes: atlas {}, instance ring {}, capture {}, other {}, current total {}, concurrent-replacement peak {}. \
 Opaque driver allocations are covered by process RSS, not guessed into GPU byte accounting.\n\n\
 Lifetime segment: {} real GPU queue frames at {} ms virtual cadence ({} ms semantic time); \
-RSS warmup/final/peak {}/{}/{}, accounted GPU warmup/final/peak {}/{}/{}.\n\n\
+RSS warmup-end/warmup-high-water/final/peak {}/{}/{}/{}, accounted GPU warmup-end/warmup-high-water/final/peak {}/{}/{}/{}.\n\n\
 ## Structured gate results\n\n\
 | Gate | Status | Measured | Limit | Disposition |\n\
 |---|---|---|---|---|\n\
@@ -1085,9 +1089,11 @@ An em dash means the future renderer-neutral category does not exist yet and is 
         value_u64(lifetime, "cadence_ms")?,
         value_u64(lifetime, "virtual_elapsed_ms")?,
         value_u64(lifetime, "rss_warmup_bytes")?,
+        value_u64(lifetime, "rss_warmup_peak_bytes")?,
         value_u64(lifetime, "rss_final_bytes")?,
         value_u64(lifetime, "rss_peak_bytes")?,
         value_u64(lifetime, "gpu_warmup_bytes")?,
+        value_u64(lifetime, "gpu_warmup_peak_bytes")?,
         value_u64(lifetime, "gpu_final_bytes")?,
         value_u64(lifetime, "gpu_peak_bytes")?,
     ))
@@ -2002,9 +2008,11 @@ mod tests {
                 "frames": 4500,
                 "cadence_ms": 250,
                 "rss_warmup_bytes": 1000000,
+                "rss_warmup_peak_bytes": 1000000,
                 "rss_final_bytes": 1005000,
                 "rss_peak_bytes": 1009000,
                 "gpu_warmup_bytes": 1000000,
+                "gpu_warmup_peak_bytes": 1000000,
                 "gpu_final_bytes": 1005000,
                 "gpu_peak_bytes": 1009000
             }

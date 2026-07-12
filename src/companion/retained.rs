@@ -581,6 +581,8 @@ impl ActiveRetainedHost {
             host.queue.submit([encoder.finish()])
         };
         let mut last_submission = None;
+        let mut rss_warmup_peak_bytes = 0_u64;
+        let mut gpu_warmup_peak_bytes = 0_u64;
         for frame in 0..DRIVER_WARMUP_FRAMES {
             last_submission = Some(submit(&mut self.host));
             if (frame + 1) % 64 == 0 {
@@ -590,6 +592,17 @@ impl ActiveRetainedHost {
                         timeout: Some(Duration::from_secs(5)),
                     });
                 }
+            }
+            if (frame + 1) % 256 == 0 {
+                rss_warmup_peak_bytes =
+                    rss_warmup_peak_bytes.max(current_process_rss_bytes().unwrap_or(0));
+                gpu_warmup_peak_bytes = gpu_warmup_peak_bytes.max(
+                    self.host
+                        .metrics
+                        .gpu_accounting_snapshot()
+                        .current
+                        .total_bytes,
+                );
             }
         }
         if let Some(submission) = last_submission.take() {
@@ -605,6 +618,8 @@ impl ActiveRetainedHost {
             .gpu_accounting_snapshot()
             .current
             .total_bytes;
+        rss_warmup_peak_bytes = rss_warmup_peak_bytes.max(rss_warmup_bytes);
+        gpu_warmup_peak_bytes = gpu_warmup_peak_bytes.max(gpu_warmup_bytes);
         let mut rss_peak_bytes = rss_warmup_bytes;
         let mut gpu_peak_bytes = gpu_warmup_bytes;
         for frame in 0..frames {
@@ -646,9 +661,11 @@ impl ActiveRetainedHost {
                 cadence_ms: CADENCE_MS,
                 virtual_elapsed_ms: frames.saturating_mul(CADENCE_MS),
                 rss_warmup_bytes,
+                rss_warmup_peak_bytes,
                 rss_final_bytes,
                 rss_peak_bytes: rss_peak_bytes.max(rss_final_bytes),
                 gpu_warmup_bytes,
+                gpu_warmup_peak_bytes,
                 gpu_final_bytes,
                 gpu_peak_bytes: gpu_peak_bytes.max(gpu_final_bytes),
             });
