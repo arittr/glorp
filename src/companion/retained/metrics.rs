@@ -290,7 +290,7 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub encode_us: Percentiles,
     pub queue_wait_us: Percentiles,
     pub compile_us: Percentiles,
-    pub activation_us: Percentiles,
+    pub activation_render_owner_us: Percentiles,
     pub generation_count: u64,
     pub coalesced_updates: u64,
     pub cancellations: u64,
@@ -330,7 +330,7 @@ pub(crate) struct CompanionRuntimeMetrics {
     encode_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     queue_wait_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     compile_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
-    activation_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    activation_render_owner_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     generation_count: u64,
     coalesced_updates: u64,
     cancellations: u64,
@@ -376,7 +376,7 @@ impl Default for CompanionRuntimeMetrics {
             encode_us: FixedSamples::default(),
             queue_wait_us: FixedSamples::default(),
             compile_us: FixedSamples::default(),
-            activation_us: FixedSamples::default(),
+            activation_render_owner_us: FixedSamples::default(),
             generation_count: 0,
             coalesced_updates: 0,
             cancellations: 0,
@@ -488,8 +488,8 @@ impl CompanionRuntimeMetrics {
         increment(&mut self.generation_count, 1);
     }
 
-    pub(crate) fn record_activation_us(&mut self, value: u32) {
-        self.activation_us.push(value);
+    pub(crate) fn record_activation_render_owner_us(&mut self, value: u32) {
+        self.activation_render_owner_us.push(value);
     }
 
     pub(crate) fn record_queue_write(&mut self, bytes: u64) {
@@ -641,7 +641,7 @@ impl CompanionRuntimeMetrics {
             encode_us: Percentiles::from_samples(&self.encode_us),
             queue_wait_us: Percentiles::from_samples(&self.queue_wait_us),
             compile_us: Percentiles::from_samples(&self.compile_us),
-            activation_us: Percentiles::from_samples(&self.activation_us),
+            activation_render_owner_us: Percentiles::from_samples(&self.activation_render_owner_us),
             generation_count: self.generation_count,
             coalesced_updates: self.coalesced_updates,
             cancellations: self.cancellations,

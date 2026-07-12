@@ -137,6 +137,7 @@ fn activation_finishes_on_first_successful_present_not_frame_zero() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/retained.rs");
     let text = read(&path);
     assert!(text.contains("activation_render_owner_us"));
+    assert!(text.contains("activation_excluded_appkit_us"));
     assert!(text.contains("!self.activation_recorded"));
     assert!(text.contains("progress.disposition() == Some(FrameDisposition::SurfacePresentCalled)"));
     assert!(!text.contains("(self.frame_counter == 0).then(Instant::now)"));

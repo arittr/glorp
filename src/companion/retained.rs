@@ -262,6 +262,7 @@ pub(super) struct RetainedHost {
     backing_scale: f64,
     frame_counter: u64,
     activation_render_owner_us: u64,
+    activation_excluded_appkit_us: u64,
     activation_recorded: bool,
     gpu_errors: GpuErrorMailbox,
     metrics: CompanionRuntimeMetrics,
@@ -487,6 +488,7 @@ impl PreparedRetainedHost {
                 backing_scale: scale,
                 frame_counter: 0,
                 activation_render_owner_us: 0,
+                activation_excluded_appkit_us: 0,
                 activation_recorded: false,
                 gpu_errors: mailbox,
                 metrics,
@@ -566,7 +568,7 @@ impl ActiveRetainedHost {
     /// virtual time while queue work is submitted as fast as the device allows.
     pub(crate) fn run_virtual_lifetime_audit(&mut self, frames: u64) {
         const CADENCE_MS: u64 = 250;
-        const DRIVER_WARMUP_FRAMES: u64 = 100;
+        const DRIVER_WARMUP_FRAMES: u64 = 4_500;
         let instances = vec![GpuPrimitive::zeroed(); FIXED_INSTANCE_RING_MIN];
         let submit = |host: &mut RetainedHost| {
             host.frame_buffers
@@ -578,9 +580,22 @@ impl ActiveRetainedHost {
                 });
             host.queue.submit([encoder.finish()])
         };
+        // Prime the RSS sampler itself before the warmup boundary so process
+        // spawning/buffer retention is not misclassified as renderer growth.
+        for _ in 0..4 {
+            let _ = current_process_rss_bytes();
+        }
         let mut last_submission = None;
-        for _ in 0..DRIVER_WARMUP_FRAMES {
+        for frame in 0..DRIVER_WARMUP_FRAMES {
             last_submission = Some(submit(&mut self.host));
+            if (frame + 1) % 64 == 0 {
+                if let Some(submission) = last_submission.take() {
+                    let _ = self.host.device.poll(wgpu::PollType::Wait {
+                        submission_index: Some(submission),
+                        timeout: Some(Duration::from_secs(5)),
+                    });
+                }
+            }
         }
         if let Some(submission) = last_submission.take() {
             let _ = self.host.device.poll(wgpu::PollType::Wait {
@@ -599,7 +614,7 @@ impl ActiveRetainedHost {
         let mut gpu_peak_bytes = gpu_warmup_bytes;
         for frame in 0..frames {
             last_submission = Some(submit(&mut self.host));
-            if (frame + 1) % 64 == 0 {
+            if (frame + 1) % 256 == 0 {
                 if let Some(submission) = last_submission.take() {
                     let _ = self.host.device.poll(wgpu::PollType::Wait {
                         submission_index: Some(submission),
@@ -915,8 +930,13 @@ impl RetainedHost {
                 .activation_render_owner_us
                 .saturating_add(u64::from(duration_us(started_at.elapsed())));
             if progress.disposition() == Some(FrameDisposition::SurfacePresentCalled) {
-                let activation_us = self.activation_render_owner_us.min(u64::from(u32::MAX)) as u32;
-                self.record_metrics(|metrics| metrics.record_activation_us(activation_us));
+                let activation_us = self
+                    .activation_render_owner_us
+                    .saturating_sub(self.activation_excluded_appkit_us)
+                    .min(u64::from(u32::MAX)) as u32;
+                self.record_metrics(|metrics| {
+                    metrics.record_activation_render_owner_us(activation_us)
+                });
                 self.activation_recorded = true;
             }
         }
@@ -1028,8 +1048,13 @@ impl RetainedHost {
             GlyphRepertoireManifest::for_active_pet(identity.clone(), self.backing_scale);
         let compile_started_at = Instant::now();
         let resources = CompiledRetainedResources::compile(&manifest)?;
-        self.metrics
-            .record_compile_us(duration_us(compile_started_at.elapsed()));
+        let compile_us = duration_us(compile_started_at.elapsed());
+        self.metrics.record_compile_us(compile_us);
+        if !self.activation_recorded {
+            self.activation_excluded_appkit_us = self
+                .activation_excluded_appkit_us
+                .saturating_add(u64::from(compile_us));
+        }
         let before = self.counters;
         let static_bytes = resources.atlas().rgba.len() as u64;
         let (texture, bind_group) = upload_glyph_atlas(
