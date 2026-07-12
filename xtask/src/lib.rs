@@ -663,13 +663,16 @@ struct BaselineSourceIdentity {
     tracked_tree_state: String,
 }
 
+const APPKIT_RASTER_DIAGNOSTIC_CAPACITY: u64 = 256;
+const APPKIT_RASTER_DIAGNOSTIC_TABLE_HEADER: &str = "| Retained sample | Start cursor | End cursor | Items completed | Elapsed (us) | Setup (us) | Max item (us) | Max item repertoire index |\n|---:|---:|---:|---:|---:|---:|---:|---:|";
+
 fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String> {
     if snapshot
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
-        != Some(3)
+        != Some(4)
     {
-        return Err("runtime metrics snapshot schema_version is not 3".to_string());
+        return Err("runtime metrics snapshot schema_version is not 4".to_string());
     }
     for metric in [
         "ui_tick_us",
@@ -776,6 +779,14 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
     ] {
         snapshot_u64(snapshot, &[field])?;
     }
+    let diagnostic_capacity = snapshot_u64(snapshot, &["appkit_raster_diagnostic_capacity"])?;
+    let slice_count = snapshot_u64(snapshot, &["appkit_raster_slice_count"])?;
+    let diagnostics = snapshot
+        .get("appkit_raster_slice_diagnostics")
+        .ok_or_else(|| {
+            "runtime metrics snapshot missing appkit_raster_slice_diagnostics".to_string()
+        })?;
+    validate_appkit_raster_diagnostics(diagnostics, diagnostic_capacity, slice_count)?;
     let gpu_accounting = snapshot
         .get("gpu_accounting")
         .ok_or_else(|| "runtime metrics snapshot missing gpu_accounting".to_string())?;
@@ -813,6 +824,126 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
         value_u64(lifetime, field)?;
     }
     Ok(())
+}
+
+fn validate_appkit_raster_diagnostics(
+    diagnostics: &serde_json::Value,
+    capacity: u64,
+    slice_count: u64,
+) -> Result<(), String> {
+    let diagnostics = diagnostics
+        .as_array()
+        .ok_or_else(|| "appkit_raster_slice_diagnostics is not an array".to_string())?;
+    if capacity != APPKIT_RASTER_DIAGNOSTIC_CAPACITY {
+        return Err(format!(
+            "appkit_raster_diagnostic_capacity is {capacity}, expected {APPKIT_RASTER_DIAGNOSTIC_CAPACITY}"
+        ));
+    }
+    let expected_samples = slice_count.min(APPKIT_RASTER_DIAGNOSTIC_CAPACITY);
+    if diagnostics.len() as u64 != expected_samples {
+        return Err(format!(
+            "appkit_raster_slice_diagnostics has {} samples, expected {expected_samples} for {slice_count} slices",
+            diagnostics.len()
+        ));
+    }
+    let allowed_fields = [
+        "start_cursor",
+        "end_cursor",
+        "items_completed",
+        "elapsed_us",
+        "setup_us",
+        "max_item_us",
+        "max_item_index",
+    ];
+    for (sample_index, diagnostic) in diagnostics.iter().enumerate() {
+        let object = diagnostic.as_object().ok_or_else(|| {
+            format!("appkit_raster_slice_diagnostics[{sample_index}] is not an object")
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|field| !allowed_fields.contains(&field.as_str()))
+        {
+            return Err(format!(
+                "appkit_raster_slice_diagnostics[{sample_index}] contains unsupported field {field}"
+            ));
+        }
+        let start_cursor = value_u64(diagnostic, "start_cursor")?;
+        let end_cursor = value_u64(diagnostic, "end_cursor")?;
+        let items_completed = value_u64(diagnostic, "items_completed")?;
+        let elapsed_us = value_u64(diagnostic, "elapsed_us")?;
+        let setup_us = value_u64(diagnostic, "setup_us")?;
+        let max_item_us = value_u64(diagnostic, "max_item_us")?;
+        if end_cursor < start_cursor {
+            return Err(format!(
+                "appkit_raster_slice_diagnostics[{sample_index}] end_cursor precedes start_cursor"
+            ));
+        }
+        if items_completed != end_cursor - start_cursor {
+            return Err(format!(
+                "appkit_raster_slice_diagnostics[{sample_index}] items_completed does not match its cursor range"
+            ));
+        }
+        if setup_us > elapsed_us || max_item_us > elapsed_us {
+            return Err(format!(
+                "appkit_raster_slice_diagnostics[{sample_index}] component timing exceeds elapsed_us"
+            ));
+        }
+        match diagnostic.get("max_item_index") {
+            Some(value) if items_completed == 0 && value.is_null() && max_item_us == 0 => {}
+            Some(_) if items_completed == 0 => {
+                return Err(format!(
+                    "appkit_raster_slice_diagnostics[{sample_index}] empty slice has max-item data"
+                ));
+            }
+            Some(value) => {
+                let item_index = value.as_u64().ok_or_else(|| {
+                    format!(
+                        "appkit_raster_slice_diagnostics[{sample_index}].max_item_index is not an unsigned integer or null"
+                    )
+                })?;
+                if item_index < start_cursor || item_index >= end_cursor {
+                    return Err(format!(
+                        "appkit_raster_slice_diagnostics[{sample_index}].max_item_index is outside the completed cursor range"
+                    ));
+                }
+            }
+            None => {
+                return Err(format!(
+                    "appkit_raster_slice_diagnostics[{sample_index}] missing max_item_index"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn format_appkit_raster_diagnostic_rows(diagnostics: &serde_json::Value) -> Result<String, String> {
+    let diagnostics = diagnostics
+        .as_array()
+        .ok_or_else(|| "appkit_raster_slice_diagnostics is not an array".to_string())?;
+    if diagnostics.is_empty() {
+        return Ok("| — | — | — | — | — | — | — | — |".to_string());
+    }
+    diagnostics
+        .iter()
+        .enumerate()
+        .map(|(slice_index, diagnostic)| {
+            let start_cursor = value_u64(diagnostic, "start_cursor")?;
+            let end_cursor = value_u64(diagnostic, "end_cursor")?;
+            let max_item_index = diagnostic
+                .get("max_item_index")
+                .and_then(serde_json::Value::as_u64)
+                .map_or_else(|| "—".to_string(), |value| value.to_string());
+            Ok(format!(
+                "| {slice_index} | {start_cursor} | {end_cursor} | {} | {} | {} | {} | {max_item_index} |",
+                value_u64(diagnostic, "items_completed")?,
+                value_u64(diagnostic, "elapsed_us")?,
+                value_u64(diagnostic, "setup_us")?,
+                value_u64(diagnostic, "max_item_us")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map(|rows| rows.join("\n"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1091,6 +1222,14 @@ fn render_scene_baseline_report(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let appkit_diagnostic_rows = format_appkit_raster_diagnostic_rows(
+        snapshot
+            .get("appkit_raster_slice_diagnostics")
+            .ok_or_else(|| {
+                "runtime snapshot missing appkit_raster_slice_diagnostics".to_string()
+            })?,
+    )?;
+    let appkit_diagnostic_header = APPKIT_RASTER_DIAGNOSTIC_TABLE_HEADER;
     let capacity_rows = [
         ("Prepared legacy GPU primitives", "max_prepared_gpu_primitives", "observed by compiling every production-prepared matrix frame through the retained GPU translator"),
         ("Nodes", "max_nodes", "Task 2 scene nodes unavailable; versioned contract reservation"),
@@ -1159,6 +1298,10 @@ Lifetime segment: {} warmup + {} measured real prepared/encoded GPU frames at {}
 prepared {}, encoded {}, semantic changes {}, GPU hash changes {}, draws {}, polls {}; \
 RSS warmup-end/warmup-high-water/final/peak {}/{}/{}/{}, accounted GPU warmup-end/warmup-high-water/final/peak {}/{}/{}/{}.\n\n\
 AppKit preparation slices/deadline misses/coalesces/cancellations: {}/{}/{}/{}.\n\n\
+## AppKit raster slice diagnostics\n\n\
+{appkit_diagnostic_header}\n\
+{appkit_diagnostic_rows}\n\n\
+Diagnostics contain repertoire indices and timings only; glyph content is neither recorded nor serialized. Setup time is measured before raster advance, while max-item time covers the complete non-preemptible raster item (native call plus atlas insertion).\n\n\
 ## Structured gate results\n\n\
 | Gate | Status | Measured | Limit | Disposition |\n\
 |---|---|---|---|---|\n\
@@ -2128,6 +2271,55 @@ mod tests {
                 "target/glorp-review/scene-baseline".to_string(),
             ]
         }));
+    }
+
+    #[test]
+    fn appkit_raster_diagnostics_validate_and_render_for_review() {
+        assert!(APPKIT_RASTER_DIAGNOSTIC_TABLE_HEADER.starts_with("| Retained sample |"));
+        let diagnostics = serde_json::json!([
+            {
+                "start_cursor": 0,
+                "end_cursor": 2,
+                "items_completed": 2,
+                "elapsed_us": 3_100,
+                "setup_us": 100,
+                "max_item_us": 2_900,
+                "max_item_index": 1
+            },
+            {
+                "start_cursor": 2,
+                "end_cursor": 2,
+                "items_completed": 0,
+                "elapsed_us": 80,
+                "setup_us": 80,
+                "max_item_us": 0,
+                "max_item_index": null
+            }
+        ]);
+
+        assert!(validate_appkit_raster_diagnostics(&diagnostics, 256, 2).is_ok());
+        assert!(validate_appkit_raster_diagnostics(&diagnostics, 255, 2).is_err());
+        assert!(validate_appkit_raster_diagnostics(&serde_json::json!([]), 256, 1).is_err());
+        assert!(validate_appkit_raster_diagnostics(&diagnostics, 256, 3).is_err());
+        let rows = format_appkit_raster_diagnostic_rows(&diagnostics).unwrap();
+        assert!(rows.contains("| 0 | 0 | 2 | 2 | 3100 | 100 | 2900 | 1 |"));
+        assert!(rows.contains("| 1 | 2 | 2 | 0 | 80 | 80 | 0 | — |"));
+
+        let mut invalid = diagnostics.clone();
+        invalid[0].as_object_mut().unwrap().remove("max_item_us");
+        assert!(validate_appkit_raster_diagnostics(&invalid, 256, 2).is_err());
+
+        let mut setup_after_slice = diagnostics.clone();
+        setup_after_slice[0]["setup_us"] = serde_json::json!(3_101);
+        assert!(validate_appkit_raster_diagnostics(&setup_after_slice, 256, 2).is_err());
+
+        let mut item_longer_than_slice = diagnostics.clone();
+        item_longer_than_slice[0]["max_item_us"] = serde_json::json!(3_101);
+        assert!(validate_appkit_raster_diagnostics(&item_longer_than_slice, 256, 2).is_err());
+
+        let mut empty_with_item_time = diagnostics;
+        empty_with_item_time[1]["max_item_us"] = serde_json::json!(1);
+        assert!(validate_appkit_raster_diagnostics(&empty_with_item_time, 256, 2).is_err());
     }
 
     #[test]

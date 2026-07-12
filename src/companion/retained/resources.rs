@@ -25,10 +25,14 @@ use crate::round::smooth::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RasterSliceProgress {
+    pub(super) start_cursor: usize,
+    pub(super) end_cursor: usize,
     pub(super) completed_items: usize,
     pub(super) complete: bool,
     pub(super) deadline_missed: bool,
     pub(super) elapsed: Duration,
+    pub(super) max_item_elapsed: Duration,
+    pub(super) max_item_index: Option<usize>,
 }
 
 fn run_resumable_slice<E>(
@@ -36,24 +40,36 @@ fn run_resumable_slice<E>(
     item_count: usize,
     budget: Duration,
     mut elapsed: impl FnMut() -> Duration,
-    mut work: impl FnMut(usize) -> Result<(), E>,
+    mut work: impl FnMut(usize) -> Result<Duration, E>,
 ) -> Result<RasterSliceProgress, E> {
+    let start_cursor = *cursor;
     let mut completed_items = 0;
+    let mut max_item_elapsed = Duration::ZERO;
+    let mut max_item_index = None;
     let mut observed_elapsed = elapsed();
     while *cursor < item_count && observed_elapsed < budget {
-        work(*cursor)?;
+        let index = *cursor;
+        let item_elapsed = work(index)?;
         *cursor += 1;
         completed_items += 1;
         observed_elapsed = elapsed();
+        if max_item_index.is_none() || item_elapsed > max_item_elapsed {
+            max_item_elapsed = item_elapsed;
+            max_item_index = Some(index);
+        }
         if observed_elapsed >= budget {
             break;
         }
     }
     Ok(RasterSliceProgress {
+        start_cursor,
+        end_cursor: *cursor,
         completed_items,
         complete: *cursor == item_count,
         deadline_missed: completed_items > 0 && observed_elapsed > budget,
         elapsed: observed_elapsed,
+        max_item_elapsed,
+        max_item_index,
     })
 }
 
@@ -632,6 +648,7 @@ impl GlyphAtlasPreparation {
             budget,
             || started_at.elapsed(),
             |index| {
+                let item_started_at = std::time::Instant::now();
                 let key = &glyphs[index];
                 let slot_x = index as u32 % ATLAS_COLUMNS;
                 let slot_y = index as u32 / ATLAS_COLUMNS;
@@ -651,7 +668,8 @@ impl GlyphAtlasPreparation {
                     slot_y * target.cell,
                 )?;
                 atlas.entries.insert(key.clone(), entry);
-                Ok(())
+                let item_elapsed = item_started_at.elapsed();
+                Ok(item_elapsed)
             },
         )
     }
@@ -1168,7 +1186,7 @@ mod glyph_tests {
             || times.next().expect("clock sample"),
             |index| {
                 visited.push(index);
-                Ok::<_, ()>(())
+                Ok::<_, ()>(std::time::Duration::ZERO)
             },
         )
         .unwrap();
@@ -1191,7 +1209,7 @@ mod glyph_tests {
             || times.next().expect("clock sample"),
             |index| {
                 visited.push(index);
-                Ok::<_, ()>(())
+                Ok::<_, ()>(std::time::Duration::ZERO)
             },
         )
         .unwrap();
@@ -1218,7 +1236,7 @@ mod glyph_tests {
             || times.next().expect("clock sample"),
             |index| {
                 visited.push(index);
-                Ok::<_, ()>(())
+                Ok::<_, ()>(std::time::Duration::from_micros(4_001))
             },
         )
         .unwrap();
@@ -1227,6 +1245,39 @@ mod glyph_tests {
         assert_eq!(slice.completed_items, 1);
         assert!(!slice.complete);
         assert!(slice.deadline_missed);
+    }
+
+    #[test]
+    fn raster_slice_reports_cursor_range_and_actual_item_time() {
+        let mut cursor = 0;
+        let mut lane_times = [
+            std::time::Duration::from_micros(100),
+            std::time::Duration::from_micros(1_200),
+            std::time::Duration::from_micros(2_000),
+        ]
+        .into_iter();
+        let item_times = [
+            std::time::Duration::from_micros(900),
+            std::time::Duration::from_micros(500),
+        ];
+
+        let slice = run_resumable_slice(
+            &mut cursor,
+            2,
+            std::time::Duration::from_micros(4_000),
+            || lane_times.next().expect("lane clock sample"),
+            |index| Ok::<_, ()>(item_times[index]),
+        )
+        .unwrap();
+
+        assert_eq!(slice.start_cursor, 0);
+        assert_eq!(slice.end_cursor, 2);
+        assert_eq!(
+            slice.max_item_elapsed,
+            std::time::Duration::from_micros(900)
+        );
+        assert_eq!(slice.max_item_index, Some(0));
+        assert_eq!(slice.elapsed, std::time::Duration::from_micros(2_000));
     }
 
     #[test]

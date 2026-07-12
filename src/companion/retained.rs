@@ -32,9 +32,9 @@ mod resources;
 
 pub(crate) use capture::CanonicalRgbaFrame;
 pub(crate) use metrics::{
-    duration_us, CapacityContract, CompanionCapacityInventory, CompanionRuntimeMetrics,
-    CompanionRuntimeMetricsSnapshot, GpuAllocationKind, LifetimeAuditSnapshot,
-    RuntimeFixtureIdentity, RuntimeIdentity, RuntimeWorkCounters,
+    duration_us, AppkitRasterSliceDiagnostic, CapacityContract, CompanionCapacityInventory,
+    CompanionRuntimeMetrics, CompanionRuntimeMetricsSnapshot, GpuAllocationKind,
+    LifetimeAuditSnapshot, RuntimeFixtureIdentity, RuntimeIdentity, RuntimeWorkCounters,
 };
 pub(crate) use presentation::{
     FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox, RetainedFailureCategory,
@@ -1541,6 +1541,18 @@ impl RetainedHost {
         pending.active_raster_us = pending.active_raster_us.saturating_add(u64::from(slice_us));
         self.metrics
             .record_appkit_raster_slice_us(slice_us, deadline_missed);
+        self.metrics
+            .record_appkit_raster_slice_diagnostic(AppkitRasterSliceDiagnostic {
+                start_cursor: u32::try_from(progress.start_cursor).unwrap_or(u32::MAX),
+                end_cursor: u32::try_from(progress.end_cursor).unwrap_or(u32::MAX),
+                items_completed: u32::try_from(progress.completed_items).unwrap_or(u32::MAX),
+                elapsed_us: slice_us,
+                setup_us: duration_us(before_raster),
+                max_item_us: duration_us(progress.max_item_elapsed),
+                max_item_index: progress
+                    .max_item_index
+                    .map(|index| u32::try_from(index).unwrap_or(u32::MAX)),
+            });
         if progress.complete {
             pending.cpu_complete = true;
             let active_us = pending.active_raster_us.min(u64::from(u32::MAX)) as u32;

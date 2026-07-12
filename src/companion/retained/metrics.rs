@@ -8,6 +8,7 @@ use crate::presentation::companion_scene::scene::{
 };
 
 pub(crate) const METRIC_SAMPLE_CAPACITY: usize = 4_096;
+pub(crate) const APPKIT_RASTER_DIAGNOSTIC_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub(crate) struct FixedSamples<const N: usize> {
@@ -48,6 +49,57 @@ impl<const N: usize> FixedSamples<N> {
 
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct AppkitRasterSliceDiagnostic {
+    pub start_cursor: u32,
+    pub end_cursor: u32,
+    pub items_completed: u32,
+    pub elapsed_us: u32,
+    pub setup_us: u32,
+    pub max_item_us: u32,
+    pub max_item_index: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct FixedAppkitRasterDiagnostics<const N: usize> {
+    values: [AppkitRasterSliceDiagnostic; N],
+    len: usize,
+    next: usize,
+}
+
+impl<const N: usize> Default for FixedAppkitRasterDiagnostics<N> {
+    fn default() -> Self {
+        assert!(
+            N > 0,
+            "FixedAppkitRasterDiagnostics requires non-zero capacity"
+        );
+        Self {
+            values: [AppkitRasterSliceDiagnostic::default(); N],
+            len: 0,
+            next: 0,
+        }
+    }
+}
+
+impl<const N: usize> FixedAppkitRasterDiagnostics<N> {
+    fn push(&mut self, value: AppkitRasterSliceDiagnostic) {
+        self.values[self.next] = value;
+        self.next = (self.next + 1) % N;
+        self.len = self.len.saturating_add(1).min(N);
+    }
+
+    fn chronological_values(&self) -> Vec<AppkitRasterSliceDiagnostic> {
+        if self.len < N {
+            return self.values[..self.len].to_vec();
+        }
+        self.values[self.next..]
+            .iter()
+            .chain(self.values[..self.next].iter())
+            .copied()
+            .collect()
     }
 }
 
@@ -361,6 +413,8 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub appkit_raster_deadline_misses: u64,
     pub appkit_raster_coalesces: u64,
     pub appkit_raster_cancellations: u64,
+    pub appkit_raster_diagnostic_capacity: usize,
+    pub appkit_raster_slice_diagnostics: Vec<AppkitRasterSliceDiagnostic>,
     pub activation_render_owner_us: Percentiles,
     pub generation_count: u64,
     pub coalesced_updates: u64,
@@ -410,6 +464,8 @@ pub(crate) struct CompanionRuntimeMetrics {
     appkit_raster_deadline_misses: u64,
     appkit_raster_coalesces: u64,
     appkit_raster_cancellations: u64,
+    appkit_raster_slice_diagnostics:
+        FixedAppkitRasterDiagnostics<APPKIT_RASTER_DIAGNOSTIC_CAPACITY>,
     activation_render_owner_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     generation_count: u64,
     coalesced_updates: u64,
@@ -469,6 +525,7 @@ impl Default for CompanionRuntimeMetrics {
             appkit_raster_deadline_misses: 0,
             appkit_raster_coalesces: 0,
             appkit_raster_cancellations: 0,
+            appkit_raster_slice_diagnostics: FixedAppkitRasterDiagnostics::default(),
             activation_render_owner_us: FixedSamples::default(),
             generation_count: 0,
             coalesced_updates: 0,
@@ -611,6 +668,13 @@ impl CompanionRuntimeMetrics {
 
     pub(crate) fn record_appkit_raster_cancellation(&mut self) {
         increment(&mut self.appkit_raster_cancellations, 1);
+    }
+
+    pub(crate) fn record_appkit_raster_slice_diagnostic(
+        &mut self,
+        diagnostic: AppkitRasterSliceDiagnostic,
+    ) {
+        self.appkit_raster_slice_diagnostics.push(diagnostic);
     }
 
     pub(crate) fn record_activation_render_owner_us(&mut self, value: u32) {
@@ -804,7 +868,7 @@ impl CompanionRuntimeMetrics {
         fixture: RuntimeFixtureIdentity,
     ) -> CompanionRuntimeMetricsSnapshot {
         CompanionRuntimeMetricsSnapshot {
-            schema_version: 3,
+            schema_version: 4,
             identity,
             fixture,
             sample_capacity: METRIC_SAMPLE_CAPACITY,
@@ -824,6 +888,10 @@ impl CompanionRuntimeMetrics {
             appkit_raster_deadline_misses: self.appkit_raster_deadline_misses,
             appkit_raster_coalesces: self.appkit_raster_coalesces,
             appkit_raster_cancellations: self.appkit_raster_cancellations,
+            appkit_raster_diagnostic_capacity: APPKIT_RASTER_DIAGNOSTIC_CAPACITY,
+            appkit_raster_slice_diagnostics: self
+                .appkit_raster_slice_diagnostics
+                .chronological_values(),
             activation_render_owner_us: Percentiles::from_samples(&self.activation_render_owner_us),
             generation_count: self.generation_count,
             coalesced_updates: self.coalesced_updates,
@@ -1003,7 +1071,7 @@ mod tests {
                 backing_scale: 2.0,
             },
         );
-        assert_eq!(snapshot.schema_version, 3);
+        assert_eq!(snapshot.schema_version, 4);
         assert_eq!(snapshot.ui_tick_us.p95, Some(1_500));
         assert_eq!(snapshot.state_prepare_us.p95, Some(900));
         assert_eq!(snapshot.gpu_translate_us.p95, Some(300));
@@ -1020,6 +1088,60 @@ mod tests {
         assert_eq!(snapshot.identity.layout_generation, None);
         assert_eq!(snapshot.identity.semantic_revision, None);
         assert_eq!(snapshot.identity.frame_revision, None);
+    }
+
+    #[test]
+    fn appkit_raster_diagnostics_are_bounded_and_privacy_safe() {
+        let mut metrics = CompanionRuntimeMetrics::default();
+        for index in 0..=APPKIT_RASTER_DIAGNOSTIC_CAPACITY {
+            metrics.record_appkit_raster_slice_diagnostic(AppkitRasterSliceDiagnostic {
+                start_cursor: index as u32,
+                end_cursor: index as u32 + 1,
+                items_completed: 1,
+                elapsed_us: 1_200,
+                setup_us: 100,
+                max_item_us: 900,
+                max_item_index: Some(index as u32),
+            });
+        }
+
+        let snapshot = metrics.snapshot(
+            RuntimeIdentity::baseline(),
+            CompanionCapacityInventory::contract_fixture(),
+            RuntimeFixtureIdentity {
+                fixture_id: "test",
+                seed: "test",
+                update_source: "fixed",
+                cadence_ms: 250,
+                logical_width: 360.0,
+                logical_height: 360.0,
+                physical_width: 720,
+                physical_height: 720,
+                backing_scale: 2.0,
+            },
+        );
+
+        assert_eq!(snapshot.schema_version, 4);
+        assert_eq!(snapshot.appkit_raster_diagnostic_capacity, 256);
+        assert_eq!(snapshot.appkit_raster_slice_diagnostics.len(), 256);
+        assert_eq!(snapshot.appkit_raster_slice_diagnostics[0].start_cursor, 1);
+        assert_eq!(
+            snapshot.appkit_raster_slice_diagnostics[255].start_cursor,
+            256
+        );
+        assert_eq!(
+            snapshot.appkit_raster_slice_diagnostics[255].items_completed,
+            1
+        );
+        assert_eq!(
+            snapshot.appkit_raster_slice_diagnostics[255].elapsed_us,
+            1_200
+        );
+        let json = serde_json::to_value(&snapshot.appkit_raster_slice_diagnostics).unwrap();
+        let text = json.to_string();
+        assert!(!text.contains("glyph"));
+        assert!(!text.contains("sequence"));
+        assert!(!text.contains("character"));
     }
 
     #[test]
