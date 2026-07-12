@@ -820,6 +820,7 @@ pub(crate) enum RuntimeDisposition {
     Activation(ActivationTransition),
     HiddenCoalesced,
     Revealed,
+    SurfaceRebound(SurfaceEpoch),
     Shutdown,
     DroppedStale,
 }
@@ -963,6 +964,11 @@ pub(crate) enum RecoveryRequirement {
 pub(crate) enum RecoveryState {
     Operational,
     FallbackPending(RecoveryRequirement),
+    AwaitingRetry {
+        requirement: RecoveryRequirement,
+        device: DeviceEpoch,
+        surface: SurfaceEpoch,
+    },
     Recovering {
         requirement: RecoveryRequirement,
         device: DeviceEpoch,
@@ -1134,6 +1140,11 @@ impl CompanionSceneRuntimeState {
         self.pending
             .as_ref()
             .map(|pending| &pending.desired_snapshot)
+    }
+
+    fn pending_identity_after_generation(&self) -> RequestIdentity {
+        self.pending_request_identity()
+            .expect("resource invalidation always queues one generation")
     }
 
     fn ensure_running(&self) -> Result<(), RuntimeError> {
@@ -1501,7 +1512,10 @@ impl CompanionSceneRuntimeState {
         if self.visibility == RuntimeVisibility::Hidden {
             return Err(ActivationStartError::Hidden);
         }
-        if matches!(self.recovery, RecoveryState::FallbackPending(_)) {
+        if matches!(
+            self.recovery,
+            RecoveryState::FallbackPending(_) | RecoveryState::AwaitingRetry { .. }
+        ) {
             return Err(ActivationStartError::SurfaceUnavailable);
         }
         let pending = self
@@ -1661,8 +1675,10 @@ impl CompanionSceneRuntimeState {
                 let dropped = candidate.request_id;
                 self.pending = None;
                 effects.drop_candidate = Some(DropCandidate { request_id: dropped });
-                if let RecoveryState::Recovering { requirement, .. } = self.recovery {
-                    self.recovery = RecoveryState::FallbackPending(requirement);
+                if let RecoveryState::Recovering { requirement, device, surface, .. } =
+                    self.recovery
+                {
+                    self.recovery = RecoveryState::AwaitingRetry { requirement, device, surface };
                 }
                 ActivationTransition::CandidateDestroyedRetainingActive
             }
@@ -1699,6 +1715,7 @@ impl CompanionSceneRuntimeState {
                                 && request == candidate.request_id
                         }
                         RecoveryState::FallbackPending(_) => false,
+                        RecoveryState::AwaitingRetry { .. } => false,
                     } =>
             {
                 self.active = Some(ActiveGeneration {
@@ -1747,9 +1764,7 @@ impl CompanionSceneRuntimeState {
                 *commit_eligible = false;
             }
         }
-        let identity = self
-            .pending_request_identity()
-            .ok_or(RuntimeError::RecoveryActionRejected)?;
+        let identity = self.pending_identity_after_generation();
         self.recovery = RecoveryState::Recovering {
             requirement,
             device: identity.key.device,
@@ -1757,6 +1772,29 @@ impl CompanionSceneRuntimeState {
             request: identity.request_id,
         };
         Ok(effects)
+    }
+
+    pub(crate) fn acknowledge_operational_surface_rebound(
+        &mut self,
+    ) -> Result<RuntimeEffects, RuntimeError> {
+        self.ensure_running()?;
+        if self.recovery != RecoveryState::Operational {
+            return Err(RuntimeError::RecoveryActionRejected);
+        }
+        let next = SurfaceEpoch(increment(self.surface_epoch.0, CounterKind::SurfaceEpoch)?);
+        self.surface_epoch = next;
+        if let Some(active) = &mut self.active {
+            active.version.surface = next;
+        }
+        if let Some(pending) = &mut self.pending {
+            pending.desired_surface = next;
+            if let PendingPhase::Activating { commit_eligible, .. } = &mut pending.phase {
+                *commit_eligible = false;
+            }
+        }
+        Ok(RuntimeEffects::new(RuntimeDisposition::SurfaceRebound(
+            next,
+        )))
     }
 
     pub(crate) fn acknowledge_device_recreated(&mut self) -> Result<RuntimeEffects, RuntimeError> {
@@ -1773,13 +1811,47 @@ impl CompanionSceneRuntimeState {
         self.device_epoch = next;
         self.active = None;
         let effects = self.invalidate_resource_mask(ResourceChangeMask::DEVICE_RECOVERY)?;
-        let identity = self
-            .pending_request_identity()
-            .ok_or(RuntimeError::RecoveryActionRejected)?;
+        let identity = self.pending_identity_after_generation();
         self.recovery = RecoveryState::Recovering {
             requirement,
             device: identity.key.device,
             surface: identity.surface,
+            request: identity.request_id,
+        };
+        Ok(effects)
+    }
+
+    pub(crate) fn retry_recovery(&mut self) -> Result<RuntimeEffects, RuntimeError> {
+        self.ensure_running()?;
+        let (requirement, device, surface) = match self.recovery {
+            RecoveryState::AwaitingRetry { requirement, device, surface }
+                if device == self.device_epoch
+                    && surface == self.surface_epoch
+                    && match requirement {
+                        RecoveryRequirement::SurfaceSuccessor { failed_device, failed_surface } => {
+                            device == failed_device && surface.0 > failed_surface.0
+                        }
+                        RecoveryRequirement::DeviceSuccessor { failed_device } => {
+                            device.0 > failed_device.0
+                        }
+                    } =>
+            {
+                (requirement, device, surface)
+            }
+            _ => return Err(RuntimeError::RecoveryActionRejected),
+        };
+        let mask = match requirement {
+            RecoveryRequirement::SurfaceSuccessor { .. } => ResourceChangeMask::SURFACE_RECOVERY,
+            RecoveryRequirement::DeviceSuccessor { .. } => ResourceChangeMask::DEVICE_RECOVERY,
+        };
+        let effects = self.invalidate_resource_mask(mask)?;
+        let identity = self.pending_identity_after_generation();
+        debug_assert_eq!(identity.key.device, device);
+        debug_assert_eq!(identity.surface, surface);
+        self.recovery = RecoveryState::Recovering {
+            requirement,
+            device,
+            surface,
             request: identity.request_id,
         };
         Ok(effects)
@@ -2613,6 +2685,89 @@ mod tests {
     }
 
     #[test]
+    fn operational_surface_rebind_relabels_only_surface_binding() {
+        let mut runtime = runtime();
+        let before = runtime.active_version().unwrap();
+        let counters = (
+            runtime.reconciler.layout_generation(),
+            runtime.resource_generation,
+            runtime.reconciler.applied_revisions(),
+            runtime.next_request_id,
+        );
+        let mut effects = runtime.acknowledge_operational_surface_rebound().unwrap();
+        let after = runtime.active_version().unwrap();
+        assert_eq!(after.surface, SurfaceEpoch(before.surface.0 + 1));
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.applied, before.applied);
+        assert_eq!(runtime.capture_lease().unwrap().version(), after);
+        assert_eq!(
+            (
+                runtime.reconciler.layout_generation(),
+                runtime.resource_generation,
+                runtime.reconciler.applied_revisions(),
+                runtime.next_request_id,
+            ),
+            counters
+        );
+        assert!(effects.take_start_worker().is_none());
+        assert!(effects.take_cancel_worker().is_none());
+        assert!(effects.take_drop_candidate().is_none());
+    }
+
+    #[test]
+    fn operational_surface_rebind_preserves_ready_candidate_for_new_surface() {
+        let mut runtime = runtime();
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        let identity = request.identity();
+        runtime.complete_candidate(request.accept(accepted_state()));
+        assert!(matches!(
+            runtime.pending.as_ref().unwrap().phase,
+            PendingPhase::Ready(_)
+        ));
+
+        let effects = runtime.acknowledge_operational_surface_rebound().unwrap();
+        assert!(effects.start_worker.is_none());
+        assert!(matches!(
+            runtime.pending.as_ref().unwrap().phase,
+            PendingPhase::Ready(_)
+        ));
+        assert_eq!(runtime.pending_request_identity(), Some(identity));
+        let attempt = runtime.begin_activation().unwrap();
+        assert_eq!(attempt.surface, SurfaceEpoch(2));
+    }
+
+    #[test]
+    fn operational_rebind_keeps_old_activation_tracked_but_commit_ineligible() {
+        for outcome in [
+            ActivationAttemptOutcome::PresentedClean { surface: SurfaceEpoch(1) },
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceValidation),
+        ] {
+            let (mut runtime, _, old_attempt) = runtime_with_activation();
+            runtime.acknowledge_operational_surface_rebound().unwrap();
+            assert!(matches!(
+                runtime.pending.as_ref().unwrap().phase,
+                PendingPhase::Activating { commit_eligible: false, .. }
+            ));
+            let before = runtime.active_version();
+            let effects = runtime.finish_activation(old_attempt, outcome);
+            assert!(matches!(
+                effects.disposition(),
+                RuntimeDisposition::DroppedStale
+                    | RuntimeDisposition::Activation(ActivationTransition::DroppedStale)
+            ));
+            assert_eq!(runtime.active_version(), before);
+            assert!(matches!(
+                runtime.pending.as_ref().unwrap().phase,
+                PendingPhase::Ready(_)
+            ));
+            let retry = runtime.begin_activation().unwrap();
+            assert_eq!(retry.surface, SurfaceEpoch(2));
+        }
+    }
+
+    #[test]
     fn prepared_snapshot_shares_arc_and_change_masks_remain_fixed_size() {
         assert_eq!(std::mem::size_of::<SnapshotChangeSet>(), 32);
         let mut runtime = runtime();
@@ -2953,6 +3108,129 @@ mod tests {
         let mut device_effects = device.acknowledge_device_recreated().unwrap();
         let device_request = device_effects.take_start_worker().unwrap();
         assert!(device_request.key().device.0 > DeviceEpoch(1).0);
+    }
+
+    fn awaiting_recovery_retry(
+        failure: EpochFailure,
+    ) -> (CompanionSceneRuntimeState, RequestIdentity) {
+        let (mut runtime, _, attempt) = runtime_with_activation();
+        runtime.finish_activation(attempt, ActivationAttemptOutcome::Fatal(failure));
+        let recovery = if matches!(
+            failure,
+            EpochFailure::SurfaceLost | EpochFailure::SurfaceValidation
+        ) {
+            take_start(runtime.acknowledge_surface_rebound().unwrap())
+        } else {
+            take_start(runtime.acknowledge_device_recreated().unwrap())
+        };
+        let identity = recovery.identity();
+        runtime.complete_candidate(recovery.accept(accepted_state()));
+        let attempt = runtime.begin_activation().unwrap();
+        let mut rejection = runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource),
+        );
+        assert!(rejection.take_start_worker().is_none());
+        assert!(rejection.take_drop_candidate().is_some());
+        assert!(runtime.pending.is_none());
+        assert_eq!(runtime.worker, WorkerState::Idle);
+        assert_eq!(
+            runtime.begin_activation(),
+            Err(ActivationStartError::SurfaceUnavailable)
+        );
+        (runtime, identity)
+    }
+
+    #[test]
+    fn rejected_surface_recovery_retries_on_same_verified_successor() {
+        let (mut runtime, rejected) = awaiting_recovery_retry(EpochFailure::SurfaceLost);
+        assert!(matches!(
+            runtime.recovery,
+            RecoveryState::AwaitingRetry {
+                requirement: RecoveryRequirement::SurfaceSuccessor { .. },
+                device: DeviceEpoch(1),
+                surface: SurfaceEpoch(2),
+            }
+        ));
+        let resource = runtime.resource_generation;
+        let next_request = runtime.next_request_id;
+        let mut effects = runtime.retry_recovery().unwrap();
+        let retry = effects.take_start_worker().unwrap();
+        assert_ne!(retry.request_id(), rejected.request_id());
+        assert_eq!(retry.request_id(), next_request);
+        assert_eq!(retry.key().device, rejected.key().device);
+        assert_eq!(retry.surface(), rejected.surface());
+        assert_eq!(retry.key().resources, ResourceGeneration(resource.0 + 1));
+        runtime.complete_candidate(retry.accept(accepted_state()));
+        let attempt = runtime.begin_activation().unwrap();
+        runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
+        );
+        assert_eq!(runtime.recovery, RecoveryState::Operational);
+    }
+
+    #[test]
+    fn rejected_device_recovery_retries_without_advancing_device_again() {
+        let (mut runtime, rejected) = awaiting_recovery_retry(EpochFailure::DeviceLost);
+        assert!(matches!(
+            runtime.recovery,
+            RecoveryState::AwaitingRetry {
+                requirement: RecoveryRequirement::DeviceSuccessor { .. },
+                device: DeviceEpoch(2),
+                surface: SurfaceEpoch(1),
+            }
+        ));
+        let device = runtime.device_epoch;
+        let surface = runtime.surface_epoch;
+        let resource = runtime.resource_generation;
+        let next_request = runtime.next_request_id;
+        let retry = take_start(runtime.retry_recovery().unwrap());
+        assert_eq!(runtime.device_epoch, device);
+        assert_eq!(runtime.surface_epoch, surface);
+        assert_eq!(retry.request_id(), next_request);
+        assert_ne!(retry.request_id(), rejected.request_id());
+        assert_eq!(retry.key().device, device);
+        assert_eq!(retry.surface(), surface);
+        assert_eq!(retry.key().resources, ResourceGeneration(resource.0 + 1));
+        runtime.complete_candidate(retry.accept(accepted_state()));
+        let attempt = runtime.begin_activation().unwrap();
+        runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
+        );
+        assert_eq!(runtime.recovery, RecoveryState::Operational);
+    }
+
+    #[test]
+    fn stale_or_shutdown_recovery_retry_rejects_without_work() {
+        let (mut stale, _) = awaiting_recovery_retry(EpochFailure::SurfaceLost);
+        stale.surface_epoch = SurfaceEpoch(stale.surface_epoch.0 + 1);
+        let before = (
+            stale.resource_generation,
+            stale.next_request_id,
+            stale.pending_request_identity(),
+            stale.worker,
+            stale.recovery,
+        );
+        assert_eq!(
+            stale.retry_recovery(),
+            Err(RuntimeError::RecoveryActionRejected)
+        );
+        assert_eq!(
+            (
+                stale.resource_generation,
+                stale.next_request_id,
+                stale.pending_request_identity(),
+                stale.worker,
+                stale.recovery,
+            ),
+            before
+        );
+
+        let (mut shutdown, _) = awaiting_recovery_retry(EpochFailure::DeviceLost);
+        shutdown.shutdown();
+        assert_eq!(shutdown.retry_recovery(), Err(RuntimeError::Shutdown));
     }
 
     #[test]

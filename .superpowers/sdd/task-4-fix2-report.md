@@ -1,6 +1,6 @@
 # Task 4 Fix 2 Report: One-Shot Recovery Authority
 
-Status: DONE
+Status: SUPERSEDED BY `task-4-fix3-report.md`
 
 Baseline: `9ecb4b03884fe332b36150c177303046b8835fc2`
 
@@ -87,3 +87,9 @@ requirements, stale surface-fatal cross-product, publication/rebase seams,
 cancellation ordering, hidden/shutdown behavior, counters, and cleanup.
 
 Final verdict: **PASS**, with no Critical or Important findings.
+
+## Later root closure
+
+A later cumulative review found two lifecycle regressions. The separate normal
+surface-rebind acknowledgement and exact-successor recovery retry repairs are
+documented in `task-4-fix3-report.md`.
