@@ -1319,6 +1319,24 @@ impl CaptureLease<'_> {
         self.active.generation.frame_checksum()
     }
 
+    pub(crate) fn source_identity(&self) -> super::contract::CaptureSourceIdentity {
+        super::contract::CaptureSourceIdentity::new(
+            self.template().generation_checksum,
+            self.content_checksum(),
+            self.frame_checksum(),
+        )
+    }
+
+    pub(crate) fn logical_state_alias(&self) -> super::contract::CompanionCaptureStateAlias {
+        let snapshot = self.source_snapshot();
+        super::contract::CompanionCaptureStateAlias::resolve(
+            snapshot.frame.helper_trouble,
+            snapshot.frame.asleep,
+            snapshot.frame.dim_amount > 0.0,
+            snapshot.content.activity_pulse_age_ms.is_some(),
+        )
+    }
+
     pub(crate) fn source_snapshot(&self) -> &Arc<CompanionSceneSnapshot> {
         self.active.generation.source_snapshot()
     }
@@ -4671,6 +4689,117 @@ mod tests {
             ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
         );
         assert_ne!(runtime.capture_lease().unwrap().version(), leased);
+    }
+
+    #[test]
+    fn capture_lease_derives_neutral_identity_and_locked_logical_state() {
+        let runtime = runtime();
+        let lease = runtime.capture_lease().unwrap();
+        assert_eq!(
+            lease.source_identity(),
+            super::super::contract::CaptureSourceIdentity::new(
+                lease.template().generation_checksum,
+                lease.content_checksum(),
+                lease.frame_checksum(),
+            )
+        );
+        assert_eq!(
+            lease.logical_state_alias(),
+            super::super::contract::CompanionCaptureStateAlias::Active
+        );
+    }
+
+    #[test]
+    fn capture_lease_state_matrix_never_mixes_active_and_candidate_versions() {
+        let mut runtime = runtime();
+        let active = runtime.capture_lease().unwrap().version();
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        assert!(matches!(
+            runtime.pending.as_ref().unwrap().phase,
+            PendingPhase::Preparing
+        ));
+        assert_eq!(runtime.capture_lease().unwrap().version(), active);
+
+        runtime.complete_candidate(request.accept());
+        assert!(matches!(
+            runtime.pending.as_ref().unwrap().phase,
+            PendingPhase::Ready(_)
+        ));
+        assert_eq!(runtime.capture_lease().unwrap().version(), active);
+
+        let attempt = runtime.begin_activation().unwrap();
+        assert_eq!(
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::ActivationInProgress
+        );
+        let superseding = topology_update(runtime.snapshot(), Stage::S5);
+        commit_snapshot(&mut runtime, superseding);
+        assert!(matches!(
+            runtime.pending.as_ref().unwrap().phase,
+            PendingPhase::SupersedingActivation { .. }
+        ));
+        assert_eq!(
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::ActivationInProgress
+        );
+
+        runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
+        );
+        assert!(matches!(
+            runtime.recovery,
+            RecoveryState::FallbackPending(_)
+        ));
+        assert_eq!(
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::RecoveryInProgress
+        );
+
+        let request = take_start(runtime.acknowledge_surface_rebound().unwrap());
+        assert!(matches!(runtime.recovery, RecoveryState::Recovering { .. }));
+        assert_eq!(
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::RecoveryInProgress
+        );
+        runtime.complete_candidate(request.accept());
+        let attempt = runtime.begin_activation().unwrap();
+        runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Validation),
+        );
+        assert!(matches!(
+            runtime.recovery,
+            RecoveryState::AwaitingRetry { .. }
+        ));
+        assert_eq!(
+            runtime.capture_lease().unwrap_err(),
+            CaptureDefer::RecoveryInProgress
+        );
+
+        let mut no_active = CompanionSceneRuntimeState::with_active(snapshot()).unwrap();
+        no_active.active = None;
+        assert_eq!(
+            no_active.capture_lease().unwrap_err(),
+            CaptureDefer::NoActiveGeneration
+        );
+        no_active.shutdown();
+        assert_eq!(
+            no_active.capture_lease().unwrap_err(),
+            CaptureDefer::Shutdown
+        );
+    }
+
+    #[test]
+    fn operational_rebind_releases_only_new_surface_version_to_capture() {
+        let mut runtime = runtime();
+        let before = runtime.capture_lease().unwrap().version();
+        runtime.acknowledge_operational_surface_rebound().unwrap();
+        let after = runtime.capture_lease().unwrap().version();
+        assert_eq!(after.surface, SurfaceEpoch(before.surface.0 + 1));
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.applied, before.applied);
     }
 
     #[test]

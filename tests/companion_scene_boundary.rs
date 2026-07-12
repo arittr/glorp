@@ -108,6 +108,131 @@ fn compiled_generation_provenance_is_not_publicly_mutable() {
 }
 
 #[test]
+fn neutral_capture_identity_is_closed_and_contains_no_private_or_renderer_evidence() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation/companion_scene/contract.rs");
+    let source = fs::read_to_string(path).expect("read capture contract source");
+    let identity = source
+        .split("pub struct CaptureSourceIdentity")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CaptureSourceIdentity").next())
+        .expect("CaptureSourceIdentity declaration");
+    let normalized_identity = normalize_boundary_text(identity);
+    for required in ["template_checksum", "content_checksum", "frame_checksum"] {
+        assert!(
+            normalized_identity.contains(&normalize_boundary_text(required)),
+            "capture source identity is missing {required}"
+        );
+    }
+    for forbidden in [
+        "Smooth",
+        "plan",
+        "draw_order",
+        "wall_clock",
+        "frame_id",
+        "renderer_generation",
+        "source_name",
+        "project_name",
+        "path",
+        "diagnostic",
+        "prompt",
+        "response",
+        "token",
+        "user_text",
+        "String",
+        "Vec",
+    ] {
+        assert!(
+            !normalized_identity.contains(&normalize_boundary_text(forbidden)),
+            "capture source identity contains forbidden evidence {forbidden}"
+        );
+    }
+
+    let request = source
+        .split("pub struct CompanionCaptureRequest")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CompanionCaptureRequest").next())
+        .expect("CompanionCaptureRequest declaration");
+    let normalized_request = normalize_boundary_text(request);
+    for required in [
+        "SceneVersion",
+        "CaptureSourceIdentity",
+        "CompanionCaptureStateAlias",
+        "PrivacyProjection",
+        "CaptureSurfaceArtifact",
+        "CanonicalReadbackRequest",
+        "CompanionSceneMetricsArtifact",
+    ] {
+        assert!(
+            normalized_request.contains(&normalize_boundary_text(required)),
+            "capture request is missing typed field {required}"
+        );
+    }
+    for forbidden in ["String", "Path", "SystemTime", "Instant", "Smooth", "wgpu"] {
+        assert!(
+            !normalized_request.contains(&normalize_boundary_text(forbidden)),
+            "capture request contains forbidden type {forbidden}"
+        );
+    }
+
+    let metrics = source
+        .split("pub struct CompanionSceneMetricsArtifact")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CompanionSceneMetricsArtifact").next())
+        .expect("CompanionSceneMetricsArtifact declaration");
+    let normalized_metrics = normalize_boundary_text(metrics);
+    for required in [
+        "node_high_water",
+        "primitive_high_water",
+        "blended_draw_high_water",
+        "persistent_gpu_objects_created",
+        "static_upload_bytes",
+        "content_write_bytes",
+        "frame_write_bytes",
+    ] {
+        assert!(
+            normalized_metrics.contains(&normalize_boundary_text(required)),
+            "capture metrics are missing {required}"
+        );
+    }
+    for forbidden in [
+        "String",
+        "Path",
+        "source_name",
+        "project_name",
+        "user_text",
+        "prompt",
+        "response",
+        "diagnostic",
+        "token",
+    ] {
+        assert!(
+            !normalized_metrics.contains(&normalize_boundary_text(forbidden)),
+            "capture metrics contain forbidden evidence {forbidden}"
+        );
+    }
+
+    let alpha = source
+        .split("pub enum CaptureCompositeAlpha")
+        .nth(1)
+        .and_then(|tail| tail.split("pub enum CanonicalReadbackFormat").next())
+        .expect("CaptureCompositeAlpha declaration");
+    let normalized_alpha = normalize_boundary_text(alpha);
+    assert!(normalized_alpha.contains(&normalize_boundary_text("PostMultiplied")));
+    assert!(!normalized_alpha.contains(&normalize_boundary_text("Premultiplied")));
+
+    let aliases = source
+        .split("pub enum CompanionCaptureStateAlias")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CompanionCaptureStateAlias").next())
+        .expect("CompanionCaptureStateAlias declaration");
+    assert!(
+        !normalize_boundary_text(aliases).contains(&normalize_boundary_text("Fault")),
+        "capture fault must be a sanitized outcome, not a logical state"
+    );
+}
+
+#[test]
 fn companion_scene_neutral_dependency_closure_has_no_view_or_renderer_ownership() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
