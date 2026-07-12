@@ -667,9 +667,9 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
     if snapshot
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
-        != Some(2)
+        != Some(3)
     {
-        return Err("runtime metrics snapshot schema_version is not 2".to_string());
+        return Err("runtime metrics snapshot schema_version is not 3".to_string());
     }
     for metric in [
         "ui_tick_us",
@@ -678,6 +678,9 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
         "encode_us",
         "queue_wait_us",
         "compile_us",
+        "appkit_raster_queue_wait_us",
+        "appkit_raster_slice_us",
+        "appkit_raster_total_us",
         "activation_render_owner_us",
     ] {
         for percentile in ["p50", "p95", "p99"] {
@@ -762,7 +765,15 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
             return Err(format!("runtime metrics snapshot missing {field}"));
         }
     }
-    for field in ["capture_attempted", "capture_succeeded", "capture_failed"] {
+    for field in [
+        "capture_attempted",
+        "capture_succeeded",
+        "capture_failed",
+        "appkit_raster_slice_count",
+        "appkit_raster_deadline_misses",
+        "appkit_raster_coalesces",
+        "appkit_raster_cancellations",
+    ] {
         snapshot_u64(snapshot, &[field])?;
     }
     let gpu_accounting = snapshot
@@ -807,7 +818,6 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GateStatus {
     Pass,
-    AcceptedPreexisting,
     Fail,
 }
 
@@ -815,7 +825,6 @@ impl GateStatus {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
-            Self::AcceptedPreexisting => "ACCEPTED_PREEXISTING",
             Self::Fail => "FAIL",
         }
     }
@@ -853,12 +862,10 @@ fn evaluate_baseline_gates(
     snapshot: &serde_json::Value,
 ) -> Result<Vec<BaselineGateResult>, String> {
     const APPKIT_TARGET_US: u64 = 4_000;
-    const APPKIT_STAGE0_EXCEPTION_CEILING_US: u64 = 20_000;
-    const APPKIT_STAGE0_DISPOSITION: &str = "stage0-appkit-raster-v1";
     let ui_p95 = snapshot_u64(snapshot, &["ui_tick_us", "p95"])?;
     let ui_p99 = snapshot_u64(snapshot, &["ui_tick_us", "p99"])?;
     let encode_p95 = snapshot_u64(snapshot, &["encode_us", "p95"])?;
-    let compile_p95 = snapshot_u64(snapshot, &["compile_us", "p95"])?;
+    let appkit_slice_p95 = snapshot_u64(snapshot, &["appkit_raster_slice_us", "p95"])?;
     let activation_p95 = snapshot_u64(snapshot, &["activation_render_owner_us", "p95"])?;
     let ui_p95_limit = 8_000_u64.min(((ui_p95 * 110).div_ceil(100)).max(ui_p95 + 500));
     let ui_p99_limit = 16_000_u64.min(((ui_p99 * 115).div_ceil(100)).max(ui_p99 + 1_000));
@@ -873,6 +880,7 @@ fn evaluate_baseline_gates(
         .ok_or_else(|| "runtime snapshot missing hidden_segment.steady_delta".to_string())?;
     let hidden_zero = [
         "prepare",
+        "appkit_raster_slices",
         "queue_writes",
         "surface_acquires",
         "encode",
@@ -896,18 +904,12 @@ fn evaluate_baseline_gates(
         warmup > 0 && value <= warmup.saturating_add(warmup.div_ceil(100))
     };
 
-    let mut appkit = gate(
+    let appkit = gate(
         "appkit-raster-slice",
-        compile_p95 <= APPKIT_TARGET_US,
-        format!("{compile_p95} us"),
-        format!("{APPKIT_TARGET_US} us target; {APPKIT_STAGE0_EXCEPTION_CEILING_US} us frozen exception ceiling"),
+        appkit_slice_p95 <= APPKIT_TARGET_US,
+        format!("{appkit_slice_p95} us"),
+        format!("{APPKIT_TARGET_US} us"),
     );
-    if compile_p95 > APPKIT_TARGET_US && compile_p95 <= APPKIT_STAGE0_EXCEPTION_CEILING_US {
-        appkit.status = GateStatus::AcceptedPreexisting;
-        appkit.disposition = format!(
-            "{APPKIT_STAGE0_DISPOSITION}: bounded pre-existing Stage-0 miss; post-Task-6 <=4000us sliced AppKit preparation prerequisite must pass before Task 7"
-        );
-    }
 
     Ok(vec![
         gate(
@@ -1143,7 +1145,10 @@ The first 20 visible ticks are discarded before steady-state sampling.\n\n\
 | GPU translation | {} | {} | {} |\n\
 | Encode | {} | {} | {} |\n\
 | Queue submit wait | {} | {} | {} |\n\
-| AppKit raster/compile slice | {} | {} | {} |\n\
+| Resource generation compile total | {} | {} | {} |\n\
+| AppKit raster queue wait | {} | {} | {} |\n\
+| AppKit raster slice | {} | {} | {} |\n\
+| AppKit raster enqueue-to-CPU-complete | {} | {} | {} |\n\
 | First-present activation render-owner boundary (excluding separately measured AppKit raster) | {} | {} | {} |\n\n\
 Metrics overhead uses {} alternating on/off-control trials of {} representative complete metric ticks ({} control / {} instrumented); \
 control {} ns/tick, instrumented {} ns/tick, net {} ns/tick.\n\n\
@@ -1153,11 +1158,12 @@ Opaque driver allocations are covered by process RSS, not guessed into GPU byte 
 Lifetime segment: {} warmup + {} measured real prepared/encoded GPU frames at {} ms virtual cadence ({} ms semantic time); \
 prepared {}, encoded {}, semantic changes {}, GPU hash changes {}, draws {}, polls {}; \
 RSS warmup-end/warmup-high-water/final/peak {}/{}/{}/{}, accounted GPU warmup-end/warmup-high-water/final/peak {}/{}/{}/{}.\n\n\
+AppKit preparation slices/deadline misses/coalesces/cancellations: {}/{}/{}/{}.\n\n\
 ## Structured gate results\n\n\
 | Gate | Status | Measured | Limit | Disposition |\n\
 |---|---|---|---|---|\n\
 {gate_rows}\n\n\
-The AppKit result is a versioned, bounded pre-existing Stage-0 disposition, not a pass. The explicit post-Task-6 <=4000 us sliced AppKit preparation prerequisite must pass before Task 7 begins. Stage 0 is therefore not globally green. Every other failed or unmeasured gate makes the command fail.\n\n\
+AppKit raster preparation is resumable at glyph boundaries. The slice gate is strict: p95 must be <=4000 us, with no Stage-0 exception. Queue wait and enqueue-to-CPU-complete wall time remain separately observable. One non-preemptible glyph overrun increments the deadline-miss counter and fails the gate if it raises p95 above the deadline.\n\n\
 ## Capacity inventory\n\n\
 | Capacity | Observed | Reservation | Headroom | Limit | Evidence |\n\
 |---|---:|---:|---:|---:|---|\n\
@@ -1194,6 +1200,15 @@ An em dash means the future renderer-neutral category does not exist yet and is 
         snapshot_u64(snapshot, &["compile_us", "p50"])? ,
         snapshot_u64(snapshot, &["compile_us", "p95"])? ,
         snapshot_u64(snapshot, &["compile_us", "p99"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_queue_wait_us", "p50"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_queue_wait_us", "p95"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_queue_wait_us", "p99"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_slice_us", "p50"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_slice_us", "p95"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_slice_us", "p99"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_total_us", "p50"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_total_us", "p95"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_total_us", "p99"])? ,
         snapshot_u64(snapshot, &["activation_render_owner_us", "p50"])? ,
         snapshot_u64(snapshot, &["activation_render_owner_us", "p95"])? ,
         snapshot_u64(snapshot, &["activation_render_owner_us", "p99"])? ,
@@ -1235,6 +1250,10 @@ An em dash means the future renderer-neutral category does not exist yet and is 
         value_u64(lifetime, "gpu_warmup_peak_bytes")?,
         value_u64(lifetime, "gpu_final_bytes")?,
         value_u64(lifetime, "gpu_peak_bytes")?,
+        snapshot_u64(snapshot, &["appkit_raster_slice_count"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_deadline_misses"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_coalesces"])? ,
+        snapshot_u64(snapshot, &["appkit_raster_cancellations"])? ,
         value_u64(inventory, "matrix_fixture_count")?,
         value_u64(inventory, "dimmed_fixture_count")?,
         value_u64(inventory, "full_props_tank_fixture_count")?,
@@ -2112,14 +2131,10 @@ mod tests {
     }
 
     #[test]
-    fn baseline_gates_accept_only_the_versioned_appkit_disposition() {
+    fn baseline_gates_require_appkit_slice_to_pass_without_stage0_exception() {
         let snapshot = baseline_gate_fixture();
         let gates = evaluate_baseline_gates(&snapshot).unwrap();
-        assert!(gates.iter().all(|gate| {
-            gate.status == GateStatus::Pass
-                || (gate.id == "appkit-raster-slice"
-                    && gate.status == GateStatus::AcceptedPreexisting)
-        }));
+        assert!(gates.iter().all(|gate| gate.status == GateStatus::Pass));
         assert!(validate_gate_results(&gates).is_ok());
     }
 
@@ -2133,31 +2148,31 @@ mod tests {
     }
 
     #[test]
-    fn baseline_gates_keep_appkit_miss_as_non_pass_at_unchanged_limit() {
+    fn baseline_gates_reject_appkit_slice_above_unchanged_limit() {
         let mut snapshot = baseline_gate_fixture();
-        snapshot["compile_us"]["p95"] = serde_json::json!(12_000);
+        snapshot["appkit_raster_slice_us"]["p95"] = serde_json::json!(4_001);
         let gates = evaluate_baseline_gates(&snapshot).unwrap();
         let appkit = gates
             .iter()
             .find(|gate| gate.id == "appkit-raster-slice")
             .unwrap();
-        assert!(appkit.limit.contains("4000 us target"));
-        assert!(appkit.limit.contains("20000 us frozen exception ceiling"));
-        assert_eq!(appkit.status, GateStatus::AcceptedPreexisting);
-        assert!(validate_gate_results(&gates).is_ok());
+        assert_eq!(appkit.limit, "4000 us");
+        assert_eq!(appkit.status, GateStatus::Fail);
+        assert!(appkit.disposition.is_empty());
+        assert!(validate_gate_results(&gates).is_err());
     }
 
     #[test]
-    fn baseline_gates_reject_appkit_regressions_above_versioned_stage0_ceiling() {
+    fn baseline_gates_accept_appkit_slice_at_exact_deadline() {
         let mut snapshot = baseline_gate_fixture();
-        snapshot["compile_us"]["p95"] = serde_json::json!(20_001);
+        snapshot["appkit_raster_slice_us"]["p95"] = serde_json::json!(4_000);
         let gates = evaluate_baseline_gates(&snapshot).unwrap();
         let appkit = gates
             .iter()
             .find(|gate| gate.id == "appkit-raster-slice")
             .unwrap();
-        assert_eq!(appkit.status, GateStatus::Fail);
-        assert!(validate_gate_results(&gates).is_err());
+        assert_eq!(appkit.status, GateStatus::Pass);
+        assert!(validate_gate_results(&gates).is_ok());
     }
 
     fn baseline_gate_fixture() -> serde_json::Value {
@@ -2165,6 +2180,7 @@ mod tests {
             "ui_tick_us": {"p95": 1000, "p99": 1500},
             "encode_us": {"p95": 100},
             "compile_us": {"p95": 12000},
+            "appkit_raster_slice_us": {"p95": 3999},
             "activation_render_owner_us": {"p95": 8000},
             "metrics_overhead_control": {"net_ns_per_tick": 1000},
             "capture_attempted": 1,
@@ -2175,7 +2191,7 @@ mod tests {
             "hidden_segment": {
                 "transition_ticks": 1,
                 "steady_ticks": 2,
-                "steady_delta": {"prepare": 0, "queue_writes": 0, "surface_acquires": 0, "encode": 0, "submit": 0}
+                "steady_delta": {"prepare": 0, "appkit_raster_slices": 0, "queue_writes": 0, "surface_acquires": 0, "encode": 0, "submit": 0}
             },
             "lifetime_audit": {
                 "frames": 4500,

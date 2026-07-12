@@ -8,6 +8,7 @@
 //! renderer here rather than in `capture.rs`.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::ClassType;
@@ -21,6 +22,40 @@ use super::RetainedFailureCategory;
 use crate::round::smooth::{
     collect_companion_glyph_repertoire, CompanionContentIdentity, RepertoireGlyph,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RasterSliceProgress {
+    pub(super) completed_items: usize,
+    pub(super) complete: bool,
+    pub(super) deadline_missed: bool,
+    pub(super) elapsed: Duration,
+}
+
+fn run_resumable_slice<E>(
+    cursor: &mut usize,
+    item_count: usize,
+    budget: Duration,
+    mut elapsed: impl FnMut() -> Duration,
+    mut work: impl FnMut(usize) -> Result<(), E>,
+) -> Result<RasterSliceProgress, E> {
+    let mut completed_items = 0;
+    let mut observed_elapsed = elapsed();
+    while *cursor < item_count && observed_elapsed < budget {
+        work(*cursor)?;
+        *cursor += 1;
+        completed_items += 1;
+        observed_elapsed = elapsed();
+        if observed_elapsed >= budget {
+            break;
+        }
+    }
+    Ok(RasterSliceProgress {
+        completed_items,
+        complete: *cursor == item_count,
+        deadline_missed: completed_items > 0 && observed_elapsed > budget,
+        elapsed: observed_elapsed,
+    })
+}
 
 /// Deterministic FNV-1a so a font-policy id is a stable hash of its inputs,
 /// independent of the standard hasher's seeded internals.
@@ -181,10 +216,10 @@ impl GlyphAtlasEntry {
         }
     }
 
-    /// A fully populated entry for contract tests that need a visible glyph of a
-    /// given kind without rasterizing a real font.
-    #[cfg(test)]
-    pub(super) fn fixture(kind: GlyphEntryKind) -> Self {
+    /// A deterministic visible entry for capacity inventory and contract tests.
+    /// Primitive-count inventory needs key occupancy, not native font geometry;
+    /// using this avoids hidden AppKit raster work in the evidence callback.
+    pub(super) fn synthetic_visible(kind: GlyphEntryKind) -> Self {
         Self {
             visible_uv: Some([0.0, 0.0, 1.0, 1.0]),
             ink_origin: [1.0, 2.0],
@@ -536,12 +571,17 @@ pub(super) struct CompiledGlyphAtlas {
     pub(super) entries: BTreeMap<GlyphKey, GlyphAtlasEntry>,
 }
 
-impl CompiledGlyphAtlas {
-    /// Rasterizes every key in `glyphs` into a packed atlas at `point_size`.
-    /// Fails with [`RetainedFailureCategory::AtlasUnavailable`] if the repertoire
-    /// overflows the row ceiling or a glyph does not fit its cell, so a preflight
-    /// that cannot hold the full repertoire falls back rather than rebuilding.
-    fn compile(
+struct GlyphAtlasPreparation {
+    glyphs: Vec<GlyphKey>,
+    target: GlyphRasterTarget,
+    regular_font_policy_id: u64,
+    bold_font_policy_id: u64,
+    next_index: usize,
+    atlas: CompiledGlyphAtlas,
+}
+
+impl GlyphAtlasPreparation {
+    fn new(
         glyphs: &[GlyphKey],
         point_size: f64,
         backing_scale: f64,
@@ -556,30 +596,71 @@ impl CompiledGlyphAtlas {
         }
         let width = ATLAS_COLUMNS * cell;
         let height = rows * cell;
-        let mut rgba = vec![0_u8; (width * height * 4) as usize];
         let target = GlyphRasterTarget { cell, padding, point_size };
-        let regular_id =
+        let regular_font_policy_id =
             ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Regular).id();
-        let bold_id =
+        let bold_font_policy_id =
             ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Bold).id();
-        let mut entries = BTreeMap::new();
-        for (index, key) in glyphs.iter().enumerate() {
-            let slot_x = index as u32 % ATLAS_COLUMNS;
-            let slot_y = index as u32 / ATLAS_COLUMNS;
-            let font_policy_id = if key.bold { bold_id } else { regular_id };
-            let entry = rasterize_glyph_entry(
-                key,
-                &target,
-                font_policy_id,
-                &mut rgba,
+        Ok(Self {
+            glyphs: glyphs.to_vec(),
+            target,
+            regular_font_policy_id,
+            bold_font_policy_id,
+            next_index: 0,
+            atlas: CompiledGlyphAtlas {
                 width,
                 height,
-                slot_x * cell,
-                slot_y * cell,
-            )?;
-            entries.insert(key.clone(), entry);
+                rgba: vec![0_u8; (width * height * 4) as usize],
+                entries: BTreeMap::new(),
+            },
+        })
+    }
+
+    fn advance(
+        &mut self,
+        budget: Duration,
+    ) -> std::result::Result<RasterSliceProgress, RetainedFailureCategory> {
+        let started_at = std::time::Instant::now();
+        let glyphs = &self.glyphs;
+        let target = &self.target;
+        let regular_font_policy_id = self.regular_font_policy_id;
+        let bold_font_policy_id = self.bold_font_policy_id;
+        let atlas = &mut self.atlas;
+        run_resumable_slice(
+            &mut self.next_index,
+            glyphs.len(),
+            budget,
+            || started_at.elapsed(),
+            |index| {
+                let key = &glyphs[index];
+                let slot_x = index as u32 % ATLAS_COLUMNS;
+                let slot_y = index as u32 / ATLAS_COLUMNS;
+                let font_policy_id = if key.bold {
+                    bold_font_policy_id
+                } else {
+                    regular_font_policy_id
+                };
+                let entry = rasterize_glyph_entry(
+                    key,
+                    target,
+                    font_policy_id,
+                    &mut atlas.rgba,
+                    atlas.width,
+                    atlas.height,
+                    slot_x * target.cell,
+                    slot_y * target.cell,
+                )?;
+                atlas.entries.insert(key.clone(), entry);
+                Ok(())
+            },
+        )
+    }
+
+    fn finish(self) -> std::result::Result<CompiledGlyphAtlas, RetainedFailureCategory> {
+        if self.next_index != self.glyphs.len() {
+            return Err(RetainedFailureCategory::AtlasUnavailable);
         }
-        Ok(Self { width, height, rgba, entries })
+        Ok(self.atlas)
     }
 }
 
@@ -723,22 +804,81 @@ pub(super) struct CompiledRetainedResources {
     atlas: CompiledGlyphAtlas,
 }
 
+pub(super) struct CompiledRetainedResourcesPreparation {
+    generation: ResourceGenerationKey,
+    atlas: GlyphAtlasPreparation,
+}
+
+impl CompiledRetainedResourcesPreparation {
+    pub(super) fn new(
+        manifest: &GlyphRepertoireManifest,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
+        Ok(Self {
+            generation: manifest.generation_key(),
+            atlas: GlyphAtlasPreparation::new(
+                manifest.glyphs(),
+                manifest.atlas_point_size,
+                manifest.backing_scale,
+            )?,
+        })
+    }
+
+    pub(super) fn advance(
+        &mut self,
+        budget: Duration,
+    ) -> std::result::Result<RasterSliceProgress, RetainedFailureCategory> {
+        self.atlas.advance(budget)
+    }
+
+    pub(super) fn finish(
+        self,
+    ) -> std::result::Result<CompiledRetainedResources, RetainedFailureCategory> {
+        Ok(CompiledRetainedResources {
+            generation: self.generation,
+            atlas: self.atlas.finish()?,
+        })
+    }
+}
+
 impl CompiledRetainedResources {
     /// Compiles the manifest's full repertoire into an atlas. On overflow or a
     /// glyph that does not fit, returns the failure category so the caller can
     /// retain the previous generation and fall back.
+    #[cfg(test)]
     pub(super) fn compile(
         manifest: &GlyphRepertoireManifest,
     ) -> std::result::Result<Self, RetainedFailureCategory> {
-        let atlas = CompiledGlyphAtlas::compile(
-            manifest.glyphs(),
-            manifest.atlas_point_size,
-            manifest.backing_scale,
-        )?;
-        Ok(Self {
-            generation: manifest.generation_key(),
-            atlas,
-        })
+        let mut preparation = CompiledRetainedResourcesPreparation::new(manifest)?;
+        let progress = preparation.advance(Duration::MAX)?;
+        if !progress.complete {
+            return Err(RetainedFailureCategory::AtlasUnavailable);
+        }
+        preparation.finish()
+    }
+
+    pub(super) fn for_capacity_inventory(manifest: &GlyphRepertoireManifest) -> Self {
+        let entries = manifest
+            .glyphs()
+            .iter()
+            .cloned()
+            .map(|key| {
+                let entry = if key.sequence.as_str().chars().all(char::is_whitespace) {
+                    GlyphAtlasEntry::whitespace(29.0, 52.0)
+                } else {
+                    GlyphAtlasEntry::synthetic_visible(GlyphEntryKind::Mask)
+                };
+                (key, entry)
+            })
+            .collect();
+        Self {
+            generation: ResourceGenerationKey(0),
+            atlas: CompiledGlyphAtlas {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+                entries,
+            },
+        }
     }
 
     pub(super) fn generation(&self) -> ResourceGenerationKey {
@@ -1009,7 +1149,110 @@ mod metric_tests {
 
 #[cfg(test)]
 mod glyph_tests {
-    use super::{FragmentGlyphMode, GlyphAtlasEntry, GlyphEntryKind, GlyphKey};
+    use super::*;
+
+    #[test]
+    fn raster_slice_stops_at_deadline_and_resumes_at_exact_next_item() {
+        let mut cursor = 0;
+        let mut visited = Vec::new();
+        let mut times = [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_micros(2_000),
+            std::time::Duration::from_micros(4_000),
+        ]
+        .into_iter();
+        let first = run_resumable_slice(
+            &mut cursor,
+            4,
+            std::time::Duration::from_micros(4_000),
+            || times.next().expect("clock sample"),
+            |index| {
+                visited.push(index);
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, [0, 1]);
+        assert_eq!(cursor, 2);
+        assert_eq!(first.completed_items, 2);
+        assert!(!first.complete);
+        assert!(!first.deadline_missed);
+
+        let mut times = [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_micros(1_000),
+            std::time::Duration::from_micros(2_000),
+        ]
+        .into_iter();
+        let second = run_resumable_slice(
+            &mut cursor,
+            4,
+            std::time::Duration::from_micros(4_000),
+            || times.next().expect("clock sample"),
+            |index| {
+                visited.push(index);
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, [0, 1, 2, 3]);
+        assert_eq!(cursor, 4);
+        assert_eq!(second.completed_items, 2);
+        assert!(second.complete);
+        assert!(!second.deadline_missed);
+    }
+
+    #[test]
+    fn one_nonpreemptible_item_overrun_records_miss_and_yields_before_next_item() {
+        let mut cursor = 0;
+        let mut visited = Vec::new();
+        let mut times = [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_micros(4_001),
+        ]
+        .into_iter();
+        let slice = run_resumable_slice(
+            &mut cursor,
+            3,
+            std::time::Duration::from_micros(4_000),
+            || times.next().expect("clock sample"),
+            |index| {
+                visited.push(index);
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, [0]);
+        assert_eq!(cursor, 1);
+        assert_eq!(slice.completed_items, 1);
+        assert!(!slice.complete);
+        assert!(slice.deadline_missed);
+    }
+
+    #[test]
+    fn resumable_atlas_keeps_fixed_storage_and_publishes_only_after_all_slots() {
+        let glyphs = [GlyphKey::new("x", false), GlyphKey::new("g", true)];
+        let mut preparation = GlyphAtlasPreparation::new(&glyphs, 48.0, 2.0).unwrap();
+        let rgba_pointer = preparation.atlas.rgba.as_ptr();
+        let rgba_capacity = preparation.atlas.rgba.capacity();
+
+        let paused = preparation.advance(std::time::Duration::ZERO).unwrap();
+        assert_eq!(paused.completed_items, 0);
+        assert!(!paused.complete);
+        assert_eq!(preparation.next_index, 0);
+        assert!(preparation.atlas.entries.is_empty());
+        assert_eq!(preparation.atlas.rgba.as_ptr(), rgba_pointer);
+        assert_eq!(preparation.atlas.rgba.capacity(), rgba_capacity);
+
+        let completed = preparation.advance(std::time::Duration::MAX).unwrap();
+        assert!(completed.complete);
+        assert_eq!(preparation.next_index, glyphs.len());
+        assert_eq!(preparation.atlas.entries.len(), glyphs.len());
+        assert_eq!(preparation.atlas.rgba.as_ptr(), rgba_pointer);
+        assert_eq!(preparation.atlas.rgba.capacity(), rgba_capacity);
+        let atlas = preparation.finish().unwrap();
+        assert_eq!(atlas.entries.len(), glyphs.len());
+    }
 
     #[test]
     fn scalar_sequence_is_one_atlas_key() {
@@ -1019,7 +1262,7 @@ mod glyph_tests {
 
     #[test]
     fn color_entry_bypasses_foreground_tint() {
-        let entry = GlyphAtlasEntry::fixture(GlyphEntryKind::PremultipliedColorRgba);
+        let entry = GlyphAtlasEntry::synthetic_visible(GlyphEntryKind::PremultipliedColorRgba);
         assert_eq!(entry.fragment_mode(), FragmentGlyphMode::NativeColor);
     }
 

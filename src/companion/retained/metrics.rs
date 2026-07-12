@@ -195,6 +195,7 @@ impl CompanionCapacityInventory {
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub(crate) struct RuntimeWorkCounters {
     pub prepare: u64,
+    pub appkit_raster_slices: u64,
     pub queue_writes: u64,
     pub surface_acquires: u64,
     pub encode: u64,
@@ -205,6 +206,9 @@ impl RuntimeWorkCounters {
     fn saturating_sub(self, previous: Self) -> Self {
         Self {
             prepare: self.prepare.saturating_sub(previous.prepare),
+            appkit_raster_slices: self
+                .appkit_raster_slices
+                .saturating_sub(previous.appkit_raster_slices),
             queue_writes: self.queue_writes.saturating_sub(previous.queue_writes),
             surface_acquires: self
                 .surface_acquires
@@ -217,6 +221,9 @@ impl RuntimeWorkCounters {
     fn saturating_add(self, other: Self) -> Self {
         Self {
             prepare: self.prepare.saturating_add(other.prepare),
+            appkit_raster_slices: self
+                .appkit_raster_slices
+                .saturating_add(other.appkit_raster_slices),
             queue_writes: self.queue_writes.saturating_add(other.queue_writes),
             surface_acquires: self.surface_acquires.saturating_add(other.surface_acquires),
             encode: self.encode.saturating_add(other.encode),
@@ -347,6 +354,13 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub encode_us: Percentiles,
     pub queue_wait_us: Percentiles,
     pub compile_us: Percentiles,
+    pub appkit_raster_queue_wait_us: Percentiles,
+    pub appkit_raster_slice_us: Percentiles,
+    pub appkit_raster_total_us: Percentiles,
+    pub appkit_raster_slice_count: u64,
+    pub appkit_raster_deadline_misses: u64,
+    pub appkit_raster_coalesces: u64,
+    pub appkit_raster_cancellations: u64,
     pub activation_render_owner_us: Percentiles,
     pub generation_count: u64,
     pub coalesced_updates: u64,
@@ -389,6 +403,13 @@ pub(crate) struct CompanionRuntimeMetrics {
     encode_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     queue_wait_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     compile_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    appkit_raster_queue_wait_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    appkit_raster_slice_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    appkit_raster_total_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    appkit_raster_slice_count: u64,
+    appkit_raster_deadline_misses: u64,
+    appkit_raster_coalesces: u64,
+    appkit_raster_cancellations: u64,
     activation_render_owner_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     generation_count: u64,
     coalesced_updates: u64,
@@ -441,6 +462,13 @@ impl Default for CompanionRuntimeMetrics {
             encode_us: FixedSamples::default(),
             queue_wait_us: FixedSamples::default(),
             compile_us: FixedSamples::default(),
+            appkit_raster_queue_wait_us: FixedSamples::default(),
+            appkit_raster_slice_us: FixedSamples::default(),
+            appkit_raster_total_us: FixedSamples::default(),
+            appkit_raster_slice_count: 0,
+            appkit_raster_deadline_misses: 0,
+            appkit_raster_coalesces: 0,
+            appkit_raster_cancellations: 0,
             activation_render_owner_us: FixedSamples::default(),
             generation_count: 0,
             coalesced_updates: 0,
@@ -561,6 +589,30 @@ impl CompanionRuntimeMetrics {
         increment(&mut self.generation_count, 1);
     }
 
+    pub(crate) fn record_appkit_raster_queue_wait_us(&mut self, value: u32) {
+        self.appkit_raster_queue_wait_us.push(value);
+    }
+
+    pub(crate) fn record_appkit_raster_slice_us(&mut self, value: u32, deadline_missed: bool) {
+        self.appkit_raster_slice_us.push(value);
+        increment(&mut self.appkit_raster_slice_count, 1);
+        if deadline_missed {
+            increment(&mut self.appkit_raster_deadline_misses, 1);
+        }
+    }
+
+    pub(crate) fn record_appkit_raster_total_us(&mut self, value: u32) {
+        self.appkit_raster_total_us.push(value);
+    }
+
+    pub(crate) fn record_appkit_raster_coalesce(&mut self) {
+        increment(&mut self.appkit_raster_coalesces, 1);
+    }
+
+    pub(crate) fn record_appkit_raster_cancellation(&mut self) {
+        increment(&mut self.appkit_raster_cancellations, 1);
+    }
+
     pub(crate) fn record_activation_render_owner_us(&mut self, value: u32) {
         self.activation_render_owner_us.push(value);
     }
@@ -665,6 +717,7 @@ impl CompanionRuntimeMetrics {
     pub(crate) fn work_counters(&self) -> RuntimeWorkCounters {
         RuntimeWorkCounters {
             prepare: self.prepare_count,
+            appkit_raster_slices: self.appkit_raster_slice_count,
             queue_writes: self.queue_writes,
             surface_acquires: self.surface_acquires,
             encode: self.encode_count,
@@ -751,7 +804,7 @@ impl CompanionRuntimeMetrics {
         fixture: RuntimeFixtureIdentity,
     ) -> CompanionRuntimeMetricsSnapshot {
         CompanionRuntimeMetricsSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             identity,
             fixture,
             sample_capacity: METRIC_SAMPLE_CAPACITY,
@@ -762,6 +815,15 @@ impl CompanionRuntimeMetrics {
             encode_us: Percentiles::from_samples(&self.encode_us),
             queue_wait_us: Percentiles::from_samples(&self.queue_wait_us),
             compile_us: Percentiles::from_samples(&self.compile_us),
+            appkit_raster_queue_wait_us: Percentiles::from_samples(
+                &self.appkit_raster_queue_wait_us,
+            ),
+            appkit_raster_slice_us: Percentiles::from_samples(&self.appkit_raster_slice_us),
+            appkit_raster_total_us: Percentiles::from_samples(&self.appkit_raster_total_us),
+            appkit_raster_slice_count: self.appkit_raster_slice_count,
+            appkit_raster_deadline_misses: self.appkit_raster_deadline_misses,
+            appkit_raster_coalesces: self.appkit_raster_coalesces,
+            appkit_raster_cancellations: self.appkit_raster_cancellations,
             activation_render_owner_us: Percentiles::from_samples(&self.activation_render_owner_us),
             generation_count: self.generation_count,
             coalesced_updates: self.coalesced_updates,
@@ -918,6 +980,12 @@ mod tests {
         metrics.record_state_prepare_us(900);
         metrics.record_gpu_translate_us(300);
         metrics.record_encode_us(800);
+        metrics.record_appkit_raster_queue_wait_us(17);
+        metrics.record_appkit_raster_slice_us(3_999, false);
+        metrics.record_appkit_raster_slice_us(4_001, true);
+        metrics.record_appkit_raster_total_us(12_345);
+        metrics.record_appkit_raster_coalesce();
+        metrics.record_appkit_raster_cancellation();
         metrics.record_persistent_gpu_create(3);
         metrics.observe_nodes(72);
         let snapshot = metrics.snapshot(
@@ -935,11 +1003,18 @@ mod tests {
                 backing_scale: 2.0,
             },
         );
-        assert_eq!(snapshot.schema_version, 2);
+        assert_eq!(snapshot.schema_version, 3);
         assert_eq!(snapshot.ui_tick_us.p95, Some(1_500));
         assert_eq!(snapshot.state_prepare_us.p95, Some(900));
         assert_eq!(snapshot.gpu_translate_us.p95, Some(300));
         assert_eq!(snapshot.encode_us.p99, Some(800));
+        assert_eq!(snapshot.appkit_raster_queue_wait_us.p95, Some(17));
+        assert_eq!(snapshot.appkit_raster_slice_us.p95, Some(4_001));
+        assert_eq!(snapshot.appkit_raster_total_us.p95, Some(12_345));
+        assert_eq!(snapshot.appkit_raster_slice_count, 2);
+        assert_eq!(snapshot.appkit_raster_deadline_misses, 1);
+        assert_eq!(snapshot.appkit_raster_coalesces, 1);
+        assert_eq!(snapshot.appkit_raster_cancellations, 1);
         assert_eq!(snapshot.persistent_gpu_objects_created, 3);
         assert_eq!(snapshot.node_high_water, 72);
         assert_eq!(snapshot.identity.layout_generation, None);
@@ -977,6 +1052,22 @@ mod tests {
         assert_eq!(audit.transition_ticks, 1);
         assert_eq!(audit.steady_ticks, 2);
         assert_eq!(audit.steady_delta, RuntimeWorkCounters::default());
+    }
+
+    #[test]
+    fn hidden_audit_detects_any_appkit_raster_slice() {
+        let mut metrics = CompanionRuntimeMetrics::default();
+        metrics.record_hidden_tick(metrics.work_counters());
+        let steady = metrics.work_counters();
+        metrics.record_appkit_raster_slice_us(1, false);
+        metrics.record_hidden_tick(steady);
+        assert_eq!(
+            metrics
+                .hidden_segment_snapshot()
+                .steady_delta
+                .appkit_raster_slices,
+            1
+        );
     }
 
     #[test]

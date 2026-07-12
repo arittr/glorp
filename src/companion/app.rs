@@ -1088,6 +1088,17 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
         });
     });
 
+    #[cfg(feature = "retained-renderer")]
+    let needs_initial_smooth_frame = APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|state| state.retained_host.is_none())
+    });
+    #[cfg(feature = "retained-renderer")]
+    if needs_initial_smooth_frame {
+        prepare_current_frame_from_state();
+    }
+    #[cfg(not(feature = "retained-renderer"))]
     prepare_current_frame_from_state();
 
     let _timer: Retained<NSTimer> = unsafe {
@@ -1313,11 +1324,33 @@ fn ui_tick() {
             host.begin_visible_tick();
         }
     });
+    #[cfg(feature = "retained-renderer")]
+    let presented_active_generation = present_retained_active_generation();
+    #[cfg(feature = "retained-renderer")]
+    match drive_retained_resource_preparation() {
+        crate::companion::retained::ResourcePreparationTick::Ready
+            if !presented_active_generation => {}
+        crate::companion::retained::ResourcePreparationTick::Ready
+        | crate::companion::retained::ResourcePreparationTick::YieldedRetainingActive
+        | crate::companion::retained::ResourcePreparationTick::YieldedWithoutActive
+        | crate::companion::retained::ResourcePreparationTick::FailedRetainingActive(_) => {
+            record_retained_ui_tick(started_at);
+            return;
+        }
+        crate::companion::retained::ResourcePreparationTick::FailedWithoutActive(category) => {
+            fallback_from_retained(category);
+        }
+    }
     animate_pet();
     prepare_current_frame_from_state();
     drive_smooth_fallback_paint();
     finish_review_capture_if_due();
     #[cfg(feature = "retained-renderer")]
+    record_retained_ui_tick(started_at);
+}
+
+#[cfg(feature = "retained-renderer")]
+fn record_retained_ui_tick(started_at: Instant) {
     APP_STATE.with(|cell| {
         if let Some(host) = cell
             .borrow_mut()
@@ -1329,6 +1362,62 @@ fn ui_tick() {
             ));
         }
     });
+}
+
+#[cfg(feature = "retained-renderer")]
+fn drive_retained_resource_preparation() -> crate::companion::retained::ResourcePreparationTick {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return crate::companion::retained::ResourcePreparationTick::Ready;
+        };
+        let identity = crate::round::smooth::CompanionContentIdentity::for_pet(
+            state.vm.pet_render.generated_species,
+        );
+        let AppState { view, retained_host, .. } = state;
+        let Some(host) = retained_host.as_mut() else {
+            return crate::companion::retained::ResourcePreparationTick::Ready;
+        };
+        let desired_backing_scale = match crate::companion::retained::ActiveRetainedHost::backing_scale_for_resource_preparation(view.as_super()) {
+            Ok(scale) => scale,
+            Err(category) => {
+                return crate::companion::retained::ResourcePreparationTick::FailedWithoutActive(
+                    category,
+                );
+            }
+        };
+        let outcome = host.advance_resource_preparation(&identity, desired_backing_scale);
+        if outcome
+            == crate::companion::retained::ResourcePreparationTick::YieldedWithoutActive
+        {
+            let _ = host.record_resource_preparation_skip();
+        }
+        outcome
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn present_retained_active_generation() -> bool {
+    let identity = APP_STATE.with(|cell| {
+        let state = cell.borrow();
+        let state = state.as_ref()?;
+        state.last_good_frame.as_ref()?;
+        let desired_identity = crate::round::smooth::CompanionContentIdentity::for_pet(
+            state.vm.pet_render.generated_species,
+        );
+        let host = state.retained_host.as_ref()?;
+        let desired_backing_scale =
+            crate::companion::retained::ActiveRetainedHost::backing_scale_for_resource_preparation(
+                state.view.as_super(),
+            )
+            .ok()?;
+        host.active_identity_for_resource_preparation(&desired_identity, desired_backing_scale)
+    });
+    let Some(identity) = identity else {
+        return false;
+    };
+    present_retained_frame_with(RetainedPresentIdentity::ActiveGeneration(identity));
+    true
 }
 
 /// After a runtime fallback tears down the retained host, the reverted
@@ -1446,7 +1535,18 @@ fn prepare_current_frame_from_state() {
 }
 
 #[cfg(feature = "retained-renderer")]
+enum RetainedPresentIdentity {
+    Current,
+    ActiveGeneration(crate::round::smooth::CompanionContentIdentity),
+}
+
+#[cfg(feature = "retained-renderer")]
 fn present_retained_frame() {
+    present_retained_frame_with(RetainedPresentIdentity::Current);
+}
+
+#[cfg(feature = "retained-renderer")]
+fn present_retained_frame_with(present_identity: RetainedPresentIdentity) {
     use crate::companion::retained::FrameDisposition;
 
     let failure = APP_STATE.with(|cell| {
@@ -1469,9 +1569,15 @@ fn present_retained_frame() {
         // the atlas is compiled for. It is stable for the pet's lifetime, so the
         // host reuses the compiled atlas every frame and only rebuilds on a real
         // generation change (a resize's backing-scale change).
-        let identity = crate::round::smooth::CompanionContentIdentity::for_pet(
-            state.vm.pet_render.generated_species,
-        );
+        let (identity, refresh_surface) = match present_identity {
+            RetainedPresentIdentity::Current => (
+                crate::round::smooth::CompanionContentIdentity::for_pet(
+                    state.vm.pet_render.generated_species,
+                ),
+                true,
+            ),
+            RetainedPresentIdentity::ActiveGeneration(identity) => (identity, false),
+        };
         let host = state.retained_host.as_mut()?;
         let background = [
             frame.background.0,
@@ -1503,6 +1609,7 @@ fn present_retained_frame() {
                 dim_overlay: frame.dim_overlay,
             },
             &identity,
+            refresh_surface,
         );
         // A GPU device fault reported asynchronously is a failure even when the
         // frame otherwise presented, so drain the mailbox before recording any

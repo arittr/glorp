@@ -33,6 +33,7 @@ impl FrameMilestone {
 /// Why a frame reached a terminal state without presenting its surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SkipReason {
+    ResourcePreparation,
     Outdated,
     Timeout,
     Occluded,
@@ -237,6 +238,20 @@ mod tests {
             .unwrap();
         assert!(!progress.observed(FrameMilestone::SurfacePresentCalled));
         assert!(!progress.observed(FrameMilestone::ReadbackCompleted));
+    }
+
+    #[test]
+    fn resource_preparation_skip_is_nonfatal_and_claims_no_frame_milestone() {
+        let mut progress = FrameProgress::new(9, 0);
+        progress
+            .finish(FrameDisposition::Skipped(SkipReason::ResourcePreparation))
+            .unwrap();
+        assert_eq!(
+            progress.disposition(),
+            Some(FrameDisposition::Skipped(SkipReason::ResourcePreparation))
+        );
+        assert!(!progress.observed(FrameMilestone::Prepared));
+        assert!(!progress.observed(FrameMilestone::SurfacePresentCalled));
     }
 
     #[test]

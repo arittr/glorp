@@ -41,8 +41,9 @@ pub(crate) use presentation::{
     SkipReason,
 };
 use resources::{
-    CompiledGlyphAtlas, CompiledRetainedResources, FragmentGlyphMode, GlyphAtlasEntry, GlyphKey,
-    GlyphRepertoireManifest, RetainedResourceCounters, RETAINED_ATLAS_POINT_SIZE,
+    CompiledGlyphAtlas, CompiledRetainedResources, CompiledRetainedResourcesPreparation,
+    FragmentGlyphMode, GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest,
+    RetainedResourceCounters, RETAINED_ATLAS_POINT_SIZE,
 };
 
 use crate::round::smooth::CompanionContentIdentity;
@@ -51,6 +52,7 @@ use crate::round::smooth::CompanionContentIdentity;
 /// scale divides the display font size by this. Matches the manifest's
 /// production atlas point size.
 const GLYPH_FONT_SIZE: f64 = RETAINED_ATLAS_POINT_SIZE;
+const APPKIT_RASTER_SLICE_BUDGET: Duration = Duration::from_micros(4_000);
 /// Logical-pixel margin the analytic-arc primitive rect extends past the stroke's
 /// outer radius, so the outer edge's one-physical-pixel coverage band has room to
 /// fall off inside the rect instead of being clipped at its boundary. A couple of
@@ -130,7 +132,7 @@ impl PreparedGpuPrimitiveCollector {
             2.0,
         );
         Ok(Self {
-            resources: CompiledRetainedResources::compile(&manifest)?,
+            resources: CompiledRetainedResources::for_capacity_inventory(&manifest),
         })
     }
 
@@ -302,6 +304,78 @@ struct ActiveGlyphResources {
     bind_group: wgpu::BindGroup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResourcePreparationKey {
+    identity: CompanionContentIdentity,
+    backing_scale_bits: u64,
+}
+
+impl ResourcePreparationKey {
+    fn new(identity: CompanionContentIdentity, backing_scale: f64) -> Self {
+        Self {
+            identity,
+            backing_scale_bits: backing_scale.to_bits(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceRequestAction {
+    Ready,
+    FailedCached,
+    Resume,
+    Replace { cancel_pending: bool },
+}
+
+fn classify_resource_request(
+    active: Option<&ResourcePreparationKey>,
+    pending: Option<&ResourcePreparationKey>,
+    failed: Option<&ResourcePreparationKey>,
+    desired: &ResourcePreparationKey,
+) -> ResourceRequestAction {
+    if active == Some(desired) {
+        return ResourceRequestAction::Ready;
+    }
+    if failed == Some(desired) {
+        return ResourceRequestAction::FailedCached;
+    }
+    if pending == Some(desired) {
+        return ResourceRequestAction::Resume;
+    }
+    ResourceRequestAction::Replace { cancel_pending: pending.is_some() }
+}
+
+fn publish_is_allowed_in_slice(cpu_complete: bool, elapsed: Duration, budget: Duration) -> bool {
+    cpu_complete && elapsed < budget
+}
+
+fn preparation_wall_us(enqueued_at: Instant, completed_at: Instant) -> u32 {
+    duration_us(completed_at.saturating_duration_since(enqueued_at))
+}
+
+struct PendingGlyphResources {
+    key: ResourcePreparationKey,
+    enqueued_at: Instant,
+    first_slice_started: bool,
+    active_raster_us: u64,
+    cpu_complete: bool,
+    preparation: CompiledRetainedResourcesPreparation,
+}
+
+struct FailedGlyphPreparation {
+    key: ResourcePreparationKey,
+    category: RetainedFailureCategory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourcePreparationTick {
+    Ready,
+    YieldedRetainingActive,
+    YieldedWithoutActive,
+    FailedRetainingActive(RetainedFailureCategory),
+    FailedWithoutActive(RetainedFailureCategory),
+}
+
 pub(super) struct RetainedHost {
     // Surface must drop before the retained CAMetalLayer.
     surface: wgpu::Surface<'static>,
@@ -312,6 +386,8 @@ pub(super) struct RetainedHost {
     pipelines: Pipelines,
     atlas_layout: wgpu::BindGroupLayout,
     glyph_resources: Option<ActiveGlyphResources>,
+    pending_glyph_resources: Option<PendingGlyphResources>,
+    failed_glyph_preparation: Option<FailedGlyphPreparation>,
     frame_buffers: PersistentFrameBuffers,
     capture_resources: Option<PersistentCaptureResources>,
     counters: RetainedResourceCounters,
@@ -320,7 +396,6 @@ pub(super) struct RetainedHost {
     backing_scale: f64,
     frame_counter: u64,
     activation_render_owner_us: u64,
-    activation_excluded_appkit_us: u64,
     activation_recorded: bool,
     gpu_errors: GpuErrorMailbox,
     metrics: CompanionRuntimeMetrics,
@@ -542,6 +617,8 @@ impl PreparedRetainedHost {
                 pipelines,
                 atlas_layout,
                 glyph_resources: None,
+                pending_glyph_resources: None,
+                failed_glyph_preparation: None,
                 frame_buffers: PersistentFrameBuffers::new(),
                 capture_resources: None,
                 counters,
@@ -550,7 +627,6 @@ impl PreparedRetainedHost {
                 backing_scale: scale,
                 frame_counter: 0,
                 activation_render_owner_us: 0,
-                activation_excluded_appkit_us: 0,
                 activation_recorded: false,
                 gpu_errors: mailbox,
                 metrics,
@@ -637,6 +713,39 @@ impl ActiveRetainedHost {
             .as_ref()
             .map(|active| active.resources.generation().value())
             .unwrap_or(0)
+    }
+
+    pub(crate) fn advance_resource_preparation(
+        &mut self,
+        identity: &CompanionContentIdentity,
+        desired_backing_scale: f64,
+    ) -> ResourcePreparationTick {
+        self.host
+            .advance_resource_preparation(identity, desired_backing_scale)
+    }
+
+    pub(crate) fn backing_scale_for_resource_preparation(
+        view: &NSView,
+    ) -> std::result::Result<f64, RetainedFailureCategory> {
+        view.window()
+            .map(|window| window.backingScaleFactor())
+            .ok_or(RetainedFailureCategory::SurfaceUnavailable)
+    }
+
+    pub(crate) fn active_identity_for_resource_preparation(
+        &self,
+        desired_identity: &CompanionContentIdentity,
+        desired_backing_scale: f64,
+    ) -> Option<CompanionContentIdentity> {
+        self.host.glyph_resources.as_ref().and_then(|active| {
+            (active.identity != *desired_identity
+                || active.backing_scale.to_bits() != desired_backing_scale.to_bits())
+            .then(|| active.identity.clone())
+        })
+    }
+
+    pub(crate) fn record_resource_preparation_skip(&mut self) -> FrameProgress {
+        self.host.record_resource_preparation_skip()
     }
 
     /// Drives a real retained GPU instance ring and queue through a bounded
@@ -1101,30 +1210,30 @@ impl RetainedHost {
         background: [f32; 4],
         chrome: RetainedChrome<'_>,
         identity: &CompanionContentIdentity,
+        refresh_surface: bool,
     ) -> FrameProgress {
         let activation_attempt_started = (!self.activation_recorded).then(Instant::now);
         let progress = (|| {
             let frame_id = self.next_frame_id();
-            if let Err(category) = self.resize_if_needed(view) {
-                let mut progress = FrameProgress::new(frame_id, 0);
-                fail(&mut progress, category);
-                return progress;
-            }
-            // Compile the full declared repertoire once per resource generation. A
-            // per-frame glyph-set change never rebuilds; only a generation change
-            // (species, font policy, or backing scale) does.
-            if let Err(category) = self.ensure_resources(identity) {
-                let mut progress = FrameProgress::new(frame_id, 0);
-                fail(&mut progress, category);
-                return progress;
+            if refresh_surface {
+                if let Err(category) = self.resize_if_needed(view) {
+                    let mut progress = FrameProgress::new(frame_id, 0);
+                    fail(&mut progress, category);
+                    return progress;
+                }
             }
             let Some(generation) = self
                 .glyph_resources
                 .as_ref()
+                .filter(|active| {
+                    active.identity == *identity
+                        && active.backing_scale.to_bits() == self.backing_scale.to_bits()
+                })
                 .map(|active| active.resources.generation().value())
             else {
                 let mut progress = FrameProgress::new(frame_id, 0);
-                fail(&mut progress, RetainedFailureCategory::AtlasUnavailable);
+                self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                skip(&mut progress, SkipReason::ResourcePreparation);
                 return progress;
             };
             let mut progress = FrameProgress::new(frame_id, generation);
@@ -1237,10 +1346,7 @@ impl RetainedHost {
                 .activation_render_owner_us
                 .saturating_add(u64::from(duration_us(started_at.elapsed())));
             if progress.disposition() == Some(FrameDisposition::SurfacePresentCalled) {
-                let activation_us = self
-                    .activation_render_owner_us
-                    .saturating_sub(self.activation_excluded_appkit_us)
-                    .min(u64::from(u32::MAX)) as u32;
+                let activation_us = self.activation_render_owner_us.min(u64::from(u32::MAX)) as u32;
                 self.record_metrics(|metrics| {
                     metrics.record_activation_render_owner_us(activation_us)
                 });
@@ -1333,41 +1439,143 @@ impl RetainedHost {
         }
     }
 
-    /// Ensures the active glyph resources match the pet's declared-content
-    /// `identity` at the current backing scale. Reuses the active generation when
-    /// nothing changed; otherwise compiles the full declared repertoire into a
-    /// fresh atlas and uploads it. Compile-before-replace: on a compile failure
-    /// the previous generation stays active so the caller can keep rendering it or
-    /// fall back explicitly.
-    fn ensure_resources(
+    fn advance_resource_preparation(
         &mut self,
         identity: &CompanionContentIdentity,
-    ) -> std::result::Result<(), RetainedFailureCategory> {
-        if let Some(active) = &self.glyph_resources {
-            if active.identity == *identity
-                && (active.backing_scale - self.backing_scale).abs() < f64::EPSILON
-            {
-                return Ok(());
+        desired_backing_scale: f64,
+    ) -> ResourcePreparationTick {
+        let desired = ResourcePreparationKey::new(identity.clone(), desired_backing_scale);
+        let active_key = self.glyph_resources.as_ref().map(|active| {
+            ResourcePreparationKey::new(active.identity.clone(), active.backing_scale)
+        });
+        let action = classify_resource_request(
+            active_key.as_ref(),
+            self.pending_glyph_resources
+                .as_ref()
+                .map(|pending| &pending.key),
+            self.failed_glyph_preparation
+                .as_ref()
+                .map(|failed| &failed.key),
+            &desired,
+        );
+        match action {
+            ResourceRequestAction::Ready => {
+                if self.pending_glyph_resources.take().is_some() {
+                    self.metrics.record_appkit_raster_cancellation();
+                }
+                self.failed_glyph_preparation = None;
+                return ResourcePreparationTick::Ready;
+            }
+            ResourceRequestAction::FailedCached => {
+                let category = self
+                    .failed_glyph_preparation
+                    .as_ref()
+                    .expect("classified cached failure exists")
+                    .category;
+                return if self.glyph_resources.is_some() {
+                    ResourcePreparationTick::FailedRetainingActive(category)
+                } else {
+                    ResourcePreparationTick::FailedWithoutActive(category)
+                };
+            }
+            ResourceRequestAction::Resume => {}
+            ResourceRequestAction::Replace { cancel_pending } => {
+                if cancel_pending {
+                    self.pending_glyph_resources = None;
+                    self.metrics.record_appkit_raster_cancellation();
+                }
+                self.failed_glyph_preparation = None;
             }
         }
-        // The first compile is the activation build; any later one is a
-        // legitimate, rare rebuild a resource generation change (e.g. a resize's
-        // backing-scale change) caused — never per-frame animation churn. A
-        // rebuild while a generation is already active is post-activation churn
-        // the counters surface for the churn contract.
-        let rebuilding = self.glyph_resources.is_some();
-        let manifest =
-            GlyphRepertoireManifest::for_active_pet(identity.clone(), self.backing_scale);
-        let compile_started_at = Instant::now();
-        let resources = CompiledRetainedResources::compile(&manifest)?;
-        let compile_us = duration_us(compile_started_at.elapsed());
-        self.metrics.record_compile_us(compile_us);
-        if !self.activation_recorded {
-            self.activation_excluded_appkit_us = self
-                .activation_excluded_appkit_us
-                .saturating_add(u64::from(compile_us));
+
+        let slice_started_at = Instant::now();
+        let mut pending = match self.pending_glyph_resources.take() {
+            Some(pending) if pending.key == desired => {
+                self.metrics.record_appkit_raster_coalesce();
+                pending
+            }
+            previous => {
+                debug_assert!(previous.is_none());
+                let manifest = GlyphRepertoireManifest::for_active_pet(
+                    desired.identity.clone(),
+                    f64::from_bits(desired.backing_scale_bits),
+                );
+                let preparation = match CompiledRetainedResourcesPreparation::new(&manifest) {
+                    Ok(preparation) => preparation,
+                    Err(category) => {
+                        return self.finish_resource_preparation_failure(desired, category);
+                    }
+                };
+                PendingGlyphResources {
+                    key: desired,
+                    enqueued_at: slice_started_at,
+                    first_slice_started: false,
+                    active_raster_us: 0,
+                    cpu_complete: false,
+                    preparation,
+                }
+            }
+        };
+        if pending.cpu_complete {
+            return self.publish_prepared_resources(pending);
         }
-        let before = self.counters;
+        if !pending.first_slice_started {
+            self.metrics.record_appkit_raster_queue_wait_us(duration_us(
+                slice_started_at.saturating_duration_since(pending.enqueued_at),
+            ));
+            pending.first_slice_started = true;
+        }
+        let before_raster = slice_started_at.elapsed();
+        let remaining = APPKIT_RASTER_SLICE_BUDGET.saturating_sub(before_raster);
+        let progress = match pending.preparation.advance(remaining) {
+            Ok(progress) => progress,
+            Err(category) => {
+                let key = pending.key;
+                return self.finish_resource_preparation_failure(key, category);
+            }
+        };
+        let slice_elapsed = slice_started_at.elapsed();
+        let slice_us = duration_us(slice_elapsed);
+        let deadline_missed =
+            progress.deadline_missed || slice_elapsed > APPKIT_RASTER_SLICE_BUDGET;
+        pending.active_raster_us = pending.active_raster_us.saturating_add(u64::from(slice_us));
+        self.metrics
+            .record_appkit_raster_slice_us(slice_us, deadline_missed);
+        if progress.complete {
+            pending.cpu_complete = true;
+            let active_us = pending.active_raster_us.min(u64::from(u32::MAX)) as u32;
+            let total_wall_us = preparation_wall_us(pending.enqueued_at, Instant::now());
+            self.metrics.record_compile_us(active_us);
+            self.metrics.record_appkit_raster_total_us(total_wall_us);
+        }
+        if !publish_is_allowed_in_slice(
+            progress.complete,
+            slice_elapsed,
+            APPKIT_RASTER_SLICE_BUDGET,
+        ) {
+            self.pending_glyph_resources = Some(pending);
+            return if self.glyph_resources.is_some() {
+                ResourcePreparationTick::YieldedRetainingActive
+            } else {
+                ResourcePreparationTick::YieldedWithoutActive
+            };
+        }
+
+        self.publish_prepared_resources(pending)
+    }
+
+    fn publish_prepared_resources(
+        &mut self,
+        pending: PendingGlyphResources,
+    ) -> ResourcePreparationTick {
+        debug_assert!(pending.cpu_complete);
+        let resources = match pending.preparation.finish() {
+            Ok(resources) => resources,
+            Err(category) => {
+                return self.finish_resource_preparation_failure(pending.key, category);
+            }
+        };
+        let rebuilding = self.glyph_resources.is_some();
         let static_bytes = resources.atlas().rgba.len() as u64;
         let (texture, bind_group) = upload_glyph_atlas(
             &self.device,
@@ -1376,7 +1584,6 @@ impl RetainedHost {
             resources.atlas(),
             &mut self.counters,
         );
-        let _delta = self.counters - before;
         self.metrics.record_static_upload(static_bytes);
         self.metrics
             .replace_gpu_allocation(GpuAllocationKind::Atlas, static_bytes, 2);
@@ -1384,14 +1591,36 @@ impl RetainedHost {
             self.counters.atlas_builds_after_activation += 1;
             self.counters.atlas_uploads_after_activation += 1;
         }
+        let published_backing_scale = f64::from_bits(pending.key.backing_scale_bits);
         self.glyph_resources = Some(ActiveGlyphResources {
-            identity: identity.clone(),
-            backing_scale: self.backing_scale,
+            identity: pending.key.identity,
+            backing_scale: published_backing_scale,
             resources,
             _texture: texture,
             bind_group,
         });
-        Ok(())
+        self.backing_scale = published_backing_scale;
+        ResourcePreparationTick::Ready
+    }
+
+    fn record_resource_preparation_skip(&mut self) -> FrameProgress {
+        let mut progress = FrameProgress::new(self.next_frame_id(), 0);
+        self.record_metrics(CompanionRuntimeMetrics::record_skip);
+        skip(&mut progress, SkipReason::ResourcePreparation);
+        progress
+    }
+
+    fn finish_resource_preparation_failure(
+        &mut self,
+        key: ResourcePreparationKey,
+        category: RetainedFailureCategory,
+    ) -> ResourcePreparationTick {
+        self.failed_glyph_preparation = Some(FailedGlyphPreparation { key, category });
+        if self.glyph_resources.is_some() {
+            ResourcePreparationTick::FailedRetainingActive(category)
+        } else {
+            ResourcePreparationTick::FailedWithoutActive(category)
+        }
     }
 
     /// Ensures the persistent capture intermediate and staging buffer match the
@@ -2355,15 +2584,16 @@ mod tests {
     use super::parity::srgb_channel_to_linear;
     use super::resources::GlyphEntryKind;
     use super::{
-        create_atlas_bind_group_layout, create_pipelines, current_process_rss_bytes, glyph_advance,
-        glyph_ink_rect, glyph_run_height, glyph_run_width, persistent_instance_capacity,
-        physical_dimension, push_analytic_arc, run_lifetime_schedule, upload_glyph_atlas,
+        classify_resource_request, create_atlas_bind_group_layout, create_pipelines,
+        current_process_rss_bytes, glyph_advance, glyph_ink_rect, glyph_run_height,
+        glyph_run_width, persistent_instance_capacity, physical_dimension, preparation_wall_us,
+        publish_is_allowed_in_slice, push_analytic_arc, run_lifetime_schedule, upload_glyph_atlas,
         CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry, GlyphKey,
         GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard, LayerActivationState,
         LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
-        PersistentFrameBuffers, Pipelines, PreparedGpuFrame, RetainedFailureCategory,
-        RetainedResourceCounters, SmoothBlendMode, FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE,
-        RETAINED_ATLAS_POINT_SIZE,
+        PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationKey,
+        ResourceRequestAction, RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
+        FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE, RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -2379,6 +2609,57 @@ mod tests {
     /// wobbles a fixed set of primitives, so the count never changes and the
     /// persistent ring is written but never grown after warmup.
     const AMBIENT_PRIMITIVE_COUNT: usize = 96;
+
+    #[test]
+    fn resource_request_coalesces_same_identity_and_replaces_stale_before_work() {
+        let fuzz =
+            ResourcePreparationKey::new(CompanionContentIdentity::for_pet(Species::Fuzz), 2.0);
+        let crystal =
+            ResourcePreparationKey::new(CompanionContentIdentity::for_pet(Species::Crystal), 2.0);
+        assert_eq!(
+            classify_resource_request(None, Some(&fuzz), None, &fuzz),
+            ResourceRequestAction::Resume
+        );
+        assert_eq!(
+            classify_resource_request(None, Some(&fuzz), None, &crystal),
+            ResourceRequestAction::Replace { cancel_pending: true }
+        );
+        assert_eq!(
+            classify_resource_request(Some(&fuzz), Some(&crystal), None, &fuzz),
+            ResourceRequestAction::Ready
+        );
+    }
+
+    #[test]
+    fn completed_cpu_atlas_publishes_only_with_budget_remaining() {
+        assert!(publish_is_allowed_in_slice(
+            true,
+            std::time::Duration::from_micros(3_999),
+            std::time::Duration::from_micros(4_000),
+        ));
+        assert!(!publish_is_allowed_in_slice(
+            true,
+            std::time::Duration::from_micros(4_000),
+            std::time::Duration::from_micros(4_000),
+        ));
+        assert!(!publish_is_allowed_in_slice(
+            true,
+            std::time::Duration::from_micros(4_001),
+            std::time::Duration::from_micros(4_000),
+        ));
+        assert!(!publish_is_allowed_in_slice(
+            false,
+            std::time::Duration::from_micros(1),
+            std::time::Duration::from_micros(4_000),
+        ));
+    }
+
+    #[test]
+    fn raster_total_is_enqueue_to_cpu_completion_wall_time() {
+        let enqueued = std::time::Instant::now();
+        let completed = enqueued + std::time::Duration::from_micros(12_345);
+        assert_eq!(preparation_wall_us(enqueued, completed), 12_345);
+    }
 
     /// A deterministic ambient animation strip as prepared GPU frames. Each frame
     /// carries the same primitive count with per-frame position wobble — the
