@@ -568,7 +568,7 @@ impl ActiveRetainedHost {
     /// virtual time while queue work is submitted as fast as the device allows.
     pub(crate) fn run_virtual_lifetime_audit(&mut self, frames: u64) {
         const CADENCE_MS: u64 = 250;
-        const DRIVER_WARMUP_FRAMES: u64 = 18_000;
+        const DRIVER_WARMUP_FRAMES: u64 = 4_500;
         let instances = vec![GpuPrimitive::zeroed(); FIXED_INSTANCE_RING_MIN];
         let submit = |host: &mut RetainedHost| {
             host.frame_buffers
@@ -580,11 +580,6 @@ impl ActiveRetainedHost {
                 });
             host.queue.submit([encoder.finish()])
         };
-        // Prime the RSS sampler itself before the warmup boundary so process
-        // spawning/buffer retention is not misclassified as renderer growth.
-        for _ in 0..4 {
-            let _ = current_process_rss_bytes();
-        }
         let mut last_submission = None;
         for frame in 0..DRIVER_WARMUP_FRAMES {
             last_submission = Some(submit(&mut self.host));
@@ -595,12 +590,6 @@ impl ActiveRetainedHost {
                         timeout: Some(Duration::from_secs(5)),
                     });
                 }
-            }
-            if (frame + 1) % 256 == 0 {
-                // Match the measured phase's RSS sampling cadence so sampler
-                // process/cache growth is fully inside warmup, not charged to
-                // the renderer lifetime segment.
-                let _ = current_process_rss_bytes();
             }
         }
         if let Some(submission) = last_submission.take() {
@@ -729,20 +718,39 @@ impl ActiveRetainedHost {
 }
 
 fn current_process_rss_bytes() -> Option<u64> {
-    let pid = std::process::id().to_string();
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    #[repr(C)]
+    #[derive(Default)]
+    struct RUsageInfoV0 {
+        uuid: [u8; 16],
+        user_time: u64,
+        system_time: u64,
+        package_idle_wakeups: u64,
+        interrupt_wakeups: u64,
+        pageins: u64,
+        wired_size: u64,
+        resident_size: u64,
+        physical_footprint: u64,
+        process_start_abstime: u64,
+        process_exit_abstime: u64,
     }
-    let kib = std::str::from_utf8(&output.stdout)
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?;
-    Some(kib.saturating_mul(1024))
+
+    #[link(name = "proc")]
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut std::ffi::c_void) -> i32;
+    }
+
+    const RUSAGE_INFO_V0: i32 = 0;
+    let mut usage = RUsageInfoV0::default();
+    // SAFETY: `usage` has the documented RUSAGE_INFO_V0 layout and remains live
+    // for the duration of the call. The current process id fits Darwin's pid_t.
+    let rc = unsafe {
+        proc_pid_rusage(
+            std::process::id() as i32,
+            RUSAGE_INFO_V0,
+            std::ptr::from_mut(&mut usage).cast(),
+        )
+    };
+    (rc == 0 && usage.resident_size > 0).then_some(usage.resident_size)
 }
 
 impl std::ops::Deref for ActiveRetainedHost {
@@ -2051,14 +2059,14 @@ mod tests {
     use super::parity::srgb_channel_to_linear;
     use super::resources::GlyphEntryKind;
     use super::{
-        create_atlas_bind_group_layout, create_pipelines, glyph_advance, glyph_ink_rect,
-        glyph_run_height, glyph_run_width, persistent_instance_capacity, physical_dimension,
-        push_analytic_arc, upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources,
-        GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
-        LayerActivationState, PersistentFrameBuffers, Pipelines, PreparedGpuFrame,
-        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
-        FULL_FIXTURE_INSTANCE_HEADROOM, FULL_FIXTURE_INSTANCE_MAX, GLYPH_FONT_SIZE,
-        RETAINED_ATLAS_POINT_SIZE,
+        create_atlas_bind_group_layout, create_pipelines, current_process_rss_bytes, glyph_advance,
+        glyph_ink_rect, glyph_run_height, glyph_run_width, persistent_instance_capacity,
+        physical_dimension, push_analytic_arc, upload_glyph_atlas, CompiledGlyphAtlas,
+        CompiledRetainedResources, GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest,
+        GpuPrimitive, LayerActivationGuard, LayerActivationState, PersistentFrameBuffers,
+        Pipelines, PreparedGpuFrame, RetainedFailureCategory, RetainedResourceCounters,
+        SmoothBlendMode, FULL_FIXTURE_INSTANCE_HEADROOM, FULL_FIXTURE_INSTANCE_MAX,
+        GLYPH_FONT_SIZE, RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -2266,6 +2274,11 @@ mod tests {
         }
         let delta = host.counters() - before;
         assert_eq!(delta.buffer_creations, 0);
+    }
+
+    #[test]
+    fn process_rss_sampler_reads_current_process_without_spawning() {
+        assert!(current_process_rss_bytes().is_some_and(|bytes| bytes > 0));
     }
 
     /// A visible coverage-mask entry with the given ink geometry; the metric
