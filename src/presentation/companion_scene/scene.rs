@@ -1,6 +1,7 @@
 use crate::presentation::privacy::PrivacyProjection;
 use std::fmt;
 use std::ops::Mul;
+use std::sync::Arc;
 
 pub const SCENE_CONTRACT_SCHEMA_VERSION: u16 = super::COMPANION_SCENE_SCHEMA_VERSION;
 pub const MAX_SCENE_NODES: usize = 128;
@@ -12,6 +13,9 @@ pub const MAX_AMBIENT_INSTANCES: usize = 64;
 pub const MAX_BLENDED_DRAWS: usize = 256;
 pub const MAX_LIGHTS: usize = 2;
 pub const MAX_ATTACHMENTS: usize = 32;
+pub const MAX_PROP_GLYPHS_PER_SLOT: usize = 9;
+pub const MAX_TANK_GLYPHS_PER_SLOT: usize = 8;
+pub const MAX_HUD_GLYPH_SLOTS: usize = 24;
 pub const LIT_CARD_SCALE_TOLERANCE: f32 = 1.0e-5;
 pub const MIN_LIT_CARD_WORLD_SCALE: f64 = 1.0e-6;
 // V1 emits SDR, but these bounds leave ample headroom for authored HDR-like
@@ -435,6 +439,35 @@ pub struct PrimitiveTemplate {
     pub resource: Option<ResourceId>,
     pub blend: WorldBlend,
     pub depth: DepthBehavior,
+    pub instance_group: Option<InstanceGroupBinding>,
+    pub authored_order: u16,
+    pub local_geometry: Bounds3,
+    pub space: PrimitiveSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrimitiveSpace {
+    World,
+    Screen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstanceLayer {
+    Behind,
+    Foreground,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstanceGroupBinding {
+    PetBody,
+    PetParticles,
+    PropGlyphs(u8),
+    TankCells { slot: u8, layer: InstanceLayer },
+    Ambient,
+    Hud,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -490,6 +523,7 @@ pub struct SceneTemplate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentValueError {
     InvalidPetGlyph,
+    InvalidAuthoredGlyph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -512,6 +546,27 @@ impl PetGlyph {
     }
 }
 
+/// A glyph from the closed companion-authored repertoire. This deliberately
+/// excludes arbitrary user text and control characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct AuthoredGlyph(char);
+
+impl AuthoredGlyph {
+    pub fn new(glyph: char) -> Result<Self, ContentValueError> {
+        const REPERTOIRE: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,:;!?%+-_#*/\\()[]<>|~`'\"@=&^$◆◇◈◉○◌◦◡◑◔◜▲▼◣◢▝▴▱▂▃▓▣☁☼✦✺·•°˚˙‹›ѱ⁙⌁╭╮╰╯╲╱╵╷╽╿┃│┊─┬~≈";
+        REPERTOIRE
+            .chars()
+            .any(|candidate| candidate == glyph)
+            .then_some(Self(glyph))
+            .ok_or(ContentValueError::InvalidAuthoredGlyph)
+    }
+
+    pub const fn as_char(self) -> char {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PetPaletteRole {
@@ -527,35 +582,56 @@ pub enum PetPaletteRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PropContentKind {
-    Static,
-    SpritePhase0,
-    SpritePhase1,
-    TwinkleInactive,
-    TwinkleActive,
-    MotionPhase0,
-    MotionPhase1,
-    ChestClosed,
-    ChestOpen,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TankContentKind {
-    SpriteVariant0,
-    SpriteVariant1,
-    AnemoneFlower,
-    AnemoneComb,
-    AnemoneCrown,
-    AnemoneDotColony,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum AmbientContentKind {
     Mote,
     ActivityPulse,
     PetParticle,
+    Weather,
+    MoodAura,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MoodContentKind {
+    Happy,
+    Ecstatic,
+    Content,
+    Hungry,
+    Sad,
+    Sleepy,
+    Wilted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeatherContentKind {
+    Clear,
+    CacheMist,
+    OutputSparks,
+    ReasoningPulse,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PropGlyphContent {
+    pub glyph: Option<AuthoredGlyph>,
+    pub local_cell: [i8; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PropSemanticContent {
+    pub sprite_phase: Option<u8>,
+    pub twinkle_active: Option<bool>,
+    pub lid_open: Option<bool>,
+    pub bloom_active: Option<bool>,
+    pub glyphs: [PropGlyphContent; MAX_PROP_GLYPHS_PER_SLOT],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct TankSemanticContent {
+    pub sprite_variant: u8,
+    pub morph: Option<u8>,
+    pub glyphs: [Option<AuthoredGlyph>; MAX_TANK_GLYPHS_PER_SLOT],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -568,30 +644,83 @@ pub struct PetArtSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PropContentSlot {
     pub slot: u8,
-    pub kind: PropContentKind,
+    pub content: Option<PropSemanticContent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct TankContentSlot {
     pub slot: u8,
-    pub kind: TankContentKind,
+    pub content: Option<TankSemanticContent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct AmbientContentSlot {
     pub slot: u8,
-    pub active: bool,
-    pub kind: AmbientContentKind,
+    pub kind: Option<AmbientContentKind>,
+    pub glyph: Option<AuthoredGlyph>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct HudContentSlot {
+    pub slot: u8,
+    pub glyph: Option<AuthoredGlyph>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneContent {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
+    pub palette: [[u8; 3]; 8],
+    pub mood: MoodContentKind,
+    pub weather: WeatherContentKind,
     pub pet_art_slots: Vec<PetArtSlot>,
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
+    pub hud_slots: Vec<HudContentSlot>,
+}
+
+const fn zero_generation_key() -> super::SceneGenerationKey {
+    super::SceneGenerationKey {
+        device: super::DeviceEpoch(0),
+        layout: super::LayoutGeneration(0),
+        resources: super::ResourceGeneration(0),
+    }
+}
+
+impl SceneContent {
+    pub fn empty_v1() -> Self {
+        Self {
+            schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
+            renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
+            palette: [[0; 3]; 8],
+            mood: MoodContentKind::Content,
+            weather: WeatherContentKind::Clear,
+            pet_art_slots: (0..MAX_PET_ART_SLOTS)
+                .map(|slot| PetArtSlot {
+                    slot: slot as u16,
+                    glyph: None,
+                    palette_role: PetPaletteRole::Body,
+                })
+                .collect(),
+            prop_slots: (0..MAX_VISIBLE_PROPS)
+                .map(|slot| PropContentSlot { slot: slot as u8, content: None })
+                .collect(),
+            tank_slots: (0..MAX_ROUND_TANK_INHABITANTS)
+                .map(|slot| TankContentSlot { slot: slot as u8, content: None })
+                .collect(),
+            ambient_slots: (0..MAX_AMBIENT_INSTANCES)
+                .map(|slot| AmbientContentSlot {
+                    slot: slot as u8,
+                    kind: None,
+                    glyph: None,
+                })
+                .collect(),
+            hud_slots: (0..MAX_HUD_GLYPH_SLOTS)
+                .map(|slot| HudContentSlot { slot: slot as u8, glyph: None })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -609,15 +738,113 @@ pub struct LightFrame {
     pub intensity: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct PropFrameSlot {
+    pub slot: u8,
+    pub visible: bool,
+    pub origin_points: [f32; 2],
+    pub motion_offset_points: [f32; 2],
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct TankCellFrame {
+    pub visible: bool,
+    pub position_points: [f32; 2],
+    pub layer: InstanceLayer,
+    pub bounds_points: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct TankFrameSlot {
+    pub slot: u8,
+    pub visible: bool,
+    pub origin_points: [f32; 2],
+    pub cells: [TankCellFrame; MAX_TANK_GLYPHS_PER_SLOT],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct AmbientFrameSlot {
+    pub slot: u8,
+    pub visible: bool,
+    pub position_points: [f32; 2],
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct HudFrameSlot {
+    pub slot: u8,
+    pub visible: bool,
+    pub position_points: [f32; 2],
+    pub opacity: f32,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct SceneFrame {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
     pub camera: OrthographicCamera,
     pub nodes: Vec<NodeFrameState>,
+    pub prop_slots: Vec<PropFrameSlot>,
+    pub tank_slots: Vec<TankFrameSlot>,
+    pub ambient_slots: Vec<AmbientFrameSlot>,
+    pub hud_slots: Vec<HudFrameSlot>,
     pub gauges: [f32; 4],
     pub dim_amount: f32,
     pub lights: Vec<LightFrame>,
+}
+
+impl SceneFrame {
+    pub fn empty_v1(camera: OrthographicCamera) -> Self {
+        let hidden_tank_cell = TankCellFrame {
+            visible: false,
+            position_points: [0.0; 2],
+            layer: InstanceLayer::Behind,
+            bounds_points: [0.0; 4],
+        };
+        Self {
+            schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
+            renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
+            camera,
+            nodes: Vec::new(),
+            prop_slots: (0..MAX_VISIBLE_PROPS)
+                .map(|slot| PropFrameSlot {
+                    slot: slot as u8,
+                    visible: false,
+                    origin_points: [0.0; 2],
+                    motion_offset_points: [0.0; 2],
+                    opacity: 0.0,
+                })
+                .collect(),
+            tank_slots: (0..MAX_ROUND_TANK_INHABITANTS)
+                .map(|slot| TankFrameSlot {
+                    slot: slot as u8,
+                    visible: false,
+                    origin_points: [0.0; 2],
+                    cells: [hidden_tank_cell; MAX_TANK_GLYPHS_PER_SLOT],
+                })
+                .collect(),
+            ambient_slots: (0..MAX_AMBIENT_INSTANCES)
+                .map(|slot| AmbientFrameSlot {
+                    slot: slot as u8,
+                    visible: false,
+                    position_points: [0.0; 2],
+                    opacity: 0.0,
+                })
+                .collect(),
+            hud_slots: (0..MAX_HUD_GLYPH_SLOTS)
+                .map(|slot| HudFrameSlot {
+                    slot: slot as u8,
+                    visible: false,
+                    position_points: [0.0; 2],
+                    opacity: 0.0,
+                })
+                .collect(),
+            gauges: [0.0; 4],
+            dim_amount: 0.0,
+            lights: Vec::new(),
+        }
+    }
 }
 
 impl fmt::Debug for SceneFrame {
@@ -628,6 +855,10 @@ impl fmt::Debug for SceneFrame {
             .field("renderer_schema_version", &self.renderer_schema_version)
             .field("camera", &self.camera)
             .field("nodes", &self.nodes)
+            .field("prop_slots", &self.prop_slots)
+            .field("tank_slots", &self.tank_slots)
+            .field("ambient_slots", &self.ambient_slots)
+            .field("hud_slots", &self.hud_slots)
             .field("gauges", &"<redacted>")
             .field("dim_amount", &"<redacted>")
             .field("light_count", &self.lights.len())
@@ -639,10 +870,17 @@ impl fmt::Debug for SceneFrame {
 pub struct ContentDelta {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
+    pub generation_key: super::SceneGenerationKey,
+    pub from: super::AppliedRevisions,
+    pub to: super::AppliedRevisions,
+    pub palette: Option<[[u8; 3]; 8]>,
+    pub mood: Option<MoodContentKind>,
+    pub weather: Option<WeatherContentKind>,
     pub pet_art_slots: Vec<PetArtSlot>,
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
+    pub hud_slots: Vec<HudContentSlot>,
 }
 
 impl ContentDelta {
@@ -650,10 +888,17 @@ impl ContentDelta {
         Self {
             schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
             renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
+            generation_key: zero_generation_key(),
+            from: super::AppliedRevisions::new(0, 0),
+            to: super::AppliedRevisions::new(0, 0),
+            palette: None,
+            mood: None,
+            weather: None,
             pet_art_slots: Vec::new(),
             prop_slots: Vec::new(),
             tank_slots: Vec::new(),
             ambient_slots: Vec::new(),
+            hud_slots: Vec::new(),
         }
     }
 }
@@ -662,8 +907,15 @@ impl ContentDelta {
 pub struct FrameDelta {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
+    pub generation_key: super::SceneGenerationKey,
+    pub from: super::AppliedRevisions,
+    pub to: super::AppliedRevisions,
     pub camera: Option<OrthographicCamera>,
     pub nodes: Vec<NodeFrameState>,
+    pub prop_slots: Vec<PropFrameSlot>,
+    pub tank_slots: Vec<TankFrameSlot>,
+    pub ambient_slots: Vec<AmbientFrameSlot>,
+    pub hud_slots: Vec<HudFrameSlot>,
     pub gauges: Option<[f32; 4]>,
     pub dim_amount: Option<f32>,
     pub lights: Vec<(u8, LightFrame)>,
@@ -689,14 +941,90 @@ impl FrameDelta {
         Self {
             schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
             renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
+            generation_key: zero_generation_key(),
+            from: super::AppliedRevisions::new(0, 0),
+            to: super::AppliedRevisions::new(0, 0),
             camera: None,
             nodes: Vec::new(),
+            prop_slots: Vec::new(),
+            tank_slots: Vec::new(),
+            ambient_slots: Vec::new(),
+            hud_slots: Vec::new(),
             gauges: None,
             dim_amount: None,
             lights: Vec::new(),
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneGenerationData {
+    pub generation_key: super::SceneGenerationKey,
+    pub source_revisions: super::AppliedRevisions,
+    pub source_snapshot: Arc<super::CompanionSceneSnapshot>,
+    pub template: SceneTemplate,
+    pub content: SceneContent,
+    pub frame: SceneFrame,
+    pub content_checksum: u64,
+    pub frame_checksum: u64,
+    pub(crate) delta_scratch: SceneDeltaScratch,
+    accepted: super::validate::AcceptedSceneState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SceneDeltaScratch {
+    pub content: ContentDelta,
+    pub frame: FrameDelta,
+}
+
+impl SceneDeltaScratch {
+    fn fixed_v1() -> Self {
+        Self {
+            content: ContentDelta {
+                schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
+                renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
+                generation_key: zero_generation_key(),
+                from: super::AppliedRevisions::new(0, 0),
+                to: super::AppliedRevisions::new(0, 0),
+                palette: None,
+                mood: None,
+                weather: None,
+                pet_art_slots: Vec::with_capacity(MAX_PET_ART_SLOTS),
+                prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
+                tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
+                ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
+                hud_slots: Vec::with_capacity(MAX_HUD_GLYPH_SLOTS),
+            },
+            frame: FrameDelta {
+                schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
+                renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
+                generation_key: zero_generation_key(),
+                from: super::AppliedRevisions::new(0, 0),
+                to: super::AppliedRevisions::new(0, 0),
+                camera: None,
+                nodes: Vec::with_capacity(MAX_SCENE_NODES),
+                prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
+                tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
+                ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
+                hud_slots: Vec::with_capacity(MAX_HUD_GLYPH_SLOTS),
+                gauges: None,
+                dim_amount: None,
+                lights: Vec::with_capacity(MAX_LIGHTS),
+            },
+        }
+    }
+}
+
+mod checksum;
+mod compiler;
+
+#[cfg(test)]
+use checksum::canonical_f32_bits;
+#[cfg(test)]
+use compiler::prop_glyphs;
+pub use compiler::{build_scene_generation, SceneGenerationError};
+#[allow(unused_imports)] // Public Task 8 seam; Task 5 exercises it only in unit tests.
+pub(crate) use compiler::{build_scene_generation_owned, SceneDeltaApplyError};
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -752,6 +1080,10 @@ impl SceneFixture {
                     resource: Some(resource),
                     blend: WorldBlend::AlphaCutout,
                     depth: DepthBehavior::WorldWrite,
+                    instance_group: None,
+                    authored_order: 0,
+                    local_geometry: Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] },
+                    space: PrimitiveSpace::World,
                 }],
                 materials: vec![MaterialTemplate {
                     id: material,
@@ -778,16 +1110,23 @@ impl SceneFixture {
             content: SceneContent {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
                 renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
-                pet_art_slots: vec![PetArtSlot {
-                    slot: 0,
-                    glyph: Some(
-                        PetGlyph::for_species('^', crate::pet::generation::Species::Fuzz).unwrap(),
-                    ),
-                    palette_role: PetPaletteRole::Body,
-                }],
-                prop_slots: vec![],
-                tank_slots: vec![],
-                ambient_slots: vec![],
+                palette: [[0; 3]; 8],
+                mood: MoodContentKind::Content,
+                weather: WeatherContentKind::Clear,
+                pet_art_slots: (0..MAX_PET_ART_SLOTS)
+                    .map(|slot| PetArtSlot {
+                        slot: slot as u16,
+                        glyph: (slot == 0).then(|| {
+                            PetGlyph::for_species('^', crate::pet::generation::Species::Fuzz)
+                                .unwrap()
+                        }),
+                        palette_role: PetPaletteRole::Body,
+                    })
+                    .collect(),
+                prop_slots: SceneContent::empty_v1().prop_slots,
+                tank_slots: SceneContent::empty_v1().tank_slots,
+                ambient_slots: SceneContent::empty_v1().ambient_slots,
+                hud_slots: SceneContent::empty_v1().hud_slots,
             },
             frame: SceneFrame {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -807,6 +1146,10 @@ impl SceneFixture {
                         opacity: 1.0,
                     },
                 ],
+                prop_slots: SceneFrame::empty_v1(camera).prop_slots,
+                tank_slots: SceneFrame::empty_v1(camera).tank_slots,
+                ambient_slots: SceneFrame::empty_v1(camera).ambient_slots,
+                hud_slots: SceneFrame::empty_v1(camera).hud_slots,
                 gauges: [0.0; 4],
                 dim_amount: 0.0,
                 lights: vec![],
@@ -827,8 +1170,166 @@ impl SceneFixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::evolution::Stage;
+    use crate::game::metabolism::Mood;
+    use crate::pet::generation::{generate_pet, Species};
+    use crate::pet::render::{render_pet, AnimationFrame, PaletteRoleName};
+    use crate::presentation::companion_scene::{CompanionLogicalLayout, CompanionSceneSnapshot};
+    use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
 
     const EPSILON: f32 = 1.0e-5;
+
+    fn generation_key(value: u64) -> super::super::SceneGenerationKey {
+        super::super::SceneGenerationKey {
+            device: super::super::DeviceEpoch(value),
+            layout: super::super::LayoutGeneration(value + 1),
+            resources: super::super::ResourceGeneration(value + 2),
+        }
+    }
+
+    fn snapshot_for(species: Species, stage: Stage) -> CompanionSceneSnapshot {
+        let generated = generate_pet("direct-unlit-scene-fixture").with_species(species);
+        let rendered = render_pet(&generated, stage, Mood::Content, AnimationFrame::default());
+        let source_lines = rendered.lines;
+        let mut pet_lines = source_lines
+            .iter()
+            .map(|line| {
+                let mut chars = line.chars().collect::<Vec<_>>();
+                chars.resize(super::super::PET_LATTICE_WIDTH as usize, ' ');
+                chars.into_iter().collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        pet_lines.resize(
+            super::super::PET_LATTICE_HEIGHT as usize,
+            " ".repeat(super::super::PET_LATTICE_WIDTH as usize),
+        );
+        let pet_roles = rendered
+            .spans
+            .iter()
+            .map(|span| super::super::PetRoleSpanSnapshot {
+                line_index: span.line as u16,
+                start_char: span.start as u16,
+                end_char: span.end as u16,
+                role: match span.role {
+                    PaletteRoleName::Body => "body",
+                    PaletteRoleName::BodyGlow => "body-glow",
+                    PaletteRoleName::Eye => "eye",
+                    PaletteRoleName::Mouth => "mouth",
+                    PaletteRoleName::Accent => "accent",
+                    PaletteRoleName::Pattern => "pattern",
+                    PaletteRoleName::Particle => "particle",
+                    PaletteRoleName::Corruption => "corruption",
+                },
+            })
+            .collect();
+        let hud_lines = [
+            "review".to_owned(),
+            "privacy".to_owned(),
+            "redacted".to_owned(),
+        ];
+        let hud_glyphs = hud_lines
+            .iter()
+            .flat_map(|line| {
+                let mut chars = line.chars().map(Some).collect::<Vec<_>>();
+                chars.resize(8, None);
+                chars
+            })
+            .enumerate()
+            .map(|(slot, glyph)| super::super::HudGlyphSnapshot { slot: slot as u8, glyph })
+            .collect::<Vec<_>>();
+        CompanionSceneSnapshot {
+            schema_version: super::super::COMPANION_SCENE_SCHEMA_VERSION,
+            privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
+            topology: super::super::TopologySnapshot {
+                layout: CompanionLogicalLayout::round(360.0, 360.0),
+                pet: super::super::PetTopologySnapshot {
+                    species,
+                    stage,
+                    lattice: super::super::PetLatticeSnapshot {
+                        identity: "pet-art-13x10-v1",
+                        width: super::super::PET_LATTICE_WIDTH,
+                        height: super::super::PET_LATTICE_HEIGHT,
+                        slot_count: super::super::PET_LATTICE_SLOTS,
+                    },
+                },
+                room: super::super::RoomTopologySnapshot {
+                    primary_biome: "starter",
+                    secondary_biome: None,
+                    species_dialect: species.as_str(),
+                },
+                visible_props: Vec::new(),
+                visible_tank_inhabitants: Vec::new(),
+                renderer_schema: super::super::COMPANION_RENDERER_SCHEMA_VERSION,
+            },
+            content: super::super::ContentSnapshot {
+                mood: Mood::Content,
+                room_weather: "clear",
+                pet_lines,
+                pet_roles,
+                palette: super::super::PaletteSnapshot {
+                    body: [120, 130, 140],
+                    body_glow: [150, 160, 170],
+                    eye: [220, 230, 240],
+                    mouth: [180, 100, 110],
+                    accent: [100, 180, 200],
+                    pattern: [90, 100, 110],
+                    particle: [200, 190, 100],
+                    corruption: [210, 70, 180],
+                },
+                prop_animation_states: Vec::new(),
+                tank_animation_states: Vec::new(),
+                ambient_semantics: (0..MAX_AMBIENT_INSTANCES)
+                    .map(|slot| super::super::AmbientSemanticSnapshot {
+                        slot: slot as u8,
+                        kind: (slot == 0)
+                            .then_some(super::super::AmbientSemanticKindSnapshot::MoodAura),
+                        glyph: (slot == 0).then_some('◌'),
+                    })
+                    .collect(),
+                hud_glyphs,
+                activity_pulse_age_ms: None,
+            },
+            frame: super::super::FrameSnapshot {
+                elapsed_ms: 1_000,
+                pet_anchor_points: [120.0, 140.0],
+                pet_depth: 0.0,
+                facing: 1,
+                breath_offset_y_points: 0.0,
+                bob_offset_y_points: 0.0,
+                asleep: false,
+                helper_trouble: false,
+                gauges: [super::super::GaugeLevelSnapshot::Empty; 4],
+                dim_amount: 0.0,
+                hud_lines,
+                ambient_instances: (0..MAX_AMBIENT_INSTANCES)
+                    .map(|slot| super::super::AmbientFrameSnapshot {
+                        slot: slot as u8,
+                        visible: slot == 0,
+                        position_points: if slot == 0 { [180.0, 180.0] } else { [0.0; 2] },
+                        opacity: if slot == 0 { 1.0 } else { 0.0 },
+                    })
+                    .collect(),
+                hud_instances: (0..MAX_HUD_GLYPH_SLOTS)
+                    .map(|slot| {
+                        let visible = slot < 6 || (8..15).contains(&slot) || slot >= 16;
+                        super::super::HudFrameSnapshot {
+                            slot: slot as u8,
+                            visible,
+                            position_points: if visible {
+                                [
+                                    20.0 + (slot % 8) as f32 * 8.0,
+                                    300.0 + (slot / 8) as f32 * 10.0,
+                                ]
+                            } else {
+                                [0.0; 2]
+                            },
+                            opacity: if visible { 1.0 } else { 0.0 },
+                        }
+                    })
+                    .collect(),
+            },
+        }
+    }
 
     fn assert_point_close(actual: [f32; 4], expected: [f32; 4]) {
         for (actual, expected) in actual.into_iter().zip(expected) {
@@ -850,6 +1351,626 @@ mod tests {
         assert_eq!(MAX_BLENDED_DRAWS, 256);
         assert_eq!(MAX_LIGHTS, 2);
         assert_eq!(MAX_ATTACHMENTS, 32);
+        assert_eq!(MAX_PROP_GLYPHS_PER_SLOT, 9);
+        assert_eq!(MAX_TANK_GLYPHS_PER_SLOT, 8);
+        assert_eq!(MAX_HUD_GLYPH_SLOTS, 24);
+    }
+
+    #[test]
+    fn repaired_mirrors_have_canonical_empty_slots_and_fixed_frame_storage() {
+        let content = SceneContent::empty_v1();
+        assert_eq!(content.pet_art_slots.len(), MAX_PET_ART_SLOTS);
+        assert_eq!(content.prop_slots.len(), MAX_VISIBLE_PROPS);
+        assert_eq!(content.tank_slots.len(), MAX_ROUND_TANK_INHABITANTS);
+        assert_eq!(content.ambient_slots.len(), MAX_AMBIENT_INSTANCES);
+        assert_eq!(content.hud_slots.len(), MAX_HUD_GLYPH_SLOTS);
+        assert!(content.prop_slots.iter().all(|slot| slot.content.is_none()));
+        assert!(content.tank_slots.iter().all(|slot| slot.content.is_none()));
+        assert!(content.ambient_slots.iter().all(|slot| slot.kind.is_none()));
+
+        let frame = SceneFrame::empty_v1(OrthographicCamera::new(360.0, 360.0, -2.0, 2.0).unwrap());
+        assert_eq!(frame.prop_slots.len(), MAX_VISIBLE_PROPS);
+        assert_eq!(frame.tank_slots.len(), MAX_ROUND_TANK_INHABITANTS);
+        assert_eq!(frame.ambient_slots.len(), MAX_AMBIENT_INSTANCES);
+        assert_eq!(frame.hud_slots.len(), MAX_HUD_GLYPH_SLOTS);
+        assert!(frame.prop_slots.iter().all(|slot| !slot.visible));
+        assert!(frame
+            .tank_slots
+            .iter()
+            .flat_map(|slot| slot.cells)
+            .all(|cell| !cell.visible));
+    }
+
+    #[test]
+    fn non_pet_glyphs_are_finite_and_instance_bindings_are_explicit() {
+        assert_eq!(AuthoredGlyph::new('◆').unwrap().as_char(), '◆');
+        assert_eq!(
+            AuthoredGlyph::new('\n'),
+            Err(ContentValueError::InvalidAuthoredGlyph)
+        );
+        assert_eq!(
+            AuthoredGlyph::new('\u{1f4a5}'),
+            Err(ContentValueError::InvalidAuthoredGlyph)
+        );
+
+        let primitive = PrimitiveTemplate {
+            node: NodeId(1),
+            kind: PrimitiveKind::InstanceQuad,
+            material: MaterialId(2),
+            resource: Some(ResourceId(3)),
+            blend: WorldBlend::AlphaCutout,
+            depth: DepthBehavior::WorldWrite,
+            instance_group: Some(InstanceGroupBinding::PropGlyphs(4)),
+            authored_order: 17,
+            local_geometry: Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] },
+            space: PrimitiveSpace::World,
+        };
+        assert_eq!(
+            primitive.instance_group,
+            Some(InstanceGroupBinding::PropGlyphs(4))
+        );
+        assert_eq!(primitive.authored_order, 17);
+        assert_eq!(primitive.space, PrimitiveSpace::World);
+    }
+
+    #[test]
+    fn canonical_checksums_repeat_exclude_runtime_identity_and_normalize_zero() {
+        assert_eq!(
+            canonical_f32_bits(0.0).unwrap(),
+            canonical_f32_bits(-0.0).unwrap()
+        );
+        assert!(canonical_f32_bits(f32::NAN).is_err());
+
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let first = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        let repeated = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        let other_runtime = build_scene_generation(&snapshot, generation_key(99)).unwrap();
+        assert_ne!(first.template.generation_checksum, 0);
+        assert_eq!(
+            first.accepted.template().template().generation_checksum,
+            first.template.generation_checksum
+        );
+        assert_eq!(
+            first.template.generation_checksum,
+            repeated.template.generation_checksum
+        );
+        assert_eq!(first.content_checksum, repeated.content_checksum);
+        assert_eq!(first.frame_checksum, repeated.frame_checksum);
+        assert_eq!(
+            first.template.generation_checksum,
+            other_runtime.template.generation_checksum
+        );
+        assert_eq!(first.content_checksum, other_runtime.content_checksum);
+        assert_eq!(first.frame_checksum, other_runtime.frame_checksum);
+        assert_ne!(first.generation_key, other_runtime.generation_key);
+
+        let mut changed = snapshot.clone();
+        changed.content.palette.body[0] ^= 1;
+        let changed = build_scene_generation(&changed, generation_key(1)).unwrap();
+        assert_ne!(first.content_checksum, changed.content_checksum);
+        assert_eq!(
+            first.template.generation_checksum,
+            changed.template.generation_checksum
+        );
+
+        let mut changed = snapshot.clone();
+        changed.content.ambient_semantics[0].glyph = Some('◇');
+        let changed = build_scene_generation(&changed, generation_key(1)).unwrap();
+        assert_ne!(first.content_checksum, changed.content_checksum);
+
+        let mut changed = snapshot.clone();
+        changed.frame.pet_anchor_points[0] += 1.0;
+        let changed = build_scene_generation(&changed, generation_key(1)).unwrap();
+        assert_ne!(first.frame_checksum, changed.frame_checksum);
+
+        let mut changed = snapshot.clone();
+        changed.topology.room.species_dialect = "glitch";
+        let changed = build_scene_generation(&changed, generation_key(1)).unwrap();
+        assert_ne!(
+            first.template.generation_checksum,
+            changed.template.generation_checksum
+        );
+    }
+
+    #[test]
+    fn full_fixture_builds_complete_unlit_shallow_hierarchy() {
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        assert_eq!(
+            built
+                .template
+                .nodes
+                .iter()
+                .find(|node| node.alias.as_str() == "scene.root")
+                .unwrap()
+                .parent,
+            None
+        );
+        assert_eq!(built.content.pet_art_slots.len(), 130);
+        assert_eq!(built.content.prop_slots.len(), 10);
+        assert_eq!(built.content.tank_slots.len(), 2);
+        assert_eq!(built.content.ambient_slots.len(), 64);
+        assert_eq!(built.content.hud_slots.len(), 24);
+        assert!(built
+            .template
+            .nodes
+            .iter()
+            .all(|node| node.depth_cue == DepthCue::NEUTRAL));
+        assert!(built
+            .template
+            .primitives
+            .iter()
+            .all(|primitive| primitive.kind != PrimitiveKind::ShallowCard));
+        assert!(built
+            .template
+            .materials
+            .iter()
+            .all(|material| material.kind != MaterialKind::LitShallowCard));
+        assert!(built.frame.lights.is_empty());
+        assert!(built
+            .template
+            .attachments
+            .iter()
+            .all(|attachment| attachment.mode == AttachmentMode::Follow));
+        super::super::validate::validate_full_generation(
+            &built.template,
+            &built.content,
+            &built.frame,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn every_species_stage_uses_exact_pet_roles_and_fixed_lattice() {
+        let stages = [
+            Stage::S0,
+            Stage::S1,
+            Stage::S2,
+            Stage::S3,
+            Stage::S4,
+            Stage::S5,
+            Stage::S6,
+        ];
+        for species in Species::all() {
+            for stage in stages {
+                let snapshot = snapshot_for(species, stage);
+                let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+                assert_eq!(
+                    built.content.pet_art_slots.len(),
+                    130,
+                    "{species:?} {stage:?}"
+                );
+                assert!(built
+                    .content
+                    .pet_art_slots
+                    .iter()
+                    .enumerate()
+                    .all(|(index, slot)| usize::from(slot.slot) == index));
+            }
+        }
+    }
+
+    #[test]
+    fn compatible_changes_project_through_stable_preallocated_scratch() {
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let mut built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        let capacities = built.delta_capacities();
+
+        let mut facing = snapshot.clone();
+        facing.frame.facing *= -1;
+        let facing = std::sync::Arc::new(facing);
+        let changes = super::super::runtime::classify_snapshot_changes(&snapshot, &facing);
+        let deltas = built
+            .project_snapshot_changes(
+                &facing,
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(0, 1),
+            )
+            .unwrap();
+        assert!(deltas.content.pet_art_slots.is_empty());
+        assert_eq!(deltas.frame.nodes.len(), 1);
+        assert_eq!(built.delta_capacities(), capacities);
+
+        let mut raw_clock = snapshot.clone();
+        raw_clock.frame.elapsed_ms += 1;
+        let raw_clock = std::sync::Arc::new(raw_clock);
+        let changes = super::super::runtime::classify_snapshot_changes(&snapshot, &raw_clock);
+        let deltas = built
+            .project_snapshot_changes(
+                &raw_clock,
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(0, 0),
+            )
+            .unwrap();
+        assert!(deltas.content.pet_art_slots.is_empty());
+        assert!(deltas.frame.nodes.is_empty());
+        assert_eq!(built.delta_capacities(), capacities);
+    }
+
+    #[test]
+    fn compatible_apply_is_revision_bound_transactional_and_matches_rebuild() {
+        let mut initial = snapshot_for(Species::Fuzz, Stage::S3);
+        initial.topology.visible_props = vec![super::super::PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            zone: super::super::PropZoneSnapshot::FloorMid,
+            authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+        }];
+        initial.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            kind: super::super::PropAnimationKindSnapshot::Static,
+            sprite_phase: None,
+            twinkle_active: None,
+            motion_phase: None,
+            chest_lid_open: None,
+            bloom_active: None,
+            origin_points: [180.0, 280.0],
+        }];
+        let initial = std::sync::Arc::new(initial);
+        let mut built = build_scene_generation_owned(
+            std::sync::Arc::clone(&initial),
+            generation_key(1),
+            super::super::AppliedRevisions::new(3, 5),
+        )
+        .unwrap();
+        let mut asleep = (*initial).clone();
+        asleep.frame.asleep = true;
+        let asleep = std::sync::Arc::new(asleep);
+        let changes = super::super::runtime::classify_snapshot_changes(&initial, &asleep);
+        built
+            .apply_compatible_snapshot(
+                std::sync::Arc::clone(&asleep),
+                changes,
+                super::super::AppliedRevisions::new(3, 5),
+                super::super::AppliedRevisions::new(3, 6),
+            )
+            .unwrap();
+        let rebuilt = build_scene_generation_owned(
+            std::sync::Arc::clone(&asleep),
+            generation_key(1),
+            super::super::AppliedRevisions::new(3, 6),
+        )
+        .unwrap();
+        assert_eq!(built.content_checksum, rebuilt.content_checksum);
+        assert_eq!(built.frame_checksum, rebuilt.frame_checksum);
+        assert_eq!(built.frame.prop_slots, rebuilt.frame.prop_slots);
+        assert_eq!(built.frame.prop_slots[0].opacity, 0.72);
+
+        let before = built.clone();
+        assert_eq!(
+            built.apply_compatible_snapshot(
+                std::sync::Arc::clone(&initial),
+                super::super::runtime::classify_snapshot_changes(&asleep, &initial),
+                super::super::AppliedRevisions::new(3, 5),
+                super::super::AppliedRevisions::new(3, 7),
+            ),
+            Err(SceneDeltaApplyError::StaleBase)
+        );
+        assert_eq!(built, before);
+    }
+
+    #[test]
+    fn room_authored_identity_changes_template_resources_and_checksum() {
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let first = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        let mut changed = snapshot.clone();
+        changed.topology.room.primary_biome = "technical";
+        changed.topology.room.secondary_biome = Some("artifact");
+        changed.topology.room.species_dialect = "glitch";
+        let changed = build_scene_generation(&changed, generation_key(1)).unwrap();
+        assert_ne!(
+            first.template.generation_checksum,
+            changed.template.generation_checksum
+        );
+        assert_ne!(first.template.resources, changed.template.resources);
+    }
+
+    #[test]
+    fn builder_rejects_mismatched_and_out_of_order_slots_without_panicking() {
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let mut mismatch = snapshot.clone();
+        mismatch
+            .content
+            .prop_animation_states
+            .push(super::super::PropAnimationSnapshot {
+                catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+                stable_order: 0,
+                kind: super::super::PropAnimationKindSnapshot::Static,
+                sprite_phase: None,
+                twinkle_active: None,
+                motion_phase: None,
+                chest_lid_open: None,
+                bloom_active: None,
+                origin_points: [0.0; 2],
+            });
+        assert!(build_scene_generation(&mismatch, generation_key(1)).is_err());
+
+        let mut bad_slot = snapshot;
+        bad_slot.content.ambient_semantics[0].slot = 63;
+        assert!(build_scene_generation(&bad_slot, generation_key(1)).is_err());
+    }
+
+    #[test]
+    fn pet_body_and_particles_use_distinct_instance_groups() {
+        let built =
+            build_scene_generation(&snapshot_for(Species::Fuzz, Stage::S3), generation_key(1))
+                .unwrap();
+        let bindings = built
+            .template
+            .primitives
+            .iter()
+            .filter_map(|primitive| primitive.instance_group)
+            .collect::<Vec<_>>();
+        assert!(bindings.contains(&InstanceGroupBinding::PetBody));
+        assert!(bindings.contains(&InstanceGroupBinding::PetParticles));
+    }
+
+    #[test]
+    fn prop_catalog_states_fit_nine_glyphs_and_chest_attachment_is_lid_owned() {
+        for spec in crate::game::habitat::HABITAT_PROP_CATALOG {
+            for phase in [Some(0), Some(1)] {
+                for active in [Some(false), Some(true)] {
+                    let glyphs =
+                        prop_glyphs(spec.id, Species::Fuzz, phase, active, active, active).unwrap();
+                    assert!(
+                        glyphs.iter().any(|slot| slot.glyph.is_some()),
+                        "{}",
+                        spec.id
+                    );
+                    assert!(glyphs.iter().filter(|slot| slot.glyph.is_some()).count() <= 9);
+                }
+            }
+        }
+
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            stable_order: 0,
+            zone: super::super::PropZoneSnapshot::FloorMid,
+            authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+        }];
+        snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            stable_order: 0,
+            kind: super::super::PropAnimationKindSnapshot::Animated,
+            sprite_phase: None,
+            twinkle_active: None,
+            motion_phase: None,
+            chest_lid_open: Some(true),
+            bloom_active: None,
+            origin_points: [180.0, 280.0],
+        }];
+        let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        assert_eq!(built.template.attachments.len(), 1);
+        let attachment = &built.template.attachments[0];
+        let owner = built
+            .template
+            .nodes
+            .iter()
+            .find(|node| node.id == attachment.owner)
+            .unwrap();
+        assert_eq!(
+            owner.alias.as_str(),
+            "world.prop.token_treasure_chest_2m.lid"
+        );
+        assert_eq!(
+            attachment.alias.as_str(),
+            "world.prop.token_treasure_chest_2m.bubble-origin"
+        );
+    }
+
+    #[test]
+    fn every_tank_variant_and_morph_fits_two_by_eight_point_space_slots() {
+        for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
+            for variant in [0, 1] {
+                for morph in [None, Some(0), Some(1), Some(2), Some(3)] {
+                    let cells =
+                        crate::presentation::tank_life::tank_sprite_cells(spec.id, variant, morph);
+                    assert!(cells.len() <= MAX_TANK_GLYPHS_PER_SLOT, "{}", spec.id);
+                    for cell in cells {
+                        AuthoredGlyph::new(cell.glyph).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hierarchy_depth_gauges_and_raw_clock_contracts_are_exact() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.frame.gauges = [
+            super::super::GaugeLevelSnapshot::Empty,
+            super::super::GaugeLevelSnapshot::Low,
+            super::super::GaugeLevelSnapshot::Medium,
+            super::super::GaugeLevelSnapshot::High,
+        ];
+        let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        let nodes = built
+            .template
+            .nodes
+            .iter()
+            .map(|node| (node.alias.as_str(), node))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            nodes["world.room.background"].base_transform.translation[2],
+            -1.90
+        );
+        assert_eq!(
+            nodes["pet.shadow.wall"].base_transform.translation[2],
+            -1.30
+        );
+        assert_eq!(
+            nodes["pet.projection.floor"].base_transform.translation[2],
+            -1.20
+        );
+        assert_eq!(built.frame.gauges, [0.0, 0.125, 0.375, 0.75]);
+        let mut orders = built
+            .template
+            .primitives
+            .iter()
+            .map(|primitive| primitive.authored_order)
+            .collect::<Vec<_>>();
+        let count = orders.len();
+        orders.sort_unstable();
+        orders.dedup();
+        assert_eq!(orders.len(), count);
+
+        let mut clock_only = snapshot.clone();
+        clock_only.frame.elapsed_ms += 1_000;
+        let clock_built = build_scene_generation(&clock_only, generation_key(1)).unwrap();
+        assert_eq!(
+            built.template.generation_checksum,
+            clock_built.template.generation_checksum
+        );
+        assert_eq!(built.content_checksum, clock_built.content_checksum);
+        assert_eq!(built.frame_checksum, clock_built.frame_checksum);
+
+        let mut facing_only = snapshot.clone();
+        facing_only.frame.facing *= -1;
+        let facing_built = build_scene_generation(&facing_only, generation_key(1)).unwrap();
+        assert_eq!(
+            built.template.generation_checksum,
+            facing_built.template.generation_checksum
+        );
+        assert_eq!(built.content_checksum, facing_built.content_checksum);
+        assert_ne!(built.frame_checksum, facing_built.frame_checksum);
+    }
+
+    #[test]
+    fn overlapping_pet_roles_fail_instead_of_last_writer_wins() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.content.pet_roles = vec![
+            super::super::PetRoleSpanSnapshot {
+                line_index: 0,
+                start_char: 0,
+                end_char: 2,
+                role: "body",
+            },
+            super::super::PetRoleSpanSnapshot {
+                line_index: 0,
+                start_char: 1,
+                end_char: 3,
+                role: "eye",
+            },
+        ];
+        assert_eq!(
+            build_scene_generation(&snapshot, generation_key(1)),
+            Err(SceneGenerationError::OverlappingPetRole)
+        );
+    }
+
+    #[test]
+    fn full_ten_prop_two_tank_state_matrix_has_no_topology_churn() {
+        let mut base = snapshot_for(Species::Fuzz, Stage::S6);
+        base.topology.visible_props = crate::game::habitat::HABITAT_PROP_CATALOG
+            .iter()
+            .take(MAX_VISIBLE_PROPS)
+            .enumerate()
+            .map(|(index, spec)| super::super::PropTopologySnapshot {
+                catalog_id: spec.id,
+                stable_order: index as u8,
+                zone: spec.zone.into(),
+                authored_depth: spec.pet_layer.into(),
+            })
+            .collect();
+        base.content.prop_animation_states = base
+            .topology
+            .visible_props
+            .iter()
+            .map(|prop| super::super::PropAnimationSnapshot {
+                catalog_id: prop.catalog_id,
+                stable_order: prop.stable_order,
+                kind: super::super::PropAnimationKindSnapshot::Animated,
+                sprite_phase: Some(0),
+                twinkle_active: Some(false),
+                motion_phase: Some(0),
+                chest_lid_open: (prop.catalog_id == crate::game::habitat::TOKEN_TREASURE_CHEST_2M)
+                    .then_some(false),
+                bloom_active: None,
+                origin_points: [20.0 + f32::from(prop.stable_order) * 24.0, 280.0],
+            })
+            .collect();
+        base.topology.visible_tank_inhabitants = crate::game::habitat::TANK_INHABITANT_CATALOG
+            .iter()
+            .take(2)
+            .enumerate()
+            .map(|(index, spec)| super::super::TankTopologySnapshot {
+                catalog_id: spec.id,
+                stable_order: index as u8,
+                route: spec.route_family.into(),
+                authored_depth: spec.natural_layer.into(),
+            })
+            .collect();
+        base.content.tank_animation_states = base
+            .topology
+            .visible_tank_inhabitants
+            .iter()
+            .map(|tank| super::super::TankAnimationSnapshot {
+                catalog_id: tank.catalog_id,
+                stable_order: tank.stable_order,
+                route: tank.route,
+                visible: true,
+                origin_col: 1,
+                origin_row: 1,
+                origin_points: [40.0 + f32::from(tank.stable_order) * 40.0, 120.0],
+                side: None,
+                layer: super::super::TankLayerSnapshot::Behind,
+                sprite_variant: 0,
+                visible_rows: 1,
+                anemone_morph: None,
+                cadence_ms: 4_000,
+                calm: false,
+                cells: vec![super::super::TankCellSnapshot {
+                    col: 1,
+                    row: 1,
+                    glyph: if tank.stable_order == 0 { '╭' } else { '‹' },
+                    layer: super::super::TankLayerSnapshot::Behind,
+                    position_points: [40.0, 120.0],
+                }],
+                bounds: Some(super::super::TankBoundsSnapshot { x: 1, y: 1, width: 1, height: 1 }),
+                bounds_points: Some([40.0, 120.0, 8.0, 12.0]),
+            })
+            .collect();
+
+        let normal = build_scene_generation(&base, generation_key(1)).unwrap();
+        for (asleep, helper, dim) in [
+            (false, false, 0.0),
+            (false, true, 0.0),
+            (true, false, 0.35),
+            (true, true, 0.35),
+        ] {
+            let mut state = base.clone();
+            state.frame.asleep = asleep;
+            state.frame.helper_trouble = helper;
+            state.frame.dim_amount = dim;
+            let built = build_scene_generation(&state, generation_key(1)).unwrap();
+            assert_eq!(
+                built.template.generation_checksum,
+                normal.template.generation_checksum
+            );
+            assert_eq!(
+                built
+                    .content
+                    .prop_slots
+                    .iter()
+                    .filter(|slot| slot.content.is_some())
+                    .count(),
+                10
+            );
+            assert_eq!(
+                built
+                    .content
+                    .tank_slots
+                    .iter()
+                    .filter(|slot| slot.content.is_some())
+                    .count(),
+                2
+            );
+            assert!(built.frame.lights.is_empty());
+        }
     }
 
     #[test]

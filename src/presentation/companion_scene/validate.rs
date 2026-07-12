@@ -15,6 +15,7 @@ pub enum SceneValidationError {
     PropCapacityExceeded,
     TankCapacityExceeded,
     AmbientCapacityExceeded,
+    HudCapacityExceeded,
     BlendedDrawCapacityExceeded,
     LightCapacityExceeded,
     AttachmentCapacityExceeded,
@@ -46,12 +47,18 @@ pub enum SceneValidationError {
     PropSlotOutOfBounds,
     TankSlotOutOfBounds,
     AmbientSlotOutOfBounds,
+    HudSlotOutOfBounds,
     NodeSlotOutOfBounds,
     LightSlotOutOfBounds,
     DuplicateSlot,
+    FixedSlotCountMismatch,
+    InvalidPrimitiveBinding,
+    DuplicateAuthoredOrder,
+    NonCanonicalEmptySlot,
     MissingNodeFrameState,
     NonFiniteFrameValue,
     InvalidFrameValue,
+    InvalidContentValue,
     AcceptedStateMismatch,
 }
 
@@ -123,6 +130,14 @@ impl AcceptedSceneState {
     pub fn into_parts(self) -> (AcceptedSceneTemplate, AcceptedSceneFrame) {
         (self.template, self.frame)
     }
+
+    #[allow(dead_code)] // Task 8 publishes same-generation projections through this proof.
+    pub(crate) fn apply_frame_delta(
+        &mut self,
+        delta: &FrameDelta,
+    ) -> Result<FrameDeltaValidation, SceneValidationError> {
+        validate_frame_delta(delta, &self.template, &mut self.frame)
+    }
 }
 
 pub fn validate_full_generation(
@@ -133,6 +148,7 @@ pub fn validate_full_generation(
     let accepted = validate_template(template)?;
     validate_content(content)?;
     let accepted_frame = validate_frame(frame, &accepted)?;
+    validate_content_frame_canonical(content, accepted_frame.frame())?;
     Ok(AcceptedSceneState {
         template: accepted,
         frame: accepted_frame,
@@ -189,12 +205,53 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
     if content.ambient_slots.len() > MAX_AMBIENT_INSTANCES {
         return Err(SceneValidationError::AmbientCapacityExceeded);
     }
+    if content.hud_slots.len() > MAX_HUD_GLYPH_SLOTS {
+        return Err(SceneValidationError::HudCapacityExceeded);
+    }
+    if content.pet_art_slots.len() != MAX_PET_ART_SLOTS
+        || content.prop_slots.len() != MAX_VISIBLE_PROPS
+        || content.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
+        || content.ambient_slots.len() != MAX_AMBIENT_INSTANCES
+        || content.hud_slots.len() != MAX_HUD_GLYPH_SLOTS
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
     validate_content_slots(
         &content.pet_art_slots,
         &content.prop_slots,
         &content.tank_slots,
         &content.ambient_slots,
-    )
+        &content.hud_slots,
+    )?;
+    if content
+        .pet_art_slots
+        .iter()
+        .enumerate()
+        .any(|(index, slot)| usize::from(slot.slot) != index)
+        || content
+            .prop_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || content
+            .tank_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || content
+            .ambient_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || content
+            .hud_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    Ok(())
 }
 
 pub fn validate_frame(
@@ -214,6 +271,10 @@ pub fn validate_frame(
         .iter()
         .map(|node| by_id[&node.id])
         .collect();
+    canonical.prop_slots.sort_by_key(|slot| slot.slot);
+    canonical.tank_slots.sort_by_key(|slot| slot.slot);
+    canonical.ambient_slots.sort_by_key(|slot| slot.slot);
+    canonical.hud_slots.sort_by_key(|slot| slot.slot);
     Ok(AcceptedSceneFrame {
         frame: canonical,
         template_identity: Arc::clone(&accepted_template.identity),
@@ -231,6 +292,37 @@ fn validate_frame_against_template(
     }
     if frame.lights.len() > MAX_LIGHTS {
         return Err(SceneValidationError::LightCapacityExceeded);
+    }
+    if frame.prop_slots.len() != MAX_VISIBLE_PROPS
+        || frame.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
+        || frame.ambient_slots.len() != MAX_AMBIENT_INSTANCES
+        || frame.hud_slots.len() != MAX_HUD_GLYPH_SLOTS
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    validate_instance_frame_slots(frame)?;
+    if frame
+        .prop_slots
+        .iter()
+        .enumerate()
+        .any(|(index, slot)| usize::from(slot.slot) != index)
+        || frame
+            .tank_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || frame
+            .ambient_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || frame
+            .hud_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
     }
     let mut seen = HashSet::new();
     for node in &frame.nodes {
@@ -257,6 +349,7 @@ fn validate_frame_against_template(
     validate_lit_card_world_transforms(&accepted_template.lit_paths, |id| {
         frame_transforms.get(&id).copied()
     })?;
+    validate_instance_frame_slots(frame)?;
     validate_frame_scalars(frame.gauges, frame.dim_amount, &frame.lights)
 }
 
@@ -269,7 +362,110 @@ pub fn validate_content_delta(delta: &ContentDelta) -> Result<(), SceneValidatio
         &delta.prop_slots,
         &delta.tank_slots,
         &delta.ambient_slots,
+        &delta.hud_slots,
     )
+}
+
+#[allow(dead_code)] // Task 8 calls this before committing paired content/frame deltas.
+pub(crate) fn validate_content_frame_delta(
+    current_content: &SceneContent,
+    current_frame: &SceneFrame,
+    content_delta: &ContentDelta,
+    frame_delta: &FrameDelta,
+) -> Result<(), SceneValidationError> {
+    if content_delta.generation_key != frame_delta.generation_key
+        || content_delta.from != frame_delta.from
+        || content_delta.to != frame_delta.to
+    {
+        return Err(SceneValidationError::AcceptedStateMismatch);
+    }
+    validate_content_delta(content_delta)?;
+    let zero2 = |value: [f32; 2]| value.into_iter().all(|component| component.to_bits() == 0);
+    let zero4 = |value: [f32; 4]| value.into_iter().all(|component| component.to_bits() == 0);
+    for slot in 0..MAX_VISIBLE_PROPS {
+        let content = content_delta
+            .prop_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_content.prop_slots[slot]);
+        let frame = frame_delta
+            .prop_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_frame.prop_slots[slot]);
+        if content.content.is_none()
+            && (frame.visible
+                || !zero2(frame.origin_points)
+                || !zero2(frame.motion_offset_points)
+                || frame.opacity.to_bits() != 0)
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    for slot in 0..MAX_ROUND_TANK_INHABITANTS {
+        let content = content_delta
+            .tank_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_content.tank_slots[slot]);
+        let frame = frame_delta
+            .tank_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_frame.tank_slots[slot]);
+        if content.content.is_none() && (frame.visible || !zero2(frame.origin_points)) {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+        let glyphs = content
+            .content
+            .map(|content| content.glyphs)
+            .unwrap_or([None; MAX_TANK_GLYPHS_PER_SLOT]);
+        for (glyph, cell) in glyphs.into_iter().zip(frame.cells) {
+            if glyph.is_none()
+                && (cell.visible
+                    || !zero2(cell.position_points)
+                    || !zero4(cell.bounds_points)
+                    || cell.layer != InstanceLayer::Behind)
+            {
+                return Err(SceneValidationError::NonCanonicalEmptySlot);
+            }
+        }
+    }
+    for slot in 0..MAX_AMBIENT_INSTANCES {
+        let content = content_delta
+            .ambient_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_content.ambient_slots[slot]);
+        let frame = frame_delta
+            .ambient_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_frame.ambient_slots[slot]);
+        if content.kind.is_none()
+            && (frame.visible || !zero2(frame.position_points) || frame.opacity.to_bits() != 0)
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    for slot in 0..MAX_HUD_GLYPH_SLOTS {
+        let content = content_delta
+            .hud_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_content.hud_slots[slot]);
+        let frame = frame_delta
+            .hud_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_frame.hud_slots[slot]);
+        if content.glyph.is_none()
+            && (frame.visible || !zero2(frame.position_points) || frame.opacity.to_bits() != 0)
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    Ok(())
 }
 
 /// Validates changed fields and affected lit paths over an accepted current
@@ -293,6 +489,7 @@ pub fn validate_frame_delta(
     if delta.lights.len() > MAX_LIGHTS {
         return Err(SceneValidationError::LightCapacityExceeded);
     }
+    validate_changed_instance_frame_slots(delta)?;
     if let Some(camera) = delta.camera {
         validate_camera(camera)?;
     }
@@ -380,6 +577,18 @@ pub fn validate_frame_delta(
         if let Some(changed) = light_overlay[slot] {
             current_frame.frame.lights[slot] = changed;
         }
+    }
+    for changed in &delta.prop_slots {
+        current_frame.frame.prop_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.tank_slots {
+        current_frame.frame.tank_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.ambient_slots {
+        current_frame.frame.ambient_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.hud_slots {
+        current_frame.frame.hud_slots[usize::from(changed.slot)] = *changed;
     }
     Ok(FrameDeltaValidation {
         node_slots_checked: delta.nodes.len(),
@@ -563,6 +772,7 @@ fn validate_primitives(template: &SceneTemplate) -> Result<(), SceneValidationEr
         .iter()
         .map(|resource| (resource.id, resource.kind))
         .collect::<HashMap<_, _>>();
+    let mut authored_orders = HashSet::new();
     for primitive in &template.primitives {
         if !node_ids.contains(&primitive.node) {
             return Err(SceneValidationError::DanglingNodeReference);
@@ -587,6 +797,37 @@ fn validate_primitives(template: &SceneTemplate) -> Result<(), SceneValidationEr
         }
         if !primitive_resource_compatible(primitive.kind, resource) {
             return Err(SceneValidationError::PrimitiveResourceIncompatible);
+        }
+        validate_bounds(primitive.local_geometry)?;
+        if !authored_orders.insert(primitive.authored_order) {
+            return Err(SceneValidationError::DuplicateAuthoredOrder);
+        }
+        let binding_matches = match (primitive.kind, primitive.instance_group) {
+            (PrimitiveKind::InstanceQuad, Some(InstanceGroupBinding::PropGlyphs(slot))) => {
+                usize::from(slot) < MAX_VISIBLE_PROPS
+            }
+            (PrimitiveKind::InstanceQuad, Some(InstanceGroupBinding::TankCells { slot, .. })) => {
+                usize::from(slot) < MAX_ROUND_TANK_INHABITANTS
+            }
+            (
+                PrimitiveKind::InstanceQuad,
+                Some(
+                    InstanceGroupBinding::PetBody
+                    | InstanceGroupBinding::PetParticles
+                    | InstanceGroupBinding::Ambient
+                    | InstanceGroupBinding::Hud,
+                ),
+            ) => true,
+            (PrimitiveKind::InstanceQuad, None) => false,
+            (_, None) => true,
+            (_, Some(_)) => false,
+        };
+        let space_matches = match material {
+            MaterialKind::ScreenChrome => primitive.space == PrimitiveSpace::Screen,
+            _ => primitive.space == PrimitiveSpace::World,
+        };
+        if !binding_matches || !space_matches {
+            return Err(SceneValidationError::InvalidPrimitiveBinding);
         }
     }
     Ok(())
@@ -816,7 +1057,28 @@ fn validate_content_slots(
     props: &[PropContentSlot],
     tanks: &[TankContentSlot],
     ambient: &[AmbientContentSlot],
+    hud: &[HudContentSlot],
 ) -> Result<(), SceneValidationError> {
+    if pet
+        .iter()
+        .any(|slot| slot.glyph.is_none() && slot.palette_role != PetPaletteRole::Body)
+        || props.iter().any(|slot| {
+            slot.content.is_some_and(|content| {
+                content
+                    .glyphs
+                    .iter()
+                    .any(|glyph| glyph.glyph.is_none() && glyph.local_cell != [0; 2])
+            })
+        })
+    {
+        return Err(SceneValidationError::NonCanonicalEmptySlot);
+    }
+    if ambient
+        .iter()
+        .any(|slot| slot.kind.is_some() != slot.glyph.is_some())
+    {
+        return Err(SceneValidationError::InvalidContentValue);
+    }
     validate_unique_slots(
         pet.iter().map(|slot| usize::from(slot.slot)),
         MAX_PET_ART_SLOTS,
@@ -836,7 +1098,170 @@ fn validate_content_slots(
         ambient.iter().map(|slot| usize::from(slot.slot)),
         MAX_AMBIENT_INSTANCES,
         SceneValidationError::AmbientSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        hud.iter().map(|slot| usize::from(slot.slot)),
+        MAX_HUD_GLYPH_SLOTS,
+        SceneValidationError::HudSlotOutOfBounds,
     )
+}
+
+fn validate_instance_frame_slots(frame: &SceneFrame) -> Result<(), SceneValidationError> {
+    validate_unique_slots(
+        frame.prop_slots.iter().map(|slot| usize::from(slot.slot)),
+        MAX_VISIBLE_PROPS,
+        SceneValidationError::PropSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        frame.tank_slots.iter().map(|slot| usize::from(slot.slot)),
+        MAX_ROUND_TANK_INHABITANTS,
+        SceneValidationError::TankSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        frame
+            .ambient_slots
+            .iter()
+            .map(|slot| usize::from(slot.slot)),
+        MAX_AMBIENT_INSTANCES,
+        SceneValidationError::AmbientSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        frame.hud_slots.iter().map(|slot| usize::from(slot.slot)),
+        MAX_HUD_GLYPH_SLOTS,
+        SceneValidationError::HudSlotOutOfBounds,
+    )?;
+    for slot in &frame.prop_slots {
+        validate_points(slot.origin_points)?;
+        validate_points(slot.motion_offset_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
+    for slot in &frame.tank_slots {
+        validate_points(slot.origin_points)?;
+        for cell in slot.cells {
+            validate_points(cell.position_points)?;
+            if !cell.bounds_points.iter().all(|value| value.is_finite()) {
+                return Err(SceneValidationError::NonFiniteFrameValue);
+            }
+        }
+    }
+    for slot in &frame.ambient_slots {
+        validate_points(slot.position_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
+    for slot in &frame.hud_slots {
+        validate_points(slot.position_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
+    Ok(())
+}
+
+fn validate_content_frame_canonical(
+    content: &SceneContent,
+    frame: &SceneFrame,
+) -> Result<(), SceneValidationError> {
+    let zero2 = |value: [f32; 2]| value.into_iter().all(|component| component.to_bits() == 0);
+    let zero4 = |value: [f32; 4]| value.into_iter().all(|component| component.to_bits() == 0);
+    for (content, frame) in content.prop_slots.iter().zip(&frame.prop_slots) {
+        if content.content.is_none()
+            && (frame.visible
+                || !zero2(frame.origin_points)
+                || !zero2(frame.motion_offset_points)
+                || frame.opacity.to_bits() != 0)
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    for (content, frame) in content.tank_slots.iter().zip(&frame.tank_slots) {
+        if content.content.is_none() && (frame.visible || !zero2(frame.origin_points)) {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+        let glyphs = content
+            .content
+            .map(|content| content.glyphs)
+            .unwrap_or([None; MAX_TANK_GLYPHS_PER_SLOT]);
+        for (glyph, cell) in glyphs.into_iter().zip(frame.cells) {
+            if glyph.is_none()
+                && (cell.visible
+                    || !zero2(cell.position_points)
+                    || !zero4(cell.bounds_points)
+                    || cell.layer != InstanceLayer::Behind)
+            {
+                return Err(SceneValidationError::NonCanonicalEmptySlot);
+            }
+        }
+    }
+    for (content, frame) in content.ambient_slots.iter().zip(&frame.ambient_slots) {
+        if content.kind.is_none()
+            && (frame.visible || !zero2(frame.position_points) || frame.opacity.to_bits() != 0)
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    for (content, frame) in content.hud_slots.iter().zip(&frame.hud_slots) {
+        if content.glyph.is_none()
+            && (frame.visible || !zero2(frame.position_points) || frame.opacity.to_bits() != 0)
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    Ok(())
+}
+
+fn validate_changed_instance_frame_slots(delta: &FrameDelta) -> Result<(), SceneValidationError> {
+    validate_unique_slots(
+        delta.prop_slots.iter().map(|slot| usize::from(slot.slot)),
+        MAX_VISIBLE_PROPS,
+        SceneValidationError::PropSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        delta.tank_slots.iter().map(|slot| usize::from(slot.slot)),
+        MAX_ROUND_TANK_INHABITANTS,
+        SceneValidationError::TankSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        delta
+            .ambient_slots
+            .iter()
+            .map(|slot| usize::from(slot.slot)),
+        MAX_AMBIENT_INSTANCES,
+        SceneValidationError::AmbientSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        delta.hud_slots.iter().map(|slot| usize::from(slot.slot)),
+        MAX_HUD_GLYPH_SLOTS,
+        SceneValidationError::HudSlotOutOfBounds,
+    )?;
+    for slot in &delta.prop_slots {
+        validate_points(slot.origin_points)?;
+        validate_points(slot.motion_offset_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
+    for slot in &delta.tank_slots {
+        validate_points(slot.origin_points)?;
+        for cell in slot.cells {
+            validate_points(cell.position_points)?;
+            if !cell.bounds_points.iter().all(|value| value.is_finite()) {
+                return Err(SceneValidationError::NonFiniteFrameValue);
+            }
+        }
+    }
+    for slot in &delta.ambient_slots {
+        validate_points(slot.position_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
+    for slot in &delta.hud_slots {
+        validate_points(slot.position_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
+    Ok(())
+}
+
+fn validate_points(points: [f32; 2]) -> Result<(), SceneValidationError> {
+    points
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(())
+        .ok_or(SceneValidationError::NonFiniteFrameValue)
 }
 
 fn validate_unique_slots(
@@ -844,12 +1269,13 @@ fn validate_unique_slots(
     capacity: usize,
     out_of_bounds: SceneValidationError,
 ) -> Result<(), SceneValidationError> {
-    let mut seen = HashSet::new();
+    debug_assert!(capacity <= MAX_PET_ART_SLOTS);
+    let mut seen = [false; MAX_PET_ART_SLOTS];
     for slot in slots {
         if slot >= capacity {
             return Err(out_of_bounds);
         }
-        if !seen.insert(slot) {
+        if std::mem::replace(&mut seen[slot], true) {
             return Err(SceneValidationError::DuplicateSlot);
         }
     }
@@ -994,6 +1420,69 @@ mod tests {
         assert_eq!(
             validate_template(&template),
             Err(SceneValidationError::NodeCapacityExceeded)
+        );
+    }
+
+    #[test]
+    fn duplicate_authored_order_and_noncanonical_empty_mirrors_are_rejected() {
+        let mut fixture = SceneFixture::valid();
+        let mut duplicate = fixture.template.primitives[0].clone();
+        duplicate.node = fixture.template.nodes[0].id;
+        fixture.template.primitives.push(duplicate);
+        assert_eq!(
+            validate_template(&fixture.template),
+            Err(SceneValidationError::DuplicateAuthoredOrder)
+        );
+
+        let mut fixture = SceneFixture::valid();
+        fixture.frame.prop_slots[0].visible = true;
+        assert_eq!(
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
+        );
+
+        let mut fixture = SceneFixture::valid();
+        fixture.content.pet_art_slots[1].palette_role = PetPaletteRole::Eye;
+        assert_eq!(
+            validate_content(&fixture.content),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
+        );
+
+        let mut bad_glyphs =
+            [PropGlyphContent { glyph: None, local_cell: [0; 2] }; MAX_PROP_GLYPHS_PER_SLOT];
+        bad_glyphs[0].local_cell = [1, 0];
+        let bad_prop = PropContentSlot {
+            slot: 0,
+            content: Some(PropSemanticContent {
+                sprite_phase: None,
+                twinkle_active: None,
+                lid_open: None,
+                bloom_active: None,
+                glyphs: bad_glyphs,
+            }),
+        };
+        let mut fixture = SceneFixture::valid();
+        fixture.content.prop_slots[0] = bad_prop;
+        assert_eq!(
+            validate_content(&fixture.content),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
+        );
+
+        let mut delta = ContentDelta::empty();
+        delta.pet_art_slots.push(PetArtSlot {
+            slot: 1,
+            glyph: None,
+            palette_role: PetPaletteRole::Eye,
+        });
+        assert_eq!(
+            validate_content_delta(&delta),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
+        );
+        delta.pet_art_slots.clear();
+        delta.prop_slots.push(bad_prop);
+        assert_eq!(
+            validate_content_delta(&delta),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
         );
     }
 
@@ -1361,21 +1850,32 @@ mod tests {
         });
         delta.prop_slots.push(PropContentSlot {
             slot: 0,
-            kind: PropContentKind::ChestOpen,
+            content: Some(PropSemanticContent {
+                sprite_phase: None,
+                twinkle_active: None,
+                lid_open: Some(true),
+                bloom_active: None,
+                glyphs: [PropGlyphContent { glyph: None, local_cell: [0; 2] };
+                    MAX_PROP_GLYPHS_PER_SLOT],
+            }),
         });
         delta.tank_slots.push(TankContentSlot {
             slot: 0,
-            kind: TankContentKind::SpriteVariant1,
+            content: Some(TankSemanticContent {
+                sprite_variant: 1,
+                morph: None,
+                glyphs: [None; MAX_TANK_GLYPHS_PER_SLOT],
+            }),
         });
         delta.ambient_slots.push(AmbientContentSlot {
             slot: 0,
-            active: true,
-            kind: AmbientContentKind::ActivityPulse,
+            kind: Some(AmbientContentKind::ActivityPulse),
+            glyph: Some(AuthoredGlyph::new('✦').unwrap()),
         });
         assert_eq!(validate_content_delta(&delta), Ok(()));
         delta
             .prop_slots
-            .push(PropContentSlot { slot: 0, kind: PropContentKind::Static });
+            .push(PropContentSlot { slot: 0, content: None });
         assert_eq!(
             validate_content_delta(&delta),
             Err(SceneValidationError::DuplicateSlot)
@@ -1433,6 +1933,7 @@ mod tests {
         lit_source.nodes.push(sibling_node);
         let mut sibling_primitive = lit_source.primitives[0].clone();
         sibling_primitive.node = sibling;
+        sibling_primitive.authored_order = 1;
         lit_source.primitives.push(sibling_primitive);
         let lit_template = validate_template(&lit_source).unwrap();
         assert_eq!(lit_template.lit_paths.len(), 2);

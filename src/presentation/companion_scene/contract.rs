@@ -86,7 +86,7 @@ impl SceneArtifacts {
         let mut active_ambient_slots = content
             .ambient_slots
             .iter()
-            .filter(|slot| slot.active)
+            .filter(|slot| slot.kind.is_some())
             .map(|slot| slot.slot)
             .collect::<Vec<_>>();
         active_ambient_slots.sort_unstable();
@@ -198,6 +198,7 @@ mod tests {
         fixture.template.materials[0].kind = MaterialKind::ScreenChrome;
         fixture.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
         fixture.template.primitives[0].depth = super::super::scene::DepthBehavior::ScreenNoDepth;
+        fixture.template.primitives[0].space = super::super::scene::PrimitiveSpace::Screen;
         let artifacts =
             SceneArtifacts::try_from_parts(&fixture.template, &fixture.content, &fixture.frame)
                 .unwrap();
@@ -210,7 +211,11 @@ mod tests {
         chrome.template.materials[0].kind = MaterialKind::ScreenChrome;
         chrome.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
         chrome.template.primitives[0].depth = super::super::scene::DepthBehavior::ScreenNoDepth;
+        chrome.template.primitives[0].space = super::super::scene::PrimitiveSpace::Screen;
         chrome.template.primitives = vec![chrome.template.primitives[0].clone(); 257];
+        for (order, primitive) in chrome.template.primitives.iter_mut().enumerate() {
+            primitive.authored_order = order as u16;
+        }
         assert!(super::super::validate::validate_template(&chrome.template).is_ok());
         let chrome_artifacts =
             SceneArtifacts::try_from_parts(&chrome.template, &chrome.content, &chrome.frame)
@@ -221,6 +226,9 @@ mod tests {
         world.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
         world.template.primitives[0].depth = super::super::scene::DepthBehavior::WorldReadOnly;
         world.template.primitives = vec![world.template.primitives[0].clone(); 257];
+        for (order, primitive) in world.template.primitives.iter_mut().enumerate() {
+            primitive.authored_order = order as u16;
+        }
         assert_eq!(
             super::super::validate::validate_template(&world.template),
             Err(SceneValidationError::BlendedDrawCapacityExceeded)

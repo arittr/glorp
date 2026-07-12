@@ -242,10 +242,12 @@ pub struct ContentSnapshot {
     pub palette: PaletteSnapshot,
     pub prop_animation_states: Vec<PropAnimationSnapshot>,
     pub tank_animation_states: Vec<TankAnimationSnapshot>,
+    pub ambient_semantics: Vec<AmbientSemanticSnapshot>,
+    pub hud_glyphs: Vec<HudGlyphSnapshot>,
     pub activity_pulse_age_ms: Option<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PropAnimationSnapshot {
     pub catalog_id: &'static str,
     pub stable_order: u8,
@@ -254,6 +256,8 @@ pub struct PropAnimationSnapshot {
     pub twinkle_active: Option<bool>,
     pub motion_phase: Option<u8>,
     pub chest_lid_open: Option<bool>,
+    pub bloom_active: Option<bool>,
+    pub origin_points: [f32; 2],
 }
 
 impl PropAnimationSnapshot {
@@ -269,7 +273,7 @@ pub enum PropAnimationKindSnapshot {
     Animated,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TankAnimationSnapshot {
     pub catalog_id: &'static str,
     pub stable_order: u8,
@@ -277,6 +281,7 @@ pub struct TankAnimationSnapshot {
     pub visible: bool,
     pub origin_col: u16,
     pub origin_row: u16,
+    pub origin_points: [f32; 2],
     pub side: Option<TankSideSnapshot>,
     pub layer: TankLayerSnapshot,
     pub sprite_variant: u8,
@@ -286,14 +291,39 @@ pub struct TankAnimationSnapshot {
     pub calm: bool,
     pub cells: Vec<TankCellSnapshot>,
     pub bounds: Option<TankBoundsSnapshot>,
+    pub bounds_points: Option<[f32; 4]>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct TankCellSnapshot {
     pub col: u16,
     pub row: u16,
     pub glyph: char,
     pub layer: TankLayerSnapshot,
+    pub position_points: [f32; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AmbientSemanticKindSnapshot {
+    MoodAura,
+    Weather,
+    ActivityPulse,
+    Mote,
+    PetParticle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct AmbientSemanticSnapshot {
+    pub slot: u8,
+    pub kind: Option<AmbientSemanticKindSnapshot>,
+    pub glyph: Option<char>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct HudGlyphSnapshot {
+    pub slot: u8,
+    pub glyph: Option<char>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -347,13 +377,31 @@ pub struct FrameSnapshot {
     pub pet_anchor_points: [f32; 2],
     pub pet_depth: f32,
     pub facing: i8,
-    pub breath_offset_y_cells: u8,
-    pub bob_offset_y_cells: f32,
+    pub breath_offset_y_points: f32,
+    pub bob_offset_y_points: f32,
     pub asleep: bool,
     pub helper_trouble: bool,
     pub gauges: [GaugeLevelSnapshot; 4],
     pub dim_amount: f32,
     pub hud_lines: [String; 3],
+    pub ambient_instances: Vec<AmbientFrameSnapshot>,
+    pub hud_instances: Vec<HudFrameSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct AmbientFrameSnapshot {
+    pub slot: u8,
+    pub visible: bool,
+    pub position_points: [f32; 2],
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct HudFrameSnapshot {
+    pub slot: u8,
+    pub visible: bool,
+    pub position_points: [f32; 2],
+    pub opacity: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

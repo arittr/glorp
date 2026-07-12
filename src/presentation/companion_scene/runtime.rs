@@ -288,17 +288,22 @@ fn classify_tank_changes(
     if previous.visible != newest.visible
         || previous.origin_col != newest.origin_col
         || previous.origin_row != newest.origin_row
+        || previous.origin_points != newest.origin_points
         || previous.side != newest.side
         || previous.layer != newest.layer
         || previous.visible_rows != newest.visible_rows
         || previous.bounds != newest.bounds
+        || previous.bounds_points != newest.bounds_points
         || previous.cells.len() != newest.cells.len()
         || previous
             .cells
             .iter()
             .zip(&newest.cells)
             .any(|(left, right)| {
-                left.col != right.col || left.row != right.row || left.layer != right.layer
+                left.col != right.col
+                    || left.row != right.row
+                    || left.layer != right.layer
+                    || left.position_points != right.position_points
             })
     {
         changes.frame.insert(FrameChangeMask::TANK_INSTANCES);
@@ -396,10 +401,11 @@ pub(crate) fn classify_snapshot_changes(
             || left.sprite_phase != right.sprite_phase
             || left.twinkle_active != right.twinkle_active
             || left.chest_lid_open != right.chest_lid_open
+            || left.bloom_active != right.bloom_active
         {
             changes.semantic.insert(SemanticChangeMask::PROP);
         }
-        if left.motion_phase != right.motion_phase {
+        if left.motion_phase != right.motion_phase || left.origin_points != right.origin_points {
             changes.frame.insert(FrameChangeMask::PROP_TRANSFORMS);
         }
     }
@@ -417,6 +423,19 @@ pub(crate) fn classify_snapshot_changes(
         classify_tank_changes(left, right, &mut changes);
     }
 
+    if previous.content.ambient_semantics != newest.content.ambient_semantics {
+        changes.semantic.insert(SemanticChangeMask::AMBIENT);
+    }
+    if previous.frame.ambient_instances != newest.frame.ambient_instances {
+        changes.frame.insert(FrameChangeMask::AMBIENT_INSTANCES);
+    }
+    if previous.content.hud_glyphs != newest.content.hud_glyphs {
+        changes.semantic.insert(SemanticChangeMask::HUD);
+    }
+    if previous.frame.hud_instances != newest.frame.hud_instances {
+        changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
+    }
+
     if previous.content.activity_pulse_age_ms.is_some()
         != newest.content.activity_pulse_age_ms.is_some()
     {
@@ -429,14 +448,16 @@ pub(crate) fn classify_snapshot_changes(
     if previous.frame.pet_anchor_points != newest.frame.pet_anchor_points
         || previous.frame.pet_depth != newest.frame.pet_depth
         || previous.frame.facing != newest.frame.facing
-        || previous.frame.breath_offset_y_cells != newest.frame.breath_offset_y_cells
-        || previous.frame.bob_offset_y_cells != newest.frame.bob_offset_y_cells
+        || previous.frame.breath_offset_y_points != newest.frame.breath_offset_y_points
+        || previous.frame.bob_offset_y_points != newest.frame.bob_offset_y_points
     {
         changes.frame.insert(FrameChangeMask::PET_TRANSFORM);
     }
-    if previous.frame.asleep != newest.frame.asleep
-        || previous.frame.helper_trouble != newest.frame.helper_trouble
-    {
+    if previous.frame.asleep != newest.frame.asleep {
+        changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
+        changes.frame.insert(FrameChangeMask::PROP_TRANSFORMS);
+    }
+    if previous.frame.helper_trouble != newest.frame.helper_trouble {
         changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
     }
     if previous.frame.gauges != newest.frame.gauges {
@@ -455,7 +476,7 @@ pub(crate) fn classify_snapshot_changes(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SnapshotRejection {
+pub enum SnapshotRejection {
     SchemaVersion,
     RendererSchemaVersion,
     Privacy,
@@ -465,7 +486,9 @@ pub(crate) enum SnapshotRejection {
     FixedCapacity,
 }
 
-fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRejection> {
+pub(crate) fn validate_snapshot(
+    snapshot: &CompanionSceneSnapshot,
+) -> Result<(), SnapshotRejection> {
     if snapshot.schema_version != COMPANION_SCENE_SCHEMA_VERSION {
         return Err(SnapshotRejection::SchemaVersion);
     }
@@ -485,8 +508,30 @@ fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRe
             .iter()
             .all(|value| value.is_finite())
         || !snapshot.frame.pet_depth.is_finite()
-        || !snapshot.frame.bob_offset_y_cells.is_finite()
+        || !snapshot.frame.breath_offset_y_points.is_finite()
+        || !snapshot.frame.bob_offset_y_points.is_finite()
         || !snapshot.frame.dim_amount.is_finite()
+        || snapshot
+            .content
+            .prop_animation_states
+            .iter()
+            .any(|state| !state.origin_points.iter().all(|value| value.is_finite()))
+        || snapshot.content.tank_animation_states.iter().any(|state| {
+            !state.origin_points.iter().all(|value| value.is_finite())
+                || state
+                    .cells
+                    .iter()
+                    .any(|cell| !cell.position_points.iter().all(|value| value.is_finite()))
+                || state
+                    .bounds_points
+                    .is_some_and(|bounds| !bounds.iter().all(|value| value.is_finite()))
+        })
+        || snapshot.frame.ambient_instances.iter().any(|slot| {
+            !slot.position_points.iter().all(|value| value.is_finite()) || !slot.opacity.is_finite()
+        })
+        || snapshot.frame.hud_instances.iter().any(|slot| {
+            !slot.position_points.iter().all(|value| value.is_finite()) || !slot.opacity.is_finite()
+        })
     {
         return Err(SnapshotRejection::NonFinite);
     }
@@ -494,6 +539,17 @@ fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRe
         || layout.height_points <= 0.0
         || !matches!(snapshot.frame.facing, -1 | 1)
         || !(0.0..=1.0).contains(&snapshot.frame.dim_amount)
+        || !(-1.0..=1.0).contains(&snapshot.frame.pet_depth)
+        || snapshot
+            .frame
+            .ambient_instances
+            .iter()
+            .any(|slot| !(0.0..=1.0).contains(&slot.opacity))
+        || snapshot
+            .frame
+            .hud_instances
+            .iter()
+            .any(|slot| !(0.0..=1.0).contains(&slot.opacity))
     {
         return Err(SnapshotRejection::InvalidValue);
     }
@@ -506,6 +562,10 @@ fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRe
             .pet_lines
             .iter()
             .any(|line| line.chars().count() != usize::from(PET_LATTICE_WIDTH))
+        || snapshot.content.ambient_semantics.len() != super::scene::MAX_AMBIENT_INSTANCES
+        || snapshot.frame.ambient_instances.len() != super::scene::MAX_AMBIENT_INSTANCES
+        || snapshot.content.hud_glyphs.len() != super::scene::MAX_HUD_GLYPH_SLOTS
+        || snapshot.frame.hud_instances.len() != super::scene::MAX_HUD_GLYPH_SLOTS
     {
         return Err(SnapshotRejection::FixedCapacity);
     }
@@ -520,6 +580,33 @@ fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRe
     {
         return Err(SnapshotRejection::InconsistentIdentity);
     }
+    if snapshot
+        .content
+        .ambient_semantics
+        .iter()
+        .enumerate()
+        .any(|(index, slot)| usize::from(slot.slot) != index)
+        || snapshot
+            .frame
+            .ambient_instances
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || snapshot
+            .content
+            .hud_glyphs
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || snapshot
+            .frame
+            .hud_instances
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+    {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
     for (index, (topology, content)) in snapshot
         .topology
         .visible_props
@@ -530,6 +617,7 @@ fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRe
         if topology.catalog_id != content.catalog_id
             || topology.stable_order != content.stable_order
             || usize::from(topology.stable_order) != index
+            || usize::from(topology.stable_order) >= super::MAX_VISIBLE_PROPS
         {
             return Err(SnapshotRejection::InconsistentIdentity);
         }
@@ -545,6 +633,8 @@ fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRe
             || topology.stable_order != content.stable_order
             || topology.route != content.route
             || usize::from(topology.stable_order) != index
+            || usize::from(topology.stable_order) >= super::MAX_VISIBLE_TANK_INHABITANTS
+            || content.cells.len() > super::scene::MAX_TANK_GLYPHS_PER_SLOT
         {
             return Err(SnapshotRejection::InconsistentIdentity);
         }
@@ -579,6 +669,19 @@ fn validate_snapshot(snapshot: &CompanionSceneSnapshot) -> Result<(), SnapshotRe
             || role.start_char >= role.end_char
             || role.end_char > PET_LATTICE_WIDTH
         {
+            return Err(SnapshotRejection::InvalidValue);
+        }
+    }
+    for state in &snapshot.content.tank_animation_states {
+        if state
+            .bounds_points
+            .is_some_and(|bounds| bounds[2] < 0.0 || bounds[3] < 0.0)
+        {
+            return Err(SnapshotRejection::InvalidValue);
+        }
+    }
+    for slot in &snapshot.content.ambient_semantics {
+        if slot.kind.is_some() != slot.glyph.is_some() {
             return Err(SnapshotRejection::InvalidValue);
         }
     }
@@ -791,6 +894,17 @@ impl GenerationRequest {
         &self.snapshot
     }
 
+    pub(crate) fn build_scene_generation(
+        &self,
+    ) -> Result<super::scene::SceneGenerationData, super::scene::SceneGenerationError> {
+        super::scene::build_scene_generation_owned(
+            Arc::clone(&self.snapshot),
+            self.key,
+            self.source,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn accept(self, accepted: AcceptedSceneState) -> AcceptedGenerationCandidate {
         AcceptedGenerationCandidate {
             request_id: self.request_id,
@@ -799,9 +913,32 @@ impl GenerationRequest {
             accepted,
         }
     }
+
+    pub(crate) fn accept_generation(
+        self,
+        built: super::scene::SceneGenerationData,
+    ) -> Result<AcceptedGenerationCandidate, GenerationAcceptanceError> {
+        if built.generation_key != self.key
+            || built.source_revisions != self.source
+            || !Arc::ptr_eq(&built.source_snapshot, &self.snapshot)
+        {
+            return Err(GenerationAcceptanceError::IdentityMismatch);
+        }
+        Ok(AcceptedGenerationCandidate {
+            request_id: self.request_id,
+            key: self.key,
+            applied: self.source,
+            accepted: built.into_accepted(),
+        })
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenerationAcceptanceError {
+    IdentityMismatch,
+}
+
+#[derive(Debug, PartialEq)]
 pub(crate) struct AcceptedGenerationCandidate {
     request_id: RequestId,
     key: SceneGenerationKey,
@@ -2018,12 +2155,13 @@ mod tests {
     use crate::presentation::companion_scene::scene::SceneFixture;
     use crate::presentation::companion_scene::validate::validate_full_generation;
     use crate::presentation::companion_scene::{
+        AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
         AuthoredDepthSnapshot, CompanionLogicalLayout, CompanionSceneSnapshot, ContentSnapshot,
-        FrameSnapshot, GaugeLevelSnapshot, PaletteSnapshot, PetLatticeSnapshot,
-        PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
-        PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot, TankAnimationSnapshot,
-        TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot, TankRouteSnapshot,
-        TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
+        FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot, HudGlyphSnapshot, PaletteSnapshot,
+        PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
+        PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
+        TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot,
+        TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
         COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION, PET_LATTICE_HEIGHT,
         PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
     };
@@ -2052,13 +2190,13 @@ mod tests {
                     species_dialect: "fuzz",
                 },
                 visible_props: vec![PropTopologySnapshot {
-                    catalog_id: "treasure_chest",
+                    catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
                     stable_order: 0,
                     zone: PropZoneSnapshot::FloorRight,
                     authored_depth: AuthoredDepthSnapshot::Foreground,
                 }],
                 visible_tank_inhabitants: vec![TankTopologySnapshot {
-                    catalog_id: "bytefish",
+                    catalog_id: crate::game::habitat::NEEDLEFISH,
                     stable_order: 0,
                     route: TankRouteSnapshot::CrossTankSwimmer,
                     authored_depth: AuthoredDepthSnapshot::BehindPet,
@@ -2086,21 +2224,24 @@ mod tests {
                     corruption: [22, 23, 24],
                 },
                 prop_animation_states: vec![PropAnimationSnapshot {
-                    catalog_id: "treasure_chest",
+                    catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
                     stable_order: 0,
                     kind: PropAnimationKindSnapshot::Animated,
                     sprite_phase: Some(0),
                     twinkle_active: Some(false),
                     motion_phase: Some(0),
                     chest_lid_open: Some(false),
+                    bloom_active: None,
+                    origin_points: [120.0, 140.0],
                 }],
                 tank_animation_states: vec![TankAnimationSnapshot {
-                    catalog_id: "bytefish",
+                    catalog_id: crate::game::habitat::NEEDLEFISH,
                     stable_order: 0,
                     route: TankRouteSnapshot::CrossTankSwimmer,
                     visible: true,
                     origin_col: 4,
                     origin_row: 5,
+                    origin_points: [40.0, 50.0],
                     side: Some(TankSideSnapshot::Left),
                     layer: TankLayerSnapshot::Behind,
                     sprite_variant: 0,
@@ -2113,9 +2254,17 @@ mod tests {
                         row: 5,
                         glyph: '<',
                         layer: TankLayerSnapshot::Behind,
+                        position_points: [40.0, 50.0],
                     }],
                     bounds: Some(TankBoundsSnapshot { x: 4, y: 5, width: 1, height: 1 }),
+                    bounds_points: Some([40.0, 50.0, 10.0, 10.0]),
                 }],
+                ambient_semantics: (0..64)
+                    .map(|slot| AmbientSemanticSnapshot { slot, kind: None, glyph: None })
+                    .collect(),
+                hud_glyphs: (0..24)
+                    .map(|slot| HudGlyphSnapshot { slot, glyph: None })
+                    .collect(),
                 activity_pulse_age_ms: Some(100),
             },
             frame: FrameSnapshot {
@@ -2123,13 +2272,29 @@ mod tests {
                 pet_anchor_points: [120.0, 140.0],
                 pet_depth: 0.5,
                 facing: 1,
-                breath_offset_y_cells: 0,
-                bob_offset_y_cells: 0.25,
+                breath_offset_y_points: 0.0,
+                bob_offset_y_points: 5.0,
                 asleep: false,
                 helper_trouble: false,
                 gauges: [GaugeLevelSnapshot::Medium; 4],
                 dim_amount: 0.0,
                 hud_lines: ["today".to_owned(), "daily".to_owned(), "pace".to_owned()],
+                ambient_instances: (0..64)
+                    .map(|slot| AmbientFrameSnapshot {
+                        slot,
+                        visible: false,
+                        position_points: [0.0; 2],
+                        opacity: 0.0,
+                    })
+                    .collect(),
+                hud_instances: (0..24)
+                    .map(|slot| HudFrameSnapshot {
+                        slot,
+                        visible: false,
+                        position_points: [0.0; 2],
+                        opacity: 0.0,
+                    })
+                    .collect(),
             },
         })
     }
@@ -2250,6 +2415,14 @@ mod tests {
             .motion_phase = Some(1));
         assert_class!(prop_lid, semantic, |s| s.content.prop_animation_states[0]
             .chest_lid_open = Some(true));
+        assert_class!(prop_bloom, semantic, |s| s.content.prop_animation_states
+            [0]
+        .bloom_active = Some(true));
+        assert_class!(prop_resolved_origin, frame, |s| s
+            .content
+            .prop_animation_states[0]
+            .origin_points[0] +=
+            1.0);
         assert_class!(tank_visible, frame, |s| s.content.tank_animation_states
             [0]
         .visible = false);
@@ -2261,6 +2434,10 @@ mod tests {
             .content
             .tank_animation_states[0]
             .origin_row += 1);
+        assert_class!(tank_origin_points, frame, |s| s
+            .content
+            .tank_animation_states[0]
+            .origin_points[0] += 1.0);
         assert_class!(tank_side, frame, |s| s.content.tank_animation_states[0]
             .side =
             Some(TankSideSnapshot::Right));
@@ -2300,6 +2477,31 @@ mod tests {
         .as_mut()
         .unwrap()
         .x += 1);
+        assert_class!(tank_cell_points, frame, |s| s
+            .content
+            .tank_animation_states[0]
+            .cells[0]
+            .position_points[0] += 1.0);
+        assert_class!(tank_bounds_points, frame, |s| s
+            .content
+            .tank_animation_states[0]
+            .bounds_points
+            .as_mut()
+            .unwrap()[0] += 1.0);
+        assert_class!(ambient_identity, semantic, |s| s
+            .content
+            .ambient_semantics[0]
+            .kind =
+            Some(AmbientSemanticKindSnapshot::Mote));
+        assert_class!(ambient_glyph, semantic, |s| s.content.ambient_semantics
+            [0]
+        .glyph = Some('·'));
+        assert_class!(ambient_frame, frame, |s| s.frame.ambient_instances[0]
+            .position_points[0] += 1.0);
+        assert_class!(hud_glyph, semantic, |s| s.content.hud_glyphs[0].glyph =
+            Some('R'));
+        assert_class!(hud_frame, frame, |s| s.frame.hud_instances[0]
+            .position_points[0] += 1.0);
         assert_class!(activity_age, frame, |s| s.content.activity_pulse_age_ms =
             Some(101));
         assert_class!(activity_activation, semantic_frame, |s| s
@@ -2310,8 +2512,8 @@ mod tests {
         assert_class!(pet_anchor, frame, |s| s.frame.pet_anchor_points[0] += 1.0);
         assert_class!(pet_depth, frame, |s| s.frame.pet_depth += 0.1);
         assert_class!(facing, frame, |s| s.frame.facing = -1);
-        assert_class!(breath, frame, |s| s.frame.breath_offset_y_cells = 1);
-        assert_class!(bob, frame, |s| s.frame.bob_offset_y_cells += 0.1);
+        assert_class!(breath, frame, |s| s.frame.breath_offset_y_points = 20.0);
+        assert_class!(bob, frame, |s| s.frame.bob_offset_y_points += 0.1);
         assert_class!(asleep, frame, |s| s.frame.asleep = true);
         assert_class!(helper, frame, |s| s.frame.helper_trouble = true);
         assert_class!(gauges, frame, |s| s.frame.gauges[0] =
@@ -2348,6 +2550,38 @@ mod tests {
         assert!(FrameChangeMask::CAMERA.is_named());
         assert!(FrameChangeMask::LIGHTS.is_named());
         assert!(ResourceChangeMask::AMBIENT_AUTHORED.is_named());
+    }
+
+    #[test]
+    fn generation_request_builds_from_exact_snapshot_key_and_revisions() {
+        let mut runtime = runtime();
+        let next = topology_update(runtime.snapshot(), Stage::S4);
+        let request = take_start(commit_snapshot(&mut runtime, next));
+        let expected_key = request.key();
+        let expected_source = request.source();
+        let expected_snapshot = Arc::clone(request.snapshot());
+
+        let built = request.build_scene_generation().unwrap();
+        assert_eq!(built.generation_key, expected_key);
+        assert_eq!(built.source_revisions, expected_source);
+        assert!(Arc::ptr_eq(&expected_snapshot, runtime.snapshot()));
+        assert!(Arc::ptr_eq(&built.source_snapshot, &expected_snapshot));
+    }
+
+    #[test]
+    fn generation_request_rejects_another_requests_validated_output() {
+        let mut first_runtime = runtime();
+        let first_snapshot = topology_update(first_runtime.snapshot(), Stage::S4);
+        let first = take_start(commit_snapshot(&mut first_runtime, first_snapshot));
+        let first_built = first.build_scene_generation().unwrap();
+
+        let mut other_runtime = runtime();
+        let second_snapshot = topology_update(other_runtime.snapshot(), Stage::S5);
+        let second = take_start(commit_snapshot(&mut other_runtime, second_snapshot));
+        assert_eq!(
+            second.accept_generation(first_built),
+            Err(GenerationAcceptanceError::IdentityMismatch)
+        );
     }
 
     fn accepted_state() -> crate::presentation::companion_scene::validate::AcceptedSceneState {

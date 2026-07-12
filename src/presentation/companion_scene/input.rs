@@ -1,12 +1,14 @@
 use super::{
+    AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
     AuthoredDepthSnapshot, CompanionSceneProjectionError, CompanionSceneProjectionInput,
-    CompanionSceneSnapshot, ContentSnapshot, FrameSnapshot, GaugeLevelSnapshot, PaletteSnapshot,
-    PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
-    PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
-    TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot,
-    TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
-    COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS,
-    MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
+    CompanionSceneSnapshot, ContentSnapshot, FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot,
+    HudGlyphSnapshot, PaletteSnapshot, PetLatticeSnapshot, PetRoleSpanSnapshot,
+    PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot, PropTopologySnapshot,
+    PropZoneSnapshot, RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot,
+    TankCellSnapshot, TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
+    TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
+    MAX_VISIBLE_PROPS, MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS,
+    PET_LATTICE_WIDTH,
 };
 use crate::game::habitat::{HabitatPetLayer, HabitatPropZone, TankLifeRouteFamily};
 use crate::pet::palette::{body_glow, ResolvedPalette, Rgb};
@@ -168,10 +170,13 @@ impl CompanionSceneSnapshot {
         );
         let visible_props = project_props(vm, now);
         let visible_tank_inhabitants = project_tank_inhabitants(vm);
-        let prop_animation_states = project_prop_animation_states(&visible_props, now);
+        let prop_animation_states = project_prop_animation_states(vm, &visible_props, now, layout);
         let tank_animation_states =
             project_tank_animation_states(vm, &visible_tank_inhabitants, input, motion);
         let hud = crate::round::hud::review_capture_hud_text();
+        let (ambient_semantics, ambient_instances) =
+            project_ambient_slots(activity_pulse, room_profile.room_weather, layout);
+        let (hud_glyphs, hud_instances) = project_hud_slots(&hud, layout);
         let asleep = vm.day_context.asleep;
         let dimmed = asleep || vm.life_profile.calm_mode;
 
@@ -203,6 +208,8 @@ impl CompanionSceneSnapshot {
                 palette: PaletteSnapshot::from(vm.pet_palette),
                 prop_animation_states,
                 tank_animation_states,
+                ambient_semantics,
+                hud_glyphs,
                 activity_pulse_age_ms: activity_pulse.age_ms(),
             },
             frame: FrameSnapshot {
@@ -210,8 +217,10 @@ impl CompanionSceneSnapshot {
                 pet_anchor_points: motion.motion_top_left_points,
                 pet_depth: motion.normalized_depth,
                 facing: motion.facing,
-                breath_offset_y_cells: motion.breath_offset_y_cells,
-                bob_offset_y_cells: motion.bob_offset_y_cells,
+                breath_offset_y_points: f32::from(motion.breath_offset_y_cells)
+                    * (layout.height_points / f32::from(input.grid_rows.max(1))),
+                bob_offset_y_points: motion.bob_offset_y_cells
+                    * (layout.height_points / f32::from(input.grid_rows.max(1))),
                 asleep,
                 helper_trouble: helper_health == SemanticHelperHealth::Trouble,
                 gauges: [
@@ -232,6 +241,8 @@ impl CompanionSceneSnapshot {
                 ],
                 dim_amount: if dimmed { 0.35 } else { 0.0 },
                 hud_lines: [hud.today_total, hud.daily_percent, hud.pace],
+                ambient_instances,
+                hud_instances,
             },
         })
     }
@@ -378,8 +389,10 @@ fn project_pet_roles(
 }
 
 fn project_prop_animation_states(
+    vm: &WatchViewModel,
     visible_props: &[PropTopologySnapshot],
     now: OffsetDateTime,
+    layout: super::CompanionLogicalLayout,
 ) -> Vec<PropAnimationSnapshot> {
     visible_props
         .iter()
@@ -397,9 +410,27 @@ fn project_prop_animation_states(
                 twinkle_active: state.twinkle_active,
                 motion_phase: state.motion_phase,
                 chest_lid_open: state.chest_lid_open,
+                bloom_active: is_blooming_prop(prop.catalog_id).then(|| {
+                    vm.habitat
+                        .earned_props
+                        .iter()
+                        .find(|earned| earned.id.as_str() == prop.catalog_id)
+                        .is_some_and(|earned| (now - earned.earned_at).whole_days() >= 3)
+                }),
+                origin_points: resolved_prop_origin(prop.zone, prop.stable_order, layout),
             }
         })
         .collect()
+}
+
+fn is_blooming_prop(catalog_id: &str) -> bool {
+    matches!(
+        catalog_id,
+        crate::game::habitat::TOKEN_MOSS_TUFT_250K
+            | crate::game::habitat::TOKEN_HANGING_VINE_25M
+            | crate::game::habitat::HEAVY_SESSION_PLANTER
+            | crate::game::habitat::TOKEN_REEDS_5M
+    )
 }
 
 fn project_tank_animation_states(
@@ -444,6 +475,7 @@ fn project_tank_animation_states(
                 visible: outcome.visible,
                 origin_col: outcome.origin_col,
                 origin_row: outcome.origin_row,
+                origin_points: grid_cell_to_points(outcome.origin_col, outcome.origin_row, input),
                 side: outcome.side.map(|side| match side {
                     crate::presentation::tank_life::TankRouteSide::Left => TankSideSnapshot::Left,
                     crate::presentation::tank_life::TankRouteSide::Right => TankSideSnapshot::Right,
@@ -484,6 +516,11 @@ fn project_tank_animation_states(
                                 unreachable!("combined route layer is not a resolved cell layer")
                             }
                         },
+                        position_points: grid_cell_to_points(
+                            cell.col,
+                            cell.row,
+                            input,
+                        ),
                     })
                     .collect(),
                 bounds: outcome.bounds.map(|bounds| TankBoundsSnapshot {
@@ -492,9 +529,149 @@ fn project_tank_animation_states(
                     width: bounds.width,
                     height: bounds.height,
                 }),
+                bounds_points: outcome.bounds.map(|bounds| {
+                    let origin = grid_cell_to_points(bounds.x, bounds.y, input);
+                    let cell_width = input.layout.width_points / f32::from(input.grid_columns.max(1));
+                    let cell_height = input.layout.height_points / f32::from(input.grid_rows.max(1));
+                    [
+                        origin[0],
+                        origin[1],
+                        f32::from(bounds.width) * cell_width,
+                        f32::from(bounds.height) * cell_height,
+                    ]
+                }),
             })
         })
         .collect()
+}
+
+fn resolved_prop_origin(
+    zone: PropZoneSnapshot,
+    stable_order: u8,
+    layout: super::CompanionLogicalLayout,
+) -> [f32; 2] {
+    let [x, y] = match zone {
+        PropZoneSnapshot::FloorLeft => [0.18, 0.78],
+        PropZoneSnapshot::FloorMid => [0.47, 0.78],
+        PropZoneSnapshot::FloorRight => [0.76, 0.78],
+        PropZoneSnapshot::WallLeft => [0.14, 0.48],
+        PropZoneSnapshot::WallRight => [0.82, 0.48],
+        PropZoneSnapshot::AirLeft => [0.22, 0.28],
+        PropZoneSnapshot::AirMid => [0.48, 0.25],
+        PropZoneSnapshot::AirRight => [0.74, 0.28],
+        PropZoneSnapshot::Ceiling => [0.50, 0.10],
+    };
+    let lane = f32::from(stable_order % 3) - 1.0;
+    [
+        (x + lane * 0.025) * layout.width_points,
+        y * layout.height_points,
+    ]
+}
+
+fn grid_cell_to_points(col: u16, row: u16, input: CompanionSceneProjectionInput) -> [f32; 2] {
+    let cell_width = input.layout.width_points / f32::from(input.grid_columns.max(1));
+    let cell_height = input.layout.height_points / f32::from(input.grid_rows.max(1));
+    [
+        (f32::from(col) + 0.5) * cell_width,
+        (f32::from(row) + 0.5) * cell_height,
+    ]
+}
+
+fn project_ambient_slots(
+    activity: SemanticActivityPulse,
+    weather: RoomWeatherLayer,
+    layout: super::CompanionLogicalLayout,
+) -> (Vec<AmbientSemanticSnapshot>, Vec<AmbientFrameSnapshot>) {
+    let weather_glyph = match weather {
+        RoomWeatherLayer::Clear => None,
+        RoomWeatherLayer::CacheMist => Some('~'),
+        RoomWeatherLayer::OutputSparks => Some('✦'),
+        RoomWeatherLayer::ReasoningPulse => Some('◌'),
+        RoomWeatherLayer::Mixed => Some('·'),
+    };
+    let mut semantics = (0..super::scene::MAX_AMBIENT_INSTANCES)
+        .map(|slot| AmbientSemanticSnapshot {
+            slot: slot as u8,
+            kind: None,
+            glyph: None,
+        })
+        .collect::<Vec<_>>();
+    semantics[0] = AmbientSemanticSnapshot {
+        slot: 0,
+        kind: Some(AmbientSemanticKindSnapshot::MoodAura),
+        glyph: Some('◌'),
+    };
+    if let Some(glyph) = weather_glyph {
+        semantics[1] = AmbientSemanticSnapshot {
+            slot: 1,
+            kind: Some(AmbientSemanticKindSnapshot::Weather),
+            glyph: Some(glyph),
+        };
+    }
+    if activity.age_ms().is_some() {
+        semantics[2] = AmbientSemanticSnapshot {
+            slot: 2,
+            kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
+            glyph: Some('✦'),
+        };
+    }
+    let age_opacity = activity
+        .age_ms()
+        .map(|age| 1.0 - f32::from(age).min(2_000.0) / 2_000.0)
+        .unwrap_or(0.0);
+    let frames = (0..super::scene::MAX_AMBIENT_INSTANCES)
+        .map(|slot| {
+            let visible = semantics[slot].kind.is_some();
+            let opacity = match slot {
+                2 => age_opacity,
+                _ if visible => 1.0,
+                _ => 0.0,
+            };
+            AmbientFrameSnapshot {
+                slot: slot as u8,
+                visible,
+                position_points: match slot {
+                    0 => [layout.width_points * 0.5, layout.height_points * 0.5],
+                    1 => [layout.width_points * 0.25, layout.height_points * 0.22],
+                    2 => [layout.width_points * 0.5, layout.height_points * 0.18],
+                    _ => [0.0; 2],
+                },
+                opacity,
+            }
+        })
+        .collect();
+    (semantics, frames)
+}
+
+fn project_hud_slots(
+    hud: &crate::round::hud::CompanionHudText,
+    layout: super::CompanionLogicalLayout,
+) -> (Vec<HudGlyphSnapshot>, Vec<HudFrameSnapshot>) {
+    let lines = [&hud.today_total, &hud.daily_percent, &hud.pace];
+    let mut glyphs = Vec::with_capacity(super::scene::MAX_HUD_GLYPH_SLOTS);
+    let mut frames = Vec::with_capacity(super::scene::MAX_HUD_GLYPH_SLOTS);
+    for (row, line) in lines.into_iter().enumerate() {
+        let mut chars = line.chars();
+        for col in 0..8 {
+            let slot = row * 8 + col;
+            let glyph = chars.next();
+            glyphs.push(HudGlyphSnapshot { slot: slot as u8, glyph });
+            frames.push(HudFrameSnapshot {
+                slot: slot as u8,
+                visible: glyph.is_some(),
+                position_points: if glyph.is_some() {
+                    [
+                        layout.width_points * 0.5 - 28.0 + col as f32 * 8.0,
+                        layout.height_points - 36.0 + row as f32 * 10.0,
+                    ]
+                } else {
+                    [0.0; 2]
+                },
+                opacity: if glyph.is_some() { 1.0 } else { 0.0 },
+            });
+        }
+    }
+    (glyphs, frames)
 }
 
 fn biome_alias(biome: RoomBiomeTag) -> &'static str {
@@ -676,6 +853,54 @@ mod tests {
             .pet_lines
             .iter()
             .all(|line| line.chars().count() == usize::from(PET_LATTICE_WIDTH)));
+    }
+
+    #[test]
+    fn projection_resolves_fixed_point_space_instance_inputs_without_live_hud() {
+        let vm = fixture_with_real_pet_art();
+        let snapshot = project_snapshot(
+            &vm,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.content.ambient_semantics.len(), 64);
+        assert_eq!(snapshot.frame.ambient_instances.len(), 64);
+        assert_eq!(snapshot.content.hud_glyphs.len(), 24);
+        assert_eq!(snapshot.frame.hud_instances.len(), 24);
+        assert!(snapshot
+            .content
+            .hud_glyphs
+            .iter()
+            .filter_map(|slot| slot.glyph)
+            .collect::<String>()
+            .contains("privacy"));
+        assert!(snapshot
+            .content
+            .prop_animation_states
+            .iter()
+            .all(|state| state.origin_points.iter().all(|value| value.is_finite())));
+        assert!(snapshot
+            .content
+            .tank_animation_states
+            .iter()
+            .flat_map(|state| &state.cells)
+            .all(|cell| cell.position_points.iter().all(|value| value.is_finite())));
+    }
+
+    #[test]
+    fn pet_cell_offsets_are_projected_to_logical_points() {
+        let mut vm = fixture_with_real_pet_art();
+        vm.breath_offset_y = 1;
+        let snapshot = project_snapshot(
+            &vm,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .unwrap();
+        assert_eq!(snapshot.frame.breath_offset_y_points, 20.0);
+        assert!(snapshot.frame.bob_offset_y_points.is_finite());
     }
 
     #[test]
@@ -1045,11 +1270,14 @@ mod tests {
         assert_eq!(snapshot.frame.pet_depth, shared.normalized_depth);
         assert_eq!(snapshot.frame.facing, shared.facing);
         assert_eq!(
-            snapshot.frame.breath_offset_y_cells,
-            shared.breath_offset_y_cells
+            snapshot.frame.breath_offset_y_points,
+            f32::from(shared.breath_offset_y_cells) * 20.0
         );
-        assert_eq!(snapshot.frame.bob_offset_y_cells, shared.bob_offset_y_cells);
-        assert_ne!(snapshot.frame.bob_offset_y_cells, 0.0);
+        assert_eq!(
+            snapshot.frame.bob_offset_y_points,
+            shared.bob_offset_y_cells * 20.0
+        );
+        assert_ne!(snapshot.frame.bob_offset_y_points, 0.0);
         assert_ne!(snapshot.frame.pet_depth, 0.0);
     }
 
@@ -1366,8 +1594,8 @@ mod tests {
             resting_shared.motion_top_left_points
         );
         assert_eq!(
-            resting_snapshot.frame.bob_offset_y_cells,
-            active_snapshot.frame.bob_offset_y_cells
+            resting_snapshot.frame.bob_offset_y_points,
+            active_snapshot.frame.bob_offset_y_points
         );
         assert!(resting_snapshot.frame.asleep);
         assert!(resting_snapshot
