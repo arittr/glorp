@@ -596,6 +596,12 @@ impl ActiveRetainedHost {
                     });
                 }
             }
+            if (frame + 1) % 256 == 0 {
+                // Match the measured phase's RSS sampling cadence so sampler
+                // process/cache growth is fully inside warmup, not charged to
+                // the renderer lifetime segment.
+                let _ = current_process_rss_bytes();
+            }
         }
         if let Some(submission) = last_submission.take() {
             let _ = self.host.device.poll(wgpu::PollType::Wait {
