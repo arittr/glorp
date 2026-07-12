@@ -243,17 +243,7 @@ fn gauge_level(value: f64) -> GaugeLevelSnapshot {
     } else {
         0.0
     };
-    if value == 0.0 {
-        GaugeLevelSnapshot::Empty
-    } else if value < 0.25 {
-        GaugeLevelSnapshot::Low
-    } else if value < 0.5 {
-        GaugeLevelSnapshot::Medium
-    } else if value < 1.0 {
-        GaugeLevelSnapshot::High
-    } else {
-        GaugeLevelSnapshot::Full
-    }
+    GaugeLevelSnapshot::from_fraction(value)
 }
 
 pub(super) fn companion_motion_input(

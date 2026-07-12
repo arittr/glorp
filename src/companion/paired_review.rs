@@ -32,6 +32,10 @@ use crate::game::evolution::Stage;
 use crate::game::habitat::HABITAT_PROP_CATALOG;
 use crate::game::metabolism::Mood;
 use crate::pet::generation::Species;
+use crate::presentation::companion_scene::scene::{
+    MAX_AMBIENT_INSTANCES, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS, MAX_LIGHTS, MAX_PET_ART_SLOTS,
+    MAX_ROUND_TANK_INHABITANTS, MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_VISIBLE_PROPS,
+};
 use crate::presentation::draw_list::SceneDrawList;
 use crate::presentation::pixel::PixelFrame;
 use crate::presentation::smooth::SmoothCompanionScenePlan;
@@ -178,21 +182,25 @@ pub(crate) fn full_preview_capacity_inventory() -> CompanionCapacityInventory {
             1_024_u32.saturating_sub(max_prepared_gpu_primitives),
             1_024,
         ),
-        max_nodes: CapacityContract::reserved(96, 32, 128),
-        max_static_primitives: CapacityContract::reserved(640, 128, 768),
+        max_nodes: CapacityContract::reserved(96, 32, MAX_SCENE_NODES as u32),
+        max_static_primitives: CapacityContract::reserved(640, 128, MAX_STATIC_PRIMITIVES as u32),
         // The current fixed pet-art lattice exactly occupies the frozen V1
         // limit; any future slot requires a measured spec amendment.
-        max_pet_slots: CapacityContract::observed(max_pet_slots, 0, 130),
-        max_visible_props: CapacityContract::observed(visible_props as u32, 0, 10),
+        max_pet_slots: CapacityContract::observed(max_pet_slots, 0, MAX_PET_ART_SLOTS as u32),
+        max_visible_props: CapacityContract::observed(
+            visible_props as u32,
+            0,
+            MAX_VISIBLE_PROPS as u32,
+        ),
         max_round_tank_inhabitants: CapacityContract::observed(
             tank_cast.rendered_ids.len() as u32,
             0,
-            2,
+            MAX_ROUND_TANK_INHABITANTS as u32,
         ),
-        max_ambient_instances: CapacityContract::reserved(48, 16, 64),
-        max_blended_draws: CapacityContract::reserved(192, 64, 256),
-        max_lights: CapacityContract::reserved(1, 1, 2),
-        max_attachments: CapacityContract::reserved(16, 16, 32),
+        max_ambient_instances: CapacityContract::reserved(48, 16, MAX_AMBIENT_INSTANCES as u32),
+        max_blended_draws: CapacityContract::reserved(192, 64, MAX_BLENDED_DRAWS as u32),
+        max_lights: CapacityContract::reserved(1, 1, MAX_LIGHTS as u32),
+        max_attachments: CapacityContract::reserved(16, 16, MAX_ATTACHMENTS as u32),
     };
     assert!(
         inventory.fits_global_constraints(),
@@ -1150,8 +1158,14 @@ mod tests {
         assert!(inventory.fits_global_constraints());
         assert!(inventory.max_pet_slots.observed.is_some());
         assert_eq!(inventory.max_pet_slots.reservation, 0);
-        assert_eq!(inventory.max_visible_props.observed, Some(10));
-        assert_eq!(inventory.max_round_tank_inhabitants.observed, Some(2));
+        assert_eq!(
+            inventory.max_visible_props.observed,
+            Some(MAX_VISIBLE_PROPS as u32)
+        );
+        assert_eq!(
+            inventory.max_round_tank_inhabitants.observed,
+            Some(MAX_ROUND_TANK_INHABITANTS as u32)
+        );
         assert_eq!(inventory.matrix_fixture_count, 630);
         assert_eq!(inventory.dimmed_fixture_count, 126);
         assert_eq!(inventory.full_props_tank_fixture_count, 630);

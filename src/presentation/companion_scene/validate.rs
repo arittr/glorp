@@ -53,17 +53,29 @@ pub enum SceneValidationError {
     InvalidFrameValue,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedSceneTemplate(SceneTemplate);
+
+impl AcceptedSceneTemplate {
+    pub fn template(&self) -> &SceneTemplate {
+        &self.0
+    }
+}
+
 pub fn validate_full_generation(
     template: &SceneTemplate,
     content: &SceneContent,
     frame: &SceneFrame,
-) -> Result<(), SceneValidationError> {
-    validate_template(template)?;
+) -> Result<AcceptedSceneTemplate, SceneValidationError> {
+    let accepted = validate_template(template)?;
     validate_content(content)?;
-    validate_frame(frame, template)
+    validate_frame(frame, &accepted)?;
+    Ok(accepted)
 }
 
-pub fn validate_template(template: &SceneTemplate) -> Result<(), SceneValidationError> {
+pub fn validate_template(
+    template: &SceneTemplate,
+) -> Result<AcceptedSceneTemplate, SceneValidationError> {
     validate_versions(template.schema_version, template.renderer_schema_version)?;
     validate_capacity_counts(template)?;
     validate_fixed_capacities(template.capacities)?;
@@ -75,7 +87,7 @@ pub fn validate_template(template: &SceneTemplate) -> Result<(), SceneValidation
     validate_primitives(template)?;
     validate_lit_card_scale_ancestry(template)?;
     validate_privacy(template)?;
-    Ok(())
+    Ok(AcceptedSceneTemplate(template.clone()))
 }
 
 pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationError> {
@@ -102,8 +114,9 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
 
 pub fn validate_frame(
     frame: &SceneFrame,
-    template: &SceneTemplate,
+    accepted_template: &AcceptedSceneTemplate,
 ) -> Result<(), SceneValidationError> {
+    let template = accepted_template.template();
     validate_versions(frame.schema_version, frame.renderer_schema_version)?;
     validate_camera(frame.camera)?;
     if frame.nodes.len() > MAX_SCENE_NODES {
@@ -151,8 +164,9 @@ pub fn validate_content_delta(delta: &ContentDelta) -> Result<(), SceneValidatio
 /// template. It deliberately does not re-run full template validation.
 pub fn validate_frame_delta(
     delta: &FrameDelta,
-    accepted_template: &SceneTemplate,
+    accepted_template: &AcceptedSceneTemplate,
 ) -> Result<(), SceneValidationError> {
+    let accepted_template = accepted_template.template();
     validate_versions(delta.schema_version, delta.renderer_schema_version)?;
     if delta.nodes.len() > MAX_SCENE_NODES {
         return Err(SceneValidationError::NodeCapacityExceeded);
@@ -470,71 +484,43 @@ fn primitive_resource_compatible(kind: PrimitiveKind, resource: Option<ResourceK
 }
 
 fn validate_lit_card_scale_ancestry(template: &SceneTemplate) -> Result<(), SceneValidationError> {
-    let nodes = template
-        .nodes
-        .iter()
-        .map(|node| (node.id, node))
-        .collect::<HashMap<_, _>>();
-    let materials = template
-        .materials
-        .iter()
-        .map(|material| (material.id, material.kind))
-        .collect::<HashMap<_, _>>();
-    for primitive in &template.primitives {
-        if materials.get(&primitive.material) != Some(&MaterialKind::LitShallowCard) {
-            continue;
-        }
-        let mut current = Some(primitive.node);
-        let mut effective_scale = [1.0; 3];
-        while let Some(id) = current {
-            let node = nodes
-                .get(&id)
-                .ok_or(SceneValidationError::DanglingNodeReference)?;
-            let scale = node.base_transform.scale;
-            if !positive_uniform_scale(scale) {
-                return Err(SceneValidationError::LitCardScaleIncompatible);
-            }
-            effective_scale = [
-                effective_scale[0] * scale[0],
-                effective_scale[1] * scale[1],
-                effective_scale[2] * scale[2],
-            ];
-            if !positive_uniform_scale(effective_scale) {
-                return Err(SceneValidationError::LitCardScaleIncompatible);
-            }
-            current = node.parent;
-        }
-    }
-    Ok(())
+    validate_lit_card_world_transforms(template, |_| None)
 }
 
 fn validate_lit_card_frame_scale_ancestry(
     frame: &SceneFrame,
     template: &SceneTemplate,
 ) -> Result<(), SceneValidationError> {
-    let frame_scales = frame
+    let frame_transforms = frame
         .nodes
         .iter()
-        .map(|node| (node.node, node.local_transform.scale))
+        .map(|node| (node.node, node.local_transform))
         .collect::<HashMap<_, _>>();
-    validate_lit_card_dynamic_scales(template, |id| frame_scales.get(&id).copied())
+    validate_lit_card_dynamic_transforms(template, |id| frame_transforms.get(&id).copied())
 }
 
 fn validate_lit_card_delta_scale_ancestry(
     delta: &FrameDelta,
     template: &SceneTemplate,
 ) -> Result<(), SceneValidationError> {
-    let changed_scales = delta
+    let changed_transforms = delta
         .nodes
         .iter()
-        .map(|node| (node.node, node.local_transform.scale))
+        .map(|node| (node.node, node.local_transform))
         .collect::<HashMap<_, _>>();
-    validate_lit_card_dynamic_scales(template, |id| changed_scales.get(&id).copied())
+    validate_lit_card_dynamic_transforms(template, |id| changed_transforms.get(&id).copied())
 }
 
-fn validate_lit_card_dynamic_scales(
+fn validate_lit_card_dynamic_transforms(
     template: &SceneTemplate,
-    dynamic_scale: impl Fn(NodeId) -> Option<[f32; 3]>,
+    dynamic_transform: impl Fn(NodeId) -> Option<Transform3>,
+) -> Result<(), SceneValidationError> {
+    validate_lit_card_world_transforms(template, dynamic_transform)
+}
+
+fn validate_lit_card_world_transforms(
+    template: &SceneTemplate,
+    dynamic_transform: impl Fn(NodeId) -> Option<Transform3>,
 ) -> Result<(), SceneValidationError> {
     let nodes = template
         .nodes
@@ -551,41 +537,76 @@ fn validate_lit_card_dynamic_scales(
             continue;
         }
         let mut current = Some(primitive.node);
-        let mut effective_scale = [1.0; 3];
+        let mut path = Vec::new();
+        let mut visited = HashSet::new();
         while let Some(id) = current {
+            if !visited.insert(id) {
+                return Err(SceneValidationError::HierarchyCycle);
+            }
             let node = nodes
                 .get(&id)
                 .ok_or(SceneValidationError::DanglingNodeReference)?;
-            if let Some(scale) = dynamic_scale(id) {
-                if !positive_uniform_scale(scale) {
-                    return Err(SceneValidationError::LitCardScaleIncompatible);
-                }
-                effective_scale = [
-                    effective_scale[0] * scale[0],
-                    effective_scale[1] * scale[1],
-                    effective_scale[2] * scale[2],
-                ];
-                if !positive_uniform_scale(effective_scale) {
-                    return Err(SceneValidationError::LitCardScaleIncompatible);
-                }
-            }
+            path.push(*node);
             current = node.parent;
         }
+        let mut world = Mat4::IDENTITY;
+        for node in path.into_iter().rev() {
+            world = world
+                * node
+                    .base_transform
+                    .matrix()
+                    .map_err(transform_validation_error)?;
+            if let Some(dynamic) = dynamic_transform(node.id) {
+                world = world * dynamic.matrix().map_err(transform_validation_error)?;
+            }
+        }
+        validate_lit_card_world_linear(world)?;
     }
     Ok(())
 }
 
-fn positive_uniform_scale(scale: [f32; 3]) -> bool {
-    scale
-        .iter()
-        .all(|component| component.is_finite() && *component > 0.0)
-        && nearly_equal(scale[0], scale[1])
-        && nearly_equal(scale[0], scale[2])
+fn transform_validation_error(error: TransformError) -> SceneValidationError {
+    match error {
+        TransformError::NonFinite => SceneValidationError::NonFiniteTransform,
+        TransformError::ZeroQuaternion => SceneValidationError::ZeroQuaternion,
+    }
 }
 
-fn nearly_equal(left: f32, right: f32) -> bool {
-    let tolerance = LIT_CARD_SCALE_TOLERANCE * left.abs().max(right.abs()).max(1.0);
-    (left - right).abs() <= tolerance
+fn validate_lit_card_world_linear(matrix: Mat4) -> Result<(), SceneValidationError> {
+    let columns =
+        [0, 1, 2].map(|column| [0, 1, 2].map(|row| f64::from(matrix.columns[column][row])));
+    let norms = columns.map(|column| column.iter().map(|value| value * value).sum::<f64>().sqrt());
+    if norms
+        .iter()
+        .any(|norm| !norm.is_finite() || *norm < MIN_LIT_CARD_WORLD_SCALE)
+    {
+        return Err(SceneValidationError::LitCardScaleIncompatible);
+    }
+    let max_norm = norms.into_iter().fold(0.0_f64, f64::max);
+    if norms
+        .iter()
+        .any(|norm| (norm - norms[0]).abs() > f64::from(LIT_CARD_SCALE_TOLERANCE) * max_norm)
+    {
+        return Err(SceneValidationError::LitCardScaleIncompatible);
+    }
+    for (left, right) in [(0, 1), (0, 2), (1, 2)] {
+        let dot = columns[left]
+            .iter()
+            .zip(columns[right])
+            .map(|(a, b)| a * b)
+            .sum::<f64>();
+        if dot.abs() > f64::from(LIT_CARD_SCALE_TOLERANCE) * norms[left] * norms[right] {
+            return Err(SceneValidationError::LitCardScaleIncompatible);
+        }
+    }
+    let determinant = columns[0][0]
+        * (columns[1][1] * columns[2][2] - columns[1][2] * columns[2][1])
+        - columns[1][0] * (columns[0][1] * columns[2][2] - columns[0][2] * columns[2][1])
+        + columns[2][0] * (columns[0][1] * columns[1][2] - columns[0][2] * columns[1][1]);
+    if !determinant.is_finite() || determinant <= 0.0 {
+        return Err(SceneValidationError::LitCardScaleIncompatible);
+    }
+    Ok(())
 }
 
 fn validate_privacy(template: &SceneTemplate) -> Result<(), SceneValidationError> {
@@ -714,7 +735,7 @@ fn validate_camera(camera: OrthographicCamera) -> Result<(), SceneValidationErro
         camera.far_z,
         camera.near_z,
     )
-    .map(|_| ())
+    .and_then(|camera| camera.projection_matrix().map(|_| ()))
     .map_err(|_| SceneValidationError::InvalidCamera)
 }
 
@@ -867,6 +888,39 @@ mod tests {
             validate_template(&template),
             Err(SceneValidationError::DanglingNodeReference)
         );
+
+        let mut template = SceneFixture::valid_lit_card();
+        template.nodes[1].parent = Some(template.nodes[1].id);
+        assert_eq!(
+            validate_template(&template),
+            Err(SceneValidationError::HierarchyCycle)
+        );
+
+        let mut template = SceneFixture::valid_lit_card();
+        let a_alias = CanonicalAlias::new("world.disconnected-a").unwrap();
+        let b_alias = CanonicalAlias::new("world.disconnected-b").unwrap();
+        let a = NodeId::from_alias(&a_alias);
+        let b = NodeId::from_alias(&b_alias);
+        template.nodes.push(NodeTemplate {
+            id: a,
+            alias: a_alias,
+            parent: Some(b),
+            base_transform: Transform3::IDENTITY,
+            local_bounds: Bounds3 { min: [0.0; 3], max: [1.0; 3] },
+            depth_cue: DepthCue::NEUTRAL,
+        });
+        template.nodes.push(NodeTemplate {
+            id: b,
+            alias: b_alias,
+            parent: Some(a),
+            base_transform: Transform3::IDENTITY,
+            local_bounds: Bounds3 { min: [0.0; 3], max: [1.0; 3] },
+            depth_cue: DepthCue::NEUTRAL,
+        });
+        assert_eq!(
+            validate_template(&template),
+            Err(SceneValidationError::HierarchyCycle)
+        );
     }
 
     #[test]
@@ -927,7 +981,22 @@ mod tests {
 
         let mut template = SceneFixture::valid_lit_card();
         template.nodes[0].base_transform.scale = [1.0, 1.0 + 0.5 * LIT_CARD_SCALE_TOLERANCE, 1.0];
-        assert_eq!(validate_template(&template), Ok(()));
+        assert!(validate_template(&template).is_ok());
+
+        let mut template = SceneFixture::valid_lit_card();
+        template.nodes[0].base_transform.rotation_xyzw = [0.0, 0.0, 0.382_683_43, 0.923_879_5];
+        template.nodes[1].base_transform.scale = [2.0, 1.0, 1.0];
+        assert_eq!(
+            validate_template(&template),
+            Err(SceneValidationError::LitCardScaleIncompatible)
+        );
+
+        let mut template = SceneFixture::valid_lit_card();
+        template.nodes[0].base_transform.scale = [1.0e-20; 3];
+        assert_eq!(
+            validate_template(&template),
+            Err(SceneValidationError::LitCardScaleIncompatible)
+        );
     }
 
     #[test]
@@ -943,6 +1012,7 @@ mod tests {
     #[test]
     fn full_content_and_frame_validation_reject_slot_and_reference_errors() {
         let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
         let mut content = fixture.content.clone();
         content.pet_art_slots[0].slot = MAX_PET_ART_SLOTS as u16;
         assert_eq!(
@@ -953,22 +1023,23 @@ mod tests {
         let mut frame = fixture.frame.clone();
         frame.nodes[0].node = NodeId(42);
         assert_eq!(
-            validate_frame(&frame, &fixture.template),
+            validate_frame(&frame, &accepted),
             Err(SceneValidationError::DanglingNodeReference)
         );
 
         let mut frame = fixture.frame.clone();
         frame.nodes[0].local_transform.scale = [1.0, 2.0, 1.0];
         let lit_template = SceneFixture::valid_lit_card();
+        let accepted_lit = validate_template(&lit_template).unwrap();
         assert_eq!(
-            validate_frame(&frame, &lit_template),
+            validate_frame(&frame, &accepted_lit),
             Err(SceneValidationError::LitCardScaleIncompatible)
         );
 
         let mut frame = fixture.frame.clone();
         frame.dim_amount = f32::INFINITY;
         assert_eq!(
-            validate_frame(&frame, &fixture.template),
+            validate_frame(&frame, &accepted),
             Err(SceneValidationError::NonFiniteFrameValue)
         );
     }
@@ -992,7 +1063,7 @@ mod tests {
         content_delta.pet_art_slots.push(PetArtSlot {
             slot: MAX_PET_ART_SLOTS as u16,
             glyph: None,
-            palette_role: 0,
+            palette_role: PetPaletteRole::Body,
         });
         assert_eq!(
             validate_content_delta(&content_delta),
@@ -1000,10 +1071,8 @@ mod tests {
         );
 
         let frame_delta = FrameDelta::empty();
-        assert_eq!(
-            validate_frame_delta(&frame_delta, &invalid_template),
-            Ok(())
-        );
+        let accepted = validate_template(&fixture.template).unwrap();
+        assert_eq!(validate_frame_delta(&frame_delta, &accepted), Ok(()));
         assert_eq!(
             validate_template(&invalid_template),
             Err(SceneValidationError::DuplicateNodeId)
@@ -1020,8 +1089,102 @@ mod tests {
             opacity: 1.0,
         });
         assert_eq!(
-            validate_frame_delta(&frame_delta, &SceneFixture::valid_lit_card()),
+            validate_frame_delta(
+                &frame_delta,
+                &validate_template(&SceneFixture::valid_lit_card()).unwrap(),
+            ),
             Err(SceneValidationError::LitCardScaleIncompatible)
+        );
+    }
+
+    #[test]
+    fn accepted_template_is_owned_and_reusable_for_deltas() {
+        let accepted = {
+            let template = SceneFixture::valid().template;
+            validate_template(&template).unwrap()
+        };
+        assert_eq!(
+            validate_frame_delta(&FrameDelta::empty(), &accepted),
+            Ok(())
+        );
+        assert_eq!(accepted.template().nodes.len(), 2);
+    }
+
+    #[test]
+    fn lit_card_frame_linear_transform_rejects_reflection_shear_and_tiny_scale() {
+        let template = SceneFixture::valid_lit_card();
+        let accepted = validate_template(&template).unwrap();
+        for scale in [[-1.0, 1.0, 1.0], [2.0, 1.0, 1.0], [1.0e-20; 3]] {
+            let mut delta = FrameDelta::empty();
+            delta.nodes.push(NodeFrameState {
+                node: template.nodes[0].id,
+                local_transform: Transform3 {
+                    rotation_xyzw: [0.0, 0.0, 0.382_683_43, 0.923_879_5],
+                    scale,
+                    ..Transform3::IDENTITY
+                },
+                visible: true,
+                opacity: 1.0,
+            });
+            assert_eq!(
+                validate_frame_delta(&delta, &accepted),
+                Err(SceneValidationError::LitCardScaleIncompatible)
+            );
+        }
+
+        let mut shear = FrameDelta::empty();
+        shear.nodes.push(NodeFrameState {
+            node: template.nodes[0].id,
+            local_transform: Transform3 {
+                scale: [2.0, 1.0, 1.581_138_8],
+                ..Transform3::IDENTITY
+            },
+            visible: true,
+            opacity: 1.0,
+        });
+        shear.nodes.push(NodeFrameState {
+            node: template.nodes[1].id,
+            local_transform: Transform3 {
+                rotation_xyzw: [0.0, 0.0, 0.382_683_43, 0.923_879_5],
+                ..Transform3::IDENTITY
+            },
+            visible: true,
+            opacity: 1.0,
+        });
+        assert_eq!(
+            validate_frame_delta(&shear, &accepted),
+            Err(SceneValidationError::LitCardScaleIncompatible)
+        );
+    }
+
+    #[test]
+    fn content_delta_rejects_adversarial_slot_values() {
+        let mut delta = ContentDelta::empty();
+        delta.pet_art_slots.push(PetArtSlot {
+            slot: 0,
+            glyph: Some(PetGlyph::for_species('^', crate::pet::generation::Species::Fuzz).unwrap()),
+            palette_role: PetPaletteRole::Eye,
+        });
+        delta.prop_slots.push(PropContentSlot {
+            slot: 0,
+            kind: PropContentKind::ChestOpen,
+        });
+        delta.tank_slots.push(TankContentSlot {
+            slot: 0,
+            kind: TankContentKind::SpriteVariant1,
+        });
+        delta.ambient_slots.push(AmbientContentSlot {
+            slot: 0,
+            active: true,
+            kind: AmbientContentKind::ActivityPulse,
+        });
+        assert_eq!(validate_content_delta(&delta), Ok(()));
+        delta
+            .prop_slots
+            .push(PropContentSlot { slot: 0, kind: PropContentKind::Static });
+        assert_eq!(
+            validate_content_delta(&delta),
+            Err(SceneValidationError::DuplicateSlot)
         );
     }
 }

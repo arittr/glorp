@@ -1,6 +1,12 @@
 use serde::Serialize;
 use std::time::Duration;
 
+#[cfg(test)]
+use crate::presentation::companion_scene::scene::{
+    MAX_AMBIENT_INSTANCES, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS, MAX_LIGHTS, MAX_PET_ART_SLOTS,
+    MAX_ROUND_TANK_INHABITANTS, MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_VISIBLE_PROPS,
+};
+
 pub(crate) const METRIC_SAMPLE_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone)]
@@ -152,15 +158,23 @@ impl CompanionCapacityInventory {
             dimmed_fixture_count: 126,
             full_props_tank_fixture_count: 630,
             max_prepared_gpu_primitives: CapacityContract::observed(782, 242, 1_024),
-            max_nodes: CapacityContract::reserved(96, 32, 128),
-            max_static_primitives: CapacityContract::reserved(640, 128, 768),
-            max_pet_slots: CapacityContract::observed(96, 34, 130),
-            max_visible_props: CapacityContract::observed(8, 2, 10),
-            max_round_tank_inhabitants: CapacityContract::observed(2, 0, 2),
-            max_ambient_instances: CapacityContract::reserved(48, 16, 64),
-            max_blended_draws: CapacityContract::reserved(192, 64, 256),
-            max_lights: CapacityContract::reserved(1, 1, 2),
-            max_attachments: CapacityContract::reserved(16, 16, 32),
+            max_nodes: CapacityContract::reserved(96, 32, MAX_SCENE_NODES as u32),
+            max_static_primitives: CapacityContract::reserved(
+                640,
+                128,
+                MAX_STATIC_PRIMITIVES as u32,
+            ),
+            max_pet_slots: CapacityContract::observed(96, 34, MAX_PET_ART_SLOTS as u32),
+            max_visible_props: CapacityContract::observed(8, 2, MAX_VISIBLE_PROPS as u32),
+            max_round_tank_inhabitants: CapacityContract::observed(
+                2,
+                0,
+                MAX_ROUND_TANK_INHABITANTS as u32,
+            ),
+            max_ambient_instances: CapacityContract::reserved(48, 16, MAX_AMBIENT_INSTANCES as u32),
+            max_blended_draws: CapacityContract::reserved(192, 64, MAX_BLENDED_DRAWS as u32),
+            max_lights: CapacityContract::reserved(1, 1, MAX_LIGHTS as u32),
+            max_attachments: CapacityContract::reserved(16, 16, MAX_ATTACHMENTS as u32),
         }
     }
 
@@ -943,11 +957,11 @@ mod tests {
         assert_eq!(inventory.max_prepared_gpu_primitives.limit, 1_024);
         assert_eq!(inventory.max_pet_slots.reservation, 0);
         assert_eq!(inventory.max_pet_slots.headroom, 34);
-        assert_eq!(inventory.max_pet_slots.limit, 130);
+        assert_eq!(inventory.max_pet_slots.limit, MAX_PET_ART_SLOTS as u32);
         assert_eq!(inventory.max_nodes.observed, None);
         assert_eq!(inventory.max_nodes.reservation, 96);
         assert_eq!(inventory.max_nodes.headroom, 32);
-        assert_eq!(inventory.max_nodes.limit, 128);
+        assert_eq!(inventory.max_nodes.limit, MAX_SCENE_NODES as u32);
         assert!(inventory.fits_global_constraints());
     }
 

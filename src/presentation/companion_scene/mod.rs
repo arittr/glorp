@@ -15,6 +15,8 @@ pub const COMPANION_RENDERER_SCHEMA_VERSION: u16 = 1;
 pub const PET_LATTICE_WIDTH: u16 = 13;
 pub const PET_LATTICE_HEIGHT: u16 = 10;
 pub const PET_LATTICE_SLOTS: u16 = scene::MAX_PET_ART_SLOTS as u16;
+const _: [(); scene::MAX_PET_ART_SLOTS] =
+    [(); PET_LATTICE_WIDTH as usize * PET_LATTICE_HEIGHT as usize];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompanionSceneProjectionError {
@@ -356,4 +358,20 @@ pub enum GaugeLevelSnapshot {
     Medium,
     High,
     Full,
+}
+
+impl GaugeLevelSnapshot {
+    pub(crate) fn from_fraction(value: f64) -> Self {
+        if value == 0.0 {
+            Self::Empty
+        } else if value < 0.25 {
+            Self::Low
+        } else if value < 0.5 {
+            Self::Medium
+        } else if value < 1.0 {
+            Self::High
+        } else {
+            Self::Full
+        }
+    }
 }

@@ -1,8 +1,8 @@
 use super::scene::{
-    AttachmentId, CanonicalAlias, MaterialId, NodeId, OrthographicCamera, ResourceId, SceneContent,
-    SceneFrame, SceneTemplate, WorldBlend,
+    MaterialKind, NodeId, OrthographicCamera, SceneContent, SceneFrame, SceneTemplate, WorldBlend,
 };
 use super::validate::{validate_full_generation, SceneValidationError};
+use super::GaugeLevelSnapshot;
 
 pub const SCENE_ARTIFACT_SCHEMA_VERSION: u16 = 1;
 
@@ -12,30 +12,6 @@ pub enum SceneArtifactPrivacy {
     ExternalRedacted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct NodeAliasArtifact {
-    pub id: NodeId,
-    pub alias: CanonicalAlias,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AttachmentAliasArtifact {
-    pub id: AttachmentId,
-    pub alias: CanonicalAlias,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct MaterialAliasArtifact {
-    pub id: MaterialId,
-    pub alias: CanonicalAlias,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct ResourceAliasArtifact {
-    pub id: ResourceId,
-    pub alias: CanonicalAlias,
-}
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SceneTemplateArtifact {
     pub schema_version: u16,
@@ -43,10 +19,6 @@ pub struct SceneTemplateArtifact {
     pub renderer_schema_version: u16,
     pub generation_checksum: u64,
     pub privacy: SceneArtifactPrivacy,
-    pub node_aliases: Vec<NodeAliasArtifact>,
-    pub attachment_aliases: Vec<AttachmentAliasArtifact>,
-    pub material_aliases: Vec<MaterialAliasArtifact>,
-    pub resource_aliases: Vec<ResourceAliasArtifact>,
     pub primitive_count: usize,
     pub blended_draw_count: usize,
 }
@@ -72,7 +44,7 @@ pub struct SceneFrameArtifact {
     pub schema_version: u16,
     pub camera: OrthographicCamera,
     pub nodes: Vec<SceneFrameNodeArtifact>,
-    pub gauges: [f32; 4],
+    pub gauges: [GaugeLevelSnapshot; 4],
     pub dim_amount: f32,
     pub light_count: usize,
 }
@@ -92,40 +64,6 @@ impl SceneArtifacts {
         frame: &SceneFrame,
     ) -> Result<Self, SceneValidationError> {
         validate_full_generation(template, content, frame)?;
-
-        let mut node_aliases = template
-            .nodes
-            .iter()
-            .map(|node| NodeAliasArtifact { id: node.id, alias: node.alias.clone() })
-            .collect::<Vec<_>>();
-        node_aliases.sort_by(|left, right| left.alias.cmp(&right.alias));
-        let mut attachment_aliases = template
-            .attachments
-            .iter()
-            .map(|attachment| AttachmentAliasArtifact {
-                id: attachment.id,
-                alias: attachment.alias.clone(),
-            })
-            .collect::<Vec<_>>();
-        attachment_aliases.sort_by(|left, right| left.alias.cmp(&right.alias));
-        let mut material_aliases = template
-            .materials
-            .iter()
-            .map(|material| MaterialAliasArtifact {
-                id: material.id,
-                alias: material.alias.clone(),
-            })
-            .collect::<Vec<_>>();
-        material_aliases.sort_by(|left, right| left.alias.cmp(&right.alias));
-        let mut resource_aliases = template
-            .resources
-            .iter()
-            .map(|resource| ResourceAliasArtifact {
-                id: resource.id,
-                alias: resource.alias.clone(),
-            })
-            .collect::<Vec<_>>();
-        resource_aliases.sort_by(|left, right| left.alias.cmp(&right.alias));
 
         let mut occupied_pet_art_slots = content
             .pet_art_slots
@@ -171,21 +109,21 @@ impl SceneArtifacts {
                 renderer_schema_version: template.renderer_schema_version,
                 generation_checksum: template.generation_checksum,
                 privacy: SceneArtifactPrivacy::ExternalRedacted,
-                node_aliases,
-                attachment_aliases,
-                material_aliases,
-                resource_aliases,
                 primitive_count: template.primitives.len(),
                 blended_draw_count: template
                     .primitives
                     .iter()
                     .filter(|primitive| {
+                        let is_screen_chrome = template.materials.iter().any(|material| {
+                            material.id == primitive.material
+                                && material.kind == MaterialKind::ScreenChrome
+                        });
                         matches!(
                             primitive.blend,
                             WorldBlend::PremultipliedAlpha
                                 | WorldBlend::Multiply
                                 | WorldBlend::Additive
-                        )
+                        ) && !is_screen_chrome
                     })
                     .count(),
             },
@@ -200,7 +138,9 @@ impl SceneArtifacts {
                 schema_version: SCENE_ARTIFACT_SCHEMA_VERSION,
                 camera: frame.camera,
                 nodes,
-                gauges: frame.gauges,
+                gauges: frame
+                    .gauges
+                    .map(|gauge| GaugeLevelSnapshot::from_fraction(f64::from(gauge))),
                 dim_amount: frame.dim_amount,
                 light_count: frame.lights.len(),
             },
@@ -211,11 +151,16 @@ impl SceneArtifacts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::companion_scene::scene::SceneFixture;
+    use crate::presentation::companion_scene::scene::{CanonicalAlias, SceneFixture};
 
     #[test]
     fn artifact_dtos_are_versioned_deterministic_and_privacy_safe() {
-        let fixture = SceneFixture::valid();
+        let mut fixture = SceneFixture::valid();
+        fixture.template.nodes[0].alias = CanonicalAlias::new("private-node-sentinel").unwrap();
+        fixture.template.nodes[0].id = NodeId::from_alias(&fixture.template.nodes[0].alias);
+        fixture.template.nodes[1].parent = Some(fixture.template.nodes[0].id);
+        fixture.frame.nodes[0].node = fixture.template.nodes[0].id;
+        fixture.frame.gauges = [0.123_456_79, 0.234_567_9, 0.345_678_9, 0.456_789];
         let first =
             SceneArtifacts::try_from_parts(&fixture.template, &fixture.content, &fixture.frame)
                 .unwrap();
@@ -226,11 +171,35 @@ mod tests {
         let second_json = serde_json::to_string(&second).unwrap();
         assert_eq!(first_json, second_json);
         assert!(first_json.contains("\"schema_version\":1"));
-        for forbidden in ["/Users/", "prompt", "response", "transcript", "diagnostic"] {
+        for forbidden in [
+            "/Users/",
+            "prompt",
+            "response",
+            "transcript",
+            "diagnostic",
+            "private-node-sentinel",
+            "0.12345679",
+            "node_aliases",
+        ] {
             assert!(
                 !first_json.contains(forbidden),
                 "artifact leaked {forbidden}"
             );
         }
+        assert_eq!(first.frame.gauges[0], super::super::GaugeLevelSnapshot::Low);
+        assert!(!format!("{:?}", fixture.template).contains("private-node-sentinel"));
+        assert!(!format!("{:?}", fixture.frame).contains("0.12345679"));
+    }
+
+    #[test]
+    fn screen_chrome_is_not_counted_as_a_world_blended_draw() {
+        let mut fixture = SceneFixture::valid();
+        fixture.template.materials[0].kind = MaterialKind::ScreenChrome;
+        fixture.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+        fixture.template.primitives[0].depth = super::super::scene::DepthBehavior::ScreenNoDepth;
+        let artifacts =
+            SceneArtifacts::try_from_parts(&fixture.template, &fixture.content, &fixture.frame)
+                .unwrap();
+        assert_eq!(artifacts.template.blended_draw_count, 0);
     }
 }

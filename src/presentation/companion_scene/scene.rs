@@ -1,4 +1,5 @@
 use crate::presentation::privacy::PrivacyProjection;
+use std::fmt;
 use std::ops::Mul;
 
 pub const SCENE_CONTRACT_SCHEMA_VERSION: u16 = super::COMPANION_SCENE_SCHEMA_VERSION;
@@ -12,6 +13,7 @@ pub const MAX_BLENDED_DRAWS: usize = 256;
 pub const MAX_LIGHTS: usize = 2;
 pub const MAX_ATTACHMENTS: usize = 32;
 pub const LIT_CARD_SCALE_TOLERANCE: f32 = 1.0e-5;
+pub const MIN_LIT_CARD_WORLD_SCALE: f64 = 1.0e-6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AliasError {
@@ -19,9 +21,14 @@ pub enum AliasError {
     NonCanonicalAscii,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
-#[serde(transparent)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalAlias(String);
+
+impl fmt::Debug for CanonicalAlias {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CanonicalAlias(<redacted>)")
+    }
+}
 
 impl CanonicalAlias {
     pub fn new(alias: impl Into<String>) -> Result<Self, AliasError> {
@@ -190,13 +197,13 @@ impl Mat4 {
         }
         let length_squared = value
             .iter()
-            .map(|component| component * component)
-            .sum::<f32>();
-        if length_squared <= f32::EPSILON {
+            .map(|component| f64::from(*component) * f64::from(*component))
+            .sum::<f64>();
+        if length_squared == 0.0 || !length_squared.is_finite() {
             return Err(TransformError::ZeroQuaternion);
         }
         let inverse_length = length_squared.sqrt().recip();
-        let [x, y, z, w] = value.map(|component| component * inverse_length);
+        let [x, y, z, w] = value.map(|component| (f64::from(component) * inverse_length) as f32);
         Ok(Self {
             columns: [
                 [
@@ -330,28 +337,46 @@ impl OrthographicCamera {
         if near_z <= far_z {
             return Err(CameraError::InvalidDepthRange);
         }
-        Ok(Self {
+        let camera = Self {
             width_points,
             height_points,
             far_z,
             near_z,
-        })
+        };
+        camera.projection_matrix()?;
+        Ok(camera)
     }
 
-    pub fn clip_depth(self, world_z: f32) -> f32 {
-        (self.near_z - world_z) / (self.near_z - self.far_z)
+    pub fn clip_depth(self, world_z: f32) -> Result<f32, CameraError> {
+        if !world_z.is_finite() {
+            return Err(CameraError::NonFinite);
+        }
+        let clip = (self.near_z - world_z) / (self.near_z - self.far_z);
+        clip.is_finite()
+            .then_some(clip)
+            .ok_or(CameraError::InvalidDepthRange)
     }
 
-    pub fn projection_matrix(self) -> Mat4 {
+    pub fn projection_matrix(self) -> Result<Mat4, CameraError> {
         let depth_range = self.near_z - self.far_z;
-        Mat4 {
+        if !depth_range.is_finite() || depth_range <= 0.0 {
+            return Err(CameraError::InvalidDepthRange);
+        }
+        let matrix = Mat4 {
             columns: [
                 [2.0 / self.width_points, 0.0, 0.0, 0.0],
                 [0.0, 2.0 / self.height_points, 0.0, 0.0],
                 [0.0, 0.0, -1.0 / depth_range, 0.0],
                 [-1.0, -1.0, self.near_z / depth_range, 1.0],
             ],
-        }
+        };
+        matrix
+            .columns
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+            .then_some(matrix)
+            .ok_or(CameraError::InvalidExtent)
     }
 }
 
@@ -361,7 +386,7 @@ pub struct Bounds3 {
     pub max: [f32; 3],
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeTemplate {
     pub id: NodeId,
     pub alias: CanonicalAlias,
@@ -371,14 +396,14 @@ pub struct NodeTemplate {
     pub depth_cue: DepthCue,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MaterialTemplate {
     pub id: MaterialId,
     pub alias: CanonicalAlias,
     pub kind: MaterialKind,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResourceTemplate {
     pub id: ResourceId,
     pub alias: CanonicalAlias,
@@ -395,7 +420,7 @@ pub struct PrimitiveTemplate {
     pub depth: DepthBehavior,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AttachmentTemplate {
     pub id: AttachmentId,
     pub alias: CanonicalAlias,
@@ -431,7 +456,7 @@ impl SceneCapacities {
     };
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SceneTemplate {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
@@ -445,33 +470,104 @@ pub struct SceneTemplate {
     pub generation_checksum: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentValueError {
+    InvalidPetGlyph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct PetGlyph(char);
+
+impl PetGlyph {
+    pub fn for_species(
+        glyph: char,
+        species: crate::pet::generation::Species,
+    ) -> Result<Self, ContentValueError> {
+        crate::pet::render::declared_pet_glyphs(species)
+            .contains(&glyph)
+            .then_some(Self(glyph))
+            .ok_or(ContentValueError::InvalidPetGlyph)
+    }
+
+    pub const fn as_char(self) -> char {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PetPaletteRole {
+    Body,
+    BodyGlow,
+    Eye,
+    Mouth,
+    Accent,
+    Pattern,
+    Particle,
+    Corruption,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PropContentKind {
+    Static,
+    SpritePhase0,
+    SpritePhase1,
+    TwinkleInactive,
+    TwinkleActive,
+    MotionPhase0,
+    MotionPhase1,
+    ChestClosed,
+    ChestOpen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TankContentKind {
+    SpriteVariant0,
+    SpriteVariant1,
+    AnemoneFlower,
+    AnemoneComb,
+    AnemoneCrown,
+    AnemoneDotColony,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AmbientContentKind {
+    Mote,
+    ActivityPulse,
+    PetParticle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PetArtSlot {
     pub slot: u16,
-    pub glyph: Option<char>,
-    pub palette_role: u8,
+    pub glyph: Option<PetGlyph>,
+    pub palette_role: PetPaletteRole,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PropContentSlot {
     pub slot: u8,
-    pub state: u8,
+    pub kind: PropContentKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct TankContentSlot {
     pub slot: u8,
-    pub state: u8,
+    pub kind: TankContentKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct AmbientContentSlot {
     pub slot: u8,
     pub active: bool,
-    pub kind: u8,
+    pub kind: AmbientContentKind,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SceneContent {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
@@ -496,7 +592,7 @@ pub struct LightFrame {
     pub intensity: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Clone, PartialEq)]
 pub struct SceneFrame {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
@@ -507,7 +603,22 @@ pub struct SceneFrame {
     pub lights: Vec<LightFrame>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+impl fmt::Debug for SceneFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SceneFrame")
+            .field("schema_version", &self.schema_version)
+            .field("renderer_schema_version", &self.renderer_schema_version)
+            .field("camera", &self.camera)
+            .field("nodes", &self.nodes)
+            .field("gauges", &"<redacted>")
+            .field("dim_amount", &"<redacted>")
+            .field("light_count", &self.lights.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContentDelta {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
@@ -530,7 +641,7 @@ impl ContentDelta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FrameDelta {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
@@ -637,8 +748,10 @@ impl SceneFixture {
                 renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
                 pet_art_slots: vec![PetArtSlot {
                     slot: 0,
-                    glyph: Some('@'),
-                    palette_role: 0,
+                    glyph: Some(
+                        PetGlyph::for_species('^', crate::pet::generation::Species::Fuzz).unwrap(),
+                    ),
+                    palette_role: PetPaletteRole::Body,
                 }],
                 prop_slots: vec![],
                 tank_slots: vec![],
@@ -778,12 +891,26 @@ mod tests {
     }
 
     #[test]
+    fn huge_finite_quaternion_normalizes_without_overflow() {
+        let transform = Transform3 {
+            rotation_xyzw: [f32::MAX, f32::MAX, f32::MAX, f32::MAX],
+            ..Transform3::IDENTITY
+        };
+        let matrix = transform.matrix().unwrap();
+        assert!(matrix
+            .columns
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite()));
+    }
+
+    #[test]
     fn orthographic_depth_maps_near_to_zero_and_far_to_one() {
         let camera = OrthographicCamera::new(360.0, 360.0, -2.0, 2.0).unwrap();
-        assert_eq!(camera.clip_depth(2.0), 0.0);
-        assert_eq!(camera.clip_depth(-2.0), 1.0);
-        assert_eq!(camera.clip_depth(0.0), 0.5);
-        let matrix = camera.projection_matrix();
+        assert_eq!(camera.clip_depth(2.0), Ok(0.0));
+        assert_eq!(camera.clip_depth(-2.0), Ok(1.0));
+        assert_eq!(camera.clip_depth(0.0), Ok(0.5));
+        let matrix = camera.projection_matrix().unwrap();
         assert_point_close(
             matrix.transform_point3([0.0, 0.0, 2.0]),
             [-1.0, -1.0, 0.0, 1.0],
@@ -820,5 +947,43 @@ mod tests {
             OrthographicCamera::new(f32::INFINITY, 360.0, -2.0, 2.0),
             Err(CameraError::NonFinite)
         );
+        assert_eq!(
+            OrthographicCamera::new(f32::from_bits(1), 360.0, -2.0, 2.0),
+            Err(CameraError::InvalidExtent)
+        );
+        assert_eq!(
+            OrthographicCamera::new(360.0, 360.0, -f32::MAX, f32::MAX),
+            Err(CameraError::InvalidDepthRange)
+        );
+        let camera = OrthographicCamera::new(360.0, 360.0, -2.0, 2.0).unwrap();
+        assert_eq!(
+            camera.clip_depth(f32::INFINITY),
+            Err(CameraError::NonFinite)
+        );
+    }
+
+    #[test]
+    fn content_values_are_closed_and_pet_glyphs_use_declared_repertoires() {
+        use crate::pet::generation::Species;
+
+        assert!(PetGlyph::for_species('^', Species::Fuzz).is_ok());
+        assert_eq!(
+            PetGlyph::for_species('\n', Species::Fuzz),
+            Err(ContentValueError::InvalidPetGlyph)
+        );
+        assert_eq!(
+            PetGlyph::for_species('\u{1f4a5}', Species::Fuzz),
+            Err(ContentValueError::InvalidPetGlyph)
+        );
+        let _roles = [
+            PetPaletteRole::Body,
+            PetPaletteRole::BodyGlow,
+            PetPaletteRole::Eye,
+            PetPaletteRole::Mouth,
+            PetPaletteRole::Accent,
+            PetPaletteRole::Pattern,
+            PetPaletteRole::Particle,
+            PetPaletteRole::Corruption,
+        ];
     }
 }
