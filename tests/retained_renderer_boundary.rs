@@ -294,6 +294,40 @@ fn production_and_evidence_paths_never_use_monolithic_appkit_atlas_compile() {
 }
 
 #[test]
+fn atlas_fonts_resolve_through_nullable_bounded_boundary_once_per_job() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let resources = read(&root.join("src/companion/retained/resources.rs"));
+
+    assert!(resources.contains("const FONT_RESOLUTION_MAX_ATTEMPTS: usize = 3;"));
+    assert!(resources.contains("msg_send_id!["));
+    assert!(resources.contains("monospacedSystemFontOfSize: point_size,"));
+    assert!(resources.contains("weight: weight.ns_weight()"));
+    assert!(resources.contains("Option<Retained<NSFont>>"));
+    assert!(resources.contains("autoreleasepool(|_| resolver(point_size, weight))"));
+
+    let preparation_start = resources.find("struct GlyphAtlasPreparation {").unwrap();
+    let preparation_end = resources[preparation_start..].find("\n}").unwrap() + preparation_start;
+    let preparation = &resources[preparation_start..preparation_end];
+    assert!(preparation.contains("fonts: ResolvedAtlasFonts"));
+    assert!(resources.contains("regular: Retained<NSFont>"));
+    assert!(resources.contains("bold: Retained<NSFont>"));
+
+    let raster_start = resources.find("fn rasterize_glyph_entry_impl(").unwrap();
+    let raster_end = resources[raster_start..]
+        .find("\n/// Inner drawable box")
+        .unwrap()
+        + raster_start;
+    let raster = &resources[raster_start..raster_end];
+    assert!(raster.contains("font: &NSFont"));
+    assert!(!raster.contains("resolve_font_once("));
+    assert!(!raster.contains("monospacedSystemFontOfSize"));
+
+    let presentation = read(&root.join("src/companion/retained/presentation.rs"));
+    assert!(presentation.contains("FontUnavailable"));
+    assert!(presentation.contains("retained-font-unavailable"));
+}
+
+#[test]
 fn instance_uploads_use_one_host_owned_staging_belt_on_every_submission_path() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let retained = read(&root.join("src/companion/retained.rs"));

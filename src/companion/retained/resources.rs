@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use objc2::msg_send_id;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::ClassType;
 use objc2_app_kit::{
@@ -231,6 +232,7 @@ pub(super) enum FontWeightPolicy {
 }
 
 impl FontWeightPolicy {
+    #[cfg(test)]
     pub(super) fn from_bold(bold: bool) -> Self {
         if bold {
             Self::Bold
@@ -265,16 +267,19 @@ pub(super) struct ResolvedFontPolicy {
 }
 
 impl ResolvedFontPolicy {
-    /// Resolves the exact Smooth monospaced font for a weight and reads its
-    /// identity. Uses `NSFont::monospacedSystemFontOfSize_weight` — the same
-    /// font policy Smooth's companion grid and HUD measure with — so the
-    /// retained atlas rasterizes the glyphs Smooth lays out.
-    pub(super) fn resolve(point_size: f64, backing_scale: f64, weight: FontWeightPolicy) -> Self {
-        let font = resolve_font(point_size, weight);
+    /// Reads the identity of an already-resolved Smooth monospaced font. The
+    /// policy id and the rasterizer therefore describe the exact same AppKit
+    /// object, rather than independently asking the font factory again.
+    fn from_font(
+        font: &NSFont,
+        point_size: f64,
+        backing_scale: f64,
+        weight: FontWeightPolicy,
+    ) -> Self {
         // SAFETY: `font` is a valid `NSFont`; `fontName`/`fontDescriptor` read
         // immutable identity.
         let postscript_name = unsafe { font.fontName() }.to_string();
-        let descriptor_hash = descriptor_hash(&font);
+        let descriptor_hash = descriptor_hash(font);
         Self {
             postscript_name,
             descriptor_hash,
@@ -307,11 +312,74 @@ impl ResolvedFontPolicy {
     }
 }
 
-/// Resolves the exact Smooth monospaced `NSFont` for a point size and weight.
-fn resolve_font(point_size: f64, weight: FontWeightPolicy) -> Retained<NSFont> {
-    // SAFETY: `monospacedSystemFontOfSize_weight` returns a retained font for
-    // any positive size and valid weight.
-    unsafe { NSFont::monospacedSystemFontOfSize_weight(point_size, weight.ns_weight()) }
+const FONT_RESOLUTION_MAX_ATTEMPTS: usize = 3;
+
+/// Sends the exact Smooth font selector through a nullable return type. AppKit
+/// documents the class method as nonnull, but the Objective-C ABI can still
+/// return nil under transient system-font initialization failures. Keeping the
+/// raw boundary narrow prevents the generated nonnull binding from turning nil
+/// into an objc2 panic.
+fn resolve_font_once(point_size: f64, weight: FontWeightPolicy) -> Option<Retained<NSFont>> {
+    // SAFETY: The selector and argument ABI exactly match
+    // `+[NSFont monospacedSystemFontOfSize:weight:]`. `Option<Retained<_>>`
+    // deliberately models a nullable autoreleased Objective-C object result.
+    #[allow(deprecated)]
+    unsafe {
+        msg_send_id![
+            NSFont::class(),
+            monospacedSystemFontOfSize: point_size,
+            weight: weight.ns_weight()
+        ]
+    }
+}
+
+fn resolve_font_with_attempts(
+    point_size: f64,
+    weight: FontWeightPolicy,
+    resolver: &mut impl FnMut(f64, FontWeightPolicy) -> Option<Retained<NSFont>>,
+) -> std::result::Result<Retained<NSFont>, RetainedFailureCategory> {
+    for _ in 0..FONT_RESOLUTION_MAX_ATTEMPTS {
+        // Each immediate attempt gets its own pool so a failed AppKit lookup
+        // cannot retain autoreleased intermediates into the next attempt.
+        if let Some(font) = autoreleasepool(|_| resolver(point_size, weight)) {
+            return Ok(font);
+        }
+    }
+    Err(RetainedFailureCategory::FontUnavailable)
+}
+
+struct ResolvedAtlasFonts {
+    regular: Retained<NSFont>,
+    bold: Retained<NSFont>,
+    regular_policy_id: u64,
+    bold_policy_id: u64,
+}
+
+impl ResolvedAtlasFonts {
+    fn resolve_with(
+        point_size: f64,
+        backing_scale: f64,
+        resolver: &mut impl FnMut(f64, FontWeightPolicy) -> Option<Retained<NSFont>>,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
+        let regular = resolve_font_with_attempts(point_size, FontWeightPolicy::Regular, resolver)?;
+        let bold = resolve_font_with_attempts(point_size, FontWeightPolicy::Bold, resolver)?;
+        let regular_policy_id = ResolvedFontPolicy::from_font(
+            &regular,
+            point_size,
+            backing_scale,
+            FontWeightPolicy::Regular,
+        )
+        .id();
+        let bold_policy_id =
+            ResolvedFontPolicy::from_font(&bold, point_size, backing_scale, FontWeightPolicy::Bold)
+                .id();
+        Ok(Self {
+            regular,
+            bold,
+            regular_policy_id,
+            bold_policy_id,
+        })
+    }
 }
 
 /// A stable hash of the font's canonical descriptor identity: its PostScript
@@ -336,6 +404,7 @@ fn descriptor_hash(font: &NSFont) -> u64 {
 pub(super) struct GlyphRasterTarget {
     pub(super) cell: u32,
     pub(super) padding: u32,
+    #[cfg(test)]
     pub(super) point_size: f64,
 }
 
@@ -373,6 +442,14 @@ impl Drop for CurrentGraphicsContextGuard {
 /// premultiplied RGBA the bitmap produced and is classified
 /// [`GlyphEntryKind::PremultipliedColorRgba`]; otherwise it is stored as white
 /// RGB plus coverage alpha ([`GlyphEntryKind::Mask`]).
+#[cfg(test)]
+fn resolve_reference_font_for_test(point_size: f64, weight: FontWeightPolicy) -> Retained<NSFont> {
+    // This deliberately uses the independently generated objc2 binding. It is
+    // reference-only test code; production uses the nullable raw boundary and
+    // never performs a font factory call while rasterizing a glyph.
+    unsafe { NSFont::monospacedSystemFontOfSize_weight(point_size, weight.ns_weight()) }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 pub(super) fn rasterize_glyph_entry(
@@ -385,9 +462,12 @@ pub(super) fn rasterize_glyph_entry(
     x: u32,
     y: u32,
 ) -> std::result::Result<GlyphAtlasEntry, RetainedFailureCategory> {
+    let font =
+        resolve_reference_font_for_test(target.point_size, FontWeightPolicy::from_bold(key.bold));
     rasterize_glyph_entry_impl(
         key,
         target,
+        &font,
         font_policy_id,
         atlas,
         atlas_width,
@@ -401,6 +481,7 @@ pub(super) fn rasterize_glyph_entry(
 fn rasterize_glyph_entry_impl(
     key: &GlyphKey,
     target: &GlyphRasterTarget,
+    font: &NSFont,
     font_policy_id: u64,
     atlas: &mut [u8],
     atlas_width: u32,
@@ -420,10 +501,9 @@ fn rasterize_glyph_entry_impl(
         let current_context_guard = CurrentGraphicsContextGuard::install(&context);
 
         let text = NSString::from_str(key.sequence.as_str());
-        let font = resolve_font(target.point_size, FontWeightPolicy::from_bold(key.bold));
         let mut attributed = NSMutableAttributedString::from_nsstring(&text);
         let range = NSRange::from(0..text.length());
-        attributed.addAttribute_value_range(NSFontAttributeName, &font, range);
+        attributed.addAttribute_value_range(NSFontAttributeName, font, range);
         let white = NSColor::whiteColor();
         attributed.addAttribute_value_range(NSForegroundColorAttributeName, &white, range);
         let attributed: Retained<objc2_foundation::NSAttributedString> =
@@ -585,17 +665,27 @@ pub(super) struct CompiledGlyphAtlas {
 struct GlyphAtlasPreparation {
     glyphs: Vec<GlyphKey>,
     target: GlyphRasterTarget,
-    regular_font_policy_id: u64,
-    bold_font_policy_id: u64,
+    fonts: ResolvedAtlasFonts,
     next_index: usize,
     atlas: CompiledGlyphAtlas,
 }
 
 impl GlyphAtlasPreparation {
+    #[cfg(test)]
     fn new(
         glyphs: &[GlyphKey],
         point_size: f64,
         backing_scale: f64,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
+        let fonts =
+            ResolvedAtlasFonts::resolve_with(point_size, backing_scale, &mut resolve_font_once)?;
+        Self::new_with_fonts(glyphs, point_size, fonts)
+    }
+
+    fn new_with_fonts(
+        glyphs: &[GlyphKey],
+        point_size: f64,
+        fonts: ResolvedAtlasFonts,
     ) -> std::result::Result<Self, RetainedFailureCategory> {
         let padding = (point_size * ATLAS_PADDING_RATIO).round().max(1.0) as u32;
         let inner = (point_size * ATLAS_INNER_RATIO).round().max(1.0) as u32;
@@ -607,19 +697,16 @@ impl GlyphAtlasPreparation {
         }
         let width = ATLAS_COLUMNS * cell;
         let height = rows * cell;
-        let target = GlyphRasterTarget { cell, padding, point_size };
-        let (regular_font_policy_id, bold_font_policy_id) = autoreleasepool(|_| {
-            (
-                ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Regular)
-                    .id(),
-                ResolvedFontPolicy::resolve(point_size, backing_scale, FontWeightPolicy::Bold).id(),
-            )
-        });
+        let target = GlyphRasterTarget {
+            cell,
+            padding,
+            #[cfg(test)]
+            point_size,
+        };
         Ok(Self {
             glyphs: glyphs.to_vec(),
             target,
-            regular_font_policy_id,
-            bold_font_policy_id,
+            fonts,
             next_index: 0,
             atlas: CompiledGlyphAtlas {
                 width,
@@ -637,8 +724,7 @@ impl GlyphAtlasPreparation {
         rasterize_prepared_glyph(
             &self.glyphs,
             &self.target,
-            self.regular_font_policy_id,
-            self.bold_font_policy_id,
+            &self.fonts,
             &mut self.atlas,
             self.next_index,
         )?;
@@ -657,8 +743,7 @@ impl GlyphAtlasPreparation {
 fn rasterize_prepared_glyph(
     glyphs: &[GlyphKey],
     target: &GlyphRasterTarget,
-    regular_font_policy_id: u64,
-    bold_font_policy_id: u64,
+    fonts: &ResolvedAtlasFonts,
     atlas: &mut CompiledGlyphAtlas,
     index: usize,
 ) -> std::result::Result<(), RetainedFailureCategory> {
@@ -666,14 +751,20 @@ fn rasterize_prepared_glyph(
     let slot_x = index as u32 % ATLAS_COLUMNS;
     let slot_y = index as u32 / ATLAS_COLUMNS;
     let font_policy_id = if key.bold {
-        bold_font_policy_id
+        fonts.bold_policy_id
     } else {
-        regular_font_policy_id
+        fonts.regular_policy_id
     };
     let entry = autoreleasepool(|_| {
+        let font = if key.bold {
+            &*fonts.bold
+        } else {
+            &*fonts.regular
+        };
         rasterize_glyph_entry_impl(
             key,
             target,
+            font,
             font_policy_id,
             &mut atlas.rgba,
             atlas.width,
@@ -696,7 +787,11 @@ fn rasterize_prepared_glyph(
 pub(super) struct ResourceGenerationKey(u64);
 
 impl ResourceGenerationKey {
-    fn compute(manifest: &GlyphRepertoireManifest) -> Self {
+    fn compute(
+        manifest: &GlyphRepertoireManifest,
+        regular_font_policy_id: u64,
+        bold_font_policy_id: u64,
+    ) -> Self {
         let mut hasher = Fnv1a::new();
         hasher.write(&manifest.identity.identity_bytes());
         for key in &manifest.glyphs {
@@ -704,20 +799,8 @@ impl ResourceGenerationKey {
             hasher.write_u8(u8::from(key.bold));
             hasher.write_u8(0xff);
         }
-        let regular = ResolvedFontPolicy::resolve(
-            manifest.atlas_point_size,
-            manifest.backing_scale,
-            FontWeightPolicy::Regular,
-        )
-        .id();
-        let bold = ResolvedFontPolicy::resolve(
-            manifest.atlas_point_size,
-            manifest.backing_scale,
-            FontWeightPolicy::Bold,
-        )
-        .id();
-        hasher.write_u64(regular);
-        hasher.write_u64(bold);
+        hasher.write_u64(regular_font_policy_id);
+        hasher.write_u64(bold_font_policy_id);
         Self(hasher.finish())
     }
 
@@ -812,8 +895,15 @@ impl GlyphRepertoireManifest {
         &self.glyphs
     }
 
+    #[cfg(test)]
     pub(super) fn generation_key(&self) -> ResourceGenerationKey {
-        ResourceGenerationKey::compute(self)
+        let fonts = ResolvedAtlasFonts::resolve_with(
+            self.atlas_point_size,
+            self.backing_scale,
+            &mut resolve_font_once,
+        )
+        .expect("test font policy resolves");
+        ResourceGenerationKey::compute(self, fonts.regular_policy_id, fonts.bold_policy_id)
     }
 }
 
@@ -835,12 +925,26 @@ impl CompiledRetainedResourcesPreparation {
     pub(super) fn new(
         manifest: &GlyphRepertoireManifest,
     ) -> std::result::Result<Self, RetainedFailureCategory> {
+        Self::new_with_font_resolver(manifest, &mut resolve_font_once)
+    }
+
+    pub(super) fn new_with_font_resolver(
+        manifest: &GlyphRepertoireManifest,
+        resolver: &mut impl FnMut(f64, FontWeightPolicy) -> Option<Retained<NSFont>>,
+    ) -> std::result::Result<Self, RetainedFailureCategory> {
+        let fonts = ResolvedAtlasFonts::resolve_with(
+            manifest.atlas_point_size,
+            manifest.backing_scale,
+            resolver,
+        )?;
+        let generation =
+            ResourceGenerationKey::compute(manifest, fonts.regular_policy_id, fonts.bold_policy_id);
         Ok(Self {
-            generation: autoreleasepool(|_| manifest.generation_key()),
-            atlas: GlyphAtlasPreparation::new(
+            generation,
+            atlas: GlyphAtlasPreparation::new_with_fonts(
                 manifest.glyphs(),
                 manifest.atlas_point_size,
-                manifest.backing_scale,
+                fonts,
             )?,
         })
     }
@@ -1047,7 +1151,8 @@ mod metric_tests {
     fn reference_size(text: &str, point_size: f64, bold: bool) -> (f32, f32) {
         unsafe {
             let ns = NSString::from_str(text);
-            let font = resolve_font(point_size, FontWeightPolicy::from_bold(bold));
+            let font =
+                resolve_reference_font_for_test(point_size, FontWeightPolicy::from_bold(bold));
             let mut attributed = NSMutableAttributedString::from_nsstring(&ns);
             let range = NSRange::from(0..ns.length());
             attributed.addAttribute_value_range(NSFontAttributeName, &font, range);
@@ -1169,6 +1274,72 @@ mod metric_tests {
 #[cfg(test)]
 mod glyph_tests {
     use super::*;
+
+    #[test]
+    fn font_resolver_retries_nil_once_then_succeeds_in_exact_order() {
+        let mut attempts = Vec::new();
+        let mut resolver = |point_size, weight| {
+            attempts.push((point_size, weight));
+            (attempts.len() > 1).then(|| resolve_font_once(point_size, weight).unwrap())
+        };
+
+        let font = resolve_font_with_attempts(48.0, FontWeightPolicy::Regular, &mut resolver)
+            .expect("second immediate attempt resolves the requested font");
+
+        assert!(!unsafe { font.fontName() }.is_empty());
+        assert_eq!(
+            attempts,
+            vec![
+                (48.0, FontWeightPolicy::Regular),
+                (48.0, FontWeightPolicy::Regular),
+            ]
+        );
+    }
+
+    #[test]
+    fn font_resolver_caps_permanent_nil_at_three_with_typed_failure() {
+        let mut attempts = Vec::new();
+        let failure =
+            resolve_font_with_attempts(48.0, FontWeightPolicy::Bold, &mut |point_size, weight| {
+                attempts.push((point_size, weight));
+                None
+            })
+            .expect_err("three nil replies exhaust the bounded resolver");
+
+        assert_eq!(failure, RetainedFailureCategory::FontUnavailable);
+        assert_eq!(
+            attempts,
+            vec![
+                (48.0, FontWeightPolicy::Bold),
+                (48.0, FontWeightPolicy::Bold),
+                (48.0, FontWeightPolicy::Bold),
+            ]
+        );
+    }
+
+    #[test]
+    fn full_preparation_resolves_exactly_regular_then_bold_once() {
+        let manifest = GlyphRepertoireManifest::for_fixture_pet();
+        let mut successful_resolutions = Vec::new();
+        let mut preparation = CompiledRetainedResourcesPreparation::new_with_font_resolver(
+            &manifest,
+            &mut |point_size, weight| {
+                let font = resolve_font_once(point_size, weight);
+                if font.is_some() {
+                    successful_resolutions.push(weight);
+                }
+                font
+            },
+        )
+        .expect("the production selector resolves both atlas fonts");
+
+        while !preparation.advance_one().unwrap() {}
+        preparation.finish().unwrap();
+        assert_eq!(
+            successful_resolutions,
+            vec![FontWeightPolicy::Regular, FontWeightPolicy::Bold]
+        );
+    }
 
     fn bitmap_context() -> Retained<NSGraphicsContext> {
         unsafe {

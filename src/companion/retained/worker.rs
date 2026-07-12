@@ -16,11 +16,27 @@ use super::RetainedFailureCategory;
 pub(super) struct RasterJob {
     pub(super) job_id: u64,
     pub(super) manifest: GlyphRepertoireManifest,
+    #[cfg(test)]
+    force_font_unavailable: bool,
 }
 
 impl RasterJob {
     pub(super) fn new(job_id: u64, manifest: GlyphRepertoireManifest) -> Self {
-        Self { job_id, manifest }
+        Self {
+            job_id,
+            manifest,
+            #[cfg(test)]
+            force_font_unavailable: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_unavailable_font_for_test(job_id: u64, manifest: GlyphRepertoireManifest) -> Self {
+        Self {
+            job_id,
+            manifest,
+            force_font_unavailable: true,
+        }
     }
 }
 
@@ -430,7 +446,17 @@ fn compile_job_with_checkpoint(
             timing: RasterWorkerTiming::since(started_at, *attempts),
         };
     }
-    let mut preparation = match CompiledRetainedResourcesPreparation::new(&job.manifest) {
+    #[cfg(test)]
+    let preparation = if job.force_font_unavailable {
+        CompiledRetainedResourcesPreparation::new_with_font_resolver(&job.manifest, &mut |_, _| {
+            None
+        })
+    } else {
+        CompiledRetainedResourcesPreparation::new(&job.manifest)
+    };
+    #[cfg(not(test))]
+    let preparation = CompiledRetainedResourcesPreparation::new(&job.manifest);
+    let mut preparation = match preparation {
         Ok(preparation) => preparation,
         Err(category) => {
             return RasterReply::Failed {
@@ -714,6 +740,34 @@ mod tests {
         assert!(matches!(
             wait_for_reply(&mut worker),
             RasterReply::WorkerPanicked { job_id: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn typed_font_failure_does_not_terminate_worker() {
+        let _guard = worker_test_guard();
+        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        worker
+            .try_submit(RasterJob::with_unavailable_font_for_test(
+                1,
+                crystal_manifest(),
+            ))
+            .expect("idle worker accepts injected typed failure");
+        assert!(matches!(
+            wait_for_reply(&mut worker),
+            RasterReply::Failed {
+                job_id: 1,
+                category: crate::companion::retained::RetainedFailureCategory::FontUnavailable,
+                ..
+            }
+        ));
+
+        worker
+            .try_submit(RasterJob::new(2, crystal_manifest()))
+            .expect("typed failure leaves worker available for another job");
+        assert!(matches!(
+            wait_for_reply(&mut worker),
+            RasterReply::Completed { job_id: 2, .. }
         ));
     }
 
