@@ -1476,7 +1476,7 @@ fn production_scene_has_no_post_warmup_churn_for_300_frames() {
 
 #[test]
 fn production_scene_survives_4500_virtual_frames_and_lifecycle_boundaries() {
-    let result = run_virtual_scene(SceneRun::five_minutes_with_poll_minute_content_and_topology());
+    let result = run_virtual_scene(SceneRun::extended_with_poll_minute_content_and_topology());
     assert_eq!(result.frames, 4_500);
     assert_eq!(result.stale_mutations, 0);
     assert_eq!(result.capacity_growths, 0);
@@ -1495,7 +1495,11 @@ Expected: compile failure for missing SceneRun harness.
 
 - [ ] **Step 3: Add deterministic virtual-time runner**
 
-Advance current 4 Hz presentation, semantic animation changes, 30-second poll boundaries, minute changes, content substitutions, one topology replacement, hidden/reveal, resize/scale storms, and capture around activation. Collect versioned metrics and compare exact counts/high-water values.
+Advance 4,500 frames at the current 4 Hz cadence, spanning 18 minutes 45 seconds
+of virtual time. Include semantic animation changes, 30-second poll boundaries,
+minute changes, content substitutions, one topology replacement, hidden/reveal,
+resize/scale storms, and capture around activation. Collect versioned metrics and
+compare exact counts/high-water values.
 
 - [ ] **Step 4: Expand fault injection**
 
