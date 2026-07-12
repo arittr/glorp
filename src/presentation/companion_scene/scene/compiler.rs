@@ -249,11 +249,21 @@ impl SceneGenerationData {
                 frame.nodes.push(node);
             }
             for source in &snapshot.frame.hud_instances {
+                let occupied = snapshot.content.hud_glyphs[usize::from(source.slot)]
+                    .glyph
+                    .is_some();
                 frame.hud_slots.push(HudFrameSlot {
                     slot: source.slot,
-                    visible: source.visible,
-                    position_points: source.position_points,
-                    opacity: source.opacity,
+                    visible: occupied && source.visible,
+                    position_points: if occupied {
+                        [
+                            source.position_points[0],
+                            snapshot.topology.layout.height_points - source.position_points[1],
+                        ]
+                    } else {
+                        [0.0; 2]
+                    },
+                    opacity: if occupied { source.opacity } else { 0.0 },
                 });
             }
         }
@@ -293,7 +303,6 @@ pub enum SceneDeltaApplyError {
     StaleBase,
     IdentityMismatch,
     GenerationRequired,
-    CounterOverflow,
     Projection(SceneGenerationError),
     Validation(crate::presentation::companion_scene::validate::SceneValidationError),
 }
@@ -324,21 +333,11 @@ impl SceneGenerationData {
             != crate::presentation::companion_scene::runtime::SemanticChangeMask::NONE;
         let frame_changed =
             changes.frame() != crate::presentation::companion_scene::runtime::FrameChangeMask::NONE;
-        let expected = crate::presentation::companion_scene::AppliedRevisions {
-            semantic: crate::presentation::companion_scene::SemanticRevision(
-                from.semantic
-                    .0
-                    .checked_add(u64::from(semantic_changed))
-                    .ok_or(SceneDeltaApplyError::CounterOverflow)?,
-            ),
-            frame: crate::presentation::companion_scene::FrameRevision(
-                from.frame
-                    .0
-                    .checked_add(u64::from(frame_changed))
-                    .ok_or(SceneDeltaApplyError::CounterOverflow)?,
-            ),
-        };
-        if to != expected {
+        if to.semantic.0 < from.semantic.0
+            || to.frame.0 < from.frame.0
+            || (semantic_changed && to.semantic == from.semantic)
+            || (frame_changed && to.frame == from.frame)
+        {
             return Err(SceneDeltaApplyError::IdentityMismatch);
         }
         self.project_snapshot_changes(&snapshot, changes, from, to)
@@ -698,6 +697,24 @@ pub(crate) fn build_scene_generation_owned(
     generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     source_revisions: crate::presentation::companion_scene::AppliedRevisions,
 ) -> Result<SceneGenerationData, SceneGenerationError> {
+    build_scene_generation_sealed(snapshot, generation_key, source_revisions, Arc::new(()))
+}
+
+pub(crate) fn build_scene_generation_for_request(
+    snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+    source_revisions: crate::presentation::companion_scene::AppliedRevisions,
+    request_seal: Arc<()>,
+) -> Result<SceneGenerationData, SceneGenerationError> {
+    build_scene_generation_sealed(snapshot, generation_key, source_revisions, request_seal)
+}
+
+fn build_scene_generation_sealed(
+    snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+    source_revisions: crate::presentation::companion_scene::AppliedRevisions,
+    request_seal: Arc<()>,
+) -> Result<SceneGenerationData, SceneGenerationError> {
     validate_builder_snapshot(&snapshot)?;
     let layout = snapshot.topology.layout;
     let mut template = build_template(&snapshot)?;
@@ -719,6 +736,7 @@ pub(crate) fn build_scene_generation_owned(
         generation_key,
         source_revisions,
         source_snapshot: snapshot,
+        request_seal,
         template,
         content,
         frame,
@@ -730,10 +748,51 @@ pub(crate) fn build_scene_generation_owned(
 }
 
 impl SceneGenerationData {
-    pub(crate) fn into_accepted(
-        self,
-    ) -> crate::presentation::companion_scene::validate::AcceptedSceneState {
-        self.accepted
+    pub const fn generation_key(&self) -> crate::presentation::companion_scene::SceneGenerationKey {
+        self.generation_key
+    }
+
+    pub const fn source_revisions(&self) -> crate::presentation::companion_scene::AppliedRevisions {
+        self.source_revisions
+    }
+
+    pub fn source_snapshot(
+        &self,
+    ) -> &Arc<crate::presentation::companion_scene::CompanionSceneSnapshot> {
+        &self.source_snapshot
+    }
+
+    pub fn template(&self) -> &SceneTemplate {
+        &self.template
+    }
+
+    pub fn content(&self) -> &SceneContent {
+        &self.content
+    }
+
+    pub fn frame(&self) -> &SceneFrame {
+        &self.frame
+    }
+
+    pub const fn content_checksum(&self) -> u64 {
+        self.content_checksum
+    }
+
+    pub const fn frame_checksum(&self) -> u64 {
+        self.frame_checksum
+    }
+
+    pub(crate) fn matches_request(
+        &self,
+        request_seal: &Arc<()>,
+        generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+        source_revisions: crate::presentation::companion_scene::AppliedRevisions,
+        snapshot: &Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    ) -> bool {
+        Arc::ptr_eq(&self.request_seal, request_seal)
+            && self.generation_key == generation_key
+            && self.source_revisions == source_revisions
+            && Arc::ptr_eq(&self.source_snapshot, snapshot)
     }
 }
 
@@ -1176,6 +1235,15 @@ fn build_template(
             owner: NodeId::from_alias(&owner_alias),
             local: Transform3::translated([0.0, 1.25, 0.0]),
             mode: AttachmentMode::Follow,
+            instance_binding: Some(AttachmentInstanceBinding::PropGlyphs(
+                snapshot
+                    .topology
+                    .visible_props
+                    .iter()
+                    .find(|prop| prop.catalog_id == crate::game::habitat::TOKEN_TREASURE_CHEST_2M)
+                    .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?
+                    .stable_order,
+            )),
         });
     }
     Ok(SceneTemplate {
@@ -1760,11 +1828,19 @@ fn build_frame(
     }
     for source in &snapshot.frame.hud_instances {
         let slot = usize::from(source.slot);
+        let occupied = snapshot.content.hud_glyphs[slot].glyph.is_some();
         frame.hud_slots[slot] = HudFrameSlot {
             slot: source.slot,
-            visible: source.visible,
-            position_points: source.position_points,
-            opacity: source.opacity,
+            visible: occupied && source.visible,
+            position_points: if occupied {
+                [
+                    source.position_points[0],
+                    layout.height_points - source.position_points[1],
+                ]
+            } else {
+                [0.0; 2]
+            },
+            opacity: if occupied { source.opacity } else { 0.0 },
         };
     }
     frame.gauges = snapshot.frame.gauges.map(|gauge| match gauge {

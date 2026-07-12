@@ -27,6 +27,7 @@ pub enum SceneValidationError {
     ResourceIdCollision,
     DuplicateAttachmentId,
     AttachmentIdCollision,
+    InvalidAttachmentBinding,
     AliasIdMismatch,
     DanglingNodeReference,
     DanglingMaterialReference,
@@ -149,6 +150,15 @@ pub fn validate_full_generation(
     validate_content(content)?;
     let accepted_frame = validate_frame(frame, &accepted)?;
     validate_content_frame_canonical(content, accepted_frame.frame())?;
+    for attachment in &template.attachments {
+        if let Some(AttachmentInstanceBinding::PropGlyphs(slot)) = attachment.instance_binding {
+            if content.prop_slots[usize::from(slot)].content.is_none() {
+                return Err(SceneValidationError::InvalidAttachmentBinding);
+            }
+        }
+        resolve_attachment_world(template, accepted_frame.frame(), attachment)
+            .map_err(|_| SceneValidationError::InvalidAttachmentBinding)?;
+    }
     Ok(AcceptedSceneState {
         template: accepted,
         frame: accepted_frame,
@@ -725,6 +735,45 @@ fn validate_attachments(template: &SceneTemplate) -> Result<(), SceneValidationE
             return Err(SceneValidationError::DanglingNodeReference);
         }
         validate_transform(attachment.local)?;
+        if let Some(AttachmentInstanceBinding::PropGlyphs(slot)) = attachment.instance_binding {
+            if usize::from(slot) >= MAX_VISIBLE_PROPS {
+                return Err(SceneValidationError::InvalidAttachmentBinding);
+            }
+            let mut sources = template
+                .primitives
+                .iter()
+                .filter(|primitive| {
+                    primitive.instance_group == Some(InstanceGroupBinding::PropGlyphs(slot))
+                })
+                .map(|primitive| primitive.node);
+            let source = sources
+                .next()
+                .ok_or(SceneValidationError::InvalidAttachmentBinding)?;
+            if sources.next().is_some() {
+                return Err(SceneValidationError::InvalidAttachmentBinding);
+            }
+            let mut current = Some(attachment.owner);
+            let mut visited = 0;
+            let mut found = false;
+            while let Some(id) = current {
+                if id == source {
+                    found = true;
+                    break;
+                }
+                visited += 1;
+                if visited > MAX_SCENE_NODES {
+                    return Err(SceneValidationError::HierarchyCycle);
+                }
+                current = template
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == id)
+                    .and_then(|node| node.parent);
+            }
+            if !found {
+                return Err(SceneValidationError::InvalidAttachmentBinding);
+            }
+        }
     }
     Ok(())
 }
@@ -1719,6 +1768,40 @@ mod tests {
         assert_eq!(
             validate_frame(&frame, &accepted).map(|_| ()),
             Err(SceneValidationError::NonFiniteFrameValue)
+        );
+    }
+
+    #[test]
+    fn attachment_instance_binding_must_resolve_to_an_ancestor_instance_source() {
+        let mut template = SceneFixture::valid().template;
+        template.attachments[0].instance_binding = Some(AttachmentInstanceBinding::PropGlyphs(
+            MAX_VISIBLE_PROPS as u8,
+        ));
+        assert_eq!(
+            validate_template(&template),
+            Err(SceneValidationError::InvalidAttachmentBinding)
+        );
+
+        let mut template = SceneFixture::valid().template;
+        template.primitives[0].instance_group = Some(InstanceGroupBinding::PropGlyphs(0));
+        template.attachments[0].instance_binding = Some(AttachmentInstanceBinding::PropGlyphs(0));
+        template.attachments[0].owner = template.nodes[0].id;
+        assert_eq!(
+            validate_template(&template),
+            Err(SceneValidationError::InvalidAttachmentBinding)
+        );
+    }
+
+    #[test]
+    fn attachment_instance_binding_rejects_canonical_empty_prop_slot() {
+        let mut fixture = SceneFixture::valid();
+        fixture.template.primitives[0].kind = PrimitiveKind::InstanceQuad;
+        fixture.template.primitives[0].instance_group = Some(InstanceGroupBinding::PropGlyphs(0));
+        fixture.template.attachments[0].instance_binding =
+            Some(AttachmentInstanceBinding::PropGlyphs(0));
+        assert_eq!(
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame),
+            Err(SceneValidationError::InvalidAttachmentBinding)
         );
     }
 

@@ -470,6 +470,12 @@ pub enum InstanceGroupBinding {
     Hud,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttachmentInstanceBinding {
+    PropGlyphs(u8),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttachmentTemplate {
     pub id: AttachmentId,
@@ -477,6 +483,109 @@ pub struct AttachmentTemplate {
     pub owner: NodeId,
     pub local: Transform3,
     pub mode: AttachmentMode,
+    pub instance_binding: Option<AttachmentInstanceBinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentResolveError {
+    DanglingOwner,
+    MissingFrameNode,
+    MissingInstanceSource,
+    AmbiguousInstanceSource,
+    OwnerOutsideInstanceSource,
+    SlotOutOfBounds,
+    InvalidTransform,
+    HierarchyCycle,
+}
+
+pub fn resolve_attachment_world(
+    template: &SceneTemplate,
+    frame: &SceneFrame,
+    attachment: &AttachmentTemplate,
+) -> Result<Mat4, AttachmentResolveError> {
+    let source = match attachment.instance_binding {
+        None => None,
+        Some(AttachmentInstanceBinding::PropGlyphs(slot)) => {
+            if usize::from(slot) >= frame.prop_slots.len() {
+                return Err(AttachmentResolveError::SlotOutOfBounds);
+            }
+            let mut matches = template
+                .primitives
+                .iter()
+                .filter(|primitive| {
+                    primitive.instance_group == Some(InstanceGroupBinding::PropGlyphs(slot))
+                })
+                .map(|primitive| primitive.node);
+            let source = matches
+                .next()
+                .ok_or(AttachmentResolveError::MissingInstanceSource)?;
+            if matches.next().is_some() {
+                return Err(AttachmentResolveError::AmbiguousInstanceSource);
+            }
+            Some((source, slot))
+        }
+    };
+
+    let mut chain = [NodeId(0); MAX_SCENE_NODES];
+    let mut count = 0;
+    let mut current = Some(attachment.owner);
+    while let Some(id) = current {
+        if count >= chain.len() || chain[..count].contains(&id) {
+            return Err(AttachmentResolveError::HierarchyCycle);
+        }
+        chain[count] = id;
+        count += 1;
+        let node = template
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .ok_or(AttachmentResolveError::DanglingOwner)?;
+        current = node.parent;
+    }
+    if source.is_some_and(|(source, _)| !chain[..count].contains(&source)) {
+        return Err(AttachmentResolveError::OwnerOutsideInstanceSource);
+    }
+
+    let mut world = Mat4::IDENTITY;
+    for id in chain[..count].iter().rev().copied() {
+        let node = template
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .ok_or(AttachmentResolveError::DanglingOwner)?;
+        let dynamic = frame
+            .nodes
+            .iter()
+            .find(|node| node.node == id)
+            .ok_or(AttachmentResolveError::MissingFrameNode)?;
+        world = world
+            * node
+                .base_transform
+                .matrix()
+                .map_err(|_| AttachmentResolveError::InvalidTransform)?
+            * dynamic
+                .local_transform
+                .matrix()
+                .map_err(|_| AttachmentResolveError::InvalidTransform)?;
+        if let Some((source, slot)) = source {
+            if source == id {
+                let prop = frame.prop_slots[usize::from(slot)];
+                world = world
+                    * Transform3::translated([
+                        prop.origin_points[0] + prop.motion_offset_points[0],
+                        prop.origin_points[1] + prop.motion_offset_points[1],
+                        0.0,
+                    ])
+                    .matrix()
+                    .map_err(|_| AttachmentResolveError::InvalidTransform)?;
+            }
+        }
+    }
+    Ok(world
+        * attachment
+            .local
+            .matrix()
+            .map_err(|_| AttachmentResolveError::InvalidTransform)?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -959,14 +1068,15 @@ impl FrameDelta {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneGenerationData {
-    pub generation_key: super::SceneGenerationKey,
-    pub source_revisions: super::AppliedRevisions,
-    pub source_snapshot: Arc<super::CompanionSceneSnapshot>,
-    pub template: SceneTemplate,
-    pub content: SceneContent,
-    pub frame: SceneFrame,
-    pub content_checksum: u64,
-    pub frame_checksum: u64,
+    generation_key: super::SceneGenerationKey,
+    source_revisions: super::AppliedRevisions,
+    source_snapshot: Arc<super::CompanionSceneSnapshot>,
+    request_seal: Arc<()>,
+    template: SceneTemplate,
+    content: SceneContent,
+    frame: SceneFrame,
+    content_checksum: u64,
+    frame_checksum: u64,
     pub(crate) delta_scratch: SceneDeltaScratch,
     accepted: super::validate::AcceptedSceneState,
 }
@@ -1024,7 +1134,9 @@ use checksum::canonical_f32_bits;
 use compiler::prop_glyphs;
 pub use compiler::{build_scene_generation, SceneGenerationError};
 #[allow(unused_imports)] // Public Task 8 seam; Task 5 exercises it only in unit tests.
-pub(crate) use compiler::{build_scene_generation_owned, SceneDeltaApplyError};
+pub(crate) use compiler::{
+    build_scene_generation_for_request, build_scene_generation_owned, SceneDeltaApplyError,
+};
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -1101,6 +1213,7 @@ impl SceneFixture {
                     owner: child,
                     local: Transform3::IDENTITY,
                     mode: AttachmentMode::Follow,
+                    instance_binding: None,
                 }],
                 privacy: PrivacyProjection::for_surface(
                     crate::presentation::privacy::PresentationSurface::RoundCompanion,
@@ -1620,6 +1733,27 @@ mod tests {
         asleep.frame.asleep = true;
         let asleep = std::sync::Arc::new(asleep);
         let changes = super::super::runtime::classify_snapshot_changes(&initial, &asleep);
+        let before = built.clone();
+        assert_eq!(
+            built.apply_compatible_snapshot(
+                std::sync::Arc::clone(&asleep),
+                changes,
+                super::super::AppliedRevisions::new(3, 5),
+                super::super::AppliedRevisions::new(2, 6),
+            ),
+            Err(SceneDeltaApplyError::IdentityMismatch)
+        );
+        assert_eq!(built, before);
+        assert_eq!(
+            built.apply_compatible_snapshot(
+                std::sync::Arc::clone(&asleep),
+                changes,
+                super::super::AppliedRevisions::new(3, 5),
+                super::super::AppliedRevisions::new(3, 5),
+            ),
+            Err(SceneDeltaApplyError::IdentityMismatch)
+        );
+        assert_eq!(built, before);
         built
             .apply_compatible_snapshot(
                 std::sync::Arc::clone(&asleep),
@@ -1650,6 +1784,66 @@ mod tests {
             Err(SceneDeltaApplyError::StaleBase)
         );
         assert_eq!(built, before);
+
+        let mut different_generation = (*asleep).clone();
+        different_generation.topology.pet.stage = Stage::S4;
+        let different_generation = std::sync::Arc::new(different_generation);
+        let before = built.clone();
+        assert_eq!(
+            built.apply_compatible_snapshot(
+                std::sync::Arc::clone(&different_generation),
+                super::super::runtime::classify_snapshot_changes(&asleep, &different_generation,),
+                super::super::AppliedRevisions::new(3, 6),
+                super::super::AppliedRevisions::new(3, 6),
+            ),
+            Err(SceneDeltaApplyError::GenerationRequired)
+        );
+        assert_eq!(built, before);
+    }
+
+    #[test]
+    fn hud_y_down_positions_flip_once_in_full_and_compatible_projection() {
+        for height in [260.0, 480.0] {
+            let mut initial = snapshot_for(Species::Fuzz, Stage::S3);
+            initial.topology.layout = CompanionLogicalLayout::round(height, height);
+            initial.content.hud_glyphs[0].glyph = Some('R');
+            initial.frame.hud_instances[0] = super::super::HudFrameSnapshot {
+                slot: 0,
+                visible: true,
+                position_points: [20.0, height - 36.0],
+                opacity: 1.0,
+            };
+            let initial = std::sync::Arc::new(initial);
+            let mut built = build_scene_generation_owned(
+                std::sync::Arc::clone(&initial),
+                generation_key(1),
+                super::super::AppliedRevisions::new(0, 0),
+            )
+            .unwrap();
+            assert_eq!(built.frame.hud_slots[0].position_points, [20.0, 36.0]);
+
+            let mut changed = (*initial).clone();
+            changed.frame.hud_instances[0].position_points = [20.0, height - 52.0];
+            let changed = std::sync::Arc::new(changed);
+            let changes = super::super::runtime::classify_snapshot_changes(&initial, &changed);
+            built
+                .apply_compatible_snapshot(
+                    std::sync::Arc::clone(&changed),
+                    changes,
+                    super::super::AppliedRevisions::new(0, 0),
+                    super::super::AppliedRevisions::new(0, 1),
+                )
+                .unwrap();
+            let rebuilt = build_scene_generation_owned(
+                changed,
+                generation_key(1),
+                super::super::AppliedRevisions::new(0, 1),
+            )
+            .unwrap();
+            assert_eq!(built.frame.hud_slots[0].position_points, [20.0, 52.0]);
+            assert_eq!(built.frame, rebuilt.frame);
+            assert_eq!(built.frame_checksum, rebuilt.frame_checksum);
+        }
     }
 
     #[test]
@@ -1759,6 +1953,162 @@ mod tests {
         assert_eq!(
             attachment.alias.as_str(),
             "world.prop.token_treasure_chest_2m.bubble-origin"
+        );
+        assert_eq!(
+            attachment.instance_binding,
+            Some(AttachmentInstanceBinding::PropGlyphs(0))
+        );
+        let resolved = resolve_attachment_world(&built.template, &built.frame, attachment).unwrap();
+        assert_point_close(
+            resolved.transform_point3([0.0; 3]),
+            [180.0, 81.25, -1.6, 1.0],
+        );
+
+        let initial = std::sync::Arc::new(snapshot);
+        let mut built = build_scene_generation_owned(
+            std::sync::Arc::clone(&initial),
+            generation_key(1),
+            super::super::AppliedRevisions::new(0, 0),
+        )
+        .unwrap();
+        let mut moved = (*initial).clone();
+        moved.content.prop_animation_states[0].origin_points[0] += 5.0;
+        moved.content.prop_animation_states[0].motion_phase = Some(1);
+        let moved = std::sync::Arc::new(moved);
+        let changes = super::super::runtime::classify_snapshot_changes(&initial, &moved);
+        built
+            .apply_compatible_snapshot(
+                moved,
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(0, 1),
+            )
+            .unwrap();
+        let attachment = &built.template.attachments[0];
+        let resolved = resolve_attachment_world(&built.template, &built.frame, attachment).unwrap();
+        assert_point_close(
+            resolved.transform_point3([0.0; 3]),
+            [185.0, 82.25, -1.6, 1.0],
+        );
+    }
+
+    #[test]
+    fn prop_attachment_composes_instance_motion_inside_rotated_scaled_parent() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            stable_order: 0,
+            zone: super::super::PropZoneSnapshot::FloorMid,
+            authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+        }];
+        snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            stable_order: 0,
+            kind: super::super::PropAnimationKindSnapshot::Animated,
+            sprite_phase: None,
+            twinkle_active: None,
+            motion_phase: None,
+            chest_lid_open: Some(true),
+            bloom_active: None,
+            origin_points: [10.0, 20.0],
+        }];
+        let mut built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        let attachment = built.template.attachments[0].clone();
+        let source = built
+            .template
+            .primitives
+            .iter()
+            .find(|primitive| primitive.instance_group == Some(InstanceGroupBinding::PropGlyphs(0)))
+            .unwrap()
+            .node;
+
+        let mut current = Some(attachment.owner);
+        while let Some(id) = current {
+            let node = built
+                .template
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == id)
+                .unwrap();
+            current = node.parent;
+            node.base_transform = Transform3::IDENTITY;
+            built
+                .frame
+                .nodes
+                .iter_mut()
+                .find(|node| node.node == id)
+                .unwrap()
+                .local_transform = Transform3::IDENTITY;
+        }
+        built
+            .template
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == source)
+            .unwrap()
+            .base_transform = Transform3 {
+            rotation_xyzw: [0.0, 0.0, 0.707_106_77, 0.707_106_77],
+            scale: [2.0, 3.0, 1.0],
+            ..Transform3::IDENTITY
+        };
+        built
+            .frame
+            .nodes
+            .iter_mut()
+            .find(|node| node.node == attachment.owner)
+            .unwrap()
+            .local_transform = Transform3 {
+            translation: [3.0, 4.0, 0.0],
+            scale: [0.5, 2.0, 1.0],
+            ..Transform3::IDENTITY
+        };
+        built.template.attachments[0].local = Transform3::translated([1.0, 2.0, 0.0]);
+        built.frame.prop_slots[0].origin_points = [10.0, 20.0];
+        built.frame.prop_slots[0].motion_offset_points = [0.0; 2];
+
+        let attachment = &built.template.attachments[0];
+        let visible_prop_origin = resolve_attachment_world(
+            &built.template,
+            &built.frame,
+            &AttachmentTemplate {
+                local: Transform3::IDENTITY,
+                owner: source,
+                ..attachment.clone()
+            },
+        )
+        .unwrap()
+        .transform_point3([0.0; 3]);
+        let attached = resolve_attachment_world(&built.template, &built.frame, attachment)
+            .unwrap()
+            .transform_point3([0.0; 3]);
+        assert_point_close(visible_prop_origin, [-60.0, 20.0, 0.0, 1.0]);
+        assert_point_close(attached, [-84.0, 27.0, 0.0, 1.0]);
+
+        built.frame.prop_slots[0].motion_offset_points = [1.0, -2.0];
+        let moved_visible_prop_origin = resolve_attachment_world(
+            &built.template,
+            &built.frame,
+            &AttachmentTemplate {
+                local: Transform3::IDENTITY,
+                owner: source,
+                ..attachment.clone()
+            },
+        )
+        .unwrap()
+        .transform_point3([0.0; 3]);
+        let moved_attachment = resolve_attachment_world(&built.template, &built.frame, attachment)
+            .unwrap()
+            .transform_point3([0.0; 3]);
+        assert_point_close(moved_visible_prop_origin, [-54.0, 22.0, 0.0, 1.0]);
+        assert_point_close(moved_attachment, [-78.0, 29.0, 0.0, 1.0]);
+        assert_point_close(
+            [
+                moved_attachment[0] - attached[0],
+                moved_attachment[1] - attached[1],
+                moved_attachment[2] - attached[2],
+                1.0,
+            ],
+            [6.0, 2.0, 0.0, 1.0],
         );
     }
 

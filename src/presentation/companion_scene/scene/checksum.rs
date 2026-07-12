@@ -266,6 +266,13 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
         hash.u32(attachment.owner.0);
         encode_transform(&mut hash, attachment.local)?;
         hash.u8(attachment_mode_tag(attachment.mode));
+        match attachment.instance_binding {
+            None => hash.u8(0),
+            Some(AttachmentInstanceBinding::PropGlyphs(slot)) => {
+                hash.u8(1);
+                hash.u8(slot);
+            }
+        }
     }
     let privacy = template.privacy;
     hash.u8(presentation_surface_tag(privacy.surface));

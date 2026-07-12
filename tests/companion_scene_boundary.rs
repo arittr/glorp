@@ -81,6 +81,33 @@ fn companion_scene_tree_is_renderer_and_host_neutral() {
 }
 
 #[test]
+fn compiled_generation_provenance_is_not_publicly_mutable() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation/companion_scene/scene.rs");
+    let source = fs::read_to_string(path).expect("read scene contract source");
+    let generation = source
+        .split("pub struct SceneGenerationData")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) struct SceneDeltaScratch").next())
+        .expect("SceneGenerationData declaration");
+    for forbidden in [
+        "pub generation_key:",
+        "pub source_revisions:",
+        "pub source_snapshot:",
+        "pub template:",
+        "pub content:",
+        "pub frame:",
+        "pub content_checksum:",
+        "pub frame_checksum:",
+    ] {
+        assert!(
+            !generation.contains(forbidden),
+            "compiled generation exposes mutable provenance field {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn companion_scene_neutral_dependency_closure_has_no_view_or_renderer_ownership() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
