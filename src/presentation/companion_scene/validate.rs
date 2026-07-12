@@ -2,6 +2,7 @@ use super::scene::*;
 use super::COMPANION_RENDERER_SCHEMA_VERSION;
 use crate::presentation::privacy::PresentationSurface;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneValidationError {
@@ -51,14 +52,62 @@ pub enum SceneValidationError {
     MissingNodeFrameState,
     NonFiniteFrameValue,
     InvalidFrameValue,
+    AcceptedStateMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AcceptedSceneTemplate(SceneTemplate);
+struct LitPathNode {
+    id: NodeId,
+    base_transform: Transform3,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedSceneTemplate {
+    template: SceneTemplate,
+    node_ids: HashSet<NodeId>,
+    lit_paths: Vec<Vec<LitPathNode>>,
+    identity: Arc<()>,
+}
 
 impl AcceptedSceneTemplate {
     pub fn template(&self) -> &SceneTemplate {
-        &self.0
+        &self.template
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedSceneFrame {
+    frame: SceneFrame,
+    template_identity: Arc<()>,
+}
+
+impl AcceptedSceneFrame {
+    pub fn frame(&self) -> &SceneFrame {
+        &self.frame
+    }
+
+    pub fn into_frame(self) -> SceneFrame {
+        self.frame
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedSceneState {
+    template: AcceptedSceneTemplate,
+    frame: AcceptedSceneFrame,
+}
+
+impl AcceptedSceneState {
+    pub fn template(&self) -> &AcceptedSceneTemplate {
+        &self.template
+    }
+
+    pub fn frame(&self) -> &AcceptedSceneFrame {
+        &self.frame
+    }
+
+    pub fn into_parts(self) -> (AcceptedSceneTemplate, AcceptedSceneFrame) {
+        (self.template, self.frame)
     }
 }
 
@@ -66,11 +115,14 @@ pub fn validate_full_generation(
     template: &SceneTemplate,
     content: &SceneContent,
     frame: &SceneFrame,
-) -> Result<AcceptedSceneTemplate, SceneValidationError> {
+) -> Result<AcceptedSceneState, SceneValidationError> {
     let accepted = validate_template(template)?;
     validate_content(content)?;
-    validate_frame(frame, &accepted)?;
-    Ok(accepted)
+    let accepted_frame = validate_frame(frame, &accepted)?;
+    Ok(AcceptedSceneState {
+        template: accepted,
+        frame: accepted_frame,
+    })
 }
 
 pub fn validate_template(
@@ -85,9 +137,15 @@ pub fn validate_template(
     validate_attachments(template)?;
     validate_hierarchy(template)?;
     validate_primitives(template)?;
-    validate_lit_card_scale_ancestry(template)?;
+    let lit_paths = collect_lit_card_paths(template)?;
+    validate_lit_card_world_transforms(&lit_paths, |_| None)?;
     validate_privacy(template)?;
-    Ok(AcceptedSceneTemplate(template.clone()))
+    Ok(AcceptedSceneTemplate {
+        template: template.clone(),
+        node_ids: template.nodes.iter().map(|node| node.id).collect(),
+        lit_paths,
+        identity: Arc::new(()),
+    })
 }
 
 pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationError> {
@@ -115,8 +173,18 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
 pub fn validate_frame(
     frame: &SceneFrame,
     accepted_template: &AcceptedSceneTemplate,
+) -> Result<AcceptedSceneFrame, SceneValidationError> {
+    validate_frame_against_template(frame, accepted_template)?;
+    Ok(AcceptedSceneFrame {
+        frame: frame.clone(),
+        template_identity: Arc::clone(&accepted_template.identity),
+    })
+}
+
+fn validate_frame_against_template(
+    frame: &SceneFrame,
+    accepted_template: &AcceptedSceneTemplate,
 ) -> Result<(), SceneValidationError> {
-    let template = accepted_template.template();
     validate_versions(frame.schema_version, frame.renderer_schema_version)?;
     validate_camera(frame.camera)?;
     if frame.nodes.len() > MAX_SCENE_NODES {
@@ -125,14 +193,9 @@ pub fn validate_frame(
     if frame.lights.len() > MAX_LIGHTS {
         return Err(SceneValidationError::LightCapacityExceeded);
     }
-    let node_ids = template
-        .nodes
-        .iter()
-        .map(|node| node.id)
-        .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
     for node in &frame.nodes {
-        if !node_ids.contains(&node.node) {
+        if !accepted_template.node_ids.contains(&node.node) {
             return Err(SceneValidationError::DanglingNodeReference);
         }
         if !seen.insert(node.node) {
@@ -141,10 +204,17 @@ pub fn validate_frame(
         validate_transform(node.local_transform)?;
         validate_unit_interval(node.opacity)?;
     }
-    if seen.len() != node_ids.len() {
+    if seen.len() != accepted_template.node_ids.len() {
         return Err(SceneValidationError::MissingNodeFrameState);
     }
-    validate_lit_card_frame_scale_ancestry(frame, template)?;
+    let frame_transforms = frame
+        .nodes
+        .iter()
+        .map(|node| (node.node, node.local_transform))
+        .collect::<HashMap<_, _>>();
+    validate_lit_card_world_transforms(&accepted_template.lit_paths, |id| {
+        frame_transforms.get(&id).copied()
+    })?;
     validate_frame_scalars(frame.gauges, frame.dim_amount, &frame.lights)
 }
 
@@ -160,13 +230,20 @@ pub fn validate_content_delta(delta: &ContentDelta) -> Result<(), SceneValidatio
     )
 }
 
-/// Validates only bounded mutable frame fields against an already accepted
-/// template. It deliberately does not re-run full template validation.
+/// Merges bounded mutable fields over an accepted current frame, then validates
+/// the complete resulting frame against precomputed accepted-template metadata.
+/// It deliberately does not re-run full template validation or rescan primitives.
 pub fn validate_frame_delta(
     delta: &FrameDelta,
     accepted_template: &AcceptedSceneTemplate,
-) -> Result<(), SceneValidationError> {
-    let accepted_template = accepted_template.template();
+    current_frame: &AcceptedSceneFrame,
+) -> Result<AcceptedSceneFrame, SceneValidationError> {
+    if !Arc::ptr_eq(
+        &accepted_template.identity,
+        &current_frame.template_identity,
+    ) {
+        return Err(SceneValidationError::AcceptedStateMismatch);
+    }
     validate_versions(delta.schema_version, delta.renderer_schema_version)?;
     if delta.nodes.len() > MAX_SCENE_NODES {
         return Err(SceneValidationError::NodeCapacityExceeded);
@@ -174,45 +251,46 @@ pub fn validate_frame_delta(
     if delta.lights.len() > MAX_LIGHTS {
         return Err(SceneValidationError::LightCapacityExceeded);
     }
+    let mut merged = current_frame.frame.clone();
     if let Some(camera) = delta.camera {
-        validate_camera(camera)?;
+        merged.camera = camera;
     }
-    let node_ids = accepted_template
-        .nodes
-        .iter()
-        .map(|node| node.id)
-        .collect::<HashSet<_>>();
     let mut changed_nodes = HashSet::new();
     for node in &delta.nodes {
-        if !node_ids.contains(&node.node) {
+        if !accepted_template.node_ids.contains(&node.node) {
             return Err(SceneValidationError::NodeSlotOutOfBounds);
         }
         if !changed_nodes.insert(node.node) {
             return Err(SceneValidationError::DuplicateSlot);
         }
-        validate_transform(node.local_transform)?;
-        validate_unit_interval(node.opacity)?;
+        let current = merged
+            .nodes
+            .iter_mut()
+            .find(|current| current.node == node.node)
+            .ok_or(SceneValidationError::MissingNodeFrameState)?;
+        *current = *node;
     }
-    validate_lit_card_delta_scale_ancestry(delta, accepted_template)?;
     if let Some(gauges) = delta.gauges {
-        for gauge in gauges {
-            validate_unit_interval(gauge)?;
-        }
+        merged.gauges = gauges;
     }
     if let Some(dim_amount) = delta.dim_amount {
-        validate_unit_interval(dim_amount)?;
+        merged.dim_amount = dim_amount;
     }
     let mut light_slots = HashSet::new();
     for (slot, light) in &delta.lights {
-        if usize::from(*slot) >= MAX_LIGHTS {
+        if usize::from(*slot) >= merged.lights.len() {
             return Err(SceneValidationError::LightSlotOutOfBounds);
         }
         if !light_slots.insert(*slot) {
             return Err(SceneValidationError::DuplicateSlot);
         }
-        validate_light(*light)?;
+        merged.lights[usize::from(*slot)] = *light;
     }
-    Ok(())
+    validate_frame_against_template(&merged, accepted_template)?;
+    Ok(AcceptedSceneFrame {
+        frame: merged,
+        template_identity: Arc::clone(&accepted_template.identity),
+    })
 }
 
 fn validate_versions(schema: u16, renderer: u16) -> Result<(), SceneValidationError> {
@@ -236,14 +314,16 @@ fn validate_capacity_counts(template: &SceneTemplate) -> Result<(), SceneValidat
     {
         return Err(SceneValidationError::StaticPrimitiveCapacityExceeded);
     }
+    let materials = template
+        .materials
+        .iter()
+        .map(|material| (material.id, material.kind))
+        .collect::<HashMap<_, _>>();
     let blended_draws = template
         .primitives
         .iter()
         .filter(|primitive| {
-            matches!(
-                primitive.blend,
-                WorldBlend::PremultipliedAlpha | WorldBlend::Multiply | WorldBlend::Additive
-            )
+            is_world_blended(primitive.blend, materials.get(&primitive.material).copied())
         })
         .count();
     if blended_draws > template.capacities.max_blended_draws || blended_draws > MAX_BLENDED_DRAWS {
@@ -483,45 +563,9 @@ fn primitive_resource_compatible(kind: PrimitiveKind, resource: Option<ResourceK
     )
 }
 
-fn validate_lit_card_scale_ancestry(template: &SceneTemplate) -> Result<(), SceneValidationError> {
-    validate_lit_card_world_transforms(template, |_| None)
-}
-
-fn validate_lit_card_frame_scale_ancestry(
-    frame: &SceneFrame,
+fn collect_lit_card_paths(
     template: &SceneTemplate,
-) -> Result<(), SceneValidationError> {
-    let frame_transforms = frame
-        .nodes
-        .iter()
-        .map(|node| (node.node, node.local_transform))
-        .collect::<HashMap<_, _>>();
-    validate_lit_card_dynamic_transforms(template, |id| frame_transforms.get(&id).copied())
-}
-
-fn validate_lit_card_delta_scale_ancestry(
-    delta: &FrameDelta,
-    template: &SceneTemplate,
-) -> Result<(), SceneValidationError> {
-    let changed_transforms = delta
-        .nodes
-        .iter()
-        .map(|node| (node.node, node.local_transform))
-        .collect::<HashMap<_, _>>();
-    validate_lit_card_dynamic_transforms(template, |id| changed_transforms.get(&id).copied())
-}
-
-fn validate_lit_card_dynamic_transforms(
-    template: &SceneTemplate,
-    dynamic_transform: impl Fn(NodeId) -> Option<Transform3>,
-) -> Result<(), SceneValidationError> {
-    validate_lit_card_world_transforms(template, dynamic_transform)
-}
-
-fn validate_lit_card_world_transforms(
-    template: &SceneTemplate,
-    dynamic_transform: impl Fn(NodeId) -> Option<Transform3>,
-) -> Result<(), SceneValidationError> {
+) -> Result<Vec<Vec<LitPathNode>>, SceneValidationError> {
     let nodes = template
         .nodes
         .iter()
@@ -532,8 +576,12 @@ fn validate_lit_card_world_transforms(
         .iter()
         .map(|material| (material.id, material.kind))
         .collect::<HashMap<_, _>>();
+    let mut lit_nodes = HashSet::new();
+    let mut paths = Vec::new();
     for primitive in &template.primitives {
-        if materials.get(&primitive.material) != Some(&MaterialKind::LitShallowCard) {
+        if materials.get(&primitive.material) != Some(&MaterialKind::LitShallowCard)
+            || !lit_nodes.insert(primitive.node)
+        {
             continue;
         }
         let mut current = Some(primitive.node);
@@ -546,11 +594,22 @@ fn validate_lit_card_world_transforms(
             let node = nodes
                 .get(&id)
                 .ok_or(SceneValidationError::DanglingNodeReference)?;
-            path.push(*node);
+            path.push(LitPathNode { id, base_transform: node.base_transform });
             current = node.parent;
         }
+        path.reverse();
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn validate_lit_card_world_transforms(
+    paths: &[Vec<LitPathNode>],
+    dynamic_transform: impl Fn(NodeId) -> Option<Transform3>,
+) -> Result<(), SceneValidationError> {
+    for path in paths {
         let mut world = Mat4::IDENTITY;
-        for node in path.into_iter().rev() {
+        for node in path {
             world = world
                 * node
                     .base_transform
@@ -764,14 +823,21 @@ fn validate_light(light: LightFrame) -> Result<(), SceneValidationError> {
     {
         return Err(SceneValidationError::NonFiniteFrameValue);
     }
-    let direction_length_squared = light
+    let direction_norm = light
         .direction
         .iter()
-        .map(|value| value * value)
-        .sum::<f32>();
-    if direction_length_squared <= f32::EPSILON
-        || light.color_linear.iter().any(|value| *value < 0.0)
-        || light.intensity < 0.0
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if !(MIN_LIGHT_DIRECTION_NORM..=MAX_LIGHT_DIRECTION_NORM).contains(&direction_norm)
+        || light
+            .color_linear
+            .iter()
+            .any(|value| !(0.0..=MAX_LIGHT_COLOR_LINEAR).contains(value))
+        || !(0.0..=MAX_LIGHT_INTENSITY).contains(&light.intensity)
+        || light.color_linear.iter().any(|value| {
+            f64::from(*value) * f64::from(light.intensity) > MAX_LIGHT_COLOR_INTENSITY_PRODUCT
+        })
     {
         return Err(SceneValidationError::InvalidFrameValue);
     }
@@ -1023,7 +1089,7 @@ mod tests {
         let mut frame = fixture.frame.clone();
         frame.nodes[0].node = NodeId(42);
         assert_eq!(
-            validate_frame(&frame, &accepted),
+            validate_frame(&frame, &accepted).map(|_| ()),
             Err(SceneValidationError::DanglingNodeReference)
         );
 
@@ -1032,14 +1098,14 @@ mod tests {
         let lit_template = SceneFixture::valid_lit_card();
         let accepted_lit = validate_template(&lit_template).unwrap();
         assert_eq!(
-            validate_frame(&frame, &accepted_lit),
+            validate_frame(&frame, &accepted_lit).map(|_| ()),
             Err(SceneValidationError::LitCardScaleIncompatible)
         );
 
         let mut frame = fixture.frame.clone();
         frame.dim_amount = f32::INFINITY;
         assert_eq!(
-            validate_frame(&frame, &accepted),
+            validate_frame(&frame, &accepted).map(|_| ()),
             Err(SceneValidationError::NonFiniteFrameValue)
         );
     }
@@ -1072,7 +1138,8 @@ mod tests {
 
         let frame_delta = FrameDelta::empty();
         let accepted = validate_template(&fixture.template).unwrap();
-        assert_eq!(validate_frame_delta(&frame_delta, &accepted), Ok(()));
+        let accepted_frame = validate_frame(&fixture.frame, &accepted).unwrap();
+        assert!(validate_frame_delta(&frame_delta, &accepted, &accepted_frame).is_ok());
         assert_eq!(
             validate_template(&invalid_template),
             Err(SceneValidationError::DuplicateNodeId)
@@ -1088,11 +1155,10 @@ mod tests {
             visible: true,
             opacity: 1.0,
         });
+        let lit_template = validate_template(&SceneFixture::valid_lit_card()).unwrap();
+        let lit_frame = validate_frame(&SceneFixture::valid().frame, &lit_template).unwrap();
         assert_eq!(
-            validate_frame_delta(
-                &frame_delta,
-                &validate_template(&SceneFixture::valid_lit_card()).unwrap(),
-            ),
+            validate_frame_delta(&frame_delta, &lit_template, &lit_frame),
             Err(SceneValidationError::LitCardScaleIncompatible)
         );
     }
@@ -1103,17 +1169,23 @@ mod tests {
             let template = SceneFixture::valid().template;
             validate_template(&template).unwrap()
         };
-        assert_eq!(
-            validate_frame_delta(&FrameDelta::empty(), &accepted),
-            Ok(())
-        );
+        let accepted_frame = validate_frame(&SceneFixture::valid().frame, &accepted).unwrap();
+        assert!(validate_frame_delta(&FrameDelta::empty(), &accepted, &accepted_frame).is_ok());
         assert_eq!(accepted.template().nodes.len(), 2);
+
+        let fixture = SceneFixture::valid();
+        let state =
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap();
+        assert!(
+            validate_frame_delta(&FrameDelta::empty(), state.template(), state.frame()).is_ok()
+        );
     }
 
     #[test]
     fn lit_card_frame_linear_transform_rejects_reflection_shear_and_tiny_scale() {
         let template = SceneFixture::valid_lit_card();
         let accepted = validate_template(&template).unwrap();
+        let current = validate_frame(&SceneFixture::valid().frame, &accepted).unwrap();
         for scale in [[-1.0, 1.0, 1.0], [2.0, 1.0, 1.0], [1.0e-20; 3]] {
             let mut delta = FrameDelta::empty();
             delta.nodes.push(NodeFrameState {
@@ -1127,7 +1199,7 @@ mod tests {
                 opacity: 1.0,
             });
             assert_eq!(
-                validate_frame_delta(&delta, &accepted),
+                validate_frame_delta(&delta, &accepted, &current),
                 Err(SceneValidationError::LitCardScaleIncompatible)
             );
         }
@@ -1152,7 +1224,7 @@ mod tests {
             opacity: 1.0,
         });
         assert_eq!(
-            validate_frame_delta(&shear, &accepted),
+            validate_frame_delta(&shear, &accepted, &current),
             Err(SceneValidationError::LitCardScaleIncompatible)
         );
     }
@@ -1186,5 +1258,131 @@ mod tests {
             validate_content_delta(&delta),
             Err(SceneValidationError::DuplicateSlot)
         );
+    }
+
+    #[test]
+    fn frame_delta_merges_over_current_lit_world_transform() {
+        let template = SceneFixture::valid_lit_card();
+        let accepted = validate_template(&template).unwrap();
+        let mut current = SceneFixture::valid().frame;
+        current.nodes[0].local_transform.scale = [2.0, 1.0, 1.0];
+        current.nodes[1].local_transform.scale = [0.5, 1.0, 1.0];
+        let current = validate_frame(&current, &accepted).unwrap();
+
+        let mut delta = FrameDelta::empty();
+        delta.nodes.push(NodeFrameState {
+            node: template.nodes[1].id,
+            local_transform: Transform3::IDENTITY,
+            visible: true,
+            opacity: 1.0,
+        });
+        assert_eq!(
+            validate_frame_delta(&delta, &accepted, &current),
+            Err(SceneValidationError::LitCardScaleIncompatible)
+        );
+    }
+
+    #[test]
+    fn accepted_frame_is_bound_to_its_template_acceptance() {
+        let fixture = SceneFixture::valid();
+        let accepted_a = validate_template(&fixture.template).unwrap();
+        let accepted_b = validate_template(&fixture.template).unwrap();
+        let current_b = validate_frame(&fixture.frame, &accepted_b).unwrap();
+        assert_eq!(
+            validate_frame_delta(&FrameDelta::empty(), &accepted_a, &current_b),
+            Err(SceneValidationError::AcceptedStateMismatch)
+        );
+    }
+
+    #[test]
+    fn frame_delta_validates_and_returns_every_merged_field() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+        let current = validate_frame(&fixture.frame, &accepted).unwrap();
+
+        let mut valid = FrameDelta::empty();
+        valid.gauges = Some([0.25, 0.5, 0.75, 1.0]);
+        valid.dim_amount = Some(0.5);
+        let next = validate_frame_delta(&valid, &accepted, &current).unwrap();
+        assert_eq!(next.frame().gauges, [0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(next.frame().dim_amount, 0.5);
+
+        let mut invalid_gauge = FrameDelta::empty();
+        invalid_gauge.gauges = Some([f32::NAN, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            validate_frame_delta(&invalid_gauge, &accepted, &current),
+            Err(SceneValidationError::NonFiniteFrameValue)
+        );
+
+        let mut invalid_dim = FrameDelta::empty();
+        invalid_dim.dim_amount = Some(1.5);
+        assert_eq!(
+            validate_frame_delta(&invalid_dim, &accepted, &current),
+            Err(SceneValidationError::InvalidFrameValue)
+        );
+
+        let mut invalid_camera = FrameDelta::empty();
+        invalid_camera.camera = Some(OrthographicCamera {
+            width_points: f32::from_bits(1),
+            height_points: 360.0,
+            far_z: -2.0,
+            near_z: 2.0,
+        });
+        assert_eq!(
+            validate_frame_delta(&invalid_camera, &accepted, &current),
+            Err(SceneValidationError::InvalidCamera)
+        );
+
+        let mut missing_light_slot = FrameDelta::empty();
+        missing_light_slot.lights.push((
+            0,
+            LightFrame {
+                direction: [1.0, 0.0, 0.0],
+                color_linear: [1.0; 3],
+                intensity: 1.0,
+            },
+        ));
+        assert_eq!(
+            validate_frame_delta(&missing_light_slot, &accepted, &current),
+            Err(SceneValidationError::LightSlotOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn lights_reject_finite_values_that_can_overflow_shader_math() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+        let mut bounded = fixture.frame.clone();
+        bounded.lights.push(LightFrame {
+            direction: [MAX_LIGHT_DIRECTION_NORM as f32, 0.0, 0.0],
+            color_linear: [MAX_LIGHT_COLOR_LINEAR, 0.0, 0.0],
+            intensity: 16.0,
+        });
+        assert!(validate_frame(&bounded, &accepted).is_ok());
+
+        for light in [
+            LightFrame {
+                direction: [f32::MAX, 0.0, 0.0],
+                color_linear: [1.0; 3],
+                intensity: 1.0,
+            },
+            LightFrame {
+                direction: [1.0, 0.0, 0.0],
+                color_linear: [f32::MAX; 3],
+                intensity: 1.0,
+            },
+            LightFrame {
+                direction: [1.0, 0.0, 0.0],
+                color_linear: [1.0; 3],
+                intensity: f32::MAX,
+            },
+        ] {
+            let mut frame = fixture.frame.clone();
+            frame.lights.push(light);
+            assert_eq!(
+                validate_frame(&frame, &accepted).map(|_| ()),
+                Err(SceneValidationError::InvalidFrameValue)
+            );
+        }
     }
 }

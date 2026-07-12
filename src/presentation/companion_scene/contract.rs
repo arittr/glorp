@@ -1,5 +1,5 @@
 use super::scene::{
-    MaterialKind, NodeId, OrthographicCamera, SceneContent, SceneFrame, SceneTemplate, WorldBlend,
+    is_world_blended, NodeId, OrthographicCamera, SceneContent, SceneFrame, SceneTemplate,
 };
 use super::validate::{validate_full_generation, SceneValidationError};
 use super::GaugeLevelSnapshot;
@@ -45,7 +45,7 @@ pub struct SceneFrameArtifact {
     pub camera: OrthographicCamera,
     pub nodes: Vec<SceneFrameNodeArtifact>,
     pub gauges: [GaugeLevelSnapshot; 4],
-    pub dim_amount: f32,
+    pub dimmed: bool,
     pub light_count: usize,
 }
 
@@ -114,16 +114,12 @@ impl SceneArtifacts {
                     .primitives
                     .iter()
                     .filter(|primitive| {
-                        let is_screen_chrome = template.materials.iter().any(|material| {
-                            material.id == primitive.material
-                                && material.kind == MaterialKind::ScreenChrome
-                        });
-                        matches!(
-                            primitive.blend,
-                            WorldBlend::PremultipliedAlpha
-                                | WorldBlend::Multiply
-                                | WorldBlend::Additive
-                        ) && !is_screen_chrome
+                        let material = template
+                            .materials
+                            .iter()
+                            .find(|material| material.id == primitive.material)
+                            .map(|material| material.kind);
+                        is_world_blended(primitive.blend, material)
                     })
                     .count(),
             },
@@ -141,7 +137,7 @@ impl SceneArtifacts {
                 gauges: frame
                     .gauges
                     .map(|gauge| GaugeLevelSnapshot::from_fraction(f64::from(gauge))),
-                dim_amount: frame.dim_amount,
+                dimmed: frame.dim_amount > 0.0,
                 light_count: frame.lights.len(),
             },
         })
@@ -151,7 +147,9 @@ impl SceneArtifacts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::companion_scene::scene::{CanonicalAlias, SceneFixture};
+    use crate::presentation::companion_scene::scene::{
+        CanonicalAlias, MaterialKind, SceneFixture, WorldBlend,
+    };
 
     #[test]
     fn artifact_dtos_are_versioned_deterministic_and_privacy_safe() {
@@ -161,6 +159,7 @@ mod tests {
         fixture.template.nodes[1].parent = Some(fixture.template.nodes[0].id);
         fixture.frame.nodes[0].node = fixture.template.nodes[0].id;
         fixture.frame.gauges = [0.123_456_79, 0.234_567_9, 0.345_678_9, 0.456_789];
+        fixture.frame.dim_amount = 0.567_891;
         let first =
             SceneArtifacts::try_from_parts(&fixture.template, &fixture.content, &fixture.frame)
                 .unwrap();
@@ -179,6 +178,7 @@ mod tests {
             "diagnostic",
             "private-node-sentinel",
             "0.12345679",
+            "0.567891",
             "node_aliases",
         ] {
             assert!(
@@ -189,6 +189,7 @@ mod tests {
         assert_eq!(first.frame.gauges[0], super::super::GaugeLevelSnapshot::Low);
         assert!(!format!("{:?}", fixture.template).contains("private-node-sentinel"));
         assert!(!format!("{:?}", fixture.frame).contains("0.12345679"));
+        assert!(!format!("{:?}", fixture.frame).contains("0.567891"));
     }
 
     #[test]
@@ -201,5 +202,32 @@ mod tests {
             SceneArtifacts::try_from_parts(&fixture.template, &fixture.content, &fixture.frame)
                 .unwrap();
         assert_eq!(artifacts.template.blended_draw_count, 0);
+    }
+
+    #[test]
+    fn material_aware_blended_limit_and_artifact_count_agree() {
+        let mut chrome = SceneFixture::valid();
+        chrome.template.materials[0].kind = MaterialKind::ScreenChrome;
+        chrome.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+        chrome.template.primitives[0].depth = super::super::scene::DepthBehavior::ScreenNoDepth;
+        chrome.template.primitives = vec![chrome.template.primitives[0].clone(); 257];
+        assert!(super::super::validate::validate_template(&chrome.template).is_ok());
+        let chrome_artifacts =
+            SceneArtifacts::try_from_parts(&chrome.template, &chrome.content, &chrome.frame)
+                .unwrap();
+        assert_eq!(chrome_artifacts.template.blended_draw_count, 0);
+
+        let mut world = SceneFixture::valid();
+        world.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+        world.template.primitives[0].depth = super::super::scene::DepthBehavior::WorldReadOnly;
+        world.template.primitives = vec![world.template.primitives[0].clone(); 257];
+        assert_eq!(
+            super::super::validate::validate_template(&world.template),
+            Err(SceneValidationError::BlendedDrawCapacityExceeded)
+        );
+        world.template.primitives.pop();
+        let world_artifacts =
+            SceneArtifacts::try_from_parts(&world.template, &world.content, &world.frame).unwrap();
+        assert_eq!(world_artifacts.template.blended_draw_count, 256);
     }
 }

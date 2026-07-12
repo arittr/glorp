@@ -14,6 +14,13 @@ pub const MAX_LIGHTS: usize = 2;
 pub const MAX_ATTACHMENTS: usize = 32;
 pub const LIT_CARD_SCALE_TOLERANCE: f32 = 1.0e-5;
 pub const MIN_LIT_CARD_WORLD_SCALE: f64 = 1.0e-6;
+// V1 emits SDR, but these bounds leave ample headroom for authored HDR-like
+// key/rim values while keeping normalization and two-light shader math finite.
+pub const MIN_LIGHT_DIRECTION_NORM: f64 = 1.0e-6;
+pub const MAX_LIGHT_DIRECTION_NORM: f64 = 1_024.0;
+pub const MAX_LIGHT_COLOR_LINEAR: f32 = 16.0;
+pub const MAX_LIGHT_INTENSITY: f32 = 64.0;
+pub const MAX_LIGHT_COLOR_INTENSITY_PRODUCT: f64 = 256.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AliasError {
@@ -109,6 +116,16 @@ pub enum WorldBlend {
     PremultipliedAlpha,
     Multiply,
     Additive,
+}
+
+/// Screen chrome has its own fixed phase and does not consume the world blend
+/// stream. A missing material is conservatively classified as world content;
+/// reference validation reports the dangling material separately.
+pub fn is_world_blended(blend: WorldBlend, material: Option<MaterialKind>) -> bool {
+    matches!(
+        blend,
+        WorldBlend::PremultipliedAlpha | WorldBlend::Multiply | WorldBlend::Additive
+    ) && material != Some(MaterialKind::ScreenChrome)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -641,7 +658,7 @@ impl ContentDelta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct FrameDelta {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
@@ -650,6 +667,21 @@ pub struct FrameDelta {
     pub gauges: Option<[f32; 4]>,
     pub dim_amount: Option<f32>,
     pub lights: Vec<(u8, LightFrame)>,
+}
+
+impl fmt::Debug for FrameDelta {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FrameDelta")
+            .field("schema_version", &self.schema_version)
+            .field("renderer_schema_version", &self.renderer_schema_version)
+            .field("camera", &self.camera)
+            .field("nodes", &self.nodes)
+            .field("gauges", &self.gauges.map(|_| "<redacted>"))
+            .field("dim_amount", &self.dim_amount.map(|_| "<redacted>"))
+            .field("light_count", &self.lights.len())
+            .finish()
+    }
 }
 
 impl FrameDelta {
@@ -985,5 +1017,15 @@ mod tests {
             PetPaletteRole::Particle,
             PetPaletteRole::Corruption,
         ];
+    }
+
+    #[test]
+    fn frame_delta_debug_redacts_exact_gauges_and_dim() {
+        let mut delta = FrameDelta::empty();
+        delta.gauges = Some([0.123_456_79, 0.234_567_9, 0.345_678_9, 0.456_789]);
+        delta.dim_amount = Some(0.567_891);
+        let debug = format!("{delta:?}");
+        assert!(!debug.contains("0.12345679"));
+        assert!(!debug.contains("0.567891"));
     }
 }
