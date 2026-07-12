@@ -1,5 +1,5 @@
 use crate::presentation::EffectState;
-use crate::tui::room::{derive_room_life_profile, RoomLifeProfile};
+use crate::tui::room::RoomLifeProfile;
 use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
@@ -28,7 +28,7 @@ impl PetSceneModel {
         now: time::OffsetDateTime,
         color_capability: ColorCapability,
     ) -> PetSceneModel {
-        let room = derive_room_life_profile(vm, now);
+        let room = super::companion_scene::input::derive_room_profile(vm, now);
         let effects = EffectState::from_vm(vm, now, color_capability);
 
         PetSceneModel { effects, room }

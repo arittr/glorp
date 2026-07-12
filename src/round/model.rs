@@ -6,9 +6,9 @@ use crate::storage::state::HabitatPropId;
 use crate::tui::day::DayPhase;
 use crate::tui::identity::SourceDiversity;
 use crate::tui::life::WorkWeather;
-use crate::tui::room::{derive_room_life_profile, RoomBiome, RoomDialectKey};
-use crate::tui::view_model::{SourceStatus, WatchViewModel};
-use time::{Duration, OffsetDateTime};
+use crate::tui::room::{RoomBiome, RoomDialectKey};
+use crate::tui::view_model::WatchViewModel;
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundSceneModel {
@@ -128,7 +128,7 @@ pub enum RoundReplayPolicy {
 }
 
 pub fn derive_round_scene_model(vm: &WatchViewModel, now: OffsetDateTime) -> RoundSceneModel {
-    let room_profile = derive_room_life_profile(vm, now);
+    let room_profile = crate::presentation::companion_scene::input::derive_room_profile(vm, now);
     let pulse = derive_activity_pulse(vm, now);
     let moments = derive_moments(vm, &pulse);
     RoundSceneModel {
@@ -158,14 +158,15 @@ pub fn derive_round_scene_model(vm: &WatchViewModel, now: OffsetDateTime) -> Rou
                 SourceDiversity::DualLane => RoundSourceDiversity::Dual,
                 SourceDiversity::Ensemble => RoundSourceDiversity::Ensemble,
             },
-            helper_health: if vm
-                .source_health
-                .iter()
-                .any(|s| s.status == SourceStatus::Diagnostic)
-            {
-                RoundHelperHealth::Trouble
-            } else {
-                RoundHelperHealth::Ok
+            helper_health: match crate::presentation::companion_scene::input::derive_helper_health(
+                vm,
+            ) {
+                crate::presentation::companion_scene::input::SemanticHelperHealth::Ok => {
+                    RoundHelperHealth::Ok
+                }
+                crate::presentation::companion_scene::input::SemanticHelperHealth::Trouble => {
+                    RoundHelperHealth::Trouble
+                }
             },
             vitals: RoundVitals {
                 fed: vital_bucket(vm.fed),
@@ -182,18 +183,13 @@ pub fn derive_round_scene_model(vm: &WatchViewModel, now: OffsetDateTime) -> Rou
 }
 
 fn derive_activity_pulse(vm: &WatchViewModel, now: OffsetDateTime) -> RoundActivityPulse {
-    if vm.day_context.asleep {
-        return RoundActivityPulse::Quiet;
-    }
-    let Some(last) = vm.last_feed_pulse_at else {
-        return RoundActivityPulse::Quiet;
-    };
-    let age = now - last;
-    if age < Duration::ZERO || age > Duration::seconds(2) {
-        return RoundActivityPulse::Quiet;
-    }
-    RoundActivityPulse::Recent {
-        age_ms: age.whole_milliseconds().clamp(0, u16::MAX as i128) as u16,
+    match crate::presentation::companion_scene::input::derive_activity_pulse(vm, now) {
+        crate::presentation::companion_scene::input::SemanticActivityPulse::Quiet => {
+            RoundActivityPulse::Quiet
+        }
+        crate::presentation::companion_scene::input::SemanticActivityPulse::Recent { age_ms } => {
+            RoundActivityPulse::Recent { age_ms }
+        }
     }
 }
 
@@ -220,15 +216,16 @@ fn derive_moments(vm: &WatchViewModel, pulse: &RoundActivityPulse) -> Vec<RoundS
     moments
 }
 
-const VITAL_LOW_THRESHOLD: f64 = 0.34;
-const VITAL_MEDIUM_THRESHOLD: f64 = 0.67;
-
 fn vital_bucket(value: f64) -> RoundVitalBucket {
-    if value < VITAL_LOW_THRESHOLD {
-        RoundVitalBucket::Low
-    } else if value < VITAL_MEDIUM_THRESHOLD {
-        RoundVitalBucket::Medium
-    } else {
-        RoundVitalBucket::High
+    match crate::presentation::companion_scene::input::derive_vital_bucket(value) {
+        crate::presentation::companion_scene::input::SemanticVitalBucket::Low => {
+            RoundVitalBucket::Low
+        }
+        crate::presentation::companion_scene::input::SemanticVitalBucket::Medium => {
+            RoundVitalBucket::Medium
+        }
+        crate::presentation::companion_scene::input::SemanticVitalBucket::High => {
+            RoundVitalBucket::High
+        }
     }
 }

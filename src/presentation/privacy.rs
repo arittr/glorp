@@ -1,4 +1,5 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PresentationSurface {
     WatchTui,
     RoundCompanion,
@@ -7,7 +8,7 @@ pub enum PresentationSurface {
     PreviewLabArtifact,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PrivacyProjection {
     pub surface: PresentationSurface,
     pub source_names_visible: bool,

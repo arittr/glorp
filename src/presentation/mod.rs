@@ -1,4 +1,5 @@
 pub mod color_ops;
+pub mod companion_scene;
 pub mod draw_list;
 pub mod effect;
 pub mod pet;

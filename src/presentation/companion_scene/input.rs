@@ -1,0 +1,367 @@
+use super::{
+    AuthoredDepthSnapshot, CompanionLogicalLayout, CompanionSceneSnapshot, ContentSnapshot,
+    FrameSnapshot, PaletteSnapshot, PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot,
+    PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot, TankRouteSnapshot,
+    TankTopologySnapshot, TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION,
+    COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS, MAX_VISIBLE_TANK_INHABITANTS,
+    PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
+};
+use crate::game::habitat::{HabitatPetLayer, HabitatPropZone, TankLifeRouteFamily};
+use crate::pet::palette::{body_glow, ResolvedPalette, Rgb};
+use crate::pet::render::{PaletteRoleName, StyledSegment};
+use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
+use crate::round::hud::{
+    companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
+    daily_overage_marker_fraction,
+};
+use crate::tui::room::{derive_room_life_profile, RoomBiomeTag, RoomLifeProfile, RoomWeatherLayer};
+use crate::tui::view_model::{SourceStatus, WatchViewModel};
+use time::{Duration, OffsetDateTime};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SemanticVitalBucket {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SemanticHelperHealth {
+    Ok,
+    Trouble,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SemanticActivityPulse {
+    Quiet,
+    Recent { age_ms: u16 },
+}
+
+impl SemanticActivityPulse {
+    pub(crate) const fn age_ms(self) -> Option<u16> {
+        match self {
+            Self::Quiet => None,
+            Self::Recent { age_ms } => Some(age_ms),
+        }
+    }
+
+    pub(crate) const fn is_quiet(self) -> bool {
+        matches!(self, Self::Quiet)
+    }
+}
+
+pub(crate) fn derive_vital_bucket(value: f64) -> SemanticVitalBucket {
+    if value < 0.34 {
+        SemanticVitalBucket::Low
+    } else if value < 0.67 {
+        SemanticVitalBucket::Medium
+    } else {
+        SemanticVitalBucket::High
+    }
+}
+
+pub(crate) fn derive_helper_health(vm: &WatchViewModel) -> SemanticHelperHealth {
+    if vm
+        .source_health
+        .iter()
+        .any(|health| health.status == SourceStatus::Diagnostic)
+    {
+        SemanticHelperHealth::Trouble
+    } else {
+        SemanticHelperHealth::Ok
+    }
+}
+
+pub(crate) fn derive_activity_pulse(
+    vm: &WatchViewModel,
+    now: OffsetDateTime,
+) -> SemanticActivityPulse {
+    if vm.day_context.asleep {
+        return SemanticActivityPulse::Quiet;
+    }
+    let Some(last) = vm.last_feed_pulse_at else {
+        return SemanticActivityPulse::Quiet;
+    };
+    let age = now - last;
+    if age < Duration::ZERO || age > Duration::seconds(2) {
+        return SemanticActivityPulse::Quiet;
+    }
+    SemanticActivityPulse::Recent {
+        age_ms: age.whole_milliseconds().clamp(0, i128::from(u16::MAX)) as u16,
+    }
+}
+
+pub(crate) fn derive_room_profile(vm: &WatchViewModel, now: OffsetDateTime) -> RoomLifeProfile {
+    derive_room_life_profile(vm, now)
+}
+
+fn derive_visible_prop_catalog_ids(vm: &WatchViewModel, now: OffsetDateTime) -> Vec<&'static str> {
+    let trophy_ids = crate::tui::component::habitat_props::visible_trophy_ids(&vm.habitat);
+    let accent_ids = crate::tui::component::habitat_props::visible_accent_ids(&vm.habitat, now);
+
+    trophy_ids
+        .into_iter()
+        .chain(accent_ids)
+        .filter_map(|id| crate::game::habitat::catalog_prop_by_str(id).map(|spec| spec.id))
+        .take(MAX_VISIBLE_PROPS)
+        .collect()
+}
+
+fn derive_visible_round_tank_catalog_ids(vm: &WatchViewModel) -> Vec<&'static str> {
+    crate::tui::component::canonical_daily_cast(
+        &vm.habitat.earned_inhabitants,
+        &vm.pet_render.seed,
+        vm.habitat.tank_life_local_date,
+        vm.habitat.tank_life_calendar_age_days,
+    )
+    .iter()
+    .filter_map(crate::game::habitat::tank_inhabitant_spec)
+    .map(|spec| spec.id)
+    .take(MAX_VISIBLE_TANK_INHABITANTS)
+    .collect()
+}
+
+impl CompanionSceneSnapshot {
+    pub fn project(
+        vm: &WatchViewModel,
+        now: OffsetDateTime,
+        layout: CompanionLogicalLayout,
+    ) -> Self {
+        let room_profile = derive_room_profile(vm, now);
+        let activity_pulse = derive_activity_pulse(vm, now);
+        let helper_health = derive_helper_health(vm);
+        let elapsed_ms = elapsed_ms(now);
+        let visible_props = project_props(vm, now);
+        let visible_tank_inhabitants = project_tank_inhabitants(vm);
+        let prop_animation_phases = animation_phases(visible_props.len(), elapsed_ms);
+        let tank_animation_phases = animation_phases(visible_tank_inhabitants.len(), elapsed_ms);
+        let hud = companion_hud_text(
+            vm.today_effective_tokens,
+            vm.daily_comparison.fraction_of_yesterday,
+            vm.rate_momentum.pulse.current_tokens,
+        );
+        let asleep = vm.day_context.asleep;
+        let dimmed = asleep || vm.life_profile.calm_mode;
+
+        Self {
+            schema_version: COMPANION_SCENE_SCHEMA_VERSION,
+            privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
+            topology: TopologySnapshot {
+                layout,
+                pet: PetTopologySnapshot {
+                    species: vm.pet_render.generated_species,
+                    stage: vm.pet_render.stage,
+                    lattice: PetLatticeSnapshot {
+                        identity: "pet-art-13x10-v1",
+                        width: PET_LATTICE_WIDTH,
+                        height: PET_LATTICE_HEIGHT,
+                        slot_count: PET_LATTICE_SLOTS,
+                    },
+                },
+                room: project_room(&room_profile),
+                visible_props,
+                visible_tank_inhabitants,
+                renderer_schema: COMPANION_RENDERER_SCHEMA_VERSION,
+            },
+            content: ContentSnapshot {
+                mood: vm.pet_render.mood,
+                pet_lines: vm.pet_art.clone(),
+                pet_roles: project_pet_roles(&vm.pet_spans),
+                palette: PaletteSnapshot::from(vm.pet_palette),
+                prop_animation_phases,
+                tank_animation_phases,
+                activity_pulse_age_ms: activity_pulse.age_ms(),
+            },
+            frame: FrameSnapshot {
+                elapsed_ms,
+                pet_xy_depth: [
+                    layout.width_points * 0.5 + f32::from(vm.wander_offset_x),
+                    layout.height_points * 0.5 + f32::from(vm.breath_offset_y),
+                    0.0,
+                ],
+                facing: if vm.facing < 0 { -1 } else { 1 },
+                breath_offset_y: vm.breath_offset_y,
+                asleep,
+                helper_trouble: helper_health == SemanticHelperHealth::Trouble,
+                gauges: [
+                    if vm.progress.is_max_stage {
+                        1.0
+                    } else {
+                        vm.progress.fraction.clamp(0.0, 1.0)
+                    },
+                    daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday) as f32,
+                    daily_overage_marker_fraction(vm.daily_comparison.fraction_of_yesterday) as f32,
+                    companion_pace_fraction(vm.rate_momentum.pulse.current_tokens) as f32,
+                ],
+                dim_amount: if dimmed { 0.35 } else { 0.0 },
+                hud_lines: [hud.today_total, hud.daily_percent, hud.pace],
+            },
+        }
+    }
+}
+
+fn project_room(profile: &RoomLifeProfile) -> RoomTopologySnapshot {
+    RoomTopologySnapshot {
+        primary_biome: biome_alias(profile.biome.primary),
+        secondary_biome: profile.biome.secondary.map(biome_alias),
+        species_dialect: profile.species_dialect.key.as_str(),
+        room_weather: room_weather_alias(profile.room_weather),
+    }
+}
+
+fn project_props(vm: &WatchViewModel, now: OffsetDateTime) -> Vec<PropTopologySnapshot> {
+    derive_visible_prop_catalog_ids(vm, now)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, id)| {
+            let spec = crate::game::habitat::catalog_prop_by_str(id)?;
+            Some(PropTopologySnapshot {
+                catalog_id: spec.id,
+                stable_order: index as u8,
+                zone: spec.zone.into(),
+                authored_depth: spec.pet_layer.into(),
+            })
+        })
+        .collect()
+}
+
+fn project_tank_inhabitants(vm: &WatchViewModel) -> Vec<TankTopologySnapshot> {
+    derive_visible_round_tank_catalog_ids(vm)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, id)| {
+            let spec = crate::game::habitat::TANK_INHABITANT_CATALOG
+                .iter()
+                .find(|spec| spec.id == id)?;
+            Some(TankTopologySnapshot {
+                catalog_id: spec.id,
+                stable_order: index as u8,
+                route: spec.route_family.into(),
+                authored_depth: spec.natural_layer.into(),
+            })
+        })
+        .collect()
+}
+
+fn project_pet_roles(spans: &[StyledSegment]) -> Vec<PetRoleSpanSnapshot> {
+    spans
+        .iter()
+        .filter(|span| {
+            span.line < usize::from(PET_LATTICE_HEIGHT)
+                && span.start < span.end
+                && span.end <= usize::from(PET_LATTICE_WIDTH)
+        })
+        .map(|span| PetRoleSpanSnapshot {
+            line: span.line as u16,
+            start: span.start as u16,
+            end: span.end as u16,
+            role: role_alias(span.role),
+        })
+        .collect()
+}
+
+fn animation_phases(count: usize, elapsed_ms: u64) -> Vec<u8> {
+    let base = ((elapsed_ms / 500) % 2) as usize;
+    (0..count).map(|index| ((base + index) % 2) as u8).collect()
+}
+
+fn elapsed_ms(now: OffsetDateTime) -> u64 {
+    let value = now.unix_timestamp_nanos().div_euclid(1_000_000);
+    if value <= 0 {
+        0
+    } else {
+        value.min(i128::from(u64::MAX)) as u64
+    }
+}
+
+fn biome_alias(biome: RoomBiomeTag) -> &'static str {
+    match biome {
+        RoomBiomeTag::Starter => "starter",
+        RoomBiomeTag::Botanical => "botanical",
+        RoomBiomeTag::Technical => "technical",
+        RoomBiomeTag::Celestial => "celestial",
+        RoomBiomeTag::Artifact => "artifact",
+        RoomBiomeTag::Cozy => "cozy",
+    }
+}
+
+fn room_weather_alias(weather: RoomWeatherLayer) -> &'static str {
+    match weather {
+        RoomWeatherLayer::Clear => "clear",
+        RoomWeatherLayer::CacheMist => "cache-mist",
+        RoomWeatherLayer::OutputSparks => "output-sparks",
+        RoomWeatherLayer::ReasoningPulse => "reasoning-pulse",
+        RoomWeatherLayer::Mixed => "mixed",
+    }
+}
+
+fn role_alias(role: PaletteRoleName) -> &'static str {
+    match role {
+        PaletteRoleName::Body => "body",
+        PaletteRoleName::BodyGlow => "body-glow",
+        PaletteRoleName::Eye => "eye",
+        PaletteRoleName::Mouth => "mouth",
+        PaletteRoleName::Accent => "accent",
+        PaletteRoleName::Pattern => "pattern",
+        PaletteRoleName::Particle => "particle",
+        PaletteRoleName::Corruption => "corruption",
+    }
+}
+
+fn rgb(rgb: Rgb) -> [u8; 3] {
+    [rgb.r, rgb.g, rgb.b]
+}
+
+impl From<ResolvedPalette> for PaletteSnapshot {
+    fn from(palette: ResolvedPalette) -> Self {
+        Self {
+            body: rgb(palette.body),
+            body_glow: rgb(body_glow(palette.body)),
+            eye: rgb(palette.eye),
+            mouth: rgb(palette.mouth),
+            accent: rgb(palette.accent),
+            pattern: rgb(palette.pattern),
+            particle: rgb(palette.particle),
+            corruption: rgb(palette.corruption),
+        }
+    }
+}
+
+impl From<HabitatPropZone> for PropZoneSnapshot {
+    fn from(zone: HabitatPropZone) -> Self {
+        match zone {
+            HabitatPropZone::FloorLeft => Self::FloorLeft,
+            HabitatPropZone::FloorMid => Self::FloorMid,
+            HabitatPropZone::FloorRight => Self::FloorRight,
+            HabitatPropZone::WallLeft => Self::WallLeft,
+            HabitatPropZone::WallRight => Self::WallRight,
+            HabitatPropZone::AirLeft => Self::AirLeft,
+            HabitatPropZone::AirMid => Self::AirMid,
+            HabitatPropZone::AirRight => Self::AirRight,
+            HabitatPropZone::Ceiling => Self::Ceiling,
+        }
+    }
+}
+
+impl From<TankLifeRouteFamily> for TankRouteSnapshot {
+    fn from(route: TankLifeRouteFamily) -> Self {
+        match route {
+            TankLifeRouteFamily::CrossTankSwimmer => Self::CrossTankSwimmer,
+            TankLifeRouteFamily::LowerLaneResident => Self::LowerLaneResident,
+            TankLifeRouteFamily::GlassResident => Self::GlassResident,
+            TankLifeRouteFamily::RimResident => Self::RimResident,
+            TankLifeRouteFamily::LowerEdgeResident => Self::LowerEdgeResident,
+            TankLifeRouteFamily::HostCombo => Self::HostCombo,
+        }
+    }
+}
+
+impl From<HabitatPetLayer> for AuthoredDepthSnapshot {
+    fn from(layer: HabitatPetLayer) -> Self {
+        match layer {
+            HabitatPetLayer::Background => Self::Background,
+            HabitatPetLayer::Behind => Self::BehindPet,
+            HabitatPetLayer::Foreground => Self::Foreground,
+        }
+    }
+}

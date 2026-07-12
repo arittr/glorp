@@ -1,8 +1,7 @@
 use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
 use crate::presentation::room::PresentationRoom;
 use crate::presentation::target::SurfaceTargetId;
-use crate::tui::room::derive_room_life_profile;
-use crate::tui::view_model::{SourceStatus, WatchViewModel};
+use crate::tui::view_model::WatchViewModel;
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
@@ -72,7 +71,8 @@ impl PresentationScene {
         surface: PresentationSurface,
     ) -> Self {
         let privacy = PrivacyProjection::for_surface(surface);
-        let room_profile = derive_room_life_profile(vm, now);
+        let room_profile = super::companion_scene::input::derive_room_profile(vm, now);
+        let activity_pulse = super::companion_scene::input::derive_activity_pulse(vm, now);
         let redacts_runtime_ids = redacts_runtime_ids(privacy);
         let mut room = PresentationRoom::from_profile(&room_profile);
         if redacts_runtime_ids {
@@ -99,16 +99,15 @@ impl PresentationScene {
             room,
             activity: PresentationActivitySnapshot {
                 source_diversity: format!("{:?}", vm.activity_identity.source_diversity),
-                helper_health: if vm
-                    .source_health
-                    .iter()
-                    .any(|health| health.status == SourceStatus::Diagnostic)
-                {
-                    PresentationHelperHealth::Trouble
-                } else {
-                    PresentationHelperHealth::Ok
+                helper_health: match super::companion_scene::input::derive_helper_health(vm) {
+                    super::companion_scene::input::SemanticHelperHealth::Ok => {
+                        PresentationHelperHealth::Ok
+                    }
+                    super::companion_scene::input::SemanticHelperHealth::Trouble => {
+                        PresentationHelperHealth::Trouble
+                    }
                 },
-                recent_activity: vm.last_feed_pulse_at.is_some(),
+                recent_activity: !activity_pulse.is_quiet(),
                 fed_bucket: vital_bucket(vm.fed),
                 happiness_bucket: vital_bucket(vm.happiness),
                 energy_bucket: vital_bucket(vm.energy),
@@ -132,11 +131,11 @@ fn redacts_runtime_ids(privacy: PrivacyProjection) -> bool {
 }
 
 fn vital_bucket(value: f64) -> PresentationVitalBucket {
-    if value < 0.34 {
-        PresentationVitalBucket::Low
-    } else if value < 0.67 {
-        PresentationVitalBucket::Medium
-    } else {
-        PresentationVitalBucket::High
+    match super::companion_scene::input::derive_vital_bucket(value) {
+        super::companion_scene::input::SemanticVitalBucket::Low => PresentationVitalBucket::Low,
+        super::companion_scene::input::SemanticVitalBucket::Medium => {
+            PresentationVitalBucket::Medium
+        }
+        super::companion_scene::input::SemanticVitalBucket::High => PresentationVitalBucket::High,
     }
 }
