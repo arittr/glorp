@@ -789,8 +789,8 @@ mod tests {
 
     #[test]
     fn shared_route_outcomes_exactly_match_round_tui_geometry_and_cadence() {
-        let mut saw_hud_reserve_clip = false;
-        let mut saw_aperture_clip = false;
+        let mut saw_hud_reserve_effect = false;
+        let mut saw_aperture_effect = false;
         let mut saw_foreground_pet_reserve_clip = false;
         let mut saw_behind_pet_reserve_survival = false;
         for (width, height) in [(20, 12), (44, 18), (72, 24)] {
@@ -803,6 +803,10 @@ mod tests {
             );
             let protected = crate::round::scene::round_tank_life_protected_regions_for_test(
                 pet_rect, width, height,
+            );
+            assert_eq!(
+                geometry.reserved_regions, protected.bottom_hud,
+                "round geometry should reserve only the bottom HUD band"
             );
             for elapsed_seconds in [0, 4, 8, 32] {
                 for (calm, asleep) in [(false, false), (true, false), (false, true)] {
@@ -828,6 +832,34 @@ mod tests {
                             },
                         )
                         .expect("known route outcome");
+                        let mut geometry_without_hud_reserve = neutral_geometry.clone();
+                        geometry_without_hud_reserve.reserved_regions.clear();
+                        let outcome_without_hud_reserve =
+                            crate::presentation::tank_life::resolve_tank_route(
+                                crate::presentation::tank_life::TankRouteInput {
+                                    catalog_id: spec.id,
+                                    pet_seed: input.pet_seed,
+                                    local_date: input.local_date,
+                                    now: input.now,
+                                    calm: calm || asleep,
+                                    geometry: &geometry_without_hud_reserve,
+                                },
+                            )
+                            .expect("known route outcome without HUD reserve");
+                        let mut geometry_without_aperture = neutral_geometry.clone();
+                        geometry_without_aperture.aperture = None;
+                        let outcome_without_aperture =
+                            crate::presentation::tank_life::resolve_tank_route(
+                                crate::presentation::tank_life::TankRouteInput {
+                                    catalog_id: spec.id,
+                                    pet_seed: input.pet_seed,
+                                    local_date: input.local_date,
+                                    now: input.now,
+                                    calm: calm || asleep,
+                                    geometry: &geometry_without_aperture,
+                                },
+                            )
+                            .expect("known route outcome without aperture");
                         let mut geometry_without_pet_reserve = neutral_geometry.clone();
                         geometry_without_pet_reserve
                             .foreground_reserved_regions
@@ -926,13 +958,11 @@ mod tests {
                             }
                         }
 
-                        let origin_in_hud = geometry.reserved_regions.iter().any(|region| {
-                            rect_contains(*region, outcome.origin_col, outcome.origin_row)
-                        });
-                        saw_hud_reserve_clip |= origin_in_hud && !outcome.visible;
-                        saw_aperture_clip |= !geometry
-                            .cell_inside_aperture(outcome.origin_col, outcome.origin_row)
-                            && !outcome.visible;
+                        saw_hud_reserve_effect |= outcome.visible
+                            != outcome_without_hud_reserve.visible
+                            || outcome.cells != outcome_without_hud_reserve.cells;
+                        saw_aperture_effect |= outcome.visible != outcome_without_aperture.visible
+                            || outcome.cells != outcome_without_aperture.cells;
                     }
 
                     let catalog = crate::game::habitat::TANK_INHABITANT_CATALOG
@@ -975,10 +1005,13 @@ mod tests {
                 }
             }
         }
-        assert!(saw_hud_reserve_clip, "matrix did not exercise HUD clipping");
         assert!(
-            saw_aperture_clip,
-            "matrix did not exercise aperture clipping"
+            saw_hud_reserve_effect,
+            "matrix did not prove a differential HUD reserve effect"
+        );
+        assert!(
+            saw_aperture_effect,
+            "matrix did not prove a differential aperture effect"
         );
         assert!(
             saw_foreground_pet_reserve_clip,
