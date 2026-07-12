@@ -663,16 +663,13 @@ struct BaselineSourceIdentity {
     tracked_tree_state: String,
 }
 
-const APPKIT_RASTER_DIAGNOSTIC_CAPACITY: u64 = 256;
-const APPKIT_RASTER_DIAGNOSTIC_TABLE_HEADER: &str = "| Retained sample | Start cursor | End cursor | Items completed | Elapsed (us) | Setup (us) | Max item (us) | Max item repertoire index | Scratch setup (us) | Text setup + measure (us) | Draw + flush (us) | Pixel copy + classify (us) | Mask normalize + finalize (us) |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|";
-
 fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String> {
     if snapshot
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
-        != Some(5)
+        != Some(6)
     {
-        return Err("runtime metrics snapshot schema_version is not 5".to_string());
+        return Err("runtime metrics snapshot schema_version is not 6".to_string());
     }
     for metric in [
         "ui_tick_us",
@@ -680,13 +677,13 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
         "gpu_translate_us",
         "encode_us",
         "queue_wait_us",
-        "compile_us",
-        "appkit_raster_queue_wait_us",
-        "appkit_raster_slice_us",
-        "appkit_raster_total_us",
+        "worker_active_compile_us",
+        "raster_request_wall_us",
+        "generation_service_ui_us",
+        "gpu_materialize_publish_us",
         "activation_render_owner_us",
     ] {
-        for percentile in ["p50", "p95", "p99"] {
+        for percentile in ["p50", "p95", "p99", "max"] {
             if snapshot
                 .get(metric)
                 .and_then(|value| value.get(percentile))
@@ -772,21 +769,19 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
         "capture_attempted",
         "capture_succeeded",
         "capture_failed",
-        "appkit_raster_slice_count",
-        "appkit_raster_deadline_misses",
-        "appkit_raster_coalesces",
-        "appkit_raster_cancellations",
+        "main_thread_raster_calls",
+        "worker_raster_calls",
+        "worker_submissions",
+        "worker_completions",
+        "worker_cancellations",
+        "worker_coalesces",
+        "worker_stale_rejections",
+        "worker_failures",
+        "gpu_materializations",
+        "generation_count",
     ] {
         snapshot_u64(snapshot, &[field])?;
     }
-    let diagnostic_capacity = snapshot_u64(snapshot, &["appkit_raster_diagnostic_capacity"])?;
-    let slice_count = snapshot_u64(snapshot, &["appkit_raster_slice_count"])?;
-    let diagnostics = snapshot
-        .get("appkit_raster_slice_diagnostics")
-        .ok_or_else(|| {
-            "runtime metrics snapshot missing appkit_raster_slice_diagnostics".to_string()
-        })?;
-    validate_appkit_raster_diagnostics(diagnostics, diagnostic_capacity, slice_count)?;
     let gpu_accounting = snapshot
         .get("gpu_accounting")
         .ok_or_else(|| "runtime metrics snapshot missing gpu_accounting".to_string())?;
@@ -824,152 +819,6 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
         value_u64(lifetime, field)?;
     }
     Ok(())
-}
-
-fn validate_appkit_raster_diagnostics(
-    diagnostics: &serde_json::Value,
-    capacity: u64,
-    slice_count: u64,
-) -> Result<(), String> {
-    let diagnostics = diagnostics
-        .as_array()
-        .ok_or_else(|| "appkit_raster_slice_diagnostics is not an array".to_string())?;
-    if capacity != APPKIT_RASTER_DIAGNOSTIC_CAPACITY {
-        return Err(format!(
-            "appkit_raster_diagnostic_capacity is {capacity}, expected {APPKIT_RASTER_DIAGNOSTIC_CAPACITY}"
-        ));
-    }
-    let expected_samples = slice_count.min(APPKIT_RASTER_DIAGNOSTIC_CAPACITY);
-    if diagnostics.len() as u64 != expected_samples {
-        return Err(format!(
-            "appkit_raster_slice_diagnostics has {} samples, expected {expected_samples} for {slice_count} slices",
-            diagnostics.len()
-        ));
-    }
-    let allowed_fields = [
-        "start_cursor",
-        "end_cursor",
-        "items_completed",
-        "elapsed_us",
-        "setup_us",
-        "max_item_us",
-        "max_item_index",
-        "max_item_scratch_setup_us",
-        "max_item_text_setup_measure_us",
-        "max_item_draw_flush_us",
-        "max_item_pixel_copy_classify_us",
-        "max_item_mask_normalize_finalize_us",
-    ];
-    for (sample_index, diagnostic) in diagnostics.iter().enumerate() {
-        let object = diagnostic.as_object().ok_or_else(|| {
-            format!("appkit_raster_slice_diagnostics[{sample_index}] is not an object")
-        })?;
-        if let Some(field) = object
-            .keys()
-            .find(|field| !allowed_fields.contains(&field.as_str()))
-        {
-            return Err(format!(
-                "appkit_raster_slice_diagnostics[{sample_index}] contains unsupported field {field}"
-            ));
-        }
-        let start_cursor = value_u64(diagnostic, "start_cursor")?;
-        let end_cursor = value_u64(diagnostic, "end_cursor")?;
-        let items_completed = value_u64(diagnostic, "items_completed")?;
-        let elapsed_us = value_u64(diagnostic, "elapsed_us")?;
-        let setup_us = value_u64(diagnostic, "setup_us")?;
-        let max_item_us = value_u64(diagnostic, "max_item_us")?;
-        let phase_us = [
-            "max_item_scratch_setup_us",
-            "max_item_text_setup_measure_us",
-            "max_item_draw_flush_us",
-            "max_item_pixel_copy_classify_us",
-            "max_item_mask_normalize_finalize_us",
-        ]
-        .iter()
-        .try_fold(0_u64, |total, field| {
-            value_u64(diagnostic, field).map(|value| total.saturating_add(value))
-        })?;
-        if end_cursor < start_cursor {
-            return Err(format!(
-                "appkit_raster_slice_diagnostics[{sample_index}] end_cursor precedes start_cursor"
-            ));
-        }
-        if items_completed != end_cursor - start_cursor {
-            return Err(format!(
-                "appkit_raster_slice_diagnostics[{sample_index}] items_completed does not match its cursor range"
-            ));
-        }
-        if setup_us > elapsed_us || max_item_us > elapsed_us {
-            return Err(format!(
-                "appkit_raster_slice_diagnostics[{sample_index}] component timing exceeds elapsed_us"
-            ));
-        }
-        if phase_us > max_item_us {
-            return Err(format!(
-                "appkit_raster_slice_diagnostics[{sample_index}] max-item phases exceed max_item_us"
-            ));
-        }
-        match diagnostic.get("max_item_index") {
-            Some(value) if items_completed == 0 && value.is_null() && max_item_us == 0 => {}
-            Some(_) if items_completed == 0 => {
-                return Err(format!(
-                    "appkit_raster_slice_diagnostics[{sample_index}] empty slice has max-item data"
-                ));
-            }
-            Some(value) => {
-                let item_index = value.as_u64().ok_or_else(|| {
-                    format!(
-                        "appkit_raster_slice_diagnostics[{sample_index}].max_item_index is not an unsigned integer or null"
-                    )
-                })?;
-                if item_index < start_cursor || item_index >= end_cursor {
-                    return Err(format!(
-                        "appkit_raster_slice_diagnostics[{sample_index}].max_item_index is outside the completed cursor range"
-                    ));
-                }
-            }
-            None => {
-                return Err(format!(
-                    "appkit_raster_slice_diagnostics[{sample_index}] missing max_item_index"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn format_appkit_raster_diagnostic_rows(diagnostics: &serde_json::Value) -> Result<String, String> {
-    let diagnostics = diagnostics
-        .as_array()
-        .ok_or_else(|| "appkit_raster_slice_diagnostics is not an array".to_string())?;
-    if diagnostics.is_empty() {
-        return Ok("| — | — | — | — | — | — | — | — | — | — | — | — | — |".to_string());
-    }
-    diagnostics
-        .iter()
-        .enumerate()
-        .map(|(slice_index, diagnostic)| {
-            let start_cursor = value_u64(diagnostic, "start_cursor")?;
-            let end_cursor = value_u64(diagnostic, "end_cursor")?;
-            let max_item_index = diagnostic
-                .get("max_item_index")
-                .and_then(serde_json::Value::as_u64)
-                .map_or_else(|| "—".to_string(), |value| value.to_string());
-            Ok(format!(
-                "| {slice_index} | {start_cursor} | {end_cursor} | {} | {} | {} | {} | {max_item_index} | {} | {} | {} | {} | {} |",
-                value_u64(diagnostic, "items_completed")?,
-                value_u64(diagnostic, "elapsed_us")?,
-                value_u64(diagnostic, "setup_us")?,
-                value_u64(diagnostic, "max_item_us")?,
-                value_u64(diagnostic, "max_item_scratch_setup_us")?,
-                value_u64(diagnostic, "max_item_text_setup_measure_us")?,
-                value_u64(diagnostic, "max_item_draw_flush_us")?,
-                value_u64(diagnostic, "max_item_pixel_copy_classify_us")?,
-                value_u64(diagnostic, "max_item_mask_normalize_finalize_us")?,
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map(|rows| rows.join("\n"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1018,18 +867,28 @@ fn gate(
 fn evaluate_baseline_gates(
     snapshot: &serde_json::Value,
 ) -> Result<Vec<BaselineGateResult>, String> {
-    const APPKIT_TARGET_US: u64 = 4_000;
+    const UI_P95_LIMIT_US: u64 = 1_422;
+    const UI_P99_LIMIT_US: u64 = 2_070;
+    const ENCODE_P95_LIMIT_US: u64 = 282;
+    const GENERATION_SERVICE_UI_LIMIT_US: u64 = 4_000;
+    const GPU_MATERIALIZE_PUBLISH_LIMIT_US: u64 = 16_000;
+    const ACTIVATION_RENDER_OWNER_LIMIT_US: u64 = 16_000;
+    const METRICS_OVERHEAD_LIMIT_NS: u64 = 28_440;
     let ui_p95 = snapshot_u64(snapshot, &["ui_tick_us", "p95"])?;
     let ui_p99 = snapshot_u64(snapshot, &["ui_tick_us", "p99"])?;
     let encode_p95 = snapshot_u64(snapshot, &["encode_us", "p95"])?;
-    let appkit_slice_p95 = snapshot_u64(snapshot, &["appkit_raster_slice_us", "p95"])?;
-    let appkit_deadline_misses = snapshot_u64(snapshot, &["appkit_raster_deadline_misses"])?;
+    let main_thread_raster_calls = snapshot_u64(snapshot, &["main_thread_raster_calls"])?;
+    let worker_raster_calls = snapshot_u64(snapshot, &["worker_raster_calls"])?;
+    let worker_submissions = snapshot_u64(snapshot, &["worker_submissions"])?;
+    let worker_completions = snapshot_u64(snapshot, &["worker_completions"])?;
+    let gpu_materializations = snapshot_u64(snapshot, &["gpu_materializations"])?;
+    let generation_count = snapshot_u64(snapshot, &["generation_count"])?;
+    let generation_service_ui_max = snapshot_u64(snapshot, &["generation_service_ui_us", "max"])?;
+    let gpu_materialize_publish_max =
+        snapshot_u64(snapshot, &["gpu_materialize_publish_us", "max"])?;
     let activation_p95 = snapshot_u64(snapshot, &["activation_render_owner_us", "p95"])?;
-    let ui_p95_limit = 8_000_u64.min(((ui_p95 * 110).div_ceil(100)).max(ui_p95 + 500));
-    let ui_p99_limit = 16_000_u64.min(((ui_p99 * 115).div_ceil(100)).max(ui_p99 + 1_000));
-    let encode_limit = ((encode_p95 * 110).div_ceil(100)).max(encode_p95 + 250);
+    let activation_max = snapshot_u64(snapshot, &["activation_render_owner_us", "max"])?;
     let overhead_ns = snapshot_u64(snapshot, &["metrics_overhead_control", "net_ns_per_tick"])?;
-    let overhead_limit_ns = ui_p95.saturating_mul(1_000).saturating_mul(2) / 100;
     let hidden = snapshot
         .get("hidden_segment")
         .ok_or_else(|| "runtime snapshot missing hidden_segment".to_string())?;
@@ -1038,7 +897,8 @@ fn evaluate_baseline_gates(
         .ok_or_else(|| "runtime snapshot missing hidden_segment.steady_delta".to_string())?;
     let hidden_zero = [
         "prepare",
-        "appkit_raster_slices",
+        "worker_submissions",
+        "gpu_materializations",
         "queue_writes",
         "surface_acquires",
         "encode",
@@ -1062,44 +922,69 @@ fn evaluate_baseline_gates(
         warmup > 0 && value <= warmup.saturating_add(warmup.div_ceil(100))
     };
 
-    let appkit = gate(
-        "appkit-raster-slice",
-        appkit_slice_p95 <= APPKIT_TARGET_US && appkit_deadline_misses == 0,
-        format!("{appkit_slice_p95} us p95; {appkit_deadline_misses} deadline misses"),
-        format!("{APPKIT_TARGET_US} us p95; 0 deadline misses"),
-    );
-
     Ok(vec![
         gate(
             "ui-tick-p95",
-            ui_p95 <= ui_p95_limit,
+            ui_p95 <= UI_P95_LIMIT_US,
             format!("{ui_p95} us"),
-            format!("{ui_p95_limit} us"),
+            format!("{UI_P95_LIMIT_US} us"),
         ),
         gate(
             "ui-tick-p99",
-            ui_p99 <= ui_p99_limit,
+            ui_p99 <= UI_P99_LIMIT_US,
             format!("{ui_p99} us"),
-            format!("{ui_p99_limit} us"),
+            format!("{UI_P99_LIMIT_US} us"),
         ),
         gate(
             "encode-p95",
-            encode_p95 <= encode_limit,
+            encode_p95 <= ENCODE_P95_LIMIT_US,
             format!("{encode_p95} us"),
-            format!("{encode_limit} us"),
+            format!("{ENCODE_P95_LIMIT_US} us"),
         ),
-        appkit,
+        gate(
+            "main-thread-raster-calls",
+            main_thread_raster_calls == 0,
+            main_thread_raster_calls.to_string(),
+            "0",
+        ),
+        gate(
+            "worker-generation-evidence",
+            worker_raster_calls > 0
+                && worker_submissions > 0
+                && worker_completions > 0
+                && gpu_materializations > 0
+                && generation_count > 0
+                && gpu_materializations == generation_count
+                && worker_completions >= generation_count,
+            format!(
+                "raster_calls={worker_raster_calls} submissions={worker_submissions} completions={worker_completions} materializations={gpu_materializations} generations={generation_count}"
+            ),
+            "all counts > 0; materializations = generations; completions >= generations",
+        ),
+        gate(
+            "generation-service-ui-max",
+            generation_service_ui_max <= GENERATION_SERVICE_UI_LIMIT_US,
+            format!("{generation_service_ui_max} us"),
+            format!("{GENERATION_SERVICE_UI_LIMIT_US} us"),
+        ),
+        gate(
+            "gpu-materialize-publish-max",
+            gpu_materialize_publish_max <= GPU_MATERIALIZE_PUBLISH_LIMIT_US,
+            format!("{gpu_materialize_publish_max} us"),
+            format!("{GPU_MATERIALIZE_PUBLISH_LIMIT_US} us"),
+        ),
         gate(
             "activation-render-owner-slice",
-            activation_p95 <= 16_000,
-            format!("{activation_p95} us"),
-            "16000 us",
+            activation_p95 <= ACTIVATION_RENDER_OWNER_LIMIT_US
+                && activation_max <= ACTIVATION_RENDER_OWNER_LIMIT_US,
+            format!("{activation_p95} us p95; {activation_max} us max"),
+            format!("{ACTIVATION_RENDER_OWNER_LIMIT_US} us p95 and max"),
         ),
         gate(
             "metrics-overhead-control",
-            overhead_ns <= overhead_limit_ns,
+            overhead_ns <= METRICS_OVERHEAD_LIMIT_NS,
             format!("{overhead_ns} ns/tick"),
-            format!("{overhead_limit_ns} ns/tick (2% UI p95)"),
+            format!("{METRICS_OVERHEAD_LIMIT_NS} ns/tick"),
         ),
         gate(
             "hidden-steady-state",
@@ -1249,14 +1134,6 @@ fn render_scene_baseline_report(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let appkit_diagnostic_rows = format_appkit_raster_diagnostic_rows(
-        snapshot
-            .get("appkit_raster_slice_diagnostics")
-            .ok_or_else(|| {
-                "runtime snapshot missing appkit_raster_slice_diagnostics".to_string()
-            })?,
-    )?;
-    let appkit_diagnostic_header = APPKIT_RASTER_DIAGNOSTIC_TABLE_HEADER;
     let capacity_rows = [
         ("Prepared legacy GPU primitives", "max_prepared_gpu_primitives", "observed by compiling every production-prepared matrix frame through the retained GPU translator"),
         ("Nodes", "max_nodes", "Task 2 scene nodes unavailable; versioned contract reservation"),
@@ -1311,11 +1188,12 @@ The first 20 visible ticks are discarded before steady-state sampling.\n\n\
 | GPU translation | {} | {} | {} |\n\
 | Encode | {} | {} | {} |\n\
 | Queue submit wait | {} | {} | {} |\n\
-| Resource generation compile total | {} | {} | {} |\n\
-| AppKit raster queue wait | {} | {} | {} |\n\
-| AppKit raster slice | {} | {} | {} |\n\
-| AppKit raster enqueue-to-CPU-complete | {} | {} | {} |\n\
-| First-present activation render-owner boundary (excluding separately measured AppKit raster) | {} | {} | {} |\n\n\
+| Worker active compile | {} | {} | {} |\n\
+| Raster request wall time | {} | {} | {} |\n\
+| Generation-service UI work | {} | {} | {} |\n\
+| GPU materialize/upload/publish | {} | {} | {} |\n\
+| First-present activation render-owner boundary | {} | {} | {} |\n\n\
+Observed maxima: generation-service UI work {} us; GPU materialize/upload/publish {} us; first-present activation render-owner boundary {} us.\n\n\
 Metrics overhead uses {} alternating on/off-control trials of {} representative complete metric ticks ({} control / {} instrumented); \
 control {} ns/tick, instrumented {} ns/tick, net {} ns/tick.\n\n\
 Accounted persistent GPU bytes: atlas {}, instance ring {}, capture {}, current total {}, concurrent-replacement peak {}. \
@@ -1324,16 +1202,13 @@ Opaque driver allocations are covered by process RSS, not guessed into GPU byte 
 Lifetime segment: {} warmup + {} measured real prepared/encoded GPU frames at {} ms virtual cadence ({} ms semantic time); \
 prepared {}, encoded {}, semantic changes {}, GPU hash changes {}, draws {}, polls {}; \
 RSS warmup-end/warmup-high-water/final/peak {}/{}/{}/{}, accounted GPU warmup-end/warmup-high-water/final/peak {}/{}/{}/{}.\n\n\
-AppKit preparation slices/deadline misses/coalesces/cancellations: {}/{}/{}/{}.\n\n\
-## AppKit raster slice diagnostics\n\n\
-{appkit_diagnostic_header}\n\
-{appkit_diagnostic_rows}\n\n\
-Diagnostics contain repertoire indices and timings only; glyph content is neither recorded nor serialized. Setup time is measured before raster advance, while max-item time covers the complete non-preemptible raster item (native call plus atlas insertion). The five disjoint phase columns belong to that same max item; their sum may be below max-item time because timer and orchestration overhead remains unclassified.\n\n\
+Main-thread/worker raster calls: {}/{}. GPU materializations: {}.\n\
+Worker submissions/completions/cancellations/coalesces/stale rejections/failures: {}/{}/{}/{}/{}/{}.\n\n\
 ## Structured gate results\n\n\
 | Gate | Status | Measured | Limit | Disposition |\n\
 |---|---|---|---|---|\n\
 {gate_rows}\n\n\
-AppKit raster preparation is resumable at glyph boundaries. The slice gate is strict: p95 must be <=4000 us and deadline misses must equal zero, with no Stage-0 exception. Queue wait and enqueue-to-CPU-complete wall time remain separately observable. Any non-preemptible glyph overrun fails the gate even when p95 remains below the deadline.\n\n\
+Raster work is worker-owned: main-thread raster calls must remain zero. Worker compile and request wall time are diagnostic only; the UI-safety gates apply to generation-service UI work and render-owner GPU materialize/upload/publish maxima.\n\n\
 ## Capacity inventory\n\n\
 | Capacity | Observed | Reservation | Headroom | Limit | Evidence |\n\
 |---|---:|---:|---:|---:|---|\n\
@@ -1367,21 +1242,24 @@ An em dash means the future renderer-neutral category does not exist yet and is 
         snapshot_u64(snapshot, &["queue_wait_us", "p50"])? ,
         snapshot_u64(snapshot, &["queue_wait_us", "p95"])? ,
         snapshot_u64(snapshot, &["queue_wait_us", "p99"])? ,
-        snapshot_u64(snapshot, &["compile_us", "p50"])? ,
-        snapshot_u64(snapshot, &["compile_us", "p95"])? ,
-        snapshot_u64(snapshot, &["compile_us", "p99"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_queue_wait_us", "p50"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_queue_wait_us", "p95"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_queue_wait_us", "p99"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_slice_us", "p50"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_slice_us", "p95"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_slice_us", "p99"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_total_us", "p50"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_total_us", "p95"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_total_us", "p99"])? ,
+        snapshot_u64(snapshot, &["worker_active_compile_us", "p50"])? ,
+        snapshot_u64(snapshot, &["worker_active_compile_us", "p95"])? ,
+        snapshot_u64(snapshot, &["worker_active_compile_us", "p99"])? ,
+        snapshot_u64(snapshot, &["raster_request_wall_us", "p50"])? ,
+        snapshot_u64(snapshot, &["raster_request_wall_us", "p95"])? ,
+        snapshot_u64(snapshot, &["raster_request_wall_us", "p99"])? ,
+        snapshot_u64(snapshot, &["generation_service_ui_us", "p50"])? ,
+        snapshot_u64(snapshot, &["generation_service_ui_us", "p95"])? ,
+        snapshot_u64(snapshot, &["generation_service_ui_us", "p99"])? ,
+        snapshot_u64(snapshot, &["gpu_materialize_publish_us", "p50"])? ,
+        snapshot_u64(snapshot, &["gpu_materialize_publish_us", "p95"])? ,
+        snapshot_u64(snapshot, &["gpu_materialize_publish_us", "p99"])? ,
         snapshot_u64(snapshot, &["activation_render_owner_us", "p50"])? ,
         snapshot_u64(snapshot, &["activation_render_owner_us", "p95"])? ,
         snapshot_u64(snapshot, &["activation_render_owner_us", "p99"])? ,
+        snapshot_u64(snapshot, &["generation_service_ui_us", "max"])? ,
+        snapshot_u64(snapshot, &["gpu_materialize_publish_us", "max"])? ,
+        snapshot_u64(snapshot, &["activation_render_owner_us", "max"])? ,
         value_u64(overhead, "trials")?,
         value_u64(overhead, "iterations")?,
         value_u64(overhead, "control_ticks")?,
@@ -1420,10 +1298,15 @@ An em dash means the future renderer-neutral category does not exist yet and is 
         value_u64(lifetime, "gpu_warmup_peak_bytes")?,
         value_u64(lifetime, "gpu_final_bytes")?,
         value_u64(lifetime, "gpu_peak_bytes")?,
-        snapshot_u64(snapshot, &["appkit_raster_slice_count"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_deadline_misses"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_coalesces"])? ,
-        snapshot_u64(snapshot, &["appkit_raster_cancellations"])? ,
+        snapshot_u64(snapshot, &["main_thread_raster_calls"])? ,
+        snapshot_u64(snapshot, &["worker_raster_calls"])? ,
+        snapshot_u64(snapshot, &["gpu_materializations"])? ,
+        snapshot_u64(snapshot, &["worker_submissions"])? ,
+        snapshot_u64(snapshot, &["worker_completions"])? ,
+        snapshot_u64(snapshot, &["worker_cancellations"])? ,
+        snapshot_u64(snapshot, &["worker_coalesces"])? ,
+        snapshot_u64(snapshot, &["worker_stale_rejections"])? ,
+        snapshot_u64(snapshot, &["worker_failures"])? ,
         value_u64(inventory, "matrix_fixture_count")?,
         value_u64(inventory, "dimmed_fixture_count")?,
         value_u64(inventory, "full_props_tank_fixture_count")?,
@@ -2301,160 +2184,248 @@ mod tests {
     }
 
     #[test]
-    fn appkit_raster_diagnostics_validate_and_render_for_review() {
-        assert!(APPKIT_RASTER_DIAGNOSTIC_TABLE_HEADER.starts_with("| Retained sample |"));
-        let diagnostics = serde_json::json!([
-            {
-                "start_cursor": 0,
-                "end_cursor": 2,
-                "items_completed": 2,
-                "elapsed_us": 3_100,
-                "setup_us": 100,
-                "max_item_us": 2_900,
-                "max_item_index": 1,
-                "max_item_scratch_setup_us": 100,
-                "max_item_text_setup_measure_us": 400,
-                "max_item_draw_flush_us": 1_800,
-                "max_item_pixel_copy_classify_us": 300,
-                "max_item_mask_normalize_finalize_us": 200
-            },
-            {
-                "start_cursor": 2,
-                "end_cursor": 2,
-                "items_completed": 0,
-                "elapsed_us": 80,
-                "setup_us": 80,
-                "max_item_us": 0,
-                "max_item_index": null,
-                "max_item_scratch_setup_us": 0,
-                "max_item_text_setup_measure_us": 0,
-                "max_item_draw_flush_us": 0,
-                "max_item_pixel_copy_classify_us": 0,
-                "max_item_mask_normalize_finalize_us": 0
-            }
-        ]);
+    fn runtime_snapshot_requires_schema6_worker_diagnostics() {
+        let snapshot = runtime_snapshot_fixture();
+        assert!(validate_runtime_snapshot(&snapshot).is_ok());
 
-        assert!(validate_appkit_raster_diagnostics(&diagnostics, 256, 2).is_ok());
-        assert!(validate_appkit_raster_diagnostics(&diagnostics, 255, 2).is_err());
-        assert!(validate_appkit_raster_diagnostics(&serde_json::json!([]), 256, 1).is_err());
-        assert!(validate_appkit_raster_diagnostics(&diagnostics, 256, 3).is_err());
-        let rows = format_appkit_raster_diagnostic_rows(&diagnostics).unwrap();
-        assert!(rows
-            .contains("| 0 | 0 | 2 | 2 | 3100 | 100 | 2900 | 1 | 100 | 400 | 1800 | 300 | 200 |"));
-        assert!(rows.contains("| 1 | 2 | 2 | 0 | 80 | 80 | 0 | — | 0 | 0 | 0 | 0 | 0 |"));
+        let mut legacy = snapshot.clone();
+        legacy["schema_version"] = serde_json::json!(5);
+        assert_eq!(
+            validate_runtime_snapshot(&legacy),
+            Err("runtime metrics snapshot schema_version is not 6".to_string())
+        );
 
-        let mut invalid = diagnostics.clone();
-        invalid[0].as_object_mut().unwrap().remove("max_item_us");
-        assert!(validate_appkit_raster_diagnostics(&invalid, 256, 2).is_err());
-
-        let mut setup_after_slice = diagnostics.clone();
-        setup_after_slice[0]["setup_us"] = serde_json::json!(3_101);
-        assert!(validate_appkit_raster_diagnostics(&setup_after_slice, 256, 2).is_err());
-
-        let mut item_longer_than_slice = diagnostics.clone();
-        item_longer_than_slice[0]["max_item_us"] = serde_json::json!(3_101);
-        assert!(validate_appkit_raster_diagnostics(&item_longer_than_slice, 256, 2).is_err());
-
-        let mut empty_with_item_time = diagnostics;
-        empty_with_item_time[1]["max_item_us"] = serde_json::json!(1);
-        assert!(validate_appkit_raster_diagnostics(&empty_with_item_time, 256, 2).is_err());
-
-        let mut phases_exceed_item = serde_json::json!([{
-            "start_cursor": 0,
-            "end_cursor": 1,
-            "items_completed": 1,
-            "elapsed_us": 1_000,
-            "setup_us": 0,
-            "max_item_us": 500,
-            "max_item_index": 0,
-            "max_item_scratch_setup_us": 101,
-            "max_item_text_setup_measure_us": 100,
-            "max_item_draw_flush_us": 100,
-            "max_item_pixel_copy_classify_us": 100,
-            "max_item_mask_normalize_finalize_us": 100
-        }]);
-        assert!(validate_appkit_raster_diagnostics(&phases_exceed_item, 256, 1).is_err());
-        phases_exceed_item[0]["max_item_scratch_setup_us"] = serde_json::json!(100);
-        assert!(validate_appkit_raster_diagnostics(&phases_exceed_item, 256, 1).is_ok());
+        for field in [
+            "worker_active_compile_us",
+            "raster_request_wall_us",
+            "generation_service_ui_us",
+            "gpu_materialize_publish_us",
+            "main_thread_raster_calls",
+            "worker_raster_calls",
+            "worker_submissions",
+            "worker_completions",
+            "worker_cancellations",
+            "worker_coalesces",
+            "worker_stale_rejections",
+            "worker_failures",
+            "gpu_materializations",
+            "generation_count",
+        ] {
+            let mut missing = snapshot.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_runtime_snapshot(&missing)
+                    .unwrap_err()
+                    .contains(field),
+                "missing field {field} was not rejected"
+            );
+        }
+        for metric in [
+            "ui_tick_us",
+            "state_prepare_us",
+            "gpu_translate_us",
+            "encode_us",
+            "queue_wait_us",
+            "worker_active_compile_us",
+            "raster_request_wall_us",
+            "generation_service_ui_us",
+            "gpu_materialize_publish_us",
+            "activation_render_owner_us",
+        ] {
+            let mut missing = snapshot.clone();
+            missing[metric].as_object_mut().unwrap().remove("max");
+            assert!(
+                validate_runtime_snapshot(&missing)
+                    .unwrap_err()
+                    .contains(&format!("{metric}.max")),
+                "missing max for {metric} was not rejected"
+            );
+        }
     }
 
     #[test]
-    fn baseline_gates_require_appkit_slice_to_pass_without_stage0_exception() {
-        let snapshot = baseline_gate_fixture();
-        let gates = evaluate_baseline_gates(&snapshot).unwrap();
+    fn baseline_gates_accept_exact_frozen_boundaries() {
+        let gates = evaluate_baseline_gates(&baseline_gate_fixture()).unwrap();
         assert!(gates.iter().all(|gate| gate.status == GateStatus::Pass));
         assert!(validate_gate_results(&gates).is_ok());
     }
 
     #[test]
-    fn baseline_gates_reject_any_other_miss() {
-        let mut snapshot = baseline_gate_fixture();
-        snapshot["activation_render_owner_us"]["p95"] = serde_json::json!(16_001);
-        let gates = evaluate_baseline_gates(&snapshot).unwrap();
-        let error = validate_gate_results(&gates).unwrap_err();
-        assert!(error.contains("activation-render-owner-slice"));
+    fn baseline_gates_reject_one_over_every_frozen_boundary() {
+        let cases = [
+            (&["ui_tick_us", "p95"][..], 1_423, "ui-tick-p95"),
+            (&["ui_tick_us", "p99"][..], 2_071, "ui-tick-p99"),
+            (&["encode_us", "p95"][..], 283, "encode-p95"),
+            (
+                &["main_thread_raster_calls"][..],
+                1,
+                "main-thread-raster-calls",
+            ),
+            (
+                &["generation_service_ui_us", "max"][..],
+                4_001,
+                "generation-service-ui-max",
+            ),
+            (
+                &["gpu_materialize_publish_us", "max"][..],
+                16_001,
+                "gpu-materialize-publish-max",
+            ),
+            (
+                &["activation_render_owner_us", "p95"][..],
+                16_001,
+                "activation-render-owner-slice",
+            ),
+            (
+                &["activation_render_owner_us", "max"][..],
+                16_001,
+                "activation-render-owner-slice",
+            ),
+            (
+                &["metrics_overhead_control", "net_ns_per_tick"][..],
+                28_441,
+                "metrics-overhead-control",
+            ),
+        ];
+        for (path, value, gate_id) in cases {
+            let mut snapshot = baseline_gate_fixture();
+            set_snapshot_u64(&mut snapshot, path, value);
+            let gates = evaluate_baseline_gates(&snapshot).unwrap();
+            let failed = gates.iter().find(|gate| gate.id == gate_id).unwrap();
+            assert_eq!(failed.status, GateStatus::Fail, "path {path:?}");
+            assert!(validate_gate_results(&gates).is_err(), "path {path:?}");
+        }
     }
 
     #[test]
-    fn baseline_gates_reject_appkit_slice_above_unchanged_limit() {
-        let mut snapshot = baseline_gate_fixture();
-        snapshot["appkit_raster_slice_us"]["p95"] = serde_json::json!(4_001);
-        let gates = evaluate_baseline_gates(&snapshot).unwrap();
-        let appkit = gates
-            .iter()
-            .find(|gate| gate.id == "appkit-raster-slice")
-            .unwrap();
-        assert_eq!(appkit.limit, "4000 us p95; 0 deadline misses");
-        assert_eq!(appkit.status, GateStatus::Fail);
-        assert!(appkit.disposition.is_empty());
-        assert!(validate_gate_results(&gates).is_err());
+    fn worker_generation_evidence_gate_rejects_vacuous_or_inconsistent_runs() {
+        for field in [
+            "worker_raster_calls",
+            "worker_submissions",
+            "worker_completions",
+            "gpu_materializations",
+            "generation_count",
+        ] {
+            let mut snapshot = baseline_gate_fixture();
+            snapshot[field] = serde_json::json!(0);
+            let gates = evaluate_baseline_gates(&snapshot).unwrap();
+            assert_eq!(
+                gates
+                    .iter()
+                    .find(|gate| gate.id == "worker-generation-evidence")
+                    .expect("worker generation evidence gate exists")
+                    .status,
+                GateStatus::Fail,
+                "zero {field} must fail worker generation evidence",
+            );
+        }
+
+        for (materializations, generations, completions) in [(2, 1, 2), (2, 2, 1)] {
+            let mut snapshot = baseline_gate_fixture();
+            snapshot["gpu_materializations"] = serde_json::json!(materializations);
+            snapshot["generation_count"] = serde_json::json!(generations);
+            snapshot["worker_completions"] = serde_json::json!(completions);
+            let gates = evaluate_baseline_gates(&snapshot).unwrap();
+            assert_eq!(
+                gates
+                    .iter()
+                    .find(|gate| gate.id == "worker-generation-evidence")
+                    .expect("worker generation evidence gate exists")
+                    .status,
+                GateStatus::Fail,
+                "inconsistent materializations={materializations} generations={generations} completions={completions} must fail",
+            );
+        }
     }
 
     #[test]
-    fn baseline_gates_accept_appkit_slice_at_exact_deadline() {
+    fn baseline_gate_limits_are_frozen_independent_of_observations() {
         let mut snapshot = baseline_gate_fixture();
-        snapshot["appkit_raster_slice_us"]["p95"] = serde_json::json!(4_000);
+        snapshot["ui_tick_us"]["p95"] = serde_json::json!(1);
+        snapshot["ui_tick_us"]["p99"] = serde_json::json!(2);
+        snapshot["encode_us"]["p95"] = serde_json::json!(3);
         let gates = evaluate_baseline_gates(&snapshot).unwrap();
-        let appkit = gates
+        let limits = gates
             .iter()
-            .find(|gate| gate.id == "appkit-raster-slice")
-            .unwrap();
-        assert_eq!(appkit.status, GateStatus::Pass);
-        assert!(validate_gate_results(&gates).is_ok());
+            .map(|gate| (gate.id, gate.limit.as_str()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(limits["ui-tick-p95"], "1422 us");
+        assert_eq!(limits["ui-tick-p99"], "2070 us");
+        assert_eq!(limits["encode-p95"], "282 us");
+        assert_eq!(limits["metrics-overhead-control"], "28440 ns/tick");
     }
 
     #[test]
-    fn baseline_gates_reject_any_appkit_deadline_miss_even_when_p95_passes() {
-        let mut snapshot = baseline_gate_fixture();
-        snapshot["appkit_raster_slice_us"]["p95"] = serde_json::json!(3_999);
-        snapshot["appkit_raster_deadline_misses"] = serde_json::json!(1);
+    fn hidden_gate_tracks_worker_submissions_and_gpu_materializations() {
+        for field in ["worker_submissions", "gpu_materializations"] {
+            let mut snapshot = baseline_gate_fixture();
+            snapshot["hidden_segment"]["steady_delta"][field] = serde_json::json!(1);
+            let gates = evaluate_baseline_gates(&snapshot).unwrap();
+            assert_eq!(
+                gates
+                    .iter()
+                    .find(|gate| gate.id == "hidden-steady-state")
+                    .unwrap()
+                    .status,
+                GateStatus::Fail
+            );
+        }
+    }
+
+    #[test]
+    fn scene_baseline_report_describes_worker_diagnostics_without_appkit_slices() {
+        let snapshot = runtime_snapshot_fixture();
         let gates = evaluate_baseline_gates(&snapshot).unwrap();
-        let appkit = gates
-            .iter()
-            .find(|gate| gate.id == "appkit-raster-slice")
-            .unwrap();
-        assert_eq!(appkit.status, GateStatus::Fail);
-        assert!(validate_gate_results(&gates).is_err());
+        let report = render_scene_baseline_report(
+            Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+            120_000,
+            &snapshot,
+            &BaselineSourceIdentity {
+                commit: "test-commit".to_string(),
+                tracked_tree_state: "clean".to_string(),
+            },
+            &gates,
+        )
+        .unwrap();
+        assert!(report.contains("Worker active compile"));
+        assert!(report.contains("Raster request wall time"));
+        assert!(report.contains("Generation-service UI work"));
+        assert!(report.contains("GPU materialize/upload/publish"));
+        assert!(report.contains(
+            "Worker submissions/completions/cancellations/coalesces/stale rejections/failures"
+        ));
+        assert!(report.contains("Main-thread/worker raster calls"));
+        assert!(report.contains("| `worker-generation-evidence` | PASS |"));
+        assert!(report.contains("| `ui-tick-p95` | PASS | 2 us | 1422 us |"));
+        assert!(report.contains("| `ui-tick-p99` | PASS | 3 us | 2070 us |"));
+        assert!(report.contains("| `encode-p95` | PASS | 2 us | 282 us |"));
+        assert!(!report.contains("AppKit raster slice"));
+        assert!(!report.contains("AppKit raster slice diagnostics"));
     }
 
     fn baseline_gate_fixture() -> serde_json::Value {
         serde_json::json!({
-            "ui_tick_us": {"p95": 1000, "p99": 1500},
-            "encode_us": {"p95": 100},
-            "compile_us": {"p95": 12000},
-            "appkit_raster_slice_us": {"p95": 3999},
-            "activation_render_owner_us": {"p95": 8000},
-            "metrics_overhead_control": {"net_ns_per_tick": 1000},
+            "ui_tick_us": {"p95": 1422, "p99": 2070},
+            "encode_us": {"p95": 282},
+            "main_thread_raster_calls": 0,
+            "worker_raster_calls": 1,
+            "worker_submissions": 1,
+            "worker_completions": 1,
+            "gpu_materializations": 1,
+            "generation_count": 1,
+            "generation_service_ui_us": {"max": 4000},
+            "gpu_materialize_publish_us": {"max": 16000},
+            "activation_render_owner_us": {"p95": 16000, "max": 16000},
+            "metrics_overhead_control": {"net_ns_per_tick": 28440},
             "capture_attempted": 1,
             "capture_succeeded": 1,
             "capture_failed": 0,
-            "appkit_raster_deadline_misses": 0,
             "persistent_gpu_objects_created": 0,
             "static_upload_bytes": 0,
             "hidden_segment": {
                 "transition_ticks": 1,
                 "steady_ticks": 2,
-                "steady_delta": {"prepare": 0, "appkit_raster_slices": 0, "queue_writes": 0, "surface_acquires": 0, "encode": 0, "submit": 0}
+                "steady_delta": {"prepare": 0, "worker_submissions": 0, "gpu_materializations": 0, "queue_writes": 0, "surface_acquires": 0, "encode": 0, "submit": 0}
             },
             "lifetime_audit": {
                 "frames": 4500,
@@ -2477,6 +2448,119 @@ mod tests {
                 "gpu_peak_bytes": 1009000
             }
         })
+    }
+
+    fn runtime_snapshot_fixture() -> serde_json::Value {
+        let mut snapshot = baseline_gate_fixture();
+        let object = snapshot.as_object_mut().unwrap();
+        object.insert("schema_version".into(), serde_json::json!(6));
+        for metric in [
+            "ui_tick_us",
+            "state_prepare_us",
+            "gpu_translate_us",
+            "encode_us",
+            "queue_wait_us",
+            "worker_active_compile_us",
+            "raster_request_wall_us",
+            "generation_service_ui_us",
+            "gpu_materialize_publish_us",
+            "activation_render_owner_us",
+        ] {
+            object.insert(
+                metric.into(),
+                serde_json::json!({"p50": 1, "p95": 2, "p99": 3, "max": 4}),
+            );
+        }
+        for metric in [
+            "generation_service_ui_us",
+            "gpu_materialize_publish_us",
+            "activation_render_owner_us",
+        ] {
+            object.get_mut(metric).unwrap()["max"] = serde_json::json!(match metric {
+                "generation_service_ui_us" => 4_000,
+                _ => 16_000,
+            });
+        }
+        for (field, value) in [
+            ("main_thread_raster_calls", 0),
+            ("worker_raster_calls", 1),
+            ("worker_submissions", 1),
+            ("worker_completions", 1),
+            ("worker_cancellations", 0),
+            ("worker_coalesces", 0),
+            ("worker_stale_rejections", 0),
+            ("worker_failures", 0),
+            ("gpu_materializations", 1),
+            ("generation_count", 1),
+        ] {
+            object.insert(field.into(), serde_json::json!(value));
+        }
+        object.insert("visible_samples".into(), serde_json::json!(100));
+        object.insert(
+            "fixture".into(),
+            serde_json::json!({
+                "fixture_id": "glorp-scene-baseline-v2",
+                "seed": "test",
+                "update_source": "fixed",
+                "cadence_ms": 250,
+                "logical_width": 360.0,
+                "logical_height": 360.0,
+                "physical_width": 720,
+                "physical_height": 720,
+                "backing_scale": 2.0
+            }),
+        );
+        object.insert(
+            "inventory".into(),
+            serde_json::json!({
+                "matrix_fixture_count": 630,
+                "dimmed_fixture_count": 126,
+                "full_props_tank_fixture_count": 630,
+                "max_prepared_gpu_primitives": {"observed": 1, "reservation": 0, "headroom": 1023, "limit": 1024},
+                "max_nodes": {"observed": 0, "reservation": 96, "headroom": 32, "limit": 128},
+                "max_static_primitives": {"observed": 0, "reservation": 640, "headroom": 128, "limit": 768},
+                "max_pet_slots": {"observed": 130, "reservation": 0, "headroom": 0, "limit": 130},
+                "max_visible_props": {"observed": 10, "reservation": 0, "headroom": 0, "limit": 10},
+                "max_round_tank_inhabitants": {"observed": 2, "reservation": 0, "headroom": 0, "limit": 2},
+                "max_ambient_instances": {"observed": 0, "reservation": 48, "headroom": 16, "limit": 64},
+                "max_blended_draws": {"observed": 0, "reservation": 192, "headroom": 64, "limit": 256},
+                "max_lights": {"observed": 0, "reservation": 1, "headroom": 1, "limit": 2},
+                "max_attachments": {"observed": 0, "reservation": 16, "headroom": 16, "limit": 32}
+            }),
+        );
+        object.insert(
+            "gpu_accounting".into(),
+            serde_json::json!({
+                "current_bytes": {"atlas_bytes": 1, "instance_ring_bytes": 1, "capture_bytes": 0, "total_bytes": 2},
+                "current_objects": {"host_infrastructure": 1, "atlas": 1, "instance_ring": 1, "capture": 0, "total_objects": 3},
+                "peak_total_bytes": 2,
+                "peak_total_objects": 3,
+                "objects_created_total": 3,
+                "objects_destroyed_total": 0
+            }),
+        );
+        object.insert(
+            "metrics_overhead_control".into(),
+            serde_json::json!({
+                "trials": 5,
+                "iterations": 100,
+                "control_ticks": 500,
+                "instrumented_ticks": 500,
+                "control_ns_per_tick": 1,
+                "instrumented_ns_per_tick": 2,
+                "net_ns_per_tick": 1
+            }),
+        );
+        snapshot
+    }
+
+    fn set_snapshot_u64(snapshot: &mut serde_json::Value, path: &[&str], value: u64) {
+        let (last, parents) = path.split_last().unwrap();
+        let mut current = snapshot;
+        for component in parents {
+            current = current.get_mut(*component).unwrap();
+        }
+        current[*last] = serde_json::json!(value);
     }
 
     #[test]

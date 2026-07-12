@@ -54,21 +54,6 @@ use crate::round::smooth::CompanionContentIdentity;
 /// scale divides the display font size by this. Matches the manifest's
 /// production atlas point size.
 const GLYPH_FONT_SIZE: f64 = RETAINED_ATLAS_POINT_SIZE;
-/// Stop starting native glyph work after this much of the AppKit tick. The
-/// remaining time is reserved for the final non-preemptible glyph and lane
-/// overhead; the hard deadline and acceptance gate remain 4 ms.
-#[cfg(test)]
-const APPKIT_RASTER_WORK_START_BUDGET: Duration = Duration::from_micros(1_500);
-#[cfg(test)]
-const APPKIT_RASTER_SLICE_DEADLINE: Duration = Duration::from_micros(4_000);
-
-#[cfg(test)]
-fn appkit_raster_budgets(setup_elapsed: Duration) -> (Duration, Duration) {
-    (
-        APPKIT_RASTER_WORK_START_BUDGET.saturating_sub(setup_elapsed),
-        APPKIT_RASTER_SLICE_DEADLINE.saturating_sub(setup_elapsed),
-    )
-}
 /// Logical-pixel margin the analytic-arc primitive rect extends past the stroke's
 /// outer radius, so the outer edge's one-physical-pixel coverage band has room to
 /// fall off inside the rect instead of being clipped at its boundary. A couple of
@@ -335,48 +320,11 @@ impl ResourcePreparationKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
-enum ResourceRequestAction {
-    Ready,
-    FailedCached,
-    Resume,
-    Replace { cancel_pending: bool },
-}
-
-#[cfg(test)]
-fn classify_resource_request(
-    active: Option<&ResourcePreparationKey>,
-    pending: Option<&ResourcePreparationKey>,
-    failed: Option<&ResourcePreparationKey>,
-    desired: &ResourcePreparationKey,
-) -> ResourceRequestAction {
-    if active == Some(desired) {
-        return ResourceRequestAction::Ready;
-    }
-    if failed == Some(desired) {
-        return ResourceRequestAction::FailedCached;
-    }
-    if pending == Some(desired) {
-        return ResourceRequestAction::Resume;
-    }
-    ResourceRequestAction::Replace { cancel_pending: pending.is_some() }
-}
-
-#[cfg(test)]
-fn publish_is_allowed_in_slice(cpu_complete: bool, elapsed: Duration, budget: Duration) -> bool {
-    cpu_complete && elapsed < budget
-}
-
-#[cfg(test)]
-fn preparation_wall_us(enqueued_at: Instant, completed_at: Instant) -> u32 {
-    duration_us(completed_at.saturating_duration_since(enqueued_at))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResourcePreparationRequest {
     id: u64,
     key: ResourcePreparationKey,
+    enqueued_at: Instant,
 }
 
 struct FailedGlyphPreparation {
@@ -415,7 +363,7 @@ impl ResourcePreparationController {
             .checked_add(1)
             .filter(|next| *next < u64::MAX)
             .expect("resource preparation request id exhausted");
-        ResourcePreparationRequest { id, key }
+        ResourcePreparationRequest { id, key, enqueued_at: Instant::now() }
     }
 
     fn set_visible_desired(&mut self, key: ResourcePreparationKey) -> Option<u64> {
@@ -461,6 +409,12 @@ impl ResourcePreparationController {
     fn mark_submitted(&mut self, request: ResourcePreparationRequest) {
         debug_assert!(self.running.is_none());
         self.running = Some(request);
+    }
+
+    fn coalesces(&self, key: &ResourcePreparationKey) -> bool {
+        self.visible
+            && self.desired.as_ref().map(|request| &request.key) == Some(key)
+            && (self.running.is_some() || self.latest_pending.is_some())
     }
 
     fn accepts_completed(
@@ -1593,13 +1547,18 @@ impl RetainedHost {
         identity: &CompanionContentIdentity,
         desired_backing_scale: f64,
     ) -> ResourcePreparationTick {
+        let service_started_at = Instant::now();
         let desired_key = ResourcePreparationKey::new(identity.clone(), desired_backing_scale);
         if self.resource_preparation.worker_unavailable {
             let active_matches = self.glyph_resources.as_ref().is_some_and(|active| {
                 ResourcePreparationKey::new(active.identity.clone(), active.backing_scale)
                     == desired_key
             });
-            return terminal_worker_decision(active_matches, self.glyph_resources.is_some());
+            let tick = terminal_worker_decision(active_matches, self.glyph_resources.is_some());
+            return self.finish_generation_service(service_started_at, tick);
+        }
+        if self.resource_preparation.coalesces(&desired_key) {
+            self.metrics.record_worker_coalesce();
         }
         let previous_id = self
             .resource_preparation
@@ -1612,8 +1571,10 @@ impl RetainedHost {
         {
             self.failed_glyph_preparation = None;
             if self.raster_worker.cancel_with_epoch(epoch).is_err() {
-                return self.worker_unavailable();
+                let tick = self.worker_unavailable();
+                return self.finish_generation_service(service_started_at, tick);
             }
+            self.metrics.record_worker_cancellation();
         }
         if previous_id
             != self
@@ -1634,18 +1595,28 @@ impl RetainedHost {
         let mut completed = None;
         match self.raster_worker.try_recv() {
             Ok(Some(reply)) => {
-                let reply_id = match &reply {
-                    RasterReply::Completed { job_id, .. }
-                    | RasterReply::Cancelled { job_id, .. }
-                    | RasterReply::Failed { job_id, .. }
-                    | RasterReply::WorkerPanicked { job_id, .. } => *job_id,
+                let (reply_id, timing) = match &reply {
+                    RasterReply::Completed { job_id, timing, .. }
+                    | RasterReply::Cancelled { job_id, timing }
+                    | RasterReply::Failed { job_id, timing, .. }
+                    | RasterReply::WorkerPanicked { job_id, timing } => (*job_id, *timing),
                 };
+                self.metrics.record_worker_terminal(
+                    timing.active_compile,
+                    timing.raster_calls,
+                    timing.main_thread_raster_calls,
+                );
                 let running = self.resource_preparation.finish_running(reply_id);
-                if running.is_none() {
-                    return self.worker_unavailable();
-                }
+                let Some(running_request) = running.as_ref() else {
+                    let tick = self.worker_unavailable();
+                    return self.finish_generation_service(service_started_at, tick);
+                };
+                self.metrics.record_raster_request_wall_us(duration_us(
+                    Instant::now().saturating_duration_since(running_request.enqueued_at),
+                ));
                 match reply {
                     RasterReply::Completed { resources, .. } => {
+                        self.metrics.record_worker_completion();
                         if let Some(request) = running.filter(|request| {
                             request == &current
                                 && self
@@ -1653,23 +1624,34 @@ impl RetainedHost {
                                     .accepts_completed(request, &desired_key)
                         }) {
                             completed = Some((request, resources));
+                        } else {
+                            self.metrics.record_worker_stale_rejection();
                         }
                     }
                     RasterReply::Failed { category, .. } => {
+                        self.metrics.record_worker_failure();
                         if let Some(request) = running.filter(|request| request == &current) {
                             self.failed_glyph_preparation = Some(FailedGlyphPreparation {
                                 id: request.id,
                                 key: request.key,
                                 category,
                             });
+                        } else {
+                            self.metrics.record_worker_stale_rejection();
                         }
                     }
-                    RasterReply::WorkerPanicked { .. } => return self.worker_unavailable(),
+                    RasterReply::WorkerPanicked { .. } => {
+                        let tick = self.worker_unavailable();
+                        return self.finish_generation_service(service_started_at, tick);
+                    }
                     RasterReply::Cancelled { .. } => {}
                 }
             }
             Ok(None) => {}
-            Err(_) => return self.worker_unavailable(),
+            Err(_) => {
+                let tick = self.worker_unavailable();
+                return self.finish_generation_service(service_started_at, tick);
+            }
         }
 
         if let Some((request, resources)) = completed {
@@ -1681,8 +1663,17 @@ impl RetainedHost {
             if still_current {
                 self.resource_preparation.latest_pending = None;
                 self.failed_glyph_preparation = None;
-                return self.publish_prepared_resources(request, resources);
+                self.metrics
+                    .record_generation_service_ui_us(duration_us(service_started_at.elapsed()));
+                let materialize_started_at = Instant::now();
+                let tick = self.publish_prepared_resources(request, resources);
+                self.metrics.record_gpu_materialize_publish_us(duration_us(
+                    materialize_started_at.elapsed(),
+                ));
+                self.metrics.record_generation_accepted();
+                return tick;
             }
+            self.metrics.record_worker_stale_rejection();
         }
 
         let active_ready = self.glyph_resources.as_ref().is_some_and(|active| {
@@ -1692,12 +1683,14 @@ impl RetainedHost {
         if active_ready {
             self.resource_preparation.latest_pending = None;
             self.failed_glyph_preparation = None;
-            return ResourcePreparationTick::Ready;
+            return self
+                .finish_generation_service(service_started_at, ResourcePreparationTick::Ready);
         }
         if let Some(category) =
             cached_current_failure(self.failed_glyph_preparation.as_ref(), &current)
         {
-            return self.failure_tick(category);
+            let tick = self.failure_tick(category);
+            return self.finish_generation_service(service_started_at, tick);
         }
         if let Some(request) = self.resource_preparation.take_pending_if_idle() {
             let manifest = GlyphRepertoireManifest::for_active_pet(
@@ -1708,15 +1701,22 @@ impl RetainedHost {
                 .raster_worker
                 .try_submit(RasterJob::new(request.id, manifest))
             {
-                Ok(()) => self.resource_preparation.mark_submitted(request),
+                Ok(()) => {
+                    self.resource_preparation.mark_submitted(request);
+                    self.metrics.record_worker_submission();
+                }
                 Err(
                     RasterSubmitError::Busy(_)
                     | RasterSubmitError::Stale(_)
                     | RasterSubmitError::Disconnected(_),
-                ) => return self.worker_unavailable(),
+                ) => {
+                    let tick = self.worker_unavailable();
+                    return self.finish_generation_service(service_started_at, tick);
+                }
             }
         }
-        self.yield_tick()
+        let tick = self.yield_tick();
+        self.finish_generation_service(service_started_at, tick)
     }
 
     fn suspend_resource_preparation(
@@ -1727,9 +1727,21 @@ impl RetainedHost {
         let key = ResourcePreparationKey::new(identity.clone(), desired_backing_scale);
         if let Some(epoch) = self.resource_preparation.suspend(key) {
             if self.raster_worker.cancel_with_epoch(epoch).is_err() {
-                self.resource_preparation.worker_unavailable = true;
+                self.mark_worker_unavailable();
+            } else {
+                self.metrics.record_worker_cancellation();
             }
         }
+    }
+
+    fn finish_generation_service(
+        &mut self,
+        started_at: Instant,
+        tick: ResourcePreparationTick,
+    ) -> ResourcePreparationTick {
+        self.metrics
+            .record_generation_service_ui_us(duration_us(started_at.elapsed()));
+        tick
     }
 
     fn publish_prepared_resources(
@@ -1779,7 +1791,7 @@ impl RetainedHost {
 
     fn worker_unavailable(&mut self) -> ResourcePreparationTick {
         let category = RetainedFailureCategory::RasterWorkerUnavailable;
-        self.resource_preparation.worker_unavailable = true;
+        self.mark_worker_unavailable();
         if let Some(current) = self.resource_preparation.desired.clone() {
             self.failed_glyph_preparation = Some(FailedGlyphPreparation {
                 id: current.id,
@@ -1788,6 +1800,13 @@ impl RetainedHost {
             });
         }
         self.failure_tick(category)
+    }
+
+    fn mark_worker_unavailable(&mut self) {
+        if !self.resource_preparation.worker_unavailable {
+            self.metrics.record_worker_failure();
+            self.resource_preparation.worker_unavailable = true;
+        }
     }
 
     fn record_resource_preparation_skip(&mut self) -> FrameProgress {
@@ -2758,18 +2777,17 @@ mod tests {
     use super::parity::srgb_channel_to_linear;
     use super::resources::GlyphEntryKind;
     use super::{
-        appkit_raster_budgets, cached_current_failure, classify_resource_request,
-        create_atlas_bind_group_layout, create_pipelines, current_process_rss_bytes, glyph_advance,
-        glyph_ink_rect, glyph_run_height, glyph_run_width, persistent_instance_capacity,
-        physical_dimension, preparation_wall_us, publish_is_allowed_in_slice, push_analytic_arc,
+        cached_current_failure, create_atlas_bind_group_layout, create_pipelines,
+        current_process_rss_bytes, glyph_advance, glyph_ink_rect, glyph_run_height,
+        glyph_run_width, persistent_instance_capacity, physical_dimension, push_analytic_arc,
         resource_failure_tick, run_lifetime_schedule, terminal_worker_decision, upload_glyph_atlas,
         CompiledGlyphAtlas, CompiledRetainedResources, FailedGlyphPreparation, GlyphAtlasEntry,
         GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
         LayerActivationState, LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
         PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationController,
-        ResourcePreparationKey, ResourcePreparationTick, ResourceRequestAction,
-        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
-        FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE, RETAINED_ATLAS_POINT_SIZE,
+        ResourcePreparationKey, ResourcePreparationTick, RetainedFailureCategory,
+        RetainedResourceCounters, SmoothBlendMode, FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE,
+        RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -2935,82 +2953,6 @@ mod tests {
     /// wobbles a fixed set of primitives, so the count never changes and the
     /// persistent ring is written but never grown after warmup.
     const AMBIENT_PRIMITIVE_COUNT: usize = 96;
-
-    #[test]
-    fn appkit_raster_budgets_reserve_measured_guard_and_charge_setup() {
-        assert_eq!(
-            appkit_raster_budgets(std::time::Duration::ZERO),
-            (
-                std::time::Duration::from_micros(1_500),
-                std::time::Duration::from_micros(4_000),
-            )
-        );
-        assert_eq!(
-            appkit_raster_budgets(std::time::Duration::from_micros(1_000)),
-            (
-                std::time::Duration::from_micros(500),
-                std::time::Duration::from_micros(3_000),
-            )
-        );
-        assert_eq!(
-            appkit_raster_budgets(std::time::Duration::from_micros(2_000)),
-            (
-                std::time::Duration::ZERO,
-                std::time::Duration::from_micros(2_000),
-            )
-        );
-    }
-
-    #[test]
-    fn resource_request_coalesces_same_identity_and_replaces_stale_before_work() {
-        let fuzz =
-            ResourcePreparationKey::new(CompanionContentIdentity::for_pet(Species::Fuzz), 2.0);
-        let crystal =
-            ResourcePreparationKey::new(CompanionContentIdentity::for_pet(Species::Crystal), 2.0);
-        assert_eq!(
-            classify_resource_request(None, Some(&fuzz), None, &fuzz),
-            ResourceRequestAction::Resume
-        );
-        assert_eq!(
-            classify_resource_request(None, Some(&fuzz), None, &crystal),
-            ResourceRequestAction::Replace { cancel_pending: true }
-        );
-        assert_eq!(
-            classify_resource_request(Some(&fuzz), Some(&crystal), None, &fuzz),
-            ResourceRequestAction::Ready
-        );
-    }
-
-    #[test]
-    fn completed_cpu_atlas_publishes_only_with_budget_remaining() {
-        assert!(publish_is_allowed_in_slice(
-            true,
-            std::time::Duration::from_micros(3_999),
-            std::time::Duration::from_micros(4_000),
-        ));
-        assert!(!publish_is_allowed_in_slice(
-            true,
-            std::time::Duration::from_micros(4_000),
-            std::time::Duration::from_micros(4_000),
-        ));
-        assert!(!publish_is_allowed_in_slice(
-            true,
-            std::time::Duration::from_micros(4_001),
-            std::time::Duration::from_micros(4_000),
-        ));
-        assert!(!publish_is_allowed_in_slice(
-            false,
-            std::time::Duration::from_micros(1),
-            std::time::Duration::from_micros(4_000),
-        ));
-    }
-
-    #[test]
-    fn raster_total_is_enqueue_to_cpu_completion_wall_time() {
-        let enqueued = std::time::Instant::now();
-        let completed = enqueued + std::time::Duration::from_micros(12_345);
-        assert_eq!(preparation_wall_us(enqueued, completed), 12_345);
-    }
 
     /// A deterministic ambient animation strip as prepared GPU frames. Each frame
     /// carries the same primitive count with per-frame position wobble — the

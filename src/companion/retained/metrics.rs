@@ -8,7 +8,6 @@ use crate::presentation::companion_scene::scene::{
 };
 
 pub(crate) const METRIC_SAMPLE_CAPACITY: usize = 4_096;
-pub(crate) const APPKIT_RASTER_DIAGNOSTIC_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub(crate) struct FixedSamples<const N: usize> {
@@ -52,63 +51,6 @@ impl<const N: usize> FixedSamples<N> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
-pub(crate) struct AppkitRasterSliceDiagnostic {
-    pub start_cursor: u32,
-    pub end_cursor: u32,
-    pub items_completed: u32,
-    pub elapsed_us: u32,
-    pub setup_us: u32,
-    pub max_item_us: u32,
-    pub max_item_index: Option<u32>,
-    pub max_item_scratch_setup_us: u32,
-    pub max_item_text_setup_measure_us: u32,
-    pub max_item_draw_flush_us: u32,
-    pub max_item_pixel_copy_classify_us: u32,
-    pub max_item_mask_normalize_finalize_us: u32,
-}
-
-#[derive(Debug, Clone)]
-struct FixedAppkitRasterDiagnostics<const N: usize> {
-    values: [AppkitRasterSliceDiagnostic; N],
-    len: usize,
-    next: usize,
-}
-
-impl<const N: usize> Default for FixedAppkitRasterDiagnostics<N> {
-    fn default() -> Self {
-        assert!(
-            N > 0,
-            "FixedAppkitRasterDiagnostics requires non-zero capacity"
-        );
-        Self {
-            values: [AppkitRasterSliceDiagnostic::default(); N],
-            len: 0,
-            next: 0,
-        }
-    }
-}
-
-impl<const N: usize> FixedAppkitRasterDiagnostics<N> {
-    #[allow(dead_code)] // Preserved until worker timing is wired in the metrics follow-up.
-    fn push(&mut self, value: AppkitRasterSliceDiagnostic) {
-        self.values[self.next] = value;
-        self.next = (self.next + 1) % N;
-        self.len = self.len.saturating_add(1).min(N);
-    }
-
-    fn chronological_values(&self) -> Vec<AppkitRasterSliceDiagnostic> {
-        if self.len < N {
-            return self.values[..self.len].to_vec();
-        }
-        self.values[self.next..]
-            .iter()
-            .chain(self.values[..self.next].iter())
-            .copied()
-            .collect()
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) struct RuntimeIdentity {
     pub device_epoch: Option<u64>,
@@ -140,6 +82,7 @@ pub(crate) struct Percentiles {
     pub p50: Option<u32>,
     pub p95: Option<u32>,
     pub p99: Option<u32>,
+    pub max: Option<u32>,
 }
 
 impl Percentiles {
@@ -148,6 +91,7 @@ impl Percentiles {
             p50: samples.percentile(50),
             p95: samples.percentile(95),
             p99: samples.percentile(99),
+            max: samples.percentile(100),
         }
     }
 }
@@ -253,7 +197,8 @@ impl CompanionCapacityInventory {
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub(crate) struct RuntimeWorkCounters {
     pub prepare: u64,
-    pub appkit_raster_slices: u64,
+    pub worker_submissions: u64,
+    pub gpu_materializations: u64,
     pub queue_writes: u64,
     pub surface_acquires: u64,
     pub encode: u64,
@@ -264,9 +209,12 @@ impl RuntimeWorkCounters {
     fn saturating_sub(self, previous: Self) -> Self {
         Self {
             prepare: self.prepare.saturating_sub(previous.prepare),
-            appkit_raster_slices: self
-                .appkit_raster_slices
-                .saturating_sub(previous.appkit_raster_slices),
+            worker_submissions: self
+                .worker_submissions
+                .saturating_sub(previous.worker_submissions),
+            gpu_materializations: self
+                .gpu_materializations
+                .saturating_sub(previous.gpu_materializations),
             queue_writes: self.queue_writes.saturating_sub(previous.queue_writes),
             surface_acquires: self
                 .surface_acquires
@@ -279,9 +227,12 @@ impl RuntimeWorkCounters {
     fn saturating_add(self, other: Self) -> Self {
         Self {
             prepare: self.prepare.saturating_add(other.prepare),
-            appkit_raster_slices: self
-                .appkit_raster_slices
-                .saturating_add(other.appkit_raster_slices),
+            worker_submissions: self
+                .worker_submissions
+                .saturating_add(other.worker_submissions),
+            gpu_materializations: self
+                .gpu_materializations
+                .saturating_add(other.gpu_materializations),
             queue_writes: self.queue_writes.saturating_add(other.queue_writes),
             surface_acquires: self.surface_acquires.saturating_add(other.surface_acquires),
             encode: self.encode.saturating_add(other.encode),
@@ -411,21 +362,21 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub gpu_translate_us: Percentiles,
     pub encode_us: Percentiles,
     pub queue_wait_us: Percentiles,
-    pub compile_us: Percentiles,
-    pub appkit_raster_queue_wait_us: Percentiles,
-    pub appkit_raster_slice_us: Percentiles,
-    pub appkit_raster_total_us: Percentiles,
-    pub appkit_raster_slice_count: u64,
-    pub appkit_raster_deadline_misses: u64,
-    pub appkit_raster_coalesces: u64,
-    pub appkit_raster_cancellations: u64,
-    pub appkit_raster_diagnostic_capacity: usize,
-    pub appkit_raster_slice_diagnostics: Vec<AppkitRasterSliceDiagnostic>,
+    pub worker_active_compile_us: Percentiles,
+    pub raster_request_wall_us: Percentiles,
+    pub generation_service_ui_us: Percentiles,
+    pub gpu_materialize_publish_us: Percentiles,
     pub activation_render_owner_us: Percentiles,
+    pub main_thread_raster_calls: u64,
+    pub worker_raster_calls: u64,
+    pub worker_submissions: u64,
+    pub worker_completions: u64,
+    pub worker_cancellations: u64,
+    pub worker_coalesces: u64,
+    pub worker_stale_rejections: u64,
+    pub worker_failures: u64,
+    pub gpu_materializations: u64,
     pub generation_count: u64,
-    pub coalesced_updates: u64,
-    pub cancellations: u64,
-    pub stale_rejections: u64,
     pub static_upload_bytes: u64,
     pub dynamic_upload_bytes: u64,
     pub queue_writes: u64,
@@ -462,21 +413,21 @@ pub(crate) struct CompanionRuntimeMetrics {
     gpu_translate_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     encode_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     queue_wait_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
-    compile_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
-    appkit_raster_queue_wait_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
-    appkit_raster_slice_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
-    appkit_raster_total_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
-    appkit_raster_slice_count: u64,
-    appkit_raster_deadline_misses: u64,
-    appkit_raster_coalesces: u64,
-    appkit_raster_cancellations: u64,
-    appkit_raster_slice_diagnostics:
-        FixedAppkitRasterDiagnostics<APPKIT_RASTER_DIAGNOSTIC_CAPACITY>,
+    worker_active_compile_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    raster_request_wall_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    generation_service_ui_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    gpu_materialize_publish_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     activation_render_owner_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    main_thread_raster_calls: u64,
+    worker_raster_calls: u64,
+    worker_submissions: u64,
+    worker_completions: u64,
+    worker_cancellations: u64,
+    worker_coalesces: u64,
+    worker_stale_rejections: u64,
+    worker_failures: u64,
+    gpu_materializations: u64,
     generation_count: u64,
-    coalesced_updates: u64,
-    cancellations: u64,
-    stale_rejections: u64,
     static_upload_bytes: u64,
     dynamic_upload_bytes: u64,
     queue_writes: u64,
@@ -523,20 +474,21 @@ impl Default for CompanionRuntimeMetrics {
             gpu_translate_us: FixedSamples::default(),
             encode_us: FixedSamples::default(),
             queue_wait_us: FixedSamples::default(),
-            compile_us: FixedSamples::default(),
-            appkit_raster_queue_wait_us: FixedSamples::default(),
-            appkit_raster_slice_us: FixedSamples::default(),
-            appkit_raster_total_us: FixedSamples::default(),
-            appkit_raster_slice_count: 0,
-            appkit_raster_deadline_misses: 0,
-            appkit_raster_coalesces: 0,
-            appkit_raster_cancellations: 0,
-            appkit_raster_slice_diagnostics: FixedAppkitRasterDiagnostics::default(),
+            worker_active_compile_us: FixedSamples::default(),
+            raster_request_wall_us: FixedSamples::default(),
+            generation_service_ui_us: FixedSamples::default(),
+            gpu_materialize_publish_us: FixedSamples::default(),
             activation_render_owner_us: FixedSamples::default(),
+            main_thread_raster_calls: 0,
+            worker_raster_calls: 0,
+            worker_submissions: 0,
+            worker_completions: 0,
+            worker_cancellations: 0,
+            worker_coalesces: 0,
+            worker_stale_rejections: 0,
+            worker_failures: 0,
+            gpu_materializations: 0,
             generation_count: 0,
-            coalesced_updates: 0,
-            cancellations: 0,
-            stale_rejections: 0,
             static_upload_bytes: 0,
             dynamic_upload_bytes: 0,
             queue_writes: 0,
@@ -647,47 +599,60 @@ impl CompanionRuntimeMetrics {
         }
     }
 
-    #[allow(dead_code)] // Preserved until worker timing is wired in the metrics follow-up.
-    pub(crate) fn record_compile_us(&mut self, value: u32) {
-        self.compile_us.push(value);
-        increment(&mut self.generation_count, 1);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_appkit_raster_queue_wait_us(&mut self, value: u32) {
-        self.appkit_raster_queue_wait_us.push(value);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_appkit_raster_slice_us(&mut self, value: u32, deadline_missed: bool) {
-        self.appkit_raster_slice_us.push(value);
-        increment(&mut self.appkit_raster_slice_count, 1);
-        if deadline_missed {
-            increment(&mut self.appkit_raster_deadline_misses, 1);
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_appkit_raster_total_us(&mut self, value: u32) {
-        self.appkit_raster_total_us.push(value);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_appkit_raster_coalesce(&mut self) {
-        increment(&mut self.appkit_raster_coalesces, 1);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_appkit_raster_cancellation(&mut self) {
-        increment(&mut self.appkit_raster_cancellations, 1);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_appkit_raster_slice_diagnostic(
+    pub(crate) fn record_worker_terminal(
         &mut self,
-        diagnostic: AppkitRasterSliceDiagnostic,
+        active_compile: Duration,
+        raster_calls: u32,
+        main_thread_raster_calls: u32,
     ) {
-        self.appkit_raster_slice_diagnostics.push(diagnostic);
+        self.worker_active_compile_us
+            .push(duration_us(active_compile));
+        increment(&mut self.worker_raster_calls, u64::from(raster_calls));
+        increment(
+            &mut self.main_thread_raster_calls,
+            u64::from(main_thread_raster_calls),
+        );
+    }
+
+    pub(crate) fn record_raster_request_wall_us(&mut self, value: u32) {
+        self.raster_request_wall_us.push(value);
+    }
+
+    pub(crate) fn record_generation_service_ui_us(&mut self, value: u32) {
+        self.generation_service_ui_us.push(value);
+    }
+
+    pub(crate) fn record_gpu_materialize_publish_us(&mut self, value: u32) {
+        self.gpu_materialize_publish_us.push(value);
+        increment(&mut self.gpu_materializations, 1);
+    }
+
+    pub(crate) fn record_worker_submission(&mut self) {
+        increment(&mut self.worker_submissions, 1);
+    }
+
+    pub(crate) fn record_worker_completion(&mut self) {
+        increment(&mut self.worker_completions, 1);
+    }
+
+    pub(crate) fn record_worker_cancellation(&mut self) {
+        increment(&mut self.worker_cancellations, 1);
+    }
+
+    pub(crate) fn record_worker_coalesce(&mut self) {
+        increment(&mut self.worker_coalesces, 1);
+    }
+
+    pub(crate) fn record_worker_stale_rejection(&mut self) {
+        increment(&mut self.worker_stale_rejections, 1);
+    }
+
+    pub(crate) fn record_worker_failure(&mut self) {
+        increment(&mut self.worker_failures, 1);
+    }
+
+    pub(crate) fn record_generation_accepted(&mut self) {
+        increment(&mut self.generation_count, 1);
     }
 
     pub(crate) fn record_activation_render_owner_us(&mut self, value: u32) {
@@ -794,7 +759,8 @@ impl CompanionRuntimeMetrics {
     pub(crate) fn work_counters(&self) -> RuntimeWorkCounters {
         RuntimeWorkCounters {
             prepare: self.prepare_count,
-            appkit_raster_slices: self.appkit_raster_slice_count,
+            worker_submissions: self.worker_submissions,
+            gpu_materializations: self.gpu_materializations,
             queue_writes: self.queue_writes,
             surface_acquires: self.surface_acquires,
             encode: self.encode_count,
@@ -881,7 +847,7 @@ impl CompanionRuntimeMetrics {
         fixture: RuntimeFixtureIdentity,
     ) -> CompanionRuntimeMetricsSnapshot {
         CompanionRuntimeMetricsSnapshot {
-            schema_version: 5,
+            schema_version: 6,
             identity,
             fixture,
             sample_capacity: METRIC_SAMPLE_CAPACITY,
@@ -891,25 +857,21 @@ impl CompanionRuntimeMetrics {
             gpu_translate_us: Percentiles::from_samples(&self.gpu_translate_us),
             encode_us: Percentiles::from_samples(&self.encode_us),
             queue_wait_us: Percentiles::from_samples(&self.queue_wait_us),
-            compile_us: Percentiles::from_samples(&self.compile_us),
-            appkit_raster_queue_wait_us: Percentiles::from_samples(
-                &self.appkit_raster_queue_wait_us,
-            ),
-            appkit_raster_slice_us: Percentiles::from_samples(&self.appkit_raster_slice_us),
-            appkit_raster_total_us: Percentiles::from_samples(&self.appkit_raster_total_us),
-            appkit_raster_slice_count: self.appkit_raster_slice_count,
-            appkit_raster_deadline_misses: self.appkit_raster_deadline_misses,
-            appkit_raster_coalesces: self.appkit_raster_coalesces,
-            appkit_raster_cancellations: self.appkit_raster_cancellations,
-            appkit_raster_diagnostic_capacity: APPKIT_RASTER_DIAGNOSTIC_CAPACITY,
-            appkit_raster_slice_diagnostics: self
-                .appkit_raster_slice_diagnostics
-                .chronological_values(),
+            worker_active_compile_us: Percentiles::from_samples(&self.worker_active_compile_us),
+            raster_request_wall_us: Percentiles::from_samples(&self.raster_request_wall_us),
+            generation_service_ui_us: Percentiles::from_samples(&self.generation_service_ui_us),
+            gpu_materialize_publish_us: Percentiles::from_samples(&self.gpu_materialize_publish_us),
             activation_render_owner_us: Percentiles::from_samples(&self.activation_render_owner_us),
+            main_thread_raster_calls: self.main_thread_raster_calls,
+            worker_raster_calls: self.worker_raster_calls,
+            worker_submissions: self.worker_submissions,
+            worker_completions: self.worker_completions,
+            worker_cancellations: self.worker_cancellations,
+            worker_coalesces: self.worker_coalesces,
+            worker_stale_rejections: self.worker_stale_rejections,
+            worker_failures: self.worker_failures,
+            gpu_materializations: self.gpu_materializations,
             generation_count: self.generation_count,
-            coalesced_updates: self.coalesced_updates,
-            cancellations: self.cancellations,
-            stale_rejections: self.stale_rejections,
             static_upload_bytes: self.static_upload_bytes,
             dynamic_upload_bytes: self.dynamic_upload_bytes,
             queue_writes: self.queue_writes,
@@ -1052,6 +1014,7 @@ mod tests {
         assert_eq!(samples.percentile(50), Some(30));
         assert_eq!(samples.percentile(95), Some(50));
         assert_eq!(samples.percentile(99), Some(50));
+        assert_eq!(Percentiles::from_samples(&samples).max, Some(50));
     }
 
     #[test]
@@ -1061,12 +1024,18 @@ mod tests {
         metrics.record_state_prepare_us(900);
         metrics.record_gpu_translate_us(300);
         metrics.record_encode_us(800);
-        metrics.record_appkit_raster_queue_wait_us(17);
-        metrics.record_appkit_raster_slice_us(3_999, false);
-        metrics.record_appkit_raster_slice_us(4_001, true);
-        metrics.record_appkit_raster_total_us(12_345);
-        metrics.record_appkit_raster_coalesce();
-        metrics.record_appkit_raster_cancellation();
+        metrics.record_worker_terminal(Duration::from_micros(12_345), 242, 0);
+        metrics.record_raster_request_wall_us(250_000);
+        metrics.record_generation_service_ui_us(3_999);
+        metrics.record_generation_service_ui_us(4_000);
+        metrics.record_gpu_materialize_publish_us(15_999);
+        metrics.record_worker_submission();
+        metrics.record_worker_completion();
+        metrics.record_worker_cancellation();
+        metrics.record_worker_coalesce();
+        metrics.record_worker_stale_rejection();
+        metrics.record_worker_failure();
+        metrics.record_generation_accepted();
         metrics.record_persistent_gpu_create(3);
         metrics.observe_nodes(72);
         let snapshot = metrics.snapshot(
@@ -1084,18 +1053,25 @@ mod tests {
                 backing_scale: 2.0,
             },
         );
-        assert_eq!(snapshot.schema_version, 5);
+        assert_eq!(snapshot.schema_version, 6);
         assert_eq!(snapshot.ui_tick_us.p95, Some(1_500));
         assert_eq!(snapshot.state_prepare_us.p95, Some(900));
         assert_eq!(snapshot.gpu_translate_us.p95, Some(300));
         assert_eq!(snapshot.encode_us.p99, Some(800));
-        assert_eq!(snapshot.appkit_raster_queue_wait_us.p95, Some(17));
-        assert_eq!(snapshot.appkit_raster_slice_us.p95, Some(4_001));
-        assert_eq!(snapshot.appkit_raster_total_us.p95, Some(12_345));
-        assert_eq!(snapshot.appkit_raster_slice_count, 2);
-        assert_eq!(snapshot.appkit_raster_deadline_misses, 1);
-        assert_eq!(snapshot.appkit_raster_coalesces, 1);
-        assert_eq!(snapshot.appkit_raster_cancellations, 1);
+        assert_eq!(snapshot.worker_active_compile_us.max, Some(12_345));
+        assert_eq!(snapshot.raster_request_wall_us.max, Some(250_000));
+        assert_eq!(snapshot.generation_service_ui_us.max, Some(4_000));
+        assert_eq!(snapshot.gpu_materialize_publish_us.max, Some(15_999));
+        assert_eq!(snapshot.main_thread_raster_calls, 0);
+        assert_eq!(snapshot.worker_raster_calls, 242);
+        assert_eq!(snapshot.worker_submissions, 1);
+        assert_eq!(snapshot.worker_completions, 1);
+        assert_eq!(snapshot.worker_cancellations, 1);
+        assert_eq!(snapshot.worker_coalesces, 1);
+        assert_eq!(snapshot.worker_stale_rejections, 1);
+        assert_eq!(snapshot.worker_failures, 1);
+        assert_eq!(snapshot.gpu_materializations, 1);
+        assert_eq!(snapshot.generation_count, 1);
         assert_eq!(snapshot.persistent_gpu_objects_created, 3);
         assert_eq!(snapshot.node_high_water, 72);
         assert_eq!(snapshot.identity.layout_generation, None);
@@ -1104,24 +1080,17 @@ mod tests {
     }
 
     #[test]
-    fn appkit_raster_diagnostics_are_bounded_and_privacy_safe() {
+    fn worker_and_materialization_evidence_survives_visible_warmup_filter() {
         let mut metrics = CompanionRuntimeMetrics::default();
-        for index in 0..=APPKIT_RASTER_DIAGNOSTIC_CAPACITY {
-            metrics.record_appkit_raster_slice_diagnostic(AppkitRasterSliceDiagnostic {
-                start_cursor: index as u32,
-                end_cursor: index as u32 + 1,
-                items_completed: 1,
-                elapsed_us: 1_200,
-                setup_us: 100,
-                max_item_us: 900,
-                max_item_index: Some(index as u32),
-                max_item_scratch_setup_us: 100,
-                max_item_text_setup_measure_us: 200,
-                max_item_draw_flush_us: 300,
-                max_item_pixel_copy_classify_us: 150,
-                max_item_mask_normalize_finalize_us: 100,
-            });
-        }
+        metrics.discard_initial_visible_ticks(20);
+        metrics.begin_visible_tick();
+        metrics.record_worker_terminal(Duration::from_micros(9_000), 242, 0);
+        metrics.record_raster_request_wall_us(250_000);
+        metrics.record_generation_service_ui_us(1_500);
+        metrics.record_gpu_materialize_publish_us(8_000);
+        metrics.record_worker_submission();
+        metrics.record_worker_completion();
+        metrics.record_generation_accepted();
 
         let snapshot = metrics.snapshot(
             RuntimeIdentity::baseline(),
@@ -1139,33 +1108,15 @@ mod tests {
             },
         );
 
-        assert_eq!(snapshot.schema_version, 5);
-        assert_eq!(snapshot.appkit_raster_diagnostic_capacity, 256);
-        assert_eq!(snapshot.appkit_raster_slice_diagnostics.len(), 256);
-        assert_eq!(snapshot.appkit_raster_slice_diagnostics[0].start_cursor, 1);
-        assert_eq!(
-            snapshot.appkit_raster_slice_diagnostics[255].start_cursor,
-            256
-        );
-        assert_eq!(
-            snapshot.appkit_raster_slice_diagnostics[255].items_completed,
-            1
-        );
-        assert_eq!(
-            snapshot.appkit_raster_slice_diagnostics[255].elapsed_us,
-            1_200
-        );
-        let diagnostic = snapshot.appkit_raster_slice_diagnostics[255];
-        assert_eq!(diagnostic.max_item_scratch_setup_us, 100);
-        assert_eq!(diagnostic.max_item_text_setup_measure_us, 200);
-        assert_eq!(diagnostic.max_item_draw_flush_us, 300);
-        assert_eq!(diagnostic.max_item_pixel_copy_classify_us, 150);
-        assert_eq!(diagnostic.max_item_mask_normalize_finalize_us, 100);
-        let json = serde_json::to_value(&snapshot.appkit_raster_slice_diagnostics).unwrap();
-        let text = json.to_string();
-        assert!(!text.contains("glyph"));
-        assert!(!text.contains("sequence"));
-        assert!(!text.contains("character"));
+        assert_eq!(snapshot.visible_samples, 0);
+        assert_eq!(snapshot.worker_active_compile_us.max, Some(9_000));
+        assert_eq!(snapshot.raster_request_wall_us.max, Some(250_000));
+        assert_eq!(snapshot.generation_service_ui_us.max, Some(1_500));
+        assert_eq!(snapshot.gpu_materialize_publish_us.max, Some(8_000));
+        assert_eq!(snapshot.worker_submissions, 1);
+        assert_eq!(snapshot.worker_completions, 1);
+        assert_eq!(snapshot.gpu_materializations, 1);
+        assert_eq!(snapshot.generation_count, 1);
     }
 
     #[test]
@@ -1201,19 +1152,16 @@ mod tests {
     }
 
     #[test]
-    fn hidden_audit_detects_any_appkit_raster_slice() {
+    fn hidden_audit_detects_worker_submission_and_gpu_materialization() {
         let mut metrics = CompanionRuntimeMetrics::default();
         metrics.record_hidden_tick(metrics.work_counters());
         let steady = metrics.work_counters();
-        metrics.record_appkit_raster_slice_us(1, false);
+        metrics.record_worker_submission();
+        metrics.record_gpu_materialize_publish_us(1);
         metrics.record_hidden_tick(steady);
-        assert_eq!(
-            metrics
-                .hidden_segment_snapshot()
-                .steady_delta
-                .appkit_raster_slices,
-            1
-        );
+        let delta = metrics.hidden_segment_snapshot().steady_delta;
+        assert_eq!(delta.worker_submissions, 1);
+        assert_eq!(delta.gpu_materializations, 1);
     }
 
     #[test]

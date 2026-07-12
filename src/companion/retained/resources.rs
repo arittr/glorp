@@ -8,7 +8,6 @@
 //! renderer here rather than in `capture.rs`.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::ClassType;
@@ -22,99 +21,6 @@ use super::RetainedFailureCategory;
 use crate::round::smooth::{
     collect_companion_glyph_repertoire, CompanionContentIdentity, RepertoireGlyph,
 };
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct RasterItemPhases {
-    pub(super) scratch_setup: Duration,
-    pub(super) text_setup_measure: Duration,
-    pub(super) draw_flush: Duration,
-    pub(super) pixel_copy_classify: Duration,
-    pub(super) mask_normalize_finalize: Duration,
-}
-
-impl RasterItemPhases {
-    #[cfg(test)]
-    pub(super) fn total(self) -> Duration {
-        self.scratch_setup
-            .saturating_add(self.text_setup_measure)
-            .saturating_add(self.draw_flush)
-            .saturating_add(self.pixel_copy_classify)
-            .saturating_add(self.mask_normalize_finalize)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RasterItemProgress {
-    elapsed: Duration,
-    phases: RasterItemPhases,
-}
-
-impl RasterItemProgress {
-    #[cfg(test)]
-    fn unclassified(elapsed: Duration) -> Self {
-        Self {
-            elapsed,
-            phases: RasterItemPhases::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
-pub(super) struct RasterSliceProgress {
-    pub(super) start_cursor: usize,
-    pub(super) end_cursor: usize,
-    pub(super) completed_items: usize,
-    pub(super) complete: bool,
-    pub(super) deadline_missed: bool,
-    pub(super) elapsed: Duration,
-    pub(super) max_item_elapsed: Duration,
-    pub(super) max_item_index: Option<usize>,
-    pub(super) max_item_phases: RasterItemPhases,
-}
-
-#[cfg(test)]
-fn run_resumable_slice<E>(
-    cursor: &mut usize,
-    item_count: usize,
-    work_start_budget: Duration,
-    hard_deadline: Duration,
-    mut elapsed: impl FnMut() -> Duration,
-    mut work: impl FnMut(usize) -> Result<RasterItemProgress, E>,
-) -> Result<RasterSliceProgress, E> {
-    let start_cursor = *cursor;
-    let mut completed_items = 0;
-    let mut max_item_elapsed = Duration::ZERO;
-    let mut max_item_index = None;
-    let mut max_item_phases = RasterItemPhases::default();
-    let mut observed_elapsed = elapsed();
-    while *cursor < item_count && observed_elapsed < work_start_budget {
-        let index = *cursor;
-        let item = work(index)?;
-        *cursor += 1;
-        completed_items += 1;
-        observed_elapsed = elapsed();
-        if max_item_index.is_none() || item.elapsed > max_item_elapsed {
-            max_item_elapsed = item.elapsed;
-            max_item_index = Some(index);
-            max_item_phases = item.phases;
-        }
-        if observed_elapsed >= work_start_budget {
-            break;
-        }
-    }
-    Ok(RasterSliceProgress {
-        start_cursor,
-        end_cursor: *cursor,
-        completed_items,
-        complete: *cursor == item_count,
-        deadline_missed: completed_items > 0 && observed_elapsed > hard_deadline,
-        elapsed: observed_elapsed,
-        max_item_elapsed,
-        max_item_index,
-        max_item_phases,
-    })
-}
 
 /// Deterministic FNV-1a so a font-policy id is a stable hash of its inputs,
 /// independent of the standard hasher's seeded internals.
@@ -438,11 +344,6 @@ pub(super) struct GlyphRasterTarget {
 /// white text stays at spread zero; emoji cross it decisively.
 const CHROMA_THRESHOLD: u8 = 16;
 
-struct ProfiledGlyphEntry {
-    entry: GlyphAtlasEntry,
-    phases: RasterItemPhases,
-}
-
 struct CurrentGraphicsContextGuard {
     previous: Option<Retained<NSGraphicsContext>>,
 }
@@ -484,7 +385,7 @@ pub(super) fn rasterize_glyph_entry(
     x: u32,
     y: u32,
 ) -> std::result::Result<GlyphAtlasEntry, RetainedFailureCategory> {
-    rasterize_glyph_entry_profiled(
+    rasterize_glyph_entry_impl(
         key,
         target,
         font_policy_id,
@@ -494,11 +395,10 @@ pub(super) fn rasterize_glyph_entry(
         x,
         y,
     )
-    .map(|profiled| profiled.entry)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rasterize_glyph_entry_profiled(
+fn rasterize_glyph_entry_impl(
     key: &GlyphKey,
     target: &GlyphRasterTarget,
     font_policy_id: u64,
@@ -507,11 +407,10 @@ fn rasterize_glyph_entry_profiled(
     atlas_height: u32,
     x: u32,
     y: u32,
-) -> std::result::Result<ProfiledGlyphEntry, RetainedFailureCategory> {
+) -> std::result::Result<GlyphAtlasEntry, RetainedFailureCategory> {
     let cell = target.cell;
     let padding = target.padding;
     unsafe {
-        let phase_started_at = std::time::Instant::now();
         let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(), std::ptr::null_mut(), cell as isize, cell as isize,
             8, 4, true, false, NSDeviceRGBColorSpace, (cell * 4) as isize, 32,
@@ -519,9 +418,7 @@ fn rasterize_glyph_entry_profiled(
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)
             .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
         let current_context_guard = CurrentGraphicsContextGuard::install(&context);
-        let scratch_setup = phase_started_at.elapsed();
 
-        let phase_started_at = std::time::Instant::now();
         let text = NSString::from_str(key.sequence.as_str());
         let font = resolve_font(target.point_size, FontWeightPolicy::from_bold(key.bold));
         let mut attributed = NSMutableAttributedString::from_nsstring(&text);
@@ -537,17 +434,12 @@ fn rasterize_glyph_entry_profiled(
         {
             return Err(RetainedFailureCategory::AtlasUnavailable);
         }
-        let text_setup_measure = phase_started_at.elapsed();
-
-        let phase_started_at = std::time::Instant::now();
         let draw_x = f64::from(padding);
         let draw_y = f64::from(padding);
         attributed.drawAtPoint(NSPoint::new(draw_x, draw_y));
         context.flushGraphics();
         drop(current_context_guard);
-        let draw_flush = phase_started_at.elapsed();
 
-        let phase_started_at = std::time::Instant::now();
         let data = rep.bitmapData();
         if data.is_null() {
             return Err(RetainedFailureCategory::AtlasUnavailable);
@@ -583,24 +475,12 @@ fn rasterize_glyph_entry_profiled(
                 }
             }
         }
-        let pixel_copy_classify = phase_started_at.elapsed();
-
-        let phase_started_at = std::time::Instant::now();
-
         // An inkless glyph (whitespace) still advances the pen but has no quad.
         if !has_ink {
-            let entry = GlyphAtlasEntry::whitespace(size.width as f32, size.height as f32);
-            let mask_normalize_finalize = phase_started_at.elapsed();
-            return Ok(ProfiledGlyphEntry {
-                entry,
-                phases: RasterItemPhases {
-                    scratch_setup,
-                    text_setup_measure,
-                    draw_flush,
-                    pixel_copy_classify,
-                    mask_normalize_finalize,
-                },
-            });
+            return Ok(GlyphAtlasEntry::whitespace(
+                size.width as f32,
+                size.height as f32,
+            ));
         }
 
         let kind = if has_chroma {
@@ -650,17 +530,7 @@ fn rasterize_glyph_entry_profiled(
             font_policy_id,
             kind,
         };
-        let mask_normalize_finalize = phase_started_at.elapsed();
-        Ok(ProfiledGlyphEntry {
-            entry,
-            phases: RasterItemPhases {
-                scratch_setup,
-                text_setup_measure,
-                draw_flush,
-                pixel_copy_classify,
-                mask_normalize_finalize,
-            },
-        })
+        Ok(entry)
     }
 }
 
@@ -760,37 +630,6 @@ impl GlyphAtlasPreparation {
         })
     }
 
-    #[cfg(test)]
-    fn advance(
-        &mut self,
-        work_start_budget: Duration,
-        hard_deadline: Duration,
-    ) -> std::result::Result<RasterSliceProgress, RetainedFailureCategory> {
-        let started_at = std::time::Instant::now();
-        let glyphs = &self.glyphs;
-        let target = &self.target;
-        let regular_font_policy_id = self.regular_font_policy_id;
-        let bold_font_policy_id = self.bold_font_policy_id;
-        let atlas = &mut self.atlas;
-        run_resumable_slice(
-            &mut self.next_index,
-            glyphs.len(),
-            work_start_budget,
-            hard_deadline,
-            || started_at.elapsed(),
-            |index| {
-                rasterize_prepared_glyph(
-                    glyphs,
-                    target,
-                    regular_font_policy_id,
-                    bold_font_policy_id,
-                    atlas,
-                    index,
-                )
-            },
-        )
-    }
-
     fn advance_one(&mut self) -> std::result::Result<bool, RetainedFailureCategory> {
         if self.next_index == self.glyphs.len() {
             return Ok(true);
@@ -822,7 +661,7 @@ fn rasterize_prepared_glyph(
     bold_font_policy_id: u64,
     atlas: &mut CompiledGlyphAtlas,
     index: usize,
-) -> std::result::Result<RasterItemProgress, RetainedFailureCategory> {
+) -> std::result::Result<(), RetainedFailureCategory> {
     let key = &glyphs[index];
     let slot_x = index as u32 % ATLAS_COLUMNS;
     let slot_y = index as u32 / ATLAS_COLUMNS;
@@ -831,9 +670,8 @@ fn rasterize_prepared_glyph(
     } else {
         regular_font_policy_id
     };
-    let item_started_at = std::time::Instant::now();
-    let profiled = autoreleasepool(|_| {
-        rasterize_glyph_entry_profiled(
+    let entry = autoreleasepool(|_| {
+        rasterize_glyph_entry_impl(
             key,
             target,
             font_policy_id,
@@ -844,11 +682,8 @@ fn rasterize_prepared_glyph(
             slot_y * target.cell,
         )
     })?;
-    atlas.entries.insert(key.clone(), profiled.entry);
-    Ok(RasterItemProgress {
-        elapsed: item_started_at.elapsed(),
-        phases: profiled.phases,
-    })
+    atlas.entries.insert(key.clone(), entry);
+    Ok(())
 }
 
 /// A deterministic hash of a companion's declared-content identity, its full
@@ -1010,15 +845,6 @@ impl CompiledRetainedResourcesPreparation {
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn advance(
-        &mut self,
-        work_start_budget: Duration,
-        hard_deadline: Duration,
-    ) -> std::result::Result<RasterSliceProgress, RetainedFailureCategory> {
-        self.atlas.advance(work_start_budget, hard_deadline)
-    }
-
     pub(super) fn advance_one(&mut self) -> std::result::Result<bool, RetainedFailureCategory> {
         self.atlas.advance_one()
     }
@@ -1042,9 +868,9 @@ impl CompiledRetainedResources {
         manifest: &GlyphRepertoireManifest,
     ) -> std::result::Result<Self, RetainedFailureCategory> {
         let mut preparation = CompiledRetainedResourcesPreparation::new(manifest)?;
-        let progress = preparation.advance(Duration::MAX, Duration::MAX)?;
-        if !progress.complete {
-            return Err(RetainedFailureCategory::AtlasUnavailable);
+        while !preparation.advance_one()? {
+            // Synchronous parity fixtures intentionally drive the same worker
+            // primitive one glyph at a time until the full atlas is complete.
         }
         preparation.finish()
     }
@@ -1372,194 +1198,14 @@ mod glyph_tests {
     }
 
     #[test]
-    fn raster_slice_stops_at_soft_cutoff_and_resumes_at_exact_next_item() {
-        let mut cursor = 0;
-        let mut visited = Vec::new();
-        let mut times = [
-            std::time::Duration::ZERO,
-            std::time::Duration::from_micros(1_000),
-            std::time::Duration::from_micros(1_500),
-        ]
-        .into_iter();
-        let first = run_resumable_slice(
-            &mut cursor,
-            4,
-            std::time::Duration::from_micros(1_500),
-            std::time::Duration::from_micros(4_000),
-            || times.next().expect("clock sample"),
-            |index| {
-                visited.push(index);
-                Ok::<_, ()>(RasterItemProgress::unclassified(std::time::Duration::ZERO))
-            },
-        )
-        .unwrap();
-        assert_eq!(visited, [0, 1]);
-        assert_eq!(cursor, 2);
-        assert_eq!(first.completed_items, 2);
-        assert!(!first.complete);
-        assert!(!first.deadline_missed);
-
-        let mut times = [
-            std::time::Duration::ZERO,
-            std::time::Duration::from_micros(1_000),
-            std::time::Duration::from_micros(2_000),
-        ]
-        .into_iter();
-        let second = run_resumable_slice(
-            &mut cursor,
-            4,
-            std::time::Duration::from_micros(1_500),
-            std::time::Duration::from_micros(4_000),
-            || times.next().expect("clock sample"),
-            |index| {
-                visited.push(index);
-                Ok::<_, ()>(RasterItemProgress::unclassified(std::time::Duration::ZERO))
-            },
-        )
-        .unwrap();
-        assert_eq!(visited, [0, 1, 2, 3]);
-        assert_eq!(cursor, 4);
-        assert_eq!(second.completed_items, 2);
-        assert!(second.complete);
-        assert!(!second.deadline_missed);
-    }
-
-    #[test]
-    fn crossing_soft_cutoff_below_hard_deadline_is_not_a_deadline_miss() {
-        let mut cursor = 0;
-        let mut visited = Vec::new();
-        let mut times = [
-            std::time::Duration::ZERO,
-            std::time::Duration::from_micros(1_400),
-            std::time::Duration::from_micros(1_800),
-        ]
-        .into_iter();
-        let slice = run_resumable_slice(
-            &mut cursor,
-            3,
-            std::time::Duration::from_micros(1_500),
-            std::time::Duration::from_micros(4_000),
-            || times.next().expect("clock sample"),
-            |index| {
-                visited.push(index);
-                Ok::<_, ()>(RasterItemProgress::unclassified(
-                    std::time::Duration::from_micros(400),
-                ))
-            },
-        )
-        .unwrap();
-        assert_eq!(visited, [0, 1]);
-        assert_eq!(cursor, 2);
-        assert_eq!(slice.completed_items, 2);
-        assert!(!slice.complete);
-        assert!(!slice.deadline_missed);
-    }
-
-    #[test]
-    fn one_nonpreemptible_item_overrun_records_miss_and_yields_before_next_item() {
-        let mut cursor = 0;
-        let mut visited = Vec::new();
-        let mut times = [
-            std::time::Duration::ZERO,
-            std::time::Duration::from_micros(4_001),
-        ]
-        .into_iter();
-        let slice = run_resumable_slice(
-            &mut cursor,
-            3,
-            std::time::Duration::from_micros(1_500),
-            std::time::Duration::from_micros(4_000),
-            || times.next().expect("clock sample"),
-            |index| {
-                visited.push(index);
-                Ok::<_, ()>(RasterItemProgress::unclassified(
-                    std::time::Duration::from_micros(4_001),
-                ))
-            },
-        )
-        .unwrap();
-        assert_eq!(visited, [0]);
-        assert_eq!(cursor, 1);
-        assert_eq!(slice.completed_items, 1);
-        assert!(!slice.complete);
-        assert!(slice.deadline_missed);
-    }
-
-    #[test]
-    fn raster_slice_reports_cursor_range_and_actual_item_time() {
-        let mut cursor = 0;
-        let mut lane_times = [
-            std::time::Duration::from_micros(100),
-            std::time::Duration::from_micros(1_200),
-            std::time::Duration::from_micros(2_000),
-        ]
-        .into_iter();
-        let item_progress = [
-            RasterItemProgress {
-                elapsed: std::time::Duration::from_micros(900),
-                phases: RasterItemPhases {
-                    scratch_setup: std::time::Duration::from_micros(100),
-                    text_setup_measure: std::time::Duration::from_micros(200),
-                    draw_flush: std::time::Duration::from_micros(300),
-                    pixel_copy_classify: std::time::Duration::from_micros(150),
-                    mask_normalize_finalize: std::time::Duration::from_micros(100),
-                },
-            },
-            RasterItemProgress {
-                elapsed: std::time::Duration::from_micros(500),
-                phases: RasterItemPhases {
-                    scratch_setup: std::time::Duration::from_micros(50),
-                    text_setup_measure: std::time::Duration::from_micros(100),
-                    draw_flush: std::time::Duration::from_micros(150),
-                    pixel_copy_classify: std::time::Duration::from_micros(100),
-                    mask_normalize_finalize: std::time::Duration::from_micros(50),
-                },
-            },
-        ];
-
-        let slice = run_resumable_slice(
-            &mut cursor,
-            2,
-            std::time::Duration::from_micros(1_500),
-            std::time::Duration::from_micros(4_000),
-            || lane_times.next().expect("lane clock sample"),
-            |index| Ok::<_, ()>(item_progress[index]),
-        )
-        .unwrap();
-
-        assert_eq!(slice.start_cursor, 0);
-        assert_eq!(slice.end_cursor, 2);
-        assert_eq!(
-            slice.max_item_elapsed,
-            std::time::Duration::from_micros(900)
-        );
-        assert_eq!(slice.max_item_index, Some(0));
-        assert_eq!(slice.max_item_phases, item_progress[0].phases);
-        assert!(slice.max_item_phases.total() <= slice.max_item_elapsed);
-        assert_eq!(slice.elapsed, std::time::Duration::from_micros(2_000));
-    }
-
-    #[test]
-    fn resumable_atlas_keeps_fixed_storage_and_publishes_only_after_all_slots() {
+    fn advance_one_keeps_fixed_storage_and_finishes_after_all_slots() {
         let glyphs = [GlyphKey::new("x", false), GlyphKey::new("g", true)];
         let mut preparation = GlyphAtlasPreparation::new(&glyphs, 48.0, 2.0).unwrap();
         let rgba_pointer = preparation.atlas.rgba.as_ptr();
         let rgba_capacity = preparation.atlas.rgba.capacity();
 
-        let paused = preparation
-            .advance(std::time::Duration::ZERO, std::time::Duration::MAX)
-            .unwrap();
-        assert_eq!(paused.completed_items, 0);
-        assert!(!paused.complete);
-        assert_eq!(preparation.next_index, 0);
-        assert!(preparation.atlas.entries.is_empty());
-        assert_eq!(preparation.atlas.rgba.as_ptr(), rgba_pointer);
-        assert_eq!(preparation.atlas.rgba.capacity(), rgba_capacity);
-
-        let completed = preparation
-            .advance(std::time::Duration::MAX, std::time::Duration::MAX)
-            .unwrap();
-        assert!(completed.complete);
+        assert!(!preparation.advance_one().unwrap());
+        assert!(preparation.advance_one().unwrap());
         assert_eq!(preparation.next_index, glyphs.len());
         assert_eq!(preparation.atlas.entries.len(), glyphs.len());
         assert_eq!(preparation.atlas.rgba.as_ptr(), rgba_pointer);
