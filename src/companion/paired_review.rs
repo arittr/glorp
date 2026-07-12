@@ -24,26 +24,117 @@ use crate::commands::companion_mode::{
 };
 use crate::companion::app::{CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame};
 use crate::companion::retained::{
-    ActiveRetainedHost, CompanionCapacityInventory, FrameDisposition, FrameMilestone,
-    RetainedFailureCategory,
+    ActiveRetainedHost, CapacityContract, CompanionCapacityInventory, FrameDisposition,
+    FrameMilestone, RetainedFailureCategory,
 };
+use crate::game::evolution::Stage;
+use crate::game::habitat::HABITAT_PROP_CATALOG;
+use crate::game::metabolism::Mood;
+use crate::pet::generation::Species;
 use crate::presentation::draw_list::SceneDrawList;
 use crate::presentation::pixel::PixelFrame;
 use crate::presentation::smooth::SmoothCompanionScenePlan;
 use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
 use crate::round::hud::CompanionHudText;
 use crate::round::layout::RoundAperture;
+use crate::storage::state::{HabitatPropId, HabitatPropSource};
+use crate::tui::component::habitat_props::{visible_accent_ids, visible_trophy_ids};
+use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
 
-/// Versioned Stage 0 capacity inventory shared by the full Preview Lab matrix
-/// and the native baseline report. The matrix covers all six species and seven
-/// stages, the four runtime states plus dim, the complete prop/tank cast, and all
-/// three pinned depth fixtures. Task 2 moves direct counts onto the neutral scene
-/// snapshot; this function keeps Task 1's frozen numeric contract independent of
-/// the live pet or capture contents.
+/// Traverses the deterministic current-source fixture matrix. Categories that
+/// do not have renderer-neutral Task 2 owners yet are explicit reservations,
+/// never fabricated observations.
 pub(crate) fn full_preview_capacity_inventory() -> CompanionCapacityInventory {
-    debug_assert_eq!(crate::pet::generation::Species::all().len(), 6);
-    let inventory = CompanionCapacityInventory::full_preview_fixture();
-    debug_assert!(inventory.fits_global_constraints());
+    const STAGES: [Stage; 7] = [
+        Stage::S0,
+        Stage::S1,
+        Stage::S2,
+        Stage::S3,
+        Stage::S4,
+        Stage::S5,
+        Stage::S6,
+    ];
+    const STATES: [(Mood, bool, bool); 5] = [
+        (Mood::Content, false, false),
+        (Mood::Ecstatic, false, false),
+        (Mood::Sleepy, true, false),
+        (Mood::Sad, false, false),
+        (Mood::Content, false, true),
+    ];
+    const DEPTHS: [f32; 3] = [-1.0, 0.0, 1.0];
+    let now = time::macros::datetime!(2026-06-13 18:00 UTC);
+    let mut max_pet_slots = 0_u32;
+    for species in Species::all() {
+        for stage in STAGES {
+            for (mood, asleep, _dimmed) in STATES {
+                for _depth in DEPTHS {
+                    let mut vm = WatchViewModel::fixture_with_habitat_props();
+                    vm.pet_render.generated_species = species;
+                    vm.pet_render.stage = stage;
+                    vm.pet_render.mood = mood;
+                    crate::commands::watch::rerender_pet_for_view_model(&mut vm, 0, asleep, now)
+                        .expect("deterministic inventory pet rerenders");
+                    let slots = vm
+                        .pet_art
+                        .iter()
+                        .map(|line| line.chars().count() as u32)
+                        .sum::<u32>();
+                    max_pet_slots = max_pet_slots.max(slots);
+                }
+            }
+        }
+    }
+
+    let mut prop_vm = WatchViewModel::fixture();
+    prop_vm.habitat.earned_props = HABITAT_PROP_CATALOG
+        .iter()
+        .map(|prop| EarnedHabitatPropView {
+            id: HabitatPropId::new(prop.id),
+            earned_at: time::OffsetDateTime::UNIX_EPOCH,
+            kind: prop.kind,
+            display_priority: prop.display_priority,
+            source: match prop.lifetime_threshold {
+                Some(threshold) => HabitatPropSource::LifetimeTokens { threshold },
+                None => HabitatPropSource::HeavySession,
+            },
+        })
+        .collect();
+    let visible_props = visible_trophy_ids(&prop_vm.habitat).len()
+        + visible_accent_ids(&prop_vm.habitat, now).len();
+
+    let tank_vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, now.date());
+    let canonical = crate::tui::component::canonical_daily_cast(
+        &tank_vm.habitat.earned_inhabitants,
+        &tank_vm.pet_render.seed,
+        now.date(),
+        120,
+    );
+    let tank_cast = crate::tui::component::project_tank_life_cast(
+        &canonical,
+        &crate::round::scene::round_tank_life_geometry(36, 36),
+    );
+
+    let inventory = CompanionCapacityInventory {
+        max_nodes: CapacityContract::reserved(96, 32, 128),
+        max_static_primitives: CapacityContract::reserved(640, 128, 768),
+        // The current fixed pet-art lattice exactly occupies the frozen V1
+        // limit; any future slot requires a measured spec amendment.
+        max_pet_slots: CapacityContract::observed(max_pet_slots, 0, 130),
+        max_visible_props: CapacityContract::observed(visible_props as u32, 0, 10),
+        max_round_tank_inhabitants: CapacityContract::observed(
+            tank_cast.rendered_ids.len() as u32,
+            0,
+            2,
+        ),
+        max_ambient_instances: CapacityContract::reserved(48, 16, 64),
+        max_blended_draws: CapacityContract::reserved(192, 64, 256),
+        max_lights: CapacityContract::reserved(1, 1, 2),
+        max_attachments: CapacityContract::reserved(16, 16, 32),
+    };
+    assert!(
+        inventory.fits_global_constraints(),
+        "full Preview Lab capacity inventory exceeds the frozen limits: {inventory:?}"
+    );
     inventory
 }
 
@@ -986,6 +1077,18 @@ fn write_rgba_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> crate::e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_preview_inventory_uses_observations_and_explicit_reservations() {
+        let inventory = full_preview_capacity_inventory();
+        assert!(inventory.fits_global_constraints());
+        assert!(inventory.max_pet_slots.observed.is_some());
+        assert_eq!(inventory.max_pet_slots.reservation, 0);
+        assert_eq!(inventory.max_visible_props.observed, Some(10));
+        assert_eq!(inventory.max_round_tank_inhabitants.observed, Some(2));
+        assert_eq!(inventory.max_nodes.observed, None);
+        assert!(inventory.max_nodes.reservation > 0);
+    }
     use crate::companion::retained::RetainedFailureCategory;
 
     #[test]

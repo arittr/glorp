@@ -54,6 +54,16 @@ fn ui_tick_owns_preparation_and_smooth_uses_the_fallible_planner() {
     );
 
     assert!(tick.contains("prepare_current_frame_from_state()"));
+    let hidden_return = tick
+        .find("if !companion_view_is_visible()")
+        .expect("hidden early return exists");
+    let animate = tick
+        .find("animate_pet()")
+        .expect("visible animation exists");
+    let prepare = tick
+        .find("prepare_current_frame_from_state()")
+        .expect("visible preparation exists");
+    assert!(hidden_return < animate && hidden_return < prepare);
     assert!(prepare_current.contains("prepare_companion_frame("));
     assert!(prepare_current.contains("state.last_good_frame = Some(frame)"));
     assert!(prepare_frame.contains("try_build_round_smooth_scene_plan_with_options("));

@@ -47,24 +47,26 @@ impl<const N: usize> FixedSamples<N> {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) struct RuntimeIdentity {
-    pub device_epoch: u64,
+    pub device_epoch: Option<u64>,
     pub surface_epoch: u64,
-    pub layout_generation: u64,
-    pub resource_generation: u64,
-    pub semantic_revision: u64,
-    pub frame_revision: u64,
+    pub layout_generation: Option<u64>,
+    pub resource_generation: Option<u64>,
+    pub semantic_revision: Option<u64>,
+    pub frame_revision: Option<u64>,
+    pub present_attempt: u64,
 }
 
 impl RuntimeIdentity {
     #[cfg(test)]
     pub(crate) const fn baseline() -> Self {
         Self {
-            device_epoch: 1,
+            device_epoch: None,
             surface_epoch: 1,
-            layout_generation: 1,
-            resource_generation: 1,
-            semantic_revision: 0,
-            frame_revision: 0,
+            layout_generation: None,
+            resource_generation: Some(1),
+            semantic_revision: None,
+            frame_revision: None,
+            present_attempt: 0,
         }
     }
 }
@@ -87,57 +89,204 @@ impl Percentiles {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub(crate) struct CapacityContract {
+    pub observed: Option<u32>,
+    pub reservation: u32,
+    pub headroom: u32,
+    pub limit: u32,
+}
+
+impl CapacityContract {
+    pub(crate) const fn observed(value: u32, headroom: u32, limit: u32) -> Self {
+        Self {
+            observed: Some(value),
+            reservation: 0,
+            headroom,
+            limit,
+        }
+    }
+
+    pub(crate) const fn reserved(reservation: u32, headroom: u32, limit: u32) -> Self {
+        Self {
+            observed: None,
+            reservation,
+            headroom,
+            limit,
+        }
+    }
+
+    pub(crate) const fn fits(self) -> bool {
+        let observed = match self.observed {
+            Some(value) => value,
+            None => 0,
+        };
+        observed
+            .saturating_add(self.reservation)
+            .saturating_add(self.headroom)
+            <= self.limit
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub(crate) struct CompanionCapacityInventory {
-    pub max_nodes: u32,
-    pub max_static_primitives: u32,
-    pub max_pet_slots: u32,
-    pub max_visible_props: u32,
-    pub max_round_tank_inhabitants: u32,
-    pub max_ambient_instances: u32,
-    pub max_blended_draws: u32,
-    pub max_lights: u32,
-    pub max_attachments: u32,
+    pub max_nodes: CapacityContract,
+    pub max_static_primitives: CapacityContract,
+    pub max_pet_slots: CapacityContract,
+    pub max_visible_props: CapacityContract,
+    pub max_round_tank_inhabitants: CapacityContract,
+    pub max_ambient_instances: CapacityContract,
+    pub max_blended_draws: CapacityContract,
+    pub max_lights: CapacityContract,
+    pub max_attachments: CapacityContract,
 }
 
 impl CompanionCapacityInventory {
-    /// Frozen Stage 0 inventory exercised by the full deterministic Preview Lab
-    /// matrix. Later scene tasks replace these upper-bound fixture observations
-    /// with direct snapshot counts without changing the serialized contract.
-    pub(crate) const fn full_preview_fixture() -> Self {
+    #[cfg(test)]
+    pub(crate) const fn contract_fixture() -> Self {
         Self {
-            max_nodes: 128,
-            max_static_primitives: 768,
-            max_pet_slots: 130,
-            max_visible_props: 10,
-            max_round_tank_inhabitants: 2,
-            max_ambient_instances: 64,
-            max_blended_draws: 256,
-            max_lights: 2,
-            max_attachments: 32,
+            max_nodes: CapacityContract::reserved(96, 32, 128),
+            max_static_primitives: CapacityContract::reserved(640, 128, 768),
+            max_pet_slots: CapacityContract::observed(96, 34, 130),
+            max_visible_props: CapacityContract::observed(8, 2, 10),
+            max_round_tank_inhabitants: CapacityContract::observed(2, 0, 2),
+            max_ambient_instances: CapacityContract::reserved(48, 16, 64),
+            max_blended_draws: CapacityContract::reserved(192, 64, 256),
+            max_lights: CapacityContract::reserved(1, 1, 2),
+            max_attachments: CapacityContract::reserved(16, 16, 32),
         }
     }
 
     pub(crate) const fn fits_global_constraints(self) -> bool {
-        self.max_nodes <= 128
-            && self.max_static_primitives <= 768
-            && self.max_pet_slots <= 130
-            && self.max_visible_props <= 10
-            && self.max_round_tank_inhabitants <= 2
-            && self.max_ambient_instances <= 64
-            && self.max_blended_draws <= 256
-            && self.max_lights <= 2
-            && self.max_attachments <= 32
+        self.max_nodes.fits()
+            && self.max_static_primitives.fits()
+            && self.max_pet_slots.fits()
+            && self.max_visible_props.fits()
+            && self.max_round_tank_inhabitants.fits()
+            && self.max_ambient_instances.fits()
+            && self.max_blended_draws.fits()
+            && self.max_lights.fits()
+            && self.max_attachments.fits()
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct RuntimeWorkCounters {
+    pub prepare: u64,
+    pub queue_writes: u64,
+    pub surface_acquires: u64,
+    pub encode: u64,
+    pub submit: u64,
+}
+
+impl RuntimeWorkCounters {
+    fn saturating_sub(self, previous: Self) -> Self {
+        Self {
+            prepare: self.prepare.saturating_sub(previous.prepare),
+            queue_writes: self.queue_writes.saturating_sub(previous.queue_writes),
+            surface_acquires: self
+                .surface_acquires
+                .saturating_sub(previous.surface_acquires),
+            encode: self.encode.saturating_sub(previous.encode),
+            submit: self.submit.saturating_sub(previous.submit),
+        }
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        Self {
+            prepare: self.prepare.saturating_add(other.prepare),
+            queue_writes: self.queue_writes.saturating_add(other.queue_writes),
+            surface_acquires: self.surface_acquires.saturating_add(other.surface_acquires),
+            encode: self.encode.saturating_add(other.encode),
+            submit: self.submit.saturating_add(other.submit),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct HiddenSegmentSnapshot {
+    pub transition_ticks: u64,
+    pub steady_ticks: u64,
+    pub steady_delta: RuntimeWorkCounters,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct GpuByteBreakdown {
+    pub atlas_bytes: u64,
+    pub instance_ring_bytes: u64,
+    pub capture_bytes: u64,
+    pub other_persistent_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl GpuByteBreakdown {
+    fn with_total(mut self) -> Self {
+        self.total_bytes = self
+            .atlas_bytes
+            .saturating_add(self.instance_ring_bytes)
+            .saturating_add(self.capture_bytes)
+            .saturating_add(self.other_persistent_bytes);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct GpuAccountingSnapshot {
+    pub current: GpuByteBreakdown,
+    pub peak_total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum GpuAllocationKind {
+    Atlas,
+    InstanceRing,
+    Capture,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct LifetimeAuditSnapshot {
+    pub frames: u64,
+    pub cadence_ms: u64,
+    pub virtual_elapsed_ms: u64,
+    pub rss_warmup_bytes: u64,
+    pub rss_final_bytes: u64,
+    pub rss_peak_bytes: u64,
+    pub gpu_warmup_bytes: u64,
+    pub gpu_final_bytes: u64,
+    pub gpu_peak_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct MetricsOverheadAudit {
+    pub iterations: u64,
+    pub trials: u32,
+    pub control_ns_per_tick: u64,
+    pub instrumented_ns_per_tick: u64,
+    pub net_ns_per_tick: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(crate) struct RuntimeFixtureIdentity {
+    pub fixture_id: &'static str,
+    pub seed: &'static str,
+    pub update_source: &'static str,
+    pub cadence_ms: u64,
+    pub logical_width: f64,
+    pub logical_height: f64,
+    pub physical_width: u32,
+    pub physical_height: u32,
+    pub backing_scale: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub schema_version: u32,
     pub identity: RuntimeIdentity,
+    pub fixture: RuntimeFixtureIdentity,
     pub sample_capacity: usize,
     pub visible_samples: usize,
     pub ui_tick_us: Percentiles,
-    pub prepare_us: Percentiles,
+    pub state_prepare_us: Percentiles,
+    pub gpu_translate_us: Percentiles,
     pub encode_us: Percentiles,
     pub queue_wait_us: Percentiles,
     pub compile_us: Percentiles,
@@ -166,13 +315,18 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub cpu_bytes_high_water: u64,
     pub gpu_bytes_high_water: u64,
     pub metrics_overhead_us_high_water: u32,
+    pub metrics_overhead_control: MetricsOverheadAudit,
     pub inventory: CompanionCapacityInventory,
+    pub hidden_segment: HiddenSegmentSnapshot,
+    pub gpu_accounting: GpuAccountingSnapshot,
+    pub lifetime_audit: Option<LifetimeAuditSnapshot>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompanionRuntimeMetrics {
     ui_tick_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
-    prepare_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    state_prepare_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    gpu_translate_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     encode_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     queue_wait_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     compile_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
@@ -205,13 +359,20 @@ pub(crate) struct CompanionRuntimeMetrics {
     reset_steady_state_after_warmup: bool,
     metrics_overhead_ns_current_tick: u64,
     metrics_overhead_ns_high_water: u64,
+    hidden_transition_seen: bool,
+    hidden_steady_ticks: u64,
+    hidden_steady_delta: RuntimeWorkCounters,
+    gpu_current: GpuByteBreakdown,
+    gpu_peak_total_bytes: u64,
+    lifetime_audit: Option<LifetimeAuditSnapshot>,
 }
 
 impl Default for CompanionRuntimeMetrics {
     fn default() -> Self {
         Self {
             ui_tick_us: FixedSamples::default(),
-            prepare_us: FixedSamples::default(),
+            state_prepare_us: FixedSamples::default(),
+            gpu_translate_us: FixedSamples::default(),
             encode_us: FixedSamples::default(),
             queue_wait_us: FixedSamples::default(),
             compile_us: FixedSamples::default(),
@@ -244,6 +405,12 @@ impl Default for CompanionRuntimeMetrics {
             reset_steady_state_after_warmup: false,
             metrics_overhead_ns_current_tick: 0,
             metrics_overhead_ns_high_water: 0,
+            hidden_transition_seen: false,
+            hidden_steady_ticks: 0,
+            hidden_steady_delta: RuntimeWorkCounters::default(),
+            gpu_current: GpuByteBreakdown::default(),
+            gpu_peak_total_bytes: 0,
+            lifetime_audit: None,
         }
     }
 }
@@ -290,10 +457,16 @@ impl CompanionRuntimeMetrics {
         }
     }
 
-    pub(crate) fn record_prepare_us(&mut self, value: u32) {
+    pub(crate) fn record_state_prepare_us(&mut self, value: u32) {
         if self.sample_current_tick {
-            self.prepare_us.push(value);
+            self.state_prepare_us.push(value);
             increment(&mut self.prepare_count, 1);
+        }
+    }
+
+    pub(crate) fn record_gpu_translate_us(&mut self, value: u32) {
+        if self.sample_current_tick {
+            self.gpu_translate_us.push(value);
         }
     }
 
@@ -345,8 +518,15 @@ impl CompanionRuntimeMetrics {
         increment(&mut self.persistent_gpu_objects_destroyed, count);
     }
 
-    pub(crate) fn record_hidden_tick(&mut self) {
+    pub(crate) fn record_hidden_tick(&mut self, tick_start: RuntimeWorkCounters) {
         increment(&mut self.hidden_ticks, 1);
+        if self.hidden_transition_seen {
+            let delta = self.work_counters().saturating_sub(tick_start);
+            self.hidden_steady_delta = self.hidden_steady_delta.saturating_add(delta);
+            increment(&mut self.hidden_steady_ticks, 1);
+        } else {
+            self.hidden_transition_seen = true;
+        }
     }
 
     pub(crate) fn record_surface_acquire(&mut self) {
@@ -401,14 +581,63 @@ impl CompanionRuntimeMetrics {
         self.gpu_bytes_high_water = self.gpu_bytes_high_water.max(value);
     }
 
-    pub(crate) fn snapshot(&self, identity: RuntimeIdentity) -> CompanionRuntimeMetricsSnapshot {
+    pub(crate) fn work_counters(&self) -> RuntimeWorkCounters {
+        RuntimeWorkCounters {
+            prepare: self.prepare_count,
+            queue_writes: self.queue_writes,
+            surface_acquires: self.surface_acquires,
+            encode: self.encode_count,
+            submit: self.submit_count,
+        }
+    }
+
+    pub(crate) fn hidden_segment_snapshot(&self) -> HiddenSegmentSnapshot {
+        HiddenSegmentSnapshot {
+            transition_ticks: u64::from(self.hidden_transition_seen),
+            steady_ticks: self.hidden_steady_ticks,
+            steady_delta: self.hidden_steady_delta,
+        }
+    }
+
+    pub(crate) fn replace_gpu_allocation(&mut self, kind: GpuAllocationKind, bytes: u64) {
+        let overlap_peak = self.gpu_current.total_bytes.saturating_add(bytes);
+        self.gpu_peak_total_bytes = self.gpu_peak_total_bytes.max(overlap_peak);
+        match kind {
+            GpuAllocationKind::Atlas => self.gpu_current.atlas_bytes = bytes,
+            GpuAllocationKind::InstanceRing => self.gpu_current.instance_ring_bytes = bytes,
+            GpuAllocationKind::Capture => self.gpu_current.capture_bytes = bytes,
+        }
+        self.gpu_current = self.gpu_current.with_total();
+        self.gpu_peak_total_bytes = self.gpu_peak_total_bytes.max(self.gpu_current.total_bytes);
+        self.observe_gpu_bytes(self.gpu_peak_total_bytes);
+    }
+
+    pub(crate) fn gpu_accounting_snapshot(&self) -> GpuAccountingSnapshot {
+        GpuAccountingSnapshot {
+            current: self.gpu_current,
+            peak_total_bytes: self.gpu_peak_total_bytes,
+        }
+    }
+
+    pub(crate) fn record_lifetime_audit(&mut self, audit: LifetimeAuditSnapshot) {
+        self.lifetime_audit = Some(audit);
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        identity: RuntimeIdentity,
+        inventory: CompanionCapacityInventory,
+        fixture: RuntimeFixtureIdentity,
+    ) -> CompanionRuntimeMetricsSnapshot {
         CompanionRuntimeMetricsSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             identity,
+            fixture,
             sample_capacity: METRIC_SAMPLE_CAPACITY,
             visible_samples: self.ui_tick_us.len(),
             ui_tick_us: Percentiles::from_samples(&self.ui_tick_us),
-            prepare_us: Percentiles::from_samples(&self.prepare_us),
+            state_prepare_us: Percentiles::from_samples(&self.state_prepare_us),
+            gpu_translate_us: Percentiles::from_samples(&self.gpu_translate_us),
             encode_us: Percentiles::from_samples(&self.encode_us),
             queue_wait_us: Percentiles::from_samples(&self.queue_wait_us),
             compile_us: Percentiles::from_samples(&self.compile_us),
@@ -441,8 +670,64 @@ impl CompanionRuntimeMetrics {
                 .max(self.metrics_overhead_ns_current_tick)
                 .div_ceil(1_000)
                 .min(u64::from(u32::MAX)) as u32,
-            inventory: CompanionCapacityInventory::full_preview_fixture(),
+            metrics_overhead_control: measure_metrics_overhead_control(),
+            inventory,
+            hidden_segment: self.hidden_segment_snapshot(),
+            gpu_accounting: self.gpu_accounting_snapshot(),
+            lifetime_audit: self.lifetime_audit,
         }
+    }
+}
+
+fn measure_metrics_overhead_control() -> MetricsOverheadAudit {
+    const ITERATIONS: u64 = 100_000;
+    const TRIALS: u32 = 5;
+    let mut best_control = u64::MAX;
+    let mut best_instrumented = u64::MAX;
+    for _ in 0..TRIALS {
+        let control_started = std::time::Instant::now();
+        let mut control = 0_u64;
+        for tick in 0..ITERATIONS {
+            control = std::hint::black_box(control.saturating_add(tick).rotate_left(3));
+        }
+        std::hint::black_box(control);
+        let control_ns = control_started
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+
+        let instrumented_started = std::time::Instant::now();
+        let mut work = 0_u64;
+        let mut metrics = CompanionRuntimeMetrics::default();
+        for tick in 0..ITERATIONS {
+            work = std::hint::black_box(work.saturating_add(tick).rotate_left(3));
+            metrics.begin_visible_tick();
+            metrics.record_state_prepare_us(100);
+            metrics.record_gpu_translate_us(25);
+            metrics.record_queue_write(256);
+            metrics.record_surface_acquire();
+            metrics.record_encode_us(20);
+            metrics.record_queue_wait_us(5);
+            metrics.record_submit();
+            metrics.record_draws(4);
+            metrics.record_ui_tick_us(250);
+        }
+        std::hint::black_box((work, metrics.work_counters()));
+        let instrumented_ns = instrumented_started
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        best_control = best_control.min(control_ns);
+        best_instrumented = best_instrumented.min(instrumented_ns);
+    }
+    let control_ns_per_tick = best_control.div_ceil(ITERATIONS);
+    let instrumented_ns_per_tick = best_instrumented.div_ceil(ITERATIONS);
+    MetricsOverheadAudit {
+        iterations: ITERATIONS,
+        trials: TRIALS,
+        control_ns_per_tick,
+        instrumented_ns_per_tick,
+        net_ns_per_tick: instrumented_ns_per_tick.saturating_sub(control_ns_per_tick),
     }
 }
 
@@ -474,19 +759,86 @@ mod tests {
     fn snapshot_carries_epochs_counters_and_high_water_marks() {
         let mut metrics = CompanionRuntimeMetrics::default();
         metrics.record_ui_tick_us(1_500);
+        metrics.record_state_prepare_us(900);
+        metrics.record_gpu_translate_us(300);
         metrics.record_encode_us(800);
         metrics.record_persistent_gpu_create(3);
         metrics.observe_nodes(72);
-        let snapshot = metrics.snapshot(RuntimeIdentity::baseline());
-        assert_eq!(snapshot.schema_version, 1);
+        let snapshot = metrics.snapshot(
+            RuntimeIdentity::baseline(),
+            CompanionCapacityInventory::contract_fixture(),
+            RuntimeFixtureIdentity {
+                fixture_id: "test",
+                seed: "test",
+                update_source: "fixed",
+                cadence_ms: 250,
+                logical_width: 360.0,
+                logical_height: 360.0,
+                physical_width: 720,
+                physical_height: 720,
+                backing_scale: 2.0,
+            },
+        );
+        assert_eq!(snapshot.schema_version, 2);
         assert_eq!(snapshot.ui_tick_us.p95, Some(1_500));
+        assert_eq!(snapshot.state_prepare_us.p95, Some(900));
+        assert_eq!(snapshot.gpu_translate_us.p95, Some(300));
         assert_eq!(snapshot.encode_us.p99, Some(800));
         assert_eq!(snapshot.persistent_gpu_objects_created, 3);
         assert_eq!(snapshot.node_high_water, 72);
+        assert_eq!(snapshot.identity.layout_generation, None);
+        assert_eq!(snapshot.identity.semantic_revision, None);
+        assert_eq!(snapshot.identity.frame_revision, None);
     }
 
     #[test]
-    fn full_preview_inventory_fits_frozen_scene_limits() {
-        assert!(CompanionCapacityInventory::full_preview_fixture().fits_global_constraints());
+    fn capacity_contract_distinguishes_observations_reservations_headroom_and_limits() {
+        let inventory = CompanionCapacityInventory::contract_fixture();
+        assert_eq!(inventory.max_pet_slots.observed, Some(96));
+        assert_eq!(inventory.max_pet_slots.reservation, 0);
+        assert_eq!(inventory.max_pet_slots.headroom, 34);
+        assert_eq!(inventory.max_pet_slots.limit, 130);
+        assert_eq!(inventory.max_nodes.observed, None);
+        assert_eq!(inventory.max_nodes.reservation, 96);
+        assert_eq!(inventory.max_nodes.headroom, 32);
+        assert_eq!(inventory.max_nodes.limit, 128);
+        assert!(inventory.fits_global_constraints());
+    }
+
+    #[test]
+    fn hidden_steady_ticks_capture_zero_render_work_after_transition() {
+        let mut metrics = CompanionRuntimeMetrics::default();
+        let transition = metrics.work_counters();
+        metrics.record_hidden_tick(transition);
+        let steady = metrics.work_counters();
+        metrics.record_hidden_tick(steady);
+        metrics.record_hidden_tick(steady);
+        let audit = metrics.hidden_segment_snapshot();
+        assert_eq!(audit.transition_ticks, 1);
+        assert_eq!(audit.steady_ticks, 2);
+        assert_eq!(audit.steady_delta, RuntimeWorkCounters::default());
+    }
+
+    #[test]
+    fn gpu_accounting_includes_concurrent_replacement_peak() {
+        let mut metrics = CompanionRuntimeMetrics::default();
+        metrics.replace_gpu_allocation(GpuAllocationKind::Atlas, 100);
+        metrics.replace_gpu_allocation(GpuAllocationKind::InstanceRing, 60);
+        metrics.replace_gpu_allocation(GpuAllocationKind::Capture, 80);
+        metrics.replace_gpu_allocation(GpuAllocationKind::Atlas, 120);
+        let accounting = metrics.gpu_accounting_snapshot();
+        assert_eq!(accounting.current.atlas_bytes, 120);
+        assert_eq!(accounting.current.instance_ring_bytes, 60);
+        assert_eq!(accounting.current.capture_bytes, 80);
+        assert_eq!(accounting.current.total_bytes, 260);
+        assert_eq!(accounting.peak_total_bytes, 360);
+    }
+
+    #[test]
+    fn metrics_overhead_audit_pairs_full_tick_instrumentation_with_control() {
+        let audit = measure_metrics_overhead_control();
+        assert_eq!(audit.iterations, 100_000);
+        assert_eq!(audit.trials, 5);
+        assert!(audit.instrumented_ns_per_tick >= audit.net_ns_per_tick);
     }
 }

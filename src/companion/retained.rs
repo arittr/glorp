@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
 use objc2::rc::Retained;
@@ -32,8 +32,9 @@ mod resources;
 
 pub(crate) use capture::CanonicalRgbaFrame;
 pub(crate) use metrics::{
-    duration_us, CompanionCapacityInventory, CompanionRuntimeMetrics,
-    CompanionRuntimeMetricsSnapshot, RuntimeIdentity,
+    duration_us, CapacityContract, CompanionCapacityInventory, CompanionRuntimeMetrics,
+    CompanionRuntimeMetricsSnapshot, GpuAllocationKind, LifetimeAuditSnapshot,
+    RuntimeFixtureIdentity, RuntimeIdentity, RuntimeWorkCounters,
 };
 pub(crate) use presentation::{
     FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox, RetainedFailureCategory,
@@ -124,6 +125,13 @@ const INSTANCE_RING_LEN: usize = 3;
 /// One instance's stride in the persistent buffer.
 const INSTANCE_STRIDE: usize = std::mem::size_of::<GpuPrimitive>();
 
+/// Maximum primitive count observed by the deterministic full current-renderer
+/// fixture matrix. The fixed minimum ring adds explicit non-growth headroom;
+/// larger generation requests remain possible but are not ordinary frames.
+const FULL_FIXTURE_INSTANCE_MAX: usize = 774;
+const FULL_FIXTURE_INSTANCE_HEADROOM: usize = 32;
+const FIXED_INSTANCE_RING_MIN: usize = FULL_FIXTURE_INSTANCE_MAX + FULL_FIXTURE_INSTANCE_HEADROOM;
+
 /// A capacity-bounded ring of persistent `VERTEX | COPY_DST` instance buffers.
 ///
 /// A frame writes its instances into the next ring slot with `queue.write_buffer`
@@ -205,7 +213,11 @@ impl PersistentFrameBuffers {
 }
 
 fn persistent_instance_capacity(instances: usize) -> usize {
-    instances.max(1).next_power_of_two()
+    if instances <= FIXED_INSTANCE_RING_MIN {
+        FIXED_INSTANCE_RING_MIN
+    } else {
+        instances.next_power_of_two()
+    }
 }
 
 /// The off-screen capture intermediate and its mappable staging buffer, keyed by
@@ -484,17 +496,13 @@ impl PreparedRetainedHost {
     /// step is ever added and fails, the dropped guard restores the view's prior
     /// AppKit layer state before the error propagates.
     pub(super) fn activate(
-        mut self,
+        self,
         view: &NSView,
     ) -> std::result::Result<ActiveRetainedHost, RetainedFailureCategory> {
-        let started_at = Instant::now();
         let guard = LayerActivationGuard::install(view);
         view.setWantsLayer(true);
         unsafe { view.setLayer(Some(&self.host.layer)) };
         guard.commit();
-        self.host
-            .metrics
-            .record_activation_us(duration_us(started_at.elapsed()));
         Ok(ActiveRetainedHost { host: self.host })
     }
 }
@@ -548,6 +556,90 @@ impl ActiveRetainedHost {
             .unwrap_or(0)
     }
 
+    /// Drives a real retained GPU instance ring and queue through a bounded
+    /// 4,500-frame virtual-time segment. Wall time is intentionally decoupled
+    /// from the fixed 4 Hz semantic cadence; each iteration advances 250 ms of
+    /// virtual time while queue work is submitted as fast as the device allows.
+    pub(crate) fn run_virtual_lifetime_audit(&mut self, frames: u64) {
+        const CADENCE_MS: u64 = 250;
+        const DRIVER_WARMUP_FRAMES: u64 = 100;
+        let instances = vec![GpuPrimitive::zeroed(); FIXED_INSTANCE_RING_MIN];
+        let submit = |host: &mut RetainedHost| {
+            host.frame_buffers
+                .write_frame_instances(&host.queue, &instances, &mut host.counters);
+            let encoder = host
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glorp-retained-lifetime-audit"),
+                });
+            host.queue.submit([encoder.finish()])
+        };
+        let mut last_submission = None;
+        for _ in 0..DRIVER_WARMUP_FRAMES {
+            last_submission = Some(submit(&mut self.host));
+        }
+        if let Some(submission) = last_submission.take() {
+            let _ = self.host.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(5)),
+            });
+        }
+        let rss_warmup_bytes = current_process_rss_bytes().unwrap_or(0);
+        let gpu_warmup_bytes = self
+            .host
+            .metrics
+            .gpu_accounting_snapshot()
+            .current
+            .total_bytes;
+        let mut rss_peak_bytes = rss_warmup_bytes;
+        let mut gpu_peak_bytes = gpu_warmup_bytes;
+        for frame in 0..frames {
+            last_submission = Some(submit(&mut self.host));
+            if (frame + 1) % 64 == 0 {
+                if let Some(submission) = last_submission.take() {
+                    let _ = self.host.device.poll(wgpu::PollType::Wait {
+                        submission_index: Some(submission),
+                        timeout: Some(Duration::from_secs(5)),
+                    });
+                }
+                rss_peak_bytes = rss_peak_bytes.max(current_process_rss_bytes().unwrap_or(0));
+                gpu_peak_bytes = gpu_peak_bytes.max(
+                    self.host
+                        .metrics
+                        .gpu_accounting_snapshot()
+                        .current
+                        .total_bytes,
+                );
+            }
+        }
+        if let Some(submission) = last_submission {
+            let _ = self.host.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(5)),
+            });
+        }
+        let rss_final_bytes = current_process_rss_bytes().unwrap_or(0);
+        let gpu_final_bytes = self
+            .host
+            .metrics
+            .gpu_accounting_snapshot()
+            .current
+            .total_bytes;
+        self.host
+            .metrics
+            .record_lifetime_audit(LifetimeAuditSnapshot {
+                frames,
+                cadence_ms: CADENCE_MS,
+                virtual_elapsed_ms: frames.saturating_mul(CADENCE_MS),
+                rss_warmup_bytes,
+                rss_final_bytes,
+                rss_peak_bytes: rss_peak_bytes.max(rss_final_bytes),
+                gpu_warmup_bytes,
+                gpu_final_bytes,
+                gpu_peak_bytes: gpu_peak_bytes.max(gpu_final_bytes),
+            });
+    }
+
     pub(crate) fn record_ui_tick_us(&mut self, value: u32) {
         let started_at = Instant::now();
         self.host.metrics.record_ui_tick_us(value);
@@ -560,33 +652,72 @@ impl ActiveRetainedHost {
         self.host.metrics.begin_visible_tick();
     }
 
-    pub(crate) fn record_prepare_us(&mut self, value: u32) {
+    pub(crate) fn record_state_prepare_us(&mut self, value: u32) {
         let started_at = Instant::now();
-        self.host.metrics.record_prepare_us(value);
+        self.host.metrics.record_state_prepare_us(value);
         self.host
             .metrics
             .record_metrics_overhead(started_at.elapsed());
     }
 
-    pub(crate) fn record_hidden_tick(&mut self) {
-        self.host.metrics.record_hidden_tick();
+    pub(crate) fn runtime_work_counters(&self) -> RuntimeWorkCounters {
+        self.host.metrics.work_counters()
+    }
+
+    pub(crate) fn record_hidden_tick(&mut self, tick_start: RuntimeWorkCounters) {
+        self.host.metrics.record_hidden_tick(tick_start);
     }
 
     pub(crate) fn record_fallback(&mut self) {
         self.host.metrics.record_fallback();
     }
 
-    pub(crate) fn runtime_metrics_snapshot(&self) -> CompanionRuntimeMetricsSnapshot {
+    pub(crate) fn runtime_metrics_snapshot(
+        &self,
+        inventory: CompanionCapacityInventory,
+    ) -> CompanionRuntimeMetricsSnapshot {
         let resource_generation = self.current_resource_generation();
-        self.host.metrics.snapshot(RuntimeIdentity {
-            device_epoch: 1,
-            surface_epoch: self.host.surface_epoch,
-            layout_generation: self.host.surface_epoch,
-            resource_generation,
-            semantic_revision: self.host.frame_counter,
-            frame_revision: self.host.frame_counter,
-        })
+        self.host.metrics.snapshot(
+            RuntimeIdentity {
+                device_epoch: None,
+                surface_epoch: self.host.surface_epoch,
+                layout_generation: None,
+                resource_generation: (resource_generation != 0).then_some(resource_generation),
+                semantic_revision: None,
+                frame_revision: None,
+                present_attempt: self.host.frame_counter,
+            },
+            inventory,
+            RuntimeFixtureIdentity {
+                fixture_id: "glorp-scene-baseline-v2",
+                seed: "glorp-scene-baseline-v1",
+                update_source: "fixed-initial-state-no-live-polling",
+                cadence_ms: 250,
+                logical_width: f64::from(self.host.physical_width) / self.host.backing_scale,
+                logical_height: f64::from(self.host.physical_height) / self.host.backing_scale,
+                physical_width: self.host.physical_width,
+                physical_height: self.host.physical_height,
+                backing_scale: self.host.backing_scale,
+            },
+        )
     }
+}
+
+fn current_process_rss_bytes() -> Option<u64> {
+    let pid = std::process::id().to_string();
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let kib = std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(kib.saturating_mul(1024))
 }
 
 impl std::ops::Deref for ActiveRetainedHost {
@@ -645,6 +776,7 @@ impl RetainedHost {
         chrome: RetainedChrome<'_>,
         identity: &CompanionContentIdentity,
     ) -> FrameProgress {
+        let activation_started_at = (self.frame_counter == 0).then(Instant::now);
         let frame_id = self.next_frame_id();
         if let Err(category) = self.resize_if_needed(view) {
             let mut progress = FrameProgress::new(frame_id, 0);
@@ -685,7 +817,7 @@ impl RetainedHost {
                 active.resources.atlas(),
             );
             let elapsed = duration_us(started_at.elapsed());
-            self.record_metrics(|metrics| metrics.record_prepare_us(elapsed));
+            self.record_metrics(|metrics| metrics.record_gpu_translate_us(elapsed));
             match result {
                 Ok(frame) => frame,
                 Err(category) => {
@@ -771,6 +903,11 @@ impl RetainedHost {
         progress
             .finish(FrameDisposition::SurfacePresentCalled)
             .expect("a submitted frame presents exactly once");
+        if let Some(started_at) = activation_started_at {
+            self.record_metrics(|metrics| {
+                metrics.record_activation_us(duration_us(started_at.elapsed()))
+            });
+        }
         progress
     }
 
@@ -802,7 +939,7 @@ impl RetainedHost {
             metrics.observe_primitives(primitives);
             metrics.observe_blended_draws(blended_draws);
             metrics.observe_cpu_bytes(cpu_bytes);
-            metrics.observe_gpu_bytes(gpu_bytes);
+            metrics.replace_gpu_allocation(GpuAllocationKind::InstanceRing, gpu_bytes);
         });
     }
 
@@ -894,9 +1031,8 @@ impl RetainedHost {
         self.metrics
             .record_persistent_gpu_create(resource_object_count(delta));
         self.metrics.record_static_upload(static_bytes);
-        self.metrics.observe_gpu_bytes(static_bytes.saturating_add(
-            (self.frame_buffers.capacity_instances * INSTANCE_RING_LEN * INSTANCE_STRIDE) as u64,
-        ));
+        self.metrics
+            .replace_gpu_allocation(GpuAllocationKind::Atlas, static_bytes);
         if rebuilding {
             self.counters.atlas_builds_after_activation += 1;
             self.counters.atlas_uploads_after_activation += 1;
@@ -941,6 +1077,12 @@ impl RetainedHost {
             mapped_at_creation: false,
         });
         self.counters.buffer_creations += 1;
+        let capture_bytes = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(4)
+            .saturating_add(capture::staging_buffer_size(width, height));
+        self.metrics
+            .replace_gpu_allocation(GpuAllocationKind::Capture, capture_bytes);
         self.capture_resources = Some(PersistentCaptureResources {
             width,
             height,
@@ -1871,7 +2013,8 @@ mod tests {
         push_analytic_arc, upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources,
         GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
         LayerActivationState, PersistentFrameBuffers, Pipelines, PreparedGpuFrame,
-        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode, GLYPH_FONT_SIZE,
+        RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode,
+        FULL_FIXTURE_INSTANCE_HEADROOM, FULL_FIXTURE_INSTANCE_MAX, GLYPH_FONT_SIZE,
         RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
@@ -1918,6 +2061,24 @@ mod tests {
                 PreparedGpuFrame { primitives, blends }
             })
             .collect()
+    }
+
+    fn prepared_frame_with_count(count: usize) -> PreparedGpuFrame {
+        let primitive = GpuPrimitive {
+            rect: [0.0; 4],
+            color_a: [0.0; 4],
+            color_b: [0.0; 4],
+            uv: [0.0; 4],
+            params: [0.0; 4],
+            clip_rect: [0.0; 4],
+            clip_ellipse: [0.0; 4],
+            viewport_aperture: [360.0, 360.0, 180.0, 180.0],
+            aperture_radius: [180.0, 0.0, 0.0, 0.0],
+        };
+        PreparedGpuFrame {
+            primitives: vec![primitive; count],
+            blends: vec![SmoothBlendMode::Normal; count],
+        }
     }
 
     /// A warmed, surfaceless mirror of the retained host's GPU resource surface:
@@ -2046,12 +2207,22 @@ mod tests {
 
     #[test]
     fn first_instance_ring_allocation_has_bounded_fixture_headroom() {
-        let capacity = persistent_instance_capacity(774);
-        assert_eq!(capacity, 1_024);
-        assert!(
-            capacity >= 790,
-            "the full 120-second fixture high-water fits"
-        );
+        assert_eq!(FULL_FIXTURE_INSTANCE_MAX, 774);
+        assert_eq!(FULL_FIXTURE_INSTANCE_HEADROOM, 32);
+        assert_eq!(persistent_instance_capacity(1), 806);
+        assert_eq!(persistent_instance_capacity(774), 806);
+    }
+
+    #[test]
+    fn varying_full_fixture_counts_never_recreate_the_instance_ring() {
+        let mut host = TestRetainedResources::warm();
+        let before = host.counters();
+        for count in [1, 96, 774, 12, 773, 0, 512, 774] {
+            host.prepare_frame(&prepared_frame_with_count(count))
+                .unwrap();
+        }
+        let delta = host.counters() - before;
+        assert_eq!(delta.buffer_creations, 0);
     }
 
     /// A visible coverage-mask entry with the given ink geometry; the metric

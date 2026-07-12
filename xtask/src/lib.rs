@@ -547,6 +547,21 @@ fn run_companion_scene_baseline(
     if std::env::consts::OS != "macos" {
         return Err("cargo xtask companion scene-baseline is only supported on macOS".to_string());
     }
+    let source_commit = required_command_output(repo_root, "git", &["rev-parse", "HEAD"])?;
+    let tracked_state = required_command_output(
+        repo_root,
+        "git",
+        &["status", "--porcelain", "--untracked-files=no"],
+    )?;
+    if !tracked_state.is_empty() {
+        return Err(format!(
+            "scene baseline requires a clean committed source tree before build; tracked changes:\n{tracked_state}"
+        ));
+    }
+    let source_identity = BaselineSourceIdentity {
+        commit: source_commit,
+        tracked_tree_state: "clean".to_string(),
+    };
     let work = repo_root.join("target/glorp-scene-baseline");
     match std::fs::remove_dir_all(&work) {
         Ok(()) => {}
@@ -617,7 +632,10 @@ fn run_companion_scene_baseline(
         })?)
         .map_err(|error| format!("runtime metrics snapshot is invalid JSON: {error}"))?;
     validate_runtime_snapshot(&snapshot)?;
-    let report = render_scene_baseline_report(repo_root, duration_ms, &snapshot)?;
+    let gates = evaluate_baseline_gates(&snapshot)?;
+    validate_gate_results(&gates)?;
+    let report =
+        render_scene_baseline_report(repo_root, duration_ms, &snapshot, &source_identity, &gates)?;
     let out_path = repo_root.join(out);
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -627,17 +645,23 @@ fn run_companion_scene_baseline(
     Ok(())
 }
 
+struct BaselineSourceIdentity {
+    commit: String,
+    tracked_tree_state: String,
+}
+
 fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String> {
     if snapshot
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
-        != Some(1)
+        != Some(2)
     {
-        return Err("runtime metrics snapshot schema_version is not 1".to_string());
+        return Err("runtime metrics snapshot schema_version is not 2".to_string());
     }
     for metric in [
         "ui_tick_us",
-        "prepare_us",
+        "state_prepare_us",
+        "gpu_translate_us",
         "encode_us",
         "queue_wait_us",
         "compile_us",
@@ -670,38 +694,238 @@ fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String>
         ("max_lights", 2),
         ("max_attachments", 32),
     ] {
-        let value = inventory
+        let contract = inventory
             .get(field)
-            .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| format!("runtime inventory missing {field}"))?;
-        if value > limit {
-            return Err(format!("runtime inventory {field}={value} exceeds {limit}"));
+        let observed = contract
+            .get("observed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let reservation = value_u64(contract, "reservation")?;
+        let headroom = value_u64(contract, "headroom")?;
+        let recorded_limit = value_u64(contract, "limit")?;
+        if recorded_limit != limit
+            || observed
+                .saturating_add(reservation)
+                .saturating_add(headroom)
+                > limit
+        {
+            return Err(format!(
+                "runtime inventory {field} observed={observed} reservation={reservation} headroom={headroom} limit={recorded_limit} violates frozen limit {limit}"
+            ));
+        }
+    }
+    for field in [
+        "fixture",
+        "hidden_segment",
+        "gpu_accounting",
+        "lifetime_audit",
+    ] {
+        if snapshot.get(field).is_none()
+            || snapshot.get(field).is_some_and(serde_json::Value::is_null)
+        {
+            return Err(format!("runtime metrics snapshot missing {field}"));
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateStatus {
+    Pass,
+    AcceptedPreexisting,
+    Fail,
+}
+
+impl GateStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::AcceptedPreexisting => "ACCEPTED_PREEXISTING",
+            Self::Fail => "FAIL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BaselineGateResult {
+    id: &'static str,
+    status: GateStatus,
+    measured: String,
+    limit: String,
+    disposition: String,
+}
+
+fn gate(
+    id: &'static str,
+    passed: bool,
+    measured: impl Into<String>,
+    limit: impl Into<String>,
+) -> BaselineGateResult {
+    BaselineGateResult {
+        id,
+        status: if passed {
+            GateStatus::Pass
+        } else {
+            GateStatus::Fail
+        },
+        measured: measured.into(),
+        limit: limit.into(),
+        disposition: String::new(),
+    }
+}
+
+fn evaluate_baseline_gates(
+    snapshot: &serde_json::Value,
+) -> Result<Vec<BaselineGateResult>, String> {
+    let ui_p95 = snapshot_u64(snapshot, &["ui_tick_us", "p95"])?;
+    let ui_p99 = snapshot_u64(snapshot, &["ui_tick_us", "p99"])?;
+    let encode_p95 = snapshot_u64(snapshot, &["encode_us", "p95"])?;
+    let compile_p95 = snapshot_u64(snapshot, &["compile_us", "p95"])?;
+    let activation_p95 = snapshot_u64(snapshot, &["activation_us", "p95"])?;
+    let ui_p95_limit = 8_000_u64.min(((ui_p95 * 110).div_ceil(100)).max(ui_p95 + 500));
+    let ui_p99_limit = 16_000_u64.min(((ui_p99 * 115).div_ceil(100)).max(ui_p99 + 1_000));
+    let encode_limit = ((encode_p95 * 110).div_ceil(100)).max(encode_p95 + 250);
+    let overhead_ns = snapshot_u64(snapshot, &["metrics_overhead_control", "net_ns_per_tick"])?;
+    let overhead_limit_ns = ui_p95.saturating_mul(1_000).saturating_mul(2) / 100;
+    let hidden = snapshot
+        .get("hidden_segment")
+        .ok_or_else(|| "runtime snapshot missing hidden_segment".to_string())?;
+    let hidden_delta = hidden
+        .get("steady_delta")
+        .ok_or_else(|| "runtime snapshot missing hidden_segment.steady_delta".to_string())?;
+    let hidden_zero = [
+        "prepare",
+        "queue_writes",
+        "surface_acquires",
+        "encode",
+        "submit",
+    ]
+    .iter()
+    .all(|field| value_u64(hidden_delta, field) == Ok(0));
+    let hidden_ticks = value_u64(hidden, "steady_ticks")?;
+    let lifetime = snapshot
+        .get("lifetime_audit")
+        .ok_or_else(|| "runtime snapshot missing lifetime_audit".to_string())?;
+    let rss_warmup = value_u64(lifetime, "rss_warmup_bytes")?;
+    let rss_final = value_u64(lifetime, "rss_final_bytes")?;
+    let rss_peak = value_u64(lifetime, "rss_peak_bytes")?;
+    let gpu_warmup = value_u64(lifetime, "gpu_warmup_bytes")?;
+    let gpu_final = value_u64(lifetime, "gpu_final_bytes")?;
+    let gpu_peak = value_u64(lifetime, "gpu_peak_bytes")?;
+    let within_one_percent = |value: u64, warmup: u64| {
+        warmup > 0 && value <= warmup.saturating_add(warmup.div_ceil(100))
+    };
+
+    let mut appkit = gate(
+        "appkit-raster-slice",
+        compile_p95 <= 4_000,
+        format!("{compile_p95} us"),
+        "4000 us",
+    );
+    if appkit.status == GateStatus::Fail && compile_p95 <= 16_000 {
+        appkit.status = GateStatus::AcceptedPreexisting;
+        appkit.disposition = "versioned pre-existing Stage-0 miss (accepted only up to 16000us); Task 12 must implement <=4000us sliced AppKit preparation before Task 7 begins".into();
+    }
+
+    Ok(vec![
+        gate(
+            "ui-tick-p95",
+            ui_p95 <= ui_p95_limit,
+            format!("{ui_p95} us"),
+            format!("{ui_p95_limit} us"),
+        ),
+        gate(
+            "ui-tick-p99",
+            ui_p99 <= ui_p99_limit,
+            format!("{ui_p99} us"),
+            format!("{ui_p99_limit} us"),
+        ),
+        gate(
+            "encode-p95",
+            encode_p95 <= encode_limit,
+            format!("{encode_p95} us"),
+            format!("{encode_limit} us"),
+        ),
+        appkit,
+        gate(
+            "activation-render-owner-slice",
+            activation_p95 <= 16_000,
+            format!("{activation_p95} us"),
+            "16000 us",
+        ),
+        gate(
+            "metrics-overhead-control",
+            overhead_ns <= overhead_limit_ns,
+            format!("{overhead_ns} ns/tick"),
+            format!("{overhead_limit_ns} ns/tick (2% UI p95)"),
+        ),
+        gate(
+            "hidden-steady-state",
+            hidden_ticks >= 2 && hidden_zero,
+            format!("{hidden_ticks} steady ticks; delta={hidden_delta}"),
+            "after 1 transition tick, >=2 steady ticks and all work counters 0",
+        ),
+        gate(
+            "post-warmup-persistent-gpu-creations",
+            snapshot_u64(snapshot, &["persistent_gpu_objects_created"])? == 0,
+            snapshot_u64(snapshot, &["persistent_gpu_objects_created"])?.to_string(),
+            "0",
+        ),
+        gate(
+            "post-warmup-static-upload-bytes",
+            snapshot_u64(snapshot, &["static_upload_bytes"])? == 0,
+            snapshot_u64(snapshot, &["static_upload_bytes"])?.to_string(),
+            "0",
+        ),
+        gate(
+            "lifetime-frame-count-and-cadence",
+            value_u64(lifetime, "frames")? == 4_500 && value_u64(lifetime, "cadence_ms")? == 250,
+            format!(
+                "{} frames @ {} ms",
+                value_u64(lifetime, "frames")?,
+                value_u64(lifetime, "cadence_ms")?
+            ),
+            "4500 frames @ 250 ms virtual cadence",
+        ),
+        gate(
+            "lifetime-rss",
+            within_one_percent(rss_final, rss_warmup) && within_one_percent(rss_peak, rss_warmup),
+            format!("warmup={rss_warmup} final={rss_final} peak={rss_peak}"),
+            "final and peak <= warmup + 1%",
+        ),
+        gate(
+            "lifetime-accounted-gpu",
+            within_one_percent(gpu_final, gpu_warmup) && within_one_percent(gpu_peak, gpu_warmup),
+            format!("warmup={gpu_warmup} final={gpu_final} peak={gpu_peak}"),
+            "final and peak <= warmup + 1%",
+        ),
+    ])
+}
+
+fn validate_gate_results(gates: &[BaselineGateResult]) -> Result<(), String> {
+    let failed = gates
+        .iter()
+        .filter(|gate| gate.status == GateStatus::Fail)
+        .map(|gate| gate.id)
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "scene baseline gate failures: {}",
+            failed.join(", ")
+        ))
+    }
 }
 
 fn render_scene_baseline_report(
     repo_root: &Path,
     duration_ms: u64,
     snapshot: &serde_json::Value,
+    source: &BaselineSourceIdentity,
+    gates: &[BaselineGateResult],
 ) -> Result<String, String> {
-    let ui_p95 = snapshot_u64(snapshot, &["ui_tick_us", "p95"])?;
-    let ui_p99 = snapshot_u64(snapshot, &["ui_tick_us", "p99"])?;
-    let encode_p95 = snapshot_u64(snapshot, &["encode_us", "p95"])?;
-    let compile_p95 = snapshot_u64(snapshot, &["compile_us", "p95"])?;
-    let activation_p95 = snapshot_u64(snapshot, &["activation_us", "p95"])?;
-    let persistent_creates = snapshot_u64(snapshot, &["persistent_gpu_objects_created"])?;
-    let static_upload_bytes = snapshot_u64(snapshot, &["static_upload_bytes"])?;
-    let gpu_high_water = snapshot_u64(snapshot, &["gpu_bytes_high_water"])?;
-    let cpu_high_water = snapshot_u64(snapshot, &["cpu_bytes_high_water"])?;
-    let visible_samples = snapshot_u64(snapshot, &["visible_samples"])?;
-    let hidden_ticks = snapshot_u64(snapshot, &["hidden_ticks"])?;
-    let metrics_overhead_us = snapshot_u64(snapshot, &["metrics_overhead_us_high_water"])?;
-    let ui_p95_gate = 8_000_u64.min(((ui_p95 * 110).div_ceil(100)).max(ui_p95 + 500));
-    let ui_p99_gate = 16_000_u64.min(((ui_p99 * 115).div_ceil(100)).max(ui_p99 + 1_000));
-    let encode_p95_gate = ((encode_p95 * 110).div_ceil(100)).max(encode_p95 + 250);
-    let git_sha = required_command_output(repo_root, "git", &["rev-parse", "HEAD"])?;
     let rustc = required_command_output(repo_root, "rustc", &["--version"])?;
     let os = required_command_output(repo_root, "sw_vers", &["-productVersion"])?;
     let arch = required_command_output(repo_root, "uname", &["-m"])?;
@@ -709,84 +933,163 @@ fn render_scene_baseline_report(
     let inventory = snapshot
         .get("inventory")
         .ok_or_else(|| "runtime snapshot missing inventory".to_string())?;
+    let fixture = snapshot
+        .get("fixture")
+        .ok_or_else(|| "runtime snapshot missing fixture".to_string())?;
+    let lifetime = snapshot
+        .get("lifetime_audit")
+        .ok_or_else(|| "runtime snapshot missing lifetime_audit".to_string())?;
+    let gpu = snapshot
+        .get("gpu_accounting")
+        .ok_or_else(|| "runtime snapshot missing gpu_accounting".to_string())?;
+    let current_gpu = gpu
+        .get("current")
+        .ok_or_else(|| "runtime snapshot missing gpu_accounting.current".to_string())?;
+    let overhead = snapshot
+        .get("metrics_overhead_control")
+        .ok_or_else(|| "runtime snapshot missing metrics_overhead_control".to_string())?;
+    let gate_rows = gates
+        .iter()
+        .map(|gate| {
+            format!(
+                "| `{}` | {} | {} | {} | {} |",
+                gate.id,
+                gate.status.as_str(),
+                gate.measured,
+                gate.limit,
+                if gate.disposition.is_empty() {
+                    "—"
+                } else {
+                    &gate.disposition
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let capacity_rows = [
+        ("Nodes", "max_nodes", "Task 2 scene nodes unavailable; versioned contract reservation"),
+        ("Static primitives", "max_static_primitives", "Task 2 scene primitives unavailable; versioned contract reservation"),
+        ("Pet art slots", "max_pet_slots", "observed across 6 species x 7 stages x 5 states x 3 depths"),
+        ("Visible props", "max_visible_props", "observed from complete habitat prop catalog through current 6 trophy + 4 accent selectors"),
+        ("Round tank inhabitants", "max_round_tank_inhabitants", "observed from complete tank cast through current round surface budget"),
+        ("Ambient instances", "max_ambient_instances", "Task 2 scene ambient instances unavailable; versioned contract reservation"),
+        ("Blended draws", "max_blended_draws", "Task 2 ordered blend records unavailable; versioned contract reservation"),
+        ("Lights", "max_lights", "Task 2 scene lights unavailable; versioned contract reservation"),
+        ("Attachments", "max_attachments", "Task 2 scene attachments unavailable; versioned contract reservation"),
+    ]
+    .iter()
+    .map(|(label, field, source_label)| {
+        let contract = inventory.get(*field).expect("validated capacity field");
+        let observed = contract.get("observed").and_then(serde_json::Value::as_u64)
+            .map_or_else(|| "—".to_string(), |value| value.to_string());
+        format!(
+            "| {label} | {observed} | {} | {} | {} | {source_label} |",
+            value_u64(contract, "reservation").expect("validated reservation"),
+            value_u64(contract, "headroom").expect("validated headroom"),
+            value_u64(contract, "limit").expect("validated limit"),
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
 
     Ok(format!(
         "# Glorp Companion Scene Runtime Baseline\n\n\
 Generated by `cargo xtask companion scene-baseline` from a release `retained-renderer` build. \
-The fixture uses an isolated Glorp config, deterministic seed, redacted HUD, and a 360x360 logical window. \
+The command rejects tracked source changes before build. The fixture uses an isolated Glorp config, \
+a fixed initial update source with live polling disabled, deterministic seed, redacted HUD, and a fixed 4 Hz cadence. \
 The first 20 visible ticks are discarded before steady-state sampling.\n\n\
 ## Build and host identity\n\n\
-- Git commit: `{git_sha}`\n\
+- Source commit captured before build: `{}`\n\
+- Tracked tree state captured before build: `{}`\n\
 - Rust: `{rustc}`\n\
 - macOS: `{os}`\n\
 - Architecture: `{arch}`\n\
 - Hardware model: `{hardware}`\n\
 - Build: `release`, feature `retained-renderer`\n\
 - Requested duration: {duration_ms} ms\n\
-- Steady visible samples: {visible_samples}\n\n\
+- Fixture: `{}`; seed: `{}`; update source: `{}`\n\
+- Cadence: {} ms (4 Hz)\n\
+- Logical size: {} x {}; physical size: {} x {}; backing scale: {}\n\
+- Steady visible samples: {}\n\n\
 ## Measured baseline\n\n\
 | Metric | p50 (us) | p95 (us) | p99 (us) |\n\
 |---|---:|---:|---:|\n\
-| UI tick | {} | {ui_p95} | {ui_p99} |\n\
-| Frame preparation | {} | {} | {} |\n\
-| Encode | {} | {encode_p95} | {} |\n\
+| UI tick | {} | {} | {} |\n\
+| App state/frame preparation | {} | {} | {} |\n\
+| GPU translation | {} | {} | {} |\n\
+| Encode | {} | {} | {} |\n\
 | Queue submit wait | {} | {} | {} |\n\
-| AppKit raster/compile slice | {} | {compile_p95} | {} |\n\
-| Activation render-owner slice | {} | {activation_p95} | {} |\n\n\
-Post-warmup persistent GPU creations: {persistent_creates}.  \
-Post-warmup static upload bytes: {static_upload_bytes}.  \
-CPU accounted-byte high-water: {cpu_high_water}.  \
-GPU accounted-byte high-water: {gpu_high_water}.  \
-Hidden ticks observed in the visible baseline fixture: {hidden_ticks}.\n\n\
-## Frozen gates\n\n\
-- UI tick p95 <= `{ui_p95_gate} us` (`min(8000us, max(baseline p95 * 1.10, baseline p95 + 500us))`).\n\
-- UI tick p99 <= `{ui_p99_gate} us` (`min(16000us, max(baseline p99 * 1.15, baseline p99 + 1000us))`).\n\
-- Encode p95 <= `{encode_p95_gate} us` (`max(baseline p95 * 1.10, baseline p95 + 250us)`).\n\
-- AppKit raster slice <= `4000 us`; measured p95 `{compile_p95} us`.\n\
-- Activation render-owner slice <= `16000 us`; measured p95 `{activation_p95} us`.\n\
-- Metrics overhead <= `2%` of baseline UI-tick p95 (maximum `{:.2} us`); measured high-water `{metrics_overhead_us} us`.\n\
-- Hidden steady state after one transition tick = zero prepare/write/acquire/encode/submit.\n\
-- Ordinary post-warmup persistent GPU creations = `0`; measured `{persistent_creates}`.\n\
-- Ordinary post-warmup static upload bytes = `0`; measured `{static_upload_bytes}`.\n\
-- RSS and accounted GPU bytes after 4500 virtual frames <= warmup high-water + `1%`.\n\n\
-## Current baseline concern\n\n\
-**FAIL:** the one-time AppKit raster/compile slice measured `{compile_p95} us`, exceeding the frozen `4000 us` gate. The command preserves this miss as stop-gate evidence; it does not loosen or derive the absolute gate from the failing baseline.\n\n\
+| AppKit raster/compile slice | {} | {} | {} |\n\
+| First-present activation render-owner boundary | {} | {} | {} |\n\n\
+Metrics overhead uses {} alternating on/off-control trials of {} representative complete metric ticks; \
+control {} ns/tick, instrumented {} ns/tick, net {} ns/tick.\n\n\
+Accounted persistent GPU bytes: atlas {}, instance ring {}, capture {}, other {}, current total {}, concurrent-replacement peak {}. \
+Opaque driver allocations are covered by process RSS, not guessed into GPU byte accounting.\n\n\
+Lifetime segment: {} real GPU queue frames at {} ms virtual cadence ({} ms semantic time); \
+RSS warmup/final/peak {}/{}/{}, accounted GPU warmup/final/peak {}/{}/{}.\n\n\
+## Structured gate results\n\n\
+| Gate | Status | Measured | Limit | Disposition |\n\
+|---|---|---|---|---|\n\
+{gate_rows}\n\n\
+The AppKit result is a versioned pre-existing Stage-0 disposition, not a pass. Task 12's <=4000 us sliced AppKit preparation is required before Task 7 begins. Stage 0 is therefore not globally green. Every other failed or unmeasured gate makes the command fail.\n\n\
 ## Capacity inventory\n\n\
-| Capacity | Frozen maximum |\n\
-|---|---:|\n\
-| Nodes | {} |\n\
-| Static primitives | {} |\n\
-| Pet art slots | {} |\n\
-| Visible props | {} |\n\
-| Round tank inhabitants | {} |\n\
-| Ambient instances | {} |\n\
-| Blended draw records | {} |\n\
-| Lights | {} |\n\
-| Attachments | {} |\n\n\
-Every inventory value is at or below the versioned Global Constraints limit.\n",
+| Capacity | Observed | Reservation | Headroom | Limit | Evidence |\n\
+|---|---:|---:|---:|---:|---|\n\
+{capacity_rows}\n\n\
+An em dash means the future renderer-neutral category does not exist yet and is represented by an explicit contract reservation. Each observed value plus reservation plus explicit headroom fits its frozen limit. Zero headroom is intentional for the already-full pet lattice, visible prop budget, and round tank cast; expanding any requires measured evidence and a spec amendment.\n",
+        source.commit,
+        source.tracked_tree_state,
+        fixture["fixture_id"].as_str().unwrap_or("missing"),
+        fixture["seed"].as_str().unwrap_or("missing"),
+        fixture["update_source"].as_str().unwrap_or("missing"),
+        value_u64(fixture, "cadence_ms")?,
+        fixture["logical_width"].as_f64().ok_or("missing logical_width")?,
+        fixture["logical_height"].as_f64().ok_or("missing logical_height")?,
+        value_u64(fixture, "physical_width")?,
+        value_u64(fixture, "physical_height")?,
+        fixture["backing_scale"].as_f64().ok_or("missing backing_scale")?,
+        snapshot_u64(snapshot, &["visible_samples"])? ,
         snapshot_u64(snapshot, &["ui_tick_us", "p50"])? ,
-        snapshot_u64(snapshot, &["prepare_us", "p50"])? ,
-        snapshot_u64(snapshot, &["prepare_us", "p95"])? ,
-        snapshot_u64(snapshot, &["prepare_us", "p99"])? ,
+        snapshot_u64(snapshot, &["ui_tick_us", "p95"])? ,
+        snapshot_u64(snapshot, &["ui_tick_us", "p99"])? ,
+        snapshot_u64(snapshot, &["state_prepare_us", "p50"])? ,
+        snapshot_u64(snapshot, &["state_prepare_us", "p95"])? ,
+        snapshot_u64(snapshot, &["state_prepare_us", "p99"])? ,
+        snapshot_u64(snapshot, &["gpu_translate_us", "p50"])? ,
+        snapshot_u64(snapshot, &["gpu_translate_us", "p95"])? ,
+        snapshot_u64(snapshot, &["gpu_translate_us", "p99"])? ,
         snapshot_u64(snapshot, &["encode_us", "p50"])? ,
+        snapshot_u64(snapshot, &["encode_us", "p95"])? ,
         snapshot_u64(snapshot, &["encode_us", "p99"])? ,
         snapshot_u64(snapshot, &["queue_wait_us", "p50"])? ,
         snapshot_u64(snapshot, &["queue_wait_us", "p95"])? ,
         snapshot_u64(snapshot, &["queue_wait_us", "p99"])? ,
         snapshot_u64(snapshot, &["compile_us", "p50"])? ,
+        snapshot_u64(snapshot, &["compile_us", "p95"])? ,
         snapshot_u64(snapshot, &["compile_us", "p99"])? ,
         snapshot_u64(snapshot, &["activation_us", "p50"])? ,
+        snapshot_u64(snapshot, &["activation_us", "p95"])? ,
         snapshot_u64(snapshot, &["activation_us", "p99"])? ,
-        ui_p95 as f64 * 0.02,
-        value_u64(inventory, "max_nodes")?,
-        value_u64(inventory, "max_static_primitives")?,
-        value_u64(inventory, "max_pet_slots")?,
-        value_u64(inventory, "max_visible_props")?,
-        value_u64(inventory, "max_round_tank_inhabitants")?,
-        value_u64(inventory, "max_ambient_instances")?,
-        value_u64(inventory, "max_blended_draws")?,
-        value_u64(inventory, "max_lights")?,
-        value_u64(inventory, "max_attachments")?,
+        value_u64(overhead, "trials")?,
+        value_u64(overhead, "iterations")?,
+        value_u64(overhead, "control_ns_per_tick")?,
+        value_u64(overhead, "instrumented_ns_per_tick")?,
+        value_u64(overhead, "net_ns_per_tick")?,
+        value_u64(current_gpu, "atlas_bytes")?,
+        value_u64(current_gpu, "instance_ring_bytes")?,
+        value_u64(current_gpu, "capture_bytes")?,
+        value_u64(current_gpu, "other_persistent_bytes")?,
+        value_u64(current_gpu, "total_bytes")?,
+        value_u64(gpu, "peak_total_bytes")?,
+        value_u64(lifetime, "frames")?,
+        value_u64(lifetime, "cadence_ms")?,
+        value_u64(lifetime, "virtual_elapsed_ms")?,
+        value_u64(lifetime, "rss_warmup_bytes")?,
+        value_u64(lifetime, "rss_final_bytes")?,
+        value_u64(lifetime, "rss_peak_bytes")?,
+        value_u64(lifetime, "gpu_warmup_bytes")?,
+        value_u64(lifetime, "gpu_final_bytes")?,
+        value_u64(lifetime, "gpu_peak_bytes")?,
     ))
 }
 
@@ -1644,6 +1947,63 @@ mod tests {
                 out: "docs/superpowers/measurements/baseline.md".into(),
             })
         );
+    }
+
+    #[test]
+    fn baseline_gates_accept_only_the_versioned_appkit_disposition() {
+        let snapshot = baseline_gate_fixture();
+        let gates = evaluate_baseline_gates(&snapshot).unwrap();
+        assert!(gates.iter().all(|gate| {
+            gate.status == GateStatus::Pass
+                || (gate.id == "appkit-raster-slice"
+                    && gate.status == GateStatus::AcceptedPreexisting)
+        }));
+        assert!(validate_gate_results(&gates).is_ok());
+    }
+
+    #[test]
+    fn baseline_gates_reject_any_other_miss() {
+        let mut snapshot = baseline_gate_fixture();
+        snapshot["activation_us"]["p95"] = serde_json::json!(16_001);
+        let gates = evaluate_baseline_gates(&snapshot).unwrap();
+        let error = validate_gate_results(&gates).unwrap_err();
+        assert!(error.contains("activation-render-owner-slice"));
+    }
+
+    #[test]
+    fn baseline_gates_reject_appkit_regressions_beyond_versioned_disposition() {
+        let mut snapshot = baseline_gate_fixture();
+        snapshot["compile_us"]["p95"] = serde_json::json!(16_001);
+        let gates = evaluate_baseline_gates(&snapshot).unwrap();
+        let error = validate_gate_results(&gates).unwrap_err();
+        assert!(error.contains("appkit-raster-slice"));
+    }
+
+    fn baseline_gate_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "ui_tick_us": {"p95": 1000, "p99": 1500},
+            "encode_us": {"p95": 100},
+            "compile_us": {"p95": 12000},
+            "activation_us": {"p95": 8000},
+            "metrics_overhead_control": {"net_ns_per_tick": 1000},
+            "persistent_gpu_objects_created": 0,
+            "static_upload_bytes": 0,
+            "hidden_segment": {
+                "transition_ticks": 1,
+                "steady_ticks": 2,
+                "steady_delta": {"prepare": 0, "queue_writes": 0, "surface_acquires": 0, "encode": 0, "submit": 0}
+            },
+            "lifetime_audit": {
+                "frames": 4500,
+                "cadence_ms": 250,
+                "rss_warmup_bytes": 1000000,
+                "rss_final_bytes": 1005000,
+                "rss_peak_bytes": 1009000,
+                "gpu_warmup_bytes": 1000000,
+                "gpu_final_bytes": 1005000,
+                "gpu_peak_bytes": 1009000
+            }
+        })
     }
 
     #[test]

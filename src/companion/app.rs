@@ -596,6 +596,8 @@ struct AppState {
     review_capture_live_values: bool,
     #[cfg(feature = "retained-renderer")]
     runtime_metrics_out: Option<std::path::PathBuf>,
+    #[cfg(feature = "retained-renderer")]
+    terminal_runtime_metrics: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
     metric_cache: CompanionMetricCache,
     last_good_frame: Option<PreparedCompanionFrame>,
     #[allow(dead_code)] // Read by the Task 5 paint boundary.
@@ -828,18 +830,26 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
         .as_ref()
         .is_some_and(|capture| capture.redacts_live_hud())
         || review.runtime_metrics_out.is_some();
-    let poll_rx = crate::watch_live::spawn_live_watch_worker(
-        paths,
-        POLL_INTERVAL,
-        "glorp-companion-poll",
-        if renderer_runtime.effective().is_pixel()
-            || renderer_runtime.effective().uses_smooth_scene()
-        {
-            LiveWatchRenderMode::Semantic
-        } else {
-            LiveWatchRenderMode::Rendered
-        },
-    );
+    let poll_rx = if review.runtime_metrics_out.is_some() {
+        // The hidden Stage-0 baseline consumes only the initialized fixture.
+        // Live usage polling would make the measured scene and wakeup source
+        // depend on the developer's machine state.
+        let (_fixed_source, receiver) = mpsc::channel::<LiveWatchUpdate>();
+        receiver
+    } else {
+        crate::watch_live::spawn_live_watch_worker(
+            paths,
+            POLL_INTERVAL,
+            "glorp-companion-poll",
+            if renderer_runtime.effective().is_pixel()
+                || renderer_runtime.effective().uses_smooth_scene()
+            {
+                LiveWatchRenderMode::Semantic
+            } else {
+                LiveWatchRenderMode::Rendered
+            },
+        )
+    };
 
     // The smooth scene is CPU-drawn: every tick invalidates the whole porthole
     // for a full CG redraw and CoreAnimation recomposite. Its motion is slow
@@ -882,6 +892,8 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             review_capture_live_values: review.review_capture_live_values,
             #[cfg(feature = "retained-renderer")]
             runtime_metrics_out: review.runtime_metrics_out.clone(),
+            #[cfg(feature = "retained-renderer")]
+            terminal_runtime_metrics: None,
             metric_cache: CompanionMetricCache::default(),
             last_good_frame: None,
             last_frame_preparation_error: None,
@@ -1079,6 +1091,13 @@ fn build_window(
 fn ui_tick() {
     #[cfg(feature = "retained-renderer")]
     let started_at = Instant::now();
+    #[cfg(feature = "retained-renderer")]
+    let hidden_work_start = APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|state| state.retained_host.as_ref())
+            .map(crate::companion::retained::ActiveRetainedHost::runtime_work_counters)
+    });
     let _mtm = MainThreadMarker::new().expect("companion ui_tick on non-main thread");
     drain_poll_results();
     // AppKit does not need fresh backing-store contents for a window that cannot
@@ -1093,7 +1112,7 @@ fn ui_tick() {
                 .as_mut()
                 .and_then(|state| state.retained_host.as_mut())
             {
-                host.record_hidden_tick();
+                host.record_hidden_tick(hidden_work_start.unwrap_or_default());
             }
         });
         finish_review_capture_if_due();
@@ -1222,7 +1241,7 @@ fn prepare_current_frame_from_state() {
         };
         #[cfg(feature = "retained-renderer")]
         if let Some(host) = state.retained_host.as_mut() {
-            host.record_prepare_us(crate::companion::retained::duration_us(
+            host.record_state_prepare_us(crate::companion::retained::duration_us(
                 started_at.elapsed(),
             ));
         }
@@ -1351,6 +1370,9 @@ fn fallback_from_retained(error: crate::companion::retained::RetainedFailureCate
         }
         if let Some(host) = state.retained_host.as_mut() {
             host.record_fallback();
+            state.terminal_runtime_metrics = Some(host.runtime_metrics_snapshot(
+                crate::companion::paired_review::full_preview_capacity_inventory(),
+            ));
         }
         state.retained_host.take();
         // Restore the AppKit-drawn view (this also requests a display) and record
@@ -1524,6 +1546,23 @@ fn finish_review_capture_if_due() {
         {
             return None;
         }
+        // Produce the paired Smooth/Retained artifacts from the frozen last-good
+        // frame before the capture session is torn down.
+        #[cfg(feature = "retained-renderer")]
+        if state.runtime_metrics_out.is_some() {
+            if let Some(host) = state.retained_host.as_mut() {
+                // Exercise the exact hidden-tick metrics boundary. The first is
+                // the transition tick; the following two are the measured
+                // steady segment and must record zero renderer work.
+                for _ in 0..3 {
+                    let start = host.runtime_work_counters();
+                    host.record_hidden_tick(start);
+                }
+                host.run_virtual_lifetime_audit(4_500);
+            }
+        }
+        #[cfg(feature = "retained-renderer")]
+        run_paired_capture(state);
         #[cfg(feature = "retained-renderer")]
         if let Err(error) = write_runtime_metrics_if_requested(state) {
             write_boundary_diagnostic(format_args!(
@@ -1531,10 +1570,6 @@ fn finish_review_capture_if_due() {
             ));
             std::process::exit(1);
         }
-        // Produce the paired Smooth/Retained artifacts from the frozen last-good
-        // frame before the capture session is torn down.
-        #[cfg(feature = "retained-renderer")]
-        run_paired_capture(state);
         let capture = state.review_capture.take()?;
         Some((state.view.clone(), capture))
     });
@@ -1583,9 +1618,6 @@ fn write_runtime_metrics_if_requested(state: &mut AppState) -> Result<()> {
     let Some(path) = state.runtime_metrics_out.take() else {
         return Ok(());
     };
-    let host = state.retained_host.as_ref().ok_or_else(|| {
-        GlorpError::Message("retained runtime metrics requested without an active host".into())
-    })?;
     let inventory = crate::companion::paired_review::full_preview_capacity_inventory();
     if !inventory.fits_global_constraints() {
         return Err(GlorpError::Message(
@@ -1595,7 +1627,15 @@ fn write_runtime_metrics_if_requested(state: &mut AppState) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let snapshot = host.runtime_metrics_snapshot();
+    let snapshot = if let Some(host) = state.retained_host.as_ref() {
+        host.runtime_metrics_snapshot(inventory)
+    } else {
+        state.terminal_runtime_metrics.clone().ok_or_else(|| {
+            GlorpError::Message(
+                "retained runtime metrics requested without live or terminal evidence".into(),
+            )
+        })?
+    };
     std::fs::write(path, serde_json::to_vec_pretty(&snapshot)?)?;
     Ok(())
 }

@@ -107,3 +107,27 @@ fn draw_scene_reads_only_last_good_frame_and_never_records_runtime_metrics() {
         );
     }
 }
+
+#[test]
+fn terminal_metrics_survive_fallback_and_follow_paired_capture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
+    let text = read(&path);
+    assert!(
+        text.contains("terminal_runtime_metrics"),
+        "fallback must preserve a terminal runtime snapshot after host teardown"
+    );
+    let finish = text
+        .find("fn finish_review_capture_if_due()")
+        .expect("finish_review_capture_if_due exists");
+    let tail = &text[finish..];
+    let capture = tail
+        .find("run_paired_capture(state)")
+        .expect("paired capture runs");
+    let snapshot = tail
+        .find("write_runtime_metrics_if_requested(state)")
+        .expect("terminal metrics are written");
+    assert!(
+        capture < snapshot,
+        "terminal snapshot must be emitted after paired capture increments capture_count"
+    );
+}
