@@ -24,7 +24,8 @@ use crate::commands::companion_mode::{
 };
 use crate::companion::app::{CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame};
 use crate::companion::retained::{
-    ActiveRetainedHost, FrameDisposition, FrameMilestone, RetainedFailureCategory,
+    ActiveRetainedHost, CompanionCapacityInventory, FrameDisposition, FrameMilestone,
+    RetainedFailureCategory,
 };
 use crate::presentation::draw_list::SceneDrawList;
 use crate::presentation::pixel::PixelFrame;
@@ -32,6 +33,19 @@ use crate::presentation::smooth::SmoothCompanionScenePlan;
 use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
 use crate::round::hud::CompanionHudText;
 use crate::round::layout::RoundAperture;
+
+/// Versioned Stage 0 capacity inventory shared by the full Preview Lab matrix
+/// and the native baseline report. The matrix covers all six species and seven
+/// stages, the four runtime states plus dim, the complete prop/tank cast, and all
+/// three pinned depth fixtures. Task 2 moves direct counts onto the neutral scene
+/// snapshot; this function keeps Task 1's frozen numeric contract independent of
+/// the live pet or capture contents.
+pub(crate) fn full_preview_capacity_inventory() -> CompanionCapacityInventory {
+    debug_assert_eq!(crate::pet::generation::Species::all().len(), 6);
+    let inventory = CompanionCapacityInventory::full_preview_fixture();
+    debug_assert!(inventory.fits_global_constraints());
+    inventory
+}
 
 /// A frozen companion frame: a cloned [`PreparedCompanionFrame`], the
 /// serializable identity projected from it plus its sampling context, and a

@@ -57,6 +57,8 @@ pub enum Command {
         review_duration_ms: Option<u64>,
         #[arg(long, hide = true)]
         review_capture_dir: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        review_runtime_metrics_out: Option<PathBuf>,
         #[arg(long, value_enum, hide = true)]
         review_depth: Option<CompanionReviewDepth>,
         #[arg(long, hide = true)]
@@ -94,6 +96,8 @@ pub enum Command {
         review_duration_ms: Option<u64>,
         #[arg(long, hide = true)]
         review_capture_dir: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        review_runtime_metrics_out: Option<PathBuf>,
         #[arg(long, value_enum, hide = true)]
         review_depth: Option<CompanionReviewDepth>,
         #[arg(long, hide = true)]
@@ -202,6 +206,7 @@ impl Cli {
         review_state: Option<CompanionReviewState>,
         review_duration_ms: Option<u64>,
         review_capture_dir: Option<PathBuf>,
+        review_runtime_metrics_out: Option<PathBuf>,
         review_depth: Option<CompanionReviewDepth>,
         review_capture_live_values: bool,
         review_force_dim: bool,
@@ -212,6 +217,7 @@ impl Cli {
             state: review_state,
             duration_ms: review_duration_ms,
             capture_dir: review_capture_dir,
+            runtime_metrics_out: review_runtime_metrics_out,
             depth: review_depth,
             review_capture_live_values,
             force_dim_overlay: review_force_dim,
@@ -318,11 +324,30 @@ mod companion_review_depth_tests {
             None,
             None,
             None,
+            None,
             Some(CompanionReviewDepth::Near),
             false,
             false,
         );
         assert!(options.has_review_launch_options());
         assert_eq!(options.depth, Some(CompanionReviewDepth::Near));
+    }
+
+    #[test]
+    fn companion_app_parses_hidden_runtime_metrics_output() {
+        let cli = Cli::try_parse_from([
+            "glorp",
+            "companion-app",
+            "--review-runtime-metrics-out",
+            "target/glorp-scene-baseline/runtime-metrics.json",
+        ])
+        .expect("hidden runtime metrics output must parse");
+        let super::Command::CompanionApp { review_runtime_metrics_out, .. } = cli.command else {
+            panic!("expected companion-app");
+        };
+        assert_eq!(
+            review_runtime_metrics_out,
+            Some("target/glorp-scene-baseline/runtime-metrics.json".into())
+        );
     }
 }

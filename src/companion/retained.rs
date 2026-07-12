@@ -2,6 +2,7 @@
 
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use objc2::rc::Retained;
@@ -24,11 +25,16 @@ use crate::round::layout::RoundAperture;
 use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 
 mod capture;
+mod metrics;
 mod parity;
 mod presentation;
 mod resources;
 
 pub(crate) use capture::CanonicalRgbaFrame;
+pub(crate) use metrics::{
+    duration_us, CompanionCapacityInventory, CompanionRuntimeMetrics,
+    CompanionRuntimeMetricsSnapshot, RuntimeIdentity,
+};
 pub(crate) use presentation::{
     FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox, RetainedFailureCategory,
     SkipReason,
@@ -154,7 +160,7 @@ impl PersistentFrameBuffers {
         if !self.ring.is_empty() && instances <= self.capacity_instances {
             return;
         }
-        let capacity = instances.max(1);
+        let capacity = persistent_instance_capacity(instances);
         let size = (capacity * INSTANCE_STRIDE) as wgpu::BufferAddress;
         self.ring = (0..INSTANCE_RING_LEN)
             .map(|_| {
@@ -196,6 +202,10 @@ impl PersistentFrameBuffers {
     fn current_buffer(&self) -> &wgpu::Buffer {
         &self.ring[self.cursor]
     }
+}
+
+fn persistent_instance_capacity(instances: usize) -> usize {
+    instances.max(1).next_power_of_two()
 }
 
 /// The off-screen capture intermediate and its mappable staging buffer, keyed by
@@ -240,6 +250,8 @@ pub(super) struct RetainedHost {
     backing_scale: f64,
     frame_counter: u64,
     gpu_errors: GpuErrorMailbox,
+    metrics: CompanionRuntimeMetrics,
+    surface_epoch: u64,
 }
 
 struct Pipelines {
@@ -440,6 +452,9 @@ impl PreparedRetainedHost {
         let mut counters = RetainedResourceCounters::default();
         let atlas_layout = create_atlas_bind_group_layout(&device);
         let pipelines = create_pipelines(&device, config.format, &atlas_layout, &mut counters);
+        let mut metrics = CompanionRuntimeMetrics::default();
+        metrics.discard_initial_visible_ticks(20);
+        metrics.record_persistent_gpu_create(resource_object_count(counters));
         Ok(Self {
             host: RetainedHost {
                 surface,
@@ -458,6 +473,8 @@ impl PreparedRetainedHost {
                 backing_scale: scale,
                 frame_counter: 0,
                 gpu_errors: mailbox,
+                metrics,
+                surface_epoch: 1,
             },
         })
     }
@@ -467,13 +484,17 @@ impl PreparedRetainedHost {
     /// step is ever added and fails, the dropped guard restores the view's prior
     /// AppKit layer state before the error propagates.
     pub(super) fn activate(
-        self,
+        mut self,
         view: &NSView,
     ) -> std::result::Result<ActiveRetainedHost, RetainedFailureCategory> {
+        let started_at = Instant::now();
         let guard = LayerActivationGuard::install(view);
         view.setWantsLayer(true);
         unsafe { view.setLayer(Some(&self.host.layer)) };
         guard.commit();
+        self.host
+            .metrics
+            .record_activation_us(duration_us(started_at.elapsed()));
         Ok(ActiveRetainedHost { host: self.host })
     }
 }
@@ -495,7 +516,9 @@ impl ActiveRetainedHost {
         &mut self,
         frame: &crate::companion::paired_review::PairedReviewFrame,
     ) -> std::result::Result<CanonicalRgbaFrame, RetainedFailureCategory> {
-        capture::RetainedCaptureTarget::new(&mut self.host).capture(frame)
+        let result = capture::RetainedCaptureTarget::new(&mut self.host).capture(frame);
+        self.host.metrics.record_capture();
+        result
     }
 
     /// The physical-pixel drawable size the retained surface is configured for.
@@ -524,6 +547,46 @@ impl ActiveRetainedHost {
             .map(|active| active.resources.generation().value())
             .unwrap_or(0)
     }
+
+    pub(crate) fn record_ui_tick_us(&mut self, value: u32) {
+        let started_at = Instant::now();
+        self.host.metrics.record_ui_tick_us(value);
+        self.host
+            .metrics
+            .record_metrics_overhead(started_at.elapsed());
+    }
+
+    pub(crate) fn begin_visible_tick(&mut self) {
+        self.host.metrics.begin_visible_tick();
+    }
+
+    pub(crate) fn record_prepare_us(&mut self, value: u32) {
+        let started_at = Instant::now();
+        self.host.metrics.record_prepare_us(value);
+        self.host
+            .metrics
+            .record_metrics_overhead(started_at.elapsed());
+    }
+
+    pub(crate) fn record_hidden_tick(&mut self) {
+        self.host.metrics.record_hidden_tick();
+    }
+
+    pub(crate) fn record_fallback(&mut self) {
+        self.host.metrics.record_fallback();
+    }
+
+    pub(crate) fn runtime_metrics_snapshot(&self) -> CompanionRuntimeMetricsSnapshot {
+        let resource_generation = self.current_resource_generation();
+        self.host.metrics.snapshot(RuntimeIdentity {
+            device_epoch: 1,
+            surface_epoch: self.host.surface_epoch,
+            layout_generation: self.host.surface_epoch,
+            resource_generation,
+            semantic_revision: self.host.frame_counter,
+            frame_revision: self.host.frame_counter,
+        })
+    }
 }
 
 impl std::ops::Deref for ActiveRetainedHost {
@@ -541,6 +604,12 @@ impl std::ops::DerefMut for ActiveRetainedHost {
 }
 
 impl RetainedHost {
+    fn record_metrics(&mut self, record: impl FnOnce(&mut CompanionRuntimeMetrics)) {
+        let started_at = Instant::now();
+        record(&mut self.metrics);
+        self.metrics.record_metrics_overhead(started_at.elapsed());
+    }
+
     /// Advances the monotonic frame counter, returning the id for the frame
     /// about to be attempted.
     fn next_frame_id(&mut self) -> u64 {
@@ -605,7 +674,8 @@ impl RetainedHost {
                 .glyph_resources
                 .as_ref()
                 .expect("an established generation implies active glyph resources");
-            match prepare_gpu_frame(
+            let started_at = Instant::now();
+            let result = prepare_gpu_frame(
                 plan,
                 draw_order,
                 metrics,
@@ -613,7 +683,10 @@ impl RetainedHost {
                 background,
                 &chrome,
                 active.resources.atlas(),
-            ) {
+            );
+            let elapsed = duration_us(started_at.elapsed());
+            self.record_metrics(|metrics| metrics.record_prepare_us(elapsed));
+            match result {
                 Ok(frame) => frame,
                 Err(category) => {
                     fail(&mut progress, category);
@@ -625,19 +698,23 @@ impl RetainedHost {
         progress
             .mark(FrameMilestone::Prepared)
             .expect("prepared opens the frame ladder");
+        self.record_metrics(CompanionRuntimeMetrics::record_surface_acquire);
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
+                self.record_metrics(CompanionRuntimeMetrics::record_skip);
                 skip(&mut progress, SkipReason::Outdated);
                 return progress;
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
+                self.record_metrics(CompanionRuntimeMetrics::record_skip);
                 skip(&mut progress, SkipReason::Timeout);
                 return progress;
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
+                self.record_metrics(CompanionRuntimeMetrics::record_skip);
                 skip(&mut progress, SkipReason::Occluded);
                 return progress;
             }
@@ -653,6 +730,7 @@ impl RetainedHost {
         let target = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let encode_started_at = Instant::now();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -675,7 +753,17 @@ impl RetainedHost {
         progress
             .mark(FrameMilestone::Encoded)
             .expect("encoded follows prepared");
+        let encode_us = duration_us(encode_started_at.elapsed());
+        self.record_metrics(|metrics| metrics.record_encode_us(encode_us));
+        let submit_started_at = Instant::now();
         self.queue.submit([encoder.finish()]);
+        let queue_wait_us = duration_us(submit_started_at.elapsed());
+        let draws = frame.blends.len() as u64;
+        self.record_metrics(|metrics| {
+            metrics.record_queue_wait_us(queue_wait_us);
+            metrics.record_submit();
+            metrics.record_draws(draws);
+        });
         progress
             .mark(FrameMilestone::Submitted)
             .expect("submitted follows encoded");
@@ -691,6 +779,7 @@ impl RetainedHost {
     /// then writes the used prefix into the next slot. Ordinary motion holds the
     /// count steady, so this only issues a `write_buffer` and never allocates.
     fn prepare_frame(&mut self, frame: &PreparedGpuFrame) {
+        let before = self.counters;
         self.frame_buffers.ensure_instance_capacity(
             frame.primitives.len(),
             &self.device,
@@ -701,6 +790,20 @@ impl RetainedHost {
             &frame.primitives,
             &mut self.counters,
         );
+        let delta = self.counters - before;
+        let primitives = frame.primitives.len() as u32;
+        let blended_draws = frame.blends.len() as u32;
+        let cpu_bytes = (frame.primitives.capacity() * std::mem::size_of::<GpuPrimitive>()) as u64;
+        let gpu_bytes =
+            (self.frame_buffers.capacity_instances * INSTANCE_RING_LEN * INSTANCE_STRIDE) as u64;
+        self.record_metrics(|metrics| {
+            metrics.record_persistent_gpu_create(resource_object_count(delta));
+            metrics.record_queue_write(delta.instance_write_bytes);
+            metrics.observe_primitives(primitives);
+            metrics.observe_blended_draws(blended_draws);
+            metrics.observe_cpu_bytes(cpu_bytes);
+            metrics.observe_gpu_bytes(gpu_bytes);
+        });
     }
 
     /// Encodes the prepared companion scene into `target_view` on `encoder`: one
@@ -774,7 +877,12 @@ impl RetainedHost {
         let rebuilding = self.glyph_resources.is_some();
         let manifest =
             GlyphRepertoireManifest::for_active_pet(identity.clone(), self.backing_scale);
+        let compile_started_at = Instant::now();
         let resources = CompiledRetainedResources::compile(&manifest)?;
+        self.metrics
+            .record_compile_us(duration_us(compile_started_at.elapsed()));
+        let before = self.counters;
+        let static_bytes = resources.atlas().rgba.len() as u64;
         let (texture, bind_group) = upload_glyph_atlas(
             &self.device,
             &self.queue,
@@ -782,6 +890,13 @@ impl RetainedHost {
             resources.atlas(),
             &mut self.counters,
         );
+        let delta = self.counters - before;
+        self.metrics
+            .record_persistent_gpu_create(resource_object_count(delta));
+        self.metrics.record_static_upload(static_bytes);
+        self.metrics.observe_gpu_bytes(static_bytes.saturating_add(
+            (self.frame_buffers.capacity_instances * INSTANCE_RING_LEN * INSTANCE_STRIDE) as u64,
+        ));
         if rebuilding {
             self.counters.atlas_builds_after_activation += 1;
             self.counters.atlas_uploads_after_activation += 1;
@@ -870,8 +985,17 @@ impl RetainedHost {
                 .setDrawableSize(NSSize::new(f64::from(width), f64::from(height)))
         };
         self.surface.configure(&self.device, &self.config);
+        self.surface_epoch = self.surface_epoch.saturating_add(1);
         Ok(())
     }
+}
+
+fn resource_object_count(counters: RetainedResourceCounters) -> u64 {
+    u64::from(counters.buffer_creations)
+        .saturating_add(u64::from(counters.texture_creations))
+        .saturating_add(u64::from(counters.sampler_creations))
+        .saturating_add(u64::from(counters.bind_group_creations))
+        .saturating_add(u64::from(counters.pipeline_creations))
 }
 
 /// Terminates a frame that could not present because a render resource failed.
@@ -1743,9 +1867,9 @@ mod tests {
     use super::resources::GlyphEntryKind;
     use super::{
         create_atlas_bind_group_layout, create_pipelines, glyph_advance, glyph_ink_rect,
-        glyph_run_height, glyph_run_width, physical_dimension, push_analytic_arc,
-        upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources, GlyphAtlasEntry,
-        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
+        glyph_run_height, glyph_run_width, persistent_instance_capacity, physical_dimension,
+        push_analytic_arc, upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources,
+        GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
         LayerActivationState, PersistentFrameBuffers, Pipelines, PreparedGpuFrame,
         RetainedFailureCategory, RetainedResourceCounters, SmoothBlendMode, GLYPH_FONT_SIZE,
         RETAINED_ATLAS_POINT_SIZE,
@@ -1918,6 +2042,16 @@ mod tests {
         assert_eq!(delta.pipeline_creations, 0);
         assert_eq!(delta.static_uploads, 0);
         assert!(delta.instance_writes > 0);
+    }
+
+    #[test]
+    fn first_instance_ring_allocation_has_bounded_fixture_headroom() {
+        let capacity = persistent_instance_capacity(774);
+        assert_eq!(capacity, 1_024);
+        assert!(
+            capacity >= 790,
+            "the full 120-second fixture high-water fits"
+        );
     }
 
     /// A visible coverage-mask entry with the given ink geometry; the metric

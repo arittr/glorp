@@ -81,3 +81,29 @@ fn retained_capture_never_falls_back_to_appkit_view_caching() {
         );
     }
 }
+
+#[test]
+fn draw_scene_reads_only_last_good_frame_and_never_records_runtime_metrics() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
+    let text = read(&path);
+    let start = text.find("\nfn draw_scene(").expect("draw_scene exists");
+    let tail = &text[start..];
+    let end = tail
+        .find("\nfn paint_prepared_frame(")
+        .expect("paint_prepared_frame follows draw_scene");
+    let body = &tail[..end];
+    assert!(body.contains("state.last_good_frame.as_ref()"));
+    for forbidden in [
+        "prepare_current_frame_from_state(",
+        "prepare_companion_frame(",
+        "runtime_metrics",
+        "record_ui_tick_us(",
+        "record_prepare_us(",
+        "record_encode_us(",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "draw_scene must remain a last-good-frame consumer; found {forbidden}"
+        );
+    }
+}

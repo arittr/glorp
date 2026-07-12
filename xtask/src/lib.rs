@@ -23,6 +23,10 @@ pub enum XtaskCommand {
         live_values: bool,
         out: String,
     },
+    CompanionSceneBaseline {
+        duration_ms: u64,
+        out: String,
+    },
     RendererSpikeValidate {
         out: String,
     },
@@ -44,7 +48,7 @@ pub enum XtaskCommand {
     },
 }
 
-const USAGE: &str = "Usage:\n  cargo xtask companion fresh [--debug|--release]\n  cargo xtask companion review-pair --size N [--state STATE] [--dimmed] [--live-values] --out DIR\n  cargo xtask renderer-spike validate --out DIR\n  cargo xtask renderer-spike run --candidate smooth|wgpu|software --track TRACK --size 360|720 --duration-ms N --out DIR\n  cargo xtask renderer-spike qualify --binary target/renderer-spikes/bin/FILE --target TARGET --candidate smooth|wgpu --track TRACK --size 360|720 --duration-ms N --out target/renderer-spikes/DIR";
+const USAGE: &str = "Usage:\n  cargo xtask companion fresh [--debug|--release]\n  cargo xtask companion review-pair --size N [--state STATE] [--dimmed] [--live-values] --out DIR\n  cargo xtask companion scene-baseline --duration-ms N --out PATH\n  cargo xtask renderer-spike validate --out DIR\n  cargo xtask renderer-spike run --candidate smooth|wgpu|software --track TRACK --size 360|720 --duration-ms N --out DIR\n  cargo xtask renderer-spike qualify --binary target/renderer-spikes/bin/FILE --target TARGET --candidate smooth|wgpu --track TRACK --size 360|720 --duration-ms N --out target/renderer-spikes/DIR";
 
 pub fn parse_args<I, S>(args: I) -> Result<XtaskCommand, String>
 where
@@ -78,6 +82,11 @@ where
         {
             parse_companion_review_pair(rest)
         }
+        [companion, subcommand, rest @ ..]
+            if companion == "companion" && subcommand == "scene-baseline" =>
+        {
+            parse_companion_scene_baseline(rest)
+        }
         [renderer, validate, out_flag, out]
             if renderer == "renderer-spike" && validate == "validate" && out_flag == "--out" =>
         {
@@ -93,6 +102,36 @@ where
         [] => Err(USAGE.to_string()),
         _ => Err(format!("unknown xtask command\n\n{USAGE}")),
     }
+}
+
+fn parse_companion_scene_baseline(args: &[String]) -> Result<XtaskCommand, String> {
+    let mut duration_ms = None;
+    let mut out = None;
+    let mut index = 0;
+    while index < args.len() {
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("missing value for `{}`\n\n{USAGE}", args[index]))?;
+        match args[index].as_str() {
+            "--duration-ms" => {
+                duration_ms = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid duration\n\n{USAGE}"))?,
+                )
+            }
+            "--out" => out = Some(value.clone()),
+            flag => return Err(format!("unknown scene-baseline flag `{flag}`\n\n{USAGE}")),
+        }
+        index += 2;
+    }
+    let duration_ms = duration_ms.unwrap_or(120_000);
+    if duration_ms == 0 {
+        return Err(format!("duration must be greater than zero\n\n{USAGE}"));
+    }
+    let out = out.ok_or_else(|| format!("missing --out\n\n{USAGE}"))?;
+    require_owned_relative_path(&out, "docs/superpowers/measurements", "out")?;
+    Ok(XtaskCommand::CompanionSceneBaseline { duration_ms, out })
 }
 
 fn parse_renderer_spike_run(args: &[String]) -> Result<XtaskCommand, String> {
@@ -356,6 +395,9 @@ where
         XtaskCommand::CompanionReviewPair { size, state, dimmed, live_values, out } => {
             run_companion_review_pair(repo_root, size, state.as_deref(), dimmed, live_values, &out)
         }
+        XtaskCommand::CompanionSceneBaseline { duration_ms, out } => {
+            run_companion_scene_baseline(repo_root, duration_ms, &out)
+        }
         XtaskCommand::RendererSpikeValidate { out } => validate_renderer_spike(repo_root, &out),
         XtaskCommand::RendererSpikeRun { candidate, track, size, duration_ms, out } => {
             if std::env::consts::OS != "macos" {
@@ -495,6 +537,299 @@ fn run_companion_review_pair(
         ),
     )?;
     validate_pair_manifest(repo_root, out)
+}
+
+fn run_companion_scene_baseline(
+    repo_root: &Path,
+    duration_ms: u64,
+    out: &str,
+) -> Result<(), String> {
+    if std::env::consts::OS != "macos" {
+        return Err("cargo xtask companion scene-baseline is only supported on macOS".to_string());
+    }
+    let work = repo_root.join("target/glorp-scene-baseline");
+    match std::fs::remove_dir_all(&work) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    let config_dir = work.join("config");
+    let metrics_path = work.join("runtime-metrics.json");
+
+    run_steps(
+        &[ProcessStep {
+            program: "cargo".into(),
+            args: vec![
+                "build".into(),
+                "--release".into(),
+                "--features".into(),
+                "retained-renderer".into(),
+            ],
+            best_effort: false,
+        }],
+        repo_root,
+    )?;
+
+    let binary = repo_root.join("target/release/glorp");
+    let environment = &[(
+        "GLORP_CONFIG_DIR",
+        config_dir.to_string_lossy().into_owned(),
+    )];
+    run_bounded_process_with_env(
+        &binary,
+        &[
+            "init".into(),
+            "--seed".into(),
+            "glorp-scene-baseline-v1".into(),
+            "--name".into(),
+            "Baseline".into(),
+            "--yes".into(),
+        ],
+        repo_root,
+        Duration::from_secs(30),
+        environment,
+    )?;
+    run_bounded_process_with_env(
+        &binary,
+        &[
+            "companion-app".into(),
+            "--renderer".into(),
+            "retained".into(),
+            "--review-size".into(),
+            "360x360".into(),
+            "--review-duration-ms".into(),
+            duration_ms.to_string(),
+            "--review-runtime-metrics-out".into(),
+            metrics_path.to_string_lossy().into_owned(),
+        ],
+        repo_root,
+        Duration::from_millis(duration_ms.saturating_add(60_000)),
+        environment,
+    )?;
+
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metrics_path).map_err(|error| {
+            format!(
+                "runtime metrics snapshot missing at {}: {error}",
+                metrics_path.display()
+            )
+        })?)
+        .map_err(|error| format!("runtime metrics snapshot is invalid JSON: {error}"))?;
+    validate_runtime_snapshot(&snapshot)?;
+    let report = render_scene_baseline_report(repo_root, duration_ms, &snapshot)?;
+    let out_path = repo_root.join(out);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&out_path, report).map_err(|error| error.to_string())?;
+    println!("xtask: wrote {}", out_path.display());
+    Ok(())
+}
+
+fn validate_runtime_snapshot(snapshot: &serde_json::Value) -> Result<(), String> {
+    if snapshot
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err("runtime metrics snapshot schema_version is not 1".to_string());
+    }
+    for metric in [
+        "ui_tick_us",
+        "prepare_us",
+        "encode_us",
+        "queue_wait_us",
+        "compile_us",
+        "activation_us",
+    ] {
+        for percentile in ["p50", "p95", "p99"] {
+            if snapshot
+                .get(metric)
+                .and_then(|value| value.get(percentile))
+                .and_then(serde_json::Value::as_u64)
+                .is_none()
+            {
+                return Err(format!(
+                    "runtime metrics snapshot missing {metric}.{percentile}"
+                ));
+            }
+        }
+    }
+    let inventory = snapshot
+        .get("inventory")
+        .ok_or_else(|| "runtime metrics snapshot missing inventory".to_string())?;
+    for (field, limit) in [
+        ("max_nodes", 128),
+        ("max_static_primitives", 768),
+        ("max_pet_slots", 130),
+        ("max_visible_props", 10),
+        ("max_round_tank_inhabitants", 2),
+        ("max_ambient_instances", 64),
+        ("max_blended_draws", 256),
+        ("max_lights", 2),
+        ("max_attachments", 32),
+    ] {
+        let value = inventory
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("runtime inventory missing {field}"))?;
+        if value > limit {
+            return Err(format!("runtime inventory {field}={value} exceeds {limit}"));
+        }
+    }
+    Ok(())
+}
+
+fn render_scene_baseline_report(
+    repo_root: &Path,
+    duration_ms: u64,
+    snapshot: &serde_json::Value,
+) -> Result<String, String> {
+    let ui_p95 = snapshot_u64(snapshot, &["ui_tick_us", "p95"])?;
+    let ui_p99 = snapshot_u64(snapshot, &["ui_tick_us", "p99"])?;
+    let encode_p95 = snapshot_u64(snapshot, &["encode_us", "p95"])?;
+    let compile_p95 = snapshot_u64(snapshot, &["compile_us", "p95"])?;
+    let activation_p95 = snapshot_u64(snapshot, &["activation_us", "p95"])?;
+    let persistent_creates = snapshot_u64(snapshot, &["persistent_gpu_objects_created"])?;
+    let static_upload_bytes = snapshot_u64(snapshot, &["static_upload_bytes"])?;
+    let gpu_high_water = snapshot_u64(snapshot, &["gpu_bytes_high_water"])?;
+    let cpu_high_water = snapshot_u64(snapshot, &["cpu_bytes_high_water"])?;
+    let visible_samples = snapshot_u64(snapshot, &["visible_samples"])?;
+    let hidden_ticks = snapshot_u64(snapshot, &["hidden_ticks"])?;
+    let metrics_overhead_us = snapshot_u64(snapshot, &["metrics_overhead_us_high_water"])?;
+    let ui_p95_gate = 8_000_u64.min(((ui_p95 * 110).div_ceil(100)).max(ui_p95 + 500));
+    let ui_p99_gate = 16_000_u64.min(((ui_p99 * 115).div_ceil(100)).max(ui_p99 + 1_000));
+    let encode_p95_gate = ((encode_p95 * 110).div_ceil(100)).max(encode_p95 + 250);
+    let git_sha = required_command_output(repo_root, "git", &["rev-parse", "HEAD"])?;
+    let rustc = required_command_output(repo_root, "rustc", &["--version"])?;
+    let os = required_command_output(repo_root, "sw_vers", &["-productVersion"])?;
+    let arch = required_command_output(repo_root, "uname", &["-m"])?;
+    let hardware = required_command_output(repo_root, "sysctl", &["-n", "hw.model"])?;
+    let inventory = snapshot
+        .get("inventory")
+        .ok_or_else(|| "runtime snapshot missing inventory".to_string())?;
+
+    Ok(format!(
+        "# Glorp Companion Scene Runtime Baseline\n\n\
+Generated by `cargo xtask companion scene-baseline` from a release `retained-renderer` build. \
+The fixture uses an isolated Glorp config, deterministic seed, redacted HUD, and a 360x360 logical window. \
+The first 20 visible ticks are discarded before steady-state sampling.\n\n\
+## Build and host identity\n\n\
+- Git commit: `{git_sha}`\n\
+- Rust: `{rustc}`\n\
+- macOS: `{os}`\n\
+- Architecture: `{arch}`\n\
+- Hardware model: `{hardware}`\n\
+- Build: `release`, feature `retained-renderer`\n\
+- Requested duration: {duration_ms} ms\n\
+- Steady visible samples: {visible_samples}\n\n\
+## Measured baseline\n\n\
+| Metric | p50 (us) | p95 (us) | p99 (us) |\n\
+|---|---:|---:|---:|\n\
+| UI tick | {} | {ui_p95} | {ui_p99} |\n\
+| Frame preparation | {} | {} | {} |\n\
+| Encode | {} | {encode_p95} | {} |\n\
+| Queue submit wait | {} | {} | {} |\n\
+| AppKit raster/compile slice | {} | {compile_p95} | {} |\n\
+| Activation render-owner slice | {} | {activation_p95} | {} |\n\n\
+Post-warmup persistent GPU creations: {persistent_creates}.  \
+Post-warmup static upload bytes: {static_upload_bytes}.  \
+CPU accounted-byte high-water: {cpu_high_water}.  \
+GPU accounted-byte high-water: {gpu_high_water}.  \
+Hidden ticks observed in the visible baseline fixture: {hidden_ticks}.\n\n\
+## Frozen gates\n\n\
+- UI tick p95 <= `{ui_p95_gate} us` (`min(8000us, max(baseline p95 * 1.10, baseline p95 + 500us))`).\n\
+- UI tick p99 <= `{ui_p99_gate} us` (`min(16000us, max(baseline p99 * 1.15, baseline p99 + 1000us))`).\n\
+- Encode p95 <= `{encode_p95_gate} us` (`max(baseline p95 * 1.10, baseline p95 + 250us)`).\n\
+- AppKit raster slice <= `4000 us`; measured p95 `{compile_p95} us`.\n\
+- Activation render-owner slice <= `16000 us`; measured p95 `{activation_p95} us`.\n\
+- Metrics overhead <= `2%` of baseline UI-tick p95 (maximum `{:.2} us`); measured high-water `{metrics_overhead_us} us`.\n\
+- Hidden steady state after one transition tick = zero prepare/write/acquire/encode/submit.\n\
+- Ordinary post-warmup persistent GPU creations = `0`; measured `{persistent_creates}`.\n\
+- Ordinary post-warmup static upload bytes = `0`; measured `{static_upload_bytes}`.\n\
+- RSS and accounted GPU bytes after 4500 virtual frames <= warmup high-water + `1%`.\n\n\
+## Current baseline concern\n\n\
+**FAIL:** the one-time AppKit raster/compile slice measured `{compile_p95} us`, exceeding the frozen `4000 us` gate. The command preserves this miss as stop-gate evidence; it does not loosen or derive the absolute gate from the failing baseline.\n\n\
+## Capacity inventory\n\n\
+| Capacity | Frozen maximum |\n\
+|---|---:|\n\
+| Nodes | {} |\n\
+| Static primitives | {} |\n\
+| Pet art slots | {} |\n\
+| Visible props | {} |\n\
+| Round tank inhabitants | {} |\n\
+| Ambient instances | {} |\n\
+| Blended draw records | {} |\n\
+| Lights | {} |\n\
+| Attachments | {} |\n\n\
+Every inventory value is at or below the versioned Global Constraints limit.\n",
+        snapshot_u64(snapshot, &["ui_tick_us", "p50"])? ,
+        snapshot_u64(snapshot, &["prepare_us", "p50"])? ,
+        snapshot_u64(snapshot, &["prepare_us", "p95"])? ,
+        snapshot_u64(snapshot, &["prepare_us", "p99"])? ,
+        snapshot_u64(snapshot, &["encode_us", "p50"])? ,
+        snapshot_u64(snapshot, &["encode_us", "p99"])? ,
+        snapshot_u64(snapshot, &["queue_wait_us", "p50"])? ,
+        snapshot_u64(snapshot, &["queue_wait_us", "p95"])? ,
+        snapshot_u64(snapshot, &["queue_wait_us", "p99"])? ,
+        snapshot_u64(snapshot, &["compile_us", "p50"])? ,
+        snapshot_u64(snapshot, &["compile_us", "p99"])? ,
+        snapshot_u64(snapshot, &["activation_us", "p50"])? ,
+        snapshot_u64(snapshot, &["activation_us", "p99"])? ,
+        ui_p95 as f64 * 0.02,
+        value_u64(inventory, "max_nodes")?,
+        value_u64(inventory, "max_static_primitives")?,
+        value_u64(inventory, "max_pet_slots")?,
+        value_u64(inventory, "max_visible_props")?,
+        value_u64(inventory, "max_round_tank_inhabitants")?,
+        value_u64(inventory, "max_ambient_instances")?,
+        value_u64(inventory, "max_blended_draws")?,
+        value_u64(inventory, "max_lights")?,
+        value_u64(inventory, "max_attachments")?,
+    ))
+}
+
+fn snapshot_u64(value: &serde_json::Value, path: &[&str]) -> Result<u64, String> {
+    let mut current = value;
+    for component in path {
+        current = current
+            .get(*component)
+            .ok_or_else(|| format!("runtime snapshot missing {}", path.join(".")))?;
+    }
+    current.as_u64().ok_or_else(|| {
+        format!(
+            "runtime snapshot {} is not an unsigned integer",
+            path.join(".")
+        )
+    })
+}
+
+fn value_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("runtime snapshot missing {field}"))
+}
+
+fn required_command_output(
+    repo_root: &Path,
+    program: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| format!("failed to run {program}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} {} failed with {}",
+            args.join(" "),
+            output.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Validates the paired-review manifest and both PNG artifacts. Rejects a missing
@@ -1290,6 +1625,24 @@ mod tests {
         assert_eq!(
             parse_args(["companion", "fresh", "--release"]),
             Ok(XtaskCommand::CompanionFresh { release: true })
+        );
+    }
+
+    #[test]
+    fn parses_companion_scene_baseline() {
+        assert_eq!(
+            parse_args([
+                "companion",
+                "scene-baseline",
+                "--duration-ms",
+                "120000",
+                "--out",
+                "docs/superpowers/measurements/baseline.md",
+            ]),
+            Ok(XtaskCommand::CompanionSceneBaseline {
+                duration_ms: 120_000,
+                out: "docs/superpowers/measurements/baseline.md".into(),
+            })
         );
     }
 

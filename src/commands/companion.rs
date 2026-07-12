@@ -63,6 +63,9 @@ fn build_open_command(
     if let Some(capture_dir) = review.capture_dir {
         command.arg("--review-capture-dir").arg(capture_dir);
     }
+    if let Some(metrics_out) = review.runtime_metrics_out {
+        command.arg("--review-runtime-metrics-out").arg(metrics_out);
+    }
     if let Some(depth) = review.depth {
         command.arg("--review-depth").arg(depth.as_str());
     }

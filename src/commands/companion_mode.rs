@@ -11,6 +11,9 @@ pub struct CompanionReviewOptions {
     pub state: Option<CompanionReviewState>,
     pub duration_ms: Option<u64>,
     pub capture_dir: Option<PathBuf>,
+    /// Hidden automation output for a redacted runtime-metrics snapshot. This
+    /// never contains pet names, HUD values, helper output, or usage data.
+    pub runtime_metrics_out: Option<PathBuf>,
     /// Pins the pet's depth plane for deterministic captures. Never persisted, and
     /// consumed only by Smooth scene preparation.
     pub depth: Option<CompanionReviewDepth>,
@@ -172,6 +175,7 @@ impl CompanionReviewOptions {
             || self.state.is_some()
             || self.duration_ms.is_some()
             || self.capture_dir.is_some()
+            || self.runtime_metrics_out.is_some()
             || self.depth.is_some()
     }
 }
