@@ -1,6 +1,6 @@
 # Task 4 Fix Report: Runtime Transition Contracts
 
-Status: DONE
+Status: SUPERSEDED BY `task-4-fix2-report.md`
 
 Baseline: `2bc49edc8ed3aaa1a70906de5b69a7fada41f52f`
 
@@ -113,3 +113,10 @@ reproduced and fixed. The final frozen-tree release review verified all seven
 closures and found no remaining Critical or Important issue.
 
 Final verdict: **PASS**.
+
+## Later root closure
+
+A later root review found three additional Important authority/recovery issues.
+Their one-shot request/action authority, typed recovery requirement, and
+device-plus-surface fatal scoping repairs are documented in
+`task-4-fix2-report.md`.

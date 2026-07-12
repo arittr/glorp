@@ -89,6 +89,7 @@ impl ResourceChangeMask {
     pub(crate) const MATERIAL_CONTRACT: Self = Self(1 << 5);
     pub(crate) const BACKING_SCALE_ATLAS: Self = Self(1 << 6);
     pub(crate) const SURFACE_RECOVERY: Self = Self(1 << 7);
+    pub(crate) const DEVICE_RECOVERY: Self = Self(1 << 8);
 
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -600,6 +601,7 @@ pub(crate) enum CounterKind {
 pub(crate) enum RuntimeError {
     SnapshotRejected(SnapshotRejection),
     CounterOverflow(CounterKind),
+    RecoveryActionRejected,
     Shutdown,
 }
 
@@ -724,6 +726,32 @@ pub(crate) enum PreparedCommitError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RequestId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RequestIdentity {
+    request_id: RequestId,
+    key: SceneGenerationKey,
+    surface: SurfaceEpoch,
+    source: AppliedRevisions,
+}
+
+impl RequestIdentity {
+    pub(crate) const fn request_id(self) -> RequestId {
+        self.request_id
+    }
+
+    pub(crate) const fn key(self) -> SceneGenerationKey {
+        self.key
+    }
+
+    pub(crate) const fn surface(self) -> SurfaceEpoch {
+        self.surface
+    }
+
+    pub(crate) const fn source(self) -> AppliedRevisions {
+        self.source
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) struct GenerationRequest {
     request_id: RequestId,
@@ -734,13 +762,12 @@ pub(crate) struct GenerationRequest {
 }
 
 impl GenerationRequest {
-    fn duplicate_for_start(&self) -> Self {
-        Self {
+    const fn identity(&self) -> RequestIdentity {
+        RequestIdentity {
             request_id: self.request_id,
             key: self.key,
             surface: self.surface,
             source: self.source,
-            snapshot: Arc::clone(&self.snapshot),
         }
     }
 
@@ -764,7 +791,7 @@ impl GenerationRequest {
         &self.snapshot
     }
 
-    pub(crate) fn accept(&self, accepted: AcceptedSceneState) -> AcceptedGenerationCandidate {
+    pub(crate) fn accept(self, accepted: AcceptedSceneState) -> AcceptedGenerationCandidate {
         AcceptedGenerationCandidate {
             request_id: self.request_id,
             key: self.key,
@@ -800,9 +827,31 @@ pub(crate) enum RuntimeDisposition {
 #[derive(Debug, PartialEq)]
 pub(crate) struct RuntimeEffects {
     disposition: RuntimeDisposition,
-    cancel_worker: Option<RequestId>,
+    cancel_worker: Option<CancelWorker>,
     start_worker: Option<GenerationRequest>,
-    drop_candidate: Option<RequestId>,
+    drop_candidate: Option<DropCandidate>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CancelWorker {
+    request_id: RequestId,
+}
+
+impl CancelWorker {
+    pub(crate) const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DropCandidate {
+    request_id: RequestId,
+}
+
+impl DropCandidate {
+    pub(crate) const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
 }
 
 impl RuntimeEffects {
@@ -819,23 +868,22 @@ impl RuntimeEffects {
         self.disposition
     }
 
-    pub(crate) const fn cancel_worker(&self) -> Option<RequestId> {
-        self.cancel_worker
+    pub(crate) fn take_cancel_worker(&mut self) -> Option<CancelWorker> {
+        self.cancel_worker.take()
     }
 
     pub(crate) fn take_start_worker(&mut self) -> Option<GenerationRequest> {
         self.start_worker.take()
     }
 
-    pub(crate) const fn drop_candidate(&self) -> Option<RequestId> {
-        self.drop_candidate
+    pub(crate) fn take_drop_candidate(&mut self) -> Option<DropCandidate> {
+        self.drop_candidate.take()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourceInvalidation {
     BackingScaleAtlas,
-    SurfaceRecovery,
     MaterialContract,
 }
 
@@ -843,7 +891,6 @@ impl ResourceInvalidation {
     const fn mask(self) -> ResourceChangeMask {
         match self {
             Self::BackingScaleAtlas => ResourceChangeMask::BACKING_SCALE_ATLAS,
-            Self::SurfaceRecovery => ResourceChangeMask::SURFACE_RECOVERY,
             Self::MaterialContract => ResourceChangeMask::MATERIAL_CONTRACT,
         }
     }
@@ -873,7 +920,8 @@ enum PendingPhase {
 
 #[derive(Debug)]
 struct PendingGeneration {
-    request: GenerationRequest,
+    identity: RequestIdentity,
+    worker_request: Option<GenerationRequest>,
     desired_surface: SurfaceEpoch,
     desired_source: AppliedRevisions,
     desired_snapshot: Arc<CompanionSceneSnapshot>,
@@ -901,13 +949,22 @@ pub(crate) enum RuntimeLifecycle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryRequirement {
+    SurfaceSuccessor {
+        failed_device: DeviceEpoch,
+        failed_surface: SurfaceEpoch,
+    },
+    DeviceSuccessor {
+        failed_device: DeviceEpoch,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoveryState {
     Operational,
-    FallbackPending {
-        device: DeviceEpoch,
-        surface: SurfaceEpoch,
-    },
+    FallbackPending(RecoveryRequirement),
     Recovering {
+        requirement: RecoveryRequirement,
         device: DeviceEpoch,
         surface: SurfaceEpoch,
         request: RequestId,
@@ -1065,8 +1122,8 @@ impl CompanionSceneRuntimeState {
         self.active.as_ref().map(|active| active.version)
     }
 
-    pub(crate) fn pending_request(&self) -> Option<&GenerationRequest> {
-        self.pending.as_ref().map(|pending| &pending.request)
+    pub(crate) fn pending_request_identity(&self) -> Option<RequestIdentity> {
+        self.pending.as_ref().map(|pending| pending.identity)
     }
 
     pub(crate) fn pending_desired_source(&self) -> Option<AppliedRevisions> {
@@ -1173,7 +1230,9 @@ impl CompanionSceneRuntimeState {
             expected_surface: self.surface_epoch,
             expected_visibility: self.visibility,
             expected_worker: self.worker,
-            expected_pending_request: self.pending_request().map(GenerationRequest::request_id),
+            expected_pending_request: self
+                .pending_request_identity()
+                .map(RequestIdentity::request_id),
             expected_recovery: self.recovery,
             expected_hidden_latest: self.hidden_latest.as_ref().map(Arc::clone),
             snapshot,
@@ -1202,7 +1261,9 @@ impl CompanionSceneRuntimeState {
             && prepared.expected_visibility == self.visibility
             && prepared.expected_worker == self.worker
             && prepared.expected_pending_request
-                == self.pending_request().map(GenerationRequest::request_id)
+                == self
+                    .pending_request_identity()
+                    .map(RequestIdentity::request_id)
             && prepared.expected_recovery == self.recovery;
         let hidden_matches = match (
             prepared.expected_hidden_latest.as_ref(),
@@ -1269,15 +1330,20 @@ impl CompanionSceneRuntimeState {
         if !matches!(pending.phase, PendingPhase::Queued) {
             return;
         }
+        let Some(request) = pending.worker_request.take() else {
+            return;
+        };
+        let identity = pending.identity;
         pending.phase = PendingPhase::Preparing;
-        self.worker = WorkerState::Running(pending.request.request_id);
-        effects.start_worker = Some(pending.request.duplicate_for_start());
-        effects.disposition = RuntimeDisposition::GenerationStarted(pending.request.request_id);
+        self.worker = WorkerState::Running(identity.request_id);
+        effects.start_worker = Some(request);
+        effects.disposition = RuntimeDisposition::GenerationStarted(identity.request_id);
     }
 
     fn queue_request(&mut self, request: GenerationRequest) -> RuntimeEffects {
+        let identity = request.identity();
         let mut effects =
-            RuntimeEffects::new(RuntimeDisposition::GenerationQueued(request.request_id));
+            RuntimeEffects::new(RuntimeDisposition::GenerationQueued(identity.request_id));
         let mut superseded_activation = None;
         if let Some(old) = self.pending.take() {
             match old.phase {
@@ -1286,12 +1352,14 @@ impl CompanionSceneRuntimeState {
                     superseded_activation = Some((candidate, attempt));
                 }
                 PendingPhase::Ready(candidate) => {
-                    effects.drop_candidate = Some(candidate.request_id);
+                    effects.drop_candidate =
+                        Some(DropCandidate { request_id: candidate.request_id });
                 }
                 _ => {
-                    if self.worker == WorkerState::Running(old.request.request_id) {
-                        self.worker = WorkerState::Cancelling(old.request.request_id);
-                        effects.cancel_worker = Some(old.request.request_id);
+                    if self.worker == WorkerState::Running(old.identity.request_id) {
+                        self.worker = WorkerState::Cancelling(old.identity.request_id);
+                        effects.cancel_worker =
+                            Some(CancelWorker { request_id: old.identity.request_id });
                     }
                 }
             }
@@ -1301,19 +1369,21 @@ impl CompanionSceneRuntimeState {
         } else {
             PendingPhase::Queued
         };
-        if let RecoveryState::Recovering { .. } = self.recovery {
+        if let RecoveryState::Recovering { requirement, .. } = self.recovery {
             self.recovery = RecoveryState::Recovering {
-                device: request.key.device,
-                surface: request.surface,
-                request: request.request_id,
+                requirement,
+                device: identity.key.device,
+                surface: identity.surface,
+                request: identity.request_id,
             };
         }
         self.pending = Some(PendingGeneration {
-            desired_surface: request.surface,
-            desired_source: request.source,
+            identity,
+            desired_surface: identity.surface,
+            desired_source: identity.source,
             desired_snapshot: Arc::clone(&request.snapshot),
             accepted_snapshot: Arc::clone(&request.snapshot),
-            request,
+            worker_request: Some(request),
             phase,
         });
         self.start_pending_worker(&mut effects);
@@ -1324,28 +1394,24 @@ impl CompanionSceneRuntimeState {
         &mut self,
         invalidation: ResourceInvalidation,
     ) -> Result<RuntimeEffects, RuntimeError> {
+        self.invalidate_resource_mask(invalidation.mask())
+    }
+
+    fn invalidate_resource_mask(
+        &mut self,
+        mask: ResourceChangeMask,
+    ) -> Result<RuntimeEffects, RuntimeError> {
         self.ensure_running()?;
         let prepared = self.prepare_with_changes(
             Arc::clone(self.reconciler.snapshot()),
             SnapshotChangeSet {
-                resources: invalidation.mask(),
+                resources: mask,
                 ..SnapshotChangeSet::NONE
             },
             false,
         )?;
-        let effects = self
-            .commit_prepared(prepared)
-            .map_err(|_| RuntimeError::SnapshotRejected(SnapshotRejection::InvalidValue))?;
-        if matches!(invalidation, ResourceInvalidation::SurfaceRecovery) {
-            if let Some(request) = self.pending_request() {
-                self.recovery = RecoveryState::Recovering {
-                    device: self.device_epoch,
-                    surface: self.surface_epoch,
-                    request: request.request_id,
-                };
-            }
-        }
-        Ok(effects)
+        self.commit_prepared(prepared)
+            .map_err(|_| RuntimeError::SnapshotRejected(SnapshotRejection::InvalidValue))
     }
 
     pub(crate) fn acknowledge_worker_cancelled(&mut self, id: RequestId) -> RuntimeEffects {
@@ -1367,26 +1433,26 @@ impl CompanionSceneRuntimeState {
     ) -> RuntimeEffects {
         let mut effects = RuntimeEffects::new(RuntimeDisposition::DroppedStale);
         if self.lifecycle == RuntimeLifecycle::Shutdown {
-            effects.drop_candidate = Some(candidate.request_id);
+            effects.drop_candidate = Some(DropCandidate { request_id: candidate.request_id });
             return effects;
         }
         if self.worker == WorkerState::Cancelling(candidate.request_id) {
             self.worker = WorkerState::Idle;
-            effects.drop_candidate = Some(candidate.request_id);
+            effects.drop_candidate = Some(DropCandidate { request_id: candidate.request_id });
             self.start_pending_worker(&mut effects);
             return effects;
         }
         let Some(pending) = &mut self.pending else {
-            effects.drop_candidate = Some(candidate.request_id);
+            effects.drop_candidate = Some(DropCandidate { request_id: candidate.request_id });
             return effects;
         };
         if self.worker != WorkerState::Running(candidate.request_id)
-            || pending.request.request_id != candidate.request_id
-            || pending.request.key != candidate.key
-            || pending.request.source != candidate.applied
+            || pending.identity.request_id != candidate.request_id
+            || pending.identity.key != candidate.key
+            || pending.identity.source != candidate.applied
             || !matches!(pending.phase, PendingPhase::Preparing)
         {
-            effects.drop_candidate = Some(candidate.request_id);
+            effects.drop_candidate = Some(DropCandidate { request_id: candidate.request_id });
             return effects;
         }
         let request_id = candidate.request_id;
@@ -1420,8 +1486,8 @@ impl CompanionSceneRuntimeState {
         }
         pending.accepted_snapshot = Arc::clone(&pending.desired_snapshot);
         pending.phase = PendingPhase::Ready(AcceptedGenerationCandidate {
-            request_id: pending.request.request_id,
-            key: pending.request.key,
+            request_id: pending.identity.request_id,
+            key: pending.identity.key,
             applied: pending.desired_source,
             accepted,
         });
@@ -1435,7 +1501,7 @@ impl CompanionSceneRuntimeState {
         if self.visibility == RuntimeVisibility::Hidden {
             return Err(ActivationStartError::Hidden);
         }
-        if matches!(self.recovery, RecoveryState::FallbackPending { .. }) {
+        if matches!(self.recovery, RecoveryState::FallbackPending(_)) {
             return Err(ActivationStartError::SurfaceUnavailable);
         }
         let pending = self
@@ -1461,8 +1527,8 @@ impl CompanionSceneRuntimeState {
         };
         let attempt = ActivationAttempt {
             attempt_id,
-            request_id: pending.request.request_id,
-            key: pending.request.key,
+            request_id: pending.identity.request_id,
+            key: pending.identity.key,
             surface: pending.desired_surface,
             applied: pending.desired_source,
         };
@@ -1519,30 +1585,11 @@ impl CompanionSceneRuntimeState {
         }
 
         if let ActivationAttemptOutcome::Fatal(failure) = outcome {
-            let stale_surface_failure = matches!(
+            let surface_failure = matches!(
                 failure,
                 EpochFailure::SurfaceLost | EpochFailure::SurfaceValidation
-            ) && attempt.surface != self.surface_epoch;
-            let stale_device_failure = matches!(
-                failure,
-                EpochFailure::DeviceLost
-                    | EpochFailure::Internal
-                    | EpochFailure::OutOfMemory
-                    | EpochFailure::UncertainPostSubmit
-                    | EpochFailure::ImmediateGpuError
-                    | EpochFailure::DelayedGpuError
-            ) && attempt.key.device != self.device_epoch;
-            if stale_surface_failure || stale_device_failure {
-                if superseding {
-                    effects.drop_candidate = Some(candidate.request_id);
-                    pending.phase = PendingPhase::Queued;
-                } else {
-                    pending.phase = PendingPhase::Ready(candidate);
-                }
-                self.start_pending_worker(&mut effects);
-                return effects;
-            }
-            let invalidates_device = matches!(
+            );
+            let device_failure = matches!(
                 failure,
                 EpochFailure::DeviceLost
                     | EpochFailure::Internal
@@ -1551,17 +1598,37 @@ impl CompanionSceneRuntimeState {
                     | EpochFailure::ImmediateGpuError
                     | EpochFailure::DelayedGpuError
             );
-            if invalidates_device {
+            let stale_surface_failure = surface_failure
+                && (attempt.key.device != self.device_epoch
+                    || attempt.surface != self.surface_epoch);
+            let stale_device_failure = device_failure && attempt.key.device != self.device_epoch;
+            if stale_surface_failure || stale_device_failure {
+                if superseding {
+                    effects.drop_candidate =
+                        Some(DropCandidate { request_id: candidate.request_id });
+                    pending.phase = PendingPhase::Queued;
+                } else {
+                    pending.phase = PendingPhase::Ready(candidate);
+                }
+                self.start_pending_worker(&mut effects);
+                return effects;
+            }
+            if device_failure {
                 self.active = None;
             }
             self.pending = None;
-            self.recovery = RecoveryState::FallbackPending {
-                device: self.device_epoch,
-                surface: self.surface_epoch,
+            let requirement = if device_failure {
+                RecoveryRequirement::DeviceSuccessor { failed_device: self.device_epoch }
+            } else {
+                RecoveryRequirement::SurfaceSuccessor {
+                    failed_device: self.device_epoch,
+                    failed_surface: self.surface_epoch,
+                }
             };
+            self.recovery = RecoveryState::FallbackPending(requirement);
             effects.disposition =
                 RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending);
-            effects.drop_candidate = Some(candidate.request_id);
+            effects.drop_candidate = Some(DropCandidate { request_id: candidate.request_id });
             return effects;
         }
 
@@ -1576,7 +1643,7 @@ impl CompanionSceneRuntimeState {
                 }
                 ActivationAttemptOutcome::Fatal(_) => unreachable!("handled above"),
             };
-            effects.drop_candidate = Some(candidate.request_id);
+            effects.drop_candidate = Some(DropCandidate { request_id: candidate.request_id });
             pending.phase = PendingPhase::Queued;
             self.start_pending_worker(&mut effects);
             if effects.start_worker.is_none() {
@@ -1593,12 +1660,9 @@ impl CompanionSceneRuntimeState {
             ActivationAttemptOutcome::CandidateRejected(_) => {
                 let dropped = candidate.request_id;
                 self.pending = None;
-                effects.drop_candidate = Some(dropped);
-                if matches!(self.recovery, RecoveryState::Recovering { .. }) {
-                    self.recovery = RecoveryState::FallbackPending {
-                        device: self.device_epoch,
-                        surface: self.surface_epoch,
-                    };
+                effects.drop_candidate = Some(DropCandidate { request_id: dropped });
+                if let RecoveryState::Recovering { requirement, .. } = self.recovery {
+                    self.recovery = RecoveryState::FallbackPending(requirement);
                 }
                 ActivationTransition::CandidateDestroyedRetainingActive
             }
@@ -1607,21 +1671,34 @@ impl CompanionSceneRuntimeState {
                     && surface == self.surface_epoch
                     && attempt.surface == pending.desired_surface
                     && attempt.applied == pending.desired_source
-                    && candidate.request_id == pending.request.request_id
-                    && candidate.key == pending.request.key
+                    && candidate.request_id == pending.identity.request_id
+                    && candidate.key == pending.identity.key
                     && candidate.applied == pending.desired_source
                     && match self.recovery {
                         RecoveryState::Operational => true,
                         RecoveryState::Recovering {
+                            requirement,
                             device,
                             surface: recovery_surface,
                             request,
                         } => {
-                            device == candidate.key.device
+                            let sufficient_successor = match requirement {
+                                RecoveryRequirement::SurfaceSuccessor {
+                                    failed_device,
+                                    failed_surface,
+                                } => {
+                                    device == failed_device && recovery_surface.0 > failed_surface.0
+                                }
+                                RecoveryRequirement::DeviceSuccessor { failed_device } => {
+                                    device.0 > failed_device.0
+                                }
+                            };
+                            sufficient_successor
+                                && device == candidate.key.device
                                 && recovery_surface == surface
                                 && request == candidate.request_id
                         }
-                        RecoveryState::FallbackPending { .. } => false,
+                        RecoveryState::FallbackPending(_) => false,
                     } =>
             {
                 self.active = Some(ActiveGeneration {
@@ -1648,35 +1725,63 @@ impl CompanionSceneRuntimeState {
 
     pub(crate) fn acknowledge_surface_rebound(&mut self) -> Result<RuntimeEffects, RuntimeError> {
         self.ensure_running()?;
+        let requirement = match self.recovery {
+            RecoveryState::FallbackPending(
+                requirement @ RecoveryRequirement::SurfaceSuccessor {
+                    failed_device,
+                    failed_surface,
+                },
+            ) if failed_device == self.device_epoch && failed_surface == self.surface_epoch => {
+                requirement
+            }
+            _ => return Err(RuntimeError::RecoveryActionRejected),
+        };
         let next = SurfaceEpoch(increment(self.surface_epoch.0, CounterKind::SurfaceEpoch)?);
         increment(self.resource_generation.0, CounterKind::ResourceGeneration)?;
         increment(self.next_request_id.0, CounterKind::RequestId)?;
         self.surface_epoch = next;
-        let effects = self.invalidate_resources(ResourceInvalidation::SurfaceRecovery)?;
+        let effects = self.invalidate_resource_mask(ResourceChangeMask::SURFACE_RECOVERY)?;
         if let Some(pending) = &mut self.pending {
             pending.desired_surface = next;
             if let PendingPhase::Activating { commit_eligible, .. } = &mut pending.phase {
                 *commit_eligible = false;
             }
         }
+        let identity = self
+            .pending_request_identity()
+            .ok_or(RuntimeError::RecoveryActionRejected)?;
+        self.recovery = RecoveryState::Recovering {
+            requirement,
+            device: identity.key.device,
+            surface: identity.surface,
+            request: identity.request_id,
+        };
         Ok(effects)
     }
 
     pub(crate) fn acknowledge_device_recreated(&mut self) -> Result<RuntimeEffects, RuntimeError> {
         self.ensure_running()?;
+        let requirement = match self.recovery {
+            RecoveryState::FallbackPending(
+                requirement @ RecoveryRequirement::DeviceSuccessor { failed_device },
+            ) if failed_device == self.device_epoch => requirement,
+            _ => return Err(RuntimeError::RecoveryActionRejected),
+        };
         let next = DeviceEpoch(increment(self.device_epoch.0, CounterKind::DeviceEpoch)?);
         increment(self.resource_generation.0, CounterKind::ResourceGeneration)?;
         increment(self.next_request_id.0, CounterKind::RequestId)?;
         self.device_epoch = next;
         self.active = None;
-        let effects = self.invalidate_resources(ResourceInvalidation::SurfaceRecovery)?;
-        if let Some(request) = self.pending_request() {
-            self.recovery = RecoveryState::Recovering {
-                device: next,
-                surface: self.surface_epoch,
-                request: request.request_id,
-            };
-        }
+        let effects = self.invalidate_resource_mask(ResourceChangeMask::DEVICE_RECOVERY)?;
+        let identity = self
+            .pending_request_identity()
+            .ok_or(RuntimeError::RecoveryActionRejected)?;
+        self.recovery = RecoveryState::Recovering {
+            requirement,
+            device: identity.key.device,
+            surface: identity.surface,
+            request: identity.request_id,
+        };
         Ok(effects)
     }
 
@@ -1788,7 +1893,7 @@ impl CompanionSceneRuntimeState {
                 PendingPhase::Ready(candidate)
                 | PendingPhase::Activating { candidate, .. }
                 | PendingPhase::SupersedingActivation { candidate, .. } => {
-                    Some(candidate.request_id)
+                    Some(DropCandidate { request_id: candidate.request_id })
                 }
                 _ => None,
             };
@@ -1796,9 +1901,11 @@ impl CompanionSceneRuntimeState {
         self.pending = None;
         if let WorkerState::Running(id) = self.worker {
             self.worker = WorkerState::Cancelling(id);
-            effects.cancel_worker = Some(id);
+            effects.cancel_worker = Some(CancelWorker { request_id: id });
         }
-        self.recovery = RecoveryState::FallbackPending { device, surface: self.surface_epoch };
+        self.recovery = RecoveryState::FallbackPending(RecoveryRequirement::DeviceSuccessor {
+            failed_device: device,
+        });
         effects.disposition =
             RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending);
         effects
@@ -1812,14 +1919,14 @@ impl CompanionSceneRuntimeState {
         self.lifecycle = RuntimeLifecycle::Shutdown;
         if let WorkerState::Running(id) = self.worker {
             self.worker = WorkerState::Cancelling(id);
-            effects.cancel_worker = Some(id);
+            effects.cancel_worker = Some(CancelWorker { request_id: id });
         }
         if let Some(pending) = &self.pending {
             effects.drop_candidate = match &pending.phase {
                 PendingPhase::Ready(candidate)
                 | PendingPhase::Activating { candidate, .. }
                 | PendingPhase::SupersedingActivation { candidate, .. } => {
-                    Some(candidate.request_id)
+                    Some(DropCandidate { request_id: candidate.request_id })
                 }
                 _ => None,
             };
@@ -2205,7 +2312,8 @@ mod tests {
 
     impl FakeWorkerDispatcher {
         fn apply(&mut self, effects: &mut RuntimeEffects) -> Option<GenerationRequest> {
-            if let Some(cancel) = effects.cancel_worker() {
+            if let Some(cancel) = effects.take_cancel_worker() {
+                let cancel = cancel.request_id();
                 assert_eq!(self.live, Some(cancel));
                 self.live = None;
                 self.cancelling = Some(cancel);
@@ -2298,6 +2406,37 @@ mod tests {
     }
 
     #[test]
+    fn emitted_worker_and_cleanup_actions_are_one_shot() {
+        let mut runtime = runtime();
+        let first_snapshot = topology_update(runtime.snapshot(), Stage::S4);
+        let mut first_effects = commit_snapshot(&mut runtime, first_snapshot);
+        let first = first_effects.take_start_worker().unwrap();
+        assert!(first_effects.take_start_worker().is_none());
+
+        let first_id = first.request_id();
+        let first_candidate = first.accept(accepted_state());
+        let second_snapshot = topology_update(runtime.snapshot(), Stage::S5);
+        let mut second_effects = commit_snapshot(&mut runtime, second_snapshot);
+        assert_eq!(
+            second_effects
+                .take_cancel_worker()
+                .map(|action| action.request_id()),
+            Some(first_id)
+        );
+        assert_eq!(second_effects.take_cancel_worker(), None);
+
+        let mut completion = runtime.complete_candidate(first_candidate);
+        let second = completion.take_start_worker().unwrap();
+        assert!(completion.take_start_worker().is_none());
+        runtime.complete_candidate(second.accept(accepted_state()));
+        let mut third_snapshot = (**runtime.snapshot()).clone();
+        third_snapshot.topology.pet.stage = Stage::S6;
+        let mut third = commit_snapshot(&mut runtime, Arc::new(third_snapshot));
+        assert!(third.take_drop_candidate().is_some());
+        assert_eq!(third.take_drop_candidate(), None);
+    }
+
+    #[test]
     fn prepared_updates_publish_only_after_exact_commit() {
         let mut runtime = runtime();
         let initial_version = runtime.active_version().unwrap();
@@ -2334,10 +2473,11 @@ mod tests {
         let mut runtime = runtime();
         let next = topology_update(runtime.snapshot(), Stage::S4);
         let request = take_start(commit_snapshot(&mut runtime, next));
+        let identity = request.identity();
         let candidate = request.accept(accepted_state());
-        assert_eq!(candidate.request_id, request.request_id());
-        assert_eq!(candidate.key, request.key());
-        assert_eq!(candidate.applied, request.source());
+        assert_eq!(candidate.request_id, identity.request_id());
+        assert_eq!(candidate.key, identity.key());
+        assert_eq!(candidate.applied, identity.source());
         runtime.complete_candidate(candidate);
 
         let mut semantic = (**runtime.snapshot()).clone();
@@ -2453,15 +2593,18 @@ mod tests {
 
     #[test]
     fn surface_recovery_advances_surface_and_resources_without_layout_relabel() {
-        let mut runtime = runtime();
+        let (mut runtime, _, attempt) = runtime_with_activation();
         let before = runtime.active_version().unwrap();
+        let layout = runtime.reconciler.layout_generation();
+        let resources = runtime.resource_generation;
+        runtime.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
+        );
         let request = take_start(runtime.acknowledge_surface_rebound().unwrap());
         assert_eq!(request.surface(), SurfaceEpoch(before.surface.0 + 1));
-        assert_eq!(request.key().layout, before.generation.layout);
-        assert_eq!(
-            request.key().resources,
-            ResourceGeneration(before.generation.resources.0 + 1)
-        );
+        assert_eq!(request.key().layout, layout);
+        assert_eq!(request.key().resources, ResourceGeneration(resources.0 + 1));
         assert_eq!(runtime.active_version(), Some(before));
         assert_eq!(
             runtime.capture_lease().unwrap_err(),
@@ -2502,8 +2645,8 @@ mod tests {
         let mut changes = classify_snapshot_changes(runtime.snapshot(), &mixed);
         changes.resources = ResourceChangeMask::MATERIAL_CONTRACT;
         let prepared = runtime.prepare_with_changes(mixed, changes, false).unwrap();
-        let effects = runtime.commit_prepared(prepared).unwrap();
-        let request = runtime.pending_request().unwrap();
+        let mut effects = runtime.commit_prepared(prepared).unwrap();
+        let request = runtime.pending_request_identity().unwrap();
         assert_eq!(
             request.key().layout,
             LayoutGeneration(before.generation.layout.0 + 2)
@@ -2513,7 +2656,7 @@ mod tests {
             ResourceGeneration(before.generation.resources.0 + 1)
         );
         assert!(effects.start_worker.is_none());
-        assert!(effects.cancel_worker().is_some());
+        assert!(effects.take_cancel_worker().is_some());
     }
 
     #[test]
@@ -2640,12 +2783,21 @@ mod tests {
 
         let mut surface_runtime = runtime();
         surface_runtime.surface_epoch = SurfaceEpoch(u64::MAX);
+        surface_runtime.recovery =
+            RecoveryState::FallbackPending(RecoveryRequirement::SurfaceSuccessor {
+                failed_device: surface_runtime.device_epoch,
+                failed_surface: surface_runtime.surface_epoch,
+            });
         assert_eq!(
             surface_runtime.acknowledge_surface_rebound(),
             Err(RuntimeError::CounterOverflow(CounterKind::SurfaceEpoch))
         );
         let mut device_runtime = runtime();
         device_runtime.device_epoch = DeviceEpoch(u64::MAX);
+        device_runtime.recovery =
+            RecoveryState::FallbackPending(RecoveryRequirement::DeviceSuccessor {
+                failed_device: device_runtime.device_epoch,
+            });
         assert_eq!(
             device_runtime.acknowledge_device_recreated(),
             Err(RuntimeError::CounterOverflow(CounterKind::DeviceEpoch))
@@ -2714,16 +2866,140 @@ mod tests {
     }
 
     #[test]
+    fn recovery_requirement_allows_only_its_exact_acknowledgement() {
+        let (mut surface, _, attempt) = runtime_with_activation();
+        surface.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
+        );
+        assert!(matches!(
+            surface.recovery,
+            RecoveryState::FallbackPending(RecoveryRequirement::SurfaceSuccessor {
+                failed_device: DeviceEpoch(1),
+                failed_surface: SurfaceEpoch(1),
+            })
+        ));
+        let before = (
+            surface.device_epoch,
+            surface.surface_epoch,
+            surface.resource_generation,
+            surface.next_request_id,
+            surface.active_version(),
+            surface.pending_request_identity(),
+            surface.worker,
+            surface.recovery,
+        );
+        assert_eq!(
+            surface.acknowledge_device_recreated(),
+            Err(RuntimeError::RecoveryActionRejected)
+        );
+        assert_eq!(
+            (
+                surface.device_epoch,
+                surface.surface_epoch,
+                surface.resource_generation,
+                surface.next_request_id,
+                surface.active_version(),
+                surface.pending_request_identity(),
+                surface.worker,
+                surface.recovery,
+            ),
+            before
+        );
+
+        let mut surface_effects = surface.acknowledge_surface_rebound().unwrap();
+        let surface_request = surface_effects.take_start_worker().unwrap();
+        assert_eq!(surface_request.key().device, DeviceEpoch(1));
+        assert_eq!(surface_request.surface(), SurfaceEpoch(2));
+
+        let (mut device, _, attempt) = runtime_with_activation();
+        device.finish_activation(
+            attempt,
+            ActivationAttemptOutcome::Fatal(EpochFailure::DeviceLost),
+        );
+        assert!(matches!(
+            device.recovery,
+            RecoveryState::FallbackPending(RecoveryRequirement::DeviceSuccessor {
+                failed_device: DeviceEpoch(1),
+            })
+        ));
+        let before = (
+            device.device_epoch,
+            device.surface_epoch,
+            device.resource_generation,
+            device.next_request_id,
+            device.active_version(),
+            device.pending_request_identity(),
+            device.worker,
+            device.recovery,
+        );
+        assert_eq!(
+            device.acknowledge_surface_rebound(),
+            Err(RuntimeError::RecoveryActionRejected)
+        );
+        assert_eq!(
+            (
+                device.device_epoch,
+                device.surface_epoch,
+                device.resource_generation,
+                device.next_request_id,
+                device.active_version(),
+                device.pending_request_identity(),
+                device.worker,
+                device.recovery,
+            ),
+            before
+        );
+        let mut device_effects = device.acknowledge_device_recreated().unwrap();
+        let device_request = device_effects.take_start_worker().unwrap();
+        assert!(device_request.key().device.0 > DeviceEpoch(1).0);
+    }
+
+    #[test]
+    fn surface_fatal_from_old_device_is_stale_even_at_current_surface() {
+        for failure in [EpochFailure::SurfaceLost, EpochFailure::SurfaceValidation] {
+            let (mut runtime, old_request, attempt) = runtime_with_activation();
+            runtime.recovery =
+                RecoveryState::FallbackPending(RecoveryRequirement::DeviceSuccessor {
+                    failed_device: runtime.device_epoch,
+                });
+            runtime.acknowledge_device_recreated().unwrap();
+            let replacement = runtime.pending_request_identity().unwrap().request_id();
+            assert_eq!(attempt.surface, runtime.surface_epoch);
+            assert_ne!(attempt.key.device, runtime.device_epoch);
+
+            let mut late =
+                runtime.finish_activation(attempt, ActivationAttemptOutcome::Fatal(failure));
+            assert_eq!(
+                late.take_drop_candidate().map(|action| action.request_id()),
+                Some(old_request.request_id())
+            );
+            assert_eq!(
+                late.take_start_worker().map(|request| request.request_id()),
+                Some(replacement)
+            );
+            assert!(matches!(
+                runtime.recovery,
+                RecoveryState::Recovering {
+                    requirement: RecoveryRequirement::DeviceSuccessor { .. },
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn superseding_activation_drops_old_candidate_and_starts_exact_new_request() {
         let mut runtime = runtime();
         let first_snapshot = topology_update(runtime.snapshot(), Stage::S4);
         let first = take_start(commit_snapshot(&mut runtime, first_snapshot));
+        let first_id = first.request_id();
         runtime.complete_candidate(first.accept(accepted_state()));
         let attempt = runtime.begin_activation().unwrap();
 
         let second_snapshot = topology_update(runtime.snapshot(), Stage::S5);
         let second_effects = commit_snapshot(&mut runtime, second_snapshot);
-        let second_id = runtime.pending_request().unwrap().request_id();
+        let second_id = runtime.pending_request_identity().unwrap().request_id();
         assert!(second_effects.start_worker.is_none());
         assert_eq!(
             runtime.capture_lease().unwrap_err(),
@@ -2734,7 +3010,12 @@ mod tests {
             attempt,
             ActivationAttemptOutcome::PresentedClean { surface: attempt.surface },
         );
-        assert_eq!(completion.drop_candidate(), Some(first.request_id()));
+        assert_eq!(
+            completion
+                .take_drop_candidate()
+                .map(|action| action.request_id()),
+            Some(first_id)
+        );
         assert_eq!(
             completion
                 .take_start_worker()
@@ -2746,15 +3027,16 @@ mod tests {
 
     fn runtime_with_activation() -> (
         CompanionSceneRuntimeState,
-        GenerationRequest,
+        RequestIdentity,
         ActivationAttempt,
     ) {
         let mut runtime = runtime();
         let topology = topology_update(runtime.snapshot(), Stage::S4);
         let request = take_start(commit_snapshot(&mut runtime, topology));
+        let identity = request.identity();
         runtime.complete_candidate(request.accept(accepted_state()));
         let attempt = runtime.begin_activation().unwrap();
-        (runtime, request, attempt)
+        (runtime, identity, attempt)
     }
 
     #[test]
@@ -2762,12 +3044,17 @@ mod tests {
         let (mut rejected, first, attempt) = runtime_with_activation();
         let next = topology_update(rejected.snapshot(), Stage::S5);
         commit_snapshot(&mut rejected, next);
-        let replacement = rejected.pending_request().unwrap().request_id();
+        let replacement = rejected.pending_request_identity().unwrap().request_id();
         let mut effects = rejected.finish_activation(
             attempt,
             ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource),
         );
-        assert_eq!(effects.drop_candidate(), Some(first.request_id()));
+        assert_eq!(
+            effects
+                .take_drop_candidate()
+                .map(|action| action.request_id()),
+            Some(first.request_id())
+        );
         assert_eq!(
             effects
                 .take_start_worker()
@@ -2779,11 +3066,16 @@ mod tests {
         let (mut fatal, first, attempt) = runtime_with_activation();
         let next = topology_update(fatal.snapshot(), Stage::S5);
         commit_snapshot(&mut fatal, next);
-        let effects = fatal.finish_activation(
+        let mut effects = fatal.finish_activation(
             attempt,
             ActivationAttemptOutcome::Fatal(EpochFailure::DeviceLost),
         );
-        assert_eq!(effects.drop_candidate(), Some(first.request_id()));
+        assert_eq!(
+            effects
+                .take_drop_candidate()
+                .map(|action| action.request_id()),
+            Some(first.request_id())
+        );
         assert!(effects.start_worker.is_none());
         assert!(fatal.active_version().is_none());
         assert!(matches!(
@@ -2795,14 +3087,21 @@ mod tests {
     #[test]
     fn retired_surface_and_device_failures_cannot_poison_recovery() {
         let (mut surface, old_surface, attempt) = runtime_with_activation();
+        surface.recovery = RecoveryState::FallbackPending(RecoveryRequirement::SurfaceSuccessor {
+            failed_device: surface.device_epoch,
+            failed_surface: surface.surface_epoch,
+        });
         let recovery = surface.acknowledge_surface_rebound().unwrap();
-        let replacement = surface.pending_request().unwrap().request_id();
+        let replacement = surface.pending_request_identity().unwrap().request_id();
         assert!(recovery.start_worker.is_none());
         let mut late = surface.finish_activation(
             attempt,
             ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost),
         );
-        assert_eq!(late.drop_candidate(), Some(old_surface.request_id()));
+        assert_eq!(
+            late.take_drop_candidate().map(|action| action.request_id()),
+            Some(old_surface.request_id())
+        );
         assert_eq!(
             late.take_start_worker().map(|request| request.request_id()),
             Some(replacement)
@@ -2811,13 +3110,19 @@ mod tests {
         assert!(surface.active_version().is_some());
 
         let (mut device, old_device, attempt) = runtime_with_activation();
+        device.recovery = RecoveryState::FallbackPending(RecoveryRequirement::DeviceSuccessor {
+            failed_device: device.device_epoch,
+        });
         device.acknowledge_device_recreated().unwrap();
-        let replacement = device.pending_request().unwrap().request_id();
+        let replacement = device.pending_request_identity().unwrap().request_id();
         let mut late = device.finish_activation(
             attempt,
             ActivationAttemptOutcome::Fatal(EpochFailure::DeviceLost),
         );
-        assert_eq!(late.drop_candidate(), Some(old_device.request_id()));
+        assert_eq!(
+            late.take_drop_candidate().map(|action| action.request_id()),
+            Some(old_device.request_id())
+        );
         assert_eq!(
             late.take_start_worker().map(|request| request.request_id()),
             Some(replacement)
@@ -2913,18 +3218,19 @@ mod tests {
     #[test]
     fn device_recreation_and_resource_work_stay_queued_while_hidden() {
         let mut runtime = runtime();
+        runtime.observe_delayed_gpu_error(runtime.device_epoch);
         runtime.set_hidden();
         let device = runtime.acknowledge_device_recreated().unwrap();
         assert!(device.start_worker.is_none());
         assert_eq!(runtime.device_epoch, DeviceEpoch(2));
         assert!(matches!(runtime.recovery, RecoveryState::Recovering { .. }));
 
-        let resource = runtime
+        let mut resource = runtime
             .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
             .unwrap();
         assert!(resource.start_worker.is_none());
-        assert_eq!(resource.cancel_worker(), None);
-        let expected = runtime.pending_request().unwrap().request_id();
+        assert_eq!(resource.take_cancel_worker(), None);
+        let expected = runtime.pending_request_identity().unwrap().request_id();
         assert!(matches!(
             runtime.recovery,
             RecoveryState::Recovering { request, .. } if request == expected
@@ -2952,9 +3258,14 @@ mod tests {
             );
             let recovery = take_start(runtime.acknowledge_surface_rebound().unwrap());
             let newest_snapshot = topology_update(runtime.snapshot(), Stage::S5);
-            let superseding = commit_snapshot(&mut runtime, newest_snapshot);
-            assert_eq!(superseding.cancel_worker(), Some(recovery.request_id()));
-            let newest = runtime.pending_request().unwrap().request_id();
+            let mut superseding = commit_snapshot(&mut runtime, newest_snapshot);
+            assert_eq!(
+                superseding
+                    .take_cancel_worker()
+                    .map(|action| action.request_id()),
+                Some(recovery.request_id())
+            );
+            let newest = runtime.pending_request_identity().unwrap().request_id();
             assert!(matches!(
                 runtime.recovery,
                 RecoveryState::Recovering { request, .. } if request == newest
@@ -3002,7 +3313,7 @@ mod tests {
         assert!(Arc::ptr_eq(runtime.snapshot(), latest.as_ref().unwrap()));
         assert!(runtime.hidden_latest.is_none());
         assert!(effects.take_start_worker().is_some());
-        assert!(effects.cancel_worker().is_none());
+        assert!(effects.take_cancel_worker().is_none());
     }
 
     #[test]
@@ -3096,11 +3407,22 @@ mod tests {
         let mut preparing = runtime();
         let topology = topology_update(preparing.snapshot(), Stage::S4);
         let request = take_start(commit_snapshot(&mut preparing, topology));
-        let effects = preparing.observe_delayed_gpu_error(request.key().device);
-        assert_eq!(effects.cancel_worker(), Some(request.request_id()));
+        let identity = request.identity();
+        let mut effects = preparing.observe_delayed_gpu_error(identity.key().device);
+        assert_eq!(
+            effects
+                .take_cancel_worker()
+                .map(|action| action.request_id()),
+            Some(identity.request_id())
+        );
         assert!(preparing.active_version().is_none());
-        let completion = preparing.complete_candidate(request.accept(accepted_state()));
-        assert_eq!(completion.drop_candidate(), Some(request.request_id()));
+        let mut completion = preparing.complete_candidate(request.accept(accepted_state()));
+        assert_eq!(
+            completion
+                .take_drop_candidate()
+                .map(|action| action.request_id()),
+            Some(identity.request_id())
+        );
         assert_eq!(preparing.worker, WorkerState::Idle);
 
         let (mut activating, _, attempt) = runtime_with_activation();
@@ -3117,6 +3439,7 @@ mod tests {
 
         let mut retired = runtime();
         let old_device = retired.device_epoch;
+        retired.observe_delayed_gpu_error(old_device);
         let replacement = take_start(retired.acknowledge_device_recreated().unwrap());
         retired.complete_candidate(replacement.accept(accepted_state()));
         let attempt = retired.begin_activation().unwrap();
@@ -3167,7 +3490,7 @@ mod tests {
         assert_eq!(runtime.lifecycle, RuntimeLifecycle::Shutdown);
         assert_eq!(runtime.capture_lease().unwrap_err(), CaptureDefer::Shutdown);
         assert_eq!(
-            runtime.invalidate_resources(ResourceInvalidation::SurfaceRecovery),
+            runtime.invalidate_resources(ResourceInvalidation::BackingScaleAtlas),
             Err(RuntimeError::Shutdown)
         );
         assert_eq!(
