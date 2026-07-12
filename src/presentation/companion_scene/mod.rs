@@ -1,4 +1,9 @@
+pub mod contract;
 pub(crate) mod input;
+pub mod scene;
+pub mod validate;
+
+pub use scene::{MAX_ROUND_TANK_INHABITANTS as MAX_VISIBLE_TANK_INHABITANTS, MAX_VISIBLE_PROPS};
 
 use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
@@ -7,11 +12,9 @@ use crate::presentation::privacy::PrivacyProjection;
 
 pub const COMPANION_SCENE_SCHEMA_VERSION: u16 = 1;
 pub const COMPANION_RENDERER_SCHEMA_VERSION: u16 = 1;
-pub const MAX_VISIBLE_PROPS: usize = 10;
-pub const MAX_VISIBLE_TANK_INHABITANTS: usize = 2;
 pub const PET_LATTICE_WIDTH: u16 = 13;
 pub const PET_LATTICE_HEIGHT: u16 = 10;
-pub const PET_LATTICE_SLOTS: u16 = PET_LATTICE_WIDTH * PET_LATTICE_HEIGHT;
+pub const PET_LATTICE_SLOTS: u16 = scene::MAX_PET_ART_SLOTS as u16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompanionSceneProjectionError {
