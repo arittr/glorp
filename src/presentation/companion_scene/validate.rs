@@ -102,6 +102,7 @@ pub struct AcceptedSceneState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameDeltaValidation {
     pub node_slots_checked: usize,
+    pub node_slots_applied: usize,
     pub lit_paths_checked: usize,
 }
 
@@ -300,8 +301,9 @@ pub fn validate_frame_delta(
     }
 
     let mut node_overlay = [None; MAX_SCENE_NODES];
+    let mut changed_dense_indices = [None; MAX_SCENE_NODES];
     let mut affected_paths = [false; MAX_STATIC_PRIMITIVES];
-    for node in &delta.nodes {
+    for (change_index, node) in delta.nodes.iter().enumerate() {
         let dense_index = *accepted_template
             .node_dense_indices
             .get(&node.node)
@@ -309,6 +311,7 @@ pub fn validate_frame_delta(
         if node_overlay[dense_index].replace(*node).is_some() {
             return Err(SceneValidationError::DuplicateSlot);
         }
+        changed_dense_indices[change_index] = Some(dense_index);
         validate_transform(node.local_transform)?;
         validate_unit_interval(node.opacity)?;
         for path_index in &accepted_template.node_lit_paths[dense_index] {
@@ -346,16 +349,21 @@ pub fn validate_frame_delta(
         lit_paths_checked += 1;
     }
 
+    if changed_dense_indices[..delta.nodes.len()]
+        .iter()
+        .any(Option::is_none)
+    {
+        return Err(SceneValidationError::AcceptedStateMismatch);
+    }
+
     if let Some(camera) = delta.camera {
         current_frame.frame.camera = camera;
     }
-    for (dense_index, changed) in node_overlay
-        .into_iter()
-        .enumerate()
-        .take(current_frame.frame.nodes.len())
-    {
-        if let Some(changed) = changed {
-            current_frame.frame.nodes[dense_index] = changed;
+    let mut node_slots_applied = 0;
+    for (change_index, changed) in delta.nodes.iter().enumerate() {
+        if let Some(dense_index) = changed_dense_indices[change_index] {
+            current_frame.frame.nodes[dense_index] = *changed;
+            node_slots_applied += 1;
         }
     }
     if let Some(gauges) = delta.gauges {
@@ -364,13 +372,15 @@ pub fn validate_frame_delta(
     if let Some(dim_amount) = delta.dim_amount {
         current_frame.frame.dim_amount = dim_amount;
     }
-    for (slot, changed) in light_overlay.into_iter().enumerate() {
-        if let Some(changed) = changed {
+    for (slot, _) in &delta.lights {
+        let slot = usize::from(*slot);
+        if let Some(changed) = light_overlay[slot] {
             current_frame.frame.lights[slot] = changed;
         }
     }
     Ok(FrameDeltaValidation {
         node_slots_checked: delta.nodes.len(),
+        node_slots_applied,
         lit_paths_checked,
     })
 }
@@ -1406,6 +1416,7 @@ mod tests {
         });
         let audit = validate_frame_delta(&delta, &unlit_template, &mut unlit_frame).unwrap();
         assert_eq!(audit.node_slots_checked, 1);
+        assert_eq!(audit.node_slots_applied, 1);
         assert_eq!(audit.lit_paths_checked, 0);
 
         let lit_fixture = SceneFixture::valid();
@@ -1413,6 +1424,7 @@ mod tests {
         let mut lit_frame = validate_frame(&lit_fixture.frame, &lit_template).unwrap();
         let audit = validate_frame_delta(&delta, &lit_template, &mut lit_frame).unwrap();
         assert_eq!(audit.node_slots_checked, 1);
+        assert_eq!(audit.node_slots_applied, 1);
         assert_eq!(audit.lit_paths_checked, 1);
     }
 
