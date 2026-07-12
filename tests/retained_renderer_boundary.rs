@@ -147,7 +147,7 @@ fn activation_finishes_on_first_successful_present_not_frame_zero() {
 }
 
 #[test]
-fn appkit_raster_lane_runs_before_presentation_and_never_inside_render() {
+fn active_hold_then_raster_worker_service_run_before_current_frame_preparation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let retained = read(&root.join("src/companion/retained.rs"));
     let render_start = retained
@@ -180,14 +180,22 @@ fn appkit_raster_lane_runs_before_presentation_and_never_inside_render() {
     let hidden = tick
         .find("if !companion_view_is_visible()")
         .expect("hidden early return exists");
-    let slice = tick
+    let worker_service = tick
         .find("drive_retained_resource_preparation()")
-        .expect("visible tick drives preparation");
+        .expect("visible tick services the raster worker");
+    let active_present = tick
+        .find("present_retained_active_generation()")
+        .expect("active generation presentation exists");
     let animate = tick.find("animate_pet()").expect("animation exists");
     let present = tick
         .find("prepare_current_frame_from_state()")
         .expect("presentation preparation exists");
-    assert!(hidden < slice && slice < animate && slice < present);
+    assert!(
+        hidden < active_present
+            && active_present < worker_service
+            && worker_service < animate
+            && worker_service < present
+    );
     assert!(tick.contains("ResourcePreparationTick::Yielded"));
 
     let drive_start = app
@@ -207,32 +215,59 @@ fn appkit_raster_lane_runs_before_presentation_and_never_inside_render() {
 }
 
 #[test]
-fn appkit_raster_lane_publishes_only_complete_resources_and_has_no_detached_owner() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/retained.rs");
-    let text = read(&path);
+fn host_owned_worker_validates_completed_resources_before_atomic_publish() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = read(&root.join("src/companion/retained.rs"));
+    assert!(text.contains("raster_worker: RasterWorker"));
     let start = text
         .find("    fn advance_resource_preparation(\n        &mut self,")
         .expect("retained resource preparation method exists");
     let tail = &text[start..];
     let end = tail
-        .find("\n    fn finish_resource_preparation_failure(")
-        .expect("failure method follows preparation");
+        .find("\n    fn record_resource_preparation_skip(")
+        .expect("skip recorder follows worker lifecycle methods");
     let body = &tail[..end];
-    let incomplete = body
-        .find("if !publish_is_allowed_in_slice")
-        .expect("incomplete or exhausted work yields");
+    let poll = body
+        .find(".try_recv()")
+        .expect("worker polling is nonblocking");
+    let validate = body
+        .find("let still_current = self.resource_preparation.visible")
+        .expect("completed result is fully revalidated");
+    let materialize = body
+        .find("self.publish_prepared_resources(request, resources)")
+        .expect("validated result reaches materialization");
     let upload = body
         .find("upload_glyph_atlas(")
         .expect("complete atlas uploads");
     let publish = body
         .find("self.glyph_resources = Some(")
         .expect("complete generation publishes");
-    assert!(incomplete < upload && upload < publish);
-    assert!(!body.contains("self.glyph_resources.take()"));
-    for forbidden in ["std::thread", "thread::spawn", "mpsc::", "dispatch_async"] {
+    assert!(poll < validate && validate < materialize && materialize < upload && upload < publish);
+    for required in [
+        "finish_running(reply_id)",
+        "request == &current",
+        "accepts_completed(request, &desired_key)",
+        "desired.as_ref() == Some(&request)",
+        "ResourcePreparationKey::new(identity.clone(), desired_backing_scale)",
+    ] {
         assert!(
-            !body.contains(forbidden),
-            "pending preparation must stay owned by the host: {forbidden}"
+            body.contains(required),
+            "missing stale-result gate: {required}"
+        );
+    }
+    assert!(!body.contains("self.glyph_resources.take()"));
+
+    let worker = read(&root.join("src/companion/retained/worker.rs"));
+    for forbidden in [
+        "wgpu",
+        "Device",
+        "Queue",
+        "upload_glyph_atlas",
+        "materialize",
+    ] {
+        assert!(
+            !worker.contains(forbidden),
+            "CPU raster worker must not own GPU materialization: {forbidden}"
         );
     }
 }
@@ -252,13 +287,14 @@ fn production_and_evidence_paths_never_use_monolithic_appkit_atlas_compile() {
             .unwrap_or(&text);
         assert!(
             !production.contains("CompiledRetainedResources::compile("),
-            "{relative} must not bypass the visible sliced AppKit lane"
+            "{relative} must not bypass the host-owned raster worker"
         );
+        assert!(!production.contains("CompiledRetainedResourcesPreparation"));
     }
 }
 
 #[test]
-fn retained_startup_waits_for_first_visibility_guarded_timer_slice() {
+fn retained_startup_waits_for_first_visibility_guarded_worker_service() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
     let text = read(&path);
     let state_ready = text
@@ -276,7 +312,7 @@ fn retained_startup_waits_for_first_visibility_guarded_timer_slice() {
 }
 
 #[test]
-fn replacement_slices_present_active_first_and_no_active_records_explicit_skip() {
+fn active_hold_precedes_worker_service_and_no_active_records_explicit_skip() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
     let text = read(&path);
     let tick_start = text.find("fn ui_tick()").expect("ui_tick exists");
@@ -285,13 +321,13 @@ fn replacement_slices_present_active_first_and_no_active_records_explicit_skip()
         .find("\n/// After a runtime fallback")
         .expect("ui_tick end marker exists");
     let tick = &tick_tail[..tick_end];
+    let worker_service = tick
+        .find("drive_retained_resource_preparation()")
+        .expect("worker service is driven");
     let hold = tick
         .find("present_retained_active_generation()")
-        .expect("active generation is presented before replacement slice");
-    let slice = tick
-        .find("drive_retained_resource_preparation()")
-        .expect("preparation slice is driven");
-    assert!(hold < slice);
+        .expect("active generation presentation exists");
+    assert!(hold < worker_service);
     assert!(tick.contains("ResourcePreparationTick::YieldedWithoutActive"));
 
     let drive_start = text

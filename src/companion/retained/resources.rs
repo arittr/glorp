@@ -60,6 +60,7 @@ impl RasterItemProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(super) struct RasterSliceProgress {
     pub(super) start_cursor: usize,
     pub(super) end_cursor: usize,
@@ -72,6 +73,7 @@ pub(super) struct RasterSliceProgress {
     pub(super) max_item_phases: RasterItemPhases,
 }
 
+#[cfg(test)]
 fn run_resumable_slice<E>(
     cursor: &mut usize,
     item_count: usize,
@@ -758,6 +760,7 @@ impl GlyphAtlasPreparation {
         })
     }
 
+    #[cfg(test)]
     fn advance(
         &mut self,
         work_start_budget: Duration,
@@ -1007,6 +1010,7 @@ impl CompiledRetainedResourcesPreparation {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn advance(
         &mut self,
         work_start_budget: Duration,

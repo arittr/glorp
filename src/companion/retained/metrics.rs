@@ -90,6 +90,7 @@ impl<const N: usize> Default for FixedAppkitRasterDiagnostics<N> {
 }
 
 impl<const N: usize> FixedAppkitRasterDiagnostics<N> {
+    #[allow(dead_code)] // Preserved until worker timing is wired in the metrics follow-up.
     fn push(&mut self, value: AppkitRasterSliceDiagnostic) {
         self.values[self.next] = value;
         self.next = (self.next + 1) % N;
@@ -646,15 +647,18 @@ impl CompanionRuntimeMetrics {
         }
     }
 
+    #[allow(dead_code)] // Preserved until worker timing is wired in the metrics follow-up.
     pub(crate) fn record_compile_us(&mut self, value: u32) {
         self.compile_us.push(value);
         increment(&mut self.generation_count, 1);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_appkit_raster_queue_wait_us(&mut self, value: u32) {
         self.appkit_raster_queue_wait_us.push(value);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_appkit_raster_slice_us(&mut self, value: u32, deadline_missed: bool) {
         self.appkit_raster_slice_us.push(value);
         increment(&mut self.appkit_raster_slice_count, 1);
@@ -663,18 +667,22 @@ impl CompanionRuntimeMetrics {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_appkit_raster_total_us(&mut self, value: u32) {
         self.appkit_raster_total_us.push(value);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_appkit_raster_coalesce(&mut self) {
         increment(&mut self.appkit_raster_coalesces, 1);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_appkit_raster_cancellation(&mut self) {
         increment(&mut self.appkit_raster_cancellations, 1);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_appkit_raster_slice_diagnostic(
         &mut self,
         diagnostic: AppkitRasterSliceDiagnostic,

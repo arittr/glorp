@@ -1305,7 +1305,16 @@ fn ui_tick() {
         #[cfg(feature = "retained-renderer")]
         APP_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
+                let identity = crate::round::smooth::CompanionContentIdentity::for_pet(
+                    state.vm.pet_render.generated_species,
+                );
+                let backing_scale = crate::companion::retained::ActiveRetainedHost::backing_scale_for_resource_preparation(
+                    state.view.as_super(),
+                )
+                .ok();
                 if let Some(host) = state.retained_host.as_mut() {
+                    let backing_scale = backing_scale.unwrap_or_else(|| host.backing_scale());
+                    host.suspend_resource_preparation(&identity, backing_scale);
                     host.record_hidden_tick(hidden_work_start.unwrap_or_default());
                 }
                 state.runtime_baseline_visibility.record_hidden_ui_tick();
