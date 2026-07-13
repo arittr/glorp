@@ -4,13 +4,16 @@ use bytemuck::{Pod, Zeroable};
 
 use super::buffers::{ByteSpan, DirtySpanSet, FixedPodMirror, MirrorError};
 use crate::presentation::companion_scene::scene::{
-    is_world_blended, AmbientContentKind, AttachmentInstanceBinding, AttachmentMode, Bounds3,
-    ContentDelta, DepthBehavior, FrameDelta, InstanceGroupBinding, InstanceLayer, MaterialKind,
-    MoodContentKind, NodeId, PetArtFilter, PetPaletteRole, PrimitiveBinding, PrimitiveKind,
-    PrimitiveSpace, ResourceKind, SceneContent, SceneFrame, SceneGenerationData, SceneTemplate,
-    WeatherContentKind, WorldBlend, MAX_AMBIENT_INSTANCES, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS,
-    MAX_LIGHTS, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT, MAX_ROUND_TANK_INHABITANTS,
-    MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT, MAX_VISIBLE_PROPS,
+    is_world_blended, AmbientContentKind, AnalyticContentSlot, AnalyticFrameSlot, AnalyticGeometry,
+    AnalyticMaskSource, AnalyticPaint, AnalyticSemantic, AnalyticShape, AttachmentInstanceBinding,
+    AttachmentMode, Bounds3, ContentDelta, DepthBehavior, FrameDelta, GaugeLineCap,
+    InstanceGroupBinding, InstanceLayer, MaterialKind, MoodContentKind, NodeId, PetArtFilter,
+    PetPaletteRole, PrimitiveBinding, PrimitiveKind, PrimitiveSpace, ResourceKind, SceneContent,
+    SceneFrame, SceneGenerationData, SceneTemplate, StatusBeaconTone, WeatherContentKind,
+    WorldBlend, MAX_AMBIENT_INSTANCES, MAX_ANALYTIC_PARAMS, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS,
+    MAX_LIGHTS, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT, MAX_ROOM_GLYPH_SLOTS,
+    MAX_ROUND_TANK_INHABITANTS, MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT,
+    MAX_VISIBLE_PROPS,
 };
 
 const NONE_U32: u32 = u32::MAX;
@@ -25,33 +28,43 @@ pub(super) struct CpuMirrorShape;
 impl CpuMirrorShape {
     pub(super) const NODE_RECORD_BYTES: usize = std::mem::size_of::<NodeGpuValue>();
     pub(super) const NODE_COUNT: usize = MAX_SCENE_NODES;
-    pub(super) const CONTENT_RECORD_BYTES: [usize; 5] = [
+    pub(super) const CONTENT_RECORD_BYTES: [usize; 8] = [
         std::mem::size_of::<ContentGlobalsGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
+        std::mem::size_of::<ContentGpuValue>(),
+        std::mem::size_of::<ContentGpuValue>(),
+        std::mem::size_of::<AnalyticContentGpuValue>(),
     ];
-    pub(super) const CONTENT_COUNTS: [usize; 5] = [
+    pub(super) const CONTENT_COUNTS: [usize; 8] = [
         1,
         MAX_PET_ART_SLOTS,
         PROP_GLYPH_CAPACITY,
         TANK_GLYPH_CAPACITY,
         MAX_AMBIENT_INSTANCES,
+        MAX_PET_ART_SLOTS,
+        MAX_ROOM_GLYPH_SLOTS,
+        MAX_ANALYTIC_PARAMS,
     ];
-    pub(super) const FRAME_RECORD_BYTES: [usize; 5] = [
+    pub(super) const FRAME_RECORD_BYTES: [usize; 7] = [
         std::mem::size_of::<FrameGlobalsGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
+        std::mem::size_of::<FrameGpuValue>(),
+        std::mem::size_of::<AnalyticFrameGpuValue>(),
     ];
-    pub(super) const FRAME_COUNTS: [usize; 5] = [
+    pub(super) const FRAME_COUNTS: [usize; 7] = [
         1,
         MAX_VISIBLE_PROPS,
         TANK_GLYPH_CAPACITY,
         MAX_AMBIENT_INSTANCES,
         MAX_LIGHTS,
+        MAX_ROOM_GLYPH_SLOTS,
+        MAX_ANALYTIC_PARAMS,
     ];
 }
 
@@ -106,6 +119,17 @@ pub(super) struct ContentGpuValue {
     signed_data: [i32; 2],
     flags: u32,
     variant: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
+/// GPU-facing fixed analytic-content ABI: identity header plus packed paint words.
+pub(super) struct AnalyticContentGpuValue {
+    id: u32,
+    semantic: u32,
+    shape: u32,
+    flags: u32,
+    payload: [u32; 8],
 }
 
 /// Narrow semantic projection used by the scene upload translator. The legacy
@@ -164,12 +188,26 @@ pub(super) struct FrameGpuValue {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+/// GPU-facing fixed analytic-frame ABI with exact point-space geometry.
+pub(super) struct AnalyticFrameGpuValue {
+    id: u32,
+    semantic: u32,
+    shape: u32,
+    flags: u32,
+    rect_points: [f32; 4],
+    payload: [f32; 16],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 /// GPU-facing content-global upload ABI.
 struct ContentGlobalsGpuValue {
     palette_rgba: [[u32; 4]; 8],
     mood: u32,
     weather: u32,
-    _padding: [u32; 2],
+    glyph_grid_dimensions: [u32; 2],
+    glyph_grid_origin_points: [f32; 2],
+    glyph_cell_extent_points: [f32; 2],
 }
 
 #[repr(C)]
@@ -328,20 +366,26 @@ impl DenseSceneIndex {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ContentMirrors {
     globals: FixedPodMirror<ContentGlobalsGpuValue, 1>,
-    pet: FixedPodMirror<ContentGpuValue, MAX_PET_ART_SLOTS>,
+    pet_body: FixedPodMirror<ContentGpuValue, MAX_PET_ART_SLOTS>,
+    pet_particles: FixedPodMirror<ContentGpuValue, MAX_PET_ART_SLOTS>,
+    room_glyphs: FixedPodMirror<ContentGpuValue, MAX_ROOM_GLYPH_SLOTS>,
     prop_glyphs: FixedPodMirror<ContentGpuValue, PROP_GLYPH_CAPACITY>,
     tank_glyphs: FixedPodMirror<ContentGpuValue, TANK_GLYPH_CAPACITY>,
     ambient: FixedPodMirror<ContentGpuValue, MAX_AMBIENT_INSTANCES>,
+    analytics: FixedPodMirror<AnalyticContentGpuValue, MAX_ANALYTIC_PARAMS>,
 }
 
 impl ContentMirrors {
     fn zeroed() -> Self {
         Self {
             globals: FixedPodMirror::zeroed(),
-            pet: FixedPodMirror::zeroed(),
+            pet_body: FixedPodMirror::zeroed(),
+            pet_particles: FixedPodMirror::zeroed(),
+            room_glyphs: FixedPodMirror::zeroed(),
             prop_glyphs: FixedPodMirror::zeroed(),
             tank_glyphs: FixedPodMirror::zeroed(),
             ambient: FixedPodMirror::zeroed(),
+            analytics: FixedPodMirror::zeroed(),
         }
     }
 }
@@ -350,9 +394,11 @@ impl ContentMirrors {
 pub(super) struct FrameMirrors {
     globals: FixedPodMirror<FrameGlobalsGpuValue, 1>,
     nodes: FixedPodMirror<NodeGpuValue, MAX_SCENE_NODES>,
+    room_glyphs: FixedPodMirror<FrameGpuValue, MAX_ROOM_GLYPH_SLOTS>,
     props: FixedPodMirror<FrameGpuValue, MAX_VISIBLE_PROPS>,
     tank_cells: FixedPodMirror<FrameGpuValue, TANK_GLYPH_CAPACITY>,
     ambient: FixedPodMirror<FrameGpuValue, MAX_AMBIENT_INSTANCES>,
+    analytics: FixedPodMirror<AnalyticFrameGpuValue, MAX_ANALYTIC_PARAMS>,
     lights: FixedPodMirror<FrameGpuValue, MAX_LIGHTS>,
 }
 
@@ -361,9 +407,11 @@ impl FrameMirrors {
         Self {
             globals: FixedPodMirror::zeroed(),
             nodes: FixedPodMirror::zeroed(),
+            room_glyphs: FixedPodMirror::zeroed(),
             props: FixedPodMirror::zeroed(),
             tank_cells: FixedPodMirror::zeroed(),
             ambient: FixedPodMirror::zeroed(),
+            analytics: FixedPodMirror::zeroed(),
             lights: FixedPodMirror::zeroed(),
         }
     }
@@ -375,9 +423,11 @@ impl std::fmt::Debug for FrameMirrors {
             .debug_struct("FrameMirrors")
             .field("globals", &self.globals)
             .field("node_count", &self.nodes.as_slice().len())
+            .field("room_glyph_slot_count", &self.room_glyphs.as_slice().len())
             .field("prop_slot_count", &self.props.as_slice().len())
             .field("tank_cell_count", &self.tank_cells.as_slice().len())
             .field("ambient_slot_count", &self.ambient.as_slice().len())
+            .field("analytic_slot_count", &self.analytics.as_slice().len())
             .field("light_slot_count", &self.lights.as_slice().len())
             .finish()
     }
@@ -401,15 +451,20 @@ pub(super) struct SceneDirtySpans {
     pub(super) from: crate::presentation::companion_scene::AppliedRevisions,
     pub(super) to: crate::presentation::companion_scene::AppliedRevisions,
     pub(super) content_globals: DirtySpanSet,
-    pub(super) pet: DirtySpanSet,
+    pub(super) pet_body: DirtySpanSet,
+    pub(super) pet_particles: DirtySpanSet,
+    pub(super) room_content: DirtySpanSet,
     pub(super) prop_glyphs: DirtySpanSet,
     pub(super) tank_glyphs: DirtySpanSet,
     pub(super) content_ambient: DirtySpanSet,
+    pub(super) content_analytics: DirtySpanSet,
     pub(super) frame_globals: DirtySpanSet,
     pub(super) nodes: DirtySpanSet,
+    pub(super) room_frame: DirtySpanSet,
     pub(super) props: DirtySpanSet,
     pub(super) tank_cells: DirtySpanSet,
     pub(super) frame_ambient: DirtySpanSet,
+    pub(super) frame_analytics: DirtySpanSet,
     pub(super) lights: DirtySpanSet,
 }
 
@@ -422,15 +477,20 @@ impl SceneDirtySpans {
             from,
             to,
             content_globals: DirtySpanSet::default(),
-            pet: DirtySpanSet::default(),
+            pet_body: DirtySpanSet::default(),
+            pet_particles: DirtySpanSet::default(),
+            room_content: DirtySpanSet::default(),
             prop_glyphs: DirtySpanSet::default(),
             tank_glyphs: DirtySpanSet::default(),
             content_ambient: DirtySpanSet::default(),
+            content_analytics: DirtySpanSet::default(),
             frame_globals: DirtySpanSet::default(),
             nodes: DirtySpanSet::default(),
+            room_frame: DirtySpanSet::default(),
             props: DirtySpanSet::default(),
             tank_cells: DirtySpanSet::default(),
             frame_ambient: DirtySpanSet::default(),
+            frame_analytics: DirtySpanSet::default(),
             lights: DirtySpanSet::default(),
         }
     }
@@ -450,7 +510,6 @@ pub(super) enum MirrorDeltaError {
     GenerationMismatch,
     PairMismatch,
     StaleBase,
-    UnsupportedDelta,
     InvalidRevisionAdvance,
     Validation(crate::presentation::companion_scene::validate::SceneValidationError),
     Compile(CompileError),
@@ -483,6 +542,7 @@ pub(super) struct CpuSceneCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrimitiveUploadSource {
     pub(super) node_index: u32,
+    pub(super) aux_node_index: u32,
     pub(super) material_index: u32,
     pub(super) resource_index: u32,
     pub(super) primitive_kind: u32,
@@ -492,25 +552,38 @@ pub(super) struct PrimitiveUploadSource {
     pub(super) depth: u32,
     pub(super) space: u32,
     pub(super) instance_group: u32,
+    pub(super) instance_slot: u32,
     pub(super) instance_base: u32,
+    pub(super) authored_order: u32,
     pub(super) first_index: u32,
     pub(super) index_count: u32,
 }
 
 pub(super) struct ContentUploadSources<'a> {
     pub(super) globals: &'a [u8],
+    /// Body-filtered pet records. The render slice still names this first family `pet`.
     pub(super) pet: &'a [ContentGpuValue],
+    #[allow(dead_code)] // Consumed when the renderer binds the v2 mirror families.
+    pub(super) pet_particles: &'a [ContentGpuValue],
+    #[allow(dead_code)] // Consumed when the renderer binds the v2 mirror families.
+    pub(super) room_glyphs: &'a [ContentGpuValue],
     pub(super) prop_glyphs: &'a [ContentGpuValue],
     pub(super) tank_glyphs: &'a [ContentGpuValue],
     pub(super) ambient: &'a [ContentGpuValue],
+    #[allow(dead_code)] // Consumed when the renderer binds the v2 mirror families.
+    pub(super) analytics: &'a [AnalyticContentGpuValue],
 }
 
 pub(super) struct FrameUploadSources<'a> {
     pub(super) globals: &'a [u8],
     pub(super) nodes: &'a [u8],
+    #[allow(dead_code)] // Consumed when the renderer binds the v2 mirror families.
+    pub(super) room_glyphs: &'a [u8],
     pub(super) props: &'a [u8],
     pub(super) tank_cells: &'a [u8],
     pub(super) ambient: &'a [u8],
+    #[allow(dead_code)] // Consumed when the renderer binds the v2 mirror families.
+    pub(super) analytics: &'a [u8],
     pub(super) lights: &'a [u8],
 }
 
@@ -523,15 +596,20 @@ pub(super) struct PhaseUploadSources<'a> {
 struct PreparedMirrorDelta {
     dirty: SceneDirtySpans,
     content_globals: Option<ContentGlobalsGpuValue>,
-    pet: [Option<ContentGpuValue>; MAX_PET_ART_SLOTS],
+    pet_body: [Option<ContentGpuValue>; MAX_PET_ART_SLOTS],
+    pet_particles: [Option<ContentGpuValue>; MAX_PET_ART_SLOTS],
+    room_content: [Option<ContentGpuValue>; MAX_ROOM_GLYPH_SLOTS],
     prop_glyphs: [Option<ContentGpuValue>; PROP_GLYPH_CAPACITY],
     tank_glyphs: [Option<ContentGpuValue>; TANK_GLYPH_CAPACITY],
     content_ambient: [Option<ContentGpuValue>; MAX_AMBIENT_INSTANCES],
+    content_analytics: [Option<AnalyticContentGpuValue>; MAX_ANALYTIC_PARAMS],
     frame_globals: Option<FrameGlobalsGpuValue>,
     nodes: [Option<NodeGpuValue>; MAX_SCENE_NODES],
+    room_frame: [Option<FrameGpuValue>; MAX_ROOM_GLYPH_SLOTS],
     props: [Option<FrameGpuValue>; MAX_VISIBLE_PROPS],
     tank_cells: [Option<FrameGpuValue>; TANK_GLYPH_CAPACITY],
     frame_ambient: [Option<FrameGpuValue>; MAX_AMBIENT_INSTANCES],
+    frame_analytics: [Option<AnalyticFrameGpuValue>; MAX_ANALYTIC_PARAMS],
     lights: [Option<FrameGpuValue>; MAX_LIGHTS],
     #[cfg(test)]
     node_resolves: usize,
@@ -545,15 +623,20 @@ impl PreparedMirrorDelta {
         Self {
             dirty: SceneDirtySpans::empty(from, to),
             content_globals: None,
-            pet: [None; MAX_PET_ART_SLOTS],
+            pet_body: [None; MAX_PET_ART_SLOTS],
+            pet_particles: [None; MAX_PET_ART_SLOTS],
+            room_content: [None; MAX_ROOM_GLYPH_SLOTS],
             prop_glyphs: [None; PROP_GLYPH_CAPACITY],
             tank_glyphs: [None; TANK_GLYPH_CAPACITY],
             content_ambient: [None; MAX_AMBIENT_INSTANCES],
+            content_analytics: [None; MAX_ANALYTIC_PARAMS],
             frame_globals: None,
             nodes: [None; MAX_SCENE_NODES],
+            room_frame: [None; MAX_ROOM_GLYPH_SLOTS],
             props: [None; MAX_VISIBLE_PROPS],
             tank_cells: [None; TANK_GLYPH_CAPACITY],
             frame_ambient: [None; MAX_AMBIENT_INSTANCES],
+            frame_analytics: [None; MAX_ANALYTIC_PARAMS],
             lights: [None; MAX_LIGHTS],
             #[cfg(test)]
             node_resolves: 0,
@@ -594,18 +677,31 @@ impl CpuSceneCandidate {
                 .kind
         };
         let instance_base = match primitive.instance_group {
-            1 | 7 | 8 => 0,
+            1 | 2 | 4 | 7 | 8 => 0,
             3 => primitive.instance_slot.checked_mul(
                 u32::try_from(MAX_PROP_GLYPHS_PER_SLOT).expect("prop glyph capacity fits in u32"),
             )?,
             5 | 6 => primitive.instance_slot.checked_mul(
                 u32::try_from(MAX_TANK_GLYPHS_PER_SLOT).expect("tank glyph capacity fits in u32"),
             )?,
-            0 | 2 => NONE_U32,
+            0 => NONE_U32,
             _ => return None,
+        };
+        let aux_node_index = if primitive.primitive_kind
+            == primitive_kind_tag(PrimitiveKind::AnalyticShape)
+            && primitive.instance_group == 0
+            && primitive.instance_slot == u32::from(AnalyticSemantic::WallShadow.id().0)
+        {
+            self.primitives
+                .iter()
+                .find(|candidate| candidate.instance_group == 1)?
+                .node_dense_index
+        } else {
+            NONE_U32
         };
         Some(PrimitiveUploadSource {
             node_index: primitive.node_dense_index,
+            aux_node_index,
             material_index: primitive.material_dense_index,
             resource_index: primitive.resource_dense_index,
             primitive_kind: primitive.primitive_kind,
@@ -615,7 +711,9 @@ impl CpuSceneCandidate {
             depth: primitive.depth,
             space: primitive.space,
             instance_group: primitive.instance_group,
+            instance_slot: primitive.instance_slot,
             instance_base,
+            authored_order: primitive.authored_order,
             first_index: primitive.first_index,
             index_count: primitive.index_count,
         })
@@ -632,10 +730,13 @@ impl CpuSceneCandidate {
     pub(super) fn content_upload_sources(&self) -> ContentUploadSources<'_> {
         ContentUploadSources {
             globals: bytemuck::cast_slice(self.content.globals.as_slice()),
-            pet: self.content.pet.as_slice(),
+            pet: self.content.pet_body.as_slice(),
+            pet_particles: self.content.pet_particles.as_slice(),
+            room_glyphs: self.content.room_glyphs.as_slice(),
             prop_glyphs: self.content.prop_glyphs.as_slice(),
             tank_glyphs: self.content.tank_glyphs.as_slice(),
             ambient: self.content.ambient.as_slice(),
+            analytics: self.content.analytics.as_slice(),
         }
     }
 
@@ -643,9 +744,11 @@ impl CpuSceneCandidate {
         FrameUploadSources {
             globals: bytemuck::cast_slice(self.frame.globals.as_slice()),
             nodes: bytemuck::cast_slice(self.frame.nodes.as_slice()),
+            room_glyphs: bytemuck::cast_slice(self.frame.room_glyphs.as_slice()),
             props: bytemuck::cast_slice(self.frame.props.as_slice()),
             tank_cells: bytemuck::cast_slice(self.frame.tank_cells.as_slice()),
             ambient: bytemuck::cast_slice(self.frame.ambient.as_slice()),
+            analytics: bytemuck::cast_slice(self.frame.analytics.as_slice()),
             lights: bytemuck::cast_slice(self.frame.lights.as_slice()),
         }
     }
@@ -677,9 +780,6 @@ impl CpuSceneCandidate {
         }
         if content_delta.from != self.source_revisions {
             return Err(MirrorDeltaError::StaleBase);
-        }
-        if !content_delta.room_glyph_slots.is_empty() || !frame_delta.room_glyph_slots.is_empty() {
-            return Err(MirrorDeltaError::UnsupportedDelta);
         }
         if content_delta.to.semantic < content_delta.from.semantic
             || content_delta.to.frame < content_delta.from.frame
@@ -727,17 +827,23 @@ fn content_delta_has_values(delta: &ContentDelta) -> bool {
         || delta.weather.is_some()
         || delta.day_phase.is_some()
         || !delta.pet_art_slots.is_empty()
+        || !delta.room_glyph_slots.is_empty()
         || !delta.prop_slots.is_empty()
         || !delta.tank_slots.is_empty()
         || !delta.ambient_slots.is_empty()
+        || !delta.prop_paint_slots.is_empty()
+        || !delta.ambient_paint_slots.is_empty()
+        || !delta.analytic_slots.is_empty()
 }
 
 fn frame_delta_has_values(delta: &FrameDelta) -> bool {
     delta.camera.is_some()
         || !delta.nodes.is_empty()
+        || !delta.room_glyph_slots.is_empty()
         || !delta.prop_slots.is_empty()
         || !delta.tank_slots.is_empty()
         || !delta.ambient_slots.is_empty()
+        || !delta.analytic_slots.is_empty()
         || delta.gauges.is_some()
         || delta.dim_amount.is_some()
         || !delta.lights.is_empty()
@@ -775,11 +881,27 @@ impl CpuSceneCandidate {
         }
         for changed in &content_delta.pet_art_slots {
             record_update(
-                &self.content.pet,
-                &mut prepared.pet,
-                &mut prepared.dirty.pet,
+                &self.content.pet_body,
+                &mut prepared.pet_body,
+                &mut prepared.dirty.pet_body,
                 usize::from(changed.slot),
-                pack_pet_content(*changed),
+                pack_pet_content(*changed, PetArtFilter::Body),
+            )?;
+            record_update(
+                &self.content.pet_particles,
+                &mut prepared.pet_particles,
+                &mut prepared.dirty.pet_particles,
+                usize::from(changed.slot),
+                pack_pet_content(*changed, PetArtFilter::Particles),
+            )?;
+        }
+        for changed in &content_delta.room_glyph_slots {
+            record_update(
+                &self.content.room_glyphs,
+                &mut prepared.room_content,
+                &mut prepared.dirty.room_content,
+                usize::from(changed.slot),
+                pack_room_content(*changed),
             )?;
         }
         for changed in &content_delta.prop_slots {
@@ -787,6 +909,11 @@ impl CpuSceneCandidate {
             if slot >= MAX_VISIBLE_PROPS {
                 return Err(MirrorDeltaError::Mirror(MirrorError::CapacityExceeded));
             }
+            let paint = content_delta
+                .prop_paint_slots
+                .iter()
+                .find(|paint| paint.slot == changed.slot)
+                .unwrap_or(&self.logical_content.prop_paint_slots[slot]);
             for subslot in 0..MAX_PROP_GLYPHS_PER_SLOT {
                 let flat = slot * MAX_PROP_GLYPHS_PER_SLOT + subslot;
                 record_update(
@@ -794,7 +921,7 @@ impl CpuSceneCandidate {
                     &mut prepared.prop_glyphs,
                     &mut prepared.dirty.prop_glyphs,
                     flat,
-                    pack_prop_content(*changed, subslot),
+                    pack_prop_content(*changed, paint.paints[subslot], subslot),
                 )?;
             }
         }
@@ -815,12 +942,27 @@ impl CpuSceneCandidate {
             }
         }
         for changed in &content_delta.ambient_slots {
+            let slot = usize::from(changed.slot);
+            let paint = content_delta
+                .ambient_paint_slots
+                .iter()
+                .find(|paint| paint.slot == changed.slot)
+                .unwrap_or(&self.logical_content.ambient_paint_slots[slot]);
             record_update(
                 &self.content.ambient,
                 &mut prepared.content_ambient,
                 &mut prepared.dirty.content_ambient,
-                usize::from(changed.slot),
-                pack_ambient_content(*changed),
+                slot,
+                pack_ambient_content(*changed, paint.paint),
+            )?;
+        }
+        for changed in &content_delta.analytic_slots {
+            record_update(
+                &self.content.analytics,
+                &mut prepared.content_analytics,
+                &mut prepared.dirty.content_analytics,
+                usize::from(changed.id.0),
+                pack_analytic_content(*changed),
             )?;
         }
 
@@ -850,6 +992,15 @@ impl CpuSceneCandidate {
             );
         }
         self.prepare_node_updates(frame_delta, &mut prepared)?;
+        for changed in &frame_delta.room_glyph_slots {
+            record_update(
+                &self.frame.room_glyphs,
+                &mut prepared.room_frame,
+                &mut prepared.dirty.room_frame,
+                usize::from(changed.slot),
+                pack_room_frame(*changed),
+            )?;
+        }
         for changed in &frame_delta.prop_slots {
             record_update(
                 &self.frame.props,
@@ -882,6 +1033,15 @@ impl CpuSceneCandidate {
                 &mut prepared.dirty.frame_ambient,
                 usize::from(changed.slot),
                 pack_ambient_frame(*changed),
+            )?;
+        }
+        for changed in &frame_delta.analytic_slots {
+            record_update(
+                &self.frame.analytics,
+                &mut prepared.frame_analytics,
+                &mut prepared.dirty.frame_analytics,
+                usize::from(changed.id.0),
+                pack_analytic_frame(*changed),
             )?;
         }
         for (slot, changed) in &frame_delta.lights {
@@ -1002,17 +1162,22 @@ impl CpuSceneCandidate {
         if let Some(value) = prepared.content_globals {
             self.content.globals.set_fixed(0, value);
         }
-        commit_updates(&mut self.content.pet, prepared.pet);
+        commit_updates(&mut self.content.pet_body, prepared.pet_body);
+        commit_updates(&mut self.content.pet_particles, prepared.pet_particles);
+        commit_updates(&mut self.content.room_glyphs, prepared.room_content);
         commit_updates(&mut self.content.prop_glyphs, prepared.prop_glyphs);
         commit_updates(&mut self.content.tank_glyphs, prepared.tank_glyphs);
         commit_updates(&mut self.content.ambient, prepared.content_ambient);
+        commit_updates(&mut self.content.analytics, prepared.content_analytics);
         if let Some(value) = prepared.frame_globals {
             self.frame.globals.set_fixed(0, value);
         }
         commit_updates(&mut self.frame.nodes, prepared.nodes);
+        commit_updates(&mut self.frame.room_glyphs, prepared.room_frame);
         commit_updates(&mut self.frame.props, prepared.props);
         commit_updates(&mut self.frame.tank_cells, prepared.tank_cells);
         commit_updates(&mut self.frame.ambient, prepared.frame_ambient);
+        commit_updates(&mut self.frame.analytics, prepared.frame_analytics);
         commit_updates(&mut self.frame.lights, prepared.lights);
     }
 }
@@ -1059,10 +1224,15 @@ fn commit_updates<T: Pod + Zeroable + Copy, const N: usize>(
 
 fn pack_pet_content(
     value: crate::presentation::companion_scene::scene::PetArtSlot,
+    filter: PetArtFilter,
 ) -> ContentGpuValue {
     ContentGpuValue {
         kind: 1,
-        glyph_scalar: option_glyph(value.glyph.map(|glyph| glyph.as_char())),
+        glyph_scalar: if filter.includes(value.palette_role) {
+            option_glyph(value.glyph.map(|glyph| glyph.as_char()))
+        } else {
+            NONE_U32
+        },
         slot: u32::from(value.slot),
         subslot: 0,
         signed_data: [0; 2],
@@ -1073,9 +1243,10 @@ fn pack_pet_content(
 
 fn pack_prop_content(
     outer: crate::presentation::companion_scene::scene::PropContentSlot,
+    paint: Option<crate::presentation::companion_scene::scene::GlyphPaintSource>,
     subslot: usize,
 ) -> ContentGpuValue {
-    let (glyph_scalar, local_cell, flags, variant) = match outer.content {
+    let (glyph_scalar, local_cell, semantic_flags) = match outer.content {
         Some(value) => {
             let glyph = value.glyphs[subslot];
             (
@@ -1084,17 +1255,48 @@ fn pack_prop_content(
                 option_bool(value.twinkle_active)
                     | (option_bool(value.lid_open) << 2)
                     | (option_bool(value.bloom_active) << 4),
-                value.sprite_phase.map_or(NONE_U32, u32::from),
             )
         }
-        None => (NONE_U32, [0; 2], 0, NONE_U32),
+        None => (NONE_U32, [0; 2], 0),
     };
+    let phase_flags = outer
+        .content
+        .and_then(|value| value.sprite_phase)
+        .map_or(0, |phase| (u32::from(phase) + 1) << 8);
+    let (paint_flags, variant) = paint.map_or((0, 0), |paint| {
+        (
+            1 << 6,
+            pack_rgba8([
+                paint.color_srgb8[0],
+                paint.color_srgb8[1],
+                paint.color_srgb8[2],
+                255,
+            ]),
+        )
+    });
     ContentGpuValue {
         kind: 2,
         glyph_scalar,
         slot: u32::from(outer.slot),
         subslot: u32::try_from(subslot).expect("fixed prop subslot fits u32"),
         signed_data: local_cell,
+        flags: semantic_flags | paint_flags | phase_flags,
+        variant,
+    }
+}
+
+fn pack_room_content(
+    value: crate::presentation::companion_scene::scene::RoomGlyphContentSlot,
+) -> ContentGpuValue {
+    let (flags, variant) = value.color_srgb8.map_or((0, 0), |color| {
+        (1, pack_rgba8([color[0], color[1], color[2], 255]))
+    });
+    ContentGpuValue {
+        kind: 5,
+        glyph_scalar: option_glyph(value.glyph.map(|glyph| glyph.as_char())),
+        slot: u32::from(value.slot),
+        subslot: 0,
+        signed_data: [0; 2],
         flags,
         variant,
     }
@@ -1133,15 +1335,219 @@ const fn pack_tank_paint(color_srgb8: [u8; 3], bold: bool) -> [i32; 2] {
 
 fn pack_ambient_content(
     value: crate::presentation::companion_scene::scene::AmbientContentSlot,
+    paint: Option<crate::presentation::companion_scene::scene::GlyphPaintSource>,
 ) -> ContentGpuValue {
+    let kind_flags = value.kind.map_or(0, ambient_kind_tag);
+    let (paint_flags, variant) = paint.map_or((0, 0), |paint| {
+        (
+            1 << 8,
+            pack_rgba8([
+                paint.color_srgb8[0],
+                paint.color_srgb8[1],
+                paint.color_srgb8[2],
+                255,
+            ]),
+        )
+    });
     ContentGpuValue {
         kind: 4,
         glyph_scalar: option_glyph(value.glyph.map(|glyph| glyph.as_char())),
         slot: u32::from(value.slot),
         subslot: 0,
         signed_data: [0; 2],
-        flags: 0,
-        variant: value.kind.map_or(NONE_U32, ambient_kind_tag),
+        flags: kind_flags | paint_flags,
+        variant,
+    }
+}
+
+const fn pack_rgb8(value: [u8; 3]) -> u32 {
+    value[0] as u32 | ((value[1] as u32) << 8) | ((value[2] as u32) << 16)
+}
+
+const fn pack_rgba8(value: [u8; 4]) -> u32 {
+    pack_rgb8([value[0], value[1], value[2]]) | ((value[3] as u32) << 24)
+}
+
+fn pack_analytic_content(value: AnalyticContentSlot) -> AnalyticContentGpuValue {
+    let Some(content) = value.value else {
+        return AnalyticContentGpuValue {
+            id: u32::from(value.id.0),
+            semantic: NONE_U32,
+            shape: NONE_U32,
+            flags: 0,
+            payload: [0; 8],
+        };
+    };
+    let mut payload = [0; 8];
+    match content.paint {
+        AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 } => {
+            payload[0] = pack_rgb8(core_srgb8);
+            payload[1] = pack_rgb8(rim_srgb8);
+        }
+        AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 } => {
+            payload[0] = pack_rgb8(color_srgb8);
+            payload[1] = u32::from(opacity_u8);
+        }
+        AnalyticPaint::FloorShadowMultiplyRadial { inner_srgba8, outer_srgba8 } => {
+            payload[0] = pack_rgba8(inner_srgba8);
+            payload[1] = pack_rgba8(outer_srgba8);
+        }
+        AnalyticPaint::StatusBeacon { active_srgba8, calm_srgba8 } => {
+            payload[0] = pack_rgba8(active_srgba8);
+            payload[1] = pack_rgba8(calm_srgba8);
+        }
+        AnalyticPaint::MoodAuraRings {
+            color_srgb8,
+            ring_count,
+            per_ring_alpha_u8,
+        } => {
+            payload[0] = pack_rgb8(color_srgb8);
+            payload[1] = u32::from(ring_count);
+            payload[2] = u32::from(per_ring_alpha_u8);
+        }
+        AnalyticPaint::PerimeterGaugeSet { xp, daily, pace, daily_overage_srgba8 } => {
+            for (offset, lane) in [xp, daily, pace].into_iter().enumerate() {
+                payload[offset * 2] = pack_rgba8(lane.track_srgba8);
+                payload[offset * 2 + 1] = pack_rgba8(lane.fill_srgba8);
+            }
+            payload[6] = pack_rgba8(daily_overage_srgba8);
+        }
+        AnalyticPaint::TroubleBeacon { color_srgba8 } => {
+            payload[0] = pack_rgba8(color_srgba8);
+        }
+        AnalyticPaint::DimOverlay { color_srgb8 } => {
+            payload[0] = pack_rgb8(color_srgb8);
+        }
+    }
+    AnalyticContentGpuValue {
+        id: u32::from(value.id.0),
+        semantic: analytic_semantic_tag(content.semantic),
+        shape: analytic_shape_tag(content.shape),
+        flags: 1,
+        payload,
+    }
+}
+
+fn pack_analytic_frame(value: AnalyticFrameSlot) -> AnalyticFrameGpuValue {
+    let Some(frame) = value.value else {
+        return AnalyticFrameGpuValue {
+            id: u32::from(value.id.0),
+            semantic: NONE_U32,
+            shape: NONE_U32,
+            flags: 0,
+            rect_points: [0.0; 4],
+            payload: [0.0; 16],
+        };
+    };
+    let mut flags = 1;
+    let mut payload = [0.0; 16];
+    match frame.geometry {
+        AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points,
+        } => payload[..4].copy_from_slice(&[
+            center_points[0],
+            center_points[1],
+            radius_points,
+            feather_points,
+        ]),
+        AnalyticGeometry::PetSilhouette { mask, offset_points, softness_points } => {
+            payload[..4].copy_from_slice(&[
+                analytic_mask_tag(mask) as f32,
+                offset_points[0],
+                offset_points[1],
+                softness_points,
+            ]);
+        }
+        AnalyticGeometry::RadialEllipse {
+            center_points,
+            radii_points,
+            softness_points,
+        } => payload[..5].copy_from_slice(&[
+            center_points[0],
+            center_points[1],
+            radii_points[0],
+            radii_points[1],
+            softness_points,
+        ]),
+        AnalyticGeometry::StatusBeacon {
+            center_points,
+            radius_points,
+            thickness_points,
+            tone,
+        } => payload[..5].copy_from_slice(&[
+            center_points[0],
+            center_points[1],
+            radius_points,
+            thickness_points,
+            status_beacon_tone_tag(tone) as f32,
+        ]),
+        AnalyticGeometry::PetAura {
+            center_points,
+            max_radius_points,
+            ring_count,
+            feather_points,
+        } => payload[..5].copy_from_slice(&[
+            center_points[0],
+            center_points[1],
+            max_radius_points,
+            f32::from(ring_count),
+            feather_points,
+        ]),
+        AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
+            payload[..2].copy_from_slice(&center_points);
+            for (index, lane) in [xp, daily, pace].into_iter().enumerate() {
+                let offset = 2 + index * 4;
+                payload[offset..offset + 4].copy_from_slice(&[
+                    lane.radius_points,
+                    lane.stroke_width_points,
+                    lane.track_start_degrees,
+                    lane.track_sweep_degrees,
+                ]);
+                flags |= gauge_cap_tag(lane.cap) << (8 + index * 4);
+            }
+        }
+        AnalyticGeometry::TroubleBeacon {
+            center_points,
+            radius_points,
+            thickness_points,
+        } => payload[..4].copy_from_slice(&[
+            center_points[0],
+            center_points[1],
+            radius_points,
+            thickness_points,
+        ]),
+        AnalyticGeometry::SurfaceOverlay => {}
+    }
+    AnalyticFrameGpuValue {
+        id: u32::from(value.id.0),
+        semantic: analytic_semantic_tag(frame.semantic),
+        shape: analytic_shape_tag(frame.shape),
+        flags,
+        rect_points: frame.rect_points,
+        payload,
+    }
+}
+
+fn pack_room_frame(
+    value: crate::presentation::companion_scene::scene::RoomGlyphFrameSlot,
+) -> FrameGpuValue {
+    FrameGpuValue {
+        kind: 4,
+        slot: u32::from(value.slot),
+        flags: u32::from(value.visible),
+        variant: 0,
+        values: [
+            f32::from(value.grid_cell[0]),
+            f32::from(value.grid_cell[1]),
+            value.position_points[0],
+            value.position_points[1],
+            value.opacity,
+            0.0,
+            0.0,
+            0.0,
+        ],
     }
 }
 
@@ -1258,6 +1664,9 @@ fn apply_content_delta_in_place(content: &mut SceneContent, delta: &ContentDelta
     for changed in &delta.pet_art_slots {
         content.pet_art_slots[usize::from(changed.slot)] = *changed;
     }
+    for changed in &delta.room_glyph_slots {
+        content.room_glyph_slots[usize::from(changed.slot)] = *changed;
+    }
     for changed in &delta.prop_slots {
         content.prop_slots[usize::from(changed.slot)] = *changed;
     }
@@ -1266,6 +1675,15 @@ fn apply_content_delta_in_place(content: &mut SceneContent, delta: &ContentDelta
     }
     for changed in &delta.ambient_slots {
         content.ambient_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.prop_paint_slots {
+        content.prop_paint_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.ambient_paint_slots {
+        content.ambient_paint_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.analytic_slots {
+        content.analytic_slots[usize::from(changed.id.0)] = *changed;
     }
 }
 
@@ -1295,13 +1713,19 @@ fn compile_cpu_parts(
     if template.nodes.len() > MAX_SCENE_NODES
         || template.primitives.len() > MAX_STATIC_PRIMITIVES
         || content.pet_art_slots.len() != MAX_PET_ART_SLOTS
+        || content.room_glyph_slots.len() != MAX_ROOM_GLYPH_SLOTS
         || content.prop_slots.len() != MAX_VISIBLE_PROPS
         || content.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
         || content.ambient_slots.len() != MAX_AMBIENT_INSTANCES
+        || content.prop_paint_slots.len() != MAX_VISIBLE_PROPS
+        || content.ambient_paint_slots.len() != MAX_AMBIENT_INSTANCES
+        || content.analytic_slots.len() != MAX_ANALYTIC_PARAMS
         || frame.nodes.len() > MAX_SCENE_NODES
+        || frame.room_glyph_slots.len() != MAX_ROOM_GLYPH_SLOTS
         || frame.prop_slots.len() != MAX_VISIBLE_PROPS
         || frame.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
         || frame.ambient_slots.len() != MAX_AMBIENT_INSTANCES
+        || frame.analytic_slots.len() != MAX_ANALYTIC_PARAMS
         || frame.lights.len() > MAX_LIGHTS
         || template.attachments.len() > MAX_ATTACHMENTS
     {
@@ -1450,7 +1874,7 @@ fn compile_cpu_parts(
 
     let attachments = compile_attachment_descriptors(template, &index)?;
 
-    let content = compile_content_mirrors(content)?;
+    let content = compile_content_mirrors(template, content)?;
     let frame = compile_frame_mirrors(template, frame, &index)?;
     let phases = PhaseLists {
         opaque_cutout,
@@ -1663,7 +2087,10 @@ fn append_local_bounds_quad(
     indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
 }
 
-fn compile_content_mirrors(content: &SceneContent) -> Result<ContentMirrors, CompileError> {
+fn compile_content_mirrors(
+    template: &SceneTemplate,
+    content: &SceneContent,
+) -> Result<ContentMirrors, CompileError> {
     let mut result = ContentMirrors::zeroed();
     set_all(
         &mut result.globals,
@@ -1673,53 +2100,40 @@ fn compile_content_mirrors(content: &SceneContent) -> Result<ContentMirrors, Com
                 .map(|rgb| [u32::from(rgb[0]), u32::from(rgb[1]), u32::from(rgb[2]), 255]),
             mood: mood_tag(content.mood),
             weather: weather_tag(content.weather),
-            _padding: [0; 2],
+            glyph_grid_dimensions: [
+                u32::from(template.glyph_grid.columns),
+                u32::from(template.glyph_grid.rows),
+            ],
+            glyph_grid_origin_points: template.glyph_grid.y_up_origin_points,
+            glyph_cell_extent_points: template.glyph_grid.cell_extent_points,
         }],
     );
     set_all(
-        &mut result.pet,
+        &mut result.pet_body,
         std::array::from_fn(|slot| {
-            let value = content.pet_art_slots[slot];
-            ContentGpuValue {
-                kind: 1,
-                glyph_scalar: option_glyph(value.glyph.map(|glyph| glyph.as_char())),
-                slot: u32::from(value.slot),
-                subslot: 0,
-                signed_data: [0; 2],
-                flags: palette_role_tag(value.palette_role),
-                variant: 0,
-            }
+            pack_pet_content(content.pet_art_slots[slot], PetArtFilter::Body)
         }),
+    );
+    set_all(
+        &mut result.pet_particles,
+        std::array::from_fn(|slot| {
+            pack_pet_content(content.pet_art_slots[slot], PetArtFilter::Particles)
+        }),
+    );
+    set_all(
+        &mut result.room_glyphs,
+        std::array::from_fn(|slot| pack_room_content(content.room_glyph_slots[slot])),
     );
     set_all(
         &mut result.prop_glyphs,
         std::array::from_fn(|flat| {
             let slot = flat / MAX_PROP_GLYPHS_PER_SLOT;
             let subslot = flat % MAX_PROP_GLYPHS_PER_SLOT;
-            let outer = content.prop_slots[slot];
-            let (glyph_scalar, local_cell, flags, variant) = match outer.content {
-                Some(value) => {
-                    let glyph = value.glyphs[subslot];
-                    (
-                        option_glyph(glyph.glyph.map(|glyph| glyph.as_char())),
-                        glyph.local_cell.map(i32::from),
-                        option_bool(value.twinkle_active)
-                            | (option_bool(value.lid_open) << 2)
-                            | (option_bool(value.bloom_active) << 4),
-                        value.sprite_phase.map_or(NONE_U32, u32::from),
-                    )
-                }
-                None => (NONE_U32, [0; 2], 0, NONE_U32),
-            };
-            ContentGpuValue {
-                kind: 2,
-                glyph_scalar,
-                slot: u32::from(outer.slot),
-                subslot: u32::try_from(subslot).expect("fixed prop subslot fits u32"),
-                signed_data: local_cell,
-                flags,
-                variant,
-            }
+            pack_prop_content(
+                content.prop_slots[slot],
+                content.prop_paint_slots[slot].paints[subslot],
+                subslot,
+            )
         }),
     );
     set_all(
@@ -1751,17 +2165,15 @@ fn compile_content_mirrors(content: &SceneContent) -> Result<ContentMirrors, Com
     set_all(
         &mut result.ambient,
         std::array::from_fn(|slot| {
-            let value = content.ambient_slots[slot];
-            ContentGpuValue {
-                kind: 4,
-                glyph_scalar: option_glyph(value.glyph.map(|glyph| glyph.as_char())),
-                slot: u32::from(value.slot),
-                subslot: 0,
-                signed_data: [0; 2],
-                flags: 0,
-                variant: value.kind.map_or(NONE_U32, ambient_kind_tag),
-            }
+            pack_ambient_content(
+                content.ambient_slots[slot],
+                content.ambient_paint_slots[slot].paint,
+            )
         }),
+    );
+    set_all(
+        &mut result.analytics,
+        std::array::from_fn(|slot| pack_analytic_content(content.analytic_slots[slot])),
     );
     Ok(result)
 }
@@ -1825,6 +2237,10 @@ fn compile_frame_mirrors(
         };
     }
     set_all(&mut result.nodes, node_values);
+    set_all(
+        &mut result.room_glyphs,
+        std::array::from_fn(|slot| pack_room_frame(frame.room_glyph_slots[slot])),
+    );
     set_all(
         &mut result.props,
         std::array::from_fn(|slot| {
@@ -1895,6 +2311,10 @@ fn compile_frame_mirrors(
                 ],
             }
         }),
+    );
+    set_all(
+        &mut result.analytics,
+        std::array::from_fn(|slot| pack_analytic_frame(frame.analytic_slots[slot])),
     );
     set_all(
         &mut result.lights,
@@ -2137,10 +2557,10 @@ fn space_tag(value: PrimitiveSpace) -> u32 {
 
 fn instance_group_tags(value: PrimitiveBinding) -> (u32, u32) {
     match value {
-        PrimitiveBinding::ShallowCard
-        | PrimitiveBinding::Analytic(_)
-        | PrimitiveBinding::StaticAtlas(_) => (0, NONE_U32),
-        PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs) => (0, NONE_U32),
+        PrimitiveBinding::ShallowCard => (0, NONE_U32),
+        PrimitiveBinding::Analytic(id) => (0, u32::from(id.0)),
+        PrimitiveBinding::StaticAtlas(id) => (0, u32::from(id.0)),
+        PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs) => (4, 0),
         PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body)) => (1, 0),
         PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Particles)) => {
             (2, 0)
@@ -2202,6 +2622,42 @@ fn ambient_kind_tag(value: AmbientContentKind) -> u32 {
     }
 }
 
+fn analytic_semantic_tag(value: AnalyticSemantic) -> u32 {
+    u32::from(value.id().0) + 1
+}
+
+fn analytic_shape_tag(value: AnalyticShape) -> u32 {
+    match value {
+        AnalyticShape::ApertureRadial => 1,
+        AnalyticShape::PetSilhouette => 2,
+        AnalyticShape::RadialEllipse => 3,
+        AnalyticShape::StatusBeacon => 4,
+        AnalyticShape::PetAura => 5,
+        AnalyticShape::PerimeterGaugeSet => 6,
+        AnalyticShape::TroubleBeacon => 7,
+        AnalyticShape::SurfaceOverlay => 8,
+    }
+}
+
+fn analytic_mask_tag(value: AnalyticMaskSource) -> u32 {
+    match value {
+        AnalyticMaskSource::PetBody => 1,
+    }
+}
+
+fn status_beacon_tone_tag(value: StatusBeaconTone) -> u32 {
+    match value {
+        StatusBeaconTone::Active => 1,
+        StatusBeaconTone::Calm => 2,
+    }
+}
+
+fn gauge_cap_tag(value: GaugeLineCap) -> u32 {
+    match value {
+        GaugeLineCap::Round => 1,
+    }
+}
+
 #[cfg(test)]
 pub(super) fn compile_fixture_for_render_test(
     fixture: &crate::presentation::companion_scene::scene::SceneFixture,
@@ -2256,7 +2712,19 @@ pub(super) fn compile_static_fixture_for_render_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::companion_scene::scene::{AuthoredGlyph, MaterialKind, SceneFixture};
+    use crate::presentation::companion_scene::scene::{
+        AnalyticContent, AnalyticContentSlot, AnalyticFrame, AnalyticFrameSlot, AnalyticGeometry,
+        AnalyticMaskSource, AnalyticPaint, AnalyticSemantic, AuthoredGlyph, GaugeLaneGeometry,
+        GaugeLanePaint, GaugeLineCap, MaterialKind, SceneFixture, StatusBeaconTone,
+    };
+
+    const fn packed_rgb(value: [u8; 3]) -> u32 {
+        value[0] as u32 | ((value[1] as u32) << 8) | ((value[2] as u32) << 16)
+    }
+
+    const fn packed_rgba(value: [u8; 4]) -> u32 {
+        packed_rgb([value[0], value[1], value[2]]) | ((value[3] as u32) << 24)
+    }
 
     fn compile_fixture(fixture: &SceneFixture) -> CpuSceneCandidate {
         let accepted = crate::presentation::companion_scene::validate::validate_full_generation(
@@ -2321,15 +2789,20 @@ mod tests {
     fn all_dirty_sets_are_empty(dirty: &SceneDirtySpans) -> bool {
         [
             &dirty.content_globals,
-            &dirty.pet,
+            &dirty.pet_body,
+            &dirty.pet_particles,
+            &dirty.room_content,
             &dirty.prop_glyphs,
             &dirty.tank_glyphs,
             &dirty.content_ambient,
+            &dirty.content_analytics,
             &dirty.frame_globals,
             &dirty.nodes,
+            &dirty.room_frame,
             &dirty.props,
             &dirty.tank_cells,
             &dirty.frame_ambient,
+            &dirty.frame_analytics,
             &dirty.lights,
         ]
         .into_iter()
@@ -2338,9 +2811,9 @@ mod tests {
 
     #[derive(Clone, Copy)]
     struct CandidateStorageIdentity {
-        static_vecs: [(usize, usize); 19],
-        fixed_mirrors: [(usize, usize); 11],
-        logical_vecs: [(usize, usize); 9],
+        static_vecs: [(usize, usize); 21],
+        fixed_mirrors: [(usize, usize); 16],
+        logical_vecs: [(usize, usize); 15],
     }
 
     fn vec_identity<T>(values: &Vec<T>) -> (usize, usize) {
@@ -2371,6 +2844,8 @@ mod tests {
                 vec_identity(&template.materials),
                 vec_identity(&template.resources),
                 vec_identity(&template.attachments),
+                vec_identity(&template.static_atlas_recipes),
+                vec_identity(&template.analytic_templates),
             ],
             fixed_mirrors: [
                 (
@@ -2378,8 +2853,16 @@ mod tests {
                     candidate.content.globals.capacity(),
                 ),
                 (
-                    candidate.content.pet.as_slice().as_ptr() as usize,
-                    candidate.content.pet.capacity(),
+                    candidate.content.pet_body.as_slice().as_ptr() as usize,
+                    candidate.content.pet_body.capacity(),
+                ),
+                (
+                    candidate.content.pet_particles.as_slice().as_ptr() as usize,
+                    candidate.content.pet_particles.capacity(),
+                ),
+                (
+                    candidate.content.room_glyphs.as_slice().as_ptr() as usize,
+                    candidate.content.room_glyphs.capacity(),
                 ),
                 (
                     candidate.content.prop_glyphs.as_slice().as_ptr() as usize,
@@ -2394,12 +2877,20 @@ mod tests {
                     candidate.content.ambient.capacity(),
                 ),
                 (
+                    candidate.content.analytics.as_slice().as_ptr() as usize,
+                    candidate.content.analytics.capacity(),
+                ),
+                (
                     candidate.frame.globals.as_slice().as_ptr() as usize,
                     candidate.frame.globals.capacity(),
                 ),
                 (
                     candidate.frame.nodes.as_slice().as_ptr() as usize,
                     candidate.frame.nodes.capacity(),
+                ),
+                (
+                    candidate.frame.room_glyphs.as_slice().as_ptr() as usize,
+                    candidate.frame.room_glyphs.capacity(),
                 ),
                 (
                     candidate.frame.props.as_slice().as_ptr() as usize,
@@ -2414,19 +2905,29 @@ mod tests {
                     candidate.frame.ambient.capacity(),
                 ),
                 (
+                    candidate.frame.analytics.as_slice().as_ptr() as usize,
+                    candidate.frame.analytics.capacity(),
+                ),
+                (
                     candidate.frame.lights.as_slice().as_ptr() as usize,
                     candidate.frame.lights.capacity(),
                 ),
             ],
             logical_vecs: [
                 vec_identity(&candidate.logical_content.pet_art_slots),
+                vec_identity(&candidate.logical_content.room_glyph_slots),
                 vec_identity(&candidate.logical_content.prop_slots),
                 vec_identity(&candidate.logical_content.tank_slots),
                 vec_identity(&candidate.logical_content.ambient_slots),
+                vec_identity(&candidate.logical_content.prop_paint_slots),
+                vec_identity(&candidate.logical_content.ambient_paint_slots),
+                vec_identity(&candidate.logical_content.analytic_slots),
                 vec_identity(&accepted_frame.nodes),
+                vec_identity(&accepted_frame.room_glyph_slots),
                 vec_identity(&accepted_frame.prop_slots),
                 vec_identity(&accepted_frame.tank_slots),
                 vec_identity(&accepted_frame.ambient_slots),
+                vec_identity(&accepted_frame.analytic_slots),
                 vec_identity(&accepted_frame.lights),
             ],
         }
@@ -2478,7 +2979,17 @@ mod tests {
         vm.day_context.asleep = (frame_index / 40) % 2 == 1;
         vm.life_profile.calm_mode = (frame_index / 30) % 2 == 1;
         vm.progress.fraction = (frame_index % 101) as f32 / 100.0;
-        let wall_time = time::macros::datetime!(2026-07-11 12:00 UTC);
+        vm.source_health[0].status = if (frame_index / 45).is_multiple_of(2) {
+            crate::tui::view_model::SourceStatus::Ready
+        } else {
+            crate::tui::view_model::SourceStatus::Diagnostic
+        };
+        let wall_time = time::macros::datetime!(2026-07-11 12:00:55 UTC)
+            + time::Duration::seconds(i64::try_from(frame_index).unwrap());
+        vm.last_feed_pulse_at = (frame_index % 20 < 10).then_some(
+            wall_time
+                - time::Duration::milliseconds(i64::try_from(frame_index % 10).unwrap() * 150),
+        );
         let mut snapshot =
             crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input(
                 &vm,
@@ -2538,14 +3049,33 @@ mod tests {
         assert_eq!(std::mem::align_of::<ContentGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(ContentGpuValue, signed_data), 16);
         assert_eq!(std::mem::offset_of!(ContentGpuValue, flags), 24);
+        assert_eq!(std::mem::size_of::<AnalyticContentGpuValue>(), 48);
+        assert_eq!(std::mem::align_of::<AnalyticContentGpuValue>(), 4);
+        assert_eq!(std::mem::offset_of!(AnalyticContentGpuValue, payload), 16);
         assert_eq!(std::mem::size_of::<FrameGpuValue>(), 48);
         assert_eq!(std::mem::align_of::<FrameGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(FrameGpuValue, values), 16);
+        assert_eq!(std::mem::size_of::<AnalyticFrameGpuValue>(), 96);
+        assert_eq!(std::mem::align_of::<AnalyticFrameGpuValue>(), 4);
+        assert_eq!(std::mem::offset_of!(AnalyticFrameGpuValue, rect_points), 16);
+        assert_eq!(std::mem::offset_of!(AnalyticFrameGpuValue, payload), 32);
 
-        assert_eq!(std::mem::size_of::<ContentGlobalsGpuValue>(), 144);
+        assert_eq!(std::mem::size_of::<ContentGlobalsGpuValue>(), 160);
         assert_eq!(std::mem::align_of::<ContentGlobalsGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(ContentGlobalsGpuValue, mood), 128);
         assert_eq!(std::mem::offset_of!(ContentGlobalsGpuValue, weather), 132);
+        assert_eq!(
+            std::mem::offset_of!(ContentGlobalsGpuValue, glyph_grid_dimensions),
+            136
+        );
+        assert_eq!(
+            std::mem::offset_of!(ContentGlobalsGpuValue, glyph_grid_origin_points),
+            144
+        );
+        assert_eq!(
+            std::mem::offset_of!(ContentGlobalsGpuValue, glyph_cell_extent_points),
+            152
+        );
         assert_eq!(std::mem::size_of::<FrameGlobalsGpuValue>(), 192);
         assert_eq!(std::mem::align_of::<FrameGlobalsGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(FrameGlobalsGpuValue, projection), 64);
@@ -2561,16 +3091,360 @@ mod tests {
     #[test]
     fn fixed_family_capacities_are_exact() {
         let content = ContentMirrors::zeroed();
-        assert_eq!(content.pet.capacity(), 130);
+        assert_eq!(content.pet_body.capacity(), 130);
+        assert_eq!(content.pet_particles.capacity(), 130);
+        assert_eq!(content.room_glyphs.capacity(), 32);
         assert_eq!(content.prop_glyphs.capacity(), 90);
         assert_eq!(content.tank_glyphs.capacity(), 16);
         assert_eq!(content.ambient.capacity(), 64);
+        assert_eq!(content.analytics.capacity(), 16);
         let frame = FrameMirrors::zeroed();
         assert_eq!(frame.nodes.capacity(), 128);
+        assert_eq!(frame.room_glyphs.capacity(), 32);
         assert_eq!(frame.props.capacity(), 10);
         assert_eq!(frame.tank_cells.capacity(), 16);
         assert_eq!(frame.ambient.capacity(), 64);
+        assert_eq!(frame.analytics.capacity(), 16);
         assert_eq!(frame.lights.capacity(), 2);
+    }
+
+    #[test]
+    fn analytic_packers_preserve_all_eight_closed_roles_exactly() {
+        let lane = |base: u8| GaugeLanePaint {
+            track_srgba8: [base, base + 1, base + 2, base + 3],
+            fill_srgba8: [base + 4, base + 5, base + 6, base + 7],
+        };
+        let paints = [
+            AnalyticPaint::ApertureDepth {
+                core_srgb8: [1, 2, 3],
+                rim_srgb8: [4, 5, 6],
+            },
+            AnalyticPaint::PetShadowMultiply { color_srgb8: [7, 8, 9], opacity_u8: 10 },
+            AnalyticPaint::FloorShadowMultiplyRadial {
+                inner_srgba8: [11, 12, 13, 14],
+                outer_srgba8: [15, 16, 17, 18],
+            },
+            AnalyticPaint::StatusBeacon {
+                active_srgba8: [19, 20, 21, 22],
+                calm_srgba8: [23, 24, 25, 26],
+            },
+            AnalyticPaint::MoodAuraRings {
+                color_srgb8: [27, 28, 29],
+                ring_count: 30,
+                per_ring_alpha_u8: 31,
+            },
+            AnalyticPaint::PerimeterGaugeSet {
+                xp: lane(32),
+                daily: lane(40),
+                pace: lane(48),
+                daily_overage_srgba8: [56, 57, 58, 59],
+            },
+            AnalyticPaint::TroubleBeacon { color_srgba8: [60, 61, 62, 63] },
+            AnalyticPaint::DimOverlay { color_srgb8: [64, 65, 66] },
+        ];
+        let expected_paints = [
+            [
+                packed_rgb([1, 2, 3]),
+                packed_rgb([4, 5, 6]),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            [packed_rgb([7, 8, 9]), 10, 0, 0, 0, 0, 0, 0],
+            [
+                packed_rgba([11, 12, 13, 14]),
+                packed_rgba([15, 16, 17, 18]),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            [
+                packed_rgba([19, 20, 21, 22]),
+                packed_rgba([23, 24, 25, 26]),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            [packed_rgb([27, 28, 29]), 30, 31, 0, 0, 0, 0, 0],
+            [
+                packed_rgba([32, 33, 34, 35]),
+                packed_rgba([36, 37, 38, 39]),
+                packed_rgba([40, 41, 42, 43]),
+                packed_rgba([44, 45, 46, 47]),
+                packed_rgba([48, 49, 50, 51]),
+                packed_rgba([52, 53, 54, 55]),
+                packed_rgba([56, 57, 58, 59]),
+                0,
+            ],
+            [packed_rgba([60, 61, 62, 63]), 0, 0, 0, 0, 0, 0, 0],
+            [packed_rgb([64, 65, 66]), 0, 0, 0, 0, 0, 0, 0],
+        ];
+        for (index, ((semantic, paint), expected)) in AnalyticSemantic::ALL
+            .into_iter()
+            .zip(paints)
+            .zip(expected_paints)
+            .enumerate()
+        {
+            let packed = pack_analytic_content(AnalyticContentSlot {
+                id: semantic.id(),
+                value: Some(AnalyticContent { semantic, shape: semantic.shape(), paint }),
+            });
+            assert_eq!(packed.id, index as u32);
+            assert_eq!(packed.semantic, index as u32 + 1);
+            assert_eq!(packed.shape, index as u32 + 1);
+            assert_eq!(packed.flags, 1);
+            assert_eq!(packed.payload, expected);
+        }
+
+        let lane_geometry = |base: f32| GaugeLaneGeometry {
+            radius_points: base,
+            stroke_width_points: base + 1.0,
+            track_start_degrees: base + 2.0,
+            track_sweep_degrees: base + 3.0,
+            cap: GaugeLineCap::Round,
+        };
+        let geometries = [
+            AnalyticGeometry::ApertureRadial {
+                center_points: [1.0, 2.0],
+                radius_points: 3.0,
+                feather_points: 4.0,
+            },
+            AnalyticGeometry::PetSilhouette {
+                mask: AnalyticMaskSource::PetBody,
+                offset_points: [5.0, 6.0],
+                softness_points: 7.0,
+            },
+            AnalyticGeometry::RadialEllipse {
+                center_points: [8.0, 9.0],
+                radii_points: [10.0, 11.0],
+                softness_points: 12.0,
+            },
+            AnalyticGeometry::StatusBeacon {
+                center_points: [13.0, 14.0],
+                radius_points: 15.0,
+                thickness_points: 16.0,
+                tone: StatusBeaconTone::Active,
+            },
+            AnalyticGeometry::PetAura {
+                center_points: [17.0, 18.0],
+                max_radius_points: 19.0,
+                ring_count: 20,
+                feather_points: 21.0,
+            },
+            AnalyticGeometry::PerimeterGaugeSet {
+                center_points: [22.0, 23.0],
+                xp: lane_geometry(24.0),
+                daily: lane_geometry(28.0),
+                pace: lane_geometry(32.0),
+            },
+            AnalyticGeometry::TroubleBeacon {
+                center_points: [36.0, 37.0],
+                radius_points: 38.0,
+                thickness_points: 39.0,
+            },
+            AnalyticGeometry::SurfaceOverlay,
+        ];
+        let expected_geometry = [
+            [
+                1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            [
+                1.0, 5.0, 6.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            [
+                8.0, 9.0, 10.0, 11.0, 12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            [
+                13.0, 14.0, 15.0, 16.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            [
+                17.0, 18.0, 19.0, 20.0, 21.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            [
+                22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0,
+                0.0, 0.0,
+            ],
+            [
+                36.0, 37.0, 38.0, 39.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            [0.0; 16],
+        ];
+        for (index, ((semantic, geometry), expected)) in AnalyticSemantic::ALL
+            .into_iter()
+            .zip(geometries)
+            .zip(expected_geometry)
+            .enumerate()
+        {
+            let rect_points = [index as f32, 40.0, 41.0, 42.0];
+            let packed = pack_analytic_frame(AnalyticFrameSlot {
+                id: semantic.id(),
+                value: Some(AnalyticFrame {
+                    semantic,
+                    shape: semantic.shape(),
+                    rect_points,
+                    geometry,
+                }),
+            });
+            assert_eq!(packed.id, index as u32);
+            assert_eq!(packed.semantic, index as u32 + 1);
+            assert_eq!(packed.shape, index as u32 + 1);
+            let expected_flags = if semantic == AnalyticSemantic::Gauges {
+                0x1_1101
+            } else {
+                1
+            };
+            assert_eq!(packed.flags, expected_flags);
+            assert_eq!(packed.rect_points, rect_points);
+            assert_eq!(packed.payload, expected);
+        }
+    }
+
+    #[test]
+    fn glyph_content_packing_preserves_filters_grid_room_and_explicit_paints() {
+        use crate::presentation::companion_scene::scene::{
+            AmbientContentKind, GlyphPaintSource, InstanceGroupBinding, PetGlyph, PropGlyphContent,
+            PropSemanticContent, RoomGlyphContentSlot, RoomGlyphFrameSlot,
+        };
+
+        let mut fixture = SceneFixture::valid();
+        fixture.content.pet_art_slots[0].glyph =
+            Some(PetGlyph::for_species('^', crate::pet::generation::Species::Fuzz).unwrap());
+        fixture.content.pet_art_slots[0].palette_role = PetPaletteRole::Eye;
+        fixture.content.pet_art_slots[1].glyph =
+            Some(PetGlyph::for_species('^', crate::pet::generation::Species::Fuzz).unwrap());
+        fixture.content.pet_art_slots[1].palette_role = PetPaletteRole::Particle;
+        fixture.content.room_glyph_slots[0] = RoomGlyphContentSlot {
+            slot: 0,
+            glyph: Some(AuthoredGlyph::new('◆').unwrap()),
+            color_srgb8: Some([1, 2, 3]),
+        };
+        fixture.frame.room_glyph_slots[0] = RoomGlyphFrameSlot {
+            slot: 0,
+            visible: true,
+            grid_cell: [2, 3],
+            position_points: [24.0, 312.0],
+            opacity: 0.75,
+        };
+        fixture.content.prop_slots[0].content = Some(PropSemanticContent {
+            sprite_phase: Some(7),
+            twinkle_active: Some(true),
+            lid_open: Some(false),
+            bloom_active: None,
+            glyphs: std::array::from_fn(|index| PropGlyphContent {
+                glyph: (index == 0).then(|| AuthoredGlyph::new('◇').unwrap()),
+                local_cell: if index == 0 { [0, -1] } else { [0; 2] },
+            }),
+        });
+        fixture.content.prop_paint_slots[0].paints[0] =
+            Some(GlyphPaintSource { color_srgb8: [4, 5, 6] });
+        fixture.content.ambient_slots[0].kind = Some(AmbientContentKind::Mote);
+        fixture.content.ambient_slots[0].glyph = Some(AuthoredGlyph::new('✦').unwrap());
+        fixture.content.ambient_paint_slots[0].paint =
+            Some(GlyphPaintSource { color_srgb8: [7, 8, 9] });
+
+        let compiled = compile_fixture(&fixture);
+        let globals = compiled.content.globals.as_slice()[0];
+        assert_eq!(globals.glyph_grid_dimensions, [30, 30]);
+        assert_eq!(globals.glyph_grid_origin_points, [0.0, 0.0]);
+        assert_eq!(globals.glyph_cell_extent_points, [12.0, 12.0]);
+
+        assert_eq!(
+            compiled.content.pet_body.as_slice()[0].glyph_scalar,
+            u32::from('^')
+        );
+        assert_eq!(
+            compiled.content.pet_particles.as_slice()[0].glyph_scalar,
+            NONE_U32
+        );
+        assert_eq!(
+            compiled.content.pet_body.as_slice()[1].glyph_scalar,
+            NONE_U32
+        );
+        assert_eq!(
+            compiled.content.pet_particles.as_slice()[1].glyph_scalar,
+            u32::from('^')
+        );
+        assert_eq!(compiled.content.pet_particles.as_slice()[1].slot, 1);
+
+        let room = compiled.content.room_glyphs.as_slice()[0];
+        assert_eq!(room.kind, 5);
+        assert_eq!(room.glyph_scalar, u32::from('◆'));
+        assert_eq!(room.flags, 1);
+        assert_eq!(room.variant, 0xff03_0201);
+        let room_frame = compiled.frame.room_glyphs.as_slice()[0];
+        assert_eq!(room_frame.kind, 4);
+        assert_eq!(room_frame.flags, 1);
+        assert_eq!(
+            room_frame.values,
+            [2.0, 3.0, 24.0, 312.0, 0.75, 0.0, 0.0, 0.0]
+        );
+
+        let prop = compiled.content.prop_glyphs.as_slice()[0];
+        assert_eq!(prop.flags, 2 | (1 << 2) | (1 << 6) | (8 << 8));
+        assert_eq!(prop.variant, 0xff06_0504);
+        let ambient = compiled.content.ambient.as_slice()[0];
+        assert_eq!(ambient.flags, 1 | (1 << 8));
+        assert_eq!(ambient.variant, 0xff09_0807);
+        assert_eq!(
+            instance_group_tags(PrimitiveBinding::Instances(
+                InstanceGroupBinding::RoomGlyphs
+            )),
+            (4, 0)
+        );
+        let mut upload_fixture = SceneFixture::valid();
+        upload_fixture.template.primitives[0].kind = PrimitiveKind::InstanceQuad;
+        upload_fixture.template.primitives[0].binding =
+            PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs);
+        upload_fixture.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+        upload_fixture.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
+        let upload = compile_fixture(&upload_fixture)
+            .primitive_upload_source(0)
+            .unwrap();
+        assert_eq!(upload.instance_group, 4);
+        assert_eq!(upload.instance_base, 0);
+
+        let mut analytic_fixture = SceneFixture::valid();
+        analytic_fixture.template.primitives[0].binding = PrimitiveBinding::Analytic(
+            crate::presentation::companion_scene::scene::AnalyticParamId(5),
+        );
+        analytic_fixture.template.primitives[0].authored_order = 17;
+        let analytic_upload = compile_static_fixture(&analytic_fixture)
+            .primitive_upload_source(0)
+            .unwrap();
+        assert_eq!(analytic_upload.instance_group, 0);
+        assert_eq!(analytic_upload.instance_base, NONE_U32);
+        assert_eq!(analytic_upload.instance_slot, 5);
+        assert_eq!(analytic_upload.authored_order, 17);
+
+        let mut wall_fixture = SceneFixture::valid();
+        let mut body = wall_fixture.template.primitives[0].clone();
+        body.kind = PrimitiveKind::InstanceQuad;
+        body.binding =
+            PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body));
+        wall_fixture.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
+        wall_fixture.template.primitives[0].binding =
+            PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id());
+        wall_fixture.template.primitives.push(body);
+        let wall = compile_static_fixture(&wall_fixture);
+        assert_eq!(
+            wall.primitive_upload_source(0).unwrap().aux_node_index,
+            wall.primitive_upload_source(1).unwrap().node_index,
+        );
+
+        let static_upload = compile_fixture(&SceneFixture::valid())
+            .primitive_upload_source(0)
+            .unwrap();
+        assert_eq!(static_upload.instance_slot, 0);
+        assert_eq!(static_upload.authored_order, 0);
     }
 
     #[test]
@@ -2699,8 +3573,8 @@ mod tests {
         let prop = compiled.content.prop_glyphs.as_slice()[3 * 9 + 4];
         assert_eq!(prop.glyph_scalar, u32::from('◆'));
         assert_eq!(prop.signed_data, [0, 2]);
-        assert_eq!(prop.flags, 2 | (1 << 2));
-        assert_eq!(prop.variant, 7);
+        assert_eq!(prop.flags, 2 | (1 << 2) | (8 << 8));
+        assert_eq!(prop.variant, 0);
         let tank = compiled.content.tank_glyphs.as_slice()[8 + 7];
         assert_eq!(tank.glyph_scalar, u32::from('◈'));
         assert_eq!(tank.signed_data, [126 | (238 << 8) | (255 << 16), 1]);
@@ -2941,15 +3815,16 @@ mod tests {
         assert_eq!(globals.mood, 1);
         assert_eq!(globals.weather, 5);
         assert_eq!(
-            compiled.content.pet.as_slice()[0].glyph_scalar,
+            compiled.content.pet_body.as_slice()[0].glyph_scalar,
             u32::from('^')
         );
-        assert_eq!(compiled.content.pet.as_slice()[0].flags, 3);
+        assert_eq!(compiled.content.pet_body.as_slice()[0].flags, 3);
         assert_eq!(
             compiled.content.ambient.as_slice()[2].glyph_scalar,
             u32::from('☁')
         );
-        assert_eq!(compiled.content.ambient.as_slice()[2].variant, 1);
+        assert_eq!(compiled.content.ambient.as_slice()[2].flags, 1);
+        assert_eq!(compiled.content.ambient.as_slice()[2].variant, 0);
 
         let frame_globals = compiled.frame.globals.as_slice()[0];
         assert_eq!(frame_globals.gauges, [0.1, 0.2, 0.3, 0.4]);
@@ -3167,37 +4042,91 @@ mod tests {
     }
 
     #[test]
-    fn room_glyph_deltas_are_unsupported_and_leave_candidate_unchanged() {
+    fn paired_room_and_analytic_deltas_update_v2_mirrors_and_invalid_frame_is_atomic() {
         let mut candidate = compile_fixture(&SceneFixture::valid());
+        let (mut content, mut frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        let mut content_slot = candidate.logical_content.room_glyph_slots[0];
+        content_slot.glyph = Some(AuthoredGlyph::new('\u{25c7}').unwrap());
+        content_slot.color_srgb8 = Some([10, 20, 30]);
+        content.room_glyph_slots.push(content_slot);
+        let mut analytic_content = candidate.logical_content.analytic_slots[0];
+        analytic_content.value.as_mut().unwrap().paint = AnalyticPaint::ApertureDepth {
+            core_srgb8: [31, 32, 33],
+            rim_srgb8: [34, 35, 36],
+        };
+        content.analytic_slots.push(analytic_content);
+        let mut frame_slot = candidate.accepted.frame().frame().room_glyph_slots[0];
+        frame_slot.visible = true;
+        frame_slot.grid_cell = [1, 2];
+        frame_slot.position_points = [12.0, 324.0];
+        frame_slot.opacity = 0.75;
+        frame.room_glyph_slots.push(frame_slot);
+        let mut analytic_frame = candidate.accepted.frame().frame().analytic_slots[0];
+        let AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points,
+        } = analytic_frame.value.unwrap().geometry
+        else {
+            panic!("fixture slot zero is the room-background aperture");
+        };
+        analytic_frame.value.as_mut().unwrap().geometry = AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points: feather_points + 0.5,
+        };
+        frame.analytic_slots.push(analytic_frame);
 
-        for case in ["content", "frame", "paired"] {
-            let before = candidate.clone();
-            let (mut content, mut frame) = paired_deltas(
-                &candidate,
-                crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
-            );
-            if matches!(case, "content" | "paired") {
-                let mut slot = candidate.logical_content.room_glyph_slots[0];
-                slot.glyph = Some(AuthoredGlyph::new('\u{25c7}').unwrap());
-                slot.color_srgb8 = Some([10, 20, 30]);
-                content.room_glyph_slots.push(slot);
-            }
-            if matches!(case, "frame" | "paired") {
-                let mut slot = candidate.accepted.frame().frame().room_glyph_slots[0];
-                slot.visible = true;
-                slot.grid_cell = [1, 2];
-                slot.position_points = [12.0, 24.0];
-                slot.opacity = 0.75;
-                frame.room_glyph_slots.push(slot);
-            }
+        let dirty = candidate.apply_deltas(&content, &frame).unwrap();
+        assert_eq!(
+            dirty.room_content.as_slice(),
+            &[ByteSpan::slots::<ContentGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.room_frame.as_slice(),
+            &[ByteSpan::slots::<FrameGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.content_analytics.as_slice(),
+            &[ByteSpan::slots::<AnalyticContentGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.frame_analytics.as_slice(),
+            &[ByteSpan::slots::<AnalyticFrameGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            candidate.content.room_glyphs.as_slice()[0],
+            pack_room_content(content_slot)
+        );
+        assert_eq!(
+            candidate.frame.room_glyphs.as_slice()[0],
+            pack_room_frame(frame_slot)
+        );
+        assert_eq!(
+            candidate.content.analytics.as_slice()[0],
+            pack_analytic_content(analytic_content)
+        );
+        assert_eq!(
+            candidate.frame.analytics.as_slice()[0],
+            pack_analytic_frame(analytic_frame)
+        );
 
-            assert_eq!(
-                candidate.apply_deltas(&content, &frame),
-                Err(MirrorDeltaError::UnsupportedDelta),
-                "{case}"
-            );
-            assert_eq!(candidate, before, "{case}");
-        }
+        let before = candidate.clone();
+        let (content, mut frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 7),
+        );
+        let mut malformed = frame_slot;
+        malformed.position_points = [13.0, 324.0];
+        frame.room_glyph_slots.push(malformed);
+        assert!(matches!(
+            candidate.apply_deltas(&content, &frame),
+            Err(MirrorDeltaError::Validation(_))
+        ));
+        assert_eq!(candidate, before);
     }
 
     #[test]
@@ -3241,6 +4170,13 @@ mod tests {
                 ),
             },
         );
+        let mut prop_paint = candidate.logical_content.prop_paint_slots[3];
+        prop_paint.paints[0] = Some(
+            crate::presentation::companion_scene::scene::GlyphPaintSource {
+                color_srgb8: [40, 50, 60],
+            },
+        );
+        content.prop_paint_slots.push(prop_paint);
         content.tank_slots.push(
             crate::presentation::companion_scene::scene::TankContentSlot {
                 slot: 1,
@@ -3262,6 +4198,13 @@ mod tests {
                 glyph: Some(AuthoredGlyph::new('☁').unwrap()),
             },
         );
+        let mut ambient_paint = candidate.logical_content.ambient_paint_slots[2];
+        ambient_paint.paint = Some(
+            crate::presentation::companion_scene::scene::GlyphPaintSource {
+                color_srgb8: [70, 80, 90],
+            },
+        );
+        content.ambient_paint_slots.push(ambient_paint);
 
         let mut node = candidate.accepted.frame().frame().nodes[1];
         node.local_transform =
@@ -3318,7 +4261,11 @@ mod tests {
             &[ByteSpan::slots::<ContentGlobalsGpuValue>(0, 1)]
         );
         assert_eq!(
-            dirty.pet.as_slice(),
+            dirty.pet_body.as_slice(),
+            &[ByteSpan::slots::<ContentGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.pet_particles.as_slice(),
             &[ByteSpan::slots::<ContentGpuValue>(0, 1)]
         );
         assert_eq!(
@@ -3368,6 +4315,14 @@ mod tests {
         assert_eq!(
             candidate.logical_content.day_phase,
             crate::presentation::companion_scene::CompanionDayPhase::Dusk
+        );
+        assert_eq!(
+            candidate.content.prop_glyphs.as_slice()[3 * MAX_PROP_GLYPHS_PER_SLOT].variant,
+            packed_rgba([40, 50, 60, 255])
+        );
+        assert_eq!(
+            candidate.content.ambient.as_slice()[2].variant,
+            packed_rgba([70, 80, 90, 255])
         );
 
         let (mut noop_content, noop_frame) = paired_deltas(
@@ -3582,6 +4537,11 @@ mod tests {
         let mut saw_prop_frame = false;
         let mut saw_tank_content = false;
         let mut saw_tank_frame = false;
+        let mut saw_room_content = false;
+        let mut saw_room_frame = false;
+        let mut saw_prop_paint = false;
+        let mut saw_content_analytics = false;
+        let mut saw_frame_analytics = false;
 
         for frame_index in 1..=300 {
             let target = Arc::new(project_lifetime_snapshot(&fixture, frame_index));
@@ -3606,6 +4566,7 @@ mod tests {
             let projected = neutral
                 .project_snapshot_changes(&target, changes, from, to)
                 .unwrap();
+            let prop_paint_changed = !projected.content.prop_paint_slots.is_empty();
             let dirty = candidate
                 .apply_deltas(&projected.content, &projected.frame)
                 .unwrap();
@@ -3665,6 +4626,10 @@ mod tests {
                 assert!(!dirty.prop_glyphs.as_slice().is_empty());
                 saw_prop_content = true;
             }
+            if prop_paint_changed {
+                assert!(!dirty.prop_glyphs.as_slice().is_empty());
+                saw_prop_paint = true;
+            }
             if changes
                 .semantic()
                 .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::TANK)
@@ -3684,6 +4649,24 @@ mod tests {
                 assert!(!dirty.tank_cells.as_slice().is_empty());
                 saw_tank_frame = true;
             }
+            if changes.semantic().contains(
+                crate::presentation::companion_scene::runtime::SemanticChangeMask::ROOM_GLYPHS,
+            ) {
+                assert!(!dirty.room_content.as_slice().is_empty());
+                saw_room_content = true;
+            }
+            if changes.frame().contains(
+                crate::presentation::companion_scene::runtime::FrameChangeMask::ROOM_GLYPHS,
+            ) {
+                assert!(!dirty.room_frame.as_slice().is_empty());
+                saw_room_frame = true;
+            }
+            if !dirty.content_analytics.as_slice().is_empty() {
+                saw_content_analytics = true;
+            }
+            if !dirty.frame_analytics.as_slice().is_empty() {
+                saw_frame_analytics = true;
+            }
         }
         assert!(saw_nodes);
         assert!(saw_globals);
@@ -3691,6 +4674,11 @@ mod tests {
         assert!(saw_prop_frame);
         assert!(saw_tank_content);
         assert!(saw_tank_frame);
+        assert!(saw_room_content);
+        assert!(saw_room_frame);
+        assert!(saw_prop_paint);
+        assert!(saw_content_analytics);
+        assert!(saw_frame_analytics);
     }
 
     #[test]

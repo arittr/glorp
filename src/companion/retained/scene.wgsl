@@ -8,7 +8,7 @@ const GLYPH_FLAG_COLOR: u32 = 2u;
 struct PrimitiveGpuValue {
     node_index: u32,
     material_index: u32,
-    resource_index: u32,
+    aux_node_index: u32,
     primitive_kind: u32,
     material_kind: u32,
     resource_kind: u32,
@@ -17,7 +17,11 @@ struct PrimitiveGpuValue {
     space: u32,
     instance_group: u32,
     instance_base: u32,
-    padding: u32,
+    binding_index: u32,
+    authored_order: u32,
+    content_base: u32,
+    frame_base: u32,
+    aux_content_base: u32,
 }
 
 struct SceneContentGpuValue {
@@ -52,7 +56,9 @@ struct ContentGlobalsGpuValue {
     palette_rgba: array<vec4<u32>, 8>,
     mood: u32,
     weather: u32,
-    padding: vec2<u32>,
+    glyph_grid_dimensions: vec2<u32>,
+    glyph_grid_origin_points: vec2<f32>,
+    glyph_cell_extent_points: vec2<f32>,
 }
 
 struct FrameGlobalsGpuValue {
@@ -75,6 +81,23 @@ struct FrameGpuValue {
     values: array<f32, 8>,
 }
 
+struct AnalyticFrameGpuValue {
+    id: u32,
+    semantic: u32,
+    shape: u32,
+    flags: u32,
+    rect_points: vec4<f32>,
+    payload: array<vec4<f32>, 4>,
+}
+
+struct AnalyticContentGpuValue {
+    id: u32,
+    semantic: u32,
+    shape: u32,
+    flags: u32,
+    payload: array<vec4<u32>, 2>,
+}
+
 struct NodeBuffer {
     values: array<NodeGpuValue>,
 }
@@ -85,7 +108,8 @@ struct ContentGlobalsBuffer {
 
 struct FrameBuffer {
     globals: FrameGlobalsGpuValue,
-    values: array<FrameGpuValue>,
+    values: array<FrameGpuValue, 124>,
+    analytics: array<AnalyticFrameGpuValue, 16>,
 }
 
 struct PrimitiveBuffer {
@@ -93,7 +117,8 @@ struct PrimitiveBuffer {
 }
 
 struct SceneContentBuffer {
-    values: array<SceneContentGpuValue>,
+    values: array<SceneContentGpuValue, 462>,
+    analytics: array<AnalyticContentGpuValue, 16>,
 }
 
 struct GlyphEntryBuffer {
@@ -145,37 +170,14 @@ struct SceneVertexOutput {
     @location(4) @interpolate(flat) instance_group: u32,
 }
 
-fn content_family_base(instance_group: u32) -> u32 {
-    // Scene content is a separate storage buffer from the 144-byte globals.
-    if (instance_group == 1u) {
-        return 0u;
-    }
-    if (instance_group == 3u) {
-        return 130u;
-    }
-    if (instance_group == 5u || instance_group == 6u) {
-        return 220u;
-    }
-    if (instance_group == 7u) {
-        return 236u;
-    }
-    return NONE_U32;
-}
-
 fn content_index_for_primitive(
     primitive: PrimitiveGpuValue,
     instance_index: u32,
 ) -> u32 {
-    // Task 9.5 defines the filtered particle stream. Until then particles have
-    // typed CPU dispatch metadata but no content base or drawable instances.
-    if (primitive.instance_group == 2u) {
+    if (primitive.content_base == NONE_U32) {
         return NONE_U32;
     }
-    let base = content_family_base(primitive.instance_group);
-    if (base == NONE_U32) {
-        return NONE_U32;
-    }
-    return base + primitive.instance_base + instance_index;
+    return primitive.content_base + instance_index;
 }
 
 fn apply_node_depth_cue(

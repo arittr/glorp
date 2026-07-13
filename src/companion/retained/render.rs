@@ -28,7 +28,7 @@ pub(super) const SCENE_SHADER_SOURCE: &str = include_str!("scene.wgsl");
 pub(super) struct PrimitiveGpuValue {
     pub(super) node_index: u32,
     pub(super) material_index: u32,
-    pub(super) resource_index: u32,
+    pub(super) aux_node_index: u32,
     pub(super) primitive_kind: u32,
     pub(super) material_kind: u32,
     pub(super) resource_kind: u32,
@@ -37,7 +37,11 @@ pub(super) struct PrimitiveGpuValue {
     pub(super) space: u32,
     pub(super) instance_group: u32,
     pub(super) instance_base: u32,
-    _padding: u32,
+    pub(super) binding_index: u32,
+    pub(super) authored_order: u32,
+    pub(super) content_base: u32,
+    pub(super) frame_base: u32,
+    pub(super) aux_content_base: u32,
 }
 
 #[repr(C)]
@@ -68,6 +72,7 @@ pub(super) struct GlyphAtlasGpuEntry {
 pub(super) enum InstanceSource {
     PetBody,
     PetParticles,
+    RoomGlyphs,
     PropGlyphs {
         slot: u32,
     },
@@ -92,6 +97,7 @@ pub(super) struct SceneDrawRecord {
     pub(super) index_range: Range<u32>,
     pub(super) instance_range: Range<u32>,
     pub(super) source: PrimitiveSource,
+    pub(super) authored_order: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,11 +167,15 @@ impl SceneGlyphWeightPolicy {
         signed_data: [i32; 2],
     ) -> bool {
         match family {
-            ContentMirrorFamily::Pet => Self::pet_is_bold(flags),
+            ContentMirrorFamily::Pet | ContentMirrorFamily::PetParticles => {
+                Self::pet_is_bold(flags)
+            }
             ContentMirrorFamily::TankGlyphs => signed_data[1] == 1,
             ContentMirrorFamily::Globals
             | ContentMirrorFamily::PropGlyphs
-            | ContentMirrorFamily::Ambient => false,
+            | ContentMirrorFamily::Ambient
+            | ContentMirrorFamily::RoomGlyphs
+            | ContentMirrorFamily::Analytics => false,
         }
     }
 }
@@ -176,7 +186,10 @@ impl SceneContentGpuValue {
         value: ContentUploadValue,
         atlas: &PreparedSceneAtlas,
     ) -> Result<Self, SceneUploadError> {
-        if family == ContentMirrorFamily::Globals {
+        if matches!(
+            family,
+            ContentMirrorFamily::Globals | ContentMirrorFamily::Analytics
+        ) {
             return Err(SceneUploadError::NonGlyphContentFamily);
         }
         let glyph_entry_index = if value.glyph_scalar == NONE_U32 {
@@ -237,10 +250,12 @@ pub(super) fn prepare_scene_upload(
         let source = candidate
             .primitive_upload_source(primitive_index)
             .ok_or(SceneUploadError::InvalidPrimitiveReference { primitive_index })?;
+        let (content_base, frame_base, aux_content_base) = primitive_arena_bases(source)
+            .ok_or(SceneUploadError::InvalidPrimitiveReference { primitive_index })?;
         primitives.push(PrimitiveGpuValue {
             node_index: source.node_index,
+            aux_node_index: source.aux_node_index,
             material_index: source.material_index,
-            resource_index: source.resource_index,
             primitive_kind: source.primitive_kind,
             material_kind: source.material_kind,
             resource_kind: source.resource_kind,
@@ -249,7 +264,11 @@ pub(super) fn prepare_scene_upload(
             space: source.space,
             instance_group: source.instance_group,
             instance_base: source.instance_base,
-            _padding: 0,
+            binding_index: source.instance_slot,
+            authored_order: source.authored_order,
+            content_base,
+            frame_base,
+            aux_content_base,
         });
         draws.push(
             prepare_draw_record(source)
@@ -302,7 +321,108 @@ fn prepare_draw_record(source: PrimitiveUploadSource) -> Option<SceneDrawRecord>
         index_range,
         instance_range: 0..instance_count,
         source: primitive_source,
+        authored_order: source.authored_order,
     })
+}
+
+fn primitive_arena_bases(source: PrimitiveUploadSource) -> Option<(u32, u32, u32)> {
+    arena_bases_from_tags(
+        source.primitive_kind,
+        source.instance_group,
+        source.instance_base,
+        source.instance_slot,
+    )
+}
+
+fn arena_bases_from_tags(
+    primitive_kind: u32,
+    instance_group: u32,
+    instance_base: u32,
+    binding_index: u32,
+) -> Option<(u32, u32, u32)> {
+    use crate::presentation::companion_scene::scene::{
+        MAX_ANALYTIC_PARAMS, MAX_PROP_GLYPHS_PER_SLOT, MAX_STATIC_ATLAS_RECIPES,
+        MAX_TANK_GLYPHS_PER_SLOT,
+    };
+
+    let content = |family| {
+        PackedMirrorLayout::scene_content_offset(family)
+            .and_then(|offset| offset.checked_div(std::mem::size_of::<SceneContentGpuValue>()))
+            .and_then(|offset| u32::try_from(offset).ok())
+    };
+    let frame = |family| {
+        PackedMirrorLayout::frame_offset(family)
+            .checked_sub(PackedMirrorLayout::frame_offset(FrameMirrorFamily::Props))
+            .and_then(|offset| {
+                offset.checked_div(std::mem::size_of::<super::compiler::FrameGpuValue>())
+            })
+            .and_then(|offset| u32::try_from(offset).ok())
+    };
+    let relative = |base: u32| base.checked_add(instance_base);
+    match instance_group {
+        0 if primitive_kind == ANALYTIC_PRIMITIVE_TAG
+            && binding_index < u32::try_from(MAX_ANALYTIC_PARAMS).ok()? =>
+        {
+            Some((
+                NONE_U32,
+                binding_index,
+                if binding_index == 1 {
+                    content(ContentMirrorFamily::Pet)?
+                } else {
+                    NONE_U32
+                },
+            ))
+        }
+        0 if primitive_kind == ATLAS_QUAD_PRIMITIVE_TAG
+            && binding_index < u32::try_from(MAX_STATIC_ATLAS_RECIPES).ok()? =>
+        {
+            Some((NONE_U32, NONE_U32, NONE_U32))
+        }
+        0 if primitive_kind == SHALLOW_CARD_PRIMITIVE_TAG && binding_index == NONE_U32 => {
+            Some((NONE_U32, NONE_U32, NONE_U32))
+        }
+        1 if binding_index == 0 && instance_base == 0 => Some((
+            relative(content(ContentMirrorFamily::Pet)?)?,
+            NONE_U32,
+            NONE_U32,
+        )),
+        2 if binding_index == 0 && instance_base == 0 => Some((
+            relative(content(ContentMirrorFamily::PetParticles)?)?,
+            NONE_U32,
+            NONE_U32,
+        )),
+        3 if instance_base
+            == binding_index.checked_mul(u32::try_from(MAX_PROP_GLYPHS_PER_SLOT).ok()?)? =>
+        {
+            Some((
+                relative(content(ContentMirrorFamily::PropGlyphs)?)?,
+                frame(FrameMirrorFamily::Props)?.checked_add(binding_index)?,
+                NONE_U32,
+            ))
+        }
+        4 if binding_index == 0 && instance_base == 0 => Some((
+            relative(content(ContentMirrorFamily::RoomGlyphs)?)?,
+            frame(FrameMirrorFamily::RoomGlyphs)?,
+            NONE_U32,
+        )),
+        5 | 6
+            if instance_base
+                == binding_index.checked_mul(u32::try_from(MAX_TANK_GLYPHS_PER_SLOT).ok()?)? =>
+        {
+            Some((
+                relative(content(ContentMirrorFamily::TankGlyphs)?)?,
+                relative(frame(FrameMirrorFamily::TankCells)?)?,
+                NONE_U32,
+            ))
+        }
+        7 if binding_index == 0 && instance_base == 0 => Some((
+            relative(content(ContentMirrorFamily::Ambient)?)?,
+            frame(FrameMirrorFamily::Ambient)?,
+            NONE_U32,
+        )),
+        8 if binding_index == 0 && instance_base == 0 => Some((NONE_U32, NONE_U32, NONE_U32)),
+        _ => None,
+    }
 }
 
 fn instance_source_and_count(source: PrimitiveUploadSource) -> Option<(InstanceSource, u32)> {
@@ -315,15 +435,14 @@ fn instance_source_and_count_from_tags(
 ) -> Option<(InstanceSource, u32)> {
     use crate::presentation::companion_scene::scene::{
         InstanceLayer, MAX_AMBIENT_INSTANCES, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT,
-        MAX_ROUND_TANK_INHABITANTS, MAX_TANK_GLYPHS_PER_SLOT, MAX_VISIBLE_PROPS,
+        MAX_ROOM_GLYPH_SLOTS, MAX_ROUND_TANK_INHABITANTS, MAX_TANK_GLYPHS_PER_SLOT,
+        MAX_VISIBLE_PROPS,
     };
 
     let count = |value: usize| u32::try_from(value).expect("scene capacity fits in u32");
     match instance_group {
         1 if instance_base == 0 => Some((InstanceSource::PetBody, count(MAX_PET_ART_SLOTS))),
-        // Task 9.5 owns the filtered particle stream; until then this source is
-        // typed but deliberately has no drawable instance or content range.
-        2 if instance_base == NONE_U32 => Some((InstanceSource::PetParticles, 0)),
+        2 if instance_base == 0 => Some((InstanceSource::PetParticles, count(MAX_PET_ART_SLOTS))),
         3 => {
             let width = count(MAX_PROP_GLYPHS_PER_SLOT);
             let slot = instance_base.checked_div(width)?;
@@ -342,6 +461,7 @@ fn instance_source_and_count_from_tags(
                 .then_some((InstanceSource::TankCells { slot, layer }, width))
         }
         7 if instance_base == 0 => Some((InstanceSource::Ambient, count(MAX_AMBIENT_INSTANCES))),
+        4 if instance_base == 0 => Some((InstanceSource::RoomGlyphs, count(MAX_ROOM_GLYPH_SLOTS))),
         // The authored HUD hook is retained, but its sensitive instances are
         // prepared through the sealed HUD path rather than general scene mirrors.
         8 if instance_base == 0 => Some((InstanceSource::Hud, 0)),
@@ -386,6 +506,8 @@ fn prepare_content_buffers(
         (ContentMirrorFamily::PropGlyphs, sources.prop_glyphs),
         (ContentMirrorFamily::TankGlyphs, sources.tank_glyphs),
         (ContentMirrorFamily::Ambient, sources.ambient),
+        (ContentMirrorFamily::PetParticles, sources.pet_particles),
+        (ContentMirrorFamily::RoomGlyphs, sources.room_glyphs),
     ] {
         let translated = values
             .iter()
@@ -401,6 +523,13 @@ fn prepare_content_buffers(
             bytemuck::cast_slice(&translated),
         )?;
     }
+    copy_family(
+        &mut scene_content,
+        PackedMirrorLayout::scene_content_offset(ContentMirrorFamily::Analytics)
+            .expect("analytic content lives in the scene-content buffer"),
+        ContentMirrorFamily::Analytics.byte_len(),
+        bytemuck::cast_slice(sources.analytics),
+    )?;
     Ok((globals, scene_content))
 }
 
@@ -412,6 +541,8 @@ fn prepare_frame_bytes(sources: FrameUploadSources<'_>) -> Result<Vec<u8>, Scene
         (FrameMirrorFamily::TankCells, sources.tank_cells),
         (FrameMirrorFamily::Ambient, sources.ambient),
         (FrameMirrorFamily::Lights, sources.lights),
+        (FrameMirrorFamily::RoomGlyphs, sources.room_glyphs),
+        (FrameMirrorFamily::Analytics, sources.analytics),
     ] {
         copy_family(
             &mut packed,
@@ -615,15 +746,21 @@ pub(super) enum ContentMirrorFamily {
     PropGlyphs,
     TankGlyphs,
     Ambient,
+    PetParticles,
+    RoomGlyphs,
+    Analytics,
 }
 
 impl ContentMirrorFamily {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 8] = [
         Self::Globals,
         Self::Pet,
         Self::PropGlyphs,
         Self::TankGlyphs,
         Self::Ambient,
+        Self::PetParticles,
+        Self::RoomGlyphs,
+        Self::Analytics,
     ];
 
     pub(super) const fn record_size(self) -> usize {
@@ -643,15 +780,19 @@ pub(super) enum FrameMirrorFamily {
     TankCells,
     Ambient,
     Lights,
+    RoomGlyphs,
+    Analytics,
 }
 
 impl FrameMirrorFamily {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 7] = [
         Self::Globals,
         Self::Props,
         Self::TankCells,
         Self::Ambient,
         Self::Lights,
+        Self::RoomGlyphs,
+        Self::Analytics,
     ];
 
     pub(super) const fn record_size(self) -> usize {
@@ -676,8 +817,8 @@ impl PackedMirrorLayout {
     pub(super) const NODE_BYTES: usize = super::compiler::CpuMirrorShape::NODE_RECORD_BYTES
         * super::compiler::CpuMirrorShape::NODE_COUNT;
     pub(super) const CONTENT_GLOBALS_BYTES: usize = ContentMirrorFamily::Globals.byte_len();
-    pub(super) const SCENE_CONTENT_BYTES: usize = scene_content_end(ContentMirrorFamily::Ambient);
-    pub(super) const FRAME_BYTES: usize = frame_end(FrameMirrorFamily::Lights);
+    pub(super) const SCENE_CONTENT_BYTES: usize = scene_content_end(ContentMirrorFamily::Analytics);
+    pub(super) const FRAME_BYTES: usize = frame_end(FrameMirrorFamily::Analytics);
 
     pub(super) const fn content_globals_offset() -> usize {
         0
@@ -694,6 +835,15 @@ impl PackedMirrorLayout {
             ContentMirrorFamily::Ambient => {
                 Some(scene_content_end(ContentMirrorFamily::TankGlyphs))
             }
+            ContentMirrorFamily::PetParticles => {
+                Some(scene_content_end(ContentMirrorFamily::Ambient))
+            }
+            ContentMirrorFamily::RoomGlyphs => {
+                Some(scene_content_end(ContentMirrorFamily::PetParticles))
+            }
+            ContentMirrorFamily::Analytics => {
+                Some(scene_content_end(ContentMirrorFamily::RoomGlyphs))
+            }
         }
     }
 
@@ -704,6 +854,8 @@ impl PackedMirrorLayout {
             FrameMirrorFamily::TankCells => frame_end(FrameMirrorFamily::Props),
             FrameMirrorFamily::Ambient => frame_end(FrameMirrorFamily::TankCells),
             FrameMirrorFamily::Lights => frame_end(FrameMirrorFamily::Ambient),
+            FrameMirrorFamily::RoomGlyphs => frame_end(FrameMirrorFamily::Lights),
+            FrameMirrorFamily::Analytics => frame_end(FrameMirrorFamily::RoomGlyphs),
         }
     }
 
@@ -983,7 +1135,9 @@ impl SceneGpuShared {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
-                            min_binding_size: None,
+                            min_binding_size: wgpu::BufferSize::new(
+                                scene_storage_min_binding_size(binding),
+                            ),
                         },
                         count: None,
                     })
@@ -1058,6 +1212,18 @@ impl SceneGpuShared {
 
     pub(super) const fn facts(&self) -> SceneGpuSharedFacts {
         SceneGpuSharedFacts::EXPECTED
+    }
+}
+
+const fn scene_storage_min_binding_size(binding: u32) -> u64 {
+    match binding {
+        0 => PackedMirrorLayout::NODE_BYTES as u64,
+        1 => PackedMirrorLayout::CONTENT_GLOBALS_BYTES as u64,
+        2 => PackedMirrorLayout::FRAME_BYTES as u64,
+        3 => std::mem::size_of::<PrimitiveGpuValue>() as u64,
+        4 => PackedMirrorLayout::SCENE_CONTENT_BYTES as u64,
+        5 => std::mem::size_of::<GlyphAtlasGpuEntry>() as u64,
+        _ => 0,
     }
 }
 
@@ -1337,7 +1503,7 @@ enum SceneUploadPhase {
 }
 
 fn expected_draw_source(primitive: PrimitiveGpuValue) -> Option<(PrimitiveSource, u32)> {
-    if primitive.resource_index == NONE_U32 {
+    if primitive.resource_kind == 0 {
         return None;
     }
     match primitive.primitive_kind {
@@ -1652,6 +1818,11 @@ fn validate_gpu_candidate_preflight(
         .chunks_exact(std::mem::size_of::<super::compiler::StaticIndex>())
         .map(|bytes| u32::from_ne_bytes(bytes.try_into().expect("four-byte index chunk")))
         .collect::<Vec<_>>();
+    let pet_body_node = upload
+        .primitives
+        .iter()
+        .find(|primitive| primitive.instance_group == 1)
+        .map(|primitive| primitive.node_index);
     for (primitive_index, (primitive, draw)) in
         upload.primitives.iter().zip(&upload.draws).enumerate()
     {
@@ -1676,9 +1847,32 @@ fn validate_gpu_candidate_preflight(
         let Some((expected_source, expected_instances)) = expected_draw_source(*primitive) else {
             return Err(SceneGpuError::InvalidUpload);
         };
+        let Some(expected_bases) = arena_bases_from_tags(
+            primitive.primitive_kind,
+            primitive.instance_group,
+            primitive.instance_base,
+            primitive.binding_index,
+        ) else {
+            return Err(SceneGpuError::InvalidUpload);
+        };
+        let expected_aux_node = if primitive.primitive_kind == ANALYTIC_PRIMITIVE_TAG
+            && primitive.instance_group == 0
+            && primitive.binding_index == 1
+        {
+            pet_body_node.ok_or(SceneGpuError::InvalidUpload)?
+        } else {
+            NONE_U32
+        };
         if draw.index_range != (first_index..index_end)
             || draw.instance_range != (0..expected_instances)
             || draw.source != expected_source
+            || draw.authored_order != primitive.authored_order
+            || (
+                primitive.content_base,
+                primitive.frame_base,
+                primitive.aux_content_base,
+            ) != expected_bases
+            || primitive.aux_node_index != expected_aux_node
             || indices[first_index as usize..index_end as usize]
                 .iter()
                 .any(|index| !(first_vertex..vertex_end).contains(index))
@@ -1688,10 +1882,15 @@ fn validate_gpu_candidate_preflight(
     }
     let glyph_count =
         u32::try_from(upload.glyph_entries.len()).map_err(|_| SceneGpuError::InvalidUpload)?;
-    if upload.scene_content_bytes.chunks_exact(32).any(|record| {
-        let glyph = u32::from_ne_bytes(record[4..8].try_into().expect("four-byte glyph id"));
-        glyph != NONE_U32 && glyph >= glyph_count
-    }) {
+    let analytic_offset = PackedMirrorLayout::scene_content_offset(ContentMirrorFamily::Analytics)
+        .ok_or(SceneGpuError::InvalidUpload)?;
+    if upload.scene_content_bytes[..analytic_offset]
+        .chunks_exact(std::mem::size_of::<SceneContentGpuValue>())
+        .any(|record| {
+            let glyph = u32::from_ne_bytes(record[4..8].try_into().expect("four-byte glyph id"));
+            glyph != NONE_U32 && glyph >= glyph_count
+        })
+    {
         return Err(SceneGpuError::InvalidUpload);
     }
     let expected_phases = upload
@@ -2011,9 +2210,9 @@ pub(super) fn scene_unpremultiply_final(color: [f32; 4]) -> [f32; 4] {
 mod tests {
     use super::*;
     use crate::presentation::companion_scene::scene::{
-        AnalyticSemantic, ContentDelta, FrameDelta, InstanceGroupBinding, InstanceLayer,
-        MaterialKind, PetArtFilter, PetPaletteRole, PrimitiveBinding, PrimitiveKind, ResourceKind,
-        SceneFixture,
+        AnalyticSemantic, AuthoredGlyph, ContentDelta, FrameDelta, InstanceGroupBinding,
+        InstanceLayer, MaterialKind, PetArtFilter, PetPaletteRole, PrimitiveBinding, PrimitiveKind,
+        ResourceKind, SceneFixture,
     };
 
     fn surface_capabilities() -> wgpu::SurfaceCapabilities {
@@ -2198,9 +2397,9 @@ mod tests {
     #[test]
     fn packed_mirror_layouts_have_frozen_offsets_sizes_and_checked_translation() {
         assert_eq!(PackedMirrorLayout::NODE_BYTES, 12_288);
-        assert_eq!(PackedMirrorLayout::CONTENT_GLOBALS_BYTES, 144);
-        assert_eq!(PackedMirrorLayout::SCENE_CONTENT_BYTES, 9_600);
-        assert_eq!(PackedMirrorLayout::FRAME_BYTES, 4_608);
+        assert_eq!(PackedMirrorLayout::CONTENT_GLOBALS_BYTES, 160);
+        assert_eq!(PackedMirrorLayout::SCENE_CONTENT_BYTES, 15_552);
+        assert_eq!(PackedMirrorLayout::FRAME_BYTES, 7_680);
         assert_eq!(PackedMirrorLayout::content_globals_offset(), 0);
         assert_eq!(
             [
@@ -2208,9 +2407,12 @@ mod tests {
                 ContentMirrorFamily::PropGlyphs,
                 ContentMirrorFamily::TankGlyphs,
                 ContentMirrorFamily::Ambient,
+                ContentMirrorFamily::PetParticles,
+                ContentMirrorFamily::RoomGlyphs,
+                ContentMirrorFamily::Analytics,
             ]
             .map(|family| PackedMirrorLayout::scene_content_offset(family).unwrap()),
-            [0, 4_160, 7_040, 7_552]
+            [0, 4_160, 7_040, 7_552, 9_600, 13_760, 14_784]
         );
         assert_eq!(
             PackedMirrorLayout::scene_content_offset(ContentMirrorFamily::Globals),
@@ -2218,17 +2420,20 @@ mod tests {
         );
         assert_eq!(
             FrameMirrorFamily::ALL.map(PackedMirrorLayout::frame_offset),
-            [0, 192, 672, 1_440, 4_512]
+            [0, 192, 672, 1_440, 4_512, 4_608, 6_144]
         );
         assert_eq!(
-            PackedMirrorLayout::translate_content_globals_span(ByteSpan { offset: 0, len: 144 }),
-            Ok(ByteSpan { offset: 0, len: 144 })
+            PackedMirrorLayout::translate_content_globals_span(ByteSpan { offset: 0, len: 160 }),
+            Ok(ByteSpan { offset: 0, len: 160 })
         );
         for family in [
             ContentMirrorFamily::Pet,
             ContentMirrorFamily::PropGlyphs,
             ContentMirrorFamily::TankGlyphs,
             ContentMirrorFamily::Ambient,
+            ContentMirrorFamily::PetParticles,
+            ContentMirrorFamily::RoomGlyphs,
+            ContentMirrorFamily::Analytics,
         ] {
             let translated = PackedMirrorLayout::translate_scene_content_span(
                 family,
@@ -2252,7 +2457,7 @@ mod tests {
         assert_eq!(
             PackedMirrorLayout::translate_scene_content_span(
                 ContentMirrorFamily::Globals,
-                ByteSpan { offset: 0, len: 144 },
+                ByteSpan { offset: 0, len: 160 },
             ),
             Err(PackedMirrorLayoutError::NonSceneContentFamily)
         );
@@ -2402,11 +2607,11 @@ mod tests {
 
     #[test]
     fn gpu_upload_records_have_locked_sizes_alignments_and_offsets() {
-        assert_eq!(std::mem::size_of::<PrimitiveGpuValue>(), 48);
+        assert_eq!(std::mem::size_of::<PrimitiveGpuValue>(), 64);
         assert_eq!(std::mem::align_of::<PrimitiveGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, node_index), 0);
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, material_index), 4);
-        assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, resource_index), 8);
+        assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, aux_node_index), 8);
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, primitive_kind), 12);
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, material_kind), 16);
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, resource_kind), 20);
@@ -2415,6 +2620,14 @@ mod tests {
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, space), 32);
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, instance_group), 36);
         assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, instance_base), 40);
+        assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, binding_index), 44);
+        assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, authored_order), 48);
+        assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, content_base), 52);
+        assert_eq!(std::mem::offset_of!(PrimitiveGpuValue, frame_base), 56);
+        assert_eq!(
+            std::mem::offset_of!(PrimitiveGpuValue, aux_content_base),
+            60
+        );
 
         assert_eq!(std::mem::size_of::<SceneContentGpuValue>(), 32);
         assert_eq!(std::mem::align_of::<SceneContentGpuValue>(), 4);
@@ -2439,6 +2652,12 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GlyphAtlasGpuEntry, metrics), 32);
         assert_eq!(std::mem::offset_of!(GlyphAtlasGpuEntry, flags), 44);
         assert_eq!(std::mem::offset_of!(GlyphAtlasGpuEntry, allocated_cell), 48);
+        assert_eq!(
+            (0..6)
+                .map(scene_storage_min_binding_size)
+                .collect::<Vec<_>>(),
+            vec![12_288, 160, 7_680, 64, 15_552, 64],
+        );
     }
 
     #[test]
@@ -2472,9 +2691,15 @@ mod tests {
         for family in [
             ContentMirrorFamily::PropGlyphs,
             ContentMirrorFamily::Ambient,
+            ContentMirrorFamily::RoomGlyphs,
         ] {
             assert!(!SceneGlyphWeightPolicy::content_is_bold(family, 0, [0; 2]));
         }
+        assert!(SceneGlyphWeightPolicy::content_is_bold(
+            ContentMirrorFamily::PetParticles,
+            3,
+            [0; 2],
+        ));
     }
 
     #[test]
@@ -2628,15 +2853,156 @@ mod tests {
             std::mem::size_of_val(upload.glyph_entries.as_slice()),
         ];
         assert_eq!(candidate_buffer_lengths.len(), 8);
-        assert_eq!(candidate_buffer_lengths[3], 144);
-        assert_eq!(candidate_buffer_lengths[4], 4_608);
+        assert_eq!(candidate_buffer_lengths[3], 160);
+        assert_eq!(candidate_buffer_lengths[4], 7_680);
         assert_eq!(
             candidate_buffer_lengths[5],
-            candidate.primitive_count() * 48
+            candidate.primitive_count() * 64
         );
-        assert_eq!(candidate_buffer_lengths[6], 9_600);
+        assert_eq!(candidate_buffer_lengths[6], 15_552);
         assert_eq!(candidate_buffer_lengths[7], 2 * 64);
         assert_eq!(candidate, before);
+    }
+
+    #[test]
+    fn v2_room_and_analytic_families_translate_into_the_existing_two_dynamic_buffers() {
+        let mut fixture = SceneFixture::valid();
+        fixture.content.room_glyph_slots[0].glyph = Some(AuthoredGlyph::new('^').unwrap());
+        fixture.content.room_glyph_slots[0].color_srgb8 = Some([10, 20, 30]);
+        let candidate = super::super::compiler::compile_static_fixture_for_render_test(&fixture);
+        let sources = candidate.frame_upload_sources();
+        let upload = prepare_scene_upload(&candidate, &two_weight_atlas('^')).unwrap();
+
+        let room_content_offset =
+            PackedMirrorLayout::scene_content_offset(ContentMirrorFamily::RoomGlyphs).unwrap();
+        let room = bytemuck::from_bytes::<SceneContentGpuValue>(
+            &upload.scene_content_bytes[room_content_offset
+                ..room_content_offset + std::mem::size_of::<SceneContentGpuValue>()],
+        );
+        assert_eq!(room.kind, 5);
+        assert_ne!(room.glyph_entry_index, NONE_U32);
+        assert_eq!(room.variant, 10 | (20 << 8) | (30 << 16) | (255 << 24));
+
+        let room_frame_offset = PackedMirrorLayout::frame_offset(FrameMirrorFamily::RoomGlyphs);
+        assert_eq!(
+            &upload.frame_bytes[room_frame_offset..room_frame_offset + sources.room_glyphs.len()],
+            sources.room_glyphs,
+        );
+        let analytic_content_offset =
+            PackedMirrorLayout::scene_content_offset(ContentMirrorFamily::Analytics).unwrap();
+        let content_sources = candidate.content_upload_sources();
+        let analytic_content_bytes: &[u8] = bytemuck::cast_slice(content_sources.analytics);
+        assert_eq!(
+            &upload.scene_content_bytes
+                [analytic_content_offset..analytic_content_offset + analytic_content_bytes.len()],
+            analytic_content_bytes,
+        );
+        let analytic_frame_offset = PackedMirrorLayout::frame_offset(FrameMirrorFamily::Analytics);
+        assert_eq!(
+            &upload.frame_bytes
+                [analytic_frame_offset..analytic_frame_offset + sources.analytics.len()],
+            sources.analytics,
+        );
+    }
+
+    #[test]
+    fn primitive_upload_preserves_authored_order_binding_ids_and_v2_arena_bases() {
+        let cases = [
+            (
+                PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body)),
+                PrimitiveKind::InstanceQuad,
+                0,
+                NONE_U32,
+            ),
+            (
+                PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Particles)),
+                PrimitiveKind::InstanceQuad,
+                300,
+                NONE_U32,
+            ),
+            (
+                PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs),
+                PrimitiveKind::InstanceQuad,
+                430,
+                92,
+            ),
+            (
+                PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(4)),
+                PrimitiveKind::InstanceQuad,
+                166,
+                4,
+            ),
+            (
+                PrimitiveBinding::Instances(InstanceGroupBinding::TankCells {
+                    slot: 1,
+                    layer: InstanceLayer::Behind,
+                }),
+                PrimitiveKind::InstanceQuad,
+                228,
+                18,
+            ),
+            (
+                PrimitiveBinding::Instances(InstanceGroupBinding::Ambient),
+                PrimitiveKind::InstanceQuad,
+                236,
+                26,
+            ),
+        ];
+        for (binding, kind, content_base, frame_base) in cases {
+            let mut fixture = SceneFixture::valid();
+            fixture.template.primitives[0].binding = binding;
+            fixture.template.primitives[0].kind = kind;
+            fixture.template.primitives[0].authored_order = 77;
+            let candidate =
+                super::super::compiler::compile_static_fixture_for_render_test(&fixture);
+            let upload = prepare_scene_upload(&candidate, &two_weight_atlas('^')).unwrap();
+            let primitive = upload.primitives[0];
+            assert_eq!(primitive.content_base, content_base, "{binding:?}");
+            assert_eq!(primitive.frame_base, frame_base, "{binding:?}");
+            assert_eq!(primitive.authored_order, 77, "{binding:?}");
+            assert_eq!(upload.draws[0].authored_order, 77, "{binding:?}");
+        }
+
+        let mut analytic = SceneFixture::valid();
+        analytic.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
+        analytic.template.primitives[0].binding =
+            PrimitiveBinding::Analytic(AnalyticSemantic::Gauges.id());
+        analytic.template.materials[0].kind = MaterialKind::UnlitAnalytic;
+        analytic.template.resources[0].kind = ResourceKind::AnalyticGeometry;
+        analytic.template.primitives[0].authored_order = 91;
+        let upload = prepare_scene_upload(
+            &super::super::compiler::compile_static_fixture_for_render_test(&analytic),
+            &two_weight_atlas('^'),
+        )
+        .unwrap();
+        assert_eq!(upload.primitives[0].binding_index, 5);
+        assert_eq!(upload.primitives[0].content_base, NONE_U32);
+        assert_eq!(upload.primitives[0].frame_base, 5);
+        assert_eq!(upload.primitives[0].aux_content_base, NONE_U32);
+        assert_eq!(upload.primitives[0].authored_order, 91);
+
+        let mut wall = SceneFixture::valid();
+        let mut body = wall.template.primitives[0].clone();
+        body.kind = PrimitiveKind::InstanceQuad;
+        body.binding =
+            PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body));
+        wall.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
+        wall.template.primitives[0].binding =
+            PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id());
+        wall.template.materials[0].kind = MaterialKind::UnlitAnalytic;
+        wall.template.resources[0].kind = ResourceKind::AnalyticGeometry;
+        wall.template.primitives.push(body);
+        let upload = prepare_scene_upload(
+            &super::super::compiler::compile_static_fixture_for_render_test(&wall),
+            &two_weight_atlas('^'),
+        )
+        .unwrap();
+        assert_eq!(upload.primitives[0].binding_index, 1);
+        assert_eq!(upload.primitives[0].aux_content_base, 0);
+        assert_eq!(
+            upload.primitives[0].aux_node_index,
+            upload.primitives[1].node_index
+        );
     }
 
     #[test]
@@ -2650,9 +3016,15 @@ mod tests {
             ),
             (
                 InstanceGroupBinding::PetArt(PetArtFilter::Particles),
-                u32::MAX,
+                0,
                 PrimitiveSource::Instances(InstanceSource::PetParticles),
-                0..0,
+                0..130,
+            ),
+            (
+                InstanceGroupBinding::RoomGlyphs,
+                0,
+                PrimitiveSource::Instances(InstanceSource::RoomGlyphs),
+                0..32,
             ),
             (
                 InstanceGroupBinding::PropGlyphs(4),
@@ -2843,15 +3215,27 @@ mod tests {
         for required in [
             "const GLYPH_FLAG_COLOR: u32 = 2u;",
             "struct PrimitiveGpuValue",
+            "aux_node_index: u32",
             "instance_base: u32",
+            "binding_index: u32",
+            "authored_order: u32",
+            "content_base: u32",
+            "frame_base: u32",
+            "aux_content_base: u32",
             "struct SceneContentGpuValue",
+            "struct AnalyticContentGpuValue",
+            "struct AnalyticFrameGpuValue",
             "glyph_entry_index: u32",
             "struct GlyphAtlasGpuEntry",
             "struct NodeBuffer",
             "struct ContentGlobalsBuffer",
             "struct FrameBuffer",
+            "values: array<FrameGpuValue, 124>",
+            "analytics: array<AnalyticFrameGpuValue, 16>",
             "struct PrimitiveBuffer",
             "struct SceneContentBuffer",
+            "values: array<SceneContentGpuValue, 462>",
+            "analytics: array<AnalyticContentGpuValue, 16>",
             "struct GlyphEntryBuffer",
             "@group(0) @binding(0) var<storage, read> node_buffer: NodeBuffer;",
             "@group(0) @binding(1) var<storage, read> content_globals_buffer: ContentGlobalsBuffer;",
@@ -2862,8 +3246,8 @@ mod tests {
             "world_position.y = world_position.y + node.depth_cue.y;",
             "output.opacity = node.opacity * f32(node.visible);",
             "point_position.y * 2.0 / frame_buffer.globals.viewport_points.y - 1.0",
-            "if (primitive.instance_group == 2u)",
-            "return NONE_U32;",
+            "if (primitive.content_base == NONE_U32)",
+            "return primitive.content_base + instance_index;",
             "fn vs_world(",
             "fn vs_screen(",
             "fn fs_analytic(",
@@ -3775,7 +4159,8 @@ mod tests {
 
         for (binding, expected_instances) in [
             (InstanceGroupBinding::PetArt(PetArtFilter::Body), 130),
-            (InstanceGroupBinding::PetArt(PetArtFilter::Particles), 0),
+            (InstanceGroupBinding::PetArt(PetArtFilter::Particles), 130),
+            (InstanceGroupBinding::RoomGlyphs, 32),
             (InstanceGroupBinding::PropGlyphs(2), 9),
             (
                 InstanceGroupBinding::TankCells {
@@ -3807,6 +4192,15 @@ mod tests {
 
             let mut malformed = upload.clone();
             malformed.draws[0].source = PrimitiveSource::Analytic;
+            assert_invalid(&malformed, &atlas);
+
+            let mut malformed = upload.clone();
+            malformed.primitives[0].content_base =
+                malformed.primitives[0].content_base.wrapping_add(1);
+            assert_invalid(&malformed, &atlas);
+
+            let mut malformed = upload.clone();
+            malformed.draws[0].authored_order = malformed.draws[0].authored_order.wrapping_add(1);
             assert_invalid(&malformed, &atlas);
 
             let mut malformed = upload;
@@ -3945,6 +4339,10 @@ mod tests {
         assert_invalid(&malformed);
 
         let mut malformed = upload.clone();
+        malformed.primitives[0].aux_node_index = 0;
+        assert_invalid(&malformed);
+
+        let mut malformed = upload.clone();
         malformed.vertex_bytes[32..36].copy_from_slice(&1_u32.to_ne_bytes());
         assert_invalid(&malformed);
 
@@ -3958,7 +4356,7 @@ mod tests {
         assert_invalid(&malformed);
 
         let mut malformed = upload;
-        malformed.primitives[0].resource_index = NONE_U32;
+        malformed.primitives[0].resource_kind = 0;
         assert_invalid(&malformed);
     }
 
