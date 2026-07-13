@@ -3,7 +3,8 @@
 
 use super::buffers::{ByteSpan, DirtySpanSet};
 use super::compiler::{
-    ContentUploadValue, CpuSceneCandidate, FrameUploadSources, PrimitiveUploadSource,
+    ContentGpuValue, ContentUploadValue, CpuSceneCandidate, FrameUploadSources, MirrorDeltaError,
+    PreparedMirrorFamily, PreparedSceneDelta, PrimitiveUploadSource, SceneDirtySpans,
 };
 use super::resources::{GlyphEntryKind, GlyphKey, PreparedSceneAtlas};
 use bytemuck::{Pod, Zeroable};
@@ -1654,6 +1655,48 @@ impl PackedMirrorLayout {
 }
 
 impl ScenePhysicalDirtySpans {
+    fn from_logical(dirty: SceneDirtySpans) -> Result<Self, PackedMirrorLayoutError> {
+        let mut physical = Self::default();
+        for span in dirty.nodes.as_slice() {
+            physical.insert_node(*span)?;
+        }
+        for (family, spans) in [
+            (ContentMirrorFamily::Globals, dirty.content_globals),
+            (ContentMirrorFamily::Pet, dirty.pet_body),
+            (ContentMirrorFamily::PetParticles, dirty.pet_particles),
+            (ContentMirrorFamily::RoomGlyphs, dirty.room_content),
+            (ContentMirrorFamily::PropGlyphs, dirty.prop_glyphs),
+            (ContentMirrorFamily::TankGlyphs, dirty.tank_glyphs),
+            (ContentMirrorFamily::Ambient, dirty.content_ambient),
+            (ContentMirrorFamily::Analytics, dirty.content_analytics),
+        ] {
+            for span in spans.as_slice() {
+                physical.insert_content(family, *span)?;
+            }
+        }
+        for (family, spans) in [
+            (FrameMirrorFamily::Globals, dirty.frame_globals),
+            (FrameMirrorFamily::RoomGlyphs, dirty.room_frame),
+            (FrameMirrorFamily::Props, dirty.props),
+            (FrameMirrorFamily::TankCells, dirty.tank_cells),
+            (FrameMirrorFamily::Ambient, dirty.frame_ambient),
+            (FrameMirrorFamily::Analytics, dirty.frame_analytics),
+            (FrameMirrorFamily::Lights, dirty.lights),
+        ] {
+            for span in spans.as_slice() {
+                physical.insert_frame(family, *span)?;
+            }
+        }
+        Ok(physical)
+    }
+
+    fn copy_count(self) -> usize {
+        self.nodes.as_slice().len()
+            + self.content_globals.as_slice().len()
+            + self.frame.as_slice().len()
+            + self.scene_content.as_slice().len()
+    }
+
     fn insert_node(&mut self, span: ByteSpan) -> Result<(), PackedMirrorLayoutError> {
         self.nodes
             .insert(PackedMirrorLayout::translate_node_span(span)?);
@@ -1820,6 +1863,7 @@ pub(super) enum SceneTargetKeyError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SceneGpuError {
+    ActualDeviceMismatch,
     AtlasGenerationMismatch {
         upload: crate::presentation::companion_scene::ResourceGeneration,
         atlas: crate::presentation::companion_scene::ResourceGeneration,
@@ -1917,10 +1961,12 @@ impl SceneBasePipelines {
     }
 }
 
-/// Device-epoch shared handles. The render owner supplies `Device`/`Queue` to
-/// operations; neither is retained here.
+/// Device-epoch shared handles. A cheap `Device` handle clone is retained only
+/// as an exact identity seal; the render owner still supplies the active
+/// `Device`/`Queue` to operations.
 pub(super) struct SceneGpuShared {
     pub(super) device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    device_identity: wgpu::Device,
     /// Immutable adapter/device limit used to reject impossible targets before
     /// any texture creation reaches wgpu validation.
     pub(super) max_texture_dimension_2d: u32,
@@ -2020,6 +2066,7 @@ impl SceneGpuShared {
         );
         Self {
             device_epoch,
+            device_identity: device.clone(),
             max_texture_dimension_2d: device.limits().max_texture_dimension_2d,
             scene_bind_group_layout,
             atlas_bind_group_layout,
@@ -2281,7 +2328,7 @@ fn create_scene_base_pipelines(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SceneBufferShadow {
     committed: Box<[u8]>,
     pending: Box<[u8]>,
@@ -2301,12 +2348,16 @@ impl SceneBufferShadow {
     fn commit(&mut self) {
         std::mem::swap(&mut self.committed, &mut self.pending);
     }
+
+    fn reset_pending(&mut self) {
+        self.pending.copy_from_slice(&self.committed);
+    }
 }
 
 /// CPU metadata owned by exactly one materialized GPU scene generation. Only
 /// buffers carrying ordinary-frame deltas have shadows; immutable geometry,
 /// primitive, and glyph-entry buffers deliberately have none.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GpuSceneGenerationState {
     glyph_lookup: SceneGlyphLookup,
     nodes: SceneBufferShadow,
@@ -2325,9 +2376,186 @@ impl GpuSceneGenerationState {
             scene_content: SceneBufferShadow::from_bytes(&upload.scene_content_bytes),
         }
     }
+
+    fn reset_pending(&mut self) {
+        self.nodes.reset_pending();
+        self.content_globals.reset_pending();
+        self.frame.reset_pending();
+        self.scene_content.reset_pending();
+    }
+
+    fn commit_pending(&mut self) {
+        self.nodes.commit();
+        self.content_globals.commit();
+        self.frame.commit();
+        self.scene_content.commit();
+        self.reset_pending();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedMirrorDestination {
+    Nodes,
+    Content(ContentMirrorFamily),
+    Frame(FrameMirrorFamily),
+}
+
+fn prepared_mirror_destination(family: PreparedMirrorFamily) -> PreparedMirrorDestination {
+    match family {
+        PreparedMirrorFamily::Nodes => PreparedMirrorDestination::Nodes,
+        PreparedMirrorFamily::ContentGlobals => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::Globals)
+        }
+        PreparedMirrorFamily::PetBody => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::Pet)
+        }
+        PreparedMirrorFamily::PetParticles => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::PetParticles)
+        }
+        PreparedMirrorFamily::RoomContent => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::RoomGlyphs)
+        }
+        PreparedMirrorFamily::PropGlyphs => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::PropGlyphs)
+        }
+        PreparedMirrorFamily::TankGlyphs => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::TankGlyphs)
+        }
+        PreparedMirrorFamily::ContentAmbient => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::Ambient)
+        }
+        PreparedMirrorFamily::ContentAnalytics => {
+            PreparedMirrorDestination::Content(ContentMirrorFamily::Analytics)
+        }
+        PreparedMirrorFamily::FrameGlobals => {
+            PreparedMirrorDestination::Frame(FrameMirrorFamily::Globals)
+        }
+        PreparedMirrorFamily::RoomFrame => {
+            PreparedMirrorDestination::Frame(FrameMirrorFamily::RoomGlyphs)
+        }
+        PreparedMirrorFamily::Props => PreparedMirrorDestination::Frame(FrameMirrorFamily::Props),
+        PreparedMirrorFamily::TankCells => {
+            PreparedMirrorDestination::Frame(FrameMirrorFamily::TankCells)
+        }
+        PreparedMirrorFamily::FrameAmbient => {
+            PreparedMirrorDestination::Frame(FrameMirrorFamily::Ambient)
+        }
+        PreparedMirrorFamily::FrameAnalytics => {
+            PreparedMirrorDestination::Frame(FrameMirrorFamily::Analytics)
+        }
+        PreparedMirrorFamily::Lights => PreparedMirrorDestination::Frame(FrameMirrorFamily::Lights),
+    }
+}
+
+fn stage_prepared_scene_delta(
+    state: &mut GpuSceneGenerationState,
+    prepared: &PreparedSceneDelta,
+) -> Result<ScenePhysicalDirtySpans, SceneDeltaRenderError> {
+    let physical = ScenePhysicalDirtySpans::from_logical(prepared.dirty_spans())
+        .map_err(SceneDeltaRenderError::Layout)?;
+    state.reset_pending();
+    let mut result = Ok(());
+    prepared.visit_mirror_updates(|family, slot, bytes| {
+        if result.is_ok() {
+            result = stage_prepared_mirror_record(state, family, slot, bytes);
+        }
+    });
+    if let Err(error) = result {
+        state.reset_pending();
+        return Err(error);
+    }
+    Ok(physical)
+}
+
+fn stage_prepared_mirror_record(
+    state: &mut GpuSceneGenerationState,
+    family: PreparedMirrorFamily,
+    slot: usize,
+    bytes: &[u8],
+) -> Result<(), SceneDeltaRenderError> {
+    let destination = prepared_mirror_destination(family);
+    let (shadow, family_offset, family_len, record_size, glyph_family) = match destination {
+        PreparedMirrorDestination::Nodes => (
+            &mut state.nodes,
+            0,
+            PackedMirrorLayout::NODE_BYTES,
+            super::compiler::CpuMirrorShape::NODE_RECORD_BYTES,
+            None,
+        ),
+        PreparedMirrorDestination::Content(family) => {
+            let layout = PackedMirrorLayout::content_family_layout(family);
+            let shadow = match layout.buffer {
+                SceneMutableBuffer::ContentGlobals => &mut state.content_globals,
+                SceneMutableBuffer::SceneContent => &mut state.scene_content,
+                SceneMutableBuffer::Nodes | SceneMutableBuffer::Frame => {
+                    unreachable!("content family has a content buffer")
+                }
+            };
+            let glyph_family = (!matches!(
+                family,
+                ContentMirrorFamily::Globals | ContentMirrorFamily::Analytics
+            ))
+            .then_some(family);
+            (
+                shadow,
+                layout.offset,
+                layout.len,
+                layout.span_alignment,
+                glyph_family,
+            )
+        }
+        PreparedMirrorDestination::Frame(family) => {
+            let layout = PackedMirrorLayout::frame_family_layout(family);
+            (
+                &mut state.frame,
+                layout.offset,
+                layout.len,
+                layout.span_alignment,
+                None,
+            )
+        }
+    };
+    if bytes.len() != record_size {
+        return Err(SceneDeltaRenderError::Upload(
+            SceneUploadError::MirrorSizeMismatch,
+        ));
+    }
+    let relative = slot
+        .checked_mul(record_size)
+        .filter(|offset| *offset < family_len)
+        .ok_or(SceneDeltaRenderError::Upload(
+            SceneUploadError::MirrorSizeMismatch,
+        ))?;
+    let offset = family_offset
+        .checked_add(relative)
+        .ok_or(SceneDeltaRenderError::Upload(
+            SceneUploadError::MirrorSizeMismatch,
+        ))?;
+    let end = offset
+        .checked_add(record_size)
+        .filter(|end| *end <= shadow.pending.len())
+        .ok_or(SceneDeltaRenderError::Upload(
+            SceneUploadError::MirrorSizeMismatch,
+        ))?;
+    if let Some(family) = glyph_family {
+        let value = bytemuck::try_from_bytes::<ContentGpuValue>(bytes)
+            .map_err(|_| SceneDeltaRenderError::Upload(SceneUploadError::MirrorSizeMismatch))?;
+        let translated = SceneContentGpuValue::translate(
+            family,
+            ContentUploadValue::from(*value),
+            &state.glyph_lookup,
+        )
+        .map_err(SceneDeltaRenderError::Upload)?;
+        shadow.pending[offset..end].copy_from_slice(bytemuck::bytes_of(&translated));
+    } else {
+        shadow.pending[offset..end].copy_from_slice(bytes);
+    }
+    Ok(())
 }
 
 pub(super) struct GpuSceneCandidate {
+    device_identity: wgpu::Device,
+    queue_identity: wgpu::Queue,
     pub(super) vertex_buffer: wgpu::Buffer,
     pub(super) index_buffer: wgpu::Buffer,
     pub(super) node_buffer: wgpu::Buffer,
@@ -2496,6 +2724,9 @@ pub(super) fn materialize_gpu_candidate(
     upload: &PreparedSceneUpload,
     atlas: &PreparedSceneAtlas,
 ) -> Result<GpuSceneCandidate, SceneGpuError> {
+    if shared.device_identity != *device {
+        return Err(SceneGpuError::ActualDeviceMismatch);
+    }
     validate_gpu_candidate_preflight(shared, upload, atlas)?;
     let draw_plan = validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases)
         .map_err(SceneGpuError::InvalidDrawPlan)?;
@@ -2637,6 +2868,8 @@ pub(super) fn materialize_gpu_candidate(
             prepared_hud_atlas,
         );
         GpuSceneCandidate {
+            device_identity: device.clone(),
+            queue_identity: queue.clone(),
             vertex_buffer,
             index_buffer,
             node_buffer,
@@ -3350,13 +3583,28 @@ pub(super) struct SceneRenderOutcome {
     pub(super) rgba: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SceneDeltaRenderError {
+    ActualDeviceMismatch,
+    ActualQueueMismatch,
+    GenerationMismatch,
+    StaticChecksumMismatch,
+    RevisionMismatch,
+    LogicalViewportMismatch,
+    PreparedRevisionMismatch,
+    Layout(PackedMirrorLayoutError),
+    Upload(SceneUploadError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SceneRenderError {
     RendererDeviceEpochMismatch {
         renderer: crate::presentation::companion_scene::DeviceEpoch,
         shared: crate::presentation::companion_scene::DeviceEpoch,
     },
     Request(SceneRenderRequestError),
+    DeltaPreparation(MirrorDeltaError),
+    Delta(SceneDeltaRenderError),
     Hud(super::hud::HudGpuStagingError),
     Target(SceneGpuError),
     Readback(super::capture::SceneReadbackError),
@@ -3385,19 +3633,30 @@ enum SceneRenderTestFault {
 /// fixed-size upload belt are retained here.
 pub(super) struct SceneRenderer {
     device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    device_identity: wgpu::Device,
+    queue_identity: wgpu::Queue,
     targets: SceneTargetCache,
     readback: super::capture::SceneReadbackCache,
     staging_belt: wgpu::util::StagingBelt,
     #[cfg(test)]
     submission_events: u64,
     #[cfg(test)]
+    scene_buffer_copy_events: u64,
+    #[cfg(test)]
     test_fault: SceneRenderTestFault,
 }
 
+struct SceneDeltaTransaction<'candidate> {
+    cpu: &'candidate mut CpuSceneCandidate,
+    prepared: PreparedSceneDelta,
+}
+
 impl SceneRenderer {
-    pub(super) fn new(device: &wgpu::Device, shared: &SceneGpuShared) -> Self {
+    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, shared: &SceneGpuShared) -> Self {
         Self {
             device_epoch: shared.device_epoch,
+            device_identity: device.clone(),
+            queue_identity: queue.clone(),
             targets: SceneTargetCache::default(),
             readback: super::capture::SceneReadbackCache::default(),
             staging_belt: wgpu::util::StagingBelt::new(
@@ -3406,6 +3665,8 @@ impl SceneRenderer {
             ),
             #[cfg(test)]
             submission_events: 0,
+            #[cfg(test)]
+            scene_buffer_copy_events: 0,
             #[cfg(test)]
             test_fault: SceneRenderTestFault::None,
         }
@@ -3423,14 +3684,111 @@ impl SceneRenderer {
         request: SceneRenderRequest,
         prepared_hud: &super::hud::CaptureSafePreparedHudFrame,
     ) -> Result<SceneRenderOutcome, SceneRenderError> {
+        self.render_offscreen_inner(
+            device,
+            queue,
+            shared,
+            candidate,
+            request,
+            prepared_hud,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_offscreen_with_delta(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        cpu: &mut CpuSceneCandidate,
+        candidate: &mut GpuSceneCandidate,
+        content_delta: &crate::presentation::companion_scene::scene::ContentDelta,
+        frame_delta: &crate::presentation::companion_scene::scene::FrameDelta,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::CaptureSafePreparedHudFrame,
+    ) -> Result<SceneRenderOutcome, SceneRenderError> {
+        self.validate_actual_identity(device, queue, shared, candidate)?;
+        if cpu.generation_key != candidate.generation_key {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::GenerationMismatch,
+            ));
+        }
+        if cpu.static_checksum != candidate.static_checksum {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::StaticChecksumMismatch,
+            ));
+        }
+        if cpu.source_revisions != candidate.source_revisions {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::RevisionMismatch,
+            ));
+        }
+        if cpu.logical_viewport_points() != candidate.logical_viewport_points {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::LogicalViewportMismatch,
+            ));
+        }
+        let prepared = cpu
+            .prepare_deltas(content_delta, frame_delta)
+            .map_err(SceneRenderError::DeltaPreparation)?;
+        let dirty = prepared.dirty_spans();
+        if dirty.from != candidate.source_revisions || dirty.to != request.version.applied {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::PreparedRevisionMismatch,
+            ));
+        }
+        self.render_offscreen_inner(
+            device,
+            queue,
+            shared,
+            candidate,
+            request,
+            prepared_hud,
+            Some(SceneDeltaTransaction { cpu, prepared }),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_offscreen_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::CaptureSafePreparedHudFrame,
+        mut delta: Option<SceneDeltaTransaction<'_>>,
+    ) -> Result<SceneRenderOutcome, SceneRenderError> {
         if self.device_epoch != shared.device_epoch {
             return Err(SceneRenderError::RendererDeviceEpochMismatch {
                 renderer: self.device_epoch,
                 shared: shared.device_epoch,
             });
         }
-        let binding = bind_scene_render_request(shared, candidate, request)
-            .map_err(SceneRenderError::Request)?;
+        self.validate_actual_identity(device, queue, shared, candidate)?;
+        let (revisions, logical_viewport_points) = delta
+            .as_ref()
+            .map(|transaction| {
+                (
+                    transaction.prepared.dirty_spans().to,
+                    transaction.prepared.prospective_logical_viewport_points(),
+                )
+            })
+            .unwrap_or((
+                candidate.source_revisions,
+                candidate.logical_viewport_points,
+            ));
+        let target_key = derive_scene_target_key(
+            shared.device_epoch,
+            candidate.generation_key,
+            revisions,
+            logical_viewport_points,
+            shared.max_texture_dimension_2d,
+            &request,
+        )
+        .map_err(SceneRenderError::Request)?;
+        let binding = SceneRenderBinding { request, target_key };
         candidate
             .hud
             .validate_redacted_capture(prepared_hud)
@@ -3448,12 +3806,26 @@ impl SceneRenderer {
         )
         .map_err(SceneRenderError::Readback)?;
 
-        self.targets
-            .ensure(device, shared, binding.target_key)
-            .map_err(SceneRenderError::Target)?;
-        self.readback
-            .ensure(device, shared, readback_key)
-            .map_err(SceneRenderError::Readback)?;
+        let physical_delta = delta
+            .as_ref()
+            .map(|transaction| {
+                stage_prepared_scene_delta(&mut candidate.generation_state, &transaction.prepared)
+            })
+            .transpose()
+            .map_err(SceneRenderError::Delta)?;
+
+        if let Err(error) = self.targets.ensure(device, shared, binding.target_key) {
+            if physical_delta.is_some() {
+                candidate.generation_state.reset_pending();
+            }
+            return Err(SceneRenderError::Target(error));
+        }
+        if let Err(error) = self.readback.ensure(device, shared, readback_key) {
+            if physical_delta.is_some() {
+                candidate.generation_state.reset_pending();
+            }
+            return Err(SceneRenderError::Readback(error));
+        }
         let targets = self
             .targets
             .current()
@@ -3472,6 +3844,16 @@ impl SceneRenderer {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("glorp-scene-offscreen-encoder"),
             });
+            let _scene_buffer_copies = physical_delta
+                .map(|physical| {
+                    encode_scene_delta_copies(
+                        &mut encoder,
+                        &mut self.staging_belt,
+                        candidate,
+                        physical,
+                    )
+                })
+                .unwrap_or(0);
             encode_scene_world(&mut encoder, targets, shared, candidate);
             encode_scene_draws_without_depth(
                 &mut encoder,
@@ -3535,6 +3917,9 @@ impl SceneRenderer {
             #[cfg(test)]
             {
                 self.submission_events = self.submission_events.saturating_add(1);
+                self.scene_buffer_copy_events = self
+                    .scene_buffer_copy_events
+                    .saturating_add(u64::try_from(_scene_buffer_copies).unwrap_or(u64::MAX));
             }
             self.staging_belt.recall();
             Ok::<_, super::hud::HudGpuStagingError>(submission)
@@ -3550,9 +3935,32 @@ impl SceneRenderer {
             // is never reused. Dropping it cancels outstanding remaps; the next
             // call starts from one clean fixed-size chunk arena.
             self.reset_staging_belt(device);
+            if physical_delta.is_some() {
+                candidate.generation_state.reset_pending();
+            }
             return Err(SceneRenderError::Gpu(category));
         }
-        let submission = submission_result.map_err(SceneRenderError::Hud)?;
+        let submission = match submission_result {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.reset_staging_belt(device);
+                if physical_delta.is_some() {
+                    candidate.generation_state.reset_pending();
+                }
+                return Err(SceneRenderError::Hud(error));
+            }
+        };
+
+        if let Some(transaction) = delta.take() {
+            let expected_dirty = transaction.prepared.dirty_spans();
+            let applied = transaction.cpu.commit_prepared(transaction.prepared);
+            debug_assert_eq!(applied.dirty, expected_dirty);
+            debug_assert_eq!(applied.generation_key, candidate.generation_key);
+            debug_assert_eq!(applied.static_checksum, candidate.static_checksum);
+            candidate.generation_state.commit_pending();
+            candidate.source_revisions = applied.to;
+            candidate.logical_viewport_points = applied.prospective_logical_viewport_points;
+        }
 
         let (sender, receiver) = mpsc::sync_channel(1);
         readback
@@ -3621,6 +4029,34 @@ impl SceneRenderer {
         )
     }
 
+    #[cfg(test)]
+    const fn delta_events_for_test(&self) -> (u64, u64) {
+        (self.submission_events, self.scene_buffer_copy_events)
+    }
+
+    fn validate_actual_identity(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &GpuSceneCandidate,
+    ) -> Result<(), SceneRenderError> {
+        if self.device_identity != *device
+            || shared.device_identity != *device
+            || candidate.device_identity != *device
+        {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::ActualDeviceMismatch,
+            ));
+        }
+        if self.queue_identity != *queue || candidate.queue_identity != *queue {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::ActualQueueMismatch,
+            ));
+        }
+        Ok(())
+    }
+
     fn reset_staging_belt(&mut self, device: &wgpu::Device) {
         self.staging_belt =
             wgpu::util::StagingBelt::new(device.clone(), SCENE_STAGING_BELT_CHUNK_BYTES);
@@ -3656,6 +4092,51 @@ impl Drop for SceneReadbackMapGuard<'_> {
         // buffer to a reusable unmapped state.
         self.buffer.unmap();
     }
+}
+
+fn encode_scene_delta_copies(
+    encoder: &mut wgpu::CommandEncoder,
+    staging_belt: &mut wgpu::util::StagingBelt,
+    candidate: &GpuSceneCandidate,
+    physical: ScenePhysicalDirtySpans,
+) -> usize {
+    let mut copies = 0;
+    for (target, pending, spans) in [
+        (
+            &candidate.node_buffer,
+            candidate.generation_state.nodes.pending.as_ref(),
+            physical.nodes,
+        ),
+        (
+            &candidate.content_globals_buffer,
+            candidate.generation_state.content_globals.pending.as_ref(),
+            physical.content_globals,
+        ),
+        (
+            &candidate.frame_buffer,
+            candidate.generation_state.frame.pending.as_ref(),
+            physical.frame,
+        ),
+        (
+            &candidate.scene_content_buffer,
+            candidate.generation_state.scene_content.pending.as_ref(),
+            physical.scene_content,
+        ),
+    ] {
+        for span in spans.as_slice() {
+            let offset = u64::try_from(span.offset).expect("validated scene span offset fits u64");
+            let size = wgpu::BufferSize::new(
+                u64::try_from(span.len).expect("validated scene span length fits u64"),
+            )
+            .expect("dirty scene spans are non-empty");
+            let mut write = staging_belt.write_buffer(encoder, target, offset, size);
+            write.copy_from_slice(&pending[span.offset..span.offset + span.len]);
+            drop(write);
+            copies += 1;
+        }
+    }
+    debug_assert_eq!(copies, physical.copy_count());
+    copies
 }
 
 fn encode_scene_world(
@@ -4318,6 +4799,56 @@ mod tests {
         assert_eq!(
             dirty.scene_content.as_slice(),
             &[ByteSpan { offset: 4_192, len: 64 }]
+        );
+    }
+
+    #[test]
+    fn delta_execution_orders_copies_submission_commit_and_mapping_once() {
+        let source = include_str!("render.rs");
+        let inner = source
+            .split("fn render_offscreen_inner(")
+            .nth(1)
+            .expect("render_offscreen_inner exists")
+            .split("\n    #[cfg(test)]\n    const fn cache_and_submission_events_for_test")
+            .next()
+            .expect("render_offscreen_inner has a test-helper boundary");
+
+        for one_shot in [
+            "encode_scene_delta_copies(",
+            "self.staging_belt.finish();",
+            "queue.submit([encoder.finish()])",
+            "self.staging_belt.recall();",
+            "transaction.cpu.commit_prepared(transaction.prepared)",
+            ".map_async(wgpu::MapMode::Read",
+        ] {
+            assert_eq!(
+                inner.matches(one_shot).count(),
+                1,
+                "expected one `{one_shot}` in the delta render transaction"
+            );
+        }
+
+        let copies = inner.find("encode_scene_delta_copies(").unwrap();
+        let first_draw = inner.find("encode_scene_world(").unwrap();
+        let finish = inner.find("self.staging_belt.finish();").unwrap();
+        let submit = inner.find("queue.submit([encoder.finish()])").unwrap();
+        let recall = inner.find("self.staging_belt.recall();").unwrap();
+        let commit = inner
+            .find("transaction.cpu.commit_prepared(transaction.prepared)")
+            .unwrap();
+        let map = inner.find(".map_async(wgpu::MapMode::Read").unwrap();
+
+        assert!(
+            copies < first_draw,
+            "scene copies must precede the first draw"
+        );
+        assert!(
+            first_draw < finish && finish < submit && submit < recall,
+            "draws, belt finish, submission, and recall must stay ordered"
+        );
+        assert!(
+            recall < commit && commit < map,
+            "canonical commit must follow clean submission and precede mapping"
         );
     }
 
@@ -6695,6 +7226,50 @@ mod tests {
         )
     }
 
+    fn paired_render_deltas(
+        candidate: &CpuSceneCandidate,
+        fixture: &SceneFixture,
+        to: crate::presentation::companion_scene::AppliedRevisions,
+    ) -> (ContentDelta, FrameDelta) {
+        let mut content = ContentDelta::empty();
+        content.generation_key = candidate.generation_key;
+        content.from = candidate.source_revisions;
+        content.to = to;
+        content.palette = Some([
+            [12, 18, 31],
+            [30, 42, 68],
+            [59, 81, 122],
+            [126, 238, 255],
+            [255, 191, 105],
+            [255, 126, 184],
+            [172, 255, 141],
+            [236, 239, 255],
+        ]);
+        let mut pet = fixture.content.pet_art_slots[0];
+        pet.palette_role = PetPaletteRole::Eye;
+        content.pet_art_slots.push(pet);
+
+        let mut frame = FrameDelta::empty();
+        frame.generation_key = candidate.generation_key;
+        frame.from = candidate.source_revisions;
+        frame.to = to;
+        frame.gauges = Some([0.15, 0.35, 0.55, 0.75]);
+        frame.dim_amount = Some(0.22);
+        (content, frame)
+    }
+
+    fn assert_scene_shadows_synchronized(state: &GpuSceneGenerationState) {
+        for shadow in [
+            &state.nodes,
+            &state.content_globals,
+            &state.frame,
+            &state.scene_content,
+        ] {
+            assert_eq!(shadow.committed, shadow.pending);
+            assert_ne!(shadow.committed.as_ptr(), shadow.pending.as_ptr());
+        }
+    }
+
     #[test]
     fn render_request_derives_only_fixed_target_facts_across_size_and_scale_matrix() {
         let generation = crate::presentation::companion_scene::SceneGenerationKey {
@@ -6925,6 +7500,31 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn native_device_pair() -> [(wgpu::Device, wgpu::Queue); 2] {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::METAL;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .expect("a surfaceless Metal adapter is available");
+        std::array::from_fn(|index| {
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some(if index == 0 {
+                    "glorp-scene-identity-test-device-a"
+                } else {
+                    "glorp-scene-identity-test-device-b"
+                }),
+                ..Default::default()
+            }))
+            .expect("two surfaceless Metal devices are available from one adapter")
+        })
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn native_shared_and_candidate_materialization_validate_without_a_surface() {
         let (device, queue) = native_device();
@@ -7032,6 +7632,632 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn native_delta_render_matches_fresh_upload_shadows_and_pixels() {
+        let (device, queue) = native_device();
+        let fixture = canonical_materialization_fixture();
+        let mut cpu = compile_fixture(&fixture);
+        let mut expected_cpu = cpu.clone();
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(
+            cpu.source_revisions.semantic.0 + 1,
+            cpu.source_revisions.frame.0 + 1,
+        );
+        let (content, frame) = paired_render_deltas(&cpu, &fixture, to);
+        expected_cpu.apply_deltas(&content, &frame).unwrap();
+        let expected_upload = prepare_scene_upload(&expected_cpu, &atlas).unwrap();
+        let request = render_request_fixture(
+            cpu.generation_key,
+            to,
+            expected_cpu.logical_viewport_points(),
+            1.0,
+        );
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+
+        let incremental = renderer
+            .render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            )
+            .unwrap();
+
+        assert_eq!(cpu, expected_cpu);
+        assert_eq!(candidate.source_revisions, to);
+        assert_eq!(
+            candidate.logical_viewport_points,
+            expected_cpu.logical_viewport_points()
+        );
+        assert_eq!(
+            candidate.generation_state.nodes.committed.as_ref(),
+            expected_upload.node_bytes.as_slice(),
+        );
+        assert_eq!(
+            candidate
+                .generation_state
+                .content_globals
+                .committed
+                .as_ref(),
+            expected_upload.content_globals_bytes.as_slice(),
+        );
+        assert_eq!(
+            candidate.generation_state.frame.committed.as_ref(),
+            expected_upload.frame_bytes.as_slice(),
+        );
+        assert_eq!(
+            candidate.generation_state.scene_content.committed.as_ref(),
+            expected_upload.scene_content_bytes.as_slice(),
+        );
+        assert_scene_shadows_synchronized(&candidate.generation_state);
+
+        let mut fresh =
+            materialize_gpu_candidate(&device, &queue, &shared, &expected_upload, &atlas).unwrap();
+        let fresh_hud = fresh
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(expected_upload.generation_key.resources),
+            )
+            .unwrap();
+        let mut fresh_renderer = SceneRenderer::new(&device, &queue, &shared);
+        let fresh_outcome = fresh_renderer
+            .render_offscreen(&device, &queue, &shared, &mut fresh, request, &fresh_hud)
+            .unwrap();
+        assert_eq!(incremental, fresh_outcome);
+        assert_eq!(renderer.delta_events_for_test(), (1, 4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_noop_delta_advances_revisions_without_scene_buffer_copies() {
+        let (device, queue) = native_device();
+        let cpu_fixture = canonical_materialization_fixture();
+        let mut cpu = compile_fixture(&cpu_fixture);
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(
+            cpu.source_revisions.semantic.0 + 1,
+            cpu.source_revisions.frame.0 + 1,
+        );
+        let mut content = ContentDelta::empty();
+        content.generation_key = cpu.generation_key;
+        content.from = cpu.source_revisions;
+        content.to = to;
+        let mut frame = FrameDelta::empty();
+        frame.generation_key = cpu.generation_key;
+        frame.from = cpu.source_revisions;
+        frame.to = to;
+        let before = candidate.generation_state.clone();
+        let request =
+            render_request_fixture(cpu.generation_key, to, cpu.logical_viewport_points(), 1.0);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+
+        renderer
+            .render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request,
+                &hud,
+            )
+            .unwrap();
+
+        assert_eq!(cpu.source_revisions, to);
+        assert_eq!(candidate.source_revisions, to);
+        assert_eq!(candidate.generation_state, before);
+        assert_scene_shadows_synchronized(&candidate.generation_state);
+        assert_eq!(renderer.delta_events_for_test(), (1, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_delta_glyph_preflight_is_atomic_before_cache_encoder_and_belt_writes() {
+        let (device, queue) = native_device();
+        let fixture = canonical_materialization_fixture();
+        let mut cpu = compile_fixture(&fixture);
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(
+            cpu.source_revisions.semantic.0 + 1,
+            cpu.source_revisions.frame.0 + 1,
+        );
+        let mut content = ContentDelta::empty();
+        content.generation_key = cpu.generation_key;
+        content.from = cpu.source_revisions;
+        content.to = to;
+        let mut room_content = fixture.content.room_glyph_slots[0];
+        room_content.glyph = Some(AuthoredGlyph::new('◆').unwrap());
+        room_content.color_srgb8 = Some([215, 121, 255]);
+        content.room_glyph_slots.push(room_content);
+        let mut frame = FrameDelta::empty();
+        frame.generation_key = cpu.generation_key;
+        frame.from = cpu.source_revisions;
+        frame.to = to;
+        let mut room_frame = fixture.frame.room_glyph_slots[0];
+        room_frame.visible = true;
+        room_frame.grid_cell = [1, 2];
+        room_frame.position_points = [12.0, 324.0];
+        room_frame.opacity = 1.0;
+        frame.room_glyph_slots.push(room_frame);
+        let before_cpu = cpu.clone();
+        let before_gpu = candidate.generation_state.clone();
+        let before_hud = candidate.hud.staging_facts_for_test();
+        let request =
+            render_request_fixture(cpu.generation_key, to, cpu.logical_viewport_points(), 1.0);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+
+        let error = renderer
+            .render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request,
+                &hud,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SceneRenderError::Delta(SceneDeltaRenderError::Upload(
+                    SceneUploadError::MissingGlyphKey { .. }
+                ))
+            ),
+            "unexpected preflight error: {error:?}"
+        );
+        assert_eq!(cpu, before_cpu);
+        assert_eq!(candidate.source_revisions, before_cpu.source_revisions);
+        assert_eq!(candidate.generation_state, before_gpu);
+        assert_eq!(candidate.hud.staging_facts_for_test(), before_hud);
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (0, 0, 0));
+        assert_eq!(renderer.delta_events_for_test(), (0, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_delta_scoped_failure_preserves_canonical_state_and_identical_retry_commits() {
+        let (device, queue) = native_device();
+        let fixture = canonical_materialization_fixture();
+        let mut cpu = compile_fixture(&fixture);
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(
+            cpu.source_revisions.semantic.0 + 1,
+            cpu.source_revisions.frame.0 + 1,
+        );
+        let (content, frame) = paired_render_deltas(&cpu, &fixture, to);
+        let request =
+            render_request_fixture(cpu.generation_key, to, cpu.logical_viewport_points(), 1.0);
+        let before_cpu = cpu.clone();
+        let before_gpu = candidate.generation_state.clone();
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+        renderer.inject_test_fault(SceneRenderTestFault::ScopedValidationAfterHudWrite);
+
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Gpu(ScopedGpuErrorCategory::Validation)),
+        );
+        assert_eq!(cpu, before_cpu);
+        assert_eq!(candidate.source_revisions, before_cpu.source_revisions);
+        assert_eq!(candidate.generation_state, before_gpu);
+        assert_eq!(renderer.delta_events_for_test(), (1, 4));
+
+        renderer
+            .render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request,
+                &hud,
+            )
+            .unwrap();
+        assert_eq!(cpu.source_revisions, to);
+        assert_eq!(candidate.source_revisions, to);
+        assert_ne!(candidate.generation_state, before_gpu);
+        assert_scene_shadows_synchronized(&candidate.generation_state);
+        assert_eq!(renderer.delta_events_for_test(), (2, 8));
+
+        let to_again = crate::presentation::companion_scene::AppliedRevisions::new(
+            to.semantic.0 + 1,
+            to.frame.0 + 1,
+        );
+        let mut content_again = ContentDelta::empty();
+        content_again.generation_key = cpu.generation_key;
+        content_again.from = to;
+        content_again.to = to_again;
+        content_again.palette = Some([[91, 73, 151]; 8]);
+        let mut frame_again = FrameDelta::empty();
+        frame_again.generation_key = cpu.generation_key;
+        frame_again.from = to;
+        frame_again.to = to_again;
+        frame_again.dim_amount = Some(0.47);
+        let request_again = render_request_fixture(
+            cpu.generation_key,
+            to_again,
+            cpu.logical_viewport_points(),
+            1.0,
+        );
+        renderer
+            .render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content_again,
+                &frame_again,
+                request_again,
+                &hud,
+            )
+            .unwrap();
+        assert_eq!(cpu.source_revisions, to_again);
+        assert_eq!(candidate.source_revisions, to_again);
+        assert_scene_shadows_synchronized(&candidate.generation_state);
+        assert_eq!(renderer.delta_events_for_test(), (3, 10));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_delta_post_submit_map_failure_leaves_cpu_and_gpu_committed() {
+        let (device, queue) = native_device();
+        let fixture = canonical_materialization_fixture();
+        let mut cpu = compile_fixture(&fixture);
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(
+            cpu.source_revisions.semantic.0 + 1,
+            cpu.source_revisions.frame.0 + 1,
+        );
+        let (content, frame) = paired_render_deltas(&cpu, &fixture, to);
+        let mut expected = cpu.clone();
+        expected.apply_deltas(&content, &frame).unwrap();
+        let expected_upload = prepare_scene_upload(&expected, &atlas).unwrap();
+        let request =
+            render_request_fixture(cpu.generation_key, to, cpu.logical_viewport_points(), 1.0);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+        renderer.inject_test_fault(SceneRenderTestFault::MapCallbackCancelled);
+
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::MapFailed),
+        );
+        assert_eq!(cpu, expected);
+        assert_eq!(candidate.source_revisions, to);
+        assert_eq!(
+            candidate.generation_state.scene_content.committed.as_ref(),
+            expected_upload.scene_content_bytes.as_slice(),
+        );
+        assert_eq!(renderer.delta_events_for_test(), (1, 4));
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::DeltaPreparation(
+                MirrorDeltaError::StaleBase
+            )),
+        );
+        assert_eq!(renderer.delta_events_for_test(), (1, 4));
+
+        let recovered = renderer
+            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .unwrap();
+        assert_eq!(recovered.version.applied, to);
+        assert_scene_shadows_synchronized(&candidate.generation_state);
+        assert_eq!(renderer.delta_events_for_test(), (2, 4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_delta_rejects_distinct_actual_device_and_queue_with_same_logical_epoch() {
+        let [(device_a, queue_a), (device_b, queue_b)] = native_device_pair();
+        let fixture = canonical_materialization_fixture();
+        let mut cpu = compile_fixture(&fixture);
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device_a, upload.generation_key.device).unwrap();
+        let foreign_shared =
+            SceneGpuShared::create(&device_b, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device_a, &queue_a, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(
+            cpu.source_revisions.semantic.0 + 1,
+            cpu.source_revisions.frame.0 + 1,
+        );
+        let (content, frame) = paired_render_deltas(&cpu, &fixture, to);
+        let request =
+            render_request_fixture(cpu.generation_key, to, cpu.logical_viewport_points(), 1.0);
+        let before_cpu = cpu.clone();
+        let before_gpu = candidate.generation_state.clone();
+        let mut renderer = SceneRenderer::new(&device_a, &queue_a, &shared);
+
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device_b,
+                &queue_b,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::ActualDeviceMismatch,
+            )),
+        );
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device_a,
+                &queue_b,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::ActualQueueMismatch,
+            )),
+        );
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device_a,
+                &queue_a,
+                &foreign_shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::ActualDeviceMismatch,
+            )),
+        );
+        assert_eq!(cpu, before_cpu);
+        assert_eq!(candidate.generation_state, before_gpu);
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (0, 0, 0));
+
+        renderer
+            .render_offscreen_with_delta(
+                &device_a,
+                &queue_a,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request,
+                &hud,
+            )
+            .unwrap();
+        assert_eq!(cpu.source_revisions, to);
+        assert_eq!(renderer.delta_events_for_test(), (1, 4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_delta_rejects_cpu_gpu_generation_static_revision_and_viewport_drift_pre_cache() {
+        let (device, queue) = native_device();
+        let fixture = canonical_materialization_fixture();
+        let mut cpu = compile_fixture(&fixture);
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(
+            cpu.source_revisions.semantic.0 + 1,
+            cpu.source_revisions.frame.0 + 1,
+        );
+        let (content, frame) = paired_render_deltas(&cpu, &fixture, to);
+        let request =
+            render_request_fixture(cpu.generation_key, to, cpu.logical_viewport_points(), 1.0);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+
+        candidate.generation_key.layout =
+            crate::presentation::companion_scene::LayoutGeneration(cpu.generation_key.layout.0 + 1);
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::GenerationMismatch,
+            )),
+        );
+        candidate.generation_key = cpu.generation_key;
+
+        candidate.static_checksum = candidate.static_checksum.wrapping_add(1);
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::StaticChecksumMismatch,
+            )),
+        );
+        candidate.static_checksum = cpu.static_checksum;
+
+        candidate.source_revisions = to;
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::RevisionMismatch,
+            )),
+        );
+        candidate.source_revisions = cpu.source_revisions;
+
+        candidate.logical_viewport_points[0] += 1.0;
+        assert_eq!(
+            renderer.render_offscreen_with_delta(
+                &device,
+                &queue,
+                &shared,
+                &mut cpu,
+                &mut candidate,
+                &content,
+                &frame,
+                request,
+                &hud,
+            ),
+            Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::LogicalViewportMismatch,
+            )),
+        );
+        candidate.logical_viewport_points = cpu.logical_viewport_points();
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (0, 0, 0));
+        assert_eq!(renderer.delta_events_for_test(), (0, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn native_synthetic_offscreen_renderer_captures_pixels_and_reuses_keyed_resources() {
         let (device, queue) = native_device();
         let cpu = compile_fixture(&canonical_materialization_fixture());
@@ -7049,7 +8275,7 @@ mod tests {
             )
             .unwrap();
         let initial_staging = candidate.hud.staging_facts_for_test();
-        let mut renderer = SceneRenderer::new(&device, &shared);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         let request = render_request_fixture(
             candidate.generation_key,
             candidate.source_revisions,
@@ -7592,7 +8818,7 @@ mod tests {
             candidate.logical_viewport_points,
             2.0,
         );
-        let mut renderer = SceneRenderer::new(&device, &shared);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         let outcome = renderer
             .render_offscreen(
                 &device,
@@ -7780,7 +9006,7 @@ mod tests {
                 hud_geometry(upload.generation_key.resources),
             )
             .unwrap();
-        let mut renderer = SceneRenderer::new(&device, &shared);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         let mut malformed = render_request_fixture(
             candidate.generation_key,
             candidate.source_revisions,
@@ -7857,7 +9083,7 @@ mod tests {
             candidate_a.logical_viewport_points,
             1.0,
         );
-        let mut old_renderer = SceneRenderer::new(&device_a, &shared_a);
+        let mut old_renderer = SceneRenderer::new(&device_a, &queue_a, &shared_a);
         old_renderer
             .render_offscreen(
                 &device_a,
@@ -7915,7 +9141,7 @@ mod tests {
         );
         assert_eq!(candidate_b.hud.staging_facts_for_test(), staging_before);
 
-        let mut new_renderer = SceneRenderer::new(&device_b, &shared_b);
+        let mut new_renderer = SceneRenderer::new(&device_b, &queue_b, &shared_b);
         let outcome = new_renderer
             .render_offscreen(
                 &device_b,
@@ -7957,7 +9183,7 @@ mod tests {
             candidate.logical_viewport_points,
             1.0,
         );
-        let mut renderer = SceneRenderer::new(&device, &shared);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         renderer.inject_test_fault(SceneRenderTestFault::ScopedValidationAfterHudWrite);
         assert_eq!(
             renderer.render_offscreen(
@@ -8002,7 +9228,7 @@ mod tests {
             candidate.logical_viewport_points,
             1.0,
         );
-        let mut renderer = SceneRenderer::new(&device, &shared);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
 
         for (fault, expected) in [
             (
@@ -8087,7 +9313,7 @@ mod tests {
             candidate.logical_viewport_points,
             1.0,
         );
-        let mut renderer = SceneRenderer::new(&device, &shared);
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         let baseline_plan = candidate.draw_plan.clone();
         let baseline = renderer
             .render_offscreen(
@@ -8586,6 +9812,22 @@ mod tests {
                 copied_bytes: 6 * super::super::hud::HUD_GPU_BUFFER_BYTES,
             }
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_materialization_rejects_foreign_same_epoch_shared_device_before_allocation() {
+        let [(device_a, queue_a), (device_b, _queue_b)] = native_device_pair();
+        let candidate = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', candidate.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
+        let foreign_shared =
+            SceneGpuShared::create(&device_b, upload.generation_key.device).unwrap();
+
+        assert!(matches!(
+            materialize_gpu_candidate(&device_a, &queue_a, &foreign_shared, &upload, &atlas,),
+            Err(SceneGpuError::ActualDeviceMismatch),
+        ));
     }
 
     #[cfg(target_os = "macos")]
