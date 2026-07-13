@@ -2097,7 +2097,7 @@ mod repertoire_tests {
     use crate::game::evolution::Stage;
     use crate::game::metabolism::Mood;
     use crate::pet::generation::Species;
-    use crate::round::hud::{companion_hud_text, CompanionHudText};
+    use crate::round::hud::{companion_hud_text, pack_companion_hud_glyphs, CompanionHudText};
     use crate::round::scene::CompanionMotion;
     use crate::round::smooth::{build_round_smooth_scene_plan, frame_glyph_sequences};
     use crate::tui::view_model::WatchViewModel;
@@ -2116,7 +2116,9 @@ mod repertoire_tests {
 
     impl StripFrame {
         fn glyph_keys(&self) -> Vec<GlyphKey> {
-            frame_glyph_sequences(&self.plan, &self.hud)
+            let packed_hud = pack_companion_hud_glyphs(&self.hud)
+                .expect("retained strip HUD fixture must satisfy the glyph contract");
+            frame_glyph_sequences(&self.plan, &packed_hud)
                 .into_iter()
                 .map(|glyph| GlyphKey::new(glyph.sequence, glyph.bold))
                 .collect()

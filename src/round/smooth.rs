@@ -684,38 +684,6 @@ impl CompanionContentIdentity {
     }
 }
 
-/// The HUD's declared character set: every scalar the companion HUD lines can
-/// render. Derived by driving the real formatters across representative values
-/// (so the suffixes/punctuation stay authoritative) plus the full digit range.
-fn declared_hud_glyphs() -> BTreeSet<char> {
-    let mut glyphs = BTreeSet::new();
-    for digit in b'0'..=b'9' {
-        glyphs.insert(digit as char);
-    }
-    let samples = [
-        crate::round::hud::companion_hud_text(12_345.0, Some(0.5), 6_789.0),
-        crate::round::hud::companion_hud_text(1_234_567.0, Some(0.0), 8.0),
-        crate::round::hud::companion_hud_text(9_876_543_210.0, Some(9.99), 0.0),
-    ];
-    for hud in samples {
-        for line in [hud.today_total, hud.daily_percent, hud.pace] {
-            glyphs.extend(line.chars());
-        }
-    }
-    for fraction in [None, Some(0.5), Some(9.99), Some(-1.0)] {
-        glyphs.extend(crate::round::hud::format_daily_percent(fraction).chars());
-    }
-    // Review-pair captures render the redacted HUD by default (no live token
-    // counts leak into the parity artifacts), whose words ("review"/"privacy"/
-    // "redacted") introduce letters the live charset never shows — enumerate them
-    // from the source function so they cannot drift.
-    let redacted = crate::round::hud::review_capture_hud_text();
-    for line in [redacted.today_total, redacted.daily_percent, redacted.pace] {
-        glyphs.extend(line.chars());
-    }
-    glyphs
-}
-
 /// Collects the full declared glyph repertoire (sorted, deduplicated) a companion
 /// could ever paint for `identity`: the pet body across every stage/mood/state,
 /// the room dialect's whole biome/weather/emitter slices, the ambient
@@ -740,7 +708,11 @@ pub fn collect_companion_glyph_repertoire(
     chars.extend(crate::tui::component::habitat_props::declared_prop_glyphs(
         identity.species(),
     ));
-    chars.extend(declared_hud_glyphs());
+    chars.extend(
+        crate::round::hud::COMPANION_HUD_GLYPH_REPERTOIRE
+            .iter()
+            .copied(),
+    );
 
     // Per-species inventories: pet body, room dialect, ambient palettes.
     for &species in identity.species() {
@@ -771,12 +743,13 @@ pub fn collect_companion_glyph_repertoire(
 
 /// The glyphs one rendered companion frame actually paints: every `LocalCell`
 /// glyph (pet body, room, props, tank life, cues — whole authored scalar
-/// sequences with their weight) plus each HUD line tokenized per ASCII scalar.
+/// sequences with their weight) plus each validated, packed HUD glyph.
 /// Sorted and deduplicated. This is a single frame's *painted* set — a subset of
 /// the declared repertoire the atlas is preflighted from.
-pub fn frame_glyph_sequences(
+#[allow(dead_code)] // Retained repertoire fixtures use this until HUD GPU prep lands.
+pub(crate) fn frame_glyph_sequences(
     plan: &SmoothCompanionScenePlan,
-    hud: &crate::round::hud::CompanionHudText,
+    hud: &crate::round::hud::PackedCompanionHudGlyphs,
 ) -> Vec<RepertoireGlyph> {
     let mut set: BTreeSet<RepertoireGlyph> = BTreeSet::new();
     for layer in &plan.layers {
@@ -788,13 +761,11 @@ pub fn frame_glyph_sequences(
             }
         }
     }
-    for line in [&hud.today_total, &hud.daily_percent, &hud.pace] {
-        for scalar in line.chars() {
-            set.insert(RepertoireGlyph {
-                sequence: scalar.to_string(),
-                bold: false,
-            });
-        }
+    for packed in hud.occupied_glyphs() {
+        set.insert(RepertoireGlyph {
+            sequence: packed.glyph.to_string(),
+            bold: false,
+        });
     }
     set.into_iter().collect()
 }

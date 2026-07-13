@@ -351,11 +351,169 @@ pub fn rate_direction_color(direction: crate::tui::view_model::RateDirection) ->
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CompanionHudText {
     pub today_total: String,
     pub daily_percent: String,
     pub pace: String,
+}
+
+impl std::fmt::Debug for CompanionHudText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CompanionHudText(<private>)")
+    }
+}
+
+/// Maximum number of HUD glyph advances emitted for one companion frame.
+///
+/// The longest production stack is `999.9B` + `999%+ yday` + `999.9B/10m`,
+/// which occupies all 26 slots. Spaces are glyph advances and count toward the
+/// limit.
+#[allow(dead_code)] // Consumed by the dedicated retained HUD buffer in the next slice.
+pub(crate) const MAX_COMPANION_HUD_GLYPHS: usize = 26;
+
+/// First token value represented by the honest saturation label `999B+`.
+const COMPANION_HUD_SATURATION_TOKENS: f64 = 999_950_000_000.0;
+
+/// Exact scalar repertoire provisioned for companion HUD text. Keeping this
+/// list next to the formatters makes both validation and atlas preflight consume
+/// the same forward-only contract.
+pub(crate) const COMPANION_HUD_GLYPH_REPERTOIRE: &[char] = &[
+    ' ', '%', '+', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'B', 'M', 'a',
+    'c', 'd', 'e', 'i', 'k', 'm', 'p', 'r', 't', 'v', 'w', 'y',
+];
+
+/// Semantic role of a line in the companion's three-line HUD stack.
+#[allow(dead_code)] // Consumed by the dedicated retained HUD buffer in the next slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompanionHudLineRole {
+    TodayTotal,
+    DailyPercent,
+    Pace,
+}
+
+/// One glyph advance in a packed HUD line.
+#[allow(dead_code)] // Consumed by the dedicated retained HUD buffer in the next slice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackedHudGlyph {
+    pub(crate) role: CompanionHudLineRole,
+    pub(crate) line_char_index: usize,
+    pub(crate) glyph: char,
+}
+
+impl std::fmt::Debug for PackedHudGlyph {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PackedHudGlyph(<private>)")
+    }
+}
+
+/// Fixed-capacity HUD glyph storage. Occupied slots are always a contiguous
+/// prefix and the unused suffix is canonically `None`.
+#[allow(dead_code)] // Consumed by the dedicated retained HUD buffer in the next slice.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PackedCompanionHudGlyphs {
+    slots: [Option<PackedHudGlyph>; MAX_COMPANION_HUD_GLYPHS],
+    occupied_len: usize,
+}
+
+#[allow(dead_code)] // The renderer integration consumes this sealed traversal next.
+impl PackedCompanionHudGlyphs {
+    pub(crate) fn slots(&self) -> &[Option<PackedHudGlyph>; MAX_COMPANION_HUD_GLYPHS] {
+        &self.slots
+    }
+
+    pub(crate) fn occupied_len(&self) -> usize {
+        self.occupied_len
+    }
+
+    pub(crate) fn occupied_glyphs(&self) -> impl ExactSizeIterator<Item = &PackedHudGlyph> {
+        self.slots[..self.occupied_len].iter().map(|slot| {
+            slot.as_ref()
+                .expect("occupied HUD prefix must be populated")
+        })
+    }
+}
+
+impl std::fmt::Debug for PackedCompanionHudGlyphs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PackedCompanionHudGlyphs(<private>)")
+    }
+}
+
+/// Why arbitrary HUD text could not be represented by the fixed frame contract.
+#[allow(dead_code)] // Consumed by the dedicated retained HUD buffer in the next slice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompanionHudPackError {
+    CapacityExceeded,
+    InvalidGlyph { role: CompanionHudLineRole },
+}
+
+impl std::fmt::Debug for CompanionHudPackError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapacityExceeded => {
+                formatter.write_str("CompanionHudPackError::CapacityExceeded")
+            }
+            Self::InvalidGlyph { role } => formatter
+                .debug_struct("CompanionHudPackError::InvalidGlyph")
+                .field("role", role)
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Display for CompanionHudPackError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapacityExceeded => formatter.write_str("companion HUD glyph capacity exceeded"),
+            Self::InvalidGlyph { role } => {
+                write!(formatter, "invalid companion HUD glyph in {role:?} line")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompanionHudPackError {}
+
+/// Packs the HUD's three lines in semantic display order without truncation.
+/// Regular spaces are valid occupied glyphs; all other input must belong to the
+/// exact repertoire provisioned by the companion HUD atlas.
+#[allow(dead_code)] // The live and redacted renderer sidecars consume this next.
+pub(crate) fn pack_companion_hud_glyphs(
+    text: &CompanionHudText,
+) -> Result<PackedCompanionHudGlyphs, CompanionHudPackError> {
+    let lines = [
+        (CompanionHudLineRole::TodayTotal, text.today_total.as_str()),
+        (
+            CompanionHudLineRole::DailyPercent,
+            text.daily_percent.as_str(),
+        ),
+        (CompanionHudLineRole::Pace, text.pace.as_str()),
+    ];
+
+    let mut required = 0;
+    for (role, line) in lines {
+        for glyph in line.chars() {
+            if !COMPANION_HUD_GLYPH_REPERTOIRE.contains(&glyph) {
+                return Err(CompanionHudPackError::InvalidGlyph { role });
+            }
+            required += 1;
+        }
+    }
+    if required > MAX_COMPANION_HUD_GLYPHS {
+        return Err(CompanionHudPackError::CapacityExceeded);
+    }
+
+    let mut slots = [None; MAX_COMPANION_HUD_GLYPHS];
+    let mut occupied_len = 0;
+    for (role, line) in lines {
+        for (line_char_index, glyph) in line.chars().enumerate() {
+            slots[occupied_len] = Some(PackedHudGlyph { role, line_char_index, glyph });
+            occupied_len += 1;
+        }
+    }
+
+    Ok(PackedCompanionHudGlyphs { slots, occupied_len })
 }
 
 pub fn companion_pace_fraction(current_10m_tokens: f64) -> f64 {
@@ -501,7 +659,7 @@ pub fn companion_hud_text(
     CompanionHudText {
         today_total: compact_hud_tokens(today_tokens),
         daily_percent: format_daily_percent(daily_fraction),
-        pace: format!("{}/10m", compact_hud_tokens(pulse_10m_tokens.max(0.0))),
+        pace: format!("{}/10m", compact_hud_tokens(pulse_10m_tokens)),
     }
 }
 
@@ -519,7 +677,22 @@ pub fn review_capture_hud_text() -> CompanionHudText {
 }
 
 fn compact_hud_tokens(value: f64) -> String {
+    let value = if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    };
+    if value >= COMPANION_HUD_SATURATION_TOKENS {
+        return "999B+".to_string();
+    }
+
     let formatted = crate::format::format_tokens(value);
+    if formatted == "1000.0k" {
+        return "1M".to_string();
+    }
+    if formatted == "1000.0M" {
+        return "1B".to_string();
+    }
     formatted
         .strip_suffix(".0B")
         .map(|prefix| format!("{prefix}B"))
@@ -948,6 +1121,314 @@ mod tests {
         assert_eq!(text.daily_percent, "124% yday");
         assert_eq!(text.pace, "31M/10m");
         assert!(!text.pace.contains("/hr"));
+    }
+
+    #[test]
+    fn companion_hud_glyphs_pack_in_role_order_and_reset_each_line_index() {
+        let text = CompanionHudText {
+            today_total: "1 2".into(),
+            daily_percent: "3".into(),
+            pace: "4 5".into(),
+        };
+
+        let packed = pack_companion_hud_glyphs(&text).expect("HUD text should fit");
+        assert_eq!(packed.occupied_len(), 7);
+        assert_eq!(
+            packed.occupied_glyphs().copied().collect::<Vec<_>>(),
+            vec![
+                PackedHudGlyph {
+                    role: CompanionHudLineRole::TodayTotal,
+                    line_char_index: 0,
+                    glyph: '1',
+                },
+                PackedHudGlyph {
+                    role: CompanionHudLineRole::TodayTotal,
+                    line_char_index: 1,
+                    glyph: ' ',
+                },
+                PackedHudGlyph {
+                    role: CompanionHudLineRole::TodayTotal,
+                    line_char_index: 2,
+                    glyph: '2',
+                },
+                PackedHudGlyph {
+                    role: CompanionHudLineRole::DailyPercent,
+                    line_char_index: 0,
+                    glyph: '3',
+                },
+                PackedHudGlyph {
+                    role: CompanionHudLineRole::Pace,
+                    line_char_index: 0,
+                    glyph: '4',
+                },
+                PackedHudGlyph {
+                    role: CompanionHudLineRole::Pace,
+                    line_char_index: 1,
+                    glyph: ' ',
+                },
+                PackedHudGlyph {
+                    role: CompanionHudLineRole::Pace,
+                    line_char_index: 2,
+                    glyph: '5',
+                },
+            ]
+        );
+        assert!(packed.slots()[7..].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn companion_hud_glyph_pack_is_fixed_capacity_and_deterministic() {
+        let exact = CompanionHudText {
+            today_total: "12345678".into(),
+            daily_percent: "123456789".into(),
+            pace: "123456789".into(),
+        };
+        let first = pack_companion_hud_glyphs(&exact).expect("exact capacity should fit");
+        let second = pack_companion_hud_glyphs(&exact).expect("repeat should fit");
+
+        assert_eq!(MAX_COMPANION_HUD_GLYPHS, 26);
+        assert_eq!(first, second);
+        assert_eq!(first.occupied_len(), MAX_COMPANION_HUD_GLYPHS);
+        assert!(first.slots().iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn companion_hud_glyph_pack_rejects_overflow_without_truncation() {
+        let overflow = CompanionHudText {
+            today_total: "123456789".into(),
+            daily_percent: "123456789".into(),
+            pace: "123456789".into(),
+        };
+
+        assert_eq!(
+            pack_companion_hud_glyphs(&overflow),
+            Err(CompanionHudPackError::CapacityExceeded)
+        );
+    }
+
+    #[test]
+    fn companion_hud_glyph_pack_rejects_control_characters() {
+        let invalid = CompanionHudText {
+            today_total: "12\n3".into(),
+            daily_percent: "4".into(),
+            pace: "5".into(),
+        };
+
+        assert_eq!(
+            pack_companion_hud_glyphs(&invalid),
+            Err(CompanionHudPackError::InvalidGlyph { role: CompanionHudLineRole::TodayTotal })
+        );
+    }
+
+    #[test]
+    fn companion_hud_glyph_pack_accepts_only_the_declared_repertoire() {
+        for undeclared in ['\u{301}', '\u{200d}', '\u{a0}', '界', '🫠', '@'] {
+            let invalid = CompanionHudText {
+                today_total: format!("1{undeclared}"),
+                daily_percent: "2".into(),
+                pace: "3".into(),
+            };
+            assert_eq!(
+                pack_companion_hud_glyphs(&invalid),
+                Err(CompanionHudPackError::InvalidGlyph { role: CompanionHudLineRole::TodayTotal }),
+                "{undeclared:?} must not enter the fixed HUD atlas contract"
+            );
+        }
+
+        let ordinary_space = CompanionHudText {
+            today_total: "1 2".into(),
+            daily_percent: "3".into(),
+            pace: "4".into(),
+        };
+        assert!(pack_companion_hud_glyphs(&ordinary_space).is_ok());
+    }
+
+    #[test]
+    fn companion_hud_debug_output_is_value_independent_and_redacted() {
+        let short = CompanionHudText {
+            today_total: "7".into(),
+            daily_percent: "8".into(),
+            pace: "9".into(),
+        };
+        let long = CompanionHudText {
+            today_total: "987654321".into(),
+            daily_percent: "privacy".into(),
+            pace: "redacted".into(),
+        };
+        let short_debug = format!("{short:?}");
+        let long_debug = format!("{long:?}");
+        assert_eq!(short_debug, long_debug);
+        for sentinel in ["7", "8", "9", "987654321", "privacy", "redacted"] {
+            assert!(!short_debug.contains(sentinel));
+            assert!(!long_debug.contains(sentinel));
+        }
+
+        let short_packed = pack_companion_hud_glyphs(&short).unwrap();
+        let long_packed = pack_companion_hud_glyphs(&long).unwrap();
+        assert_eq!(format!("{short_packed:?}"), format!("{long_packed:?}"));
+        assert!(!format!("{short_packed:?}").contains('3'));
+
+        let first_glyph = PackedHudGlyph {
+            role: CompanionHudLineRole::TodayTotal,
+            line_char_index: 0,
+            glyph: '7',
+        };
+        let second_glyph = PackedHudGlyph {
+            role: CompanionHudLineRole::Pace,
+            line_char_index: 25,
+            glyph: 'Z',
+        };
+        assert_eq!(format!("{first_glyph:?}"), format!("{second_glyph:?}"));
+        let glyph_debug = format!("{first_glyph:?}");
+        assert!(!glyph_debug.contains('7'));
+        assert!(!glyph_debug.contains("25"));
+    }
+
+    #[test]
+    fn companion_hud_pack_errors_expose_categories_not_values() {
+        let capacity_a = CompanionHudText {
+            today_total: "111111111".into(),
+            daily_percent: "111111111".into(),
+            pace: "111111111".into(),
+        };
+        let capacity_b = CompanionHudText {
+            today_total: "2222222222".into(),
+            daily_percent: "2222222222".into(),
+            pace: "2222222222".into(),
+        };
+        let a = pack_companion_hud_glyphs(&capacity_a).unwrap_err();
+        let b = pack_companion_hud_glyphs(&capacity_b).unwrap_err();
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        assert_eq!(a.to_string(), b.to_string());
+        assert!(!format!("{a:?}").contains("27"));
+        assert!(!a.to_string().contains("27"));
+
+        let invalid_a = CompanionHudText {
+            today_total: "@".into(),
+            daily_percent: "1".into(),
+            pace: "1".into(),
+        };
+        let invalid_b = CompanionHudText {
+            today_total: "🫠".into(),
+            daily_percent: "1".into(),
+            pace: "1".into(),
+        };
+        let a = pack_companion_hud_glyphs(&invalid_a).unwrap_err();
+        let b = pack_companion_hud_glyphs(&invalid_b).unwrap_err();
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        assert_eq!(a.to_string(), b.to_string());
+        assert!(!format!("{a:?}").contains('@'));
+        assert!(!a.to_string().contains('@'));
+    }
+
+    #[test]
+    fn declared_hud_repertoire_covers_every_production_and_review_output() {
+        let samples = [
+            companion_hud_text(0.0, None, 0.0),
+            companion_hud_text(999_949.0, Some(10.5), 999_949.0),
+            companion_hud_text(999_950.0, Some(0.0), 999_950.0),
+            companion_hud_text(999_949_000.0, Some(9.99), 999_949_000.0),
+            companion_hud_text(f64::MAX, Some(10.5), f64::MAX),
+            review_capture_hud_text(),
+        ];
+        for text in samples {
+            for glyph in text
+                .today_total
+                .chars()
+                .chain(text.daily_percent.chars())
+                .chain(text.pace.chars())
+            {
+                assert!(
+                    COMPANION_HUD_GLYPH_REPERTOIRE.contains(&glyph),
+                    "formatter emitted undeclared HUD glyph {glyph:?}"
+                );
+            }
+            assert!(pack_companion_hud_glyphs(&text).is_ok());
+        }
+    }
+
+    #[test]
+    fn all_production_hud_text_including_review_and_display_bounds_fits_exactly() {
+        let review = review_capture_hud_text();
+        assert_eq!(review.today_total, "review");
+        assert_eq!(review.daily_percent, "privacy");
+        assert_eq!(review.pace, "redacted");
+        assert_eq!(
+            pack_companion_hud_glyphs(&review)
+                .expect("review text should fit")
+                .occupied_len(),
+            21
+        );
+
+        let longest = companion_hud_text(999_949_000_000.0, Some(10.5), 999_949_000_000.0);
+        assert_eq!(longest.today_total, "999.9B");
+        assert_eq!(longest.daily_percent, "999%+ yday");
+        assert_eq!(longest.pace, "999.9B/10m");
+        assert_eq!(
+            pack_companion_hud_glyphs(&longest)
+                .expect("production maximum should fit")
+                .occupied_len(),
+            MAX_COMPANION_HUD_GLYPHS
+        );
+    }
+
+    #[test]
+    fn production_hud_text_bounds_huge_and_non_finite_inputs_without_ordinary_drift() {
+        assert_eq!(
+            companion_hud_text(842_000_000.0, Some(1.244), 31_000_000.0),
+            CompanionHudText {
+                today_total: "842M".into(),
+                daily_percent: "124% yday".into(),
+                pace: "31M/10m".into(),
+            }
+        );
+        assert_eq!(
+            companion_hud_text(f64::MAX, Some(10.5), f64::MAX),
+            CompanionHudText {
+                today_total: "999B+".into(),
+                daily_percent: "999%+ yday".into(),
+                pace: "999B+/10m".into(),
+            }
+        );
+        assert_eq!(
+            companion_hud_text(f64::NAN, None, f64::INFINITY),
+            CompanionHudText {
+                today_total: "0".into(),
+                daily_percent: "--% yday".into(),
+                pace: "0/10m".into(),
+            }
+        );
+        assert_eq!(
+            companion_hud_text(f64::NEG_INFINITY, None, -1.0),
+            CompanionHudText {
+                today_total: "0".into(),
+                daily_percent: "--% yday".into(),
+                pace: "0/10m".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn compact_hud_tokens_rolls_rounded_units_forward_without_capacity_spikes() {
+        assert_eq!(compact_hud_tokens(999_949.0), "999.9k");
+        assert_eq!(compact_hud_tokens(999_950.0), "1M");
+        assert_eq!(compact_hud_tokens(999_999.0), "1M");
+
+        assert_eq!(compact_hud_tokens(999_949_000.0), "999.9M");
+        assert_eq!(compact_hud_tokens(999_950_000.0), "1B");
+        assert_eq!(compact_hud_tokens(999_999_999.0), "1B");
+
+        for value in [
+            999_949.0,
+            999_950.0,
+            999_999.0,
+            999_949_000.0,
+            999_950_000.0,
+            999_999_999.0,
+        ] {
+            let text = companion_hud_text(value, Some(10.5), value);
+            assert!(pack_companion_hud_glyphs(&text).is_ok(), "{text:?}");
+        }
     }
 
     #[test]
