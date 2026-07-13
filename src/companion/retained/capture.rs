@@ -114,6 +114,194 @@ fn pixel_order_for_format(format: wgpu::TextureFormat) -> PixelOrder {
     }
 }
 
+/// Checked row geometry for the forward-only companion scene capture seam.
+///
+/// The scene renderer has one readback intermediate contract:
+/// `Bgra8UnormSrgb`, copied in top-left row order. Keeping the format and order
+/// closed here prevents a newly introduced surface format from silently taking
+/// the legacy readback path's default-RGBA interpretation.
+#[allow(dead_code)] // Consumed by the scene renderer in the readback activation slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SceneReadbackLayout {
+    width: u32,
+    height: u32,
+    unpadded_bytes_per_row: u32,
+    aligned_bytes_per_row: u32,
+    buffer_size: u64,
+    format: wgpu::TextureFormat,
+    pixel_order: PixelOrder,
+}
+
+/// Fail-closed errors from deriving or normalizing the scene readback layout.
+#[allow(dead_code)] // Consumed by the scene renderer in the readback activation slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneReadbackError {
+    EmptyExtent,
+    UnsupportedFormat,
+    RowBytesOverflow,
+    AlignedStrideOverflow,
+    BufferSizeOverflow,
+    BufferLimitExceeded { required: u64, maximum: u64 },
+    InvalidLayout,
+    SourceBufferTooShort,
+}
+
+#[allow(dead_code)] // Consumed by the scene renderer in the readback activation slice.
+impl SceneReadbackLayout {
+    /// Derives a copy-compatible layout, optionally checking the result against
+    /// the active device's maximum buffer size.
+    pub(super) fn checked(
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        max_buffer_size: Option<u64>,
+    ) -> Result<Self, SceneReadbackError> {
+        if width == 0 || height == 0 {
+            return Err(SceneReadbackError::EmptyExtent);
+        }
+        if format != wgpu::TextureFormat::Bgra8UnormSrgb {
+            return Err(SceneReadbackError::UnsupportedFormat);
+        }
+
+        let unpadded_bytes_per_row = width
+            .checked_mul(4)
+            .ok_or(SceneReadbackError::RowBytesOverflow)?;
+        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let remainder = unpadded_bytes_per_row % alignment;
+        let aligned_bytes_per_row = if remainder == 0 {
+            unpadded_bytes_per_row
+        } else {
+            unpadded_bytes_per_row
+                .checked_add(alignment - remainder)
+                .ok_or(SceneReadbackError::AlignedStrideOverflow)?
+        };
+        let buffer_size = u64::from(aligned_bytes_per_row)
+            .checked_mul(u64::from(height))
+            .ok_or(SceneReadbackError::BufferSizeOverflow)?;
+        if let Some(maximum) = max_buffer_size {
+            if buffer_size > maximum {
+                return Err(SceneReadbackError::BufferLimitExceeded {
+                    required: buffer_size,
+                    maximum,
+                });
+            }
+        }
+
+        Ok(Self {
+            width,
+            height,
+            unpadded_bytes_per_row,
+            aligned_bytes_per_row,
+            buffer_size,
+            format,
+            pixel_order: PixelOrder::Bgra,
+        })
+    }
+
+    pub(super) const fn width(self) -> u32 {
+        self.width
+    }
+
+    pub(super) const fn height(self) -> u32 {
+        self.height
+    }
+
+    pub(super) const fn unpadded_bytes_per_row(self) -> u32 {
+        self.unpadded_bytes_per_row
+    }
+
+    pub(super) const fn aligned_bytes_per_row(self) -> u32 {
+        self.aligned_bytes_per_row
+    }
+
+    pub(super) const fn buffer_size(self) -> u64 {
+        self.buffer_size
+    }
+}
+
+/// Removes copy-row padding and converts the scene intermediate into canonical
+/// top-left, straight-alpha RGBA8 sRGB pixels.
+///
+/// An sRGB render target stores an sRGB encoding of the premultiplied **linear**
+/// shader result. Consequently unpremultiplication must decode each stored RGB
+/// byte to linear, divide by alpha there, then encode back to sRGB. Dividing the
+/// stored bytes directly would brighten translucent glyph edges incorrectly.
+#[allow(dead_code)] // Consumed by the scene renderer in the readback activation slice.
+pub(super) fn normalize_scene_readback(
+    source: &[u8],
+    layout: SceneReadbackLayout,
+) -> Result<Vec<u8>, SceneReadbackError> {
+    let canonical = SceneReadbackLayout::checked(layout.width, layout.height, layout.format, None)?;
+    if layout != canonical {
+        return Err(SceneReadbackError::InvalidLayout);
+    }
+
+    let required =
+        usize::try_from(layout.buffer_size).map_err(|_| SceneReadbackError::BufferSizeOverflow)?;
+    if source.len() < required {
+        return Err(SceneReadbackError::SourceBufferTooShort);
+    }
+
+    let output_size = u64::from(layout.unpadded_bytes_per_row)
+        .checked_mul(u64::from(layout.height))
+        .ok_or(SceneReadbackError::BufferSizeOverflow)?;
+    let output_size =
+        usize::try_from(output_size).map_err(|_| SceneReadbackError::BufferSizeOverflow)?;
+    let stride = usize::try_from(layout.aligned_bytes_per_row)
+        .map_err(|_| SceneReadbackError::AlignedStrideOverflow)?;
+    let row_bytes = usize::try_from(layout.unpadded_bytes_per_row)
+        .map_err(|_| SceneReadbackError::RowBytesOverflow)?;
+    let mut rgba = vec![0_u8; output_size];
+
+    for row in
+        0..usize::try_from(layout.height).map_err(|_| SceneReadbackError::BufferSizeOverflow)?
+    {
+        let source_start = row
+            .checked_mul(stride)
+            .ok_or(SceneReadbackError::InvalidLayout)?;
+        let source_end = source_start
+            .checked_add(row_bytes)
+            .ok_or(SceneReadbackError::InvalidLayout)?;
+        let source_row = source
+            .get(source_start..source_end)
+            .ok_or(SceneReadbackError::SourceBufferTooShort)?;
+        let destination_start = row
+            .checked_mul(row_bytes)
+            .ok_or(SceneReadbackError::InvalidLayout)?;
+        let destination_end = destination_start
+            .checked_add(row_bytes)
+            .ok_or(SceneReadbackError::InvalidLayout)?;
+        let destination_row = rgba
+            .get_mut(destination_start..destination_end)
+            .ok_or(SceneReadbackError::InvalidLayout)?;
+        for (bgra, destination) in source_row
+            .chunks_exact(4)
+            .zip(destination_row.chunks_exact_mut(4))
+        {
+            let alpha_byte = bgra[3];
+            if alpha_byte == 0 {
+                destination.copy_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+
+            let alpha = f32::from(alpha_byte) / 255.0;
+            destination[0] = straight_scene_channel(bgra[2], alpha);
+            destination[1] = straight_scene_channel(bgra[1], alpha);
+            destination[2] = straight_scene_channel(bgra[0], alpha);
+            destination[3] = alpha_byte;
+        }
+    }
+
+    Ok(rgba)
+}
+
+#[allow(dead_code)] // Used by normalize_scene_readback when scene capture is activated.
+fn straight_scene_channel(stored_srgb: u8, alpha: f32) -> u8 {
+    let premultiplied_linear = super::render::scene_srgb_to_linear(f32::from(stored_srgb) / 255.0);
+    let straight_linear = (premultiplied_linear / alpha).clamp(0.0, 1.0);
+    (super::render::scene_linear_to_srgb(straight_linear).clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 /// Normalizes a mapped GPU readback buffer into canonical top-left RGBA8.
 ///
 /// The mapped buffer stores each texture row at `bytes_per_row` (256-byte
@@ -448,5 +636,129 @@ mod tests {
         ] {
             assert_eq!(category.category(), expected);
         }
+    }
+
+    #[test]
+    fn scene_readback_layout_is_checked_and_exactly_bgra8_srgb() {
+        let layout =
+            SceneReadbackLayout::checked(2, 3, wgpu::TextureFormat::Bgra8UnormSrgb, None).unwrap();
+        assert_eq!(layout.width(), 2);
+        assert_eq!(layout.height(), 3);
+        assert_eq!(layout.unpadded_bytes_per_row(), 8);
+        assert_eq!(layout.aligned_bytes_per_row(), 256);
+        assert_eq!(layout.buffer_size(), 768);
+
+        assert_eq!(
+            SceneReadbackLayout::checked(2, 3, wgpu::TextureFormat::Rgba8UnormSrgb, None),
+            Err(SceneReadbackError::UnsupportedFormat),
+        );
+        assert_eq!(
+            SceneReadbackLayout::checked(2, 3, wgpu::TextureFormat::Bgra8Unorm, None),
+            Err(SceneReadbackError::UnsupportedFormat),
+        );
+    }
+
+    #[test]
+    fn scene_readback_layout_rejects_zero_overflow_and_device_limit() {
+        assert_eq!(
+            SceneReadbackLayout::checked(0, 1, wgpu::TextureFormat::Bgra8UnormSrgb, None),
+            Err(SceneReadbackError::EmptyExtent),
+        );
+        assert_eq!(
+            SceneReadbackLayout::checked(1, 0, wgpu::TextureFormat::Bgra8UnormSrgb, None),
+            Err(SceneReadbackError::EmptyExtent),
+        );
+        assert_eq!(
+            SceneReadbackLayout::checked(u32::MAX, 1, wgpu::TextureFormat::Bgra8UnormSrgb, None,),
+            Err(SceneReadbackError::RowBytesOverflow),
+        );
+        assert_eq!(
+            SceneReadbackLayout::checked(
+                u32::MAX / 4,
+                1,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+                None,
+            ),
+            Err(SceneReadbackError::AlignedStrideOverflow),
+        );
+
+        let required = 256_u64 * 3;
+        assert!(SceneReadbackLayout::checked(
+            2,
+            3,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            Some(required),
+        )
+        .is_ok());
+        assert_eq!(
+            SceneReadbackLayout::checked(
+                2,
+                3,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+                Some(required - 1),
+            ),
+            Err(SceneReadbackError::BufferLimitExceeded { required, maximum: required - 1 }),
+        );
+    }
+
+    #[test]
+    fn scene_readback_drops_padding_preserves_top_left_rows_and_swizzles_bgra() {
+        let layout =
+            SceneReadbackLayout::checked(2, 2, wgpu::TextureFormat::Bgra8UnormSrgb, None).unwrap();
+        let mut source = vec![0xEE; layout.buffer_size() as usize];
+        source[..8].copy_from_slice(&[3, 2, 1, 255, 6, 5, 4, 255]);
+        source[256..264].copy_from_slice(&[9, 8, 7, 255, 12, 11, 10, 255]);
+
+        assert_eq!(
+            normalize_scene_readback(&source, layout).unwrap(),
+            vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255],
+        );
+    }
+
+    #[test]
+    fn scene_readback_normalizes_premultiplied_linear_color_at_edge_alphas() {
+        let layout =
+            SceneReadbackLayout::checked(4, 1, wgpu::TextureFormat::Bgra8UnormSrgb, None).unwrap();
+        let mut source = vec![0; layout.buffer_size() as usize];
+        // Stored bytes are BGRA. RGB is sRGB-encoded premultiplied-linear color.
+        source[..16].copy_from_slice(&[
+            3, 2, 1, 1, // alpha 1/255
+            16, 32, 64, 128, // a representative translucent edge
+            1, 127, 253, 254, // alpha 254/255
+            201, 101, 51, 0, // hidden RGB must not leak through alpha zero
+        ]);
+
+        assert_eq!(
+            normalize_scene_readback(&source, layout).unwrap(),
+            vec![
+                79, 110, 132, 1, // alpha 1
+                90, 47, 26, 128, // linear-space unpremultiply, not byte division
+                253, 127, 1, 254, // alpha 254
+                0, 0, 0, 0, // transparent black regardless of hidden RGB
+            ],
+        );
+    }
+
+    #[test]
+    fn scene_readback_rejects_a_short_mapped_buffer() {
+        let layout =
+            SceneReadbackLayout::checked(1, 1, wgpu::TextureFormat::Bgra8UnormSrgb, None).unwrap();
+        assert_eq!(
+            normalize_scene_readback(&vec![0; layout.buffer_size() as usize - 1], layout),
+            Err(SceneReadbackError::SourceBufferTooShort),
+        );
+    }
+
+    #[test]
+    fn scene_readback_rejects_forged_layout_metadata_without_panicking() {
+        let mut layout =
+            SceneReadbackLayout::checked(2, 2, wgpu::TextureFormat::Bgra8UnormSrgb, None).unwrap();
+        layout.aligned_bytes_per_row = 4;
+        layout.buffer_size = 8;
+
+        assert_eq!(
+            normalize_scene_readback(&[0; 8], layout),
+            Err(SceneReadbackError::InvalidLayout),
+        );
     }
 }
