@@ -17,6 +17,48 @@ const NONE_U32: u32 = u32::MAX;
 const PROP_GLYPH_CAPACITY: usize = MAX_VISIBLE_PROPS * MAX_PROP_GLYPHS_PER_SLOT;
 const TANK_GLYPH_CAPACITY: usize = MAX_ROUND_TANK_INHABITANTS * MAX_TANK_GLYPHS_PER_SLOT;
 
+/// Compiler-owned record sizes and fixed capacities consumed by GPU packing.
+/// The renderer derives packed offsets from this shape instead of duplicating
+/// the CPU mirror ABI as independent literals.
+pub(super) struct CpuMirrorShape;
+
+impl CpuMirrorShape {
+    pub(super) const NODE_RECORD_BYTES: usize = std::mem::size_of::<NodeGpuValue>();
+    pub(super) const NODE_COUNT: usize = MAX_SCENE_NODES;
+    pub(super) const CONTENT_RECORD_BYTES: [usize; 6] = [
+        std::mem::size_of::<ContentGlobalsGpuValue>(),
+        std::mem::size_of::<ContentGpuValue>(),
+        std::mem::size_of::<ContentGpuValue>(),
+        std::mem::size_of::<ContentGpuValue>(),
+        std::mem::size_of::<ContentGpuValue>(),
+        std::mem::size_of::<ContentGpuValue>(),
+    ];
+    pub(super) const CONTENT_COUNTS: [usize; 6] = [
+        1,
+        MAX_PET_ART_SLOTS,
+        PROP_GLYPH_CAPACITY,
+        TANK_GLYPH_CAPACITY,
+        MAX_AMBIENT_INSTANCES,
+        MAX_HUD_GLYPH_SLOTS,
+    ];
+    pub(super) const FRAME_RECORD_BYTES: [usize; 6] = [
+        std::mem::size_of::<FrameGlobalsGpuValue>(),
+        std::mem::size_of::<FrameGpuValue>(),
+        std::mem::size_of::<FrameGpuValue>(),
+        std::mem::size_of::<FrameGpuValue>(),
+        std::mem::size_of::<FrameGpuValue>(),
+        std::mem::size_of::<FrameGpuValue>(),
+    ];
+    pub(super) const FRAME_COUNTS: [usize; 6] = [
+        1,
+        MAX_VISIBLE_PROPS,
+        TANK_GLYPH_CAPACITY,
+        MAX_AMBIENT_INSTANCES,
+        MAX_HUD_GLYPH_SLOTS,
+        MAX_LIGHTS,
+    ];
+}
+
 pub(super) type StaticIndex = u32;
 
 #[repr(C)]

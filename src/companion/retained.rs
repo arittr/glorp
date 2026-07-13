@@ -25,6 +25,7 @@ mod host;
 mod metrics;
 mod parity;
 mod presentation;
+mod render;
 mod resources;
 #[allow(dead_code)] // Integrated with RetainedHost in the follow-up activation change.
 mod worker;

@@ -128,6 +128,31 @@ fn retained_buffers_have_no_appkit_or_objc2_dependencies() {
 }
 
 #[test]
+fn retained_scene_render_contract_uses_reusable_uploads_and_owns_its_color_math() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/retained/render.rs");
+    let text = read(&path);
+    let production = production_source(&text);
+    for forbidden in [
+        "device: wgpu::Device",
+        "queue: wgpu::Queue",
+        "queue.write_buffer",
+        "remove_srgb_suffix",
+        "premultiply_gamma_srgb",
+        "srgb_channel_to_linear",
+        "linear_channel_to_srgb",
+        "parity::",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "scene render contract must borrow GPU state, preserve the reusable staging-belt \
+             upload invariant, and keep independent IEC color math; \
+             found {forbidden} in {}",
+            path.display(),
+        );
+    }
+}
+
+#[test]
 fn retained_sources_never_reference_the_renderer_spike() {
     let files = retained_source_files();
     // Guard against a silently empty scan (e.g. a moved module).
