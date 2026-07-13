@@ -4,16 +4,17 @@ use bytemuck::{Pod, Zeroable};
 
 use super::buffers::{ByteSpan, DirtySpanSet, FixedPodMirror, MirrorError};
 use crate::presentation::companion_scene::scene::{
-    is_world_blended, AmbientContentKind, AnalyticContentSlot, AnalyticFrameSlot, AnalyticGeometry,
-    AnalyticMaskSource, AnalyticPaint, AnalyticSemantic, AnalyticShape, AttachmentInstanceBinding,
-    AttachmentMode, Bounds3, ContentDelta, DepthBehavior, FrameDelta, GaugeLineCap,
-    InstanceGroupBinding, InstanceLayer, MaterialKind, MoodContentKind, NodeId, PetArtFilter,
-    PetPaletteRole, PrimitiveBinding, PrimitiveKind, PrimitiveSpace, ResourceKind, SceneContent,
-    SceneFrame, SceneGenerationData, SceneTemplate, StatusBeaconTone, WeatherContentKind,
-    WorldBlend, MAX_AMBIENT_INSTANCES, MAX_ANALYTIC_PARAMS, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS,
-    MAX_LIGHTS, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT, MAX_ROOM_GLYPH_SLOTS,
-    MAX_ROUND_TANK_INHABITANTS, MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT,
-    MAX_VISIBLE_PROPS,
+    is_world_blended, AmbientContentKind, AmbientContentSlot, AmbientGlyphPaintSlot,
+    AnalyticContentSlot, AnalyticFrameSlot, AnalyticGeometry, AnalyticMaskSource, AnalyticPaint,
+    AnalyticSemantic, AnalyticShape, AttachmentInstanceBinding, AttachmentMode, Bounds3,
+    ContentDelta, DepthBehavior, FrameDelta, GaugeLineCap, InstanceGroupBinding, InstanceLayer,
+    MaterialKind, MoodContentKind, NodeId, PetArtFilter, PetArtSlot, PetPaletteRole,
+    PrimitiveBinding, PrimitiveKind, PrimitiveSpace, PropContentSlot, PropGlyphPaintSlot,
+    ResourceKind, RoomGlyphContentSlot, SceneContent, SceneFrame, SceneGenerationData,
+    SceneTemplate, StatusBeaconTone, TankContentSlot, WeatherContentKind, WorldBlend,
+    MAX_AMBIENT_INSTANCES, MAX_ANALYTIC_PARAMS, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS, MAX_LIGHTS,
+    MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT, MAX_ROOM_GLYPH_SLOTS, MAX_ROUND_TANK_INHABITANTS,
+    MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT, MAX_VISIBLE_PROPS,
 };
 
 const NONE_U32: u32 = u32::MAX;
@@ -520,6 +521,7 @@ pub(super) enum MirrorDeltaError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct CpuSceneCandidate {
+    instance_identity: CandidateInstanceIdentity,
     pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
     pub(super) static_checksum: u64,
@@ -539,6 +541,31 @@ pub(super) struct CpuSceneCandidate {
     topology: FixedNodeTopology,
     #[cfg(test)]
     last_node_resolves: usize,
+}
+
+/// Runtime ownership capability. Moving preserves it, cloning creates a new
+/// instance, and semantic candidate equality deliberately ignores it.
+#[derive(Debug)]
+struct CandidateInstanceIdentity(std::sync::Arc<()>);
+
+impl CandidateInstanceIdentity {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(()))
+    }
+}
+
+impl Clone for CandidateInstanceIdentity {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for CandidateInstanceIdentity {
+    fn eq(&self, _other: &Self) -> bool {
+        // CpuSceneCandidate equality describes compiled scene state, not which
+        // runtime instance owns that state.
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,6 +622,27 @@ pub(super) struct PhaseUploadSources<'a> {
     pub(super) chrome_authored: &'a [u32],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Task 10G-C consumes the sealed prepared-record visitor.
+pub(super) enum PreparedMirrorFamily {
+    Nodes,
+    ContentGlobals,
+    PetBody,
+    PetParticles,
+    RoomContent,
+    PropGlyphs,
+    TankGlyphs,
+    ContentAmbient,
+    ContentAnalytics,
+    FrameGlobals,
+    RoomFrame,
+    Props,
+    TankCells,
+    FrameAmbient,
+    FrameAnalytics,
+    Lights,
+}
+
 struct PreparedMirrorDelta {
     dirty: SceneDirtySpans,
     content_globals: Option<ContentGlobalsGpuValue>,
@@ -615,6 +663,83 @@ struct PreparedMirrorDelta {
     lights: [Option<FrameGpuValue>; MAX_LIGHTS],
     #[cfg(test)]
     node_resolves: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSceneDeltaBinding {
+    candidate_identity: std::sync::Arc<()>,
+    generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+    static_checksum: u64,
+    from: crate::presentation::companion_scene::AppliedRevisions,
+    to: crate::presentation::companion_scene::AppliedRevisions,
+    state_epoch: u64,
+}
+
+impl PartialEq for PreparedSceneDeltaBinding {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.candidate_identity, &other.candidate_identity)
+            && self.generation_key == other.generation_key
+            && self.static_checksum == other.static_checksum
+            && self.from == other.from
+            && self.to == other.to
+            && self.state_epoch == other.state_epoch
+    }
+}
+
+impl Eq for PreparedSceneDeltaBinding {}
+
+struct PreparedLogicalContentDelta {
+    palette: Option<[[u8; 3]; 8]>,
+    mood: Option<MoodContentKind>,
+    weather: Option<WeatherContentKind>,
+    day_phase: Option<crate::presentation::companion_scene::CompanionDayPhase>,
+    pet_art_slots: [Option<PetArtSlot>; MAX_PET_ART_SLOTS],
+    room_glyph_slots: [Option<RoomGlyphContentSlot>; MAX_ROOM_GLYPH_SLOTS],
+    prop_slots: [Option<PropContentSlot>; MAX_VISIBLE_PROPS],
+    tank_slots: [Option<TankContentSlot>; MAX_ROUND_TANK_INHABITANTS],
+    ambient_slots: [Option<AmbientContentSlot>; MAX_AMBIENT_INSTANCES],
+    prop_paint_slots: [Option<PropGlyphPaintSlot>; MAX_VISIBLE_PROPS],
+    ambient_paint_slots: [Option<AmbientGlyphPaintSlot>; MAX_AMBIENT_INSTANCES],
+    analytic_slots: [Option<AnalyticContentSlot>; MAX_ANALYTIC_PARAMS],
+}
+
+/// Sealed proof that both neutral scene state and packed mirrors can commit
+/// without another fallible operation.
+pub(super) struct PreparedSceneDelta {
+    binding: PreparedSceneDeltaBinding,
+    logical_content: PreparedLogicalContentDelta,
+    accepted_frame: crate::presentation::companion_scene::validate::PreparedAcceptedFrameDelta,
+    mirrors: PreparedMirrorDelta,
+    prospective_logical_viewport_points: [f32; 2],
+}
+
+impl PreparedSceneDelta {
+    #[allow(dead_code)] // Read before GPU staging lands in the next retained-renderer checkpoint.
+    pub(super) fn prospective_logical_viewport_points(&self) -> [f32; 2] {
+        self.prospective_logical_viewport_points
+    }
+
+    #[allow(dead_code)] // Task 10G-C maps these spans into four physical buffers.
+    pub(super) const fn dirty_spans(&self) -> SceneDirtySpans {
+        self.mirrors.dirty
+    }
+
+    #[allow(dead_code)] // Task 10G-C stages these sealed records after translation.
+    pub(super) fn visit_mirror_updates(
+        &self,
+        visitor: impl FnMut(PreparedMirrorFamily, usize, &[u8]),
+    ) {
+        self.mirrors.visit_updates(visitor);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct AppliedSceneDelta {
+    pub(super) dirty: SceneDirtySpans,
+    pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+    pub(super) static_checksum: u64,
+    pub(super) to: crate::presentation::companion_scene::AppliedRevisions,
+    pub(super) prospective_logical_viewport_points: [f32; 2],
 }
 
 impl PreparedMirrorDelta {
@@ -642,6 +767,196 @@ impl PreparedMirrorDelta {
             lights: [None; MAX_LIGHTS],
             #[cfg(test)]
             node_resolves: 0,
+        }
+    }
+
+    #[allow(dead_code)] // Reached through PreparedSceneDelta in Task 10G-C.
+    fn visit_updates(&self, mut visitor: impl FnMut(PreparedMirrorFamily, usize, &[u8])) {
+        visit_prepared_records(PreparedMirrorFamily::Nodes, &self.nodes, &mut visitor);
+        if let Some(value) = self.content_globals.as_ref() {
+            visitor(
+                PreparedMirrorFamily::ContentGlobals,
+                0,
+                bytemuck::bytes_of(value),
+            );
+        }
+        visit_prepared_records(PreparedMirrorFamily::PetBody, &self.pet_body, &mut visitor);
+        visit_prepared_records(
+            PreparedMirrorFamily::PetParticles,
+            &self.pet_particles,
+            &mut visitor,
+        );
+        visit_prepared_records(
+            PreparedMirrorFamily::RoomContent,
+            &self.room_content,
+            &mut visitor,
+        );
+        visit_prepared_records(
+            PreparedMirrorFamily::PropGlyphs,
+            &self.prop_glyphs,
+            &mut visitor,
+        );
+        visit_prepared_records(
+            PreparedMirrorFamily::TankGlyphs,
+            &self.tank_glyphs,
+            &mut visitor,
+        );
+        visit_prepared_records(
+            PreparedMirrorFamily::ContentAmbient,
+            &self.content_ambient,
+            &mut visitor,
+        );
+        visit_prepared_records(
+            PreparedMirrorFamily::ContentAnalytics,
+            &self.content_analytics,
+            &mut visitor,
+        );
+        if let Some(value) = self.frame_globals.as_ref() {
+            visitor(
+                PreparedMirrorFamily::FrameGlobals,
+                0,
+                bytemuck::bytes_of(value),
+            );
+        }
+        visit_prepared_records(
+            PreparedMirrorFamily::RoomFrame,
+            &self.room_frame,
+            &mut visitor,
+        );
+        visit_prepared_records(PreparedMirrorFamily::Props, &self.props, &mut visitor);
+        visit_prepared_records(
+            PreparedMirrorFamily::TankCells,
+            &self.tank_cells,
+            &mut visitor,
+        );
+        visit_prepared_records(
+            PreparedMirrorFamily::FrameAmbient,
+            &self.frame_ambient,
+            &mut visitor,
+        );
+        visit_prepared_records(
+            PreparedMirrorFamily::FrameAnalytics,
+            &self.frame_analytics,
+            &mut visitor,
+        );
+        visit_prepared_records(PreparedMirrorFamily::Lights, &self.lights, &mut visitor);
+    }
+}
+
+#[allow(dead_code)] // Reached through PreparedSceneDelta in Task 10G-C.
+fn visit_prepared_records<T: Pod, const N: usize>(
+    family: PreparedMirrorFamily,
+    records: &[Option<T>; N],
+    visitor: &mut impl FnMut(PreparedMirrorFamily, usize, &[u8]),
+) {
+    for (slot, value) in records.iter().enumerate() {
+        if let Some(value) = value.as_ref() {
+            visitor(family, slot, bytemuck::bytes_of(value));
+        }
+    }
+}
+
+fn prepare_fixed_overlay<T: Copy, const N: usize>(
+    values: &[T],
+    slot_of: impl Fn(T) -> usize,
+) -> Result<[Option<T>; N], MirrorDeltaError> {
+    let mut overlay = [None; N];
+    for value in values.iter().copied() {
+        let slot = slot_of(value);
+        let destination = overlay
+            .get_mut(slot)
+            .ok_or(MirrorDeltaError::Mirror(MirrorError::CapacityExceeded))?;
+        if destination.replace(value).is_some() {
+            return Err(MirrorDeltaError::Validation(
+                crate::presentation::companion_scene::validate::SceneValidationError::DuplicateSlot,
+            ));
+        }
+    }
+    Ok(overlay)
+}
+
+impl PreparedLogicalContentDelta {
+    fn prepare(delta: &ContentDelta) -> Result<Self, MirrorDeltaError> {
+        Ok(Self {
+            palette: delta.palette,
+            mood: delta.mood,
+            weather: delta.weather,
+            day_phase: delta.day_phase,
+            pet_art_slots: prepare_fixed_overlay(&delta.pet_art_slots, |slot| {
+                usize::from(slot.slot)
+            })?,
+            room_glyph_slots: prepare_fixed_overlay(&delta.room_glyph_slots, |slot| {
+                usize::from(slot.slot)
+            })?,
+            prop_slots: prepare_fixed_overlay(&delta.prop_slots, |slot| usize::from(slot.slot))?,
+            tank_slots: prepare_fixed_overlay(&delta.tank_slots, |slot| usize::from(slot.slot))?,
+            ambient_slots: prepare_fixed_overlay(&delta.ambient_slots, |slot| {
+                usize::from(slot.slot)
+            })?,
+            prop_paint_slots: prepare_fixed_overlay(&delta.prop_paint_slots, |slot| {
+                usize::from(slot.slot)
+            })?,
+            ambient_paint_slots: prepare_fixed_overlay(&delta.ambient_paint_slots, |slot| {
+                usize::from(slot.slot)
+            })?,
+            analytic_slots: prepare_fixed_overlay(&delta.analytic_slots, |slot| {
+                usize::from(slot.id.0)
+            })?,
+        })
+    }
+
+    fn commit(self, content: &mut SceneContent) {
+        if let Some(palette) = self.palette {
+            content.palette = palette;
+        }
+        if let Some(mood) = self.mood {
+            content.mood = mood;
+        }
+        if let Some(weather) = self.weather {
+            content.weather = weather;
+        }
+        if let Some(day_phase) = self.day_phase {
+            content.day_phase = day_phase;
+        }
+        for (slot, changed) in self.pet_art_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.pet_art_slots[slot] = changed;
+            }
+        }
+        for (slot, changed) in self.room_glyph_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.room_glyph_slots[slot] = changed;
+            }
+        }
+        for (slot, changed) in self.prop_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.prop_slots[slot] = changed;
+            }
+        }
+        for (slot, changed) in self.tank_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.tank_slots[slot] = changed;
+            }
+        }
+        for (slot, changed) in self.ambient_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.ambient_slots[slot] = changed;
+            }
+        }
+        for (slot, changed) in self.prop_paint_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.prop_paint_slots[slot] = changed;
+            }
+        }
+        for (slot, changed) in self.ambient_paint_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.ambient_paint_slots[slot] = changed;
+            }
+        }
+        for (slot, changed) in self.analytic_slots.into_iter().enumerate() {
+            if let Some(changed) = changed {
+                content.analytic_slots[slot] = changed;
+            }
         }
     }
 }
@@ -776,6 +1091,15 @@ impl CpuSceneCandidate {
         content_delta: &ContentDelta,
         frame_delta: &FrameDelta,
     ) -> Result<SceneDirtySpans, MirrorDeltaError> {
+        let prepared = self.prepare_deltas(content_delta, frame_delta)?;
+        Ok(self.commit_prepared(prepared).dirty)
+    }
+
+    pub(super) fn prepare_deltas(
+        &self,
+        content_delta: &ContentDelta,
+        frame_delta: &FrameDelta,
+    ) -> Result<PreparedSceneDelta, MirrorDeltaError> {
         if content_delta.generation_key != self.generation_key
             || frame_delta.generation_key != self.generation_key
         {
@@ -807,26 +1131,71 @@ impl CpuSceneCandidate {
             frame_delta,
         )
         .map_err(MirrorDeltaError::Validation)?;
-        let prepared = self.prepare_mirror_delta(content_delta, frame_delta)?;
-
-        // This is the final fallible operation. The neutral validator performs
-        // every check before mutating AcceptedSceneState, so an error here still
-        // leaves the complete candidate byte-for-byte unchanged.
-        self.accepted
-            .apply_frame_delta(frame_delta)
+        let accepted_frame = self
+            .accepted
+            .prepare_frame_delta(frame_delta)
             .map_err(MirrorDeltaError::Validation)?;
+        let mirrors = self.prepare_mirror_delta(content_delta, frame_delta)?;
+        let logical_content = PreparedLogicalContentDelta::prepare(content_delta)?;
+        let prospective_logical_viewport_points = frame_delta
+            .camera
+            .map(|camera| [camera.width_points, camera.height_points])
+            .unwrap_or_else(|| self.logical_viewport_points());
+        Ok(PreparedSceneDelta {
+            binding: self.prepared_delta_binding(content_delta.to),
+            logical_content,
+            accepted_frame,
+            mirrors,
+            prospective_logical_viewport_points,
+        })
+    }
 
-        apply_content_delta_in_place(&mut self.logical_content, content_delta);
-        let dirty = prepared.dirty;
+    pub(super) fn commit_prepared(&mut self, prepared: PreparedSceneDelta) -> AppliedSceneDelta {
+        assert_eq!(
+            prepared.binding,
+            self.prepared_delta_binding(prepared.binding.to),
+            "prepared scene delta does not belong to this candidate state"
+        );
+        let to = prepared.binding.to;
+        let PreparedSceneDelta {
+            logical_content,
+            accepted_frame,
+            mirrors,
+            prospective_logical_viewport_points,
+            ..
+        } = prepared;
+        self.accepted.commit_prepared_frame_delta(accepted_frame);
+        logical_content.commit(&mut self.logical_content);
+        let dirty = mirrors.dirty;
         #[cfg(test)]
-        let node_resolves = prepared.node_resolves;
-        self.commit_prepared(prepared);
+        let node_resolves = mirrors.node_resolves;
+        self.commit_mirror_delta(mirrors);
         #[cfg(test)]
         {
             self.last_node_resolves = node_resolves;
         }
-        self.source_revisions = content_delta.to;
-        Ok(dirty)
+        self.source_revisions = to;
+        AppliedSceneDelta {
+            dirty,
+            generation_key: self.generation_key,
+            static_checksum: self.static_checksum,
+            to,
+            prospective_logical_viewport_points,
+        }
+    }
+
+    fn prepared_delta_binding(
+        &self,
+        to: crate::presentation::companion_scene::AppliedRevisions,
+    ) -> PreparedSceneDeltaBinding {
+        PreparedSceneDeltaBinding {
+            candidate_identity: std::sync::Arc::clone(&self.instance_identity.0),
+            generation_key: self.generation_key,
+            static_checksum: self.static_checksum,
+            from: self.source_revisions,
+            to,
+            state_epoch: self.accepted.frame().epoch(),
+        }
     }
 }
 
@@ -1167,7 +1536,7 @@ impl CpuSceneCandidate {
         Ok(())
     }
 
-    fn commit_prepared(&mut self, prepared: PreparedMirrorDelta) {
+    fn commit_mirror_delta(&mut self, prepared: PreparedMirrorDelta) {
         if let Some(value) = prepared.content_globals {
             self.content.globals.set_fixed(0, value);
         }
@@ -1657,45 +2026,6 @@ fn pack_light(
     }
 }
 
-fn apply_content_delta_in_place(content: &mut SceneContent, delta: &ContentDelta) {
-    if let Some(palette) = delta.palette {
-        content.palette = palette;
-    }
-    if let Some(mood) = delta.mood {
-        content.mood = mood;
-    }
-    if let Some(weather) = delta.weather {
-        content.weather = weather;
-    }
-    if let Some(day_phase) = delta.day_phase {
-        content.day_phase = day_phase;
-    }
-    for changed in &delta.pet_art_slots {
-        content.pet_art_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.room_glyph_slots {
-        content.room_glyph_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.prop_slots {
-        content.prop_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.tank_slots {
-        content.tank_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.ambient_slots {
-        content.ambient_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.prop_paint_slots {
-        content.prop_paint_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.ambient_paint_slots {
-        content.ambient_paint_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.analytic_slots {
-        content.analytic_slots[usize::from(changed.id.0)] = *changed;
-    }
-}
-
 #[allow(dead_code)] // Called when retained-scene materialization lands in the next checkpoint.
 pub(super) fn compile_cpu_generation(
     generation: &SceneGenerationData,
@@ -1901,6 +2231,7 @@ fn compile_cpu_parts(
         phases: &phases,
     });
     Ok(CpuSceneCandidate {
+        instance_identity: CandidateInstanceIdentity::new(),
         generation_key,
         source_revisions,
         static_checksum,
@@ -4390,6 +4721,331 @@ mod tests {
         let noop = candidate.apply_deltas(&noop_content, &noop_frame).unwrap();
         assert!(all_dirty_sets_are_empty(&noop));
         assert_eq!(candidate.source_revisions, noop.to);
+    }
+
+    #[test]
+    fn scene_delta_prepare_is_read_only_and_commit_matches_atomic_wrapper() {
+        let mut candidate = compile_fixture(&SceneFixture::valid());
+        let mut expected = candidate.clone();
+        let before = candidate.clone();
+        let (mut content, mut frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        content.palette = Some([[17; 3]; 8]);
+        let mut node = candidate.accepted.frame().frame().nodes[0];
+        node.local_transform =
+            crate::presentation::companion_scene::scene::Transform3::translated([2.0, 3.0, 0.0]);
+        frame.nodes.push(node);
+
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+        assert_eq!(candidate, before);
+
+        let expected_dirty = expected.apply_deltas(&content, &frame).unwrap();
+        let applied = candidate.commit_prepared(prepared);
+        assert_eq!(applied.dirty, expected_dirty);
+        assert_eq!(applied.generation_key, candidate.generation_key);
+        assert_eq!(applied.static_checksum, candidate.static_checksum);
+        assert_eq!(applied.to, content.to);
+        assert_eq!(
+            applied.prospective_logical_viewport_points,
+            candidate.logical_viewport_points()
+        );
+        assert_eq!(candidate, expected);
+    }
+
+    #[test]
+    fn scene_delta_prepare_reports_exact_prospective_camera_without_mutation() {
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let before = candidate.clone();
+        let (content, mut frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(4, 6),
+        );
+        let mut camera = candidate.accepted.frame().frame().camera;
+        camera.far_z = -4.0;
+        camera.near_z = 4.0;
+        frame.camera = Some(camera);
+
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+        assert_eq!(
+            prepared.prospective_logical_viewport_points(),
+            [360.0, 360.0]
+        );
+        assert_eq!(candidate, before);
+    }
+
+    #[test]
+    fn prepared_scene_delta_exposes_sealed_dirty_spans_and_exact_record_bytes() {
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let (mut content, mut frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        content.palette = Some([[17; 3]; 8]);
+        let mut room_content = candidate.logical_content.room_glyph_slots[0];
+        room_content.glyph = Some(AuthoredGlyph::new('\u{25c7}').unwrap());
+        room_content.color_srgb8 = Some([10, 20, 30]);
+        content.room_glyph_slots.push(room_content);
+        let mut analytic_content = candidate.logical_content.analytic_slots[0];
+        analytic_content.value.as_mut().unwrap().paint = AnalyticPaint::ApertureDepth {
+            core_srgb8: [31, 32, 33],
+            rim_srgb8: [34, 35, 36],
+        };
+        content.analytic_slots.push(analytic_content);
+
+        let mut node = candidate.accepted.frame().frame().nodes[0];
+        node.local_transform =
+            crate::presentation::companion_scene::scene::Transform3::translated([2.0, 0.0, 0.0]);
+        frame.nodes.push(node);
+        frame.gauges = Some([0.1, 0.2, 0.3, 0.4]);
+        let mut room_frame = candidate.accepted.frame().frame().room_glyph_slots[0];
+        room_frame.visible = true;
+        room_frame.grid_cell = [1, 2];
+        room_frame.position_points = [12.0, 324.0];
+        room_frame.opacity = 0.75;
+        frame.room_glyph_slots.push(room_frame);
+        let mut analytic_frame = candidate.accepted.frame().frame().analytic_slots[0];
+        let AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points,
+        } = analytic_frame.value.unwrap().geometry
+        else {
+            panic!("fixture slot zero is the room-background aperture");
+        };
+        analytic_frame.value.as_mut().unwrap().geometry = AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points: feather_points + 0.5,
+        };
+        frame.analytic_slots.push(analytic_frame);
+
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+        let dirty = prepared.dirty_spans();
+        assert_eq!(
+            dirty.content_globals.as_slice(),
+            &[ByteSpan::slots::<ContentGlobalsGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.room_content.as_slice(),
+            &[ByteSpan::slots::<ContentGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.content_analytics.as_slice(),
+            &[ByteSpan::slots::<AnalyticContentGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.frame_globals.as_slice(),
+            &[ByteSpan::slots::<FrameGlobalsGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.nodes.as_slice(),
+            &[ByteSpan::slots::<NodeGpuValue>(0, 2)]
+        );
+        assert_eq!(
+            dirty.room_frame.as_slice(),
+            &[ByteSpan::slots::<FrameGpuValue>(0, 1)]
+        );
+        assert_eq!(
+            dirty.frame_analytics.as_slice(),
+            &[ByteSpan::slots::<AnalyticFrameGpuValue>(0, 1)]
+        );
+
+        let mut visited = Vec::new();
+        prepared.visit_mirror_updates(|family, slot, bytes| {
+            visited.push((family, slot, bytes.to_vec()));
+        });
+        assert_eq!(
+            visited
+                .iter()
+                .map(|(family, slot, bytes)| (*family, *slot, bytes.len()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    PreparedMirrorFamily::Nodes,
+                    0,
+                    std::mem::size_of::<NodeGpuValue>()
+                ),
+                (
+                    PreparedMirrorFamily::Nodes,
+                    1,
+                    std::mem::size_of::<NodeGpuValue>()
+                ),
+                (
+                    PreparedMirrorFamily::ContentGlobals,
+                    0,
+                    std::mem::size_of::<ContentGlobalsGpuValue>(),
+                ),
+                (
+                    PreparedMirrorFamily::RoomContent,
+                    0,
+                    std::mem::size_of::<ContentGpuValue>(),
+                ),
+                (
+                    PreparedMirrorFamily::ContentAnalytics,
+                    0,
+                    std::mem::size_of::<AnalyticContentGpuValue>(),
+                ),
+                (
+                    PreparedMirrorFamily::FrameGlobals,
+                    0,
+                    std::mem::size_of::<FrameGlobalsGpuValue>(),
+                ),
+                (
+                    PreparedMirrorFamily::RoomFrame,
+                    0,
+                    std::mem::size_of::<FrameGpuValue>(),
+                ),
+                (
+                    PreparedMirrorFamily::FrameAnalytics,
+                    0,
+                    std::mem::size_of::<AnalyticFrameGpuValue>(),
+                ),
+            ]
+        );
+        assert_eq!(
+            visited[3].2,
+            bytemuck::bytes_of(&pack_room_content(room_content))
+        );
+        assert_eq!(
+            visited[4].2,
+            bytemuck::bytes_of(&pack_analytic_content(analytic_content))
+        );
+        assert_eq!(
+            visited[6].2,
+            bytemuck::bytes_of(&pack_room_frame(room_frame))
+        );
+        assert_eq!(
+            visited[7].2,
+            bytemuck::bytes_of(&pack_analytic_frame(analytic_frame))
+        );
+    }
+
+    #[test]
+    fn prepared_noop_revision_advance_commits_empty_spans() {
+        let mut candidate = compile_fixture(&SceneFixture::valid());
+        let storage = candidate_storage_identity(&candidate);
+        let (content, frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+        let applied = candidate.commit_prepared(prepared);
+
+        assert!(all_dirty_sets_are_empty(&applied.dirty));
+        assert_eq!(candidate.source_revisions, content.to);
+        assert_eq!(applied.to, content.to);
+        assert_candidate_storage_identity(storage, &candidate);
+    }
+
+    #[test]
+    fn prepared_scene_delta_owns_values_after_caller_mutation() {
+        let mut candidate = compile_fixture(&SceneFixture::valid());
+        let mut expected = candidate.clone();
+        let (mut content, mut frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        content.palette = Some([[17; 3]; 8]);
+        content.day_phase = Some(crate::presentation::companion_scene::CompanionDayPhase::Dusk);
+        content
+            .pet_art_slots
+            .push(candidate.logical_content.pet_art_slots[0]);
+        frame.gauges = Some([0.25, 0.5, 0.75, 1.0]);
+
+        let expected_dirty = expected.apply_deltas(&content, &frame).unwrap();
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+
+        content.palette = Some([[99; 3]; 8]);
+        content.day_phase = Some(crate::presentation::companion_scene::CompanionDayPhase::Night);
+        content.pet_art_slots[0].slot = u16::MAX;
+        content.to = crate::presentation::companion_scene::AppliedRevisions::new(500, 600);
+        frame.gauges = Some([1.0; 4]);
+        frame
+            .prop_slots
+            .push(crate::presentation::companion_scene::scene::PropFrameSlot {
+                slot: u8::MAX,
+                visible: true,
+                origin_points: [1.0; 2],
+                motion_offset_points: [1.0; 2],
+                opacity: 1.0,
+            });
+        frame.to = content.to;
+
+        let applied = candidate.commit_prepared(prepared);
+        assert_eq!(applied.dirty, expected_dirty);
+        assert_eq!(candidate, expected);
+    }
+
+    #[test]
+    fn prepared_scene_delta_survives_moving_candidate_and_caller_deltas() {
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let (content, frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+
+        let moved_content = Box::new(content);
+        let moved_frame = Box::new(frame);
+        drop((moved_content, moved_frame));
+        let mut candidate = Box::new(candidate);
+        let applied = candidate.commit_prepared(prepared);
+
+        assert_eq!(
+            applied.to,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6)
+        );
+        assert_eq!(candidate.source_revisions, applied.to);
+    }
+
+    #[test]
+    fn prepared_scene_delta_retains_source_identity_and_clones_get_fresh_identity() {
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let source_identity = std::sync::Arc::downgrade(&candidate.instance_identity.0);
+        let (content, frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+        let mut cloned_candidate = candidate.clone();
+        let before = cloned_candidate.clone();
+
+        assert!(!std::sync::Arc::ptr_eq(
+            &candidate.instance_identity.0,
+            &cloned_candidate.instance_identity.0,
+        ));
+        drop(candidate);
+        assert!(source_identity.upgrade().is_some());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cloned_candidate.commit_prepared(prepared);
+        }));
+
+        assert!(result.is_err());
+        assert!(source_identity.upgrade().is_none());
+        assert_eq!(cloned_candidate, before);
+    }
+
+    #[test]
+    fn prepared_scene_delta_cannot_commit_to_a_cloned_candidate() {
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let (content, frame) = paired_deltas(
+            &candidate,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+        let mut cloned_candidate = candidate.clone();
+        let before = cloned_candidate.clone();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cloned_candidate.commit_prepared(prepared);
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(cloned_candidate, before);
     }
 
     #[test]

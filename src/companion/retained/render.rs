@@ -1,11 +1,11 @@
 //! Pure contracts and owned CPU preparation for the retained scene renderer.
 #![allow(dead_code)] // This checkpoint validates contracts before live GPU materialization.
 
-use super::buffers::ByteSpan;
+use super::buffers::{ByteSpan, DirtySpanSet};
 use super::compiler::{
     ContentUploadValue, CpuSceneCandidate, FrameUploadSources, PrimitiveUploadSource,
 };
-use super::resources::{GlyphAtlasResolveError, GlyphEntryKind, GlyphKey, PreparedSceneAtlas};
+use super::resources::{GlyphEntryKind, GlyphKey, PreparedSceneAtlas};
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 use std::sync::mpsc;
@@ -603,6 +603,7 @@ pub(super) struct PreparedSceneUpload {
     pub(super) frame_bytes: Vec<u8>,
     pub(super) scene_content_bytes: Vec<u8>,
     pub(super) glyph_entries: Vec<GlyphAtlasGpuEntry>,
+    glyph_lookup: SceneGlyphLookup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,6 +615,10 @@ pub(super) enum UnsupportedSceneFeature {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SceneUploadError {
+    AtlasGenerationMismatch {
+        candidate: crate::presentation::companion_scene::ResourceGeneration,
+        atlas: crate::presentation::companion_scene::ResourceGeneration,
+    },
     InvalidPrimitiveReference {
         primitive_index: usize,
     },
@@ -664,11 +669,67 @@ impl SceneGlyphWeightPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SceneGlyphLookupEntry {
+    scalar: u32,
+    bold: bool,
+    atlas_id: u32,
+}
+
+impl SceneGlyphLookupEntry {
+    const fn key(&self) -> (u32, bool) {
+        (self.scalar, self.bold)
+    }
+}
+
+/// Generation-owned scalar-to-atlas-id delta lookup. Multi-scalar keys remain
+/// in the complete atlas for the HUD and immutable scene upload, but cannot be
+/// authored by the fixed scalar scene mirrors and are intentionally omitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SceneGlyphLookup {
+    resource_generation: crate::presentation::companion_scene::ResourceGeneration,
+    entries: Vec<SceneGlyphLookupEntry>,
+}
+
+impl SceneGlyphLookup {
+    fn from_atlas(atlas: &PreparedSceneAtlas) -> Self {
+        let mut entries = atlas
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let mut scalars = entry.key.sequence.as_str().chars();
+                let scalar = scalars.next()?;
+                scalars.next().is_none().then_some(SceneGlyphLookupEntry {
+                    scalar: u32::from(scalar),
+                    bold: entry.key.bold,
+                    atlas_id: entry.id,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.key());
+        debug_assert!(entries.windows(2).all(|pair| pair[0].key() < pair[1].key()));
+        Self {
+            resource_generation: atlas.resource_generation,
+            entries,
+        }
+    }
+
+    fn resolve(&self, scalar: u32, bold: bool) -> Option<u32> {
+        if scalar == NONE_U32 {
+            return Some(NONE_U32);
+        }
+        self.entries
+            .binary_search_by_key(&(scalar, bold), SceneGlyphLookupEntry::key)
+            .ok()
+            .map(|index| self.entries[index].atlas_id)
+    }
+}
+
 impl SceneContentGpuValue {
-    pub(super) fn translate(
+    fn translate(
         family: ContentMirrorFamily,
         value: ContentUploadValue,
-        atlas: &PreparedSceneAtlas,
+        glyph_lookup: &SceneGlyphLookup,
     ) -> Result<Self, SceneUploadError> {
         if matches!(
             family,
@@ -677,7 +738,9 @@ impl SceneContentGpuValue {
             return Err(SceneUploadError::NonGlyphContentFamily);
         }
         let glyph_entry_index = if value.glyph_scalar == NONE_U32 {
-            NONE_U32
+            glyph_lookup
+                .resolve(value.glyph_scalar, false)
+                .expect("the NONE sentinel always resolves")
         } else {
             let scalar =
                 char::from_u32(value.glyph_scalar).ok_or(SceneUploadError::InvalidGlyphScalar {
@@ -685,24 +748,15 @@ impl SceneContentGpuValue {
                     slot: value.slot,
                     scalar: value.glyph_scalar,
                 })?;
-            let key = GlyphKey::new(
-                scalar.to_string(),
-                SceneGlyphWeightPolicy::content_is_bold(family, value.flags, value.signed_data),
-            );
-            match atlas.resolve_key(&key) {
-                Ok(entry) => entry.id,
-                Err(GlyphAtlasResolveError::MissingKey(_)) => {
-                    return Err(SceneUploadError::MissingGlyphKey {
-                        family,
-                        slot: value.slot,
-                        key,
-                    });
-                }
-                Err(
-                    GlyphAtlasResolveError::MissingSingleScalar(_)
-                    | GlyphAtlasResolveError::AmbiguousSingleScalar { .. },
-                ) => unreachable!("full GlyphKey lookup cannot return scalar-diagnostic errors"),
-            }
+            let bold =
+                SceneGlyphWeightPolicy::content_is_bold(family, value.flags, value.signed_data);
+            glyph_lookup
+                .resolve(value.glyph_scalar, bold)
+                .ok_or_else(|| SceneUploadError::MissingGlyphKey {
+                    family,
+                    slot: value.slot,
+                    key: GlyphKey::new(scalar.to_string(), bold),
+                })?
         };
         Ok(Self {
             kind: value.kind,
@@ -720,6 +774,12 @@ pub(super) fn prepare_scene_upload(
     candidate: &CpuSceneCandidate,
     atlas: &PreparedSceneAtlas,
 ) -> Result<PreparedSceneUpload, SceneUploadError> {
+    if atlas.resource_generation != candidate.generation_key.resources {
+        return Err(SceneUploadError::AtlasGenerationMismatch {
+            candidate: candidate.generation_key.resources,
+            atlas: atlas.resource_generation,
+        });
+    }
     // Reject deferred card work before allocating or copying upload-owned data.
     for primitive_index in 0..candidate.primitive_count() {
         let source = candidate
@@ -728,6 +788,7 @@ pub(super) fn prepare_scene_upload(
         preflight_primitive(primitive_index, source)?;
     }
     let glyph_entries = prepare_glyph_entries(atlas)?;
+    let glyph_lookup = SceneGlyphLookup::from_atlas(atlas);
 
     let mut primitives = Vec::with_capacity(candidate.primitive_count());
     let mut draws = Vec::with_capacity(candidate.primitive_count());
@@ -761,7 +822,8 @@ pub(super) fn prepare_scene_upload(
         );
     }
 
-    let (content_globals_bytes, scene_content_bytes) = prepare_content_buffers(candidate, atlas)?;
+    let (content_globals_bytes, scene_content_bytes) =
+        prepare_content_buffers(candidate, &glyph_lookup)?;
     let sources = candidate.frame_upload_sources();
     let node_bytes = exact_owned(sources.nodes, PackedMirrorLayout::NODE_BYTES)?;
     let frame_bytes = prepare_frame_bytes(sources)?;
@@ -785,6 +847,7 @@ pub(super) fn prepare_scene_upload(
         frame_bytes,
         scene_content_bytes,
         glyph_entries,
+        glyph_lookup,
     })
 }
 
@@ -992,7 +1055,7 @@ fn preflight_primitive(
 
 fn prepare_content_buffers(
     candidate: &CpuSceneCandidate,
-    atlas: &PreparedSceneAtlas,
+    glyph_lookup: &SceneGlyphLookup,
 ) -> Result<(Vec<u8>, Vec<u8>), SceneUploadError> {
     let sources = candidate.content_upload_sources();
     let globals = exact_owned(sources.globals, PackedMirrorLayout::CONTENT_GLOBALS_BYTES)?;
@@ -1009,7 +1072,7 @@ fn prepare_content_buffers(
             .iter()
             .copied()
             .map(ContentUploadValue::from)
-            .map(|value| SceneContentGpuValue::translate(family, value, atlas))
+            .map(|value| SceneContentGpuValue::translate(family, value, glyph_lookup))
             .collect::<Result<Vec<_>, _>>()?;
         copy_family(
             &mut scene_content,
@@ -1398,6 +1461,50 @@ impl FrameMirrorFamily {
 
 pub(super) struct PackedMirrorLayout;
 
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneMutableBuffer {
+    Nodes,
+    ContentGlobals,
+    Frame,
+    SceneContent,
+}
+
+impl SceneMutableBuffer {
+    const ALL: [Self; 4] = [
+        Self::Nodes,
+        Self::ContentGlobals,
+        Self::Frame,
+        Self::SceneContent,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SceneMutableBufferLayout {
+    staging_offset: usize,
+    len: usize,
+    copy_alignment: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackedMirrorFamilyLayout {
+    buffer: SceneMutableBuffer,
+    offset: usize,
+    len: usize,
+    span_alignment: usize,
+}
+
+/// Physical dirty ranges after logical families have been translated into the
+/// four mutable storage buffers. This stays independent of compiler deltas so
+/// staging can validate and aggregate one family at a time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScenePhysicalDirtySpans {
+    nodes: DirtySpanSet,
+    content_globals: DirtySpanSet,
+    frame: DirtySpanSet,
+    scene_content: DirtySpanSet,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PackedMirrorLayoutError {
     NonSceneContentFamily,
@@ -1411,6 +1518,59 @@ impl PackedMirrorLayout {
     pub(super) const CONTENT_GLOBALS_BYTES: usize = ContentMirrorFamily::Globals.byte_len();
     pub(super) const SCENE_CONTENT_BYTES: usize = scene_content_end(ContentMirrorFamily::Analytics);
     pub(super) const FRAME_BYTES: usize = frame_end(FrameMirrorFamily::Analytics);
+    const MUTABLE_BUFFER_BYTES: usize = Self::NODE_BYTES
+        + Self::CONTENT_GLOBALS_BYTES
+        + Self::FRAME_BYTES
+        + Self::SCENE_CONTENT_BYTES;
+    const FULL_FRAME_STAGING_BYTES: usize =
+        Self::MUTABLE_BUFFER_BYTES + super::hud::HUD_GPU_BUFFER_BYTES as usize;
+
+    const fn mutable_buffer_layout(buffer: SceneMutableBuffer) -> SceneMutableBufferLayout {
+        let staging_offset = match buffer {
+            SceneMutableBuffer::Nodes => 0,
+            SceneMutableBuffer::ContentGlobals => Self::NODE_BYTES,
+            SceneMutableBuffer::Frame => Self::NODE_BYTES + Self::CONTENT_GLOBALS_BYTES,
+            SceneMutableBuffer::SceneContent => {
+                Self::NODE_BYTES + Self::CONTENT_GLOBALS_BYTES + Self::FRAME_BYTES
+            }
+        };
+        let len = match buffer {
+            SceneMutableBuffer::Nodes => Self::NODE_BYTES,
+            SceneMutableBuffer::ContentGlobals => Self::CONTENT_GLOBALS_BYTES,
+            SceneMutableBuffer::Frame => Self::FRAME_BYTES,
+            SceneMutableBuffer::SceneContent => Self::SCENE_CONTENT_BYTES,
+        };
+        SceneMutableBufferLayout {
+            staging_offset,
+            len,
+            copy_alignment: wgpu::COPY_BUFFER_ALIGNMENT as usize,
+        }
+    }
+
+    const fn content_family_layout(family: ContentMirrorFamily) -> PackedMirrorFamilyLayout {
+        let (buffer, offset) = match Self::scene_content_offset(family) {
+            Some(offset) => (SceneMutableBuffer::SceneContent, offset),
+            None => (
+                SceneMutableBuffer::ContentGlobals,
+                Self::content_globals_offset(),
+            ),
+        };
+        PackedMirrorFamilyLayout {
+            buffer,
+            offset,
+            len: family.byte_len(),
+            span_alignment: family.record_size(),
+        }
+    }
+
+    const fn frame_family_layout(family: FrameMirrorFamily) -> PackedMirrorFamilyLayout {
+        PackedMirrorFamilyLayout {
+            buffer: SceneMutableBuffer::Frame,
+            offset: Self::frame_offset(family),
+            len: family.byte_len(),
+            span_alignment: family.record_size(),
+        }
+    }
 
     pub(super) const fn content_globals_offset() -> usize {
         0
@@ -1490,6 +1650,42 @@ impl PackedMirrorLayout {
             family.record_size(),
             span,
         )
+    }
+}
+
+impl ScenePhysicalDirtySpans {
+    fn insert_node(&mut self, span: ByteSpan) -> Result<(), PackedMirrorLayoutError> {
+        self.nodes
+            .insert(PackedMirrorLayout::translate_node_span(span)?);
+        Ok(())
+    }
+
+    fn insert_content(
+        &mut self,
+        family: ContentMirrorFamily,
+        span: ByteSpan,
+    ) -> Result<(), PackedMirrorLayoutError> {
+        match family {
+            ContentMirrorFamily::Globals => self
+                .content_globals
+                .insert(PackedMirrorLayout::translate_content_globals_span(span)?),
+            _ => self
+                .scene_content
+                .insert(PackedMirrorLayout::translate_scene_content_span(
+                    family, span,
+                )?),
+        }
+        Ok(())
+    }
+
+    fn insert_frame(
+        &mut self,
+        family: FrameMirrorFamily,
+        span: ByteSpan,
+    ) -> Result<(), PackedMirrorLayoutError> {
+        self.frame
+            .insert(PackedMirrorLayout::translate_frame_span(family, span)?);
+        Ok(())
     }
 }
 
@@ -1626,6 +1822,11 @@ pub(super) enum SceneTargetKeyError {
 pub(super) enum SceneGpuError {
     AtlasGenerationMismatch {
         upload: crate::presentation::companion_scene::ResourceGeneration,
+        atlas: crate::presentation::companion_scene::ResourceGeneration,
+    },
+    GlyphLookupGenerationMismatch {
+        upload: crate::presentation::companion_scene::ResourceGeneration,
+        lookup: crate::presentation::companion_scene::ResourceGeneration,
         atlas: crate::presentation::companion_scene::ResourceGeneration,
     },
     DeviceEpochMismatch {
@@ -2080,6 +2281,52 @@ fn create_scene_base_pipelines(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SceneBufferShadow {
+    committed: Box<[u8]>,
+    pending: Box<[u8]>,
+}
+
+impl SceneBufferShadow {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            committed: Box::from(bytes),
+            pending: Box::from(bytes),
+        }
+    }
+
+    /// Promotes a fully prepared pending image without allocating or changing
+    /// either fixed-size backing allocation. Task 10G-C owns synchronization
+    /// of the now-spare pending image after a successful GPU submission.
+    fn commit(&mut self) {
+        std::mem::swap(&mut self.committed, &mut self.pending);
+    }
+}
+
+/// CPU metadata owned by exactly one materialized GPU scene generation. Only
+/// buffers carrying ordinary-frame deltas have shadows; immutable geometry,
+/// primitive, and glyph-entry buffers deliberately have none.
+#[derive(Debug, PartialEq, Eq)]
+struct GpuSceneGenerationState {
+    glyph_lookup: SceneGlyphLookup,
+    nodes: SceneBufferShadow,
+    content_globals: SceneBufferShadow,
+    frame: SceneBufferShadow,
+    scene_content: SceneBufferShadow,
+}
+
+impl GpuSceneGenerationState {
+    fn from_upload(upload: &PreparedSceneUpload) -> Self {
+        Self {
+            glyph_lookup: upload.glyph_lookup.clone(),
+            nodes: SceneBufferShadow::from_bytes(&upload.node_bytes),
+            content_globals: SceneBufferShadow::from_bytes(&upload.content_globals_bytes),
+            frame: SceneBufferShadow::from_bytes(&upload.frame_bytes),
+            scene_content: SceneBufferShadow::from_bytes(&upload.scene_content_bytes),
+        }
+    }
+}
+
 pub(super) struct GpuSceneCandidate {
     pub(super) vertex_buffer: wgpu::Buffer,
     pub(super) index_buffer: wgpu::Buffer,
@@ -2100,6 +2347,7 @@ pub(super) struct GpuSceneCandidate {
     pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
     pub(super) logical_viewport_points: [f32; 2],
     pub(super) static_checksum: u64,
+    generation_state: GpuSceneGenerationState,
     /// Frozen once during materialization. Ordinary frames read this closed
     /// schedule directly and perform no full validation or heap allocation.
     pub(super) draw_plan: SceneDrawPlan,
@@ -2253,6 +2501,7 @@ pub(super) fn materialize_gpu_candidate(
         .map_err(SceneGpuError::InvalidDrawPlan)?;
     let prepared_hud_atlas = super::hud::PreparedHudAtlas::from_scene_atlas(atlas)
         .map_err(|_| SceneGpuError::InvalidHudAtlas)?;
+    let generation_state = GpuSceneGenerationState::from_upload(upload);
 
     create_in_gpu_error_scopes(device, || {
         let vertex_buffer = create_initial_buffer(
@@ -2407,6 +2656,7 @@ pub(super) fn materialize_gpu_candidate(
             source_revisions: upload.source_revisions,
             logical_viewport_points: upload.logical_viewport_points,
             static_checksum: upload.static_checksum,
+            generation_state,
             draw_plan,
         }
     })
@@ -2420,6 +2670,13 @@ fn validate_gpu_candidate_preflight(
     if atlas.resource_generation != upload.generation_key.resources {
         return Err(SceneGpuError::AtlasGenerationMismatch {
             upload: upload.generation_key.resources,
+            atlas: atlas.resource_generation,
+        });
+    }
+    if upload.glyph_lookup.resource_generation != upload.generation_key.resources {
+        return Err(SceneGpuError::GlyphLookupGenerationMismatch {
+            upload: upload.generation_key.resources,
+            lookup: upload.glyph_lookup.resource_generation,
             atlas: atlas.resource_generation,
         });
     }
@@ -3894,6 +4151,177 @@ mod tests {
     }
 
     #[test]
+    fn mutable_buffer_and_family_layouts_freeze_offsets_lengths_alignment_and_staging_bound() {
+        assert_eq!(
+            SceneMutableBuffer::ALL.map(PackedMirrorLayout::mutable_buffer_layout),
+            [
+                SceneMutableBufferLayout {
+                    staging_offset: 0,
+                    len: 12_288,
+                    copy_alignment: 4,
+                },
+                SceneMutableBufferLayout {
+                    staging_offset: 12_288,
+                    len: 160,
+                    copy_alignment: 4,
+                },
+                SceneMutableBufferLayout {
+                    staging_offset: 12_448,
+                    len: 7_680,
+                    copy_alignment: 4,
+                },
+                SceneMutableBufferLayout {
+                    staging_offset: 20_128,
+                    len: 15_552,
+                    copy_alignment: 4,
+                },
+            ],
+        );
+        assert_eq!(PackedMirrorLayout::MUTABLE_BUFFER_BYTES, 35_680);
+        assert_eq!(PackedMirrorLayout::FULL_FRAME_STAGING_BYTES, 36_512);
+        assert!(
+            PackedMirrorLayout::FULL_FRAME_STAGING_BYTES
+                <= usize::try_from(SCENE_STAGING_BELT_CHUNK_BYTES).unwrap()
+        );
+
+        assert_eq!(
+            ContentMirrorFamily::ALL.map(PackedMirrorLayout::content_family_layout),
+            [
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::ContentGlobals,
+                    offset: 0,
+                    len: 160,
+                    span_alignment: 160,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::SceneContent,
+                    offset: 0,
+                    len: 4_160,
+                    span_alignment: 32,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::SceneContent,
+                    offset: 4_160,
+                    len: 2_880,
+                    span_alignment: 32,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::SceneContent,
+                    offset: 7_040,
+                    len: 512,
+                    span_alignment: 32,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::SceneContent,
+                    offset: 7_552,
+                    len: 2_048,
+                    span_alignment: 32,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::SceneContent,
+                    offset: 9_600,
+                    len: 4_160,
+                    span_alignment: 32,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::SceneContent,
+                    offset: 13_760,
+                    len: 1_024,
+                    span_alignment: 32,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::SceneContent,
+                    offset: 14_784,
+                    len: 768,
+                    span_alignment: 48,
+                },
+            ],
+        );
+        assert_eq!(
+            FrameMirrorFamily::ALL.map(PackedMirrorLayout::frame_family_layout),
+            [
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::Frame,
+                    offset: 0,
+                    len: 192,
+                    span_alignment: 192,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::Frame,
+                    offset: 192,
+                    len: 480,
+                    span_alignment: 48,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::Frame,
+                    offset: 672,
+                    len: 768,
+                    span_alignment: 48,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::Frame,
+                    offset: 1_440,
+                    len: 3_072,
+                    span_alignment: 48,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::Frame,
+                    offset: 4_512,
+                    len: 96,
+                    span_alignment: 48,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::Frame,
+                    offset: 4_608,
+                    len: 1_536,
+                    span_alignment: 48,
+                },
+                PackedMirrorFamilyLayout {
+                    buffer: SceneMutableBuffer::Frame,
+                    offset: 6_144,
+                    len: 1_536,
+                    span_alignment: 96,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn physical_dirty_spans_map_logical_families_into_only_four_buffers() {
+        let mut dirty = ScenePhysicalDirtySpans::default();
+        dirty.insert_node(ByteSpan { offset: 96, len: 96 }).unwrap();
+        dirty
+            .insert_content(
+                ContentMirrorFamily::Globals,
+                ByteSpan { offset: 0, len: 160 },
+            )
+            .unwrap();
+        dirty
+            .insert_content(
+                ContentMirrorFamily::PropGlyphs,
+                ByteSpan { offset: 32, len: 64 },
+            )
+            .unwrap();
+        dirty
+            .insert_frame(FrameMirrorFamily::Lights, ByteSpan { offset: 0, len: 48 })
+            .unwrap();
+
+        assert_eq!(dirty.nodes.as_slice(), &[ByteSpan { offset: 96, len: 96 }]);
+        assert_eq!(
+            dirty.content_globals.as_slice(),
+            &[ByteSpan { offset: 0, len: 160 }]
+        );
+        assert_eq!(
+            dirty.frame.as_slice(),
+            &[ByteSpan { offset: 4_512, len: 48 }]
+        );
+        assert_eq!(
+            dirty.scene_content.as_slice(),
+            &[ByteSpan { offset: 4_192, len: 64 }]
+        );
+    }
+
+    #[test]
     fn scene_color_math_uses_exact_iec_thresholds_and_zero_safe_unpremultiply() {
         assert!((scene_srgb_to_linear(0.04045) - 0.003_130_805).abs() < 1.0e-8);
         assert!((scene_linear_to_srgb(0.003_130_8) - 0.040_449_936).abs() < 1.0e-7);
@@ -4923,16 +5351,17 @@ mod tests {
     #[test]
     fn full_key_translation_distinguishes_weights_preserves_none_and_types_failures() {
         let atlas = two_weight_atlas('^');
+        let lookup = SceneGlyphLookup::from_atlas(&atlas);
         let regular = SceneContentGpuValue::translate(
             ContentMirrorFamily::Pet,
             super::super::compiler::ContentUploadValue::fixture(u32::from('^'), 1),
-            &atlas,
+            &lookup,
         )
         .unwrap();
         let bold = SceneContentGpuValue::translate(
             ContentMirrorFamily::Pet,
             super::super::compiler::ContentUploadValue::fixture(u32::from('^'), 3),
-            &atlas,
+            &lookup,
         )
         .unwrap();
         assert_ne!(regular.glyph_entry_index, bold.glyph_entry_index);
@@ -4940,7 +5369,7 @@ mod tests {
         let none = SceneContentGpuValue::translate(
             ContentMirrorFamily::Ambient,
             super::super::compiler::ContentUploadValue::fixture(u32::MAX, 0),
-            &atlas,
+            &lookup,
         )
         .unwrap();
         assert_eq!(none.glyph_entry_index, u32::MAX);
@@ -4948,7 +5377,7 @@ mod tests {
             SceneContentGpuValue::translate(
                 ContentMirrorFamily::Ambient,
                 super::super::compiler::ContentUploadValue::fixture(0x11_0000, 0),
-                &atlas,
+                &lookup,
             ),
             Err(SceneUploadError::InvalidGlyphScalar { scalar: 0x11_0000, .. })
         ));
@@ -4956,15 +5385,124 @@ mod tests {
             SceneContentGpuValue::translate(
                 ContentMirrorFamily::Ambient,
                 super::super::compiler::ContentUploadValue::fixture(u32::from('x'), 0),
-                &atlas,
+                &lookup,
             ),
             Err(SceneUploadError::MissingGlyphKey { .. })
         ));
     }
 
     #[test]
+    fn scalar_glyph_lookup_is_generation_bound_sorted_stable_and_omits_sequences() {
+        use super::super::resources::{
+            AtlasCell, CompiledGlyphAtlas, GlyphAtlasEntry, GlyphEntryKind, GlyphKey,
+            PreparedSceneAtlas,
+        };
+        use std::collections::BTreeMap;
+
+        let generation = crate::presentation::companion_scene::ResourceGeneration(37);
+        let keys = [
+            GlyphKey::new("^^", false),
+            GlyphKey::new("z", true),
+            GlyphKey::new("^", true),
+            GlyphKey::new("z", false),
+            GlyphKey::new("^", false),
+        ];
+        let mut entries = BTreeMap::new();
+        for (column, key) in keys.into_iter().enumerate() {
+            entries.insert(
+                key,
+                GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell {
+                        origin: [column as u32, 0],
+                        extent: [1, 1],
+                    },
+                ),
+            );
+        }
+        let atlas = PreparedSceneAtlas::from_compiled_for_generation(
+            &CompiledGlyphAtlas {
+                width: 5,
+                height: 1,
+                rgba: vec![255; 20],
+                entries,
+            },
+            generation,
+        )
+        .unwrap();
+        let lookup = SceneGlyphLookup::from_atlas(&atlas);
+
+        assert_eq!(lookup.resource_generation, generation);
+        assert_eq!(lookup.entries.len(), 4, "multi-scalar atlas keys stay out");
+        assert!(
+            lookup
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].key() < pair[1].key()),
+            "lookup keys remain strictly sorted for binary search",
+        );
+        for (scalar, bold) in [('^', false), ('^', true), ('z', false), ('z', true)] {
+            let expected = atlas
+                .resolve_key(&GlyphKey::new(scalar.to_string(), bold))
+                .unwrap()
+                .id;
+            assert_eq!(lookup.resolve(u32::from(scalar), bold), Some(expected));
+        }
+        assert_eq!(lookup.resolve(NONE_U32, false), Some(NONE_U32));
+        assert_eq!(lookup.resolve(0x11_0000, false), None);
+        assert_eq!(lookup.resolve(u32::from('x'), false), None);
+    }
+
+    #[test]
+    fn scene_upload_rejects_same_shape_atlas_from_another_resource_generation() {
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let candidate_generation = candidate.generation_key.resources;
+        let matching = two_weight_atlas_for('^', candidate_generation);
+        let other_generation =
+            crate::presentation::companion_scene::ResourceGeneration(candidate_generation.0 + 1);
+        let mismatched = two_weight_atlas_for('^', other_generation);
+
+        assert_eq!(matching.entries.len(), mismatched.entries.len());
+        assert_eq!(matching.width, mismatched.width);
+        assert_eq!(matching.height, mismatched.height);
+        assert_eq!(matching.coverage_r8.len(), mismatched.coverage_r8.len());
+        assert_eq!(
+            matching.straight_color_rgba_srgb.len(),
+            mismatched.straight_color_rgba_srgb.len(),
+        );
+        assert!(prepare_scene_upload(&candidate, &matching).is_ok());
+        assert_eq!(
+            prepare_scene_upload(&candidate, &mismatched),
+            Err(SceneUploadError::AtlasGenerationMismatch {
+                candidate: candidate_generation,
+                atlas: other_generation,
+            }),
+        );
+    }
+
+    #[test]
+    fn scalar_lookup_happy_path_is_primitive_binary_search_without_key_allocation() {
+        let production = include_str!("render.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap();
+        let resolve = production
+            .split("fn resolve(&self, scalar: u32, bold: bool)")
+            .nth(1)
+            .expect("scalar lookup resolver")
+            .split("\n    }")
+            .next()
+            .unwrap();
+        assert!(resolve.contains("binary_search_by_key"));
+        assert!(!resolve.contains("GlyphKey"));
+        assert!(!resolve.contains("String"));
+        assert!(!resolve.contains("to_string"));
+    }
+
+    #[test]
     fn tank_atlas_weight_uses_authored_packed_bit() {
         let atlas = two_weight_atlas('^');
+        let lookup = SceneGlyphLookup::from_atlas(&atlas);
         let mut regular = super::super::compiler::ContentUploadValue::fixture(u32::from('^'), 0);
         regular.kind = 3;
         let packed_color = 126 | (238 << 8) | (255 << 16);
@@ -4973,10 +5511,10 @@ mod tests {
         bold.signed_data[1] = 1;
 
         let regular =
-            SceneContentGpuValue::translate(ContentMirrorFamily::TankGlyphs, regular, &atlas)
+            SceneContentGpuValue::translate(ContentMirrorFamily::TankGlyphs, regular, &lookup)
                 .unwrap();
-        let bold =
-            SceneContentGpuValue::translate(ContentMirrorFamily::TankGlyphs, bold, &atlas).unwrap();
+        let bold = SceneContentGpuValue::translate(ContentMirrorFamily::TankGlyphs, bold, &lookup)
+            .unwrap();
         assert_ne!(regular.glyph_entry_index, bold.glyph_entry_index);
         assert_eq!(bold.signed_data, [packed_color, 1]);
 
@@ -5035,7 +5573,7 @@ mod tests {
     fn candidate_translation_owns_exact_packed_bytes_and_leaves_candidate_unchanged() {
         let candidate = compile_fixture(&SceneFixture::valid());
         let before = candidate.clone();
-        let atlas = two_weight_atlas('^');
+        let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
 
         let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
 
@@ -5094,7 +5632,11 @@ mod tests {
         fixture.content.room_glyph_slots[0].color_srgb8 = Some([10, 20, 30]);
         let candidate = super::super::compiler::compile_static_fixture_for_render_test(&fixture);
         let sources = candidate.frame_upload_sources();
-        let upload = prepare_scene_upload(&candidate, &two_weight_atlas('^')).unwrap();
+        let upload = prepare_scene_upload(
+            &candidate,
+            &two_weight_atlas_for('^', candidate.generation_key.resources),
+        )
+        .unwrap();
 
         let room_content_offset =
             PackedMirrorLayout::scene_content_offset(ContentMirrorFamily::RoomGlyphs).unwrap();
@@ -5178,7 +5720,11 @@ mod tests {
             fixture.template.primitives[0].authored_order = 77;
             let candidate =
                 super::super::compiler::compile_static_fixture_for_render_test(&fixture);
-            let upload = prepare_scene_upload(&candidate, &two_weight_atlas('^')).unwrap();
+            let upload = prepare_scene_upload(
+                &candidate,
+                &two_weight_atlas_for('^', candidate.generation_key.resources),
+            )
+            .unwrap();
             let primitive = upload.primitives[0];
             assert_eq!(primitive.content_base, content_base, "{binding:?}");
             assert_eq!(primitive.frame_base, frame_base, "{binding:?}");
@@ -5193,9 +5739,11 @@ mod tests {
         analytic.template.materials[0].kind = MaterialKind::UnlitAnalytic;
         analytic.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         analytic.template.primitives[0].authored_order = 91;
+        let analytic_candidate =
+            super::super::compiler::compile_static_fixture_for_render_test(&analytic);
         let upload = prepare_scene_upload(
-            &super::super::compiler::compile_static_fixture_for_render_test(&analytic),
-            &two_weight_atlas('^'),
+            &analytic_candidate,
+            &two_weight_atlas_for('^', analytic_candidate.generation_key.resources),
         )
         .unwrap();
         assert_eq!(upload.primitives[0].binding_index, 5);
@@ -5215,9 +5763,10 @@ mod tests {
         wall.template.materials[0].kind = MaterialKind::MultiplyShadow;
         wall.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         wall.template.primitives.push(body);
+        let wall_candidate = super::super::compiler::compile_static_fixture_for_render_test(&wall);
         let upload = prepare_scene_upload(
-            &super::super::compiler::compile_static_fixture_for_render_test(&wall),
-            &two_weight_atlas('^'),
+            &wall_candidate,
+            &two_weight_atlas_for('^', wall_candidate.generation_key.resources),
         )
         .unwrap();
         assert_eq!(upload.primitives[0].binding_index, 1);
@@ -5302,16 +5851,21 @@ mod tests {
             fixture.template.primitives[0].binding = PrimitiveBinding::Instances(binding);
             let candidate =
                 super::super::compiler::compile_static_fixture_for_render_test(&fixture);
-            let upload = prepare_scene_upload(&candidate, &two_weight_atlas('^')).unwrap();
+            let upload = prepare_scene_upload(
+                &candidate,
+                &two_weight_atlas_for('^', candidate.generation_key.resources),
+            )
+            .unwrap();
             assert_eq!(upload.primitives[0].instance_base, expected_base);
             assert_eq!(upload.draws[0].index_range, 0..6);
             assert_eq!(upload.draws[0].instance_range, expected_instances);
             assert_eq!(upload.draws[0].source, expected_source);
         }
 
+        let static_candidate = compile_fixture(&SceneFixture::valid());
         let static_upload = prepare_scene_upload(
-            &compile_fixture(&SceneFixture::valid()),
-            &two_weight_atlas('^'),
+            &static_candidate,
+            &two_weight_atlas_for('^', static_candidate.generation_key.resources),
         )
         .unwrap();
         assert_eq!(static_upload.primitives[0].instance_base, u32::MAX);
@@ -5326,8 +5880,11 @@ mod tests {
         analytic_fixture.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         let analytic_candidate =
             super::super::compiler::compile_static_fixture_for_render_test(&analytic_fixture);
-        let analytic_upload =
-            prepare_scene_upload(&analytic_candidate, &two_weight_atlas('^')).unwrap();
+        let analytic_upload = prepare_scene_upload(
+            &analytic_candidate,
+            &two_weight_atlas_for('^', analytic_candidate.generation_key.resources),
+        )
+        .unwrap();
         assert_eq!(analytic_upload.primitives[0].instance_base, u32::MAX);
         assert_eq!(analytic_upload.draws[0].source, PrimitiveSource::Analytic);
         assert_eq!(analytic_upload.draws[0].instance_range, 0..1);
@@ -5337,7 +5894,7 @@ mod tests {
     fn role_only_delta_changes_upload_entry_without_resource_generation_or_mirror_rewrite() {
         let fixture = SceneFixture::valid();
         let mut candidate = compile_fixture(&fixture);
-        let atlas = two_weight_atlas('^');
+        let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
         let regular = prepare_scene_upload(&candidate, &atlas).unwrap();
         let generation = candidate.generation_key;
 
@@ -5393,14 +5950,18 @@ mod tests {
             let candidate =
                 super::super::compiler::compile_static_fixture_for_render_test(&fixture);
             assert_eq!(
-                prepare_scene_upload(&candidate, &two_weight_atlas('^')),
+                prepare_scene_upload(
+                    &candidate,
+                    &two_weight_atlas_for('^', candidate.generation_key.resources),
+                ),
                 Err(SceneUploadError::UnsupportedPrimitive { primitive_index: 0, feature: kind })
             );
         }
 
+        let candidate = compile_fixture(&SceneFixture::valid());
         prepare_scene_upload(
-            &compile_fixture(&SceneFixture::valid()),
-            &two_weight_atlas('^'),
+            &candidate,
+            &two_weight_atlas_for('^', candidate.generation_key.resources),
         )
         .unwrap();
     }
@@ -5947,21 +6508,55 @@ mod tests {
 
     #[test]
     fn candidate_buffer_usages_preserve_immutable_and_dirty_span_contracts() {
-        assert_eq!(SceneBufferUsages::VERTEX, wgpu::BufferUsages::VERTEX);
-        assert_eq!(SceneBufferUsages::INDEX, wgpu::BufferUsages::INDEX);
-        assert_eq!(SceneBufferUsages::PRIMITIVE, wgpu::BufferUsages::STORAGE);
-        assert_eq!(SceneBufferUsages::GLYPH_ENTRY, wgpu::BufferUsages::STORAGE);
-        for usage in [
+        let immutable = [
+            SceneBufferUsages::VERTEX,
+            SceneBufferUsages::INDEX,
+            SceneBufferUsages::PRIMITIVE,
+            SceneBufferUsages::GLYPH_ENTRY,
+        ];
+        assert_eq!(immutable[0], wgpu::BufferUsages::VERTEX);
+        assert_eq!(immutable[1], wgpu::BufferUsages::INDEX);
+        assert_eq!(immutable[2], wgpu::BufferUsages::STORAGE);
+        assert_eq!(immutable[3], wgpu::BufferUsages::STORAGE);
+        assert!(immutable
+            .into_iter()
+            .all(|usage| !usage.contains(wgpu::BufferUsages::COPY_DST)));
+        let mutable = [
             SceneBufferUsages::NODE,
             SceneBufferUsages::CONTENT_GLOBALS,
             SceneBufferUsages::FRAME,
             SceneBufferUsages::SCENE_CONTENT,
-        ] {
+        ];
+        for usage in mutable {
             assert_eq!(
                 usage,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             );
         }
+        assert_eq!(mutable.len(), 4);
+    }
+
+    #[test]
+    fn committed_pending_shadow_commit_swaps_storage_without_growth_or_reallocation() {
+        let initial = (0_u8..32).collect::<Vec<_>>();
+        let mut shadow = SceneBufferShadow::from_bytes(&initial);
+        assert_eq!(shadow.committed.as_ref(), initial.as_slice());
+        assert_eq!(shadow.pending.as_ref(), initial.as_slice());
+        assert_eq!(shadow.committed.len(), 32);
+        assert_eq!(shadow.pending.len(), 32);
+
+        let committed_ptr = shadow.committed.as_ptr();
+        let pending_ptr = shadow.pending.as_ptr();
+        assert_ne!(committed_ptr, pending_ptr);
+        shadow.pending[4..8].copy_from_slice(&[90, 91, 92, 93]);
+        shadow.commit();
+
+        assert_eq!(shadow.committed.as_ptr(), pending_ptr);
+        assert_eq!(shadow.pending.as_ptr(), committed_ptr);
+        assert_eq!(&shadow.committed[4..8], &[90, 91, 92, 93]);
+        assert_eq!(&shadow.pending[4..8], &[4, 5, 6, 7]);
+        assert_eq!(shadow.committed.len(), 32);
+        assert_eq!(shadow.pending.len(), 32);
     }
 
     #[test]
@@ -6353,6 +6948,31 @@ mod tests {
         assert_eq!(gpu.source_revisions, upload.source_revisions);
         assert_eq!(gpu.logical_viewport_points, upload.logical_viewport_points);
         assert_eq!(gpu.static_checksum, upload.static_checksum);
+        let GpuSceneGenerationState {
+            glyph_lookup: _,
+            nodes: _,
+            content_globals: _,
+            frame: _,
+            scene_content: _,
+        } = &gpu.generation_state;
+        assert_eq!(gpu.generation_state.glyph_lookup, upload.glyph_lookup);
+        let assert_shadow = |shadow: &SceneBufferShadow, expected: &[u8]| {
+            assert_eq!(shadow.committed.as_ref(), expected);
+            assert_eq!(shadow.pending.as_ref(), expected);
+            assert_eq!(shadow.committed.len(), expected.len());
+            assert_eq!(shadow.pending.len(), expected.len());
+            assert_ne!(shadow.committed.as_ptr(), shadow.pending.as_ptr());
+        };
+        assert_shadow(&gpu.generation_state.nodes, &upload.node_bytes);
+        assert_shadow(
+            &gpu.generation_state.content_globals,
+            &upload.content_globals_bytes,
+        );
+        assert_shadow(&gpu.generation_state.frame, &upload.frame_bytes);
+        assert_shadow(
+            &gpu.generation_state.scene_content,
+            &upload.scene_content_bytes,
+        );
         assert_eq!(
             gpu.draw_plan,
             validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases).unwrap(),
@@ -7988,6 +8608,20 @@ mod tests {
             materialize_gpu_candidate(&device, &queue, &shared, &upload, &wrong_atlas),
             Err(SceneGpuError::AtlasGenerationMismatch { .. })
         ));
+
+        let mut mismatched_lookup = upload.clone();
+        mismatched_lookup.glyph_lookup.resource_generation =
+            crate::presentation::companion_scene::ResourceGeneration(
+                upload.generation_key.resources.0 + 1,
+            );
+        assert_eq!(
+            validate_gpu_candidate_preflight(&shared, &mismatched_lookup, &atlas),
+            Err(SceneGpuError::GlyphLookupGenerationMismatch {
+                upload: upload.generation_key.resources,
+                lookup: mismatched_lookup.glyph_lookup.resource_generation,
+                atlas: atlas.resource_generation,
+            }),
+        );
 
         let wrong_shared = SceneGpuShared::create(
             &device,

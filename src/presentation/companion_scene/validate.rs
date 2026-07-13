@@ -87,10 +87,29 @@ impl AcceptedSceneTemplate {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct AcceptedSceneFrame {
     frame: SceneFrame,
     template_identity: Arc<()>,
+    instance_identity: Arc<()>,
+    epoch: u64,
+}
+
+impl Clone for AcceptedSceneFrame {
+    fn clone(&self) -> Self {
+        Self {
+            frame: self.frame.clone(),
+            template_identity: Arc::clone(&self.template_identity),
+            instance_identity: Arc::new(()),
+            epoch: self.epoch,
+        }
+    }
+}
+
+impl PartialEq for AcceptedSceneFrame {
+    fn eq(&self, other: &Self) -> bool {
+        self.frame == other.frame && self.template_identity == other.template_identity
+    }
 }
 
 impl AcceptedSceneFrame {
@@ -100,6 +119,10 @@ impl AcceptedSceneFrame {
 
     pub fn into_frame(self) -> SceneFrame {
         self.frame
+    }
+
+    pub(crate) const fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -121,6 +144,25 @@ pub struct FrameDeltaValidation {
     pub lit_paths_checked: usize,
 }
 
+/// Sealed fixed-capacity proof that a frame delta passed every validation step.
+/// The token owns exact overlays so commit performs no lookup or allocation.
+pub(crate) struct PreparedAcceptedFrameDelta {
+    template_identity: usize,
+    frame_identity: Arc<()>,
+    epoch: u64,
+    camera: Option<OrthographicCamera>,
+    nodes: [Option<NodeFrameState>; MAX_SCENE_NODES],
+    room_glyph_slots: [Option<RoomGlyphFrameSlot>; MAX_ROOM_GLYPH_SLOTS],
+    prop_slots: [Option<PropFrameSlot>; MAX_VISIBLE_PROPS],
+    tank_slots: [Option<TankFrameSlot>; MAX_ROUND_TANK_INHABITANTS],
+    ambient_slots: [Option<AmbientFrameSlot>; MAX_AMBIENT_INSTANCES],
+    analytic_slots: [Option<AnalyticFrameSlot>; MAX_ANALYTIC_PARAMS],
+    gauges: Option<[f32; 4]>,
+    dim_amount: Option<f32>,
+    lights: [Option<LightFrame>; MAX_LIGHTS],
+    audit: FrameDeltaValidation,
+}
+
 impl AcceptedSceneState {
     pub fn template(&self) -> &AcceptedSceneTemplate {
         &self.template
@@ -139,7 +181,22 @@ impl AcceptedSceneState {
         &mut self,
         delta: &FrameDelta,
     ) -> Result<FrameDeltaValidation, SceneValidationError> {
-        validate_frame_delta(delta, &self.template, &mut self.frame)
+        let prepared = self.prepare_frame_delta(delta)?;
+        Ok(self.commit_prepared_frame_delta(prepared))
+    }
+
+    pub(crate) fn prepare_frame_delta(
+        &self,
+        delta: &FrameDelta,
+    ) -> Result<PreparedAcceptedFrameDelta, SceneValidationError> {
+        prepare_accepted_frame_delta(delta, &self.template, &self.frame)
+    }
+
+    pub(crate) fn commit_prepared_frame_delta(
+        &mut self,
+        prepared: PreparedAcceptedFrameDelta,
+    ) -> FrameDeltaValidation {
+        commit_accepted_frame_delta(&mut self.frame, prepared)
     }
 }
 
@@ -313,6 +370,8 @@ pub fn validate_frame(
     Ok(AcceptedSceneFrame {
         frame: canonical,
         template_identity: Arc::clone(&accepted_template.identity),
+        instance_identity: Arc::new(()),
+        epoch: 0,
     })
 }
 
@@ -565,6 +624,15 @@ pub fn validate_frame_delta(
     accepted_template: &AcceptedSceneTemplate,
     current_frame: &mut AcceptedSceneFrame,
 ) -> Result<FrameDeltaValidation, SceneValidationError> {
+    let prepared = prepare_accepted_frame_delta(delta, accepted_template, current_frame)?;
+    Ok(commit_accepted_frame_delta(current_frame, prepared))
+}
+
+fn prepare_accepted_frame_delta(
+    delta: &FrameDelta,
+    accepted_template: &AcceptedSceneTemplate,
+    current_frame: &AcceptedSceneFrame,
+) -> Result<PreparedAcceptedFrameDelta, SceneValidationError> {
     if !Arc::ptr_eq(
         &accepted_template.identity,
         &current_frame.template_identity,
@@ -658,49 +726,113 @@ pub fn validate_frame_delta(
         return Err(SceneValidationError::AcceptedStateMismatch);
     }
 
-    if let Some(camera) = delta.camera {
+    let mut room_glyph_slots = [None; MAX_ROOM_GLYPH_SLOTS];
+    for changed in &delta.room_glyph_slots {
+        room_glyph_slots[usize::from(changed.slot)] = Some(*changed);
+    }
+    let mut prop_slots = [None; MAX_VISIBLE_PROPS];
+    for changed in &delta.prop_slots {
+        prop_slots[usize::from(changed.slot)] = Some(*changed);
+    }
+    let mut tank_slots = [None; MAX_ROUND_TANK_INHABITANTS];
+    for changed in &delta.tank_slots {
+        tank_slots[usize::from(changed.slot)] = Some(*changed);
+    }
+    let mut ambient_slots = [None; MAX_AMBIENT_INSTANCES];
+    for changed in &delta.ambient_slots {
+        ambient_slots[usize::from(changed.slot)] = Some(*changed);
+    }
+    let mut analytic_slots = [None; MAX_ANALYTIC_PARAMS];
+    for changed in &delta.analytic_slots {
+        analytic_slots[usize::from(changed.id.0)] = Some(*changed);
+    }
+    let audit = FrameDeltaValidation {
+        node_slots_checked: delta.nodes.len(),
+        node_slots_applied: delta.nodes.len(),
+        lit_path_indices_visited: affected_path_count,
+        lit_paths_checked,
+    };
+    Ok(PreparedAcceptedFrameDelta {
+        template_identity: Arc::as_ptr(&accepted_template.identity).addr(),
+        frame_identity: Arc::clone(&current_frame.instance_identity),
+        epoch: current_frame.epoch,
+        camera: delta.camera,
+        nodes: node_overlay,
+        room_glyph_slots,
+        prop_slots,
+        tank_slots,
+        ambient_slots,
+        analytic_slots,
+        gauges: delta.gauges,
+        dim_amount: delta.dim_amount,
+        lights: light_overlay,
+        audit,
+    })
+}
+
+fn commit_accepted_frame_delta(
+    current_frame: &mut AcceptedSceneFrame,
+    prepared: PreparedAcceptedFrameDelta,
+) -> FrameDeltaValidation {
+    assert_eq!(
+        prepared.template_identity,
+        Arc::as_ptr(&current_frame.template_identity).addr(),
+        "prepared frame delta belongs to another accepted template"
+    );
+    assert!(
+        Arc::ptr_eq(&prepared.frame_identity, &current_frame.instance_identity),
+        "prepared frame delta belongs to another accepted frame"
+    );
+    assert_eq!(
+        prepared.epoch, current_frame.epoch,
+        "prepared frame delta is stale for this accepted frame"
+    );
+    if let Some(camera) = prepared.camera {
         current_frame.frame.camera = camera;
     }
-    let mut node_slots_applied = 0;
-    for (change_index, changed) in delta.nodes.iter().enumerate() {
-        if let Some(dense_index) = changed_dense_indices[change_index] {
-            current_frame.frame.nodes[dense_index] = *changed;
-            node_slots_applied += 1;
+    for (slot, changed) in prepared.nodes.into_iter().enumerate() {
+        if let Some(changed) = changed {
+            current_frame.frame.nodes[slot] = changed;
         }
     }
-    if let Some(gauges) = delta.gauges {
+    if let Some(gauges) = prepared.gauges {
         current_frame.frame.gauges = gauges;
     }
-    if let Some(dim_amount) = delta.dim_amount {
+    if let Some(dim_amount) = prepared.dim_amount {
         current_frame.frame.dim_amount = dim_amount;
     }
-    for (slot, _) in &delta.lights {
-        let slot = usize::from(*slot);
-        if let Some(changed) = light_overlay[slot] {
+    for (slot, changed) in prepared.lights.into_iter().enumerate() {
+        if let Some(changed) = changed {
             current_frame.frame.lights[slot] = changed;
         }
     }
-    for changed in &delta.prop_slots {
-        current_frame.frame.prop_slots[usize::from(changed.slot)] = *changed;
+    for (slot, changed) in prepared.prop_slots.into_iter().enumerate() {
+        if let Some(changed) = changed {
+            current_frame.frame.prop_slots[slot] = changed;
+        }
     }
-    for changed in &delta.room_glyph_slots {
-        current_frame.frame.room_glyph_slots[usize::from(changed.slot)] = *changed;
+    for (slot, changed) in prepared.room_glyph_slots.into_iter().enumerate() {
+        if let Some(changed) = changed {
+            current_frame.frame.room_glyph_slots[slot] = changed;
+        }
     }
-    for changed in &delta.tank_slots {
-        current_frame.frame.tank_slots[usize::from(changed.slot)] = *changed;
+    for (slot, changed) in prepared.tank_slots.into_iter().enumerate() {
+        if let Some(changed) = changed {
+            current_frame.frame.tank_slots[slot] = changed;
+        }
     }
-    for changed in &delta.ambient_slots {
-        current_frame.frame.ambient_slots[usize::from(changed.slot)] = *changed;
+    for (slot, changed) in prepared.ambient_slots.into_iter().enumerate() {
+        if let Some(changed) = changed {
+            current_frame.frame.ambient_slots[slot] = changed;
+        }
     }
-    for changed in &delta.analytic_slots {
-        current_frame.frame.analytic_slots[usize::from(changed.id.0)] = *changed;
+    for (slot, changed) in prepared.analytic_slots.into_iter().enumerate() {
+        if let Some(changed) = changed {
+            current_frame.frame.analytic_slots[slot] = changed;
+        }
     }
-    Ok(FrameDeltaValidation {
-        node_slots_checked: delta.nodes.len(),
-        node_slots_applied,
-        lit_path_indices_visited: affected_path_count,
-        lit_paths_checked,
-    })
+    current_frame.epoch = current_frame.epoch.wrapping_add(1);
+    prepared.audit
 }
 
 fn validate_versions(schema: u16, renderer: u16) -> Result<(), SceneValidationError> {
@@ -3547,6 +3679,126 @@ mod tests {
             validate_frame_delta(&FrameDelta::empty(), &accepted_a, &mut current_b),
             Err(SceneValidationError::AcceptedStateMismatch)
         );
+    }
+
+    #[test]
+    fn accepted_frame_delta_prepare_is_read_only_and_commit_matches_wrapper() {
+        let fixture = SceneFixture::valid();
+        let mut prepared_state =
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap();
+        let mut wrapped_state = prepared_state.clone();
+        let before = prepared_state.clone();
+        let mut delta = FrameDelta::empty();
+        let mut camera = fixture.frame.camera;
+        camera.far_z = -4.0;
+        camera.near_z = 4.0;
+        delta.camera = Some(camera);
+        let mut node = fixture.frame.nodes[0];
+        node.local_transform = Transform3::translated([3.0, 4.0, 0.0]);
+        node.opacity = 0.75;
+        delta.nodes.push(node);
+        delta.gauges = Some([0.25, 0.5, 0.75, 1.0]);
+        delta.dim_amount = Some(0.5);
+
+        let prepared = prepared_state.prepare_frame_delta(&delta).unwrap();
+        assert_eq!(prepared_state, before);
+
+        let prepared_audit = prepared_state.commit_prepared_frame_delta(prepared);
+        let wrapped_audit = wrapped_state.apply_frame_delta(&delta).unwrap();
+        assert_eq!(prepared_audit, wrapped_audit);
+        assert_eq!(prepared_state, wrapped_state);
+    }
+
+    #[test]
+    fn prepared_frame_delta_survives_moving_state_and_caller_delta() {
+        let fixture = SceneFixture::valid();
+        let state =
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap();
+        let mut delta = FrameDelta::empty();
+        delta.gauges = Some([0.25, 0.5, 0.75, 1.0]);
+        let prepared = state.prepare_frame_delta(&delta).unwrap();
+
+        let moved_delta = Box::new(delta);
+        drop(moved_delta);
+        let mut moved_state = Box::new(state);
+        moved_state.commit_prepared_frame_delta(prepared);
+
+        assert_eq!(moved_state.frame().frame().gauges, [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn prepared_frame_delta_retains_source_identity_and_clones_get_fresh_identity() {
+        let fixture = SceneFixture::valid();
+        let state =
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap();
+        let source_identity = Arc::downgrade(&state.frame.instance_identity);
+        let prepared = state.prepare_frame_delta(&FrameDelta::empty()).unwrap();
+        let mut cloned_state = state.clone();
+        let before = cloned_state.clone();
+
+        assert!(!Arc::ptr_eq(
+            &state.frame.instance_identity,
+            &cloned_state.frame.instance_identity,
+        ));
+        drop(state);
+        assert!(source_identity.upgrade().is_some());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cloned_state.commit_prepared_frame_delta(prepared);
+        }));
+
+        assert!(result.is_err());
+        assert!(source_identity.upgrade().is_none());
+        assert_eq!(cloned_state.frame().epoch(), 0);
+        assert_eq!(cloned_state, before);
+    }
+
+    #[test]
+    fn stale_prepared_frame_delta_is_rejected_before_a_second_commit() {
+        let fixture = SceneFixture::valid();
+        let mut state =
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap();
+        let mut first_delta = FrameDelta::empty();
+        let mut first_node = fixture.frame.nodes[0];
+        first_node.local_transform = Transform3::translated([1.0, 0.0, 0.0]);
+        first_delta.nodes.push(first_node);
+        let first = state.prepare_frame_delta(&first_delta).unwrap();
+
+        let mut newer_delta = FrameDelta::empty();
+        let mut newer_node = fixture.frame.nodes[0];
+        newer_node.local_transform = Transform3::translated([2.0, 0.0, 0.0]);
+        newer_delta.nodes.push(newer_node);
+        let newer = state.prepare_frame_delta(&newer_delta).unwrap();
+
+        assert_eq!(state.frame().epoch(), 0);
+        state.commit_prepared_frame_delta(newer);
+        assert_eq!(state.frame().epoch(), 1);
+        let after_first_commit = state.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.commit_prepared_frame_delta(first);
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(state.frame().epoch(), 1);
+        assert_eq!(state, after_first_commit);
+    }
+
+    #[test]
+    fn prepared_frame_delta_cannot_commit_to_a_cloned_frame_instance() {
+        let fixture = SceneFixture::valid();
+        let state =
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap();
+        let prepared = state.prepare_frame_delta(&FrameDelta::empty()).unwrap();
+        let mut cloned_state = state.clone();
+        let before = cloned_state.clone();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cloned_state.commit_prepared_frame_delta(prepared);
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(cloned_state.frame().epoch(), 0);
+        assert_eq!(cloned_state, before);
     }
 
     #[test]
