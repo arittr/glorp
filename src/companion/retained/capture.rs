@@ -14,8 +14,9 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
+use super::host::RetainedHost;
 use super::presentation::RetainedFailureCategory;
-use super::{prepare_gpu_frame, RetainedChrome, RetainedHost};
+use super::{prepare_gpu_frame, RetainedChrome};
 use crate::companion::paired_review::{PairedReviewFrame, RendererIdentitySource};
 use crate::round::draw::RoundColor;
 

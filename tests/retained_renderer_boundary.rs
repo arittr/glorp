@@ -12,7 +12,7 @@
 //!    (`bitmapImageRepForCachingDisplayInRect` /
 //!    `cacheDisplayInRect_toBitmapImageRep`) to obtain pixels — capture must
 //!    read them straight off the GPU. The glyph rasterizer's unrelated
-//!    `NSBitmapImageRep::initWithBitmapDataPlanes...` use in `retained.rs` is a
+//!    `NSBitmapImageRep::initWithBitmapDataPlanes...` use in `resources.rs` is a
 //!    different selector and is deliberately not in scope here.
 
 use std::fs;
@@ -44,6 +44,87 @@ fn retained_source_files() -> Vec<PathBuf> {
 fn read(path: &Path) -> String {
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("cannot read retained source {}: {error}", path.display()))
+}
+
+fn production_source(text: &str) -> &str {
+    text.split("\n#[cfg(test)]\nmod tests {")
+        .next()
+        .unwrap_or(text)
+}
+
+#[test]
+fn retained_host_owns_appkit_surface_and_queue_types() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/retained");
+    let host_path = root.join("host.rs");
+    let host = read(&host_path);
+    for required in [
+        "surface: wgpu::Surface<'static>,",
+        "config: wgpu::SurfaceConfiguration,",
+        "device: wgpu::Device,",
+        "queue: wgpu::Queue,",
+        "layer: Retained<CAMetalLayer>,",
+    ] {
+        assert!(
+            host.contains(required),
+            "retained host must own {required} in {}",
+            host_path.display(),
+        );
+    }
+
+    // `parity.rs` has isolated headless GPU test infrastructure. The production
+    // ownership seam covers the live retained root and its runtime support
+    // modules. Helpers may borrow Device/Queue, while buffers borrow Device to
+    // allocate storage; only host.rs may own the live surface stack as fields.
+    let mut ownership_sources = vec![root.with_extension("rs")];
+    for relative in [
+        "buffers.rs",
+        "capture.rs",
+        "metrics.rs",
+        "presentation.rs",
+        "resources.rs",
+        "worker.rs",
+    ] {
+        ownership_sources.push(root.join(relative));
+    }
+    for path in ownership_sources {
+        let text = read(&path);
+        let production = production_source(&text);
+        for forbidden in [
+            "CAMetalLayer",
+            "surface: wgpu::Surface<'static>",
+            "config: wgpu::SurfaceConfiguration",
+            "device: wgpu::Device",
+            "queue: wgpu::Queue",
+            "MainThreadMarker",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "live retained ownership outside host.rs must not name {forbidden}: {}",
+                path.display(),
+            );
+        }
+    }
+}
+
+#[test]
+fn retained_buffers_have_no_appkit_or_objc2_dependencies() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/retained/buffers.rs");
+    let text = read(&path);
+    for forbidden in [
+        "AppKit",
+        "objc2",
+        "NSView",
+        "CAMetalLayer",
+        "MainThreadMarker",
+        "device: wgpu::Device",
+        "queue: wgpu::Queue",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "retained buffers must remain platform-UI-free ({forbidden} in {})",
+            path.display(),
+        );
+    }
 }
 
 #[test]
@@ -134,7 +215,7 @@ fn terminal_metrics_survive_fallback_and_follow_paired_capture() {
 
 #[test]
 fn activation_finishes_on_first_successful_present_not_frame_zero() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/retained.rs");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/retained/host.rs");
     let text = read(&path);
     assert!(text.contains("activation_render_owner_us"));
     assert!(
@@ -149,11 +230,12 @@ fn activation_finishes_on_first_successful_present_not_frame_zero() {
 #[test]
 fn active_hold_then_raster_worker_service_run_before_current_frame_preparation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let retained = read(&root.join("src/companion/retained.rs"));
-    let render_start = retained
+    let host = read(&root.join("src/companion/retained/host.rs"));
+    let render_start = host
         .find("    pub(super) fn render(")
+        .or_else(|| host.find("    pub(in crate::companion) fn render("))
         .expect("retained render exists");
-    let render_tail = &retained[render_start..];
+    let render_tail = &host[render_start..];
     let render_end = render_tail
         .find("\n    ///")
         .expect("render has a following method");
@@ -217,7 +299,7 @@ fn active_hold_then_raster_worker_service_run_before_current_frame_preparation()
 #[test]
 fn host_owned_worker_validates_completed_resources_before_atomic_publish() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = read(&root.join("src/companion/retained.rs"));
+    let text = read(&root.join("src/companion/retained/host.rs"));
     assert!(text.contains("raster_worker: RasterWorker"));
     let start = text
         .find("    fn advance_resource_preparation(\n        &mut self,")
@@ -277,6 +359,7 @@ fn production_and_evidence_paths_never_use_monolithic_appkit_atlas_compile() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for relative in [
         "src/companion/retained.rs",
+        "src/companion/retained/host.rs",
         "src/companion/paired_review.rs",
         "src/companion/app.rs",
     ] {
@@ -331,23 +414,34 @@ fn atlas_fonts_resolve_through_nullable_bounded_boundary_once_per_job() {
 fn instance_uploads_use_one_host_owned_staging_belt_on_every_submission_path() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let retained = read(&root.join("src/companion/retained.rs"));
-    let production = retained
-        .split("\n#[cfg(test)]\nmod tests {")
-        .next()
-        .unwrap_or(&retained);
-    assert!(!production.contains("queue.write_buffer"));
-    let buffers_start = production.find("struct PersistentFrameBuffers {").unwrap();
-    let buffers_end = production[buffers_start..].find("\n}").unwrap() + buffers_start;
+    let production = production_source(&retained);
+    let host = read(&root.join("src/companion/retained/host.rs"));
+    let host_production = production_source(&host);
+    let buffers = read(&root.join("src/companion/retained/buffers.rs"));
+    for (path, source) in [
+        ("retained.rs", production),
+        ("host.rs", host_production),
+        ("buffers.rs", buffers.as_str()),
+    ] {
+        assert!(
+            !source.contains("queue.write_buffer"),
+            "instance uploads must use the reusable staging belt in {path}"
+        );
+    }
+    let buffers_start = buffers.find("struct PersistentFrameBuffers {").unwrap();
+    let buffers_end = buffers[buffers_start..].find("\n}").unwrap() + buffers_start;
     assert_eq!(
-        production[buffers_start..buffers_end]
+        buffers[buffers_start..buffers_end]
             .matches("staging_belt: wgpu::util::StagingBelt")
             .count(),
         1
     );
-    assert!(production.contains("FIXED_INSTANCE_RING_MIN * INSTANCE_STRIDE"));
+    assert!(buffers.contains("FIXED_INSTANCE_RING_MIN * INSTANCE_STRIDE"));
 
-    let render_start = production.find("    pub(super) fn render(").unwrap();
-    let render = &production[render_start..];
+    let render_start = host_production
+        .find("    pub(in crate::companion) fn render(")
+        .unwrap();
+    let render = &host_production[render_start..];
     let acquire = render.find("self.surface.get_current_texture()").unwrap();
     let stage = render
         .find("self.prepare_frame(&mut encoder, &frame)")
@@ -362,7 +456,7 @@ fn instance_uploads_use_one_host_owned_staging_belt_on_every_submission_path() {
     let lifetime_start = production
         .find("impl<Prepare> LifetimeAuditExecutor for GpuLifetimeAuditExecutor")
         .unwrap();
-    let lifetime = &production[lifetime_start..render_start];
+    let lifetime = &production[lifetime_start..];
     assert!(
         lifetime.find("prepare_frame(&mut encoder").unwrap()
             < lifetime.find("finish_uploads()").unwrap()
