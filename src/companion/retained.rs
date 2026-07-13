@@ -22,6 +22,8 @@ mod buffers;
 mod capture;
 mod compiler;
 mod host;
+#[allow(dead_code)] // Pure sealed HUD preparation; GPU binding lands in the activation slice.
+pub(crate) mod hud;
 mod metrics;
 mod parity;
 mod presentation;
