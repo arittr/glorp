@@ -52,6 +52,8 @@ pub fn run() -> Result<()> {
             review_depth,
             review_capture_live_values,
             review_force_dim,
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            retained_scene_runtime,
             #[cfg(all(
                 target_os = "macos",
                 feature = "retained-renderer",
@@ -80,6 +82,12 @@ pub fn run() -> Result<()> {
                 review.retained_fault_injection = review_inject_retained_fault;
                 review
             };
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            let review = {
+                let mut review = review;
+                review.retained_scene_runtime = retained_scene_runtime;
+                review
+            };
             commands::companion::run(renderer, review)?
         }
         Command::CompanionApp { renderer, print_capabilities: true, .. } => {
@@ -100,6 +108,8 @@ pub fn run() -> Result<()> {
             review_depth,
             review_capture_live_values,
             review_force_dim,
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            retained_scene_runtime,
             #[cfg(all(
                 target_os = "macos",
                 feature = "retained-renderer",
@@ -126,6 +136,12 @@ pub fn run() -> Result<()> {
             let review = {
                 let mut review = review;
                 review.retained_fault_injection = review_inject_retained_fault;
+                review
+            };
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            let review = {
+                let mut review = review;
+                review.retained_scene_runtime = retained_scene_runtime;
                 review
             };
             commands::companion_app::run(renderer, review)?

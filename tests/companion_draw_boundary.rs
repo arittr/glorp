@@ -68,3 +68,44 @@ fn ui_tick_owns_preparation_and_smooth_uses_the_fallible_planner() {
     assert!(prepare_current.contains("state.last_good_frame = Some(frame)"));
     assert!(prepare_frame.contains("try_build_round_smooth_scene_plan_with_options("));
 }
+
+#[cfg(feature = "retained-renderer")]
+#[test]
+fn live_scene_tick_preparation_stays_out_of_the_smooth_plan_path() {
+    let prepare_scene = source_between(
+        APP_SOURCE,
+        "\nfn prepare_scene_runtime_tick(",
+        "\nfn service_scene_runtime(",
+    );
+    assert!(prepare_scene.contains("CompanionSceneSnapshot::project_with_input("));
+    for forbidden in [
+        "derive_round_scene_model(",
+        "prepare_companion_frame(",
+        "PreparedRendererFrame::Smooth",
+        "SmoothCompanionScenePlan",
+        "try_build_round_smooth_scene_plan",
+        "SceneDrawList",
+    ] {
+        assert!(
+            !prepare_scene.contains(forbidden),
+            "live scene preparation must not depend on {forbidden}"
+        );
+    }
+}
+
+#[cfg(feature = "retained-renderer")]
+#[test]
+fn draw_scene_remains_prepared_frame_and_fallback_only_with_scene_live_enabled() {
+    let body = source_between(APP_SOURCE, "\nfn draw_scene(", "\nfn paint_prepared_frame(");
+    for forbidden in [
+        "CompanionSceneSnapshot",
+        "service_scene_runtime(",
+        "present_active_scene(",
+        "activate_candidate(",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "draw_scene must not own scene runtime work: {forbidden}"
+        );
+    }
+}

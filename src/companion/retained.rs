@@ -40,7 +40,9 @@ use buffers::{
 pub(crate) use capture::CanonicalRgbaFrame;
 #[cfg(test)]
 use host::{physical_dimension, LayerActivationGuard, LayerActivationState};
-pub(super) use host::{ActiveRetainedHost, PreparedRetainedHost};
+pub(super) use host::{
+    ActiveRetainedHost, PreparedRetainedHost, SceneGenerationServiceTick, ScenePresentOutcome,
+};
 use host::{Pipelines, RetainedHost};
 pub(crate) use metrics::{
     duration_us, CapacityContract, CompanionCapacityInventory, CompanionRuntimeMetrics,
@@ -256,6 +258,13 @@ struct ActiveSceneGeneration {
     gpu: render::GpuSceneCandidate,
 }
 
+fn should_defer_scene_reveal(
+    external: Option<crate::presentation::companion_scene::SceneVersion>,
+    logical: Option<crate::presentation::companion_scene::SceneVersion>,
+) -> bool {
+    matches!((external, logical), (Some(external), Some(logical)) if external != logical)
+}
+
 #[derive(Debug)]
 #[allow(dead_code)] // Surfaced by the dormant Task 12 host scene service until Task 14 routing.
 enum SceneCandidatePreparationError {
@@ -304,6 +313,10 @@ struct CpuReadySceneCandidate {
 #[allow(dead_code)] // Host-owned production seam; installed by the Task 14 live route.
 pub(in crate::companion) struct RetainedSceneActivation {
     generations: RetainedSceneGenerationState,
+    gpu: Option<RetainedSceneGpuState>,
+}
+
+struct RetainedSceneGpuState {
     shared: render::SceneGpuShared,
     renderer: render::SceneRenderer,
 }
@@ -331,6 +344,51 @@ impl RetainedSceneGenerationState {
         crate::presentation::companion_scene::runtime::RuntimeError,
     > {
         self.runtime.invalidate_resources(invalidation)
+    }
+
+    fn reconcile_snapshot(
+        &mut self,
+        snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::RuntimeEffects,
+        RetainedFailureCategory,
+    > {
+        let prepared = self
+            .runtime
+            .prepare_snapshot(snapshot)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        self.runtime
+            .commit_prepared(prepared)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)
+    }
+
+    fn set_hidden(&mut self) -> crate::presentation::companion_scene::runtime::RuntimeEffects {
+        self.runtime.set_hidden()
+    }
+
+    fn coalesce_hidden_snapshot(
+        &mut self,
+        snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::RuntimeEffects,
+        crate::presentation::companion_scene::runtime::RuntimeError,
+    > {
+        self.runtime.coalesce_hidden_snapshot(snapshot)
+    }
+
+    fn reveal(
+        &mut self,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::RuntimeEffects,
+        RetainedFailureCategory,
+    > {
+        let prepared = self
+            .runtime
+            .prepare_reveal()
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        self.runtime
+            .commit_reveal(prepared)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)
     }
 
     fn accept_worker_candidate(
@@ -457,6 +515,122 @@ impl RetainedSceneGenerationState {
             return Err(ActivationStartError::NoReadyCandidate);
         }
         self.runtime.begin_activation()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_active_to_surface(
+        &mut self,
+        renderer: &mut render::SceneRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &render::SceneGpuShared,
+        request_extent: [u32; 2],
+        backing_scale: f64,
+        prepared_hud: &hud::SensitivePreparedHudFrame,
+        surface_view: &wgpu::TextureView,
+    ) -> Result<crate::presentation::companion_scene::SceneVersion, render::SceneRenderError> {
+        let Self { runtime, active, .. } = self;
+        let lease = runtime.capture_lease().map_err(|_| {
+            render::SceneRenderError::Delta(render::SceneDeltaRenderError::RevisionMismatch)
+        })?;
+        let version = lease.version();
+        let active = active.as_mut().ok_or({
+            render::SceneRenderError::Delta(render::SceneDeltaRenderError::RevisionMismatch)
+        })?;
+        if active.version.generation != version.generation {
+            return Err(render::SceneRenderError::Delta(
+                render::SceneDeltaRenderError::GenerationMismatch,
+            ));
+        }
+        let request = render::SceneRenderRequest::new(version, request_extent, backing_scale);
+        if active.version.applied == version.applied {
+            renderer.submit_active_to_surface(
+                device,
+                queue,
+                shared,
+                &mut active.gpu,
+                request,
+                prepared_hud,
+                surface_view,
+            )?;
+        } else {
+            renderer.submit_active_to_surface_with_delta(
+                device,
+                queue,
+                shared,
+                &mut active.cpu,
+                &mut active.gpu,
+                lease.content_delta(),
+                lease.frame_delta(),
+                request,
+                prepared_hud,
+                surface_view,
+            )?;
+        }
+        active.version = version;
+        Ok(version)
+    }
+
+    fn active_version(&self) -> Option<crate::presentation::companion_scene::SceneVersion> {
+        self.active.as_ref().map(|active| active.version)
+    }
+
+    fn active_delta_pending(&self) -> bool {
+        should_defer_scene_reveal(self.active_version(), self.runtime.active_version())
+    }
+
+    fn metrics_version(&self) -> Option<crate::presentation::companion_scene::SceneVersion> {
+        self.active_version()
+            .or_else(|| {
+                self.ready_candidate
+                    .as_ref()
+                    .map(|candidate| candidate.version)
+            })
+            .or_else(|| {
+                let identity = self.runtime.pending_request_identity()?;
+                Some(crate::presentation::companion_scene::SceneVersion {
+                    generation: identity.key(),
+                    surface: identity.surface(),
+                    applied: self
+                        .runtime
+                        .pending_desired_source()
+                        .unwrap_or_else(|| identity.source()),
+                })
+            })
+    }
+
+    fn prepare_ready_hud(
+        &self,
+        text: &crate::round::hud::CompanionHudText,
+        geometry: hud::HudPreparationGeometry,
+    ) -> Result<hud::SensitivePreparedHudFrame, hud::HudPreparationError> {
+        let candidate = self
+            .ready_candidate
+            .as_ref()
+            .ok_or(hud::HudPreparationError::ResourceGenerationMismatch)?;
+        let sealed = hud::SealedHudFrame::from_live(text)?;
+        candidate
+            .gpu
+            .hud
+            .prepared_atlas()
+            .prepare_sensitive(&sealed, geometry)
+    }
+
+    fn prepare_active_hud(
+        &self,
+        text: &crate::round::hud::CompanionHudText,
+        geometry: hud::HudPreparationGeometry,
+    ) -> Result<hud::SensitivePreparedHudFrame, hud::HudPreparationError> {
+        let active = self
+            .active
+            .as_ref()
+            .ok_or(hud::HudPreparationError::ResourceGenerationMismatch)?;
+        let sealed = hud::SealedHudFrame::from_live(text)?;
+        active
+            .gpu
+            .hud
+            .prepared_atlas()
+            .prepare_sensitive(&sealed, geometry)
     }
 
     fn finish_candidate_activation(
@@ -2025,10 +2199,11 @@ mod tests {
         cached_current_failure, create_atlas_bind_group_layout, create_pipelines,
         current_process_rss_bytes, glyph_advance, glyph_ink_rect, glyph_run_height,
         glyph_run_width, persistent_instance_capacity, physical_dimension, push_analytic_arc,
-        resource_failure_tick, run_lifetime_schedule, terminal_worker_decision, upload_glyph_atlas,
-        CompiledGlyphAtlas, CompiledRetainedResources, FailedGlyphPreparation, GlyphAtlasEntry,
-        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
-        LayerActivationState, LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
+        resource_failure_tick, run_lifetime_schedule, should_defer_scene_reveal,
+        terminal_worker_decision, upload_glyph_atlas, CompiledGlyphAtlas,
+        CompiledRetainedResources, FailedGlyphPreparation, GlyphAtlasEntry, GlyphKey,
+        GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard, LayerActivationState,
+        LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
         PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationController,
         ResourcePreparationKey, ResourcePreparationTick, RetainedFailureCategory,
         RetainedResourceCounters, RetainedSceneGenerationState, SmoothBlendMode,
@@ -2316,6 +2491,53 @@ mod tests {
         assert_eq!(candidate.cpu.source_revisions, desired);
         assert_eq!(candidate.gpu.source_revisions, desired);
         assert!(generations.begin_activation().is_ok());
+    }
+
+    #[test]
+    fn hidden_reveal_retries_external_to_logical_before_committing_latest() {
+        use crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState;
+
+        let initial =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(0));
+        let mut runtime = CompanionSceneRuntimeState::with_active(initial).unwrap();
+        let external = runtime.active_version().unwrap();
+
+        let middle =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(1));
+        let prepared = runtime
+            .prepare_snapshot(std::sync::Arc::clone(&middle))
+            .unwrap();
+        runtime.commit_prepared(prepared).unwrap();
+        let logical_middle = runtime.active_version().unwrap();
+        assert!(should_defer_scene_reveal(
+            Some(external),
+            Some(logical_middle)
+        ));
+        let retry = runtime.capture_lease().unwrap();
+        assert_eq!(retry.content_delta().from, external.applied);
+        assert_eq!(retry.content_delta().to, logical_middle.applied);
+        assert_eq!(retry.frame_delta().from, external.applied);
+        assert_eq!(retry.frame_delta().to, logical_middle.applied);
+
+        runtime.set_hidden();
+        let mut latest = (*middle).clone();
+        latest.frame.dimmed = !latest.frame.dimmed;
+        latest.frame.dim_amount = if latest.frame.dimmed { 0.35 } else { 0.0 };
+        runtime
+            .coalesce_hidden_snapshot(std::sync::Arc::new(latest))
+            .unwrap();
+
+        assert!(!should_defer_scene_reveal(
+            Some(logical_middle),
+            runtime.active_version()
+        ));
+        let prepared = runtime.prepare_reveal().unwrap();
+        runtime.commit_reveal(prepared).unwrap();
+        let revealed = runtime.capture_lease().unwrap();
+        assert_eq!(revealed.content_delta().from, logical_middle.applied);
+        assert_eq!(revealed.content_delta().to, revealed.version().applied);
+        assert_eq!(revealed.frame_delta().from, logical_middle.applied);
+        assert_eq!(revealed.frame_delta().to, revealed.version().applied);
     }
 
     fn ready_scene_generation() -> (

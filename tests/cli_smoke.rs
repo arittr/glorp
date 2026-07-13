@@ -495,6 +495,21 @@ fn companion_app_accepts_hidden_retained_renderer_under_feature() {
         .success();
 }
 
+#[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+#[test]
+fn companion_commands_accept_hidden_retained_scene_runtime_modes() {
+    for subcommand in ["companion", "companion-app"] {
+        for rollout in ["off", "shadow", "live"] {
+            Command::cargo_bin("glorp")
+                .unwrap()
+                .args([subcommand, "--retained-scene-runtime", rollout, "--help"])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("--retained-scene-runtime").not());
+        }
+    }
+}
+
 #[cfg(not(feature = "retained-renderer"))]
 #[test]
 fn companion_rejects_retained_renderer_without_feature() {

@@ -1446,6 +1446,19 @@ impl CaptureLease<'_> {
         self.active.generation.frame()
     }
 
+    /// The latest compatible content delta committed into the active logical
+    /// generation. A retained host whose GPU mirror still carries `from` can
+    /// stage this transaction directly and publish `to` only after submission.
+    pub(crate) fn content_delta(&self) -> &super::scene::ContentDelta {
+        &self.active.generation.delta_scratch.content
+    }
+
+    /// The frame half of [`content_delta`](Self::content_delta). The pair shares
+    /// one generation and revision interval by construction.
+    pub(crate) fn frame_delta(&self) -> &super::scene::FrameDelta {
+        &self.active.generation.delta_scratch.frame
+    }
+
     pub(crate) const fn content_checksum(&self) -> u64 {
         self.active.generation.content_checksum()
     }

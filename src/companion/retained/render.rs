@@ -4128,6 +4128,272 @@ impl SceneRenderer {
         }
     }
 
+    /// Submits one already-active scene generation to the host surface without a
+    /// logical delta. Ordinary Live frames use the paired delta variant below;
+    /// this path keeps an older active generation visible while a topology build
+    /// is still preparing.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn submit_active_to_surface(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
+        surface_view: &wgpu::TextureView,
+    ) -> Result<wgpu::SubmissionIndex, SceneRenderError> {
+        self.submit_active_to_surface_inner(
+            device,
+            queue,
+            shared,
+            candidate,
+            request,
+            prepared_hud,
+            surface_view,
+            None,
+        )
+    }
+
+    /// Stages, submits, and commits one compatible active-scene delta as a single
+    /// transaction. CPU and GPU mirrors advance only after a clean submission;
+    /// every pre-submit failure discards the pending packed state.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn submit_active_to_surface_with_delta(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        cpu: &mut CpuSceneCandidate,
+        candidate: &mut GpuSceneCandidate,
+        content_delta: &crate::presentation::companion_scene::scene::ContentDelta,
+        frame_delta: &crate::presentation::companion_scene::scene::FrameDelta,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
+        surface_view: &wgpu::TextureView,
+    ) -> Result<wgpu::SubmissionIndex, SceneRenderError> {
+        self.validate_actual_identity(device, queue, shared, candidate)?;
+        if cpu.generation_key != candidate.generation_key {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::GenerationMismatch,
+            ));
+        }
+        if cpu.static_checksum != candidate.static_checksum {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::StaticChecksumMismatch,
+            ));
+        }
+        if cpu.source_revisions != candidate.source_revisions {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::RevisionMismatch,
+            ));
+        }
+        if cpu.logical_viewport_points() != candidate.logical_viewport_points {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::LogicalViewportMismatch,
+            ));
+        }
+        let prepared = cpu
+            .prepare_deltas(content_delta, frame_delta)
+            .map_err(SceneRenderError::DeltaPreparation)?;
+        let dirty = prepared.dirty_spans();
+        if dirty.from != candidate.source_revisions || dirty.to != request.version.applied {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::PreparedRevisionMismatch,
+            ));
+        }
+        self.submit_active_to_surface_inner(
+            device,
+            queue,
+            shared,
+            candidate,
+            request,
+            prepared_hud,
+            surface_view,
+            Some(SceneDeltaTransaction { cpu, prepared }),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_active_to_surface_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
+        surface_view: &wgpu::TextureView,
+        mut delta: Option<SceneDeltaTransaction<'_>>,
+    ) -> Result<wgpu::SubmissionIndex, SceneRenderError> {
+        if self.device_epoch != shared.device_epoch {
+            return Err(SceneRenderError::RendererDeviceEpochMismatch {
+                renderer: self.device_epoch,
+                shared: shared.device_epoch,
+            });
+        }
+        self.validate_actual_identity(device, queue, shared, candidate)?;
+        let (revisions, logical_viewport_points) = delta
+            .as_ref()
+            .map(|transaction| {
+                (
+                    transaction.prepared.dirty_spans().to,
+                    transaction.prepared.prospective_logical_viewport_points(),
+                )
+            })
+            .unwrap_or((
+                candidate.source_revisions,
+                candidate.logical_viewport_points,
+            ));
+        let target_key = derive_scene_target_key(
+            shared.device_epoch,
+            candidate.generation_key,
+            revisions,
+            logical_viewport_points,
+            shared.max_texture_dimension_2d,
+            &request,
+        )
+        .map_err(SceneRenderError::Request)?;
+        let physical_delta = delta
+            .as_ref()
+            .map(|transaction| {
+                stage_prepared_scene_delta(&mut candidate.generation_state, &transaction.prepared)
+            })
+            .transpose()
+            .map_err(SceneRenderError::Delta)?;
+        let blended_order_prepared = if physical_delta.is_some()
+            && delta
+                .as_ref()
+                .is_some_and(|transaction| transaction.prepared.blended_depth_dirty())
+        {
+            match candidate.blended_order.prepare_from_packed(
+                candidate.generation_state.nodes.pending.as_ref(),
+                candidate.generation_state.frame.pending.as_ref(),
+                true,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    candidate.generation_state.reset_pending();
+                    candidate.blended_order.discard_pending();
+                    return Err(SceneRenderError::Delta(
+                        SceneDeltaRenderError::BlendedOrder(error),
+                    ));
+                }
+            }
+        } else {
+            candidate.blended_order.discard_pending();
+            false
+        };
+
+        if let Err(error) = self.targets.ensure(device, shared, target_key) {
+            if physical_delta.is_some() {
+                candidate.generation_state.reset_pending();
+                candidate.blended_order.discard_pending();
+            }
+            return Err(SceneRenderError::Target(error));
+        }
+        let targets = self
+            .targets
+            .current()
+            .expect("successful target ensure installs the requested target");
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let submission_result = (|| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glorp-scene-active-surface-encoder"),
+            });
+            let scene_buffer_copies = physical_delta
+                .map(|physical| {
+                    encode_scene_delta_copies(
+                        &mut encoder,
+                        &mut self.staging_belt,
+                        candidate,
+                        physical,
+                    )
+                })
+                .unwrap_or(0);
+            encode_scene_world(&mut encoder, targets, shared, candidate);
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-active-chrome-prefix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.prefix,
+            );
+            encode_sensitive_hud_hook(
+                &mut encoder,
+                &mut self.staging_belt,
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                prepared_hud,
+            )?;
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-active-chrome-suffix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.suffix,
+            );
+            encode_aperture_composite(&mut encoder, targets, shared, candidate);
+            encode_final_surface(&mut encoder, surface_view, targets, shared);
+            self.staging_belt.finish();
+            let submission = queue.submit([encoder.finish()]);
+            #[cfg(test)]
+            {
+                self.submission_events = self.submission_events.saturating_add(1);
+                self.scene_buffer_copy_events = self
+                    .scene_buffer_copy_events
+                    .saturating_add(u64::try_from(scene_buffer_copies).unwrap_or(u64::MAX));
+            }
+            #[cfg(not(test))]
+            let _ = scene_buffer_copies;
+            self.staging_belt.recall();
+            Ok::<_, super::hud::HudGpuStagingError>(submission)
+        })();
+
+        let validation_error = pollster::block_on(validation.pop()).map(sanitize_gpu_error);
+        let out_of_memory_error = pollster::block_on(out_of_memory.pop()).map(sanitize_gpu_error);
+        let internal_error = pollster::block_on(internal.pop()).map(sanitize_gpu_error);
+        if let Some(category) =
+            select_scoped_gpu_error(validation_error, out_of_memory_error, internal_error)
+        {
+            self.reset_staging_belt(device);
+            if physical_delta.is_some() {
+                candidate.generation_state.reset_pending();
+                candidate.blended_order.discard_pending();
+            }
+            return Err(SceneRenderError::Gpu(category));
+        }
+        let submission = match submission_result {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.reset_staging_belt(device);
+                if physical_delta.is_some() {
+                    candidate.generation_state.reset_pending();
+                    candidate.blended_order.discard_pending();
+                }
+                return Err(SceneRenderError::Hud(error));
+            }
+        };
+
+        if let Some(transaction) = delta.take() {
+            let expected_dirty = transaction.prepared.dirty_spans();
+            let applied = transaction.cpu.commit_prepared(transaction.prepared);
+            debug_assert_eq!(applied.dirty, expected_dirty);
+            candidate.generation_state.commit_pending();
+            if blended_order_prepared {
+                candidate.blended_order.commit_pending();
+            }
+            candidate.source_revisions = applied.to;
+            candidate.logical_viewport_points = applied.prospective_logical_viewport_points;
+        }
+        Ok(submission)
+    }
+
     pub(super) fn recall_uploads(&mut self) {
         self.staging_belt.recall();
     }

@@ -69,6 +69,11 @@ fn build_open_command(
     if let Some(depth) = review.depth {
         command.arg("--review-depth").arg(depth.as_str());
     }
+    if let Some(rollout) = review.retained_scene_runtime {
+        command
+            .arg("--retained-scene-runtime")
+            .arg(rollout.as_str());
+    }
     command
 }
 
@@ -104,7 +109,8 @@ fn companion_app_path() -> Result<std::path::PathBuf> {
 mod tests {
     use super::build_open_command;
     use crate::commands::companion_mode::{
-        CompanionRendererRequest, CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
+        CompanionRendererRequest, CompanionReviewOptions, CompanionReviewSize,
+        CompanionReviewState, SceneRuntimeRollout,
     };
     use std::ffi::OsString;
     use std::path::Path;
@@ -204,6 +210,32 @@ mod tests {
                 OsString::from("target/glorp-review/test"),
             ]
         );
+    }
+
+    #[test]
+    fn retained_scene_runtime_is_forwarded_to_the_native_companion_process() {
+        for rollout in [
+            SceneRuntimeRollout::Off,
+            SceneRuntimeRollout::Shadow,
+            SceneRuntimeRollout::Live,
+        ] {
+            let command = build_open_command(
+                Path::new("/Applications/Glorp.app"),
+                CompanionRendererRequest::Auto,
+                CompanionReviewOptions {
+                    retained_scene_runtime: Some(rollout),
+                    ..CompanionReviewOptions::default()
+                },
+            );
+            let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+            assert!(
+                args.windows(2).any(|pair| {
+                    pair[0] == "--retained-scene-runtime" && pair[1] == rollout.as_str()
+                }),
+                "expected {} rollout in {args:?}",
+                rollout.as_str()
+            );
+        }
     }
 }
 

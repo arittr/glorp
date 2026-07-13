@@ -13,6 +13,10 @@ use crate::commands::companion_mode::{
     CompanionReviewOptions, CompanionReviewSize, CompanionReviewState, EffectiveCompanionRenderer,
     RendererRuntimeState, AUTO_RETAINED_ON_APPLE_SILICON,
 };
+#[cfg(feature = "retained-renderer")]
+use crate::commands::companion_mode::{
+    resolve_scene_rollout, SceneRuntimeRollout, AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+};
 use crate::commands::watch::{
     build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
 };
@@ -704,6 +708,12 @@ struct AppState {
     renderer_runtime: RendererRuntimeState,
     #[cfg(feature = "retained-renderer")]
     retained_host: Option<crate::companion::retained::ActiveRetainedHost>,
+    #[cfg(feature = "retained-renderer")]
+    scene_runtime_rollout: SceneRuntimeRollout,
+    #[cfg(feature = "retained-renderer")]
+    scene_runtime_hidden: bool,
+    #[cfg(feature = "retained-renderer")]
+    cold_smooth_fallback: ColdSmoothFallbackGate,
     pixel_input: Option<PixelPetInput>,
     pixel_state: Option<PixelRendererState>,
     pixel_frame: Option<PixelFrame>,
@@ -736,6 +746,31 @@ struct AppState {
     callback_panic_count: u64,
     #[allow(dead_code)] // Updated by the Task 5 callback guard.
     last_callback_panic_label: Option<&'static str>,
+}
+
+#[cfg(feature = "retained-renderer")]
+struct PreparedSceneRuntimeTick {
+    snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    hud: CompanionHudText,
+    hud_font_size: f64,
+}
+
+#[cfg(feature = "retained-renderer")]
+#[derive(Debug, Default)]
+struct ColdSmoothFallbackGate {
+    prepared: bool,
+}
+
+#[cfg(feature = "retained-renderer")]
+impl ColdSmoothFallbackGate {
+    fn take_prepare_request(&mut self) -> bool {
+        if self.prepared {
+            false
+        } else {
+            self.prepared = true;
+            true
+        }
+    }
 }
 
 #[cfg(feature = "retained-renderer")]
@@ -900,6 +935,20 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     };
     let mut presentation_state = WatchPresentationState::default();
     let review_state = review.resolved_state();
+    #[cfg(feature = "retained-renderer")]
+    let scene_runtime_rollout = if renderer_runtime.effective().is_retained() {
+        match review.retained_scene_runtime {
+            Some(SceneRuntimeRollout::Off) => SceneRuntimeRollout::Off,
+            Some(SceneRuntimeRollout::Shadow) => resolve_scene_rollout(true, false),
+            Some(SceneRuntimeRollout::Live) => resolve_scene_rollout(true, true),
+            None => resolve_scene_rollout(
+                request == CompanionRendererRequest::Retained,
+                AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+            ),
+        }
+    } else {
+        SceneRuntimeRollout::Off
+    };
     apply_review_state(review_state, &mut presentation_state, &mut initial_vm, now)?;
     if renderer_runtime.effective().uses_smooth_scene() {
         prepare_smooth_view_model_for_tick(&mut initial_vm, 0, now)?;
@@ -1058,6 +1107,12 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             renderer_runtime,
             #[cfg(feature = "retained-renderer")]
             retained_host,
+            #[cfg(feature = "retained-renderer")]
+            scene_runtime_rollout,
+            #[cfg(feature = "retained-renderer")]
+            scene_runtime_hidden: false,
+            #[cfg(feature = "retained-renderer")]
+            cold_smooth_fallback: ColdSmoothFallbackGate::default(),
             pixel_input,
             pixel_state,
             pixel_frame,
@@ -1304,6 +1359,16 @@ fn ui_tick() {
     // of replaying hidden frames.
     if !companion_view_is_visible() {
         #[cfg(feature = "retained-renderer")]
+        match prepare_scene_runtime_tick() {
+            Ok(Some(tick)) => {
+                if let Err(error) = coalesce_hidden_scene_snapshot(tick.snapshot) {
+                    handle_scene_runtime_failure(error);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => handle_scene_runtime_failure(error),
+        }
+        #[cfg(feature = "retained-renderer")]
         APP_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
                 let identity = crate::round::smooth::CompanionContentIdentity::for_pet(
@@ -1334,6 +1399,78 @@ fn ui_tick() {
             host.begin_visible_tick();
         }
     });
+    #[cfg(feature = "retained-renderer")]
+    if APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|state| state.scene_runtime_rollout == SceneRuntimeRollout::Live)
+    }) {
+        animate_pet();
+        let result = prepare_scene_runtime_tick().and_then(|tick| {
+            let Some(tick) = tick else {
+                return Ok(());
+            };
+            let was_hidden = APP_STATE.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .is_some_and(|state| state.scene_runtime_hidden)
+            });
+            let active_delta_pending = APP_STATE.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|state| state.retained_host.as_ref())
+                    .is_some_and(|host| host.scene_active_delta_pending())
+            });
+            if was_hidden {
+                reveal_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
+            } else if !active_delta_pending {
+                reconcile_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
+            }
+            service_scene_runtime(&tick)
+        });
+        if let Err(error) = result {
+            handle_scene_runtime_failure(error);
+        }
+        drive_smooth_fallback_paint();
+        finish_review_capture_if_due();
+        record_retained_ui_tick(started_at);
+        return;
+    }
+    #[cfg(feature = "retained-renderer")]
+    if APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|state| state.scene_runtime_rollout == SceneRuntimeRollout::Shadow)
+    }) {
+        let result = prepare_scene_runtime_tick().and_then(|tick| {
+            let Some(tick) = tick else {
+                return Ok(());
+            };
+            let legacy_generation_ready = APP_STATE.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|state| state.retained_host.as_ref())
+                    .is_some_and(|host| host.current_resource_generation() != 0)
+            });
+            if !legacy_generation_ready {
+                return Ok(());
+            }
+            let was_hidden = APP_STATE.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .is_some_and(|state| state.scene_runtime_hidden)
+            });
+            if was_hidden {
+                reveal_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
+            } else {
+                reconcile_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
+            }
+            service_scene_runtime(&tick)
+        });
+        if let Err(error) = result {
+            handle_scene_runtime_failure(error);
+        }
+    }
     #[cfg(feature = "retained-renderer")]
     let presented_active_generation = present_retained_active_generation();
     #[cfg(feature = "retained-renderer")]
@@ -1486,6 +1623,269 @@ fn companion_view_is_visible() -> bool {
             && window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible)
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn coalesce_hidden_scene_snapshot(
+    snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return Ok(());
+        };
+        if state.scene_runtime_rollout == SceneRuntimeRollout::Off {
+            return Ok(());
+        }
+        let Some(host) = state.retained_host.as_mut() else {
+            return Ok(());
+        };
+        if !host.has_scene_runtime() {
+            return Ok(());
+        }
+        if !state.scene_runtime_hidden {
+            host.hide_scene_runtime()?;
+            state.scene_runtime_hidden = true;
+        }
+        host.coalesce_hidden_scene_snapshot(snapshot)
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn reveal_scene_runtime(
+    snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return Ok(());
+        };
+        let Some(host) = state.retained_host.as_mut() else {
+            return Ok(());
+        };
+        let revealed = if host.has_scene_runtime() && state.scene_runtime_hidden {
+            host.reveal_scene_runtime(snapshot)?
+        } else {
+            host.reconcile_scene_snapshot(snapshot)?;
+            true
+        };
+        state.scene_runtime_hidden = !revealed;
+        Ok(())
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn prepare_scene_runtime_tick() -> std::result::Result<
+    Option<PreparedSceneRuntimeTick>,
+    crate::companion::retained::RetainedFailureCategory,
+> {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return Ok(None);
+        };
+        if state.scene_runtime_rollout == SceneRuntimeRollout::Off || state.retained_host.is_none()
+        {
+            return Ok(None);
+        }
+        let bounds = prepare_bounds(state.view.bounds()).map_err(|_| {
+            crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode
+        })?;
+        let metrics = state.metric_cache.metrics_for(bounds).map_err(|_| {
+            crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode
+        })?;
+        let now = time::OffsetDateTime::now_utc();
+        let elapsed_ms = state
+            .smooth_started_at
+            .map(|started_at| started_at.elapsed().as_millis())
+            .unwrap_or(0)
+            .min(u128::from(u64::MAX)) as u64;
+        let mut input = crate::presentation::companion_scene::CompanionSceneProjectionInput::round(
+            crate::presentation::companion_scene::CompanionProjectionClock::new(now, elapsed_ms),
+            crate::presentation::companion_scene::CompanionLogicalLayout::round(
+                bounds.width_f64 as f32,
+                bounds.height_f64 as f32,
+            ),
+            metrics.grid_cols,
+            metrics.grid_rows,
+            crate::round::scene::current_round_motion_clearance(metrics.grid_rows),
+        );
+        if let Some(depth) = state.review_depth {
+            input = input.with_depth_override(depth.normalized());
+        }
+        let mut snapshot =
+            crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input(
+                &state.vm, input,
+            )
+            .map_err(|_| {
+                crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode
+            })?;
+        if state.force_dim_overlay {
+            snapshot.frame.dimmed = true;
+            snapshot.frame.dim_amount = 0.35;
+        }
+        Ok(Some(PreparedSceneRuntimeTick {
+            snapshot: std::sync::Arc::new(snapshot),
+            hud: prepare_hud_frame(&state.vm, state.redacts_live_hud),
+            hud_font_size: metrics.font_size,
+        }))
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn service_scene_runtime(
+    tick: &PreparedSceneRuntimeTick,
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    let rollout = APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|state| state.scene_runtime_rollout)
+            .unwrap_or(SceneRuntimeRollout::Off)
+    });
+    match rollout {
+        SceneRuntimeRollout::Off => Ok(()),
+        SceneRuntimeRollout::Shadow => service_shadow_scene_runtime(),
+        SceneRuntimeRollout::Live => service_live_scene_runtime(tick),
+    }
+}
+
+#[cfg(feature = "retained-renderer")]
+fn service_shadow_scene_runtime(
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(host) = state
+            .as_mut()
+            .and_then(|state| state.retained_host.as_mut())
+        else {
+            return Ok(());
+        };
+        let _ = host.advance_scene_generation(false)?;
+        Ok(())
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn service_live_scene_runtime(
+    tick: &PreparedSceneRuntimeTick,
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    use crate::companion::retained::{
+        RetainedFailureCategory, SceneGenerationServiceTick, ScenePresentOutcome,
+    };
+    use crate::presentation::companion_scene::runtime::{ActivationTransition, RuntimeDisposition};
+
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return Ok(());
+        };
+        let view = state.view.clone();
+        let Some(host) = state.retained_host.as_mut() else {
+            return Ok(());
+        };
+        let service = host.advance_scene_generation(true)?;
+        let mut activation_presented = false;
+        if service == SceneGenerationServiceTick::CandidateReady {
+            let disposition = host
+                .activate_candidate(&tick.hud, tick.hud_font_size)
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            match disposition {
+                RuntimeDisposition::Activation(ActivationTransition::Committed) => {
+                    activation_presented = true;
+                }
+                RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending) => {
+                    return Err(RetainedFailureCategory::SceneCandidateEncode);
+                }
+                RuntimeDisposition::Activation(
+                    ActivationTransition::RetryLater
+                    | ActivationTransition::CandidateDestroyedRetainingActive
+                    | ActivationTransition::DroppedStale,
+                )
+                | RuntimeDisposition::DroppedStale => {}
+                _ => {}
+            }
+        } else if service == SceneGenerationServiceTick::Failed
+            && !host.scene_has_active_generation()
+        {
+            return Err(RetainedFailureCategory::SceneCandidateEncode);
+        }
+
+        if !activation_presented && host.scene_has_active_generation() {
+            match host.present_active_scene(view.as_super(), &tick.hud, tick.hud_font_size)? {
+                ScenePresentOutcome::Presented(_version) => {
+                    if let Some(capture) = state.review_capture.as_mut() {
+                        capture.record_frame(None);
+                    }
+                }
+                ScenePresentOutcome::Skipped => {
+                    if let Some(capture) = state.review_capture.as_mut() {
+                        capture.record_offscreen_review_tick();
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn prepare_cold_smooth_fallback_once() {
+    let should_prepare = APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        if !state.cold_smooth_fallback.take_prepare_request() {
+            return false;
+        }
+        let now = time::OffsetDateTime::now_utc();
+        let _ = prepare_smooth_view_model_for_tick(
+            &mut state.vm,
+            state.smooth_semantic_art_tick_index,
+            now,
+        );
+        state.scene = derive_round_scene_model(&state.vm, now);
+        true
+    });
+    if should_prepare {
+        prepare_current_frame_from_state();
+    }
+}
+
+#[cfg(feature = "retained-renderer")]
+fn handle_scene_runtime_failure(error: crate::companion::retained::RetainedFailureCategory) {
+    let rollout = APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|state| state.scene_runtime_rollout)
+            .unwrap_or(SceneRuntimeRollout::Off)
+    });
+    if rollout == SceneRuntimeRollout::Live {
+        fallback_from_retained(error);
+        prepare_cold_smooth_fallback_once();
+    } else if rollout == SceneRuntimeRollout::Shadow {
+        write_boundary_diagnostic(format_args!(
+            "glorp retained scene shadow failed without changing presentation: {}\n",
+            error.category()
+        ));
+    }
+}
+
+#[cfg(feature = "retained-renderer")]
+fn reconcile_scene_runtime(
+    snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(host) = state
+            .as_mut()
+            .and_then(|state| state.retained_host.as_mut())
+        else {
+            return Ok(());
+        };
+        let _ = host.reconcile_scene_snapshot(snapshot)?;
+        Ok(())
     })
 }
 
@@ -1739,6 +2139,22 @@ fn drain_poll_results() {
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
             let now = time::OffsetDateTime::now_utc();
+            #[cfg(feature = "retained-renderer")]
+            if state.scene_runtime_rollout == SceneRuntimeRollout::Live {
+                let Ok(vm) = apply_post_poll_scene_runtime_update(
+                    &mut state.presentation_state,
+                    state.review_state,
+                    update,
+                    now,
+                    state.smooth_semantic_art_tick_index,
+                ) else {
+                    return;
+                };
+                state.pixel_input = None;
+                state.vm = vm;
+                unsafe { state.view.setNeedsDisplay(true) };
+                return;
+            }
             let Ok((vm, scene, pixel_input)) = apply_post_poll_update(
                 &mut state.presentation_state,
                 state.review_state,
@@ -1755,6 +2171,26 @@ fn drain_poll_results() {
             unsafe { state.view.setNeedsDisplay(true) };
         }
     });
+}
+
+#[cfg(feature = "retained-renderer")]
+fn apply_post_poll_scene_runtime_update(
+    presentation_state: &mut WatchPresentationState,
+    review_state: CompanionReviewState,
+    update: LiveWatchUpdate,
+    now: time::OffsetDateTime,
+    semantic_art_tick_index: u64,
+) -> Result<WatchViewModel> {
+    let mut vm = update.vm;
+    crate::watch_live::stamp_live_presentation(
+        presentation_state,
+        &mut vm,
+        update.applied_signal,
+        now,
+    );
+    apply_review_state(review_state, presentation_state, &mut vm, now)?;
+    prepare_smooth_view_model_for_tick(&mut vm, semantic_art_tick_index, now)?;
+    Ok(vm)
 }
 
 fn apply_post_poll_update(
@@ -1807,7 +2243,14 @@ fn animate_pet() {
                 let _ = advance_companion_animation(&mut state.vm, tick_index, now);
                 state.animation_frame = tick_index;
                 state.smooth_semantic_art_tick_index = tick_index;
-                state.scene = derive_round_scene_model(&state.vm, now);
+                #[cfg(feature = "retained-renderer")]
+                if state.scene_runtime_rollout != SceneRuntimeRollout::Live {
+                    state.scene = derive_round_scene_model(&state.vm, now);
+                }
+                #[cfg(not(feature = "retained-renderer"))]
+                {
+                    state.scene = derive_round_scene_model(&state.vm, now);
+                }
             }
             return Some(state.view.clone());
         }
@@ -3304,6 +3747,15 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn scene_runtime_fallback_cold_builds_smooth_frame_exactly_once() {
+        let mut gate = ColdSmoothFallbackGate::default();
+        assert!(gate.take_prepare_request());
+        assert!(!gate.take_prepare_request());
+        assert!(!gate.take_prepare_request());
+    }
 
     #[cfg(feature = "retained-renderer")]
     #[test]

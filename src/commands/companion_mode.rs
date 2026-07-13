@@ -26,6 +26,10 @@ pub struct CompanionReviewOptions {
     /// from the hidden `--review-force-dim` flag (the xtask `--dimmed` matrix
     /// variant); never persisted.
     pub force_dim_overlay: bool,
+    /// Hidden retained-scene rollout override. `None` preserves the shipping
+    /// retained translator; explicit `off`, `shadow`, and `live` values are
+    /// forwarded to the native companion process for bounded review only.
+    pub retained_scene_runtime: Option<SceneRuntimeRollout>,
     /// Dev/test-only bounded retained fault injection. Threaded from the hidden
     /// `--review-inject-retained-fault` flag, compiled only with the retained
     /// renderer plus dev-preview so it never ships in a release build. Drives the
@@ -177,6 +181,43 @@ impl CompanionReviewOptions {
             || self.capture_dir.is_some()
             || self.runtime_metrics_out.is_some()
             || self.depth.is_some()
+            || self.retained_scene_runtime.is_some()
+    }
+}
+
+/// Temporary rollout switch for the direct retained scene runtime. This is not
+/// a renderer backend: Retained remains the effective renderer in every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SceneRuntimeRollout {
+    Off,
+    Shadow,
+    Live,
+}
+
+impl SceneRuntimeRollout {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Live => "live",
+        }
+    }
+}
+
+/// One-line rollback for any future automatic direct-scene route. Task 14 keeps
+/// it disabled: only the hidden explicit review flag can enter Live.
+pub const AUTO_SCENE_RUNTIME_ON_APPLE_SILICON: bool = false;
+
+pub const fn resolve_scene_rollout(
+    retained_scene_review: bool,
+    live_enabled: bool,
+) -> SceneRuntimeRollout {
+    if !retained_scene_review {
+        SceneRuntimeRollout::Off
+    } else if live_enabled {
+        SceneRuntimeRollout::Live
+    } else {
+        SceneRuntimeRollout::Shadow
     }
 }
 
@@ -229,9 +270,10 @@ impl CompanionReviewState {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_renderer, CompanionRendererRequest, CompanionRendererTarget,
+        resolve_renderer, resolve_scene_rollout, CompanionRendererRequest, CompanionRendererTarget,
         CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
-        EffectiveCompanionRenderer, RendererRuntimeState,
+        EffectiveCompanionRenderer, RendererRuntimeState, SceneRuntimeRollout,
+        AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
     };
     use std::str::FromStr;
 
@@ -289,6 +331,28 @@ mod tests {
         assert_eq!(
             CompanionRendererRequest::default(),
             CompanionRendererRequest::Auto
+        );
+    }
+
+    #[test]
+    fn scene_runtime_rollout_defaults_to_shadow_for_explicit_retained_review_only() {
+        assert_eq!(
+            resolve_scene_rollout(false, false),
+            SceneRuntimeRollout::Off
+        );
+        assert_eq!(
+            resolve_scene_rollout(true, false),
+            SceneRuntimeRollout::Shadow
+        );
+        assert_eq!(resolve_scene_rollout(true, true), SceneRuntimeRollout::Live);
+    }
+
+    #[test]
+    fn scene_runtime_rollout_one_line_rollback_disables_auto_live_path() {
+        const { assert!(!AUTO_SCENE_RUNTIME_ON_APPLE_SILICON) };
+        assert_eq!(
+            resolve_scene_rollout(true, AUTO_SCENE_RUNTIME_ON_APPLE_SILICON),
+            SceneRuntimeRollout::Shadow
         );
     }
 

@@ -199,6 +199,12 @@ pub(in crate::companion) enum SceneGenerationServiceTick {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::companion) enum ScenePresentOutcome {
+    Presented(crate::presentation::companion_scene::SceneVersion),
+    Skipped,
+}
+
 impl PreparedRetainedHost {
     /// Builds the CAMetalLayer, wgpu surface, device, configuration, and
     /// pipelines against a layer that stays detached from the view. A
@@ -335,7 +341,6 @@ impl PreparedRetainedHost {
 }
 
 impl ActiveRetainedHost {
-    #[allow(dead_code)] // Production entrypoint intentionally left unrouted until Task 14.
     pub(in crate::companion) fn install_scene_runtime(
         &mut self,
         snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
@@ -354,19 +359,116 @@ impl ActiveRetainedHost {
         let effects = generations
             .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
             .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
-        let shared = render::SceneGpuShared::create(&self.host.device, self.host.device_epoch)
-            .map_err(scene_gpu_failure)?;
-        let renderer = render::SceneRenderer::new(&self.host.device, &self.host.queue, &shared);
-        let mut activation = RetainedSceneActivation { generations, shared, renderer };
+        let mut activation = RetainedSceneActivation { generations, gpu: None };
         self.host
             .apply_scene_runtime_effects(&mut activation, effects)?;
         self.host.scene_activation = Some(activation);
         Ok(SceneGenerationServiceTick::Preparing)
     }
 
-    #[allow(dead_code)] // Production entrypoint intentionally left unrouted until Task 14.
+    pub(in crate::companion) fn has_scene_runtime(&self) -> bool {
+        self.host.scene_activation.is_some()
+    }
+
+    pub(in crate::companion) fn scene_has_active_generation(&self) -> bool {
+        self.host
+            .scene_activation
+            .as_ref()
+            .and_then(|activation| activation.generations.active_version())
+            .is_some()
+    }
+
+    pub(in crate::companion) fn scene_active_delta_pending(&self) -> bool {
+        self.host
+            .scene_activation
+            .as_ref()
+            .is_some_and(|activation| activation.generations.active_delta_pending())
+    }
+
+    pub(in crate::companion) fn reconcile_scene_snapshot(
+        &mut self,
+        snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    ) -> Result<SceneGenerationServiceTick, RetainedFailureCategory> {
+        if self.host.scene_activation.is_none() {
+            return self.install_scene_runtime(snapshot);
+        }
+        let mut activation = self
+            .host
+            .scene_activation
+            .take()
+            .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
+        let result = (|| {
+            let effects = activation.generations.reconcile_snapshot(snapshot)?;
+            self.host
+                .apply_scene_runtime_effects(&mut activation, effects)?;
+            Ok(SceneGenerationServiceTick::Preparing)
+        })();
+        self.host.scene_activation = Some(activation);
+        result
+    }
+
+    pub(in crate::companion) fn hide_scene_runtime(
+        &mut self,
+    ) -> Result<(), RetainedFailureCategory> {
+        let Some(mut activation) = self.host.scene_activation.take() else {
+            return Ok(());
+        };
+        let effects = activation.generations.set_hidden();
+        let result = self
+            .host
+            .apply_scene_runtime_effects(&mut activation, effects);
+        self.host.scene_activation = Some(activation);
+        result
+    }
+
+    pub(in crate::companion) fn coalesce_hidden_scene_snapshot(
+        &mut self,
+        snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    ) -> Result<(), RetainedFailureCategory> {
+        let Some(mut activation) = self.host.scene_activation.take() else {
+            return Ok(());
+        };
+        let result = (|| {
+            let effects = activation
+                .generations
+                .coalesce_hidden_snapshot(snapshot)
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            self.host
+                .apply_scene_runtime_effects(&mut activation, effects)
+        })();
+        self.host.scene_activation = Some(activation);
+        result
+    }
+
+    pub(in crate::companion) fn reveal_scene_runtime(
+        &mut self,
+        snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    ) -> Result<bool, RetainedFailureCategory> {
+        let Some(mut activation) = self.host.scene_activation.take() else {
+            return Ok(true);
+        };
+        let result = (|| {
+            if activation.generations.active_delta_pending() {
+                return Ok(false);
+            }
+            let coalesced = activation
+                .generations
+                .coalesce_hidden_snapshot(snapshot)
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            self.host
+                .apply_scene_runtime_effects(&mut activation, coalesced)?;
+            let effects = activation.generations.reveal()?;
+            self.host
+                .apply_scene_runtime_effects(&mut activation, effects)?;
+            Ok(true)
+        })();
+        self.host.scene_activation = Some(activation);
+        result
+    }
+
     pub(in crate::companion) fn advance_scene_generation(
         &mut self,
+        materialize_candidate: bool,
     ) -> Result<SceneGenerationServiceTick, RetainedFailureCategory> {
         let started_at = Instant::now();
         let result = self.host.advance_scene_generation();
@@ -374,28 +476,93 @@ impl ActiveRetainedHost {
             .metrics
             .record_generation_service_ui_us(duration_us(started_at.elapsed()));
         let tick = result?;
-        if tick == SceneGenerationServiceTick::CandidateReady {
+        if materialize_candidate && tick == SceneGenerationServiceTick::CandidateReady {
             self.host.materialize_scene_candidate()?;
         }
         Ok(tick)
     }
 
-    #[allow(dead_code)] // Production entrypoint intentionally left unrouted until Task 14.
     pub(in crate::companion) fn activate_candidate(
         &mut self,
-        prepared_hud: &hud::SensitivePreparedHudFrame,
-    ) -> Result<crate::presentation::companion_scene::runtime::RuntimeEffects, SceneActivationError>
-    {
+        hud_text: &crate::round::hud::CompanionHudText,
+        hud_font_size: f64,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::RuntimeDisposition,
+        SceneActivationError,
+    > {
         let mut activation = self
             .host
             .scene_activation
             .take()
             .ok_or(SceneActivationError::NoSceneRuntime)?;
-        let result = self.host.activate_candidate(
+        let result = (|| {
+            let version = activation
+                .generations
+                .ready_candidate
+                .as_ref()
+                .map(|candidate| candidate.version)
+                .ok_or(SceneActivationError::Start(
+                    crate::presentation::companion_scene::runtime::ActivationStartError::NoReadyCandidate,
+                ))?;
+            let geometry = self
+                .host
+                .scene_hud_geometry(version.generation.resources, hud_font_size);
+            let prepared_hud = activation
+                .generations
+                .prepare_ready_hud(hud_text, geometry)
+                .map_err(|_| SceneActivationError::UnsupportedSurfaceContract)?;
+            let gpu = activation
+                .gpu
+                .as_mut()
+                .ok_or(SceneActivationError::UnsupportedSurfaceContract)?;
+            let effects = self.host.activate_candidate(
+                &mut activation.generations,
+                &mut gpu.renderer,
+                &gpu.shared,
+                &prepared_hud,
+            )?;
+            let disposition = effects.disposition();
+            self.host
+                .apply_scene_runtime_effects(&mut activation, effects)
+                .map_err(|_| SceneActivationError::UnsupportedSurfaceContract)?;
+            Ok(disposition)
+        })();
+        self.host.scene_activation = Some(activation);
+        result
+    }
+
+    pub(in crate::companion) fn present_active_scene(
+        &mut self,
+        view: &NSView,
+        hud_text: &crate::round::hud::CompanionHudText,
+        hud_font_size: f64,
+    ) -> Result<ScenePresentOutcome, RetainedFailureCategory> {
+        let mut activation = self
+            .host
+            .scene_activation
+            .take()
+            .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
+        let version = activation
+            .generations
+            .active_version()
+            .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
+        let geometry = self
+            .host
+            .scene_hud_geometry(version.generation.resources, hud_font_size);
+        let prepared_hud = activation
+            .generations
+            .prepare_active_hud(hud_text, geometry)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        let gpu = activation
+            .gpu
+            .as_mut()
+            .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
+        let result = self.host.present_active_scene(
+            view,
             &mut activation.generations,
-            &mut activation.renderer,
-            &activation.shared,
-            prepared_hud,
+            &mut gpu.renderer,
+            &gpu.shared,
+            &prepared_hud,
         );
         self.host.scene_activation = Some(activation);
         result
@@ -569,15 +736,26 @@ impl ActiveRetainedHost {
         &self,
         inventory: CompanionCapacityInventory,
     ) -> CompanionRuntimeMetricsSnapshot {
-        let resource_generation = self.current_resource_generation();
+        let scene_version = self
+            .host
+            .scene_activation
+            .as_ref()
+            .and_then(|activation| activation.generations.metrics_version());
+        let legacy_resource_generation = self.current_resource_generation();
         self.host.metrics.snapshot(
             RuntimeIdentity {
-                device_epoch: None,
-                surface_epoch: self.host.surface_epoch,
-                layout_generation: None,
-                resource_generation: (resource_generation != 0).then_some(resource_generation),
-                semantic_revision: None,
-                frame_revision: None,
+                device_epoch: scene_version.map(|version| version.generation.device.0),
+                surface_epoch: scene_version
+                    .map(|version| version.surface.0)
+                    .unwrap_or(self.host.surface_epoch),
+                layout_generation: scene_version.map(|version| version.generation.layout.0),
+                resource_generation: scene_version
+                    .map(|version| version.generation.resources.0)
+                    .or_else(|| {
+                        (legacy_resource_generation != 0).then_some(legacy_resource_generation)
+                    }),
+                semantic_revision: scene_version.map(|version| version.applied.semantic.0),
+                frame_revision: scene_version.map(|version| version.applied.frame.0),
                 present_attempt: self.host.frame_counter,
             },
             inventory,
@@ -610,6 +788,119 @@ impl std::ops::DerefMut for ActiveRetainedHost {
 }
 
 impl RetainedHost {
+    fn scene_hud_geometry(
+        &self,
+        resource_generation: crate::presentation::companion_scene::ResourceGeneration,
+        hud_font_size: f64,
+    ) -> hud::HudPreparationGeometry {
+        let view_width = f64::from(self.physical_width) / self.backing_scale;
+        let view_height = f64::from(self.physical_height) / self.backing_scale;
+        let aperture_radius = view_width.min(view_height) / 2.0;
+        let center_x = view_width / 2.0;
+        let center_y = view_height / 2.0;
+        let gauge = crate::round::hud::perimeter_gauge_layout(
+            center_x,
+            center_y,
+            aperture_radius,
+            crate::round::hud::COMPANION_GAUGE_GAP_DEG,
+        );
+        let gap = crate::round::hud::stat_gap_box(
+            center_x,
+            center_y,
+            gauge.pace.ring.radius - gauge.pace.stroke_width / 2.0,
+            crate::round::hud::COMPANION_GAUGE_GAP_DEG,
+        );
+        hud::HudPreparationGeometry {
+            gap,
+            aperture_radius,
+            view_width,
+            view_height,
+            hud_font_size,
+            resource_generation,
+        }
+    }
+
+    /// Presents the current active scene version. Compatible logical deltas are
+    /// staged and committed by the renderer transaction; topology changes keep
+    /// the prior active generation visible until candidate activation commits.
+    fn present_active_scene(
+        &mut self,
+        view: &NSView,
+        generations: &mut RetainedSceneGenerationState,
+        renderer: &mut render::SceneRenderer,
+        shared: &render::SceneGpuShared,
+        prepared_hud: &hud::SensitivePreparedHudFrame,
+    ) -> Result<ScenePresentOutcome, RetainedFailureCategory> {
+        self.resize_if_needed(view)?;
+        if let Some(category) = self.gpu_errors.drain() {
+            return Err(category);
+        }
+        let scene_config = self
+            .scene_config
+            .clone()
+            .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
+        if self.configured_surface != ConfiguredSurface::Scene {
+            self.surface.configure(&self.device, &scene_config);
+            self.configured_surface = ConfiguredSurface::Scene;
+        }
+        let mut progress = FrameProgress::new(
+            self.next_frame_id(),
+            generations
+                .active_version()
+                .map(|version| version.generation.resources.0)
+                .unwrap_or(0),
+        );
+        progress
+            .mark(FrameMilestone::Prepared)
+            .expect("an active scene opens the present ladder");
+        let surface_texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &scene_config);
+                return Ok(ScenePresentOutcome::Skipped);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(ScenePresentOutcome::Skipped);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(RetainedFailureCategory::SurfaceLost);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(RetainedFailureCategory::SurfaceValidation);
+            }
+        };
+        let surface_view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let version = generations
+            .submit_active_to_surface(
+                renderer,
+                &self.device,
+                &self.queue,
+                shared,
+                [self.physical_width, self.physical_height],
+                self.backing_scale,
+                prepared_hud,
+                &surface_view,
+            )
+            .map_err(scene_render_failure)?;
+        progress
+            .mark(FrameMilestone::Encoded)
+            .expect("active scene encode follows preparation");
+        progress
+            .mark(FrameMilestone::Submitted)
+            .expect("active scene submission follows encode");
+        self.queue.present(surface_texture);
+        progress
+            .finish(FrameDisposition::SurfacePresentCalled)
+            .expect("an active scene submission presents exactly once");
+        if let Some(category) = self.gpu_errors.drain() {
+            return Err(category);
+        }
+        Ok(ScenePresentOutcome::Presented(version))
+    }
+
     #[allow(dead_code)] // Reached through the dormant Task 12 entrypoint above.
     fn advance_scene_generation(
         &mut self,
@@ -709,11 +1000,20 @@ impl RetainedHost {
             .scene_activation
             .take()
             .ok_or(RetainedFailureCategory::RasterWorkerUnavailable)?;
+        let gpu_result = self.ensure_scene_gpu_state(&mut activation);
+        if let Err(error) = gpu_result {
+            self.scene_activation = Some(activation);
+            return Err(error);
+        }
         let started_at = Instant::now();
+        let gpu = activation
+            .gpu
+            .as_ref()
+            .expect("successful scene GPU initialization installs one GPU state");
         let materialized = activation.generations.materialize_ready_candidate(
             &self.device,
             &self.queue,
-            &activation.shared,
+            &gpu.shared,
         );
         let result = match materialized {
             Ok(()) => {
@@ -735,6 +1035,19 @@ impl RetainedHost {
         };
         self.scene_activation = Some(activation);
         result
+    }
+
+    fn ensure_scene_gpu_state(
+        &self,
+        activation: &mut RetainedSceneActivation,
+    ) -> Result<(), RetainedFailureCategory> {
+        if activation.gpu.is_none() {
+            let shared = render::SceneGpuShared::create(&self.device, self.device_epoch)
+                .map_err(scene_gpu_failure)?;
+            let renderer = render::SceneRenderer::new(&self.device, &self.queue, &shared);
+            activation.gpu = Some(super::RetainedSceneGpuState { shared, renderer });
+        }
+        Ok(())
     }
 
     #[allow(dead_code)] // Reached through the dormant Task 12 entrypoint above.

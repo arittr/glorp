@@ -65,6 +65,9 @@ pub enum Command {
         review_capture_live_values: bool,
         #[arg(long, hide = true)]
         review_force_dim: bool,
+        #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+        #[arg(long, value_enum, hide = true)]
+        retained_scene_runtime: Option<crate::commands::companion_mode::SceneRuntimeRollout>,
         /// Dev/test-only bounded retained fault injection (see
         /// `RetainedFaultInjection`). Compiled only with retained-renderer plus
         /// dev-preview, so it is absent from a release build.
@@ -104,6 +107,9 @@ pub enum Command {
         review_capture_live_values: bool,
         #[arg(long, hide = true)]
         review_force_dim: bool,
+        #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+        #[arg(long, value_enum, hide = true)]
+        retained_scene_runtime: Option<crate::commands::companion_mode::SceneRuntimeRollout>,
         /// Dev/test-only bounded retained fault injection (see
         /// `RetainedFaultInjection`). Compiled only with retained-renderer plus
         /// dev-preview, so it is absent from a release build.
@@ -221,6 +227,7 @@ impl Cli {
             depth: review_depth,
             review_capture_live_values,
             force_dim_overlay: review_force_dim,
+            retained_scene_runtime: None,
             // Fault injection is threaded in by the command dispatcher, not this
             // shared review-flag builder.
             #[cfg(all(
