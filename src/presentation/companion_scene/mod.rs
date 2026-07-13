@@ -16,8 +16,8 @@ use crate::game::metabolism::Mood;
 use crate::pet::generation::Species;
 use crate::presentation::privacy::PrivacyProjection;
 
-pub const COMPANION_SCENE_SCHEMA_VERSION: u16 = 1;
-pub const COMPANION_RENDERER_SCHEMA_VERSION: u16 = 1;
+pub const COMPANION_SCENE_SCHEMA_VERSION: u16 = 2;
+pub const COMPANION_RENDERER_SCHEMA_VERSION: u16 = 2;
 pub const PET_LATTICE_WIDTH: u16 = 13;
 pub const PET_LATTICE_HEIGHT: u16 = 10;
 pub const PET_LATTICE_SLOTS: u16 = scene::MAX_PET_ART_SLOTS as u16;
@@ -44,6 +44,12 @@ pub enum CompanionSceneProjectionError {
         end_char: usize,
         source_char_count: usize,
     },
+    RoomGlyphCapacity {
+        count: usize,
+    },
+    InvalidRoomGlyphColor,
+    InvalidProjectionGrid,
+    InvalidProjectionLayout,
 }
 
 impl std::fmt::Display for CompanionSceneProjectionError {
@@ -68,6 +74,16 @@ impl std::fmt::Display for CompanionSceneProjectionError {
                 f,
                 "pet role span {span_index} is invalid for source row {line_index}"
             ),
+            Self::RoomGlyphCapacity { count } => {
+                write!(f, "room emitted {count} glyphs; maximum is {}", scene::MAX_ROOM_GLYPH_SLOTS)
+            }
+            Self::InvalidRoomGlyphColor => {
+                write!(f, "room emitted a non-RGB color in truecolor projection")
+            }
+            Self::InvalidProjectionGrid => write!(f, "companion projection grid is empty"),
+            Self::InvalidProjectionLayout => {
+                write!(f, "companion projection layout must be finite and positive")
+            }
         }
     }
 }
@@ -78,6 +94,30 @@ impl std::error::Error for CompanionSceneProjectionError {}
 pub struct CompanionLogicalLayout {
     pub width_points: f32,
     pub height_points: f32,
+}
+
+/// Exact projection from the snapshot's top-left cell lattice into the
+/// renderer-neutral, Y-up logical point space used by the retained scene.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct CompanionGlyphGrid {
+    pub columns: u16,
+    pub rows: u16,
+    pub y_up_origin_points: [f32; 2],
+    pub cell_extent_points: [f32; 2],
+    pub scale: LogicalGlyphScale,
+    pub anchor: LogicalGlyphAnchor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogicalGlyphScale {
+    OneCell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogicalGlyphAnchor {
+    CellBottomLeft,
 }
 
 impl CompanionLogicalLayout {
@@ -155,6 +195,7 @@ pub struct CompanionSceneSnapshot {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TopologySnapshot {
     pub layout: CompanionLogicalLayout,
+    pub glyph_grid: CompanionGlyphGrid,
     pub pet: PetTopologySnapshot,
     pub room: RoomTopologySnapshot,
     pub visible_props: Vec<PropTopologySnapshot>,
@@ -239,6 +280,7 @@ pub struct ContentSnapshot {
     pub room_weather: &'static str,
     pub pet_lines: Vec<String>,
     pub pet_roles: Vec<PetRoleSpanSnapshot>,
+    pub room_glyphs: Vec<RoomGlyphContentSnapshot>,
     pub palette: PaletteSnapshot,
     pub prop_animation_states: Vec<PropAnimationSnapshot>,
     pub tank_animation_states: Vec<TankAnimationSnapshot>,
@@ -306,11 +348,16 @@ pub struct TankCellSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AmbientSemanticKindSnapshot {
-    MoodAura,
     Weather,
     ActivityPulse,
     Mote,
-    PetParticle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RoomGlyphContentSnapshot {
+    pub slot: u8,
+    pub glyph: char,
+    pub color_srgb8: [u8; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -384,8 +431,18 @@ pub struct FrameSnapshot {
     pub gauges: [GaugeLevelSnapshot; 4],
     pub dim_amount: f32,
     pub hud_lines: [String; 3],
+    pub room_glyphs: Vec<RoomGlyphFrameSnapshot>,
     pub ambient_instances: Vec<AmbientFrameSnapshot>,
     pub hud_instances: Vec<HudFrameSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct RoomGlyphFrameSnapshot {
+    pub slot: u8,
+    pub visible: bool,
+    pub grid_cell: [u16; 2],
+    pub position_points: [f32; 2],
+    pub opacity: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]

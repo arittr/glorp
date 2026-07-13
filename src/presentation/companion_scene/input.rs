@@ -148,6 +148,26 @@ impl CompanionSceneSnapshot {
         vm: &WatchViewModel,
         input: CompanionSceneProjectionInput,
     ) -> Result<Self, CompanionSceneProjectionError> {
+        if input.grid_columns == 0 || input.grid_rows == 0 {
+            return Err(CompanionSceneProjectionError::InvalidProjectionGrid);
+        }
+        if !input.layout.width_points.is_finite()
+            || !input.layout.height_points.is_finite()
+            || input.layout.width_points <= 0.0
+            || input.layout.height_points <= 0.0
+        {
+            return Err(CompanionSceneProjectionError::InvalidProjectionLayout);
+        }
+        let cell_extent_points = [
+            input.layout.width_points / f32::from(input.grid_columns),
+            input.layout.height_points / f32::from(input.grid_rows),
+        ];
+        if cell_extent_points
+            .iter()
+            .any(|extent| !extent.is_finite() || *extent <= 0.0)
+        {
+            return Err(CompanionSceneProjectionError::InvalidProjectionLayout);
+        }
         let now = input.clock.wall_time;
         let layout = input.layout;
         let room_profile = derive_room_profile(vm, now);
@@ -176,6 +196,8 @@ impl CompanionSceneSnapshot {
         let hud = crate::round::hud::review_capture_hud_text();
         let (ambient_semantics, ambient_instances) =
             project_ambient_slots(activity_pulse, room_profile.room_weather, layout);
+        let (room_glyphs, room_glyph_frames) =
+            project_room_glyphs(&room_profile, vm, motion, input, cell_extent_points)?;
         let (hud_glyphs, hud_instances) = project_hud_slots(&hud, layout);
         let asleep = vm.day_context.asleep;
         let dimmed = asleep || vm.life_profile.calm_mode;
@@ -185,6 +207,14 @@ impl CompanionSceneSnapshot {
             privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
             topology: TopologySnapshot {
                 layout,
+                glyph_grid: super::CompanionGlyphGrid {
+                    columns: input.grid_columns,
+                    rows: input.grid_rows,
+                    y_up_origin_points: [0.0, 0.0],
+                    cell_extent_points,
+                    scale: super::LogicalGlyphScale::OneCell,
+                    anchor: super::LogicalGlyphAnchor::CellBottomLeft,
+                },
                 pet: PetTopologySnapshot {
                     species: vm.pet_render.generated_species,
                     stage: vm.pet_render.stage,
@@ -205,6 +235,7 @@ impl CompanionSceneSnapshot {
                 room_weather: room_weather_alias(room_profile.room_weather),
                 pet_lines,
                 pet_roles,
+                room_glyphs,
                 palette: PaletteSnapshot::from(vm.pet_palette),
                 prop_animation_states,
                 tank_animation_states,
@@ -241,6 +272,7 @@ impl CompanionSceneSnapshot {
                 ],
                 dim_amount: if dimmed { 0.35 } else { 0.0 },
                 hud_lines: [hud.today_total, hud.daily_percent, hud.pace],
+                room_glyphs: room_glyph_frames,
                 ambient_instances,
                 hud_instances,
             },
@@ -577,6 +609,59 @@ fn grid_cell_to_points(col: u16, row: u16, input: CompanionSceneProjectionInput)
     ]
 }
 
+fn project_room_glyphs(
+    profile: &RoomLifeProfile,
+    vm: &WatchViewModel,
+    motion: crate::round::motion::RoundCompanionMotionProjection,
+    input: CompanionSceneProjectionInput,
+    cell_extent_points: [f32; 2],
+) -> Result<
+    (
+        Vec<super::RoomGlyphContentSnapshot>,
+        Vec<super::RoomGlyphFrameSnapshot>,
+    ),
+    CompanionSceneProjectionError,
+> {
+    let glyphs = crate::tui::room::companion_room_glyphs_for(
+        profile,
+        crate::tui::room::CompanionRoomProjectionInput {
+            pet_art: &vm.pet_art,
+            speech_visible: vm.current_speech.is_some(),
+            day_phase: vm.day_context.day_phase,
+            columns: input.grid_columns,
+            rows: input.grid_rows,
+            classic_pet_top_left: motion.classic_top_left_cells,
+            pet_frame_extent: [super::PET_LATTICE_WIDTH, super::PET_LATTICE_HEIGHT],
+            facing: motion.facing,
+            now: input.clock.wall_time,
+        },
+    )
+    .map_err(|_| CompanionSceneProjectionError::InvalidRoomGlyphColor)?;
+    if glyphs.len() > super::scene::MAX_ROOM_GLYPH_SLOTS {
+        return Err(CompanionSceneProjectionError::RoomGlyphCapacity { count: glyphs.len() });
+    }
+    let mut content = Vec::with_capacity(glyphs.len());
+    let mut frame = Vec::with_capacity(glyphs.len());
+    for (slot, glyph) in glyphs.into_iter().enumerate() {
+        content.push(super::RoomGlyphContentSnapshot {
+            slot: slot as u8,
+            glyph: glyph.glyph,
+            color_srgb8: glyph.color_rgb,
+        });
+        frame.push(super::RoomGlyphFrameSnapshot {
+            slot: slot as u8,
+            visible: true,
+            grid_cell: [glyph.col, glyph.row],
+            position_points: [
+                f32::from(glyph.col) * cell_extent_points[0],
+                input.layout.height_points - (f32::from(glyph.row) + 1.0) * cell_extent_points[1],
+            ],
+            opacity: 1.0,
+        });
+    }
+    Ok((content, frame))
+}
+
 fn project_ambient_slots(
     activity: SemanticActivityPulse,
     weather: RoomWeatherLayer,
@@ -596,21 +681,16 @@ fn project_ambient_slots(
             glyph: None,
         })
         .collect::<Vec<_>>();
-    semantics[0] = AmbientSemanticSnapshot {
-        slot: 0,
-        kind: Some(AmbientSemanticKindSnapshot::MoodAura),
-        glyph: Some('◌'),
-    };
     if let Some(glyph) = weather_glyph {
-        semantics[1] = AmbientSemanticSnapshot {
-            slot: 1,
+        semantics[0] = AmbientSemanticSnapshot {
+            slot: 0,
             kind: Some(AmbientSemanticKindSnapshot::Weather),
             glyph: Some(glyph),
         };
     }
     if activity.age_ms().is_some() {
-        semantics[2] = AmbientSemanticSnapshot {
-            slot: 2,
+        semantics[1] = AmbientSemanticSnapshot {
+            slot: 1,
             kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
             glyph: Some('✦'),
         };
@@ -623,7 +703,7 @@ fn project_ambient_slots(
         .map(|slot| {
             let visible = semantics[slot].kind.is_some();
             let opacity = match slot {
-                2 => age_opacity,
+                1 => age_opacity,
                 _ if visible => 1.0,
                 _ => 0.0,
             };
@@ -631,9 +711,8 @@ fn project_ambient_slots(
                 slot: slot as u8,
                 visible,
                 position_points: match slot {
-                    0 => [layout.width_points * 0.5, layout.height_points * 0.5],
-                    1 => [layout.width_points * 0.25, layout.height_points * 0.22],
-                    2 => [layout.width_points * 0.5, layout.height_points * 0.18],
+                    0 => [layout.width_points * 0.25, layout.height_points * 0.22],
+                    1 => [layout.width_points * 0.5, layout.height_points * 0.18],
                     _ => [0.0; 2],
                 },
                 opacity,
@@ -833,7 +912,7 @@ mod tests {
         )
         .expect("project canonical generated pet art");
 
-        assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(snapshot.schema_version, 2);
         assert_eq!(
             snapshot.topology.pet.species,
             vm.pet_render.generated_species
@@ -853,6 +932,89 @@ mod tests {
             .pet_lines
             .iter()
             .all(|line| line.chars().count() == usize::from(PET_LATTICE_WIDTH)));
+    }
+
+    #[test]
+    fn room_projection_is_bounded_colored_y_up_and_minute_dynamic() {
+        let vm = fixture_with_real_pet_art();
+        let layout = CompanionLogicalLayout::round(440.0, 360.0);
+        let first = project_snapshot(&vm, datetime!(2026-07-11 12:00 UTC), layout).unwrap();
+        let next = project_snapshot(&vm, datetime!(2026-07-11 12:01 UTC), layout).unwrap();
+
+        assert_eq!(first.topology.glyph_grid.columns, 44);
+        assert_eq!(first.topology.glyph_grid.rows, 18);
+        assert_eq!(first.topology.glyph_grid.y_up_origin_points, [0.0, 0.0]);
+        assert_eq!(first.topology.glyph_grid.cell_extent_points, [10.0, 20.0]);
+        assert!(first.content.room_glyphs.len() <= super::super::scene::MAX_ROOM_GLYPH_SLOTS);
+        assert_eq!(
+            first.content.room_glyphs.len(),
+            first.frame.room_glyphs.len()
+        );
+        assert!(!first.content.room_glyphs.is_empty());
+        for (index, (content, frame)) in first
+            .content
+            .room_glyphs
+            .iter()
+            .zip(&first.frame.room_glyphs)
+            .enumerate()
+        {
+            assert_eq!(usize::from(content.slot), index);
+            assert_eq!(content.slot, frame.slot);
+            assert_eq!(
+                frame.position_points,
+                [
+                    f32::from(frame.grid_cell[0]) * 10.0,
+                    360.0 - (f32::from(frame.grid_cell[1]) + 1.0) * 20.0,
+                ]
+            );
+            assert!(content.color_srgb8.iter().any(|channel| *channel != 0));
+        }
+        assert!(
+            first.content.room_glyphs != next.content.room_glyphs
+                || first.frame.room_glyphs != next.frame.room_glyphs,
+            "minute reseed must update room slots without changing authored topology"
+        );
+        assert_eq!(first.topology, next.topology);
+    }
+
+    #[test]
+    fn projection_rejects_an_empty_grid_before_point_division() {
+        let vm = fixture_with_real_pet_art();
+        let input = CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(datetime!(2026-07-11 12:00 UTC), 0),
+            CompanionLogicalLayout::round(360.0, 360.0),
+            0,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        );
+        assert_eq!(
+            CompanionSceneSnapshot::project_with_input(&vm, input),
+            Err(CompanionSceneProjectionError::InvalidProjectionGrid)
+        );
+
+        let invalid_layout = CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(datetime!(2026-07-11 12:00 UTC), 0),
+            CompanionLogicalLayout::round(f32::NAN, 360.0),
+            44,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        );
+        assert_eq!(
+            CompanionSceneSnapshot::project_with_input(&vm, invalid_layout),
+            Err(CompanionSceneProjectionError::InvalidProjectionLayout)
+        );
+
+        let underflow_layout = CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(datetime!(2026-07-11 12:00 UTC), 0),
+            CompanionLogicalLayout::round(f32::from_bits(1), 360.0),
+            44,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        );
+        assert_eq!(
+            CompanionSceneSnapshot::project_with_input(&vm, underflow_layout),
+            Err(CompanionSceneProjectionError::InvalidProjectionLayout)
+        );
     }
 
     #[test]

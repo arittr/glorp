@@ -526,6 +526,78 @@ pub struct RoomGlyph {
     pub zone: RoomZone,
 }
 
+/// Renderer-neutral room glyph selected for the circular companion. This
+/// adapter keeps terminal geometry, color capability, day phase, and negative
+/// space policy on the TUI side of the companion-scene boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompanionRoomGlyph {
+    pub row: u16,
+    pub col: u16,
+    pub glyph: char,
+    pub color_rgb: [u8; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompanionRoomProjectionError {
+    UnsupportedColor,
+}
+
+pub(crate) struct CompanionRoomProjectionInput<'a> {
+    pub pet_art: &'a [String],
+    pub speech_visible: bool,
+    pub day_phase: DayPhase,
+    pub columns: u16,
+    pub rows: u16,
+    pub classic_pet_top_left: [u16; 2],
+    pub pet_frame_extent: [u16; 2],
+    pub facing: i8,
+    pub now: OffsetDateTime,
+}
+
+pub(crate) fn companion_room_glyphs_for(
+    profile: &RoomLifeProfile,
+    input: CompanionRoomProjectionInput<'_>,
+) -> Result<Vec<CompanionRoomGlyph>, CompanionRoomProjectionError> {
+    let area = Rect::new(0, 0, input.columns, input.rows);
+    let mut exclusions = Vec::new();
+    if input.speech_visible {
+        exclusions.push(Rect::new(0, 0, input.columns, 1));
+    }
+    exclusions.extend(crate::tui::panels::pet::pet_silhouette_halo_rects(
+        input.pet_art,
+        Rect::new(
+            input.classic_pet_top_left[0],
+            input.classic_pet_top_left[1],
+            input.pet_frame_extent[0],
+            input.pet_frame_extent[1],
+        ),
+        input.facing == -1,
+    ));
+
+    room_glyphs_for(
+        profile,
+        area,
+        &exclusions,
+        input.now,
+        ColorCapability::Truecolor,
+        input.day_phase,
+    )
+    .into_iter()
+    .filter(|glyph| glyph.glyph != ' ')
+    .map(|glyph| {
+        let Color::Rgb(r, g, b) = glyph.style.fg.unwrap_or(Color::Reset) else {
+            return Err(CompanionRoomProjectionError::UnsupportedColor);
+        };
+        Ok(CompanionRoomGlyph {
+            row: glyph.row,
+            col: glyph.col,
+            glyph: glyph.glyph,
+            color_rgb: [r, g, b],
+        })
+    })
+    .collect()
+}
+
 /// Spatial zone inside the habitat area where a glyph belongs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RoomZone {
@@ -1768,5 +1840,104 @@ mod tests {
                 .any(|m| m.key == SceneMomentKey::HeavySessionShimmer),
             "a sleeping room stays calm — no shimmer"
         );
+    }
+
+    #[test]
+    fn companion_room_adapter_matches_authoritative_room_matrix() {
+        let area = Rect::new(0, 0, 44, 18);
+        for (speech, facing, pet_top_left) in [
+            (false, 1, [12, 4]),
+            (true, 1, [12, 4]),
+            (false, -1, [18, 5]),
+            (true, -1, [18, 5]),
+        ] {
+            for now in [
+                datetime!(2026-06-11 10:00 UTC),
+                datetime!(2026-06-11 10:01 UTC),
+            ] {
+                for phase in [
+                    DayPhase::Dawn,
+                    DayPhase::Day,
+                    DayPhase::Dusk,
+                    DayPhase::Night,
+                ] {
+                    let mut vm = vm_with_props(vec![
+                        earned(TOKEN_LANTERN_10M, 10),
+                        earned(HEAVY_SESSION_PLANTER, 20),
+                    ]);
+                    vm.day_context.day_phase = phase;
+                    vm.current_speech = speech.then(|| "hello".to_owned());
+                    let profile = derive_room_life_profile(&vm, now);
+                    let mut exclusions = Vec::new();
+                    if speech {
+                        exclusions.push(Rect::new(0, 0, 44, 1));
+                    }
+                    exclusions.extend(crate::tui::panels::pet::pet_silhouette_halo_rects(
+                        &vm.pet_art,
+                        Rect::new(
+                            pet_top_left[0],
+                            pet_top_left[1],
+                            crate::presentation::companion_scene::PET_LATTICE_WIDTH,
+                            crate::presentation::companion_scene::PET_LATTICE_HEIGHT,
+                        ),
+                        facing == -1,
+                    ));
+                    let expected = room_glyphs_for(
+                        &profile,
+                        area,
+                        &exclusions,
+                        now,
+                        ColorCapability::Truecolor,
+                        phase,
+                    )
+                    .into_iter()
+                    .filter(|glyph| glyph.glyph != ' ')
+                    .map(|glyph| {
+                        let Color::Rgb(r, g, b) = glyph.style.fg.unwrap_or(Color::Reset) else {
+                            panic!("truecolor room oracle emitted non-RGB style")
+                        };
+                        CompanionRoomGlyph {
+                            row: glyph.row,
+                            col: glyph.col,
+                            glyph: glyph.glyph,
+                            color_rgb: [r, g, b],
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                    let actual = companion_room_glyphs_for(
+                        &profile,
+                        CompanionRoomProjectionInput {
+                            pet_art: &vm.pet_art,
+                            speech_visible: speech,
+                            day_phase: phase,
+                            columns: 44,
+                            rows: 18,
+                            classic_pet_top_left: pet_top_left,
+                            pet_frame_extent: [13, 10],
+                            facing,
+                            now,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "speech={speech} facing={facing} phase={phase:?} now={now}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_declared_room_glyph_is_closed_companion_content() {
+        for species in Species::all() {
+            for glyph in declared_room_glyphs(RoomSpeciesDialect::for_species(species)) {
+                crate::presentation::companion_scene::scene::AuthoredGlyph::new(glyph)
+                    .unwrap_or_else(|_| panic!("missing {species:?} room glyph {glyph:?}"));
+            }
+        }
+        for glyph in ['✧', '⌞', '⌟', '∘', '┄', '╌', '□'] {
+            assert!(crate::presentation::companion_scene::scene::AuthoredGlyph::new(glyph).is_ok());
+        }
     }
 }

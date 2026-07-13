@@ -12,6 +12,7 @@ pub enum SceneValidationError {
     NodeCapacityExceeded,
     StaticPrimitiveCapacityExceeded,
     PetArtCapacityExceeded,
+    RoomGlyphCapacityExceeded,
     PropCapacityExceeded,
     TankCapacityExceeded,
     AmbientCapacityExceeded,
@@ -40,11 +41,13 @@ pub enum SceneValidationError {
     NonFiniteDepthCue,
     InvalidDepthCue,
     InvalidCamera,
+    InvalidGlyphGrid,
     MaterialDepthIncompatible,
     PrimitiveResourceIncompatible,
     LitCardScaleIncompatible,
     PrivacyViolation,
     PetArtSlotOutOfBounds,
+    RoomGlyphSlotOutOfBounds,
     PropSlotOutOfBounds,
     TankSlotOutOfBounds,
     AmbientSlotOutOfBounds,
@@ -171,6 +174,7 @@ pub fn validate_template(
     validate_versions(template.schema_version, template.renderer_schema_version)?;
     validate_capacity_counts(template)?;
     validate_fixed_capacities(template.capacities)?;
+    validate_glyph_grid(template.glyph_grid)?;
     validate_nodes(template)?;
     validate_materials(template)?;
     validate_resources(template)?;
@@ -206,6 +210,9 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
     if content.pet_art_slots.len() > MAX_PET_ART_SLOTS {
         return Err(SceneValidationError::PetArtCapacityExceeded);
     }
+    if content.room_glyph_slots.len() > MAX_ROOM_GLYPH_SLOTS {
+        return Err(SceneValidationError::RoomGlyphCapacityExceeded);
+    }
     if content.prop_slots.len() > MAX_VISIBLE_PROPS {
         return Err(SceneValidationError::PropCapacityExceeded);
     }
@@ -219,6 +226,7 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
         return Err(SceneValidationError::HudCapacityExceeded);
     }
     if content.pet_art_slots.len() != MAX_PET_ART_SLOTS
+        || content.room_glyph_slots.len() != MAX_ROOM_GLYPH_SLOTS
         || content.prop_slots.len() != MAX_VISIBLE_PROPS
         || content.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
         || content.ambient_slots.len() != MAX_AMBIENT_INSTANCES
@@ -228,6 +236,7 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
     }
     validate_content_slots(
         &content.pet_art_slots,
+        &content.room_glyph_slots,
         &content.prop_slots,
         &content.tank_slots,
         &content.ambient_slots,
@@ -238,6 +247,11 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
         .iter()
         .enumerate()
         .any(|(index, slot)| usize::from(slot.slot) != index)
+        || content
+            .room_glyph_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
         || content
             .prop_slots
             .iter()
@@ -281,6 +295,7 @@ pub fn validate_frame(
         .iter()
         .map(|node| by_id[&node.id])
         .collect();
+    canonical.room_glyph_slots.sort_by_key(|slot| slot.slot);
     canonical.prop_slots.sort_by_key(|slot| slot.slot);
     canonical.tank_slots.sort_by_key(|slot| slot.slot);
     canonical.ambient_slots.sort_by_key(|slot| slot.slot);
@@ -297,6 +312,11 @@ fn validate_frame_against_template(
 ) -> Result<(), SceneValidationError> {
     validate_versions(frame.schema_version, frame.renderer_schema_version)?;
     validate_camera(frame.camera)?;
+    validate_room_frame_grid(
+        frame.room_glyph_slots.iter().copied(),
+        accepted_template.template.glyph_grid,
+        frame.camera,
+    )?;
     if frame.nodes.len() > MAX_SCENE_NODES {
         return Err(SceneValidationError::NodeCapacityExceeded);
     }
@@ -304,6 +324,7 @@ fn validate_frame_against_template(
         return Err(SceneValidationError::LightCapacityExceeded);
     }
     if frame.prop_slots.len() != MAX_VISIBLE_PROPS
+        || frame.room_glyph_slots.len() != MAX_ROOM_GLYPH_SLOTS
         || frame.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
         || frame.ambient_slots.len() != MAX_AMBIENT_INSTANCES
         || frame.hud_slots.len() != MAX_HUD_GLYPH_SLOTS
@@ -316,6 +337,11 @@ fn validate_frame_against_template(
         .iter()
         .enumerate()
         .any(|(index, slot)| usize::from(slot.slot) != index)
+        || frame
+            .room_glyph_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
         || frame
             .tank_slots
             .iter()
@@ -369,6 +395,7 @@ pub fn validate_content_delta(delta: &ContentDelta) -> Result<(), SceneValidatio
     validate_versions(delta.schema_version, delta.renderer_schema_version)?;
     validate_content_slots(
         &delta.pet_art_slots,
+        &delta.room_glyph_slots,
         &delta.prop_slots,
         &delta.tank_slots,
         &delta.ambient_slots,
@@ -392,6 +419,27 @@ pub(crate) fn validate_content_frame_delta(
     validate_content_delta(content_delta)?;
     let zero2 = |value: [f32; 2]| value.into_iter().all(|component| component.to_bits() == 0);
     let zero4 = |value: [f32; 4]| value.into_iter().all(|component| component.to_bits() == 0);
+    for slot in 0..MAX_ROOM_GLYPH_SLOTS {
+        let content = content_delta
+            .room_glyph_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_content.room_glyph_slots[slot]);
+        let frame = frame_delta
+            .room_glyph_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current_frame.room_glyph_slots[slot]);
+        if content.glyph.is_some() != frame.visible
+            || (content.glyph.is_some() && frame.opacity <= 0.0)
+            || (content.glyph.is_none()
+                && (frame.grid_cell != [0; 2]
+                    || !zero2(frame.position_points)
+                    || frame.opacity.to_bits() != 0))
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
     for slot in 0..MAX_VISIBLE_PROPS {
         let content = content_delta
             .prop_slots
@@ -503,6 +551,19 @@ pub fn validate_frame_delta(
     if let Some(camera) = delta.camera {
         validate_camera(camera)?;
     }
+    let effective_camera = delta.camera.unwrap_or(current_frame.frame.camera);
+    validate_room_frame_grid(
+        (0..MAX_ROOM_GLYPH_SLOTS).map(|slot| {
+            delta
+                .room_glyph_slots
+                .iter()
+                .find(|changed| usize::from(changed.slot) == slot)
+                .copied()
+                .unwrap_or(current_frame.frame.room_glyph_slots[slot])
+        }),
+        accepted_template.template.glyph_grid,
+        effective_camera,
+    )?;
     if let Some(gauges) = delta.gauges {
         for gauge in gauges {
             validate_unit_interval(gauge)?;
@@ -591,6 +652,9 @@ pub fn validate_frame_delta(
     for changed in &delta.prop_slots {
         current_frame.frame.prop_slots[usize::from(changed.slot)] = *changed;
     }
+    for changed in &delta.room_glyph_slots {
+        current_frame.frame.room_glyph_slots[usize::from(changed.slot)] = *changed;
+    }
     for changed in &delta.tank_slots {
         current_frame.frame.tank_slots[usize::from(changed.slot)] = *changed;
     }
@@ -614,6 +678,52 @@ fn validate_versions(schema: u16, renderer: u16) -> Result<(), SceneValidationEr
     }
     if renderer != COMPANION_RENDERER_SCHEMA_VERSION {
         return Err(SceneValidationError::RendererSchemaVersionMismatch);
+    }
+    Ok(())
+}
+
+fn validate_glyph_grid(grid: super::CompanionGlyphGrid) -> Result<(), SceneValidationError> {
+    if grid.columns == 0
+        || grid.rows == 0
+        || grid.y_up_origin_points != [0.0, 0.0]
+        || !grid
+            .y_up_origin_points
+            .iter()
+            .chain(&grid.cell_extent_points)
+            .all(|value| value.is_finite())
+        || grid.cell_extent_points.iter().any(|value| *value <= 0.0)
+        || grid.scale != super::LogicalGlyphScale::OneCell
+        || grid.anchor != super::LogicalGlyphAnchor::CellBottomLeft
+    {
+        return Err(SceneValidationError::InvalidGlyphGrid);
+    }
+    Ok(())
+}
+
+fn validate_room_frame_grid(
+    slots: impl Iterator<Item = RoomGlyphFrameSlot>,
+    grid: super::CompanionGlyphGrid,
+    camera: OrthographicCamera,
+) -> Result<(), SceneValidationError> {
+    let canonical_extent = [
+        camera.width_points / f32::from(grid.columns),
+        camera.height_points / f32::from(grid.rows),
+    ];
+    if grid.cell_extent_points != canonical_extent {
+        return Err(SceneValidationError::InvalidGlyphGrid);
+    }
+    for slot in slots.filter(|slot| slot.visible) {
+        if slot.grid_cell[0] >= grid.columns || slot.grid_cell[1] >= grid.rows {
+            return Err(SceneValidationError::InvalidGlyphGrid);
+        }
+        let expected = [
+            grid.y_up_origin_points[0] + f32::from(slot.grid_cell[0]) * grid.cell_extent_points[0],
+            grid.y_up_origin_points[1] + camera.height_points
+                - (f32::from(slot.grid_cell[1]) + 1.0) * grid.cell_extent_points[1],
+        ];
+        if slot.position_points != expected {
+            return Err(SceneValidationError::InvalidGlyphGrid);
+        }
     }
     Ok(())
 }
@@ -653,7 +763,7 @@ fn validate_capacity_counts(template: &SceneTemplate) -> Result<(), SceneValidat
 }
 
 fn validate_fixed_capacities(capacities: SceneCapacities) -> Result<(), SceneValidationError> {
-    if capacities != SceneCapacities::FIXED_V1 {
+    if capacities != SceneCapacities::FIXED_V2 {
         return Err(SceneValidationError::FixedCapacityMismatch);
     }
     Ok(())
@@ -1103,6 +1213,7 @@ fn validate_privacy(template: &SceneTemplate) -> Result<(), SceneValidationError
 
 fn validate_content_slots(
     pet: &[PetArtSlot],
+    room: &[RoomGlyphContentSlot],
     props: &[PropContentSlot],
     tanks: &[TankContentSlot],
     ambient: &[AmbientContentSlot],
@@ -1119,6 +1230,9 @@ fn validate_content_slots(
                     .any(|glyph| glyph.glyph.is_none() && glyph.local_cell != [0; 2])
             })
         })
+        || room
+            .iter()
+            .any(|slot| slot.glyph.is_some() != slot.color_srgb8.is_some())
     {
         return Err(SceneValidationError::NonCanonicalEmptySlot);
     }
@@ -1132,6 +1246,11 @@ fn validate_content_slots(
         pet.iter().map(|slot| usize::from(slot.slot)),
         MAX_PET_ART_SLOTS,
         SceneValidationError::PetArtSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        room.iter().map(|slot| usize::from(slot.slot)),
+        MAX_ROOM_GLYPH_SLOTS,
+        SceneValidationError::RoomGlyphSlotOutOfBounds,
     )?;
     validate_unique_slots(
         props.iter().map(|slot| usize::from(slot.slot)),
@@ -1156,6 +1275,14 @@ fn validate_content_slots(
 }
 
 fn validate_instance_frame_slots(frame: &SceneFrame) -> Result<(), SceneValidationError> {
+    validate_unique_slots(
+        frame
+            .room_glyph_slots
+            .iter()
+            .map(|slot| usize::from(slot.slot)),
+        MAX_ROOM_GLYPH_SLOTS,
+        SceneValidationError::RoomGlyphSlotOutOfBounds,
+    )?;
     validate_unique_slots(
         frame.prop_slots.iter().map(|slot| usize::from(slot.slot)),
         MAX_VISIBLE_PROPS,
@@ -1184,6 +1311,10 @@ fn validate_instance_frame_slots(frame: &SceneFrame) -> Result<(), SceneValidati
         validate_points(slot.motion_offset_points)?;
         validate_unit_interval(slot.opacity)?;
     }
+    for slot in &frame.room_glyph_slots {
+        validate_points(slot.position_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
     for slot in &frame.tank_slots {
         validate_points(slot.origin_points)?;
         for cell in slot.cells {
@@ -1210,6 +1341,17 @@ fn validate_content_frame_canonical(
 ) -> Result<(), SceneValidationError> {
     let zero2 = |value: [f32; 2]| value.into_iter().all(|component| component.to_bits() == 0);
     let zero4 = |value: [f32; 4]| value.into_iter().all(|component| component.to_bits() == 0);
+    for (content, frame) in content.room_glyph_slots.iter().zip(&frame.room_glyph_slots) {
+        if content.glyph.is_some() != frame.visible
+            || (content.glyph.is_some() && frame.opacity <= 0.0)
+            || (content.glyph.is_none()
+                && (frame.grid_cell != [0; 2]
+                    || !zero2(frame.position_points)
+                    || frame.opacity.to_bits() != 0))
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
     for (content, frame) in content.prop_slots.iter().zip(&frame.prop_slots) {
         if content.content.is_none()
             && (frame.visible
@@ -1258,6 +1400,14 @@ fn validate_content_frame_canonical(
 
 fn validate_changed_instance_frame_slots(delta: &FrameDelta) -> Result<(), SceneValidationError> {
     validate_unique_slots(
+        delta
+            .room_glyph_slots
+            .iter()
+            .map(|slot| usize::from(slot.slot)),
+        MAX_ROOM_GLYPH_SLOTS,
+        SceneValidationError::RoomGlyphSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
         delta.prop_slots.iter().map(|slot| usize::from(slot.slot)),
         MAX_VISIBLE_PROPS,
         SceneValidationError::PropSlotOutOfBounds,
@@ -1283,6 +1433,10 @@ fn validate_changed_instance_frame_slots(delta: &FrameDelta) -> Result<(), Scene
     for slot in &delta.prop_slots {
         validate_points(slot.origin_points)?;
         validate_points(slot.motion_offset_points)?;
+        validate_unit_interval(slot.opacity)?;
+    }
+    for slot in &delta.room_glyph_slots {
+        validate_points(slot.position_points)?;
         validate_unit_interval(slot.opacity)?;
     }
     for slot in &delta.tank_slots {
@@ -1769,6 +1923,87 @@ mod tests {
             validate_frame(&frame, &accepted).map(|_| ()),
             Err(SceneValidationError::NonFiniteFrameValue)
         );
+    }
+
+    #[test]
+    fn room_frame_grid_rejects_full_frame_geometry_and_camera_mismatch() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+
+        let mut out_of_grid = fixture.frame.clone();
+        out_of_grid.room_glyph_slots[0] = RoomGlyphFrameSlot {
+            slot: 0,
+            visible: true,
+            grid_cell: [fixture.template.glyph_grid.columns, 0],
+            position_points: [0.0, 348.0],
+            opacity: 1.0,
+        };
+        assert_eq!(
+            validate_frame(&out_of_grid, &accepted),
+            Err(SceneValidationError::InvalidGlyphGrid)
+        );
+
+        let mut arbitrary_position = fixture.frame.clone();
+        arbitrary_position.room_glyph_slots[0] = RoomGlyphFrameSlot {
+            slot: 0,
+            visible: true,
+            grid_cell: [1, 1],
+            position_points: [13.0, 336.0],
+            opacity: 1.0,
+        };
+        assert_eq!(
+            validate_frame(&arbitrary_position, &accepted),
+            Err(SceneValidationError::InvalidGlyphGrid)
+        );
+
+        let mut mismatched_camera = fixture.frame;
+        mismatched_camera.camera = OrthographicCamera::new(361.0, 360.0, -2.0, 2.0).unwrap();
+        assert_eq!(
+            validate_frame(&mismatched_camera, &accepted),
+            Err(SceneValidationError::InvalidGlyphGrid)
+        );
+    }
+
+    #[test]
+    fn room_frame_grid_rejects_slot_and_camera_only_deltas() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+        let current = validate_frame(&fixture.frame, &accepted).unwrap();
+
+        for malformed in [
+            RoomGlyphFrameSlot {
+                slot: 0,
+                visible: true,
+                grid_cell: [fixture.template.glyph_grid.columns, 0],
+                position_points: [0.0, 348.0],
+                opacity: 1.0,
+            },
+            RoomGlyphFrameSlot {
+                slot: 0,
+                visible: true,
+                grid_cell: [1, 1],
+                position_points: [13.0, 336.0],
+                opacity: 1.0,
+            },
+        ] {
+            let mut delta = FrameDelta::empty();
+            delta.room_glyph_slots.push(malformed);
+            let mut target = current.clone();
+            assert_eq!(
+                validate_frame_delta(&delta, &accepted, &mut target),
+                Err(SceneValidationError::InvalidGlyphGrid)
+            );
+            assert_eq!(target, current);
+        }
+
+        let mut camera_only = FrameDelta::empty();
+        camera_only.camera = Some(OrthographicCamera::new(361.0, 360.0, -2.0, 2.0).unwrap());
+        let mut target = current.clone();
+        assert_eq!(
+            validate_frame_delta(&camera_only, &accepted, &mut target),
+            Err(SceneValidationError::InvalidGlyphGrid)
+        );
+        assert_eq!(target, current);
     }
 
     #[test]

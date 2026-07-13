@@ -7,6 +7,7 @@ pub const SCENE_CONTRACT_SCHEMA_VERSION: u16 = super::COMPANION_SCENE_SCHEMA_VER
 pub const MAX_SCENE_NODES: usize = 128;
 pub const MAX_STATIC_PRIMITIVES: usize = 768;
 pub const MAX_PET_ART_SLOTS: usize = 130;
+pub const MAX_ROOM_GLYPH_SLOTS: usize = 32;
 pub const MAX_VISIBLE_PROPS: usize = 10;
 pub const MAX_ROUND_TANK_INHABITANTS: usize = 2;
 pub const MAX_AMBIENT_INSTANCES: usize = 64;
@@ -593,6 +594,7 @@ pub struct SceneCapacities {
     pub max_nodes: usize,
     pub max_static_primitives: usize,
     pub max_pet_art_slots: usize,
+    pub max_room_glyph_slots: usize,
     pub max_visible_props: usize,
     pub max_round_tank_inhabitants: usize,
     pub max_ambient_instances: usize,
@@ -602,10 +604,11 @@ pub struct SceneCapacities {
 }
 
 impl SceneCapacities {
-    pub const FIXED_V1: Self = Self {
+    pub const FIXED_V2: Self = Self {
         max_nodes: MAX_SCENE_NODES,
         max_static_primitives: MAX_STATIC_PRIMITIVES,
         max_pet_art_slots: MAX_PET_ART_SLOTS,
+        max_room_glyph_slots: MAX_ROOM_GLYPH_SLOTS,
         max_visible_props: MAX_VISIBLE_PROPS,
         max_round_tank_inhabitants: MAX_ROUND_TANK_INHABITANTS,
         max_ambient_instances: MAX_AMBIENT_INSTANCES,
@@ -620,6 +623,7 @@ pub struct SceneTemplate {
     pub schema_version: u16,
     pub renderer_schema_version: u16,
     pub capacities: SceneCapacities,
+    pub glyph_grid: super::CompanionGlyphGrid,
     pub nodes: Vec<NodeTemplate>,
     pub primitives: Vec<PrimitiveTemplate>,
     pub materials: Vec<MaterialTemplate>,
@@ -663,7 +667,7 @@ pub struct AuthoredGlyph(char);
 
 impl AuthoredGlyph {
     pub fn new(glyph: char) -> Result<Self, ContentValueError> {
-        const REPERTOIRE: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,:;!?%+-_#*/\\()[]<>|~`'\"@=&^$◆◇◈◉○◌◦◡◑◔◜▲▼◣◢▝▴▱▂▃▓▣☁☼✦✺·•°˚˙‹›ѱ⁙⌁╭╮╰╯╲╱╵╷╽╿┃│┊─┬~≈";
+        const REPERTOIRE: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,:;!?%+-_#*/\\()[]<>|~`'\"@=&^$◆◇◈◉○◌◦◡◑◔◜▲▼◣◢▝▴▱▂▃▓▣☁☼✦✧✺·•∘°˚˙‹›ѱ⁙⌁⌞⌟╭╮╰╯╲╱╵╷╽╿┃│┊─┄╌┬~≈□";
         REPERTOIRE
             .chars()
             .any(|candidate| candidate == glyph)
@@ -694,9 +698,7 @@ pub enum PetPaletteRole {
 pub enum AmbientContentKind {
     Mote,
     ActivityPulse,
-    PetParticle,
     Weather,
-    MoodAura,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -751,6 +753,13 @@ pub struct PetArtSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RoomGlyphContentSlot {
+    pub slot: u8,
+    pub glyph: Option<AuthoredGlyph>,
+    pub color_srgb8: Option<[u8; 3]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PropContentSlot {
     pub slot: u8,
     pub content: Option<PropSemanticContent>,
@@ -783,6 +792,7 @@ pub struct SceneContent {
     pub mood: MoodContentKind,
     pub weather: WeatherContentKind,
     pub pet_art_slots: Vec<PetArtSlot>,
+    pub room_glyph_slots: Vec<RoomGlyphContentSlot>,
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
@@ -798,7 +808,7 @@ const fn zero_generation_key() -> super::SceneGenerationKey {
 }
 
 impl SceneContent {
-    pub fn empty_v1() -> Self {
+    pub fn empty_v2() -> Self {
         Self {
             schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
             renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
@@ -810,6 +820,13 @@ impl SceneContent {
                     slot: slot as u16,
                     glyph: None,
                     palette_role: PetPaletteRole::Body,
+                })
+                .collect(),
+            room_glyph_slots: (0..MAX_ROOM_GLYPH_SLOTS)
+                .map(|slot| RoomGlyphContentSlot {
+                    slot: slot as u8,
+                    glyph: None,
+                    color_srgb8: None,
                 })
                 .collect(),
             prop_slots: (0..MAX_VISIBLE_PROPS)
@@ -881,6 +898,15 @@ pub struct AmbientFrameSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct RoomGlyphFrameSlot {
+    pub slot: u8,
+    pub visible: bool,
+    pub grid_cell: [u16; 2],
+    pub position_points: [f32; 2],
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct HudFrameSlot {
     pub slot: u8,
     pub visible: bool,
@@ -894,6 +920,7 @@ pub struct SceneFrame {
     pub renderer_schema_version: u16,
     pub camera: OrthographicCamera,
     pub nodes: Vec<NodeFrameState>,
+    pub room_glyph_slots: Vec<RoomGlyphFrameSlot>,
     pub prop_slots: Vec<PropFrameSlot>,
     pub tank_slots: Vec<TankFrameSlot>,
     pub ambient_slots: Vec<AmbientFrameSlot>,
@@ -904,7 +931,7 @@ pub struct SceneFrame {
 }
 
 impl SceneFrame {
-    pub fn empty_v1(camera: OrthographicCamera) -> Self {
+    pub fn empty_v2(camera: OrthographicCamera) -> Self {
         let hidden_tank_cell = TankCellFrame {
             visible: false,
             position_points: [0.0; 2],
@@ -916,6 +943,15 @@ impl SceneFrame {
             renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
             camera,
             nodes: Vec::new(),
+            room_glyph_slots: (0..MAX_ROOM_GLYPH_SLOTS)
+                .map(|slot| RoomGlyphFrameSlot {
+                    slot: slot as u8,
+                    visible: false,
+                    grid_cell: [0; 2],
+                    position_points: [0.0; 2],
+                    opacity: 0.0,
+                })
+                .collect(),
             prop_slots: (0..MAX_VISIBLE_PROPS)
                 .map(|slot| PropFrameSlot {
                     slot: slot as u8,
@@ -964,6 +1000,7 @@ impl fmt::Debug for SceneFrame {
             .field("renderer_schema_version", &self.renderer_schema_version)
             .field("camera", &self.camera)
             .field("nodes", &self.nodes)
+            .field("room_glyph_slots", &self.room_glyph_slots)
             .field("prop_slots", &self.prop_slots)
             .field("tank_slots", &self.tank_slots)
             .field("ambient_slots", &self.ambient_slots)
@@ -986,6 +1023,7 @@ pub struct ContentDelta {
     pub mood: Option<MoodContentKind>,
     pub weather: Option<WeatherContentKind>,
     pub pet_art_slots: Vec<PetArtSlot>,
+    pub room_glyph_slots: Vec<RoomGlyphContentSlot>,
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
@@ -1004,6 +1042,7 @@ impl ContentDelta {
             mood: None,
             weather: None,
             pet_art_slots: Vec::new(),
+            room_glyph_slots: Vec::new(),
             prop_slots: Vec::new(),
             tank_slots: Vec::new(),
             ambient_slots: Vec::new(),
@@ -1021,6 +1060,7 @@ pub struct FrameDelta {
     pub to: super::AppliedRevisions,
     pub camera: Option<OrthographicCamera>,
     pub nodes: Vec<NodeFrameState>,
+    pub room_glyph_slots: Vec<RoomGlyphFrameSlot>,
     pub prop_slots: Vec<PropFrameSlot>,
     pub tank_slots: Vec<TankFrameSlot>,
     pub ambient_slots: Vec<AmbientFrameSlot>,
@@ -1055,6 +1095,7 @@ impl FrameDelta {
             to: super::AppliedRevisions::new(0, 0),
             camera: None,
             nodes: Vec::new(),
+            room_glyph_slots: Vec::new(),
             prop_slots: Vec::new(),
             tank_slots: Vec::new(),
             ambient_slots: Vec::new(),
@@ -1088,7 +1129,7 @@ pub(crate) struct SceneDeltaScratch {
 }
 
 impl SceneDeltaScratch {
-    fn fixed_v1() -> Self {
+    fn fixed_v2() -> Self {
         Self {
             content: ContentDelta {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -1100,6 +1141,7 @@ impl SceneDeltaScratch {
                 mood: None,
                 weather: None,
                 pet_art_slots: Vec::with_capacity(MAX_PET_ART_SLOTS),
+                room_glyph_slots: Vec::with_capacity(MAX_ROOM_GLYPH_SLOTS),
                 prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
                 tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
                 ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
@@ -1113,6 +1155,7 @@ impl SceneDeltaScratch {
                 to: super::AppliedRevisions::new(0, 0),
                 camera: None,
                 nodes: Vec::with_capacity(MAX_SCENE_NODES),
+                room_glyph_slots: Vec::with_capacity(MAX_ROOM_GLYPH_SLOTS),
                 prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
                 tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
                 ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
@@ -1166,7 +1209,15 @@ impl SceneFixture {
             template: SceneTemplate {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
                 renderer_schema_version: super::COMPANION_RENDERER_SCHEMA_VERSION,
-                capacities: SceneCapacities::FIXED_V1,
+                capacities: SceneCapacities::FIXED_V2,
+                glyph_grid: super::CompanionGlyphGrid {
+                    columns: 30,
+                    rows: 30,
+                    y_up_origin_points: [0.0, 0.0],
+                    cell_extent_points: [12.0, 12.0],
+                    scale: super::LogicalGlyphScale::OneCell,
+                    anchor: super::LogicalGlyphAnchor::CellBottomLeft,
+                },
                 nodes: vec![
                     NodeTemplate {
                         id: root,
@@ -1236,10 +1287,11 @@ impl SceneFixture {
                         palette_role: PetPaletteRole::Body,
                     })
                     .collect(),
-                prop_slots: SceneContent::empty_v1().prop_slots,
-                tank_slots: SceneContent::empty_v1().tank_slots,
-                ambient_slots: SceneContent::empty_v1().ambient_slots,
-                hud_slots: SceneContent::empty_v1().hud_slots,
+                room_glyph_slots: SceneContent::empty_v2().room_glyph_slots,
+                prop_slots: SceneContent::empty_v2().prop_slots,
+                tank_slots: SceneContent::empty_v2().tank_slots,
+                ambient_slots: SceneContent::empty_v2().ambient_slots,
+                hud_slots: SceneContent::empty_v2().hud_slots,
             },
             frame: SceneFrame {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -1259,10 +1311,11 @@ impl SceneFixture {
                         opacity: 1.0,
                     },
                 ],
-                prop_slots: SceneFrame::empty_v1(camera).prop_slots,
-                tank_slots: SceneFrame::empty_v1(camera).tank_slots,
-                ambient_slots: SceneFrame::empty_v1(camera).ambient_slots,
-                hud_slots: SceneFrame::empty_v1(camera).hud_slots,
+                room_glyph_slots: SceneFrame::empty_v2(camera).room_glyph_slots,
+                prop_slots: SceneFrame::empty_v2(camera).prop_slots,
+                tank_slots: SceneFrame::empty_v2(camera).tank_slots,
+                ambient_slots: SceneFrame::empty_v2(camera).ambient_slots,
+                hud_slots: SceneFrame::empty_v2(camera).hud_slots,
                 gauges: [0.0; 4],
                 dim_amount: 0.0,
                 lights: vec![],
@@ -1355,6 +1408,14 @@ mod tests {
             privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
             topology: super::super::TopologySnapshot {
                 layout: CompanionLogicalLayout::round(360.0, 360.0),
+                glyph_grid: super::super::CompanionGlyphGrid {
+                    columns: 60,
+                    rows: 30,
+                    y_up_origin_points: [0.0, 0.0],
+                    cell_extent_points: [6.0, 12.0],
+                    scale: super::super::LogicalGlyphScale::OneCell,
+                    anchor: super::super::LogicalGlyphAnchor::CellBottomLeft,
+                },
                 pet: super::super::PetTopologySnapshot {
                     species,
                     stage,
@@ -1379,6 +1440,7 @@ mod tests {
                 room_weather: "clear",
                 pet_lines,
                 pet_roles,
+                room_glyphs: Vec::new(),
                 palette: super::super::PaletteSnapshot {
                     body: [120, 130, 140],
                     body_glow: [150, 160, 170],
@@ -1394,9 +1456,8 @@ mod tests {
                 ambient_semantics: (0..MAX_AMBIENT_INSTANCES)
                     .map(|slot| super::super::AmbientSemanticSnapshot {
                         slot: slot as u8,
-                        kind: (slot == 0)
-                            .then_some(super::super::AmbientSemanticKindSnapshot::MoodAura),
-                        glyph: (slot == 0).then_some('◌'),
+                        kind: None,
+                        glyph: None,
                     })
                     .collect(),
                 hud_glyphs,
@@ -1414,6 +1475,7 @@ mod tests {
                 gauges: [super::super::GaugeLevelSnapshot::Empty; 4],
                 dim_amount: 0.0,
                 hud_lines,
+                room_glyphs: Vec::new(),
                 ambient_instances: (0..MAX_AMBIENT_INSTANCES)
                     .map(|slot| super::super::AmbientFrameSnapshot {
                         slot: slot as u8,
@@ -1454,10 +1516,11 @@ mod tests {
     }
 
     #[test]
-    fn fixed_v1_capacities_are_exact() {
+    fn fixed_v2_capacities_are_exact() {
         assert_eq!(MAX_SCENE_NODES, 128);
         assert_eq!(MAX_STATIC_PRIMITIVES, 768);
         assert_eq!(MAX_PET_ART_SLOTS, 130);
+        assert_eq!(MAX_ROOM_GLYPH_SLOTS, 32);
         assert_eq!(MAX_VISIBLE_PROPS, 10);
         assert_eq!(MAX_ROUND_TANK_INHABITANTS, 2);
         assert_eq!(MAX_AMBIENT_INSTANCES, 64);
@@ -1471,8 +1534,9 @@ mod tests {
 
     #[test]
     fn repaired_mirrors_have_canonical_empty_slots_and_fixed_frame_storage() {
-        let content = SceneContent::empty_v1();
+        let content = SceneContent::empty_v2();
         assert_eq!(content.pet_art_slots.len(), MAX_PET_ART_SLOTS);
+        assert_eq!(content.room_glyph_slots.len(), MAX_ROOM_GLYPH_SLOTS);
         assert_eq!(content.prop_slots.len(), MAX_VISIBLE_PROPS);
         assert_eq!(content.tank_slots.len(), MAX_ROUND_TANK_INHABITANTS);
         assert_eq!(content.ambient_slots.len(), MAX_AMBIENT_INSTANCES);
@@ -1480,9 +1544,14 @@ mod tests {
         assert!(content.prop_slots.iter().all(|slot| slot.content.is_none()));
         assert!(content.tank_slots.iter().all(|slot| slot.content.is_none()));
         assert!(content.ambient_slots.iter().all(|slot| slot.kind.is_none()));
+        assert!(content
+            .room_glyph_slots
+            .iter()
+            .all(|slot| slot.glyph.is_none()));
 
-        let frame = SceneFrame::empty_v1(OrthographicCamera::new(360.0, 360.0, -2.0, 2.0).unwrap());
+        let frame = SceneFrame::empty_v2(OrthographicCamera::new(360.0, 360.0, -2.0, 2.0).unwrap());
         assert_eq!(frame.prop_slots.len(), MAX_VISIBLE_PROPS);
+        assert_eq!(frame.room_glyph_slots.len(), MAX_ROOM_GLYPH_SLOTS);
         assert_eq!(frame.tank_slots.len(), MAX_ROUND_TANK_INHABITANTS);
         assert_eq!(frame.ambient_slots.len(), MAX_AMBIENT_INSTANCES);
         assert_eq!(frame.hud_slots.len(), MAX_HUD_GLYPH_SLOTS);
@@ -1567,6 +1636,8 @@ mod tests {
         );
 
         let mut changed = snapshot.clone();
+        changed.content.ambient_semantics[0].kind =
+            Some(super::super::AmbientSemanticKindSnapshot::Weather);
         changed.content.ambient_semantics[0].glyph = Some('◇');
         let changed = build_scene_generation(&changed, generation_key(1)).unwrap();
         assert_ne!(first.content_checksum, changed.content_checksum);
@@ -1806,6 +1877,10 @@ mod tests {
         for height in [260.0, 480.0] {
             let mut initial = snapshot_for(Species::Fuzz, Stage::S3);
             initial.topology.layout = CompanionLogicalLayout::round(height, height);
+            initial.topology.glyph_grid.cell_extent_points = [
+                height / f32::from(initial.topology.glyph_grid.columns),
+                height / f32::from(initial.topology.glyph_grid.rows),
+            ];
             initial.content.hud_glyphs[0].glyph = Some('R');
             initial.frame.hud_instances[0] = super::super::HudFrameSnapshot {
                 slot: 0,
@@ -1847,6 +1922,80 @@ mod tests {
     }
 
     #[test]
+    fn room_slot_delta_matches_fresh_compile_without_generation_churn() {
+        let initial = std::sync::Arc::new(snapshot_for(Species::Fuzz, Stage::S3));
+        let mut incremental = build_scene_generation_owned(
+            std::sync::Arc::clone(&initial),
+            generation_key(7),
+            super::super::AppliedRevisions::new(0, 0),
+        )
+        .unwrap();
+        let template_checksum = incremental.template.generation_checksum;
+        let mut changed = (*initial).clone();
+        changed
+            .content
+            .room_glyphs
+            .push(super::super::RoomGlyphContentSnapshot {
+                slot: 0,
+                glyph: '✦',
+                color_srgb8: [20, 40, 60],
+            });
+        changed
+            .frame
+            .room_glyphs
+            .push(super::super::RoomGlyphFrameSnapshot {
+                slot: 0,
+                visible: true,
+                grid_cell: [2, 3],
+                position_points: [12.0, 312.0],
+                opacity: 1.0,
+            });
+        let changed = std::sync::Arc::new(changed);
+        let changes = super::super::runtime::classify_snapshot_changes(&initial, &changed);
+        incremental
+            .apply_compatible_snapshot(
+                std::sync::Arc::clone(&changed),
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(1, 1),
+            )
+            .unwrap();
+        let fresh = build_scene_generation_owned(
+            std::sync::Arc::clone(&changed),
+            generation_key(7),
+            super::super::AppliedRevisions::new(1, 1),
+        )
+        .unwrap();
+        assert_eq!(incremental.template.generation_checksum, template_checksum);
+        assert_eq!(incremental.template, fresh.template);
+        assert_eq!(incremental.content, fresh.content);
+        assert_eq!(incremental.frame, fresh.frame);
+        assert_eq!(incremental.content_checksum, fresh.content_checksum);
+        assert_eq!(incremental.frame_checksum, fresh.frame_checksum);
+
+        let clearing = super::super::runtime::classify_snapshot_changes(&changed, &initial);
+        incremental
+            .apply_compatible_snapshot(
+                std::sync::Arc::clone(&initial),
+                clearing,
+                super::super::AppliedRevisions::new(1, 1),
+                super::super::AppliedRevisions::new(2, 2),
+            )
+            .unwrap();
+        assert!(incremental
+            .content
+            .room_glyph_slots
+            .iter()
+            .all(|slot| slot.glyph.is_none() && slot.color_srgb8.is_none()));
+        assert!(incremental.frame.room_glyph_slots.iter().all(|slot| {
+            !slot.visible
+                && slot.grid_cell == [0; 2]
+                && slot.position_points == [0.0; 2]
+                && slot.opacity == 0.0
+        }));
+    }
+
+    #[test]
     fn room_authored_identity_changes_template_resources_and_checksum() {
         let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
         let first = build_scene_generation(&snapshot, generation_key(1)).unwrap();
@@ -1860,6 +2009,23 @@ mod tests {
             changed.template.generation_checksum
         );
         assert_ne!(first.template.resources, changed.template.resources);
+    }
+
+    #[test]
+    fn valid_grid_change_is_immutable_template_generation_identity() {
+        let initial = snapshot_for(Species::Fuzz, Stage::S3);
+        let first = build_scene_generation(&initial, generation_key(1)).unwrap();
+        let mut changed = initial.clone();
+        changed.topology.glyph_grid.columns = 72;
+        changed.topology.glyph_grid.cell_extent_points[0] = 5.0;
+        let changes = super::super::runtime::classify_snapshot_changes(&initial, &changed);
+        assert!(changes.requires_generation());
+        let second = build_scene_generation(&changed, generation_key(2)).unwrap();
+        assert_ne!(first.template.glyph_grid, second.template.glyph_grid);
+        assert_ne!(
+            first.template.generation_checksum,
+            second.template.generation_checksum
+        );
     }
 
     #[test]

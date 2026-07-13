@@ -148,9 +148,7 @@ fn ambient_content_tag(value: AmbientContentKind) -> u8 {
     match value {
         AmbientContentKind::Mote => 1,
         AmbientContentKind::ActivityPulse => 2,
-        AmbientContentKind::PetParticle => 3,
-        AmbientContentKind::Weather => 4,
-        AmbientContentKind::MoodAura => 5,
+        AmbientContentKind::Weather => 3,
     }
 }
 
@@ -187,13 +185,14 @@ fn presentation_surface_tag(value: crate::presentation::privacy::PresentationSur
 }
 
 pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGenerationError> {
-    let mut hash = Fnv1a64::domain(b"glorp.scene-template.v1\0");
+    let mut hash = Fnv1a64::domain(b"glorp.scene-template.v2\0");
     hash.u16(template.schema_version);
     hash.u16(template.renderer_schema_version);
     for value in [
         template.capacities.max_nodes,
         template.capacities.max_static_primitives,
         template.capacities.max_pet_art_slots,
+        template.capacities.max_room_glyph_slots,
         template.capacities.max_visible_props,
         template.capacities.max_round_tank_inhabitants,
         template.capacities.max_ambient_instances,
@@ -203,6 +202,22 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
     ] {
         hash.usize(value);
     }
+    hash.u16(template.glyph_grid.columns);
+    hash.u16(template.glyph_grid.rows);
+    for value in template.glyph_grid.y_up_origin_points {
+        hash.f32(value)
+            .map_err(|_| SceneGenerationError::NonFinite)?;
+    }
+    for value in template.glyph_grid.cell_extent_points {
+        hash.f32(value)
+            .map_err(|_| SceneGenerationError::NonFinite)?;
+    }
+    hash.u8(match template.glyph_grid.scale {
+        super::super::LogicalGlyphScale::OneCell => 1,
+    });
+    hash.u8(match template.glyph_grid.anchor {
+        super::super::LogicalGlyphAnchor::CellBottomLeft => 1,
+    });
     let mut nodes = template.nodes.iter().collect::<Vec<_>>();
     nodes.sort_by(|left, right| left.alias.cmp(&right.alias));
     hash.usize(nodes.len());
@@ -286,7 +301,7 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
 }
 
 pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGenerationError> {
-    let mut hash = Fnv1a64::domain(b"glorp.scene-content.v1\0");
+    let mut hash = Fnv1a64::domain(b"glorp.scene-content.v2\0");
     hash.u16(content.schema_version);
     hash.u16(content.renderer_schema_version);
     for color in content.palette {
@@ -306,6 +321,19 @@ pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGener
             None => hash.u8(0),
         }
         hash.u8(pet_palette_role_tag(slot.palette_role));
+    }
+    for slot in &content.room_glyph_slots {
+        hash.u8(slot.slot);
+        match (slot.glyph, slot.color_srgb8) {
+            (Some(glyph), Some(color)) => {
+                hash.u8(1);
+                hash.glyph(glyph.as_char());
+                for channel in color {
+                    hash.u8(channel);
+                }
+            }
+            _ => hash.u8(0),
+        }
     }
     for slot in &content.prop_slots {
         hash.u8(slot.slot);
@@ -361,7 +389,7 @@ pub(super) fn checksum_frame(
     template: &SceneTemplate,
     frame: &SceneFrame,
 ) -> Result<u64, SceneGenerationError> {
-    let mut hash = Fnv1a64::domain(b"glorp.scene-frame.v1\0");
+    let mut hash = Fnv1a64::domain(b"glorp.scene-frame.v2\0");
     hash.u16(frame.schema_version);
     hash.u16(frame.renderer_schema_version);
     hash.f32(frame.camera.width_points)
@@ -397,6 +425,15 @@ pub(super) fn checksum_frame(
         hash.bool(slot.visible);
         encode_points(&mut hash, slot.origin_points)?;
         encode_points(&mut hash, slot.motion_offset_points)?;
+        hash.f32(slot.opacity)
+            .map_err(|_| SceneGenerationError::NonFinite)?;
+    }
+    for slot in &frame.room_glyph_slots {
+        hash.u8(slot.slot);
+        hash.bool(slot.visible);
+        hash.u16(slot.grid_cell[0]);
+        hash.u16(slot.grid_cell[1]);
+        encode_points(&mut hash, slot.position_points)?;
         hash.f32(slot.opacity)
             .map_err(|_| SceneGenerationError::NonFinite)?;
     }

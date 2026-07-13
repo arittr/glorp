@@ -1063,6 +1063,73 @@ git commit -m "feat(renderer): materialize linear depth scene resources"
 
 ---
 
+### Task 9.5: Bridge canonical companion semantics into the retained GPU scene
+
+Task 9 proved persistent GPU ownership, exact color/depth targets, and the
+fixed upload boundary. Before encoding draws, close the remaining semantic gap
+so the GPU consumes the real companion scene instead of inferring meaning from
+primitive aliases or baking dynamic room art into immutable resources.
+
+#### Task 9.5A: Define scene contract v2
+
+- Bump the companion scene and renderer contracts to schema v2. No v1 adapter.
+- Replace optional instance-group inference with typed primitive bindings for
+  analytic parameters, instance families, static-atlas recipes, and future
+  shallow cards.
+- Add fixed 32-slot dynamic room-glyph content/frame families. Generate them
+  from the existing minute-reseeded room producer with the round companion's
+  speech and pet-silhouette exclusions. The canonical static-atlas recipe table
+  remains empty until a genuinely generation-static sprite exists.
+- Add aligned fixed 16-slot analytic template/content/frame tables containing
+  exactly eight active roles: room background, wall shadow, floor projection,
+  status halo, mood aura, gauges, trouble, and dim.
+- Partition occupied pet-art slots by palette role: body consumes non-particle
+  roles and pet particles consume `Particle`. Ambient instances never own pet
+  particles or mood aura.
+- Give every visible glyph an explicit renderer-neutral color source and exact
+  grid-to-Y-up-point metrics. Reclassify soft glyphs as premultiplied source-over
+  with read-only world depth.
+- Update validation, v2 checksum domains, delta ownership, typed artifacts, and
+  production-derived lifetime tests. Cross minute, activity, trouble, and
+  dim/gauge changes across 300 frames without rebuilding immutable generation
+  state.
+
+#### Task 9.5B: Translate v2 into fixed retained mirrors
+
+- Pack immutable glyph addresses, analytic templates, and bounded static-sprite
+  capability into the existing metadata buffers. Pack dynamic analytic values,
+  room slots, and active ordering into existing fixed frame/content mirrors.
+- Thread authored order and typed source/filter data through upload and draw
+  records. Do not add independent storage bindings for each semantic table.
+- Keep all ordinary updates bounded and allocation-free. Continue to report
+  capacity overflow as a generation request instead of growing storage.
+
+#### Task 9.5C: Materialize the complete unlit material classes
+
+- Extend persistent bind groups and the scene shader for the v2 fixed tables.
+- Materialize source-over glyph, multiply analytic, additive analytic, and
+  additive glyph pipeline classes before Task 10. Pipelines are selected by
+  typed material/binding data, not aliases.
+- Preserve the six scene storage bindings and eight GPU buffers. If the static
+  recipe table is empty, bind a transparent sentinel atlas without claiming
+  the room is static.
+- Continue to prohibit `Queue::write_buffer`; mutable uploads use the host-owned
+  reusable staging belt.
+
+Required gate before Task 10:
+
+~~~bash
+cargo test --features retained-renderer presentation::companion_scene
+cargo test --features retained-renderer companion::retained::compiler
+cargo test --features retained-renderer companion::retained::render
+cargo test --test companion_scene_boundary
+cargo test --test retained_renderer_boundary
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --check
+~~~
+
+---
+
 ### Task 10: Render the complete unlit companion offscreen
 
 **Files:**
@@ -1080,9 +1147,15 @@ git commit -m "feat(renderer): materialize linear depth scene resources"
 
 ~~~rust
 #[test]
-fn opaque_world_elements_occlude_by_z_across_semantic_categories() {
-    let frame = render_fixture(SceneFixture::OpaqueCrossCategory).unwrap();
-    assert_eq!(frame.pixel(180, 180), EXPECTED_NEAR_PROP_RGBA);
+fn opaque_analytic_fixture_writes_depth() {
+    let frame = render_fixture(SceneFixture::OpaqueAnalyticDepth).unwrap();
+    assert_eq!(frame.pixel(180, 180), EXPECTED_NEAR_ANALYTIC_RGBA);
+}
+
+#[test]
+fn soft_glyph_coverage_blends_without_writing_depth() {
+    let frame = render_fixture(SceneFixture::SoftGlyphOverlap).unwrap();
+    assert_eq!(frame.pixel(180, 180), EXPECTED_COMPOSITE_RGBA);
 }
 
 #[test]
@@ -1112,7 +1185,7 @@ Expected: compile failure for missing offscreen scene renderer.
 
 - [ ] **Step 3: Encode fixed opaque and chrome batches**
 
-Apply dirty CPU mirror spans through Queue::write_buffer, bind immutable geometry/resources, encode opaque/cutout, ordered blend placeholder, chrome, and final surface/capture pass. Offscreen mode targets the persistent intermediate and capture staging without acquiring a surface.
+Apply dirty CPU mirror spans through the host-owned reusable staging belt, bind immutable geometry/resources, encode opaque, source-over, multiply, additive, chrome, and final surface/capture passes. Offscreen mode targets the persistent intermediate and capture staging without acquiring a surface. Never call `Queue::write_buffer`.
 
 - [ ] **Step 4: Implement canonical capture normalization**
 

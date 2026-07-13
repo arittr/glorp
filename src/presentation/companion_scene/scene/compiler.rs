@@ -3,14 +3,16 @@ use super::*;
 
 impl SceneGenerationData {
     #[cfg(test)]
-    pub(super) fn delta_capacities(&self) -> [usize; 11] {
+    pub(super) fn delta_capacities(&self) -> [usize; 13] {
         [
             self.delta_scratch.content.pet_art_slots.capacity(),
+            self.delta_scratch.content.room_glyph_slots.capacity(),
             self.delta_scratch.content.prop_slots.capacity(),
             self.delta_scratch.content.tank_slots.capacity(),
             self.delta_scratch.content.ambient_slots.capacity(),
             self.delta_scratch.content.hud_slots.capacity(),
             self.delta_scratch.frame.nodes.capacity(),
+            self.delta_scratch.frame.room_glyph_slots.capacity(),
             self.delta_scratch.frame.prop_slots.capacity(),
             self.delta_scratch.frame.tank_slots.capacity(),
             self.delta_scratch.frame.ambient_slots.capacity(),
@@ -36,6 +38,7 @@ impl SceneGenerationData {
         content.mood = None;
         content.weather = None;
         content.pet_art_slots.clear();
+        content.room_glyph_slots.clear();
         content.prop_slots.clear();
         content.tank_slots.clear();
         content.ambient_slots.clear();
@@ -46,6 +49,7 @@ impl SceneGenerationData {
         frame.to = to;
         frame.camera = None;
         frame.nodes.clear();
+        frame.room_glyph_slots.clear();
         frame.prop_slots.clear();
         frame.tank_slots.clear();
         frame.ambient_slots.clear();
@@ -89,6 +93,11 @@ impl SceneGenerationData {
         {
             project_pet_delta(snapshot, &mut content.pet_art_slots)?;
         }
+        if semantic.contains(
+            crate::presentation::companion_scene::runtime::SemanticChangeMask::ROOM_GLYPHS,
+        ) {
+            project_room_content_delta(snapshot, &mut content.room_glyph_slots)?;
+        }
         if semantic
             .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::PROP)
         {
@@ -109,17 +118,11 @@ impl SceneGenerationData {
                 content.ambient_slots.push(AmbientContentSlot {
                     slot: source.slot,
                     kind: source.kind.map(|kind| match kind {
-                        crate::presentation::companion_scene::AmbientSemanticKindSnapshot::MoodAura => {
-                            AmbientContentKind::MoodAura
-                        }
                         crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Weather => AmbientContentKind::Weather,
                         crate::presentation::companion_scene::AmbientSemanticKindSnapshot::ActivityPulse => {
                             AmbientContentKind::ActivityPulse
                         }
                         crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Mote => AmbientContentKind::Mote,
-                        crate::presentation::companion_scene::AmbientSemanticKindSnapshot::PetParticle => {
-                            AmbientContentKind::PetParticle
-                        }
                     }),
                     glyph: source
                         .glyph
@@ -178,6 +181,11 @@ impl SceneGenerationData {
                 local_transform: pet_transform(snapshot),
                 ..node
             });
+        }
+        if frame_mask
+            .contains(crate::presentation::companion_scene::runtime::FrameChangeMask::ROOM_GLYPHS)
+        {
+            project_room_frame_delta(snapshot, &mut frame.room_glyph_slots);
         }
         if frame_mask.contains(
             crate::presentation::companion_scene::runtime::FrameChangeMask::PROP_TRANSFORMS,
@@ -414,6 +422,40 @@ fn project_pet_delta(
     Ok(())
 }
 
+fn project_room_content_delta(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    output: &mut Vec<RoomGlyphContentSlot>,
+) -> Result<(), SceneGenerationError> {
+    for slot in 0..MAX_ROOM_GLYPH_SLOTS {
+        let source = snapshot.content.room_glyphs.get(slot);
+        output.push(RoomGlyphContentSlot {
+            slot: slot as u8,
+            glyph: source
+                .map(|source| AuthoredGlyph::new(source.glyph))
+                .transpose()
+                .map_err(|_| SceneGenerationError::InvalidGlyph)?,
+            color_srgb8: source.map(|source| source.color_srgb8),
+        });
+    }
+    Ok(())
+}
+
+fn project_room_frame_delta(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    output: &mut Vec<RoomGlyphFrameSlot>,
+) {
+    for slot in 0..MAX_ROOM_GLYPH_SLOTS {
+        let source = snapshot.frame.room_glyphs.get(slot);
+        output.push(RoomGlyphFrameSlot {
+            slot: slot as u8,
+            visible: source.is_some_and(|source| source.visible),
+            grid_cell: source.map_or([0; 2], |source| source.grid_cell),
+            position_points: source.map_or([0.0; 2], |source| source.position_points),
+            opacity: source.map_or(0.0, |source| source.opacity),
+        });
+    }
+}
+
 #[allow(dead_code)]
 fn project_prop_delta(
     snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
@@ -608,6 +650,9 @@ fn apply_content_delta(content: &mut SceneContent, delta: &ContentDelta) {
     for changed in &delta.pet_art_slots {
         content.pet_art_slots[usize::from(changed.slot)] = *changed;
     }
+    for changed in &delta.room_glyph_slots {
+        content.room_glyph_slots[usize::from(changed.slot)] = *changed;
+    }
     for changed in &delta.prop_slots {
         content.prop_slots[usize::from(changed.slot)] = *changed;
     }
@@ -635,6 +680,9 @@ fn apply_frame_delta_unchecked(frame: &mut SceneFrame, delta: &FrameDelta) {
         {
             *current = *changed;
         }
+    }
+    for changed in &delta.room_glyph_slots {
+        frame.room_glyph_slots[usize::from(changed.slot)] = *changed;
     }
     for changed in &delta.prop_slots {
         frame.prop_slots[usize::from(changed.slot)] = *changed;
@@ -742,7 +790,7 @@ fn build_scene_generation_sealed(
         frame,
         content_checksum,
         frame_checksum,
-        delta_scratch: SceneDeltaScratch::fixed_v1(),
+        delta_scratch: SceneDeltaScratch::fixed_v2(),
         accepted,
     })
 }
@@ -1255,7 +1303,8 @@ fn build_template(
         schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
         renderer_schema_version:
             crate::presentation::companion_scene::COMPANION_RENDERER_SCHEMA_VERSION,
-        capacities: SceneCapacities::FIXED_V1,
+        capacities: SceneCapacities::FIXED_V2,
+        glyph_grid: snapshot.topology.glyph_grid,
         nodes,
         primitives,
         materials,
@@ -1269,7 +1318,9 @@ fn build_template(
 fn build_content(
     snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
 ) -> Result<SceneContent, SceneGenerationError> {
-    let mut content = SceneContent::empty_v1();
+    let mut content = SceneContent::empty_v2();
+    content.room_glyph_slots.clear();
+    project_room_content_delta(snapshot, &mut content.room_glyph_slots)?;
     let palette = snapshot.content.palette;
     content.palette = [
         palette.body,
@@ -1392,9 +1443,6 @@ fn build_content(
             AuthoredGlyph::new(glyph).map_err(|_| SceneGenerationError::InvalidGlyph)?;
         }
         content.ambient_slots[slot].kind = semantic.kind.map(|kind| match kind {
-            crate::presentation::companion_scene::AmbientSemanticKindSnapshot::MoodAura => {
-                AmbientContentKind::MoodAura
-            }
             crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Weather => {
                 AmbientContentKind::Weather
             }
@@ -1403,9 +1451,6 @@ fn build_content(
             }
             crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Mote => {
                 AmbientContentKind::Mote
-            }
-            crate::presentation::companion_scene::AmbientSemanticKindSnapshot::PetParticle => {
-                AmbientContentKind::PetParticle
             }
         });
         content.ambient_slots[slot].glyph = semantic
@@ -1653,7 +1698,9 @@ fn build_frame(
     let layout = snapshot.topology.layout;
     let camera = OrthographicCamera::new(layout.width_points, layout.height_points, -2.0, 2.0)
         .map_err(|_| SceneGenerationError::NonFinite)?;
-    let mut frame = SceneFrame::empty_v1(camera);
+    let mut frame = SceneFrame::empty_v2(camera);
+    frame.room_glyph_slots.clear();
+    project_room_frame_delta(snapshot, &mut frame.room_glyph_slots);
     frame.nodes = template
         .nodes
         .iter()

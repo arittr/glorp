@@ -2251,9 +2251,7 @@ fn ambient_kind_tag(value: AmbientContentKind) -> u32 {
     match value {
         AmbientContentKind::Mote => 1,
         AmbientContentKind::ActivityPulse => 2,
-        AmbientContentKind::PetParticle => 3,
-        AmbientContentKind::Weather => 4,
-        AmbientContentKind::MoodAura => 5,
+        AmbientContentKind::Weather => 3,
     }
 }
 
@@ -2834,7 +2832,7 @@ mod tests {
             compiled.content.ambient.as_slice()[2].glyph_scalar,
             u32::from('☁')
         );
-        assert_eq!(compiled.content.ambient.as_slice()[2].variant, 4);
+        assert_eq!(compiled.content.ambient.as_slice()[2].variant, 3);
         assert_eq!(
             compiled.content.hud.as_slice()[1].glyph_scalar,
             u32::from('7')
@@ -2863,6 +2861,13 @@ mod tests {
         assert_eq!(compiled.frame.lights.as_slice()[0].flags, 1);
         assert_eq!(compiled.frame.lights.as_slice()[1].variant, NONE_U32);
         assert_eq!(compiled.frame.nodes.as_slice()[2], NodeGpuValue::zeroed());
+    }
+
+    #[test]
+    fn ambient_kind_tags_are_the_closed_v2_abi() {
+        assert_eq!(ambient_kind_tag(AmbientContentKind::Mote), 1);
+        assert_eq!(ambient_kind_tag(AmbientContentKind::ActivityPulse), 2);
+        assert_eq!(ambient_kind_tag(AmbientContentKind::Weather), 3);
     }
 
     #[test]
@@ -3563,12 +3568,12 @@ mod tests {
     }
 
     #[test]
-    fn same_generation_camera_delta_matches_fresh_compile_and_preserves_host_globals() {
+    fn same_generation_camera_depth_delta_matches_fresh_compile_and_preserves_host_globals() {
         let fixture = SceneFixture::valid();
         let mut candidate = compile_fixture(&fixture);
         let before = candidate.frame.globals.as_slice()[0];
         let camera = crate::presentation::companion_scene::scene::OrthographicCamera::new(
-            420.0, 380.0, -2.0, 2.0,
+            360.0, 360.0, -3.0, 3.0,
         )
         .unwrap();
         let (content, mut frame) = paired_deltas(
@@ -3606,7 +3611,7 @@ mod tests {
             after.projection,
             camera.projection_matrix().unwrap().columns
         );
-        assert_eq!(after.viewport_points, [420.0, 380.0]);
+        assert_eq!(after.viewport_points, before.viewport_points);
         assert_eq!(after.view, before.view);
         assert_eq!(after.viewport_pixels, before.viewport_pixels);
         assert_eq!(after.aperture, before.aperture);

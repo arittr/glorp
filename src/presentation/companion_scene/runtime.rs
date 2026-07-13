@@ -59,6 +59,7 @@ impl LayoutChangeMask {
     pub(crate) const ROOM_TOPOLOGY: Self = Self(1 << 2);
     pub(crate) const PROP_CAST: Self = Self(1 << 3);
     pub(crate) const TANK_CAST: Self = Self(1 << 4);
+    pub(crate) const GLYPH_GRID: Self = Self(1 << 5);
 
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -120,6 +121,7 @@ impl SemanticChangeMask {
     pub(crate) const AMBIENT: Self = Self(1 << 4);
     pub(crate) const HUD: Self = Self(1 << 5);
     pub(crate) const MOOD_WEATHER: Self = Self(1 << 6);
+    pub(crate) const ROOM_GLYPHS: Self = Self(1 << 7);
 
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -153,6 +155,7 @@ impl FrameChangeMask {
     pub(crate) const GAUGES: Self = Self(1 << 6);
     pub(crate) const DIM: Self = Self(1 << 7);
     pub(crate) const LIGHTS: Self = Self(1 << 8);
+    pub(crate) const ROOM_GLYPHS: Self = Self(1 << 9);
 
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -426,6 +429,9 @@ pub(crate) fn classify_snapshot_changes(
     {
         changes.layout.insert(LayoutChangeMask::LOGICAL_EXTENT);
     }
+    if previous.topology.glyph_grid != newest.topology.glyph_grid {
+        changes.layout.insert(LayoutChangeMask::GLYPH_GRID);
+    }
     if previous.topology.pet.species != newest.topology.pet.species
         || previous.topology.pet.stage != newest.topology.pet.stage
         || previous.topology.pet.lattice.identity != newest.topology.pet.lattice.identity
@@ -471,6 +477,12 @@ pub(crate) fn classify_snapshot_changes(
         || visible_pet_roles_changed(previous, newest)
     {
         changes.semantic.insert(SemanticChangeMask::PET_ART);
+    }
+    if previous.content.room_glyphs != newest.content.room_glyphs {
+        changes.semantic.insert(SemanticChangeMask::ROOM_GLYPHS);
+    }
+    if previous.frame.room_glyphs != newest.frame.room_glyphs {
+        changes.frame.insert(FrameChangeMask::ROOM_GLYPHS);
     }
     if previous.content.room_weather != newest.content.room_weather {
         changes.semantic.insert(SemanticChangeMask::MOOD_WEATHER);
@@ -597,8 +609,14 @@ pub(crate) fn validate_snapshot(
         return Err(SnapshotRejection::Privacy);
     }
     let layout = snapshot.topology.layout;
+    let grid = snapshot.topology.glyph_grid;
     if !layout.width_points.is_finite()
         || !layout.height_points.is_finite()
+        || !grid
+            .y_up_origin_points
+            .iter()
+            .chain(&grid.cell_extent_points)
+            .all(|value| value.is_finite())
         || !snapshot
             .frame
             .pet_anchor_points
@@ -629,11 +647,16 @@ pub(crate) fn validate_snapshot(
         || snapshot.frame.hud_instances.iter().any(|slot| {
             !slot.position_points.iter().all(|value| value.is_finite()) || !slot.opacity.is_finite()
         })
+        || snapshot.frame.room_glyphs.iter().any(|slot| {
+            !slot.position_points.iter().all(|value| value.is_finite()) || !slot.opacity.is_finite()
+        })
     {
         return Err(SnapshotRejection::NonFinite);
     }
     if layout.width_points <= 0.0
         || layout.height_points <= 0.0
+        || snapshot.topology.glyph_grid.columns == 0
+        || snapshot.topology.glyph_grid.rows == 0
         || !matches!(snapshot.frame.facing, -1 | 1)
         || !(0.0..=1.0).contains(&snapshot.frame.dim_amount)
         || !(-1.0..=1.0).contains(&snapshot.frame.pet_depth)
@@ -647,6 +670,10 @@ pub(crate) fn validate_snapshot(
             .hud_instances
             .iter()
             .any(|slot| !(0.0..=1.0).contains(&slot.opacity))
+        || snapshot.frame.room_glyphs.iter().any(|slot| {
+            !slot.visible || !(0.0..=1.0).contains(&slot.opacity) || slot.opacity == 0.0
+        })
+        || grid.cell_extent_points.iter().any(|value| *value <= 0.0)
     {
         return Err(SnapshotRejection::InvalidValue);
     }
@@ -663,6 +690,8 @@ pub(crate) fn validate_snapshot(
         || snapshot.frame.ambient_instances.len() != super::scene::MAX_AMBIENT_INSTANCES
         || snapshot.content.hud_glyphs.len() != super::scene::MAX_HUD_GLYPH_SLOTS
         || snapshot.frame.hud_instances.len() != super::scene::MAX_HUD_GLYPH_SLOTS
+        || snapshot.content.room_glyphs.len() > super::scene::MAX_ROOM_GLYPH_SLOTS
+        || snapshot.frame.room_glyphs.len() != snapshot.content.room_glyphs.len()
     {
         return Err(SnapshotRejection::FixedCapacity);
     }
@@ -691,6 +720,18 @@ pub(crate) fn validate_snapshot(
             .any(|(index, slot)| usize::from(slot.slot) != index)
         || snapshot
             .content
+            .room_glyphs
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || snapshot
+            .frame
+            .room_glyphs
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || snapshot
+            .content
             .hud_glyphs
             .iter()
             .enumerate()
@@ -701,6 +742,27 @@ pub(crate) fn validate_snapshot(
             .iter()
             .enumerate()
             .any(|(index, slot)| usize::from(slot.slot) != index)
+    {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
+    let expected_extent = [
+        layout.width_points / f32::from(grid.columns),
+        layout.height_points / f32::from(grid.rows),
+    ];
+    if grid.y_up_origin_points != [0.0, 0.0]
+        || grid.cell_extent_points != expected_extent
+        || grid.scale != super::LogicalGlyphScale::OneCell
+        || grid.anchor != super::LogicalGlyphAnchor::CellBottomLeft
+        || snapshot.frame.room_glyphs.iter().any(|slot| {
+            slot.grid_cell[0] >= grid.columns
+                || slot.grid_cell[1] >= grid.rows
+                || slot.position_points
+                    != [
+                        f32::from(slot.grid_cell[0]) * expected_extent[0],
+                        layout.height_points
+                            - (f32::from(slot.grid_cell[1]) + 1.0) * expected_extent[1],
+                    ]
+        })
     {
         return Err(SnapshotRejection::InconsistentIdentity);
     }
@@ -2318,14 +2380,15 @@ mod tests {
     use crate::pet::generation::Species;
     use crate::presentation::companion_scene::{
         AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
-        AuthoredDepthSnapshot, CompanionLogicalLayout, CompanionSceneSnapshot, ContentSnapshot,
-        FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot, HudGlyphSnapshot, PaletteSnapshot,
-        PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
-        PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
-        TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot,
-        TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
-        COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION, PET_LATTICE_HEIGHT,
-        PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
+        AuthoredDepthSnapshot, CompanionGlyphGrid, CompanionLogicalLayout, CompanionSceneSnapshot,
+        ContentSnapshot, FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot, HudGlyphSnapshot,
+        LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot, PetLatticeSnapshot,
+        PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
+        PropTopologySnapshot, PropZoneSnapshot, RoomGlyphContentSnapshot, RoomGlyphFrameSnapshot,
+        RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot,
+        TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
+        TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
+        PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
     };
     use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
     use std::sync::Arc;
@@ -2338,6 +2401,14 @@ mod tests {
             privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
             topology: TopologySnapshot {
                 layout: CompanionLogicalLayout::round(360.0, 360.0),
+                glyph_grid: CompanionGlyphGrid {
+                    columns: 60,
+                    rows: 30,
+                    y_up_origin_points: [0.0, 0.0],
+                    cell_extent_points: [6.0, 12.0],
+                    scale: LogicalGlyphScale::OneCell,
+                    anchor: LogicalGlyphAnchor::CellBottomLeft,
+                },
                 pet: PetTopologySnapshot {
                     species: Species::Fuzz,
                     stage: Stage::S3,
@@ -2377,6 +2448,7 @@ mod tests {
                     end_char: 1,
                     role: "body",
                 }],
+                room_glyphs: Vec::new(),
                 palette: PaletteSnapshot {
                     body: [1, 2, 3],
                     body_glow: [4, 5, 6],
@@ -2443,6 +2515,7 @@ mod tests {
                 gauges: [GaugeLevelSnapshot::Medium; 4],
                 dim_amount: 0.0,
                 hud_lines: ["today".to_owned(), "daily".to_owned(), "pace".to_owned()],
+                room_glyphs: Vec::new(),
                 ambient_instances: (0..64)
                     .map(|slot| AmbientFrameSnapshot {
                         slot,
@@ -2491,6 +2564,21 @@ mod tests {
             .topology
             .layout
             .height_points += 1.0);
+        assert_class!(grid_columns, generation, |s| s
+            .topology
+            .glyph_grid
+            .columns += 1);
+        assert_class!(grid_rows, generation, |s| s.topology.glyph_grid.rows += 1);
+        assert_class!(grid_origin, generation, |s| s
+            .topology
+            .glyph_grid
+            .y_up_origin_points[0] +=
+            1.0);
+        assert_class!(grid_extent, generation, |s| s
+            .topology
+            .glyph_grid
+            .cell_extent_points[0] +=
+            1.0);
         assert_class!(pet_species, generation, |s| s.topology.pet.species =
             Species::Blob);
         assert_class!(pet_stage, generation, |s| s.topology.pet.stage = Stage::S4);
@@ -2561,6 +2649,14 @@ mod tests {
         assert_class!(weather, semantic, |s| s.content.room_weather = "cache-mist");
         assert_class!(pet_glyphs, semantic, |s| s.content.pet_lines[0]
             .replace_range(0..1, "o"));
+        assert_class!(room_glyph_content, semantic, |s| s
+            .content
+            .room_glyphs
+            .push(RoomGlyphContentSnapshot {
+                slot: 0,
+                glyph: '✦',
+                color_srgb8: [1, 2, 3]
+            }));
         assert_class!(pet_roles, ChangeFamilies::NONE, |s| s.content.pet_roles
             [0]
         .role = "eye");
@@ -2692,6 +2788,15 @@ mod tests {
             None);
 
         assert_class!(pet_anchor, frame, |s| s.frame.pet_anchor_points[0] += 1.0);
+        assert_class!(room_glyph_frame, frame, |s| s.frame.room_glyphs.push(
+            RoomGlyphFrameSnapshot {
+                slot: 0,
+                visible: true,
+                grid_cell: [1, 1],
+                position_points: [6.0, 336.0],
+                opacity: 1.0,
+            }
+        ));
         assert_class!(pet_depth, frame, |s| s.frame.pet_depth += 0.1);
         assert_class!(facing, frame, |s| s.frame.facing = -1);
         assert_class!(breath, frame, |s| s.frame.breath_offset_y_points = 20.0);
@@ -3800,6 +3905,8 @@ mod tests {
         let before = runtime.active_version().unwrap();
         let mut layout = (**runtime.snapshot()).clone();
         layout.topology.layout.width_points += 1.0;
+        layout.topology.glyph_grid.cell_extent_points[0] =
+            layout.topology.layout.width_points / f32::from(layout.topology.glyph_grid.columns);
         let request = take_start(commit_snapshot(&mut runtime, Arc::new(layout)));
         assert_eq!(
             request.key().layout,
@@ -3809,6 +3916,8 @@ mod tests {
 
         let mut mixed = (**runtime.snapshot()).clone();
         mixed.topology.layout.height_points += 1.0;
+        mixed.topology.glyph_grid.cell_extent_points[1] =
+            mixed.topology.layout.height_points / f32::from(mixed.topology.glyph_grid.rows);
         let mixed = Arc::new(mixed);
         let mut changes = classify_snapshot_changes(runtime.snapshot(), &mixed);
         changes.resources = ResourceChangeMask::MATERIAL_CONTRACT;
@@ -3825,6 +3934,29 @@ mod tests {
         );
         assert!(effects.start_worker.is_none());
         assert!(effects.take_cancel_worker().is_some());
+    }
+
+    #[test]
+    fn room_reshuffle_is_content_and_frame_work_not_generation_work() {
+        let first = snapshot();
+        let mut changed = (*first).clone();
+        changed.content.room_glyphs.push(RoomGlyphContentSnapshot {
+            slot: 0,
+            glyph: '✦',
+            color_srgb8: [12, 34, 56],
+        });
+        changed.frame.room_glyphs.push(RoomGlyphFrameSnapshot {
+            slot: 0,
+            visible: true,
+            grid_cell: [3, 4],
+            position_points: [18.0, 300.0],
+            opacity: 1.0,
+        });
+        validate_snapshot(&changed).unwrap();
+        let changes = classify_snapshot_changes(&first, &changed);
+        assert!(!changes.requires_generation());
+        assert!(changes.semantic().contains(SemanticChangeMask::ROOM_GLYPHS));
+        assert!(changes.frame().contains(FrameChangeMask::ROOM_GLYPHS));
     }
 
     #[test]
@@ -3880,6 +4012,50 @@ mod tests {
             Box::new(|s| s.privacy.surface = PresentationSurface::WatchTui),
             Box::new(|s| s.privacy.source_names_visible = true),
             Box::new(|s| s.frame.pet_depth = f32::NAN),
+            Box::new(|s| s.topology.glyph_grid.cell_extent_points[0] = 0.0),
+            Box::new(|s| s.topology.glyph_grid.cell_extent_points[1] = f32::NAN),
+            Box::new(|s| {
+                s.content.room_glyphs.push(RoomGlyphContentSnapshot {
+                    slot: 0,
+                    glyph: '✦',
+                    color_srgb8: [1, 2, 3],
+                });
+                s.frame.room_glyphs.push(RoomGlyphFrameSnapshot {
+                    slot: 0,
+                    visible: false,
+                    grid_cell: [1, 1],
+                    position_points: [6.0, 336.0],
+                    opacity: 1.0,
+                });
+            }),
+            Box::new(|s| {
+                s.content.room_glyphs.push(RoomGlyphContentSnapshot {
+                    slot: 0,
+                    glyph: '✦',
+                    color_srgb8: [1, 2, 3],
+                });
+                s.frame.room_glyphs.push(RoomGlyphFrameSnapshot {
+                    slot: 0,
+                    visible: true,
+                    grid_cell: [1, 1],
+                    position_points: [6.0, 336.0],
+                    opacity: 0.0,
+                });
+            }),
+            Box::new(|s| {
+                s.content.room_glyphs.push(RoomGlyphContentSnapshot {
+                    slot: 0,
+                    glyph: '✦',
+                    color_srgb8: [1, 2, 3],
+                });
+                s.frame.room_glyphs.push(RoomGlyphFrameSnapshot {
+                    slot: 0,
+                    visible: true,
+                    grid_cell: [1, 1],
+                    position_points: [f32::NAN, 336.0],
+                    opacity: 1.0,
+                });
+            }),
             Box::new(|s| s.content.prop_animation_states[0].catalog_id = "wrong"),
             Box::new(|s| s.content.tank_animation_states[0].stable_order = 1),
             Box::new(|s| {
@@ -3921,6 +4097,8 @@ mod tests {
         layout_runtime.reconciler.layout_generation = LayoutGeneration(u64::MAX);
         let mut layout = (*base).clone();
         layout.topology.layout.width_points += 1.0;
+        layout.topology.glyph_grid.cell_extent_points[0] =
+            layout.topology.layout.width_points / f32::from(layout.topology.glyph_grid.columns);
         assert_eq!(
             layout_runtime
                 .prepare_snapshot(Arc::new(layout))
