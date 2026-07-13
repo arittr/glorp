@@ -148,7 +148,7 @@ struct HudGlyphBuffer {
 @group(1) @binding(1) var color_texture: texture_2d<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
 
-@group(2) @binding(0) var intermediate_texture: texture_2d<f32>;
+@group(2) @binding(0) var scene_sampled_texture: texture_2d<f32>;
 
 @group(3) @binding(0) var<storage, read> hud_glyph_buffer: HudGlyphBuffer;
 
@@ -746,13 +746,11 @@ fn fs_room_aperture(
         return vec4<f32>(0.0);
     }
     let distance = length(input.point_position - center);
-    let edge = max(feather, fwidth(distance));
-    let coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance);
     let radial = smoothstep(0.0, radius, distance);
     let core = packed_rgb8_linear(content.payload[0].x);
     let rim = packed_rgb8_linear(content.payload[0].y);
     let straight = vec4<f32>(mix(core, rim, radial), 1.0);
-    return analytic_premultiply(straight, coverage, input.opacity, input.saturation);
+    return analytic_premultiply(straight, 1.0, input.opacity, input.saturation);
 }
 
 fn fs_floor_projection(
@@ -1015,32 +1013,13 @@ fn fs_dim(
     content: AnalyticContentGpuValue,
     analytic: AnalyticFrameGpuValue,
 ) -> vec4<f32> {
-    let aperture = frame_buffer.analytics[0u];
-    let aperture_content = scene_content_buffer.analytics[0u];
-    if (!valid_analytic_role(0u, aperture, aperture_content)) {
-        return vec4<f32>(0.0);
-    }
-    let aperture_radius = aperture.payload[0].z;
-    let aperture_feather = aperture.payload[0].w;
-    if (aperture_radius <= 0.0 || aperture_feather < 0.0) {
-        return vec4<f32>(0.0);
-    }
-    let aperture_distance = length(input.point_position - aperture.payload[0].xy);
-    let aperture_edge = max(aperture_feather, fwidth(aperture_distance));
-    let aperture_coverage = 1.0 - smoothstep(
-        aperture_radius - aperture_edge,
-        aperture_radius + aperture_edge,
-        aperture_distance,
-    );
-    let rect_coverage = select(0.0, 1.0,
-        analytic.rect_points.z > 0.0 && analytic.rect_points.w > 0.0);
     let straight = vec4<f32>(
         packed_rgb8_linear(content.payload[0].x),
         1.0,
     );
     return analytic_premultiply(
         straight,
-        rect_coverage * aperture_coverage,
+        1.0,
         input.opacity,
         input.saturation,
     );
@@ -1248,11 +1227,44 @@ fn vs_final(@builtin(vertex_index) vertex_index: u32) -> FinalVertexOutput {
 }
 
 @fragment
+fn fs_aperture_composite(input: FinalVertexOutput) -> @location(0) vec4<f32> {
+    let aperture = frame_buffer.analytics[0u];
+    let aperture_content = scene_content_buffer.analytics[0u];
+    if (!valid_analytic_role(0u, aperture, aperture_content)) {
+        return vec4<f32>(0.0);
+    }
+    let radius = aperture.payload[0].z;
+    let feather = aperture.payload[0].w;
+    let viewport_points = frame_buffer.globals.viewport_points;
+    let dimensions = textureDimensions(scene_sampled_texture);
+    if (radius <= 0.0 || feather < 0.0
+        || min(viewport_points.x, viewport_points.y) <= 0.0
+        || min(dimensions.x, dimensions.y) == 0u) {
+        return vec4<f32>(0.0);
+    }
+    let pixel = vec2<i32>(input.position.xy);
+    let sampled = textureLoad(scene_sampled_texture, pixel, 0);
+    let normalized_pixel = input.position.xy / vec2<f32>(dimensions);
+    let point_position = vec2<f32>(
+        normalized_pixel.x * viewport_points.x,
+        (1.0 - normalized_pixel.y) * viewport_points.y,
+    );
+    let distance = length(point_position - aperture.payload[0].xy);
+    let point_per_pixel = max(
+        viewport_points.x / f32(dimensions.x),
+        viewport_points.y / f32(dimensions.y),
+    );
+    let edge = max(feather, point_per_pixel);
+    let coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance);
+    return sampled * coverage;
+}
+
+@fragment
 fn fs_final(input: FinalVertexOutput) -> @location(0) vec4<f32> {
     // Sampling the sRGB intermediate decodes its stored premultiplied RGB back
     // to linear before the PostMultiplied surface receives straight RGB.
     let pixel = vec2<i32>(input.position.xy);
-    let sampled = textureLoad(intermediate_texture, pixel, 0);
+    let sampled = textureLoad(scene_sampled_texture, pixel, 0);
     if (sampled.a == 0.0) {
         return vec4<f32>(0.0);
     }

@@ -275,6 +275,27 @@ struct ScenePipelineContract {
     depth_write_enabled: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApertureCompositePipelineContract {
+    pipeline: ScenePipelineContract,
+    scene_storage_group: u8,
+    sampled_raw_group: u8,
+    target_format: wgpu::TextureFormat,
+}
+
+const APERTURE_COMPOSITE_PIPELINE_CONTRACT: ApertureCompositePipelineContract =
+    ApertureCompositePipelineContract {
+        pipeline: ScenePipelineContract {
+            vertex_entry: "vs_final",
+            fragment_entry: "fs_aperture_composite",
+            blend: None,
+            depth_write_enabled: None,
+        },
+        scene_storage_group: 0,
+        sampled_raw_group: 2,
+        target_format: SceneTextureContract::INTERMEDIATE,
+    };
+
 const fn scene_pipeline_contract(class: ScenePipelineClass) -> ScenePipelineContract {
     use ScenePipelineClass::*;
     match class {
@@ -1219,6 +1240,17 @@ impl SceneSurfaceContract {
 
 pub(super) struct SceneTextureContract;
 
+pub(super) struct SceneTargetTextureUsages;
+
+impl SceneTargetTextureUsages {
+    pub(super) const RAW_SCENE: wgpu::TextureUsages =
+        wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+    pub(super) const INTERMEDIATE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
+        .union(wgpu::TextureUsages::TEXTURE_BINDING)
+        .union(wgpu::TextureUsages::COPY_SRC);
+    pub(super) const DEPTH: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SceneTextureContractError {
     Usage {
@@ -1504,7 +1536,7 @@ impl SceneGpuSharedFacts {
     pub(super) const EXPECTED: Self = Self {
         bind_group_layouts: 4,
         samplers: 1,
-        pipelines: 10,
+        pipelines: 11,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -1561,9 +1593,9 @@ pub(super) struct SceneTargetFacts {
 
 impl SceneTargetFacts {
     pub(super) const EXPECTED: Self = Self {
-        textures: 2,
-        texture_views: 2,
-        bind_groups: 1,
+        textures: 3,
+        texture_views: 3,
+        bind_groups: 2,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -1655,6 +1687,7 @@ pub(super) struct SceneBasePipelines {
     pub(super) world_additive_analytic_reserved: wgpu::RenderPipeline,
     pub(super) chrome_analytic: wgpu::RenderPipeline,
     pub(super) chrome_hud: wgpu::RenderPipeline,
+    pub(super) aperture_composite: wgpu::RenderPipeline,
     pub(super) final_surface: wgpu::RenderPipeline,
 }
 
@@ -1853,6 +1886,11 @@ fn create_scene_base_pipelines(
         bind_group_layouts: &[None, None, Some(final_layout)],
         immediate_size: 0,
     });
+    let aperture_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("glorp-scene-aperture-pipeline-layout"),
+        bind_group_layouts: &[Some(scene_layout), None, Some(final_layout)],
+        immediate_size: 0,
+    });
     let hud_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("glorp-scene-hud-pipeline-layout"),
         bind_group_layouts: &[
@@ -1968,6 +2006,32 @@ fn create_scene_base_pipelines(
         multiview_mask: None,
         cache: None,
     });
+    let aperture_contract = APERTURE_COMPOSITE_PIPELINE_CONTRACT.pipeline;
+    let aperture_composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("glorp-scene-aperture-composite"),
+        layout: Some(&aperture_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some(aperture_contract.vertex_entry),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some(aperture_contract.fragment_entry),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: APERTURE_COMPOSITE_PIPELINE_CONTRACT.target_format,
+                blend: aperture_contract.blend.map(scene_blend_state),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
     let final_surface = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("glorp-scene-final-surface"),
         layout: Some(&final_pipeline_layout),
@@ -2003,6 +2067,7 @@ fn create_scene_base_pipelines(
         world_additive_analytic_reserved,
         chrome_analytic,
         chrome_hud,
+        aperture_composite,
         final_surface,
     }
 }
@@ -2626,10 +2691,13 @@ impl SceneTargetKey {
 
 pub(super) struct SceneTargets {
     pub(super) key: SceneTargetKey,
+    pub(super) raw_scene_texture: wgpu::Texture,
+    pub(super) raw_scene_view: wgpu::TextureView,
     pub(super) intermediate_texture: wgpu::Texture,
     pub(super) intermediate_view: wgpu::TextureView,
     pub(super) depth_texture: wgpu::Texture,
     pub(super) depth_view: wgpu::TextureView,
+    pub(super) aperture_bind_group: wgpu::BindGroup,
     pub(super) final_bind_group: wgpu::BindGroup,
 }
 
@@ -2652,6 +2720,18 @@ impl SceneTargets {
             });
         }
         create_in_gpu_error_scopes(device, || {
+            let raw_scene_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("glorp-scene-raw"),
+                size: key.extent,
+                mip_level_count: 1,
+                sample_count: key.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: key.intermediate_format,
+                usage: SceneTargetTextureUsages::RAW_SCENE,
+                view_formats: &[],
+            });
+            let raw_scene_view =
+                raw_scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
             let intermediate_texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("glorp-scene-intermediate"),
                 size: key.extent,
@@ -2659,9 +2739,7 @@ impl SceneTargets {
                 sample_count: key.sample_count,
                 dimension: wgpu::TextureDimension::D2,
                 format: key.intermediate_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                usage: SceneTargetTextureUsages::INTERMEDIATE,
                 view_formats: &[],
             });
             let intermediate_view =
@@ -2673,10 +2751,18 @@ impl SceneTargets {
                 sample_count: key.sample_count,
                 dimension: wgpu::TextureDimension::D2,
                 format: key.depth_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: SceneTargetTextureUsages::DEPTH,
                 view_formats: &[],
             });
             let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let aperture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("glorp-scene-aperture-bind-group"),
+                layout: &shared.final_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&raw_scene_view),
+                }],
+            });
             let final_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("glorp-scene-final-bind-group"),
                 layout: &shared.final_bind_group_layout,
@@ -2697,10 +2783,13 @@ impl SceneTargets {
             }
             Self {
                 key,
+                raw_scene_texture,
+                raw_scene_view,
                 intermediate_texture,
                 intermediate_view,
                 depth_texture,
                 depth_view,
+                aperture_bind_group,
                 final_bind_group,
             }
         })
@@ -3716,10 +3805,26 @@ mod tests {
                 },
             );
         }
+        assert_eq!(
+            APERTURE_COMPOSITE_PIPELINE_CONTRACT,
+            ApertureCompositePipelineContract {
+                pipeline: ScenePipelineContract {
+                    vertex_entry: "vs_final",
+                    fragment_entry: "fs_aperture_composite",
+                    blend: None,
+                    depth_write_enabled: None,
+                },
+                scene_storage_group: 0,
+                sampled_raw_group: 2,
+                target_format: SceneTextureContract::INTERMEDIATE,
+            },
+        );
         let production = include_str!("render.rs")
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap();
+        assert!(production
+            .contains("bind_group_layouts: &[Some(scene_layout), None, Some(final_layout)]"));
         assert!(!production.contains("chrome_glyph"));
     }
 
@@ -3738,6 +3843,7 @@ mod tests {
             "fn fs_gauges(",
             "fn fs_trouble(",
             "fn fs_dim(",
+            "fn fs_aperture_composite(",
             "fn fs_wall_shadow_glyph(",
         ] {
             assert!(SCENE_SHADER_SOURCE.contains(required), "missing {required}");
@@ -3769,19 +3875,7 @@ mod tests {
             "node opacity already owns dim amount"
         );
         assert!(dim.contains("1.0,"));
-        for aperture_contract in [
-            "let aperture = frame_buffer.analytics[0u];",
-            "let aperture_content = scene_content_buffer.analytics[0u];",
-            "valid_analytic_role(0u, aperture, aperture_content)",
-            "input.point_position - aperture.payload[0].xy",
-            "aperture.payload[0].z",
-            "aperture.payload[0].w",
-        ] {
-            assert!(
-                dim.contains(aperture_contract),
-                "dim aperture: {aperture_contract}"
-            );
-        }
+        assert!(!dim.contains("aperture"));
 
         let mood = SCENE_SHADER_SOURCE
             .split("fn fs_mood_rings(")
@@ -4987,7 +5081,7 @@ mod tests {
             "discard;",
             "fn vs_final(",
             "fn fs_final(",
-            "textureLoad(intermediate_texture",
+            "textureLoad(scene_sampled_texture",
             "if (sampled.a == 0.0)",
         ] {
             assert!(
@@ -5023,7 +5117,7 @@ mod tests {
     }
 
     #[test]
-    fn analytic_fragment_discards_zero_coverage_before_depth_can_be_written() {
+    fn aperture_composite_is_the_only_circular_clip_authority() {
         let aperture = SCENE_SHADER_SOURCE
             .split("fn fs_room_aperture(")
             .nth(1)
@@ -5031,9 +5125,45 @@ mod tests {
             .split("fn fs_floor_projection(")
             .next()
             .expect("room role has a bounded body");
-        let coverage = aperture.find("let coverage = 1.0 - smoothstep(").unwrap();
-        let output = aperture.find("return analytic_premultiply(").unwrap();
-        assert!(coverage < output, "coverage contributes before role output");
+        assert!(!aperture.contains("1.0 - smoothstep"));
+        assert!(!aperture.contains("let coverage"));
+
+        let dim = SCENE_SHADER_SOURCE
+            .split("fn fs_dim(")
+            .nth(1)
+            .unwrap()
+            .split("@fragment")
+            .next()
+            .unwrap();
+        assert!(!dim.contains("aperture"));
+
+        let composite = SCENE_SHADER_SOURCE
+            .split("fn fs_aperture_composite(")
+            .nth(1)
+            .expect("aperture composite exists")
+            .split("@fragment")
+            .next()
+            .expect("aperture composite has a bounded body");
+        for required in [
+            "frame_buffer.analytics[0u]",
+            "scene_content_buffer.analytics[0u]",
+            "valid_analytic_role(0u, aperture, aperture_content)",
+            "textureDimensions(scene_sampled_texture)",
+            "frame_buffer.globals.viewport_points",
+            "textureLoad(scene_sampled_texture",
+            "sampled * coverage",
+        ] {
+            assert!(
+                composite.contains(required),
+                "missing composite contract: {required}"
+            );
+        }
+        for forbidden in ["frame_buffer.globals.aperture", "viewport_pixels"] {
+            assert!(
+                !composite.contains(forbidden),
+                "reserved global used: {forbidden}"
+            );
+        }
 
         let entry = SCENE_SHADER_SOURCE.split("fn fs_analytic(").nth(1).unwrap();
         assert!(entry.contains("if (output.a <= 0.0) {\n        discard;\n    }"));
@@ -5064,20 +5194,20 @@ mod tests {
     fn gpu_resource_accounting_is_exact_and_not_a_live_global_metric() {
         assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 4);
         assert_eq!(SceneGpuSharedFacts::EXPECTED.samplers, 1);
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 10);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 11);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 10);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.textures, 2);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.texture_views, 2);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.bind_groups, 4);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.static_uploads, 10);
-        assert_eq!(SceneTargetFacts::EXPECTED.textures, 2);
-        assert_eq!(SceneTargetFacts::EXPECTED.texture_views, 2);
-        assert_eq!(SceneTargetFacts::EXPECTED.bind_groups, 1);
+        assert_eq!(SceneTargetFacts::EXPECTED.textures, 3);
+        assert_eq!(SceneTargetFacts::EXPECTED.texture_views, 3);
+        assert_eq!(SceneTargetFacts::EXPECTED.bind_groups, 2);
         assert_eq!(
             SceneGpuSharedFacts::EXPECTED.persistent_owned_handles()
                 + GpuSceneCandidateFacts::EXPECTED.persistent_owned_handles()
                 + SceneTargetFacts::EXPECTED.persistent_owned_handles(),
-            38,
+            42,
         );
     }
 
@@ -6250,7 +6380,32 @@ mod tests {
             SceneTargetUpdate::Created
         );
         assert_eq!(cache.creation_events(), 1);
-        assert_eq!(cache.current().unwrap().facts(), SceneTargetFacts::EXPECTED);
+        let targets = cache.current().unwrap();
+        assert_eq!(targets.facts(), SceneTargetFacts::EXPECTED);
+        assert_eq!(
+            targets.raw_scene_texture.format(),
+            SceneTextureContract::INTERMEDIATE
+        );
+        assert_eq!(targets.raw_scene_texture.size(), key.extent);
+        assert_eq!(
+            targets.raw_scene_texture.usage(),
+            SceneTargetTextureUsages::RAW_SCENE
+        );
+        assert_eq!(
+            targets.intermediate_texture.format(),
+            SceneTextureContract::INTERMEDIATE
+        );
+        assert_eq!(targets.intermediate_texture.size(), key.extent);
+        assert_eq!(
+            targets.intermediate_texture.usage(),
+            SceneTargetTextureUsages::INTERMEDIATE
+        );
+        assert_eq!(targets.depth_texture.format(), SceneTextureContract::DEPTH);
+        assert_eq!(targets.depth_texture.size(), key.extent);
+        assert_eq!(
+            targets.depth_texture.usage(),
+            SceneTargetTextureUsages::DEPTH
+        );
         assert_eq!(
             cache.ensure(&device, &shared, key).unwrap(),
             SceneTargetUpdate::Reused
