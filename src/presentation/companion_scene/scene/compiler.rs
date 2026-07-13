@@ -3,20 +3,18 @@ use super::*;
 
 impl SceneGenerationData {
     #[cfg(test)]
-    pub(super) fn delta_capacities(&self) -> [usize; 13] {
+    pub(super) fn delta_capacities(&self) -> [usize; 11] {
         [
             self.delta_scratch.content.pet_art_slots.capacity(),
             self.delta_scratch.content.room_glyph_slots.capacity(),
             self.delta_scratch.content.prop_slots.capacity(),
             self.delta_scratch.content.tank_slots.capacity(),
             self.delta_scratch.content.ambient_slots.capacity(),
-            self.delta_scratch.content.hud_slots.capacity(),
             self.delta_scratch.frame.nodes.capacity(),
             self.delta_scratch.frame.room_glyph_slots.capacity(),
             self.delta_scratch.frame.prop_slots.capacity(),
             self.delta_scratch.frame.tank_slots.capacity(),
             self.delta_scratch.frame.ambient_slots.capacity(),
-            self.delta_scratch.frame.hud_slots.capacity(),
             self.delta_scratch.frame.lights.capacity(),
         ]
     }
@@ -43,7 +41,6 @@ impl SceneGenerationData {
         content.prop_slots.clear();
         content.tank_slots.clear();
         content.ambient_slots.clear();
-        content.hud_slots.clear();
         let frame = &mut self.delta_scratch.frame;
         frame.generation_key = self.generation_key;
         frame.from = from;
@@ -54,7 +51,6 @@ impl SceneGenerationData {
         frame.prop_slots.clear();
         frame.tank_slots.clear();
         frame.ambient_slots.clear();
-        frame.hud_slots.clear();
         frame.gauges = None;
         frame.dim_amount = None;
         frame.lights.clear();
@@ -129,20 +125,6 @@ impl SceneGenerationData {
                 });
             }
         }
-        if semantic.contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::HUD)
-        {
-            for source in &snapshot.content.hud_glyphs {
-                content.hud_slots.push(HudContentSlot {
-                    slot: source.slot,
-                    glyph: source
-                        .glyph
-                        .map(AuthoredGlyph::new)
-                        .transpose()
-                        .map_err(|_| SceneGenerationError::InvalidGlyph)?,
-                });
-            }
-        }
-
         let frame_mask = changes.frame();
         if frame_mask
             .contains(crate::presentation::companion_scene::runtime::FrameChangeMask::CAMERA)
@@ -263,24 +245,6 @@ impl SceneGenerationData {
                     _ => unreachable!("closed status node set"),
                 }
                 frame.nodes.push(node);
-            }
-            for source in &snapshot.frame.hud_instances {
-                let occupied = snapshot.content.hud_glyphs[usize::from(source.slot)]
-                    .glyph
-                    .is_some();
-                frame.hud_slots.push(HudFrameSlot {
-                    slot: source.slot,
-                    visible: occupied && source.visible,
-                    position_points: if occupied {
-                        [
-                            source.position_points[0],
-                            snapshot.topology.layout.height_points - source.position_points[1],
-                        ]
-                    } else {
-                        [0.0; 2]
-                    },
-                    opacity: if occupied { source.opacity } else { 0.0 },
-                });
             }
         }
         if frame_mask.contains(
@@ -737,9 +701,6 @@ fn apply_content_delta(content: &mut SceneContent, delta: &ContentDelta) {
     for changed in &delta.ambient_slots {
         content.ambient_slots[usize::from(changed.slot)] = *changed;
     }
-    for changed in &delta.hud_slots {
-        content.hud_slots[usize::from(changed.slot)] = *changed;
-    }
 }
 
 #[allow(dead_code)] // Used only after the Task 3 validator accepts the exact delta.
@@ -767,9 +728,6 @@ fn apply_frame_delta_unchecked(frame: &mut SceneFrame, delta: &FrameDelta) {
     }
     for changed in &delta.ambient_slots {
         frame.ambient_slots[usize::from(changed.slot)] = *changed;
-    }
-    for changed in &delta.hud_slots {
-        frame.hud_slots[usize::from(changed.slot)] = *changed;
     }
     if let Some(gauges) = delta.gauges {
         frame.gauges = gauges;
@@ -963,8 +921,6 @@ fn validate_builder_snapshot(
         || snapshot.topology.visible_tank_inhabitants.len() > MAX_ROUND_TANK_INHABITANTS
         || snapshot.content.ambient_semantics.len() != MAX_AMBIENT_INSTANCES
         || snapshot.frame.ambient_instances.len() != MAX_AMBIENT_INSTANCES
-        || snapshot.content.hud_glyphs.len() != MAX_HUD_GLYPH_SLOTS
-        || snapshot.frame.hud_instances.len() != MAX_HUD_GLYPH_SLOTS
     {
         return Err(SceneGenerationError::FixedCapacity);
     }
@@ -1542,17 +1498,6 @@ fn build_content(
             .transpose()
             .map_err(|_| SceneGenerationError::InvalidGlyph)?;
     }
-    for hud in &snapshot.content.hud_glyphs {
-        let slot = usize::from(hud.slot);
-        if slot >= MAX_HUD_GLYPH_SLOTS {
-            return Err(SceneGenerationError::FixedCapacity);
-        }
-        content.hud_slots[slot].glyph = hud
-            .glyph
-            .map(AuthoredGlyph::new)
-            .transpose()
-            .map_err(|_| SceneGenerationError::InvalidGlyph)?;
-    }
     Ok(content)
 }
 
@@ -1942,23 +1887,6 @@ fn build_frame(
         let slot = usize::from(source.slot);
         let occupied = snapshot.content.ambient_semantics[slot].kind.is_some();
         frame.ambient_slots[slot] = AmbientFrameSlot {
-            slot: source.slot,
-            visible: occupied && source.visible,
-            position_points: if occupied {
-                [
-                    source.position_points[0],
-                    layout.height_points - source.position_points[1],
-                ]
-            } else {
-                [0.0; 2]
-            },
-            opacity: if occupied { source.opacity } else { 0.0 },
-        };
-    }
-    for source in &snapshot.frame.hud_instances {
-        let slot = usize::from(source.slot);
-        let occupied = snapshot.content.hud_glyphs[slot].glyph.is_some();
-        frame.hud_slots[slot] = HudFrameSlot {
             slot: source.slot,
             visible: occupied && source.visible,
             position_points: if occupied {

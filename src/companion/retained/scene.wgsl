@@ -145,9 +145,6 @@ fn content_family_base(instance_group: u32) -> u32 {
     if (instance_group == 7u) {
         return 236u;
     }
-    if (instance_group == 8u) {
-        return 300u;
-    }
     return NONE_U32;
 }
 

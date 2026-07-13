@@ -399,16 +399,6 @@ pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGener
             None => hash.u8(0),
         }
     }
-    for slot in &content.hud_slots {
-        hash.u8(slot.slot);
-        match slot.glyph {
-            Some(glyph) => {
-                hash.u8(1);
-                hash.glyph(glyph.as_char());
-            }
-            None => hash.u8(0),
-        }
-    }
     Ok(hash.finish())
 }
 
@@ -510,13 +500,6 @@ fn checksum_frame_with_projection(
         }
     }
     for slot in &frame.ambient_slots {
-        hash.u8(slot.slot);
-        hash.bool(slot.visible);
-        encode_points(&mut hash, slot.position_points)?;
-        hash.f32(slot.opacity)
-            .map_err(|_| SceneGenerationError::NonFinite)?;
-    }
-    for slot in &frame.hud_slots {
         hash.u8(slot.slot);
         hash.bool(slot.visible);
         encode_points(&mut hash, slot.position_points)?;

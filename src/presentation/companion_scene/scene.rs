@@ -17,7 +17,6 @@ pub const MAX_LIGHTS: usize = 2;
 pub const MAX_ATTACHMENTS: usize = 32;
 pub const MAX_PROP_GLYPHS_PER_SLOT: usize = 9;
 pub const MAX_TANK_GLYPHS_PER_SLOT: usize = 8;
-pub const MAX_HUD_GLYPH_SLOTS: usize = 24;
 pub const MAX_STATIC_ATLAS_RECIPES: usize = 8;
 pub const MAX_ANALYTIC_PARAMS: usize = 16;
 pub const LIT_CARD_SCALE_TOLERANCE: f32 = 1.0e-5;
@@ -922,12 +921,6 @@ pub struct AmbientContentSlot {
     pub glyph: Option<AuthoredGlyph>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct HudContentSlot {
-    pub slot: u8,
-    pub glyph: Option<AuthoredGlyph>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneContent {
     pub schema_version: u16,
@@ -941,7 +934,6 @@ pub struct SceneContent {
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
-    pub hud_slots: Vec<HudContentSlot>,
 }
 
 const fn zero_generation_key() -> super::SceneGenerationKey {
@@ -987,9 +979,6 @@ impl SceneContent {
                     kind: None,
                     glyph: None,
                 })
-                .collect(),
-            hud_slots: (0..MAX_HUD_GLYPH_SLOTS)
-                .map(|slot| HudContentSlot { slot: slot as u8, glyph: None })
                 .collect(),
         }
     }
@@ -1064,14 +1053,6 @@ pub struct RoomGlyphFrameSlot {
     pub opacity: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
-pub struct HudFrameSlot {
-    pub slot: u8,
-    pub visible: bool,
-    pub position_points: [f32; 2],
-    pub opacity: f32,
-}
-
 #[derive(Clone, PartialEq)]
 pub struct SceneFrame {
     pub schema_version: u16,
@@ -1082,7 +1063,6 @@ pub struct SceneFrame {
     pub prop_slots: Vec<PropFrameSlot>,
     pub tank_slots: Vec<TankFrameSlot>,
     pub ambient_slots: Vec<AmbientFrameSlot>,
-    pub hud_slots: Vec<HudFrameSlot>,
     pub gauges: [f32; 4],
     pub dim_amount: f32,
     pub lights: Vec<LightFrame>,
@@ -1129,14 +1109,6 @@ impl SceneFrame {
                 .collect(),
             ambient_slots: (0..MAX_AMBIENT_INSTANCES)
                 .map(|slot| AmbientFrameSlot {
-                    slot: slot as u8,
-                    visible: false,
-                    position_points: [0.0; 2],
-                    opacity: 0.0,
-                })
-                .collect(),
-            hud_slots: (0..MAX_HUD_GLYPH_SLOTS)
-                .map(|slot| HudFrameSlot {
                     slot: slot as u8,
                     visible: false,
                     position_points: [0.0; 2],
@@ -1200,7 +1172,6 @@ impl fmt::Debug for SceneFrame {
             .field("prop_slot_count", &self.prop_slots.len())
             .field("tank_slot_count", &self.tank_slots.len())
             .field("ambient_slot_count", &self.ambient_slots.len())
-            .field("hud_slot_count", &self.hud_slots.len())
             .field("gauges", &"<redacted>")
             .field("dim_amount", &"<redacted>")
             .field("light_count", &self.lights.len())
@@ -1224,7 +1195,6 @@ pub struct ContentDelta {
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
-    pub hud_slots: Vec<HudContentSlot>,
 }
 
 impl ContentDelta {
@@ -1244,7 +1214,6 @@ impl ContentDelta {
             prop_slots: Vec::new(),
             tank_slots: Vec::new(),
             ambient_slots: Vec::new(),
-            hud_slots: Vec::new(),
         }
     }
 }
@@ -1262,7 +1231,6 @@ pub struct FrameDelta {
     pub prop_slots: Vec<PropFrameSlot>,
     pub tank_slots: Vec<TankFrameSlot>,
     pub ambient_slots: Vec<AmbientFrameSlot>,
-    pub hud_slots: Vec<HudFrameSlot>,
     pub gauges: Option<[f32; 4]>,
     pub dim_amount: Option<f32>,
     pub lights: Vec<(u8, LightFrame)>,
@@ -1280,7 +1248,6 @@ impl fmt::Debug for FrameDelta {
             .field("prop_slot_count", &self.prop_slots.len())
             .field("tank_slot_count", &self.tank_slots.len())
             .field("ambient_slot_count", &self.ambient_slots.len())
-            .field("hud_slot_count", &self.hud_slots.len())
             .field("gauges", &self.gauges.map(|_| "<redacted>"))
             .field("dim_amount", &self.dim_amount.map(|_| "<redacted>"))
             .field("light_count", &self.lights.len())
@@ -1302,7 +1269,6 @@ impl FrameDelta {
             prop_slots: Vec::new(),
             tank_slots: Vec::new(),
             ambient_slots: Vec::new(),
-            hud_slots: Vec::new(),
             gauges: None,
             dim_amount: None,
             lights: Vec::new(),
@@ -1377,7 +1343,6 @@ impl SceneDeltaScratch {
                 prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
                 tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
                 ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
-                hud_slots: Vec::with_capacity(MAX_HUD_GLYPH_SLOTS),
             },
             frame: FrameDelta {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -1391,7 +1356,6 @@ impl SceneDeltaScratch {
                 prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
                 tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
                 ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
-                hud_slots: Vec::with_capacity(MAX_HUD_GLYPH_SLOTS),
                 gauges: None,
                 dim_amount: None,
                 lights: Vec::with_capacity(MAX_LIGHTS),
@@ -1536,7 +1500,6 @@ impl SceneFixture {
                 prop_slots: SceneContent::empty_v2().prop_slots,
                 tank_slots: SceneContent::empty_v2().tank_slots,
                 ambient_slots: SceneContent::empty_v2().ambient_slots,
-                hud_slots: SceneContent::empty_v2().hud_slots,
             },
             frame: SceneFrame {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -1560,7 +1523,6 @@ impl SceneFixture {
                 prop_slots: SceneFrame::empty_v2(camera).prop_slots,
                 tank_slots: SceneFrame::empty_v2(camera).tank_slots,
                 ambient_slots: SceneFrame::empty_v2(camera).ambient_slots,
-                hud_slots: SceneFrame::empty_v2(camera).hud_slots,
                 gauges: [0.0; 4],
                 dim_amount: 0.0,
                 lights: vec![],
@@ -1655,21 +1617,6 @@ mod tests {
                 },
             })
             .collect();
-        let hud_lines = [
-            "review".to_owned(),
-            "privacy".to_owned(),
-            "redacted".to_owned(),
-        ];
-        let hud_glyphs = hud_lines
-            .iter()
-            .flat_map(|line| {
-                let mut chars = line.chars().map(Some).collect::<Vec<_>>();
-                chars.resize(8, None);
-                chars
-            })
-            .enumerate()
-            .map(|(slot, glyph)| super::super::HudGlyphSnapshot { slot: slot as u8, glyph })
-            .collect::<Vec<_>>();
         CompanionSceneSnapshot {
             schema_version: super::super::COMPANION_SCENE_SCHEMA_VERSION,
             privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
@@ -1728,7 +1675,6 @@ mod tests {
                         glyph: None,
                     })
                     .collect(),
-                hud_glyphs,
             },
             frame: super::super::FrameSnapshot {
                 elapsed_ms: 1_000,
@@ -1747,7 +1693,6 @@ mod tests {
                 gauge_fractions: [0.0; 4],
                 dimmed: false,
                 dim_amount: 0.0,
-                hud_lines,
                 room_glyphs: Vec::new(),
                 ambient_instances: (0..MAX_AMBIENT_INSTANCES)
                     .map(|slot| super::super::AmbientFrameSnapshot {
@@ -1755,24 +1700,6 @@ mod tests {
                         visible: false,
                         position_points: [0.0; 2],
                         opacity: 0.0,
-                    })
-                    .collect(),
-                hud_instances: (0..MAX_HUD_GLYPH_SLOTS)
-                    .map(|slot| {
-                        let visible = slot < 6 || (8..15).contains(&slot) || slot >= 16;
-                        super::super::HudFrameSnapshot {
-                            slot: slot as u8,
-                            visible,
-                            position_points: if visible {
-                                [
-                                    20.0 + (slot % 8) as f32 * 8.0,
-                                    300.0 + (slot / 8) as f32 * 10.0,
-                                ]
-                            } else {
-                                [0.0; 2]
-                            },
-                            opacity: if visible { 1.0 } else { 0.0 },
-                        }
                     })
                     .collect(),
             },
@@ -1802,7 +1729,6 @@ mod tests {
         assert_eq!(MAX_ATTACHMENTS, 32);
         assert_eq!(MAX_PROP_GLYPHS_PER_SLOT, 9);
         assert_eq!(MAX_TANK_GLYPHS_PER_SLOT, 8);
-        assert_eq!(MAX_HUD_GLYPH_SLOTS, 24);
     }
 
     #[test]
@@ -1813,7 +1739,6 @@ mod tests {
         assert_eq!(content.prop_slots.len(), MAX_VISIBLE_PROPS);
         assert_eq!(content.tank_slots.len(), MAX_ROUND_TANK_INHABITANTS);
         assert_eq!(content.ambient_slots.len(), MAX_AMBIENT_INSTANCES);
-        assert_eq!(content.hud_slots.len(), MAX_HUD_GLYPH_SLOTS);
         assert!(content.prop_slots.iter().all(|slot| slot.content.is_none()));
         assert!(content.tank_slots.iter().all(|slot| slot.content.is_none()));
         assert!(content.ambient_slots.iter().all(|slot| slot.kind.is_none()));
@@ -1827,7 +1752,6 @@ mod tests {
         assert_eq!(frame.room_glyph_slots.len(), MAX_ROOM_GLYPH_SLOTS);
         assert_eq!(frame.tank_slots.len(), MAX_ROUND_TANK_INHABITANTS);
         assert_eq!(frame.ambient_slots.len(), MAX_AMBIENT_INSTANCES);
-        assert_eq!(frame.hud_slots.len(), MAX_HUD_GLYPH_SLOTS);
         assert!(frame.prop_slots.iter().all(|slot| !slot.visible));
         assert!(frame
             .tank_slots
@@ -1947,7 +1871,6 @@ mod tests {
         assert_eq!(built.content.prop_slots.len(), 10);
         assert_eq!(built.content.tank_slots.len(), 2);
         assert_eq!(built.content.ambient_slots.len(), 64);
-        assert_eq!(built.content.hud_slots.len(), 24);
         assert!(built
             .template
             .nodes
@@ -2162,55 +2085,6 @@ mod tests {
             Err(SceneDeltaApplyError::GenerationRequired)
         );
         assert_eq!(built, before);
-    }
-
-    #[test]
-    fn hud_y_down_positions_flip_once_in_full_and_compatible_projection() {
-        for height in [260.0, 480.0] {
-            let mut initial = snapshot_for(Species::Fuzz, Stage::S3);
-            initial.topology.layout = CompanionLogicalLayout::round(height, height);
-            initial.topology.glyph_grid.cell_extent_points = [
-                height / f32::from(initial.topology.glyph_grid.columns),
-                height / f32::from(initial.topology.glyph_grid.rows),
-            ];
-            initial.content.hud_glyphs[0].glyph = Some('R');
-            initial.frame.hud_instances[0] = super::super::HudFrameSnapshot {
-                slot: 0,
-                visible: true,
-                position_points: [20.0, height - 36.0],
-                opacity: 1.0,
-            };
-            let initial = std::sync::Arc::new(initial);
-            let mut built = build_scene_generation_owned(
-                std::sync::Arc::clone(&initial),
-                generation_key(1),
-                super::super::AppliedRevisions::new(0, 0),
-            )
-            .unwrap();
-            assert_eq!(built.frame.hud_slots[0].position_points, [20.0, 36.0]);
-
-            let mut changed = (*initial).clone();
-            changed.frame.hud_instances[0].position_points = [20.0, height - 52.0];
-            let changed = std::sync::Arc::new(changed);
-            let changes = super::super::runtime::classify_snapshot_changes(&initial, &changed);
-            built
-                .apply_compatible_snapshot(
-                    std::sync::Arc::clone(&changed),
-                    changes,
-                    super::super::AppliedRevisions::new(0, 0),
-                    super::super::AppliedRevisions::new(0, 1),
-                )
-                .unwrap();
-            let rebuilt = build_scene_generation_owned(
-                changed,
-                generation_key(1),
-                super::super::AppliedRevisions::new(0, 1),
-            )
-            .unwrap();
-            assert_eq!(built.frame.hud_slots[0].position_points, [20.0, 52.0]);
-            assert_eq!(built.frame, rebuilt.frame);
-            assert_eq!(built.frame_checksum, rebuilt.frame_checksum);
-        }
     }
 
     #[test]

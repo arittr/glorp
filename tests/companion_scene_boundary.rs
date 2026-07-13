@@ -44,6 +44,10 @@ const FORBIDDEN_NEUTRAL_DEPENDENCIES: &[&str] = &[
 const NEUTRAL_DEPENDENCY_MANIFEST: &[(&str, &str)] = &[
     ("src/round/motion.rs", "crate::round::motion"),
     (
+        "src/presentation/gauge_values.rs",
+        "crate::presentation::gauge_values",
+    ),
+    (
         "src/presentation/habitat_inventory.rs",
         "crate::presentation::habitat_inventory",
     ),
@@ -628,6 +632,146 @@ fn input_rs_accepts_only_direct_canonical_tui_roots() {
         assert!(
             companion_source_violations(Path::new("input.rs"), source).is_empty(),
             "input adapter rejected canonical TUI root: {source}"
+        );
+    }
+}
+
+#[test]
+fn neutral_scene_source_regression_guard_rejects_removed_hud_payload_identifiers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation/companion_scene");
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+
+    let forbidden = [
+        "review_capture_hud_text",
+        "project_hud_slots",
+        "MAX_HUD_GLYPH_SLOTS",
+        "HudGlyphSnapshot",
+        "HudFrameSnapshot",
+        "HudContentSlot",
+        "HudFrameSlot",
+        "hud_glyphs",
+        "hud_lines",
+        "hud_instances",
+        "hud_slots",
+    ];
+    let mut violations = Vec::new();
+    for file in files {
+        let source = fs::read_to_string(&file).expect("read companion scene source");
+        for token in forbidden {
+            if source.contains(token) {
+                violations.push(format!("{} owns {token}", file.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "neutral scene still owns HUD payloads:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn neutral_scene_authors_hud_hook_without_round_hud_runtime_dependency() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/presentation/companion_scene");
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    let source = files
+        .iter()
+        .map(|path| fs::read_to_string(path).expect("read companion scene source"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(source.contains("\"chrome.hud\""));
+    assert!(source.contains("InstanceGroupBinding::Hud"));
+    assert!(!source.contains("crate::round::hud"));
+}
+
+#[test]
+fn retained_source_regression_guard_rejects_removed_hud_mirror_identifiers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = [
+        root.join("src/companion/retained/compiler.rs"),
+        root.join("src/companion/retained/render.rs"),
+    ]
+    .iter()
+    .map(|path| fs::read_to_string(path).expect("read retained source"))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    for forbidden in [
+        "ContentMirrorFamily::Hud",
+        "FrameMirrorFamily::Hud",
+        "content_hud",
+        "frame_hud",
+        "pack_hud_content",
+        "pack_hud_frame",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "general retained mirrors still reserve {forbidden}"
+        );
+    }
+    assert!(source.contains("InstanceGroupBinding::Hud"));
+}
+
+#[test]
+fn gauge_value_source_regression_guard_rejects_duplicate_shipping_formulas() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let neutral_path = root.join("src/presentation/gauge_values.rs");
+    assert!(neutral_path.is_file(), "missing neutral gauge value source");
+    let neutral = fs::read_to_string(&neutral_path).expect("read neutral gauge value source");
+    for required in [
+        "PACE_SOFT_CAP_10M_TOKENS",
+        "companion_pace_fraction",
+        "daily_fraction_for_gauge",
+        "daily_overage_marker_fraction",
+    ] {
+        assert!(
+            neutral.contains(required),
+            "neutral source is missing {required}"
+        );
+    }
+
+    let mut files = Vec::new();
+    collect_rust_files(&root.join("src"), &mut files);
+    for declaration in [
+        "pub const PACE_SOFT_CAP_10M_TOKENS: f64 =",
+        "pub fn companion_pace_fraction(",
+        "pub fn daily_fraction_for_gauge(",
+        "pub fn daily_overage_marker_fraction(",
+    ] {
+        let owners = files
+            .iter()
+            .filter(|path| {
+                fs::read_to_string(path)
+                    .expect("read Rust source")
+                    .contains(declaration)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners,
+            vec![&neutral_path],
+            "gauge declaration {declaration} must have one neutral owner"
+        );
+    }
+    for formula in [
+        "(-current_10m_tokens / PACE_SOFT_CAP_10M_TOKENS).exp()",
+        ".map(|value| (value - 1.0).clamp(0.0, 1.0))",
+    ] {
+        let owners = files
+            .iter()
+            .filter(|path| {
+                fs::read_to_string(path)
+                    .expect("read Rust source")
+                    .contains(formula)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners,
+            vec![&neutral_path],
+            "gauge formula must have one neutral owner: {formula}"
         );
     }
 }

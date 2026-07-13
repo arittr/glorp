@@ -4,6 +4,11 @@
 use crate::game::metabolism::Mood;
 use crate::round::draw::RoundColor;
 
+pub use crate::presentation::gauge_values::{
+    companion_pace_fraction, daily_fraction_for_gauge, daily_overage_marker_fraction,
+    PACE_SOFT_CAP_10M_TOKENS,
+};
+
 /// Open-bottom growth ring geometry. Angles are degrees, CCW from +x (AppKit).
 /// The gap is centered at the bottom (270°); the track sweeps CCW over the top
 /// from the gap's right edge to its left edge.
@@ -17,7 +22,6 @@ pub struct GrowthRing {
 }
 
 pub const COMPANION_GAUGE_GAP_DEG: f64 = 70.0;
-pub const PACE_SOFT_CAP_10M_TOKENS: f64 = 15_000_000.0;
 
 /// The colour the companion tank's depth falloff lifts its opaque core toward.
 /// Backend-neutral: both the AppKit dithered-bitmap path and the retained shader
@@ -514,27 +518,6 @@ pub(crate) fn pack_companion_hud_glyphs(
     }
 
     Ok(PackedCompanionHudGlyphs { slots, occupied_len })
-}
-
-pub fn companion_pace_fraction(current_10m_tokens: f64) -> f64 {
-    if !current_10m_tokens.is_finite() || current_10m_tokens <= 0.0 {
-        return 0.0;
-    }
-    (1.0 - (-current_10m_tokens / PACE_SOFT_CAP_10M_TOKENS).exp()).clamp(0.0, 1.0)
-}
-
-pub fn daily_fraction_for_gauge(fraction_of_yesterday: Option<f64>) -> f64 {
-    fraction_of_yesterday
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .map(|value| value.clamp(0.0, 1.0))
-        .unwrap_or(0.0)
-}
-
-pub fn daily_overage_marker_fraction(fraction_of_yesterday: Option<f64>) -> f64 {
-    fraction_of_yesterday
-        .filter(|value| value.is_finite() && *value > 1.0)
-        .map(|value| (value - 1.0).clamp(0.0, 1.0))
-        .unwrap_or(0.0)
 }
 
 pub fn daily_overage_color() -> RoundColor {

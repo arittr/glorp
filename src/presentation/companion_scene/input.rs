@@ -1,22 +1,21 @@
 use super::{
     AmbientFrameSnapshot, AmbientSemanticSnapshot, AuthoredDepthSnapshot, CompanionDayPhase,
     CompanionSceneProjectionError, CompanionSceneProjectionInput, CompanionSceneSnapshot,
-    ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot,
-    HudGlyphSnapshot, PaletteSnapshot, PetLatticeSnapshot, PetRoleSpanSnapshot,
-    PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot, PropTopologySnapshot,
-    PropZoneSnapshot, RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot,
-    TankCellSnapshot, TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
-    TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
-    MAX_VISIBLE_PROPS, MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS,
-    PET_LATTICE_WIDTH,
+    ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot, PaletteSnapshot,
+    PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
+    PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
+    TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot,
+    TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
+    COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS,
+    MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
 };
 use crate::game::habitat::{HabitatPetLayer, HabitatPropZone, TankLifeRouteFamily};
 use crate::pet::palette::{body_glow, ResolvedPalette, Rgb};
 use crate::pet::render::{PaletteRoleName, StyledSegment};
-use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
-use crate::round::hud::{
+use crate::presentation::gauge_values::{
     companion_pace_fraction, daily_fraction_for_gauge, daily_overage_marker_fraction,
 };
+use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
 use crate::tui::day::DayPhase;
 use crate::tui::room::{derive_room_life_profile, RoomBiomeTag, RoomLifeProfile, RoomWeatherLayer};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
@@ -200,11 +199,9 @@ impl CompanionSceneSnapshot {
         let prop_animation_states = project_prop_animation_states(vm, &visible_props, now, layout);
         let tank_animation_states =
             project_tank_animation_states(vm, &visible_tank_inhabitants, input, motion)?;
-        let hud = crate::round::hud::review_capture_hud_text();
         let (ambient_semantics, ambient_instances) = project_ambient_slots();
         let (room_glyphs, room_glyph_frames) =
             project_room_glyphs(&room_profile, vm, motion, input, cell_extent_points)?;
-        let (hud_glyphs, hud_instances) = project_hud_slots(&hud, layout);
         let asleep = vm.day_context.asleep;
         let calm = vm.life_profile.calm_mode || asleep;
         let dimmed = asleep || calm;
@@ -254,7 +251,6 @@ impl CompanionSceneSnapshot {
                 prop_animation_states,
                 tank_animation_states,
                 ambient_semantics,
-                hud_glyphs,
             },
             frame: FrameSnapshot {
                 elapsed_ms,
@@ -281,10 +277,8 @@ impl CompanionSceneSnapshot {
                 gauge_fractions,
                 dimmed,
                 dim_amount: if dimmed { 0.35 } else { 0.0 },
-                hud_lines: [hud.today_total, hud.daily_percent, hud.pace],
                 room_glyphs: room_glyph_frames,
                 ambient_instances,
-                hud_instances,
             },
         })
     }
@@ -716,37 +710,6 @@ fn project_ambient_slots() -> (Vec<AmbientSemanticSnapshot>, Vec<AmbientFrameSna
     (semantics, frames)
 }
 
-fn project_hud_slots(
-    hud: &crate::round::hud::CompanionHudText,
-    layout: super::CompanionLogicalLayout,
-) -> (Vec<HudGlyphSnapshot>, Vec<HudFrameSnapshot>) {
-    let lines = [&hud.today_total, &hud.daily_percent, &hud.pace];
-    let mut glyphs = Vec::with_capacity(super::scene::MAX_HUD_GLYPH_SLOTS);
-    let mut frames = Vec::with_capacity(super::scene::MAX_HUD_GLYPH_SLOTS);
-    for (row, line) in lines.into_iter().enumerate() {
-        let mut chars = line.chars();
-        for col in 0..8 {
-            let slot = row * 8 + col;
-            let glyph = chars.next();
-            glyphs.push(HudGlyphSnapshot { slot: slot as u8, glyph });
-            frames.push(HudFrameSnapshot {
-                slot: slot as u8,
-                visible: glyph.is_some(),
-                position_points: if glyph.is_some() {
-                    [
-                        layout.width_points * 0.5 - 28.0 + col as f32 * 8.0,
-                        layout.height_points - 36.0 + row as f32 * 10.0,
-                    ]
-                } else {
-                    [0.0; 2]
-                },
-                opacity: if glyph.is_some() { 1.0 } else { 0.0 },
-            });
-        }
-    }
-    (glyphs, frames)
-}
-
 fn biome_alias(biome: RoomBiomeTag) -> &'static str {
     match biome {
         RoomBiomeTag::Starter => "starter",
@@ -1012,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_resolves_fixed_point_space_instance_inputs_without_live_hud() {
+    fn projection_resolves_fixed_point_space_instance_inputs() {
         let vm = fixture_with_real_pet_art();
         let snapshot = project_snapshot(
             &vm,
@@ -1023,15 +986,6 @@ mod tests {
 
         assert_eq!(snapshot.content.ambient_semantics.len(), 64);
         assert_eq!(snapshot.frame.ambient_instances.len(), 64);
-        assert_eq!(snapshot.content.hud_glyphs.len(), 24);
-        assert_eq!(snapshot.frame.hud_instances.len(), 24);
-        assert!(snapshot
-            .content
-            .hud_glyphs
-            .iter()
-            .filter_map(|slot| slot.glyph)
-            .collect::<String>()
-            .contains("privacy"));
         assert!(snapshot
             .content
             .prop_animation_states
@@ -1151,46 +1105,62 @@ mod tests {
     }
 
     #[test]
-    fn privacy_projection_redacts_formatted_live_hud_telemetry_everywhere() {
-        let mut vm = fixture_with_real_pet_art();
-        vm.today_effective_tokens = 842_000_000.0;
-        vm.daily_comparison.fraction_of_yesterday = Some(0.94);
-        vm.rate_momentum.pulse.current_tokens = 31_000_000.0;
-        let live = crate::round::hud::companion_hud_text(
-            vm.today_effective_tokens,
-            vm.daily_comparison.fraction_of_yesterday,
-            vm.rate_momentum.pulse.current_tokens,
+    fn live_display_totals_cannot_change_neutral_scene_or_artifacts() {
+        let mut low = fixture_with_real_pet_art();
+        low.today_effective_tokens = 1_234.0;
+        let mut high = low.clone();
+        high.today_effective_tokens = 842_000_000.0;
+
+        let low_snapshot = project_snapshot(
+            &low,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .expect("low-total neutral projection");
+        let high_snapshot = project_snapshot(
+            &high,
+            datetime!(2026-07-11 12:00 UTC),
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .expect("high-total neutral projection");
+
+        assert_eq!(
+            serde_json::to_string(&low_snapshot).unwrap(),
+            serde_json::to_string(&high_snapshot).unwrap()
+        );
+        assert_eq!(format!("{low_snapshot:?}"), format!("{high_snapshot:?}"));
+
+        let key = super::super::SceneGenerationKey {
+            device: super::super::DeviceEpoch(1),
+            layout: super::super::LayoutGeneration(1),
+            resources: super::super::ResourceGeneration(1),
+        };
+        let low_generation = super::super::scene::build_scene_generation(&low_snapshot, key)
+            .expect("compile low-total scene");
+        let high_generation = super::super::scene::build_scene_generation(&high_snapshot, key)
+            .expect("compile high-total scene");
+        assert_eq!(
+            low_generation.content_checksum(),
+            high_generation.content_checksum()
+        );
+        assert_eq!(
+            low_generation.frame_checksum(),
+            high_generation.frame_checksum()
         );
 
-        let snapshot = project_snapshot(
-            &vm,
-            datetime!(2026-07-11 12:00 UTC),
-            CompanionLogicalLayout::round(360.0, 360.0),
+        let low_artifacts = super::super::contract::SceneArtifacts::try_from_parts(
+            low_generation.template(),
+            low_generation.content(),
+            low_generation.frame(),
         )
-        .expect("privacy-aware projection");
-        let json = serde_json::to_string(&snapshot).expect("serialize privacy projection");
-        let debug = format!("{snapshot:?}");
-        let mut invalid = vm.clone();
-        invalid.pet_art[0] = "private/path".to_string();
-        let error = project_snapshot(
-            &invalid,
-            datetime!(2026-07-11 12:00 UTC),
-            CompanionLogicalLayout::round(360.0, 360.0),
+        .expect("low-total artifacts");
+        let high_artifacts = super::super::contract::SceneArtifacts::try_from_parts(
+            high_generation.template(),
+            high_generation.content(),
+            high_generation.frame(),
         )
-        .expect_err("invalid private art fails closed");
-        let error_text = format!("{error} {error:?}");
-
-        assert!(!snapshot.privacy.exact_counts_visible);
-        assert!(!snapshot.privacy.source_names_visible);
-        assert_eq!(snapshot.frame.hud_lines, ["review", "privacy", "redacted"]);
-        for private in [live.today_total, live.daily_percent, live.pace] {
-            assert!(!json.contains(&private), "JSON leaked {private}: {json}");
-            assert!(!debug.contains(&private), "Debug leaked {private}: {debug}");
-            assert!(
-                !error_text.contains(&private),
-                "public error text leaked {private}: {error_text}"
-            );
-        }
+        .expect("high-total artifacts");
+        assert_eq!(low_artifacts, high_artifacts);
     }
 
     #[test]
@@ -1200,11 +1170,9 @@ mod tests {
         vm.daily_comparison.fraction_of_yesterday = Some(0.943_217);
         vm.rate_momentum.pulse.current_tokens = 31_234_567.0;
         let exact_daily =
-            crate::round::hud::daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday)
-                as f32;
+            super::daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday) as f32;
         let exact_pace =
-            crate::round::hud::companion_pace_fraction(vm.rate_momentum.pulse.current_tokens)
-                as f32;
+            super::companion_pace_fraction(vm.rate_momentum.pulse.current_tokens) as f32;
 
         let snapshot = project_snapshot(
             &vm,
@@ -1220,9 +1188,8 @@ mod tests {
             [
                 vm.progress.fraction,
                 exact_daily,
-                crate::round::hud::daily_overage_marker_fraction(
-                    vm.daily_comparison.fraction_of_yesterday,
-                ) as f32,
+                super::daily_overage_marker_fraction(vm.daily_comparison.fraction_of_yesterday,)
+                    as f32,
                 exact_pace,
             ]
         );

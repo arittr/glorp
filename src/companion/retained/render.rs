@@ -165,8 +165,7 @@ impl SceneGlyphWeightPolicy {
             ContentMirrorFamily::TankGlyphs => signed_data[1] == 1,
             ContentMirrorFamily::Globals
             | ContentMirrorFamily::PropGlyphs
-            | ContentMirrorFamily::Ambient
-            | ContentMirrorFamily::Hud => false,
+            | ContentMirrorFamily::Ambient => false,
         }
     }
 }
@@ -315,9 +314,8 @@ fn instance_source_and_count_from_tags(
     instance_base: u32,
 ) -> Option<(InstanceSource, u32)> {
     use crate::presentation::companion_scene::scene::{
-        InstanceLayer, MAX_AMBIENT_INSTANCES, MAX_HUD_GLYPH_SLOTS, MAX_PET_ART_SLOTS,
-        MAX_PROP_GLYPHS_PER_SLOT, MAX_ROUND_TANK_INHABITANTS, MAX_TANK_GLYPHS_PER_SLOT,
-        MAX_VISIBLE_PROPS,
+        InstanceLayer, MAX_AMBIENT_INSTANCES, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT,
+        MAX_ROUND_TANK_INHABITANTS, MAX_TANK_GLYPHS_PER_SLOT, MAX_VISIBLE_PROPS,
     };
 
     let count = |value: usize| u32::try_from(value).expect("scene capacity fits in u32");
@@ -344,7 +342,9 @@ fn instance_source_and_count_from_tags(
                 .then_some((InstanceSource::TankCells { slot, layer }, width))
         }
         7 if instance_base == 0 => Some((InstanceSource::Ambient, count(MAX_AMBIENT_INSTANCES))),
-        8 if instance_base == 0 => Some((InstanceSource::Hud, count(MAX_HUD_GLYPH_SLOTS))),
+        // The authored HUD hook is retained, but its sensitive instances are
+        // prepared through the sealed HUD path rather than general scene mirrors.
+        8 if instance_base == 0 => Some((InstanceSource::Hud, 0)),
         _ => None,
     }
 }
@@ -386,7 +386,6 @@ fn prepare_content_buffers(
         (ContentMirrorFamily::PropGlyphs, sources.prop_glyphs),
         (ContentMirrorFamily::TankGlyphs, sources.tank_glyphs),
         (ContentMirrorFamily::Ambient, sources.ambient),
-        (ContentMirrorFamily::Hud, sources.hud),
     ] {
         let translated = values
             .iter()
@@ -412,7 +411,6 @@ fn prepare_frame_bytes(sources: FrameUploadSources<'_>) -> Result<Vec<u8>, Scene
         (FrameMirrorFamily::Props, sources.props),
         (FrameMirrorFamily::TankCells, sources.tank_cells),
         (FrameMirrorFamily::Ambient, sources.ambient),
-        (FrameMirrorFamily::Hud, sources.hud),
         (FrameMirrorFamily::Lights, sources.lights),
     ] {
         copy_family(
@@ -617,17 +615,15 @@ pub(super) enum ContentMirrorFamily {
     PropGlyphs,
     TankGlyphs,
     Ambient,
-    Hud,
 }
 
 impl ContentMirrorFamily {
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 5] = [
         Self::Globals,
         Self::Pet,
         Self::PropGlyphs,
         Self::TankGlyphs,
         Self::Ambient,
-        Self::Hud,
     ];
 
     pub(super) const fn record_size(self) -> usize {
@@ -646,17 +642,15 @@ pub(super) enum FrameMirrorFamily {
     Props,
     TankCells,
     Ambient,
-    Hud,
     Lights,
 }
 
 impl FrameMirrorFamily {
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 5] = [
         Self::Globals,
         Self::Props,
         Self::TankCells,
         Self::Ambient,
-        Self::Hud,
         Self::Lights,
     ];
 
@@ -682,7 +676,7 @@ impl PackedMirrorLayout {
     pub(super) const NODE_BYTES: usize = super::compiler::CpuMirrorShape::NODE_RECORD_BYTES
         * super::compiler::CpuMirrorShape::NODE_COUNT;
     pub(super) const CONTENT_GLOBALS_BYTES: usize = ContentMirrorFamily::Globals.byte_len();
-    pub(super) const SCENE_CONTENT_BYTES: usize = scene_content_end(ContentMirrorFamily::Hud);
+    pub(super) const SCENE_CONTENT_BYTES: usize = scene_content_end(ContentMirrorFamily::Ambient);
     pub(super) const FRAME_BYTES: usize = frame_end(FrameMirrorFamily::Lights);
 
     pub(super) const fn content_globals_offset() -> usize {
@@ -700,7 +694,6 @@ impl PackedMirrorLayout {
             ContentMirrorFamily::Ambient => {
                 Some(scene_content_end(ContentMirrorFamily::TankGlyphs))
             }
-            ContentMirrorFamily::Hud => Some(scene_content_end(ContentMirrorFamily::Ambient)),
         }
     }
 
@@ -710,8 +703,7 @@ impl PackedMirrorLayout {
             FrameMirrorFamily::Props => frame_end(FrameMirrorFamily::Globals),
             FrameMirrorFamily::TankCells => frame_end(FrameMirrorFamily::Props),
             FrameMirrorFamily::Ambient => frame_end(FrameMirrorFamily::TankCells),
-            FrameMirrorFamily::Hud => frame_end(FrameMirrorFamily::Ambient),
-            FrameMirrorFamily::Lights => frame_end(FrameMirrorFamily::Hud),
+            FrameMirrorFamily::Lights => frame_end(FrameMirrorFamily::Ambient),
         }
     }
 
@@ -2106,8 +2098,8 @@ mod tests {
     fn packed_mirror_layouts_have_frozen_offsets_sizes_and_checked_translation() {
         assert_eq!(PackedMirrorLayout::NODE_BYTES, 12_288);
         assert_eq!(PackedMirrorLayout::CONTENT_GLOBALS_BYTES, 144);
-        assert_eq!(PackedMirrorLayout::SCENE_CONTENT_BYTES, 10_368);
-        assert_eq!(PackedMirrorLayout::FRAME_BYTES, 5_760);
+        assert_eq!(PackedMirrorLayout::SCENE_CONTENT_BYTES, 9_600);
+        assert_eq!(PackedMirrorLayout::FRAME_BYTES, 4_608);
         assert_eq!(PackedMirrorLayout::content_globals_offset(), 0);
         assert_eq!(
             [
@@ -2115,10 +2107,9 @@ mod tests {
                 ContentMirrorFamily::PropGlyphs,
                 ContentMirrorFamily::TankGlyphs,
                 ContentMirrorFamily::Ambient,
-                ContentMirrorFamily::Hud,
             ]
             .map(|family| PackedMirrorLayout::scene_content_offset(family).unwrap()),
-            [0, 4_160, 7_040, 7_552, 9_600]
+            [0, 4_160, 7_040, 7_552]
         );
         assert_eq!(
             PackedMirrorLayout::scene_content_offset(ContentMirrorFamily::Globals),
@@ -2126,7 +2117,7 @@ mod tests {
         );
         assert_eq!(
             FrameMirrorFamily::ALL.map(PackedMirrorLayout::frame_offset),
-            [0, 192, 672, 1_440, 4_512, 5_664]
+            [0, 192, 672, 1_440, 4_512]
         );
         assert_eq!(
             PackedMirrorLayout::translate_content_globals_span(ByteSpan { offset: 0, len: 144 }),
@@ -2137,7 +2128,6 @@ mod tests {
             ContentMirrorFamily::PropGlyphs,
             ContentMirrorFamily::TankGlyphs,
             ContentMirrorFamily::Ambient,
-            ContentMirrorFamily::Hud,
         ] {
             let translated = PackedMirrorLayout::translate_scene_content_span(
                 family,
@@ -2311,7 +2301,6 @@ mod tests {
         for family in [
             ContentMirrorFamily::PropGlyphs,
             ContentMirrorFamily::Ambient,
-            ContentMirrorFamily::Hud,
         ] {
             assert!(!SceneGlyphWeightPolicy::content_is_bold(family, 0, [0; 2]));
         }
@@ -2335,7 +2324,7 @@ mod tests {
         assert_ne!(regular.glyph_entry_index, bold.glyph_entry_index);
 
         let none = SceneContentGpuValue::translate(
-            ContentMirrorFamily::Hud,
+            ContentMirrorFamily::Ambient,
             super::super::compiler::ContentUploadValue::fixture(u32::MAX, 0),
             &atlas,
         )
@@ -2343,7 +2332,7 @@ mod tests {
         assert_eq!(none.glyph_entry_index, u32::MAX);
         assert!(matches!(
             SceneContentGpuValue::translate(
-                ContentMirrorFamily::Hud,
+                ContentMirrorFamily::Ambient,
                 super::super::compiler::ContentUploadValue::fixture(0x11_0000, 0),
                 &atlas,
             ),
@@ -2351,7 +2340,7 @@ mod tests {
         ));
         assert!(matches!(
             SceneContentGpuValue::translate(
-                ContentMirrorFamily::Hud,
+                ContentMirrorFamily::Ambient,
                 super::super::compiler::ContentUploadValue::fixture(u32::from('x'), 0),
                 &atlas,
             ),
@@ -2469,12 +2458,12 @@ mod tests {
         ];
         assert_eq!(candidate_buffer_lengths.len(), 8);
         assert_eq!(candidate_buffer_lengths[3], 144);
-        assert_eq!(candidate_buffer_lengths[4], 5_760);
+        assert_eq!(candidate_buffer_lengths[4], 4_608);
         assert_eq!(
             candidate_buffer_lengths[5],
             candidate.primitive_count() * 48
         );
-        assert_eq!(candidate_buffer_lengths[6], 10_368);
+        assert_eq!(candidate_buffer_lengths[6], 9_600);
         assert_eq!(candidate_buffer_lengths[7], 2 * 64);
         assert_eq!(candidate, before);
     }
@@ -2531,7 +2520,7 @@ mod tests {
                 InstanceGroupBinding::Hud,
                 0,
                 PrimitiveSource::Instances(InstanceSource::Hud),
-                0..24,
+                0..0,
             ),
         ];
 
@@ -2738,6 +2727,7 @@ mod tests {
             "fn fs_color(",
             "var<uniform> frame_globals",
             "clip.z =",
+            "return 300u;",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -3063,7 +3053,9 @@ mod tests {
         assert_invalid(malformed);
 
         let mut malformed = upload.clone();
-        malformed.scene_content_bytes.truncate(10_364);
+        malformed
+            .scene_content_bytes
+            .truncate(PackedMirrorLayout::SCENE_CONTENT_BYTES - 4);
         assert_invalid(malformed);
 
         let mut malformed = upload.clone();
@@ -3176,7 +3168,7 @@ mod tests {
                 8,
             ),
             (InstanceGroupBinding::Ambient, 64),
-            (InstanceGroupBinding::Hud, 24),
+            (InstanceGroupBinding::Hud, 0),
         ] {
             let mut fixture = SceneFixture::valid();
             fixture.template.primitives[0].kind = PrimitiveKind::InstanceQuad;

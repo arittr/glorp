@@ -119,7 +119,6 @@ impl SemanticChangeMask {
     pub(crate) const PROP: Self = Self(1 << 2);
     pub(crate) const TANK: Self = Self(1 << 3);
     pub(crate) const AMBIENT: Self = Self(1 << 4);
-    pub(crate) const HUD: Self = Self(1 << 5);
     pub(crate) const MOOD_WEATHER: Self = Self(1 << 6);
     pub(crate) const ROOM_GLYPHS: Self = Self(1 << 7);
 
@@ -390,37 +389,6 @@ fn canonical_ambient_frames_changed(
         })
 }
 
-fn canonical_hud_frames_changed(
-    previous: &CompanionSceneSnapshot,
-    newest: &CompanionSceneSnapshot,
-) -> bool {
-    previous
-        .frame
-        .hud_instances
-        .iter()
-        .zip(&previous.content.hud_glyphs)
-        .zip(
-            newest
-                .frame
-                .hud_instances
-                .iter()
-                .zip(&newest.content.hud_glyphs),
-        )
-        .any(|((left, left_content), (right, right_content))| {
-            let left = if left_content.glyph.is_some() {
-                (left.visible, left.position_points, left.opacity)
-            } else {
-                (false, [0.0; 2], 0.0)
-            };
-            let right = if right_content.glyph.is_some() {
-                (right.visible, right.position_points, right.opacity)
-            } else {
-                (false, [0.0; 2], 0.0)
-            };
-            left != right
-        })
-}
-
 pub(crate) fn classify_snapshot_changes(
     previous: &CompanionSceneSnapshot,
     newest: &CompanionSceneSnapshot,
@@ -553,12 +521,6 @@ pub(crate) fn classify_snapshot_changes(
     if super::canonical_activity_status(previous) != super::canonical_activity_status(newest) {
         changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
     }
-    if previous.content.hud_glyphs != newest.content.hud_glyphs {
-        changes.semantic.insert(SemanticChangeMask::HUD);
-    }
-    if canonical_hud_frames_changed(previous, newest) {
-        changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
-    }
 
     if previous.frame.pet_anchor_points[0] != newest.frame.pet_anchor_points[0]
         || previous.frame.pet_anchor_points[1]
@@ -591,7 +553,7 @@ pub(crate) fn classify_snapshot_changes(
     {
         changes.frame.insert(FrameChangeMask::DIM);
     }
-    // Raw clocks, grid helpers, and formatted HUD lines are producer inputs.
+    // Raw clocks and grid helpers are producer inputs.
     // Only the canonical point-space/content/frame mirrors above allocate a
     // revision, so changing redundant metadata with identical output is a no-op.
 
@@ -668,9 +630,6 @@ pub(crate) fn validate_snapshot(
         || snapshot.frame.ambient_instances.iter().any(|slot| {
             !slot.position_points.iter().all(|value| value.is_finite()) || !slot.opacity.is_finite()
         })
-        || snapshot.frame.hud_instances.iter().any(|slot| {
-            !slot.position_points.iter().all(|value| value.is_finite()) || !slot.opacity.is_finite()
-        })
         || snapshot.frame.room_glyphs.iter().any(|slot| {
             !slot.position_points.iter().all(|value| value.is_finite()) || !slot.opacity.is_finite()
         })
@@ -698,11 +657,6 @@ pub(crate) fn validate_snapshot(
             .ambient_instances
             .iter()
             .any(|slot| !(0.0..=1.0).contains(&slot.opacity))
-        || snapshot
-            .frame
-            .hud_instances
-            .iter()
-            .any(|slot| !(0.0..=1.0).contains(&slot.opacity))
         || snapshot.frame.room_glyphs.iter().any(|slot| {
             !slot.visible || !(0.0..=1.0).contains(&slot.opacity) || slot.opacity == 0.0
         })
@@ -721,8 +675,6 @@ pub(crate) fn validate_snapshot(
             .any(|line| line.chars().count() != usize::from(PET_LATTICE_WIDTH))
         || snapshot.content.ambient_semantics.len() != super::scene::MAX_AMBIENT_INSTANCES
         || snapshot.frame.ambient_instances.len() != super::scene::MAX_AMBIENT_INSTANCES
-        || snapshot.content.hud_glyphs.len() != super::scene::MAX_HUD_GLYPH_SLOTS
-        || snapshot.frame.hud_instances.len() != super::scene::MAX_HUD_GLYPH_SLOTS
         || snapshot.content.room_glyphs.len() > super::scene::MAX_ROOM_GLYPH_SLOTS
         || snapshot.frame.room_glyphs.len() != snapshot.content.room_glyphs.len()
     {
@@ -796,18 +748,6 @@ pub(crate) fn validate_snapshot(
         || snapshot
             .frame
             .room_glyphs
-            .iter()
-            .enumerate()
-            .any(|(index, slot)| usize::from(slot.slot) != index)
-        || snapshot
-            .content
-            .hud_glyphs
-            .iter()
-            .enumerate()
-            .any(|(index, slot)| usize::from(slot.slot) != index)
-        || snapshot
-            .frame
-            .hud_instances
             .iter()
             .enumerate()
             .any(|(index, slot)| usize::from(slot.slot) != index)
@@ -2477,13 +2417,13 @@ mod tests {
         AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
         AuthoredDepthSnapshot, CompanionDayPhase, CompanionGlyphGrid, CompanionLogicalLayout,
         CompanionSceneSnapshot, ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot,
-        HudFrameSnapshot, HudGlyphSnapshot, LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot,
-        PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
-        PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomGlyphContentSnapshot,
-        RoomGlyphFrameSnapshot, RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot,
-        TankCellSnapshot, TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot,
-        TankTopologySnapshot, TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION,
-        COMPANION_SCENE_SCHEMA_VERSION, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
+        LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot, PetLatticeSnapshot,
+        PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
+        PropTopologySnapshot, PropZoneSnapshot, RoomGlyphContentSnapshot, RoomGlyphFrameSnapshot,
+        RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot,
+        TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
+        TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
+        PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
     };
     use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
     use std::sync::Arc;
@@ -2596,9 +2536,6 @@ mod tests {
                 ambient_semantics: (0..64)
                     .map(|slot| AmbientSemanticSnapshot { slot, kind: None, glyph: None })
                     .collect(),
-                hud_glyphs: (0..24)
-                    .map(|slot| HudGlyphSnapshot { slot, glyph: None })
-                    .collect(),
             },
             frame: FrameSnapshot {
                 elapsed_ms: 1_000,
@@ -2622,18 +2559,9 @@ mod tests {
                 gauge_fractions: [0.375; 4],
                 dimmed: false,
                 dim_amount: 0.0,
-                hud_lines: ["today".to_owned(), "daily".to_owned(), "pace".to_owned()],
                 room_glyphs: Vec::new(),
                 ambient_instances: (0..64)
                     .map(|slot| AmbientFrameSnapshot {
-                        slot,
-                        visible: false,
-                        position_points: [0.0; 2],
-                        opacity: 0.0,
-                    })
-                    .collect(),
-                hud_instances: (0..24)
-                    .map(|slot| HudFrameSnapshot {
                         slot,
                         visible: false,
                         position_points: [0.0; 2],
@@ -2901,13 +2829,6 @@ mod tests {
             .ambient_instances[0]
             .position_points[0] +=
             1.0);
-        assert_class!(hud_glyph, semantic, |s| s.content.hud_glyphs[0].glyph =
-            Some('R'));
-        assert_class!(hud_frame, ChangeFamilies::NONE, |s| s
-            .frame
-            .hud_instances[0]
-            .position_points[0] +=
-            1.0);
         assert_class!(activity_status, frame, |s| {
             s.frame.activity_recent = true;
             s.frame.activity_opacity = 0.75;
@@ -2942,9 +2863,6 @@ mod tests {
             s.frame.dim_amount = 0.35;
         });
         assert_class!(dim_derivative, frame, |s| s.frame.dimmed = true);
-        assert_class!(hud, ChangeFamilies::NONE, |s| s.frame.hud_lines[0] =
-            "new".to_owned());
-
         assert_class!(elapsed_clock, ChangeFamilies::NONE, |s| s
             .frame
             .elapsed_ms +=
@@ -3017,14 +2935,6 @@ mod tests {
                         .unwrap()
                         .x += 1
                 }),
-            ),
-            (
-                "hud lines",
-                Box::new(|s| s.frame.hud_lines[0] = "ignored".to_owned()),
-            ),
-            (
-                "empty hud frame",
-                Box::new(|s| s.frame.hud_instances[0].position_points[0] += 1.0),
             ),
             (
                 "cancelled pet offsets",
@@ -3146,18 +3056,6 @@ mod tests {
                 Box::new(|s| {
                     s.frame.activity_recent = true;
                     s.frame.activity_opacity = 0.6;
-                }),
-            ),
-            (
-                "hud",
-                Box::new(|s| {
-                    s.content.hud_glyphs[0] = HudGlyphSnapshot { slot: 0, glyph: Some('R') };
-                    s.frame.hud_instances[0] = HudFrameSnapshot {
-                        slot: 0,
-                        visible: true,
-                        position_points: [24.0, 324.0],
-                        opacity: 1.0,
-                    };
                 }),
             ),
             ("pet transform", Box::new(|s| offset_pet_depth(s, 0.1))),

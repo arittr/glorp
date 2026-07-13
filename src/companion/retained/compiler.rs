@@ -9,9 +9,8 @@ use crate::presentation::companion_scene::scene::{
     MoodContentKind, NodeId, PetArtFilter, PetPaletteRole, PrimitiveBinding, PrimitiveKind,
     PrimitiveSpace, ResourceKind, SceneContent, SceneFrame, SceneGenerationData, SceneTemplate,
     WeatherContentKind, WorldBlend, MAX_AMBIENT_INSTANCES, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS,
-    MAX_HUD_GLYPH_SLOTS, MAX_LIGHTS, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT,
-    MAX_ROUND_TANK_INHABITANTS, MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT,
-    MAX_VISIBLE_PROPS,
+    MAX_LIGHTS, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT, MAX_ROUND_TANK_INHABITANTS,
+    MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT, MAX_VISIBLE_PROPS,
 };
 
 const NONE_U32: u32 = u32::MAX;
@@ -26,36 +25,32 @@ pub(super) struct CpuMirrorShape;
 impl CpuMirrorShape {
     pub(super) const NODE_RECORD_BYTES: usize = std::mem::size_of::<NodeGpuValue>();
     pub(super) const NODE_COUNT: usize = MAX_SCENE_NODES;
-    pub(super) const CONTENT_RECORD_BYTES: [usize; 6] = [
+    pub(super) const CONTENT_RECORD_BYTES: [usize; 5] = [
         std::mem::size_of::<ContentGlobalsGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
         std::mem::size_of::<ContentGpuValue>(),
-        std::mem::size_of::<ContentGpuValue>(),
     ];
-    pub(super) const CONTENT_COUNTS: [usize; 6] = [
+    pub(super) const CONTENT_COUNTS: [usize; 5] = [
         1,
         MAX_PET_ART_SLOTS,
         PROP_GLYPH_CAPACITY,
         TANK_GLYPH_CAPACITY,
         MAX_AMBIENT_INSTANCES,
-        MAX_HUD_GLYPH_SLOTS,
     ];
-    pub(super) const FRAME_RECORD_BYTES: [usize; 6] = [
+    pub(super) const FRAME_RECORD_BYTES: [usize; 5] = [
         std::mem::size_of::<FrameGlobalsGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
         std::mem::size_of::<FrameGpuValue>(),
-        std::mem::size_of::<FrameGpuValue>(),
     ];
-    pub(super) const FRAME_COUNTS: [usize; 6] = [
+    pub(super) const FRAME_COUNTS: [usize; 5] = [
         1,
         MAX_VISIBLE_PROPS,
         TANK_GLYPH_CAPACITY,
         MAX_AMBIENT_INSTANCES,
-        MAX_HUD_GLYPH_SLOTS,
         MAX_LIGHTS,
     ];
 }
@@ -337,7 +332,6 @@ pub(super) struct ContentMirrors {
     prop_glyphs: FixedPodMirror<ContentGpuValue, PROP_GLYPH_CAPACITY>,
     tank_glyphs: FixedPodMirror<ContentGpuValue, TANK_GLYPH_CAPACITY>,
     ambient: FixedPodMirror<ContentGpuValue, MAX_AMBIENT_INSTANCES>,
-    hud: FixedPodMirror<ContentGpuValue, MAX_HUD_GLYPH_SLOTS>,
 }
 
 impl ContentMirrors {
@@ -348,7 +342,6 @@ impl ContentMirrors {
             prop_glyphs: FixedPodMirror::zeroed(),
             tank_glyphs: FixedPodMirror::zeroed(),
             ambient: FixedPodMirror::zeroed(),
-            hud: FixedPodMirror::zeroed(),
         }
     }
 }
@@ -360,7 +353,6 @@ pub(super) struct FrameMirrors {
     props: FixedPodMirror<FrameGpuValue, MAX_VISIBLE_PROPS>,
     tank_cells: FixedPodMirror<FrameGpuValue, TANK_GLYPH_CAPACITY>,
     ambient: FixedPodMirror<FrameGpuValue, MAX_AMBIENT_INSTANCES>,
-    hud: FixedPodMirror<FrameGpuValue, MAX_HUD_GLYPH_SLOTS>,
     lights: FixedPodMirror<FrameGpuValue, MAX_LIGHTS>,
 }
 
@@ -372,7 +364,6 @@ impl FrameMirrors {
             props: FixedPodMirror::zeroed(),
             tank_cells: FixedPodMirror::zeroed(),
             ambient: FixedPodMirror::zeroed(),
-            hud: FixedPodMirror::zeroed(),
             lights: FixedPodMirror::zeroed(),
         }
     }
@@ -387,7 +378,6 @@ impl std::fmt::Debug for FrameMirrors {
             .field("prop_slot_count", &self.props.as_slice().len())
             .field("tank_cell_count", &self.tank_cells.as_slice().len())
             .field("ambient_slot_count", &self.ambient.as_slice().len())
-            .field("hud_slot_count", &self.hud.as_slice().len())
             .field("light_slot_count", &self.lights.as_slice().len())
             .finish()
     }
@@ -415,13 +405,11 @@ pub(super) struct SceneDirtySpans {
     pub(super) prop_glyphs: DirtySpanSet,
     pub(super) tank_glyphs: DirtySpanSet,
     pub(super) content_ambient: DirtySpanSet,
-    pub(super) content_hud: DirtySpanSet,
     pub(super) frame_globals: DirtySpanSet,
     pub(super) nodes: DirtySpanSet,
     pub(super) props: DirtySpanSet,
     pub(super) tank_cells: DirtySpanSet,
     pub(super) frame_ambient: DirtySpanSet,
-    pub(super) frame_hud: DirtySpanSet,
     pub(super) lights: DirtySpanSet,
 }
 
@@ -438,13 +426,11 @@ impl SceneDirtySpans {
             prop_glyphs: DirtySpanSet::default(),
             tank_glyphs: DirtySpanSet::default(),
             content_ambient: DirtySpanSet::default(),
-            content_hud: DirtySpanSet::default(),
             frame_globals: DirtySpanSet::default(),
             nodes: DirtySpanSet::default(),
             props: DirtySpanSet::default(),
             tank_cells: DirtySpanSet::default(),
             frame_ambient: DirtySpanSet::default(),
-            frame_hud: DirtySpanSet::default(),
             lights: DirtySpanSet::default(),
         }
     }
@@ -517,7 +503,6 @@ pub(super) struct ContentUploadSources<'a> {
     pub(super) prop_glyphs: &'a [ContentGpuValue],
     pub(super) tank_glyphs: &'a [ContentGpuValue],
     pub(super) ambient: &'a [ContentGpuValue],
-    pub(super) hud: &'a [ContentGpuValue],
 }
 
 pub(super) struct FrameUploadSources<'a> {
@@ -526,7 +511,6 @@ pub(super) struct FrameUploadSources<'a> {
     pub(super) props: &'a [u8],
     pub(super) tank_cells: &'a [u8],
     pub(super) ambient: &'a [u8],
-    pub(super) hud: &'a [u8],
     pub(super) lights: &'a [u8],
 }
 
@@ -543,13 +527,11 @@ struct PreparedMirrorDelta {
     prop_glyphs: [Option<ContentGpuValue>; PROP_GLYPH_CAPACITY],
     tank_glyphs: [Option<ContentGpuValue>; TANK_GLYPH_CAPACITY],
     content_ambient: [Option<ContentGpuValue>; MAX_AMBIENT_INSTANCES],
-    content_hud: [Option<ContentGpuValue>; MAX_HUD_GLYPH_SLOTS],
     frame_globals: Option<FrameGlobalsGpuValue>,
     nodes: [Option<NodeGpuValue>; MAX_SCENE_NODES],
     props: [Option<FrameGpuValue>; MAX_VISIBLE_PROPS],
     tank_cells: [Option<FrameGpuValue>; TANK_GLYPH_CAPACITY],
     frame_ambient: [Option<FrameGpuValue>; MAX_AMBIENT_INSTANCES],
-    frame_hud: [Option<FrameGpuValue>; MAX_HUD_GLYPH_SLOTS],
     lights: [Option<FrameGpuValue>; MAX_LIGHTS],
     #[cfg(test)]
     node_resolves: usize,
@@ -567,13 +549,11 @@ impl PreparedMirrorDelta {
             prop_glyphs: [None; PROP_GLYPH_CAPACITY],
             tank_glyphs: [None; TANK_GLYPH_CAPACITY],
             content_ambient: [None; MAX_AMBIENT_INSTANCES],
-            content_hud: [None; MAX_HUD_GLYPH_SLOTS],
             frame_globals: None,
             nodes: [None; MAX_SCENE_NODES],
             props: [None; MAX_VISIBLE_PROPS],
             tank_cells: [None; TANK_GLYPH_CAPACITY],
             frame_ambient: [None; MAX_AMBIENT_INSTANCES],
-            frame_hud: [None; MAX_HUD_GLYPH_SLOTS],
             lights: [None; MAX_LIGHTS],
             #[cfg(test)]
             node_resolves: 0,
@@ -656,7 +636,6 @@ impl CpuSceneCandidate {
             prop_glyphs: self.content.prop_glyphs.as_slice(),
             tank_glyphs: self.content.tank_glyphs.as_slice(),
             ambient: self.content.ambient.as_slice(),
-            hud: self.content.hud.as_slice(),
         }
     }
 
@@ -667,7 +646,6 @@ impl CpuSceneCandidate {
             props: bytemuck::cast_slice(self.frame.props.as_slice()),
             tank_cells: bytemuck::cast_slice(self.frame.tank_cells.as_slice()),
             ambient: bytemuck::cast_slice(self.frame.ambient.as_slice()),
-            hud: bytemuck::cast_slice(self.frame.hud.as_slice()),
             lights: bytemuck::cast_slice(self.frame.lights.as_slice()),
         }
     }
@@ -752,7 +730,6 @@ fn content_delta_has_values(delta: &ContentDelta) -> bool {
         || !delta.prop_slots.is_empty()
         || !delta.tank_slots.is_empty()
         || !delta.ambient_slots.is_empty()
-        || !delta.hud_slots.is_empty()
 }
 
 fn frame_delta_has_values(delta: &FrameDelta) -> bool {
@@ -761,7 +738,6 @@ fn frame_delta_has_values(delta: &FrameDelta) -> bool {
         || !delta.prop_slots.is_empty()
         || !delta.tank_slots.is_empty()
         || !delta.ambient_slots.is_empty()
-        || !delta.hud_slots.is_empty()
         || delta.gauges.is_some()
         || delta.dim_amount.is_some()
         || !delta.lights.is_empty()
@@ -847,15 +823,6 @@ impl CpuSceneCandidate {
                 pack_ambient_content(*changed),
             )?;
         }
-        for changed in &content_delta.hud_slots {
-            record_update(
-                &self.content.hud,
-                &mut prepared.content_hud,
-                &mut prepared.dirty.content_hud,
-                usize::from(changed.slot),
-                pack_hud_content(*changed),
-            )?;
-        }
 
         if frame_delta.camera.is_some()
             || frame_delta.gauges.is_some()
@@ -915,15 +882,6 @@ impl CpuSceneCandidate {
                 &mut prepared.dirty.frame_ambient,
                 usize::from(changed.slot),
                 pack_ambient_frame(*changed),
-            )?;
-        }
-        for changed in &frame_delta.hud_slots {
-            record_update(
-                &self.frame.hud,
-                &mut prepared.frame_hud,
-                &mut prepared.dirty.frame_hud,
-                usize::from(changed.slot),
-                pack_hud_frame(*changed),
             )?;
         }
         for (slot, changed) in &frame_delta.lights {
@@ -1048,7 +1006,6 @@ impl CpuSceneCandidate {
         commit_updates(&mut self.content.prop_glyphs, prepared.prop_glyphs);
         commit_updates(&mut self.content.tank_glyphs, prepared.tank_glyphs);
         commit_updates(&mut self.content.ambient, prepared.content_ambient);
-        commit_updates(&mut self.content.hud, prepared.content_hud);
         if let Some(value) = prepared.frame_globals {
             self.frame.globals.set_fixed(0, value);
         }
@@ -1056,7 +1013,6 @@ impl CpuSceneCandidate {
         commit_updates(&mut self.frame.props, prepared.props);
         commit_updates(&mut self.frame.tank_cells, prepared.tank_cells);
         commit_updates(&mut self.frame.ambient, prepared.frame_ambient);
-        commit_updates(&mut self.frame.hud, prepared.frame_hud);
         commit_updates(&mut self.frame.lights, prepared.lights);
     }
 }
@@ -1189,20 +1145,6 @@ fn pack_ambient_content(
     }
 }
 
-fn pack_hud_content(
-    value: crate::presentation::companion_scene::scene::HudContentSlot,
-) -> ContentGpuValue {
-    ContentGpuValue {
-        kind: 5,
-        glyph_scalar: option_glyph(value.glyph.map(|glyph| glyph.as_char())),
-        slot: u32::from(value.slot),
-        subslot: 0,
-        signed_data: [0; 2],
-        flags: 0,
-        variant: 0,
-    }
-}
-
 fn pack_prop_frame(
     value: crate::presentation::companion_scene::scene::PropFrameSlot,
 ) -> FrameGpuValue {
@@ -1253,27 +1195,6 @@ fn pack_ambient_frame(
 ) -> FrameGpuValue {
     FrameGpuValue {
         kind: 3,
-        slot: u32::from(value.slot),
-        flags: u32::from(value.visible),
-        variant: 0,
-        values: [
-            value.position_points[0],
-            value.position_points[1],
-            value.opacity,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ],
-    }
-}
-
-fn pack_hud_frame(
-    value: crate::presentation::companion_scene::scene::HudFrameSlot,
-) -> FrameGpuValue {
-    FrameGpuValue {
-        kind: 4,
         slot: u32::from(value.slot),
         flags: u32::from(value.visible),
         variant: 0,
@@ -1346,9 +1267,6 @@ fn apply_content_delta_in_place(content: &mut SceneContent, delta: &ContentDelta
     for changed in &delta.ambient_slots {
         content.ambient_slots[usize::from(changed.slot)] = *changed;
     }
-    for changed in &delta.hud_slots {
-        content.hud_slots[usize::from(changed.slot)] = *changed;
-    }
 }
 
 #[allow(dead_code)] // Called when retained-scene materialization lands in the next checkpoint.
@@ -1380,12 +1298,10 @@ fn compile_cpu_parts(
         || content.prop_slots.len() != MAX_VISIBLE_PROPS
         || content.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
         || content.ambient_slots.len() != MAX_AMBIENT_INSTANCES
-        || content.hud_slots.len() != MAX_HUD_GLYPH_SLOTS
         || frame.nodes.len() > MAX_SCENE_NODES
         || frame.prop_slots.len() != MAX_VISIBLE_PROPS
         || frame.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
         || frame.ambient_slots.len() != MAX_AMBIENT_INSTANCES
-        || frame.hud_slots.len() != MAX_HUD_GLYPH_SLOTS
         || frame.lights.len() > MAX_LIGHTS
         || template.attachments.len() > MAX_ATTACHMENTS
     {
@@ -1847,21 +1763,6 @@ fn compile_content_mirrors(content: &SceneContent) -> Result<ContentMirrors, Com
             }
         }),
     );
-    set_all(
-        &mut result.hud,
-        std::array::from_fn(|slot| {
-            let value = content.hud_slots[slot];
-            ContentGpuValue {
-                kind: 5,
-                glyph_scalar: option_glyph(value.glyph.map(|glyph| glyph.as_char())),
-                slot: u32::from(value.slot),
-                subslot: 0,
-                signed_data: [0; 2],
-                flags: 0,
-                variant: 0,
-            }
-        }),
-    );
     Ok(result)
 }
 
@@ -1979,28 +1880,6 @@ fn compile_frame_mirrors(
             let value = frame.ambient_slots[slot];
             FrameGpuValue {
                 kind: 3,
-                slot: u32::from(value.slot),
-                flags: u32::from(value.visible),
-                variant: 0,
-                values: [
-                    value.position_points[0],
-                    value.position_points[1],
-                    value.opacity,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                ],
-            }
-        }),
-    );
-    set_all(
-        &mut result.hud,
-        std::array::from_fn(|slot| {
-            let value = frame.hud_slots[slot];
-            FrameGpuValue {
-                kind: 4,
                 slot: u32::from(value.slot),
                 flags: u32::from(value.visible),
                 variant: 0,
@@ -2446,13 +2325,11 @@ mod tests {
             &dirty.prop_glyphs,
             &dirty.tank_glyphs,
             &dirty.content_ambient,
-            &dirty.content_hud,
             &dirty.frame_globals,
             &dirty.nodes,
             &dirty.props,
             &dirty.tank_cells,
             &dirty.frame_ambient,
-            &dirty.frame_hud,
             &dirty.lights,
         ]
         .into_iter()
@@ -2462,8 +2339,8 @@ mod tests {
     #[derive(Clone, Copy)]
     struct CandidateStorageIdentity {
         static_vecs: [(usize, usize); 19],
-        fixed_mirrors: [(usize, usize); 13],
-        logical_vecs: [(usize, usize); 11],
+        fixed_mirrors: [(usize, usize); 11],
+        logical_vecs: [(usize, usize); 9],
     }
 
     fn vec_identity<T>(values: &Vec<T>) -> (usize, usize) {
@@ -2517,10 +2394,6 @@ mod tests {
                     candidate.content.ambient.capacity(),
                 ),
                 (
-                    candidate.content.hud.as_slice().as_ptr() as usize,
-                    candidate.content.hud.capacity(),
-                ),
-                (
                     candidate.frame.globals.as_slice().as_ptr() as usize,
                     candidate.frame.globals.capacity(),
                 ),
@@ -2541,10 +2414,6 @@ mod tests {
                     candidate.frame.ambient.capacity(),
                 ),
                 (
-                    candidate.frame.hud.as_slice().as_ptr() as usize,
-                    candidate.frame.hud.capacity(),
-                ),
-                (
                     candidate.frame.lights.as_slice().as_ptr() as usize,
                     candidate.frame.lights.capacity(),
                 ),
@@ -2554,12 +2423,10 @@ mod tests {
                 vec_identity(&candidate.logical_content.prop_slots),
                 vec_identity(&candidate.logical_content.tank_slots),
                 vec_identity(&candidate.logical_content.ambient_slots),
-                vec_identity(&candidate.logical_content.hud_slots),
                 vec_identity(&accepted_frame.nodes),
                 vec_identity(&accepted_frame.prop_slots),
                 vec_identity(&accepted_frame.tank_slots),
                 vec_identity(&accepted_frame.ambient_slots),
-                vec_identity(&accepted_frame.hud_slots),
                 vec_identity(&accepted_frame.lights),
             ],
         }
@@ -2698,13 +2565,11 @@ mod tests {
         assert_eq!(content.prop_glyphs.capacity(), 90);
         assert_eq!(content.tank_glyphs.capacity(), 16);
         assert_eq!(content.ambient.capacity(), 64);
-        assert_eq!(content.hud.capacity(), 24);
         let frame = FrameMirrors::zeroed();
         assert_eq!(frame.nodes.capacity(), 128);
         assert_eq!(frame.props.capacity(), 10);
         assert_eq!(frame.tank_cells.capacity(), 16);
         assert_eq!(frame.ambient.capacity(), 64);
-        assert_eq!(frame.hud.capacity(), 24);
         assert_eq!(frame.lights.capacity(), 2);
     }
 
@@ -3042,7 +2907,6 @@ mod tests {
         fixture.content.pet_art_slots[0].palette_role = PetPaletteRole::Eye;
         fixture.content.ambient_slots[2].kind = Some(AmbientContentKind::Mote);
         fixture.content.ambient_slots[2].glyph = Some(AuthoredGlyph::new('☁').unwrap());
-        fixture.content.hud_slots[1].glyph = Some(AuthoredGlyph::new('7').unwrap());
 
         fixture.frame.gauges = [0.1, 0.2, 0.3, 0.4];
         fixture.frame.dim_amount = 0.35;
@@ -3062,9 +2926,6 @@ mod tests {
         fixture.frame.ambient_slots[2].visible = true;
         fixture.frame.ambient_slots[2].position_points = [70.0, 80.0];
         fixture.frame.ambient_slots[2].opacity = 0.6;
-        fixture.frame.hud_slots[1].visible = true;
-        fixture.frame.hud_slots[1].position_points = [90.0, 100.0];
-        fixture.frame.hud_slots[1].opacity = 0.8;
         fixture
             .frame
             .lights
@@ -3089,10 +2950,6 @@ mod tests {
             u32::from('☁')
         );
         assert_eq!(compiled.content.ambient.as_slice()[2].variant, 1);
-        assert_eq!(
-            compiled.content.hud.as_slice()[1].glyph_scalar,
-            u32::from('7')
-        );
 
         let frame_globals = compiled.frame.globals.as_slice()[0];
         assert_eq!(frame_globals.gauges, [0.1, 0.2, 0.3, 0.4]);
@@ -3109,10 +2966,6 @@ mod tests {
         assert_eq!(
             compiled.frame.ambient.as_slice()[2].values[..3],
             [70.0, 80.0, 0.6]
-        );
-        assert_eq!(
-            compiled.frame.hud.as_slice()[1].values[..3],
-            [90.0, 100.0, 0.8]
         );
         assert_eq!(compiled.frame.lights.as_slice()[0].flags, 1);
         assert_eq!(compiled.frame.lights.as_slice()[1].variant, NONE_U32);
@@ -3409,12 +3262,6 @@ mod tests {
                 glyph: Some(AuthoredGlyph::new('☁').unwrap()),
             },
         );
-        content.hud_slots.push(
-            crate::presentation::companion_scene::scene::HudContentSlot {
-                slot: 1,
-                glyph: Some(AuthoredGlyph::new('7').unwrap()),
-            },
-        );
 
         let mut node = candidate.accepted.frame().frame().nodes[1];
         node.local_transform =
@@ -3455,14 +3302,6 @@ mod tests {
                 opacity: 0.7,
             },
         );
-        frame
-            .hud_slots
-            .push(crate::presentation::companion_scene::scene::HudFrameSlot {
-                slot: 1,
-                visible: true,
-                position_points: [70.0, 80.0],
-                opacity: 0.9,
-            });
         frame.lights.push((
             0,
             crate::presentation::companion_scene::scene::LightFrame {
@@ -3495,10 +3334,6 @@ mod tests {
             &[ByteSpan::slots::<ContentGpuValue>(2, 1)]
         );
         assert_eq!(
-            dirty.content_hud.as_slice(),
-            &[ByteSpan::slots::<ContentGpuValue>(1, 1)]
-        );
-        assert_eq!(
             dirty.frame_globals.as_slice(),
             &[ByteSpan::slots::<FrameGlobalsGpuValue>(0, 1)]
         );
@@ -3517,10 +3352,6 @@ mod tests {
         assert_eq!(
             dirty.frame_ambient.as_slice(),
             &[ByteSpan::slots::<FrameGpuValue>(2, 1)]
-        );
-        assert_eq!(
-            dirty.frame_hud.as_slice(),
-            &[ByteSpan::slots::<FrameGpuValue>(1, 1)]
         );
         assert_eq!(
             dirty.lights.as_slice(),

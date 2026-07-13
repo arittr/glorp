@@ -2,6 +2,7 @@ pub mod color_ops;
 pub mod companion_scene;
 pub mod draw_list;
 pub mod effect;
+pub mod gauge_values;
 pub mod habitat_inventory;
 pub mod pet;
 pub mod pet_scene;

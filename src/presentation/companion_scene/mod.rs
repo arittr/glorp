@@ -298,7 +298,6 @@ pub struct ContentSnapshot {
     pub prop_animation_states: Vec<PropAnimationSnapshot>,
     pub tank_animation_states: Vec<TankAnimationSnapshot>,
     pub ambient_semantics: Vec<AmbientSemanticSnapshot>,
-    pub hud_glyphs: Vec<HudGlyphSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -380,12 +379,6 @@ pub struct AmbientSemanticSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct HudGlyphSnapshot {
-    pub slot: u8,
-    pub glyph: Option<char>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct TankBoundsSnapshot {
     pub x: u16,
     pub y: u16,
@@ -462,10 +455,8 @@ pub struct FrameSnapshot {
     /// serialization or Debug boundary.
     #[serde(skip)]
     pub dim_amount: f32,
-    pub hud_lines: [String; 3],
     pub room_glyphs: Vec<RoomGlyphFrameSnapshot>,
     pub ambient_instances: Vec<AmbientFrameSnapshot>,
-    pub hud_instances: Vec<HudFrameSnapshot>,
 }
 
 impl std::fmt::Debug for FrameSnapshot {
@@ -488,10 +479,8 @@ impl std::fmt::Debug for FrameSnapshot {
             .field("gauge_fractions", &"<redacted>")
             .field("dimmed", &self.dimmed)
             .field("dim_amount", &"<redacted>")
-            .field("hud_lines", &self.hud_lines)
             .field("room_glyphs", &self.room_glyphs)
             .field("ambient_instances", &self.ambient_instances)
-            .field("hud_instances", &self.hud_instances)
             .finish()
     }
 }
@@ -545,14 +534,6 @@ pub(crate) fn canonical_activity_status(snapshot: &CompanionSceneSnapshot) -> (b
     } else {
         (false, 0.0)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
-pub struct HudFrameSnapshot {
-    pub slot: u8,
-    pub visible: bool,
-    pub position_points: [f32; 2],
-    pub opacity: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
