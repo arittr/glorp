@@ -589,6 +589,7 @@ fn validate_planned_draw(
 pub(super) struct PreparedSceneUpload {
     pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
+    pub(super) logical_viewport_points: [f32; 2],
     pub(super) static_checksum: u64,
     pub(super) vertex_bytes: Vec<u8>,
     pub(super) index_bytes: Vec<u8>,
@@ -766,6 +767,7 @@ pub(super) fn prepare_scene_upload(
     Ok(PreparedSceneUpload {
         generation_key: candidate.generation_key,
         source_revisions: candidate.source_revisions,
+        logical_viewport_points: candidate.logical_viewport_points(),
         static_checksum: candidate.static_checksum,
         vertex_bytes: candidate.vertex_bytes().to_vec(),
         index_bytes: candidate.index_bytes().to_vec(),
@@ -1655,7 +1657,7 @@ fn select_scoped_gpu_error(
 /// Opens the required nested scopes and explicitly pops all of them in reverse
 /// order on this caller/render-owner thread. Only the typed category escapes;
 /// backend descriptions are dropped with the original `wgpu::Error` values.
-fn create_in_gpu_error_scopes<T>(
+pub(super) fn create_in_gpu_error_scopes<T>(
     device: &wgpu::Device,
     create: impl FnOnce() -> T,
 ) -> Result<T, SceneGpuError> {
@@ -1716,6 +1718,9 @@ impl SceneBasePipelines {
 /// operations; neither is retained here.
 pub(super) struct SceneGpuShared {
     pub(super) device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    /// Immutable adapter/device limit used to reject impossible targets before
+    /// any texture creation reaches wgpu validation.
+    pub(super) max_texture_dimension_2d: u32,
     pub(super) scene_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) atlas_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) final_bind_group_layout: wgpu::BindGroupLayout,
@@ -1812,6 +1817,7 @@ impl SceneGpuShared {
         );
         Self {
             device_epoch,
+            max_texture_dimension_2d: device.limits().max_texture_dimension_2d,
             scene_bind_group_layout,
             atlas_bind_group_layout,
             final_bind_group_layout,
@@ -2090,6 +2096,7 @@ pub(super) struct GpuSceneCandidate {
     pub(super) hud: super::hud::GpuHudResources,
     pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
+    pub(super) logical_viewport_points: [f32; 2],
     pub(super) static_checksum: u64,
     /// Frozen once during materialization. Ordinary frames read this closed
     /// schedule directly and perform no full validation or heap allocation.
@@ -2396,6 +2403,7 @@ pub(super) fn materialize_gpu_candidate(
             hud,
             generation_key: upload.generation_key,
             source_revisions: upload.source_revisions,
+            logical_viewport_points: upload.logical_viewport_points,
             static_checksum: upload.static_checksum,
             draw_plan,
         }
@@ -2454,6 +2462,27 @@ fn validate_gpu_candidate_preflight(
         || upload.draws.len() != primitive_count
         || upload.glyph_entries.is_empty()
         || upload.glyph_entries.len() != atlas.entries.len()
+    {
+        return Err(SceneGpuError::InvalidUpload);
+    }
+    // Frame globals begin the packed frame mirror. Keep the separately carried
+    // request-validation extent bit-identical to the bytes the shader reads.
+    const FRAME_VIEWPORT_POINTS_OFFSET: usize =
+        super::compiler::CpuMirrorShape::FRAME_GLOBALS_VIEWPORT_POINTS_OFFSET;
+    let uploaded_viewport_points = [
+        f32::from_ne_bytes(
+            upload.frame_bytes[FRAME_VIEWPORT_POINTS_OFFSET..FRAME_VIEWPORT_POINTS_OFFSET + 4]
+                .try_into()
+                .expect("preflight checked the fixed frame byte count"),
+        ),
+        f32::from_ne_bytes(
+            upload.frame_bytes[FRAME_VIEWPORT_POINTS_OFFSET + 4..FRAME_VIEWPORT_POINTS_OFFSET + 8]
+                .try_into()
+                .expect("preflight checked the fixed frame byte count"),
+        ),
+    ];
+    if uploaded_viewport_points.map(f32::to_bits)
+        != upload.logical_viewport_points.map(f32::to_bits)
     {
         return Err(SceneGpuError::InvalidUpload);
     }
@@ -2634,6 +2663,70 @@ fn create_atlas_texture(
     })
 }
 
+/// Complete host-owned inputs for one companion scene render. Logical extent
+/// remains compiler-owned and aperture remains the role-0 analytic; the host
+/// contributes only versioning and physical surface facts here.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SceneRenderRequest {
+    pub(super) version: crate::presentation::companion_scene::SceneVersion,
+    pub(super) physical_extent_pixels: [u32; 2],
+    pub(super) backing_scale: f64,
+}
+
+impl SceneRenderRequest {
+    pub(super) const fn new(
+        version: crate::presentation::companion_scene::SceneVersion,
+        physical_extent_pixels: [u32; 2],
+        backing_scale: f64,
+    ) -> Self {
+        Self {
+            version,
+            physical_extent_pixels,
+            backing_scale,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneRequestAxis {
+    Width,
+    Height,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneRenderRequestError {
+    InvalidBackingScale,
+    InvalidLogicalViewport,
+    EmptyPhysicalExtent {
+        axis: SceneRequestAxis,
+    },
+    PhysicalExtentMismatch {
+        axis: SceneRequestAxis,
+        requested: u32,
+        expected: u32,
+    },
+    PhysicalDimensionOverflow {
+        axis: SceneRequestAxis,
+    },
+    PhysicalDimensionLimitExceeded {
+        axis: SceneRequestAxis,
+        required: u32,
+        maximum: u32,
+    },
+    GenerationMismatch {
+        requested: crate::presentation::companion_scene::SceneGenerationKey,
+        candidate: crate::presentation::companion_scene::SceneGenerationKey,
+    },
+    AppliedRevisionsMismatch {
+        requested: crate::presentation::companion_scene::AppliedRevisions,
+        candidate: crate::presentation::companion_scene::AppliedRevisions,
+    },
+    SharedDeviceEpochMismatch {
+        shared: crate::presentation::companion_scene::DeviceEpoch,
+        candidate: crate::presentation::companion_scene::DeviceEpoch,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct SceneTargetKey {
     pub(super) device_epoch: crate::presentation::companion_scene::DeviceEpoch,
@@ -2643,6 +2736,119 @@ pub(super) struct SceneTargetKey {
     pub(super) intermediate_format: wgpu::TextureFormat,
     pub(super) depth_format: wgpu::TextureFormat,
     pub(super) sample_count: u32,
+}
+
+/// A request after it has been bound to one frozen GPU candidate and shared
+/// device generation. The target key contains only fixed renderer formats.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SceneRenderBinding {
+    pub(super) request: SceneRenderRequest,
+    pub(super) target_key: SceneTargetKey,
+}
+
+pub(super) fn bind_scene_render_request(
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+    request: SceneRenderRequest,
+) -> Result<SceneRenderBinding, SceneRenderRequestError> {
+    let target_key = derive_scene_target_key(
+        shared.device_epoch,
+        candidate.generation_key,
+        candidate.source_revisions,
+        candidate.logical_viewport_points,
+        shared.max_texture_dimension_2d,
+        &request,
+    )?;
+    Ok(SceneRenderBinding { request, target_key })
+}
+
+fn derive_scene_target_key(
+    shared_device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    candidate_generation: crate::presentation::companion_scene::SceneGenerationKey,
+    candidate_revisions: crate::presentation::companion_scene::AppliedRevisions,
+    logical_viewport_points: [f32; 2],
+    max_texture_dimension_2d: u32,
+    request: &SceneRenderRequest,
+) -> Result<SceneTargetKey, SceneRenderRequestError> {
+    if !request.backing_scale.is_finite() || request.backing_scale <= 0.0 {
+        return Err(SceneRenderRequestError::InvalidBackingScale);
+    }
+    if logical_viewport_points
+        .iter()
+        .any(|dimension| !dimension.is_finite() || *dimension <= 0.0)
+    {
+        return Err(SceneRenderRequestError::InvalidLogicalViewport);
+    }
+    for (axis, requested) in [
+        (SceneRequestAxis::Width, request.physical_extent_pixels[0]),
+        (SceneRequestAxis::Height, request.physical_extent_pixels[1]),
+    ] {
+        if requested == 0 {
+            return Err(SceneRenderRequestError::EmptyPhysicalExtent { axis });
+        }
+    }
+    if request.version.generation != candidate_generation {
+        return Err(SceneRenderRequestError::GenerationMismatch {
+            requested: request.version.generation,
+            candidate: candidate_generation,
+        });
+    }
+    if request.version.applied != candidate_revisions {
+        return Err(SceneRenderRequestError::AppliedRevisionsMismatch {
+            requested: request.version.applied,
+            candidate: candidate_revisions,
+        });
+    }
+    if shared_device_epoch != candidate_generation.device {
+        return Err(SceneRenderRequestError::SharedDeviceEpochMismatch {
+            shared: shared_device_epoch,
+            candidate: candidate_generation.device,
+        });
+    }
+    for (index, axis) in [SceneRequestAxis::Width, SceneRequestAxis::Height]
+        .into_iter()
+        .enumerate()
+    {
+        let physical = f64::from(logical_viewport_points[index]) * request.backing_scale;
+        let rounded = physical.round();
+        if !physical.is_finite() || rounded > f64::from(u32::MAX) {
+            return Err(SceneRenderRequestError::PhysicalDimensionOverflow { axis });
+        }
+        let expected = super::host::physical_dimension(
+            f64::from(logical_viewport_points[index]),
+            request.backing_scale,
+        );
+        if expected > max_texture_dimension_2d {
+            return Err(SceneRenderRequestError::PhysicalDimensionLimitExceeded {
+                axis,
+                required: expected,
+                maximum: max_texture_dimension_2d,
+            });
+        }
+        let requested = request.physical_extent_pixels[index];
+        if requested != expected {
+            return Err(SceneRenderRequestError::PhysicalExtentMismatch {
+                axis,
+                requested,
+                expected,
+            });
+        }
+    }
+
+    Ok(SceneTargetKey::new(
+        candidate_generation.device,
+        request.version.surface,
+        wgpu::Extent3d {
+            width: request.physical_extent_pixels[0],
+            height: request.physical_extent_pixels[1],
+            depth_or_array_layers: 1,
+        },
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        SceneTextureContract::INTERMEDIATE,
+        SceneTextureContract::DEPTH,
+        SceneTextureContract::SAMPLE_COUNT,
+    )
+    .expect("validated request and fixed scene target formats form a valid key"))
 }
 
 impl SceneTargetKey {
@@ -4397,6 +4603,11 @@ mod tests {
 
         assert_eq!(upload.generation_key, candidate.generation_key);
         assert_eq!(upload.source_revisions, candidate.source_revisions);
+        assert_eq!(upload.logical_viewport_points, [360.0, 360.0]);
+        assert_eq!(
+            upload.logical_viewport_points,
+            candidate.logical_viewport_points()
+        );
         assert_eq!(upload.static_checksum, candidate.static_checksum);
         assert_eq!(upload.node_bytes.len(), PackedMirrorLayout::NODE_BYTES);
         assert_eq!(
@@ -5396,6 +5607,236 @@ mod tests {
         );
     }
 
+    fn render_request_fixture(
+        generation: crate::presentation::companion_scene::SceneGenerationKey,
+        applied: crate::presentation::companion_scene::AppliedRevisions,
+        logical: [f32; 2],
+        scale: f64,
+    ) -> SceneRenderRequest {
+        SceneRenderRequest::new(
+            crate::presentation::companion_scene::SceneVersion {
+                generation,
+                surface: crate::presentation::companion_scene::SurfaceEpoch(23),
+                applied,
+            },
+            [
+                super::super::host::physical_dimension(f64::from(logical[0]), scale),
+                super::super::host::physical_dimension(f64::from(logical[1]), scale),
+            ],
+            scale,
+        )
+    }
+
+    #[test]
+    fn render_request_derives_only_fixed_target_facts_across_size_and_scale_matrix() {
+        let generation = crate::presentation::companion_scene::SceneGenerationKey {
+            device: crate::presentation::companion_scene::DeviceEpoch(4),
+            layout: crate::presentation::companion_scene::LayoutGeneration(5),
+            resources: crate::presentation::companion_scene::ResourceGeneration(6),
+        };
+        let applied = crate::presentation::companion_scene::AppliedRevisions::new(7, 8);
+        for size in [260.0_f32, 360.0, 480.0, 720.0] {
+            for scale in [1.0_f64, 2.0] {
+                let request = render_request_fixture(generation, applied, [size, size], scale);
+                let SceneRenderRequest {
+                    version,
+                    physical_extent_pixels,
+                    backing_scale,
+                } = request.clone();
+                assert_eq!(version.generation, generation);
+                assert_eq!(physical_extent_pixels, request.physical_extent_pixels);
+                assert_eq!(backing_scale, scale);
+                let key = derive_scene_target_key(
+                    generation.device,
+                    generation,
+                    applied,
+                    [size, size],
+                    16_384,
+                    &request,
+                )
+                .unwrap();
+                let expected = (f64::from(size) * scale).round() as u32;
+                assert_eq!([key.extent.width, key.extent.height], [expected; 2]);
+                assert_eq!(key.device_epoch, generation.device);
+                assert_eq!(key.surface_epoch, request.version.surface);
+                assert_eq!(key.surface_format, wgpu::TextureFormat::Bgra8UnormSrgb);
+                assert_eq!(key.intermediate_format, SceneTextureContract::INTERMEDIATE);
+                assert_eq!(key.depth_format, SceneTextureContract::DEPTH);
+                assert_eq!(key.sample_count, SceneTextureContract::SAMPLE_COUNT);
+            }
+        }
+    }
+
+    #[test]
+    fn render_request_rejects_each_physical_axis_and_invalid_scale_exactly() {
+        let generation = crate::presentation::companion_scene::SceneGenerationKey {
+            device: crate::presentation::companion_scene::DeviceEpoch(4),
+            layout: crate::presentation::companion_scene::LayoutGeneration(5),
+            resources: crate::presentation::companion_scene::ResourceGeneration(6),
+        };
+        let applied = crate::presentation::companion_scene::AppliedRevisions::new(7, 8);
+        let logical = [360.0, 260.0];
+        let valid = render_request_fixture(generation, applied, logical, 2.0);
+        let derive = |request: &SceneRenderRequest| {
+            derive_scene_target_key(
+                generation.device,
+                generation,
+                applied,
+                logical,
+                16_384,
+                request,
+            )
+        };
+
+        for (index, axis) in [SceneRequestAxis::Width, SceneRequestAxis::Height]
+            .into_iter()
+            .enumerate()
+        {
+            let mut empty = valid.clone();
+            empty.physical_extent_pixels[index] = 0;
+            assert_eq!(
+                derive(&empty),
+                Err(SceneRenderRequestError::EmptyPhysicalExtent { axis }),
+            );
+
+            let mut resized = valid.clone();
+            resized.physical_extent_pixels[index] += 1;
+            assert_eq!(
+                derive(&resized),
+                Err(SceneRenderRequestError::PhysicalExtentMismatch {
+                    axis,
+                    requested: valid.physical_extent_pixels[index] + 1,
+                    expected: valid.physical_extent_pixels[index],
+                }),
+            );
+        }
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut invalid = valid.clone();
+            invalid.backing_scale = scale;
+            assert_eq!(
+                derive(&invalid),
+                Err(SceneRenderRequestError::InvalidBackingScale),
+            );
+        }
+        let tiny_scale = render_request_fixture(generation, applied, logical, f64::MIN_POSITIVE);
+        let tiny_key = derive(&tiny_scale).unwrap();
+        assert_eq!([tiny_key.extent.width, tiny_key.extent.height], [1, 1]);
+
+        let product_overflow = render_request_fixture(generation, applied, logical, f64::MAX);
+        assert_eq!(
+            derive(&product_overflow),
+            Err(SceneRenderRequestError::PhysicalDimensionOverflow {
+                axis: SceneRequestAxis::Width,
+            }),
+        );
+        let finite_clamp_scale = (f64::from(u32::MAX) + 1024.0) / f64::from(logical[0]);
+        let finite_clamp = render_request_fixture(generation, applied, logical, finite_clamp_scale);
+        assert_eq!(
+            derive(&finite_clamp),
+            Err(SceneRenderRequestError::PhysicalDimensionOverflow {
+                axis: SceneRequestAxis::Width,
+            }),
+        );
+
+        let width_limited = render_request_fixture(generation, applied, logical, 2.0);
+        assert_eq!(
+            derive_scene_target_key(
+                generation.device,
+                generation,
+                applied,
+                logical,
+                719,
+                &width_limited,
+            ),
+            Err(SceneRenderRequestError::PhysicalDimensionLimitExceeded {
+                axis: SceneRequestAxis::Width,
+                required: 720,
+                maximum: 719,
+            }),
+        );
+        let tall_logical = [260.0, 360.0];
+        let height_limited = render_request_fixture(generation, applied, tall_logical, 2.0);
+        assert_eq!(
+            derive_scene_target_key(
+                generation.device,
+                generation,
+                applied,
+                tall_logical,
+                719,
+                &height_limited,
+            ),
+            Err(SceneRenderRequestError::PhysicalDimensionLimitExceeded {
+                axis: SceneRequestAxis::Height,
+                required: 720,
+                maximum: 719,
+            }),
+        );
+    }
+
+    #[test]
+    fn render_request_rejects_candidate_version_and_device_drift() {
+        let generation = crate::presentation::companion_scene::SceneGenerationKey {
+            device: crate::presentation::companion_scene::DeviceEpoch(4),
+            layout: crate::presentation::companion_scene::LayoutGeneration(5),
+            resources: crate::presentation::companion_scene::ResourceGeneration(6),
+        };
+        let applied = crate::presentation::companion_scene::AppliedRevisions::new(7, 8);
+        let valid = render_request_fixture(generation, applied, [360.0; 2], 1.0);
+
+        let mut wrong_generation = valid.clone();
+        wrong_generation.version.generation.layout =
+            crate::presentation::companion_scene::LayoutGeneration(99);
+        assert!(matches!(
+            derive_scene_target_key(
+                generation.device,
+                generation,
+                applied,
+                [360.0; 2],
+                16_384,
+                &wrong_generation,
+            ),
+            Err(SceneRenderRequestError::GenerationMismatch { .. })
+        ));
+
+        let mut wrong_applied = valid.clone();
+        wrong_applied.version.applied =
+            crate::presentation::companion_scene::AppliedRevisions::new(7, 99);
+        assert!(matches!(
+            derive_scene_target_key(
+                generation.device,
+                generation,
+                applied,
+                [360.0; 2],
+                16_384,
+                &wrong_applied,
+            ),
+            Err(SceneRenderRequestError::AppliedRevisionsMismatch { .. })
+        ));
+
+        assert!(matches!(
+            derive_scene_target_key(
+                crate::presentation::companion_scene::DeviceEpoch(99),
+                generation,
+                applied,
+                [360.0; 2],
+                16_384,
+                &valid,
+            ),
+            Err(SceneRenderRequestError::SharedDeviceEpochMismatch { .. })
+        ));
+        assert_eq!(
+            derive_scene_target_key(
+                generation.device,
+                generation,
+                applied,
+                [f32::NAN, 360.0],
+                16_384,
+                &valid,
+            ),
+            Err(SceneRenderRequestError::InvalidLogicalViewport),
+        );
+    }
+
     #[cfg(target_os = "macos")]
     fn native_device() -> (wgpu::Device, wgpu::Queue) {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -5428,11 +5869,16 @@ mod tests {
         let atlas = full_hud_atlas_for('^', upload.generation_key.resources, None, None);
         let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
         assert_eq!(shared.facts(), SceneGpuSharedFacts::EXPECTED);
+        assert_eq!(
+            shared.max_texture_dimension_2d,
+            device.limits().max_texture_dimension_2d,
+        );
 
         let gpu = materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
         assert_eq!(gpu.facts(), GpuSceneCandidateFacts::EXPECTED);
         assert_eq!(gpu.generation_key, upload.generation_key);
         assert_eq!(gpu.source_revisions, upload.source_revisions);
+        assert_eq!(gpu.logical_viewport_points, upload.logical_viewport_points);
         assert_eq!(gpu.static_checksum, upload.static_checksum);
         assert_eq!(
             gpu.draw_plan,
@@ -5478,6 +5924,16 @@ mod tests {
         ] {
             assert!(std::ptr::eq(shared.pipelines.for_class(class), expected));
         }
+        let request = render_request_fixture(
+            gpu.generation_key,
+            gpu.source_revisions,
+            gpu.logical_viewport_points,
+            2.0,
+        );
+        let binding = bind_scene_render_request(&shared, &gpu, request.clone()).unwrap();
+        assert_eq!(binding.request, request);
+        assert_eq!(binding.target_key.extent.width, 720);
+        assert_eq!(binding.target_key.extent.height, 720);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 
@@ -5939,6 +6395,13 @@ mod tests {
             materialize_gpu_candidate(&device, &queue, &shared, &empty_upload, &atlas),
             Err(SceneGpuError::InvalidUpload),
         ));
+
+        let mut inconsistent_viewport = upload.clone();
+        inconsistent_viewport.logical_viewport_points[0] = 480.0;
+        assert_eq!(
+            validate_gpu_candidate_preflight(&shared, &inconsistent_viewport, &atlas),
+            Err(SceneGpuError::InvalidUpload),
+        );
 
         for invalid_hud_atlas in [
             full_hud_atlas_for('^', upload.generation_key.resources, Some('w'), None),

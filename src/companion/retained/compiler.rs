@@ -66,6 +66,8 @@ impl CpuMirrorShape {
         MAX_ROOM_GLYPH_SLOTS,
         MAX_ANALYTIC_PARAMS,
     ];
+    pub(super) const FRAME_GLOBALS_VIEWPORT_POINTS_OFFSET: usize =
+        std::mem::offset_of!(FrameGlobalsGpuValue, viewport_points);
 }
 
 pub(super) type StaticIndex = u32;
@@ -659,6 +661,13 @@ pub(super) enum CompileError {
 }
 
 impl CpuSceneCandidate {
+    /// Logical point extent authored by the scene camera. The host combines
+    /// this with its backing scale when validating a physical render request;
+    /// no surface metadata enters the compiler-owned frame mirror.
+    pub(super) fn logical_viewport_points(&self) -> [f32; 2] {
+        self.frame.globals.as_slice()[0].viewport_points
+    }
+
     pub(super) fn primitive_count(&self) -> usize {
         self.primitives.len()
     }
@@ -3827,6 +3836,9 @@ mod tests {
         assert_eq!(compiled.content.ambient.as_slice()[2].variant, 0);
 
         let frame_globals = compiled.frame.globals.as_slice()[0];
+        assert_eq!(frame_globals.viewport_points, [360.0, 360.0]);
+        assert_eq!(frame_globals.viewport_pixels, [0.0; 2]);
+        assert_eq!(frame_globals.aperture, [0.0; 4]);
         assert_eq!(frame_globals.gauges, [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(frame_globals.dim_amount, 0.35);
         assert_eq!(frame_globals.light_count, 1);

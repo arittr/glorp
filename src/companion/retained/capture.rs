@@ -16,6 +16,10 @@ use std::time::Duration;
 
 use super::host::RetainedHost;
 use super::presentation::RetainedFailureCategory;
+use super::render::{
+    create_in_gpu_error_scopes, SceneGpuError, SceneGpuShared, SceneTextureContract,
+    ScopedGpuErrorCategory,
+};
 use super::{prepare_gpu_frame, RetainedChrome};
 use crate::companion::paired_review::{PairedReviewFrame, RendererIdentitySource};
 use crate::round::draw::RoundColor;
@@ -136,14 +140,22 @@ pub(super) struct SceneReadbackLayout {
 #[allow(dead_code)] // Consumed by the scene renderer in the readback activation slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SceneReadbackError {
+    DeviceEpochMismatch {
+        shared: crate::presentation::companion_scene::DeviceEpoch,
+        requested: crate::presentation::companion_scene::DeviceEpoch,
+    },
     EmptyExtent,
     UnsupportedFormat,
     RowBytesOverflow,
     AlignedStrideOverflow,
     BufferSizeOverflow,
-    BufferLimitExceeded { required: u64, maximum: u64 },
+    BufferLimitExceeded {
+        required: u64,
+        maximum: u64,
+    },
     InvalidLayout,
     SourceBufferTooShort,
+    Gpu(ScopedGpuErrorCategory),
 }
 
 #[allow(dead_code)] // Consumed by the scene renderer in the readback activation slice.
@@ -216,6 +228,163 @@ impl SceneReadbackLayout {
 
     pub(super) const fn buffer_size(self) -> u64 {
         self.buffer_size
+    }
+}
+
+/// Identity of one persistent scene readback buffer. Surface churn does not
+/// affect this cache because capture copies from the renderer-owned
+/// intermediate, while device generation and physical row geometry do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // Activated by the offscreen encode slice.
+pub(super) struct SceneReadbackKey {
+    pub(super) device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    pub(super) physical_extent_pixels: [u32; 2],
+    pub(super) intermediate_format: wgpu::TextureFormat,
+}
+
+#[allow(dead_code)] // Activated by the offscreen encode slice.
+impl SceneReadbackKey {
+    pub(super) const fn new(
+        device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+        physical_extent_pixels: [u32; 2],
+    ) -> Self {
+        Self {
+            device_epoch,
+            physical_extent_pixels,
+            intermediate_format: SceneTextureContract::INTERMEDIATE,
+        }
+    }
+}
+
+#[allow(dead_code)] // Activated by the offscreen encode slice.
+pub(super) struct SceneReadbackTarget {
+    pub(super) key: SceneReadbackKey,
+    pub(super) layout: SceneReadbackLayout,
+    pub(super) buffer: wgpu::Buffer,
+}
+
+#[allow(dead_code)] // Activated by the offscreen encode slice.
+impl SceneReadbackTarget {
+    fn create(
+        device: &wgpu::Device,
+        key: SceneReadbackKey,
+        fault: SceneReadbackTestFault,
+    ) -> Result<Self, SceneReadbackError> {
+        let layout = SceneReadbackLayout::checked(
+            key.physical_extent_pixels[0],
+            key.physical_extent_pixels[1],
+            key.intermediate_format,
+            Some(device.limits().max_buffer_size),
+        )?;
+        let usage = match fault {
+            SceneReadbackTestFault::None => {
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST
+            }
+            SceneReadbackTestFault::ValidationAfterAllocation => {
+                wgpu::BufferUsages::MAP_READ
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::STORAGE
+            }
+        };
+        create_in_gpu_error_scopes(device, || {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glorp-scene-readback"),
+                size: layout.buffer_size(),
+                usage,
+                mapped_at_creation: false,
+            });
+            Self { key, layout, buffer }
+        })
+        .map_err(|error| match error {
+            SceneGpuError::Gpu(category) => SceneReadbackError::Gpu(category),
+            _ => unreachable!("GPU scope creation only returns a scoped GPU category"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Test fault is used now; the production variant is activated next.
+enum SceneReadbackTestFault {
+    None,
+    ValidationAfterAllocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Activated by the offscreen encode slice.
+pub(super) enum SceneReadbackUpdate {
+    Reused,
+    Created,
+}
+
+#[derive(Default)]
+#[allow(dead_code)] // Activated by the offscreen encode slice.
+pub(super) struct SceneReadbackCache {
+    current: Option<SceneReadbackTarget>,
+    creation_events: u64,
+}
+
+#[allow(dead_code)] // Activated by the offscreen encode slice.
+impl SceneReadbackCache {
+    pub(super) fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        key: SceneReadbackKey,
+    ) -> Result<SceneReadbackUpdate, SceneReadbackError> {
+        self.ensure_with_fault(device, shared, key, SceneReadbackTestFault::None)
+    }
+
+    #[cfg(test)]
+    fn ensure_with_test_fault(
+        &mut self,
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        key: SceneReadbackKey,
+        fault: SceneReadbackTestFault,
+    ) -> Result<SceneReadbackUpdate, SceneReadbackError> {
+        self.ensure_with_fault(device, shared, key, fault)
+    }
+
+    fn ensure_with_fault(
+        &mut self,
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        key: SceneReadbackKey,
+        fault: SceneReadbackTestFault,
+    ) -> Result<SceneReadbackUpdate, SceneReadbackError> {
+        if shared.device_epoch != key.device_epoch {
+            return Err(SceneReadbackError::DeviceEpochMismatch {
+                shared: shared.device_epoch,
+                requested: key.device_epoch,
+            });
+        }
+        // Validate every call, including same-key reuse, so a forged key cannot
+        // bypass the closed intermediate-format contract.
+        SceneReadbackLayout::checked(
+            key.physical_extent_pixels[0],
+            key.physical_extent_pixels[1],
+            key.intermediate_format,
+            Some(device.limits().max_buffer_size),
+        )?;
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|target| target.key == key)
+        {
+            return Ok(SceneReadbackUpdate::Reused);
+        }
+        let replacement = SceneReadbackTarget::create(device, key, fault)?;
+        self.current = Some(replacement);
+        self.creation_events = self.creation_events.saturating_add(1);
+        Ok(SceneReadbackUpdate::Created)
+    }
+
+    pub(super) const fn current(&self) -> Option<&SceneReadbackTarget> {
+        self.current.as_ref()
+    }
+
+    pub(super) const fn creation_events(&self) -> u64 {
+        self.creation_events
     }
 }
 
@@ -760,5 +929,181 @@ mod tests {
             normalize_scene_readback(&[0; 8], layout),
             Err(SceneReadbackError::InvalidLayout),
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_device() -> wgpu::Device {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::METAL;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .expect("a surfaceless Metal adapter is available");
+        let (device, _queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("glorp-scene-readback-cache-test-device"),
+                ..Default::default()
+            }))
+            .expect("a surfaceless Metal device is available");
+        device
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_scene_readback_cache_reuses_and_recreates_only_for_its_exact_key() {
+        let device = native_device();
+        let mut cache = SceneReadbackCache::default();
+        let shared = SceneGpuShared::create(
+            &device,
+            crate::presentation::companion_scene::DeviceEpoch(3),
+        )
+        .unwrap();
+        let key = SceneReadbackKey::new(
+            crate::presentation::companion_scene::DeviceEpoch(3),
+            [360, 360],
+        );
+        let SceneReadbackKey {
+            device_epoch,
+            physical_extent_pixels,
+            intermediate_format,
+        } = key;
+        assert_eq!(device_epoch.0, 3);
+        assert_eq!(physical_extent_pixels, [360, 360]);
+        assert_eq!(intermediate_format, SceneTextureContract::INTERMEDIATE);
+
+        assert_eq!(
+            cache.ensure(&device, &shared, key).unwrap(),
+            SceneReadbackUpdate::Created
+        );
+        assert_eq!(cache.creation_events(), 1);
+        let first = cache.current().unwrap();
+        assert_eq!(first.layout.width(), 360);
+        assert_eq!(first.layout.height(), 360);
+        assert_eq!(first.buffer.size(), first.layout.buffer_size());
+        assert_eq!(
+            first.buffer.usage(),
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        assert_eq!(
+            cache.ensure(&device, &shared, key).unwrap(),
+            SceneReadbackUpdate::Reused
+        );
+        assert_eq!(cache.creation_events(), 1);
+
+        let replacement_shared = SceneGpuShared::create(
+            &device,
+            crate::presentation::companion_scene::DeviceEpoch(4),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.ensure(&device, &replacement_shared, key),
+            Err(SceneReadbackError::DeviceEpochMismatch {
+                shared: replacement_shared.device_epoch,
+                requested: key.device_epoch,
+            }),
+        );
+        assert_eq!(cache.current().unwrap().key, key);
+        assert_eq!(cache.creation_events(), 1);
+
+        let resized = SceneReadbackKey::new(key.device_epoch, [480, 260]);
+        assert_eq!(
+            cache.ensure(&device, &shared, resized).unwrap(),
+            SceneReadbackUpdate::Created,
+        );
+        assert_eq!(cache.creation_events(), 2);
+        assert_eq!(cache.current().unwrap().key, resized);
+
+        let new_device_epoch = SceneReadbackKey::new(
+            crate::presentation::companion_scene::DeviceEpoch(4),
+            resized.physical_extent_pixels,
+        );
+        assert_eq!(
+            cache
+                .ensure(&device, &replacement_shared, new_device_epoch)
+                .unwrap(),
+            SceneReadbackUpdate::Created,
+        );
+        assert_eq!(cache.creation_events(), 3);
+        assert_eq!(cache.current().unwrap().key, new_device_epoch);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_scene_readback_failed_replacement_is_transactional_and_sanitized() {
+        let device = native_device();
+        let mut cache = SceneReadbackCache::default();
+        let shared = SceneGpuShared::create(
+            &device,
+            crate::presentation::companion_scene::DeviceEpoch(3),
+        )
+        .unwrap();
+        let current = SceneReadbackKey::new(
+            crate::presentation::companion_scene::DeviceEpoch(3),
+            [260, 260],
+        );
+        assert_eq!(
+            cache.ensure(&device, &shared, current).unwrap(),
+            SceneReadbackUpdate::Created
+        );
+
+        let replacement = SceneReadbackKey::new(
+            crate::presentation::companion_scene::DeviceEpoch(3),
+            [720, 720],
+        );
+        assert_eq!(
+            cache.ensure_with_test_fault(
+                &device,
+                &shared,
+                replacement,
+                SceneReadbackTestFault::ValidationAfterAllocation,
+            ),
+            Err(SceneReadbackError::Gpu(ScopedGpuErrorCategory::Validation)),
+        );
+        assert_eq!(cache.current().unwrap().key, current);
+        assert_eq!(cache.creation_events(), 1);
+
+        let forged_format = SceneReadbackKey {
+            intermediate_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            ..replacement
+        };
+        assert_eq!(
+            cache.ensure(&device, &shared, forged_format),
+            Err(SceneReadbackError::UnsupportedFormat),
+        );
+        assert_eq!(cache.current().unwrap().key, current);
+        assert_eq!(cache.creation_events(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_scene_readback_cache_checks_the_active_device_buffer_limit() {
+        let device = native_device();
+        let shared = SceneGpuShared::create(
+            &device,
+            crate::presentation::companion_scene::DeviceEpoch(3),
+        )
+        .unwrap();
+        let maximum = device.limits().max_buffer_size;
+        let aligned_row = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let height = u32::try_from(maximum / aligned_row + 1)
+            .expect("wgpu maximum buffer size yields a representable test height");
+        let mut cache = SceneReadbackCache::default();
+        let key = SceneReadbackKey::new(
+            crate::presentation::companion_scene::DeviceEpoch(3),
+            [1, height],
+        );
+        assert_eq!(
+            cache.ensure(&device, &shared, key),
+            Err(SceneReadbackError::BufferLimitExceeded {
+                required: aligned_row * u64::from(height),
+                maximum,
+            }),
+        );
+        assert!(cache.current().is_none());
+        assert_eq!(cache.creation_events(), 0);
     }
 }
