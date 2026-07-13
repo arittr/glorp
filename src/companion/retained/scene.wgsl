@@ -168,6 +168,9 @@ struct SceneVertexOutput {
     @location(2) opacity: f32,
     @location(3) saturation: f32,
     @location(4) @interpolate(flat) instance_group: u32,
+    @location(5) @interpolate(flat) analytic_id: u32,
+    @location(6) point_position: vec2<f32>,
+    @location(7) local_coordinate: vec2<f32>,
 }
 
 struct GlyphInstancePlacement {
@@ -425,6 +428,9 @@ fn scene_vertex_output(
     output.opacity = node.opacity * f32(node.visible);
     output.saturation = node.depth_cue.w;
     output.instance_group = primitive.instance_group;
+    output.analytic_id = NONE_U32;
+    output.point_position = vec2<f32>(0.0);
+    output.local_coordinate = input.local_position.xy;
     return output;
 }
 
@@ -447,6 +453,9 @@ fn vs_world_glyph(input: SceneVertexInput) -> SceneVertexOutput {
         invalid.opacity = 0.0;
         invalid.saturation = 0.0;
         invalid.instance_group = 0u;
+        invalid.analytic_id = NONE_U32;
+        invalid.point_position = vec2<f32>(0.0);
+        invalid.local_coordinate = input.local_position.xy;
         return invalid;
     }
     let primitive = primitive_buffer.values[input.primitive_index];
@@ -458,6 +467,9 @@ fn vs_world_glyph(input: SceneVertexInput) -> SceneVertexOutput {
         invalid.opacity = 0.0;
         invalid.saturation = 0.0;
         invalid.instance_group = primitive.instance_group;
+        invalid.analytic_id = NONE_U32;
+        invalid.point_position = vec2<f32>(0.0);
+        invalid.local_coordinate = input.local_position.xy;
         return invalid;
     }
     let node = node_buffer.values[primitive.node_index];
@@ -475,6 +487,10 @@ fn vs_world_glyph(input: SceneVertexInput) -> SceneVertexOutput {
     output.opacity = placement.opacity;
     output.saturation = placement.saturation;
     output.instance_group = primitive.instance_group;
+    output.analytic_id = select(NONE_U32, primitive.binding_index,
+        primitive.primitive_kind == 2u && primitive.binding_index == 1u);
+    output.point_position = placement.world_position.xy;
+    output.local_coordinate = input.local_position.xy;
     return output;
 }
 
@@ -489,6 +505,116 @@ fn vs_screen(input: SceneVertexInput) -> SceneVertexOutput {
     );
     let position = vec4<f32>(normalized, point_position.z, 1.0);
     return scene_vertex_output(input, position, primitive, node);
+}
+
+fn expected_analytic_shape(analytic_id: u32) -> u32 {
+    switch analytic_id {
+        case 0u: { return 1u; }
+        case 1u: { return 2u; }
+        case 2u: { return 3u; }
+        case 3u: { return 4u; }
+        case 4u: { return 5u; }
+        case 5u: { return 6u; }
+        case 6u: { return 7u; }
+        case 7u: { return 8u; }
+        default: { return NONE_U32; }
+    }
+}
+
+fn valid_analytic_role(
+    analytic_id: u32,
+    analytic: AnalyticFrameGpuValue,
+    content: AnalyticContentGpuValue,
+) -> bool {
+    let expected_shape = expected_analytic_shape(analytic_id);
+    return analytic_id < 8u
+        && expected_shape != NONE_U32
+        && (analytic.flags & 1u) != 0u
+        && (content.flags & 1u) != 0u
+        && analytic.id == analytic_id
+        && content.id == analytic_id
+        && analytic.semantic == analytic_id + 1u
+        && content.semantic == analytic_id + 1u
+        && analytic.shape == expected_shape
+        && content.shape == expected_shape
+        && analytic.rect_points.z > 0.0
+        && analytic.rect_points.w > 0.0;
+}
+
+fn invalid_analytic_vertex(
+    input: SceneVertexInput,
+    analytic_id: u32,
+) -> SceneVertexOutput {
+    var output: SceneVertexOutput;
+    output.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    output.uv = input.uv;
+    output.content_index = NONE_U32;
+    output.opacity = 0.0;
+    output.saturation = 0.0;
+    output.instance_group = 0u;
+    output.analytic_id = analytic_id;
+    output.point_position = vec2<f32>(0.0);
+    output.local_coordinate = input.local_position.xy;
+    return output;
+}
+
+fn analytic_vertex(
+    input: SceneVertexInput,
+    screen_space: bool,
+) -> SceneVertexOutput {
+    if (input.primitive_index >= arrayLength(&primitive_buffer.values)) {
+        return invalid_analytic_vertex(input, NONE_U32);
+    }
+    let primitive = primitive_buffer.values[input.primitive_index];
+    let analytic_id = primitive.binding_index;
+    if (analytic_id >= 16u || primitive.node_index >= arrayLength(&node_buffer.values)) {
+        return invalid_analytic_vertex(input, analytic_id);
+    }
+    let analytic = frame_buffer.analytics[primitive.binding_index];
+    let content = scene_content_buffer.analytics[primitive.binding_index];
+    if (!valid_analytic_role(analytic_id, analytic, content)) {
+        return invalid_analytic_vertex(input, analytic_id);
+    }
+    let node = node_buffer.values[primitive.node_index];
+    let point_position = analytic.rect_points.xy
+        + input.local_position.xy * analytic.rect_points.zw;
+    let world_position = apply_node_depth_cue_to_point(
+        vec3<f32>(point_position, input.local_position.z),
+        node,
+    );
+    var position: vec4<f32>;
+    if (screen_space) {
+        let normalized = vec2<f32>(
+            world_position.x * 2.0 / frame_buffer.globals.viewport_points.x - 1.0,
+            world_position.y * 2.0 / frame_buffer.globals.viewport_points.y - 1.0,
+        );
+        position = vec4<f32>(normalized, world_position.z, 1.0);
+    } else {
+        position = frame_buffer.globals.projection
+            * frame_buffer.globals.view
+            * world_position;
+    }
+    var output: SceneVertexOutput;
+    output.position = position;
+    output.uv = input.uv;
+    output.content_index = NONE_U32;
+    output.opacity = node.opacity * f32(node.visible);
+    output.saturation = node.depth_cue.w;
+    output.instance_group = primitive.instance_group;
+    output.analytic_id = analytic_id;
+    output.point_position = point_position;
+    output.local_coordinate = input.local_position.xy;
+    return output;
+}
+
+@vertex
+fn vs_world_analytic(input: SceneVertexInput) -> SceneVertexOutput {
+    return analytic_vertex(input, false);
+}
+
+@vertex
+fn vs_screen_analytic(input: SceneVertexInput) -> SceneVertexOutput {
+    return analytic_vertex(input, true);
 }
 
 fn srgb_channel_to_linear(value: f32) -> f32 {
@@ -545,6 +671,15 @@ fn packed_rgba8_linear(packed: u32) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(straight_srgb.rgb), straight_srgb.a);
 }
 
+fn packed_rgb8_linear(packed: u32) -> vec3<f32> {
+    let straight_srgb = vec3<f32>(
+        f32(packed & 0xffu),
+        f32((packed >> 8u) & 0xffu),
+        f32((packed >> 16u) & 0xffu),
+    ) / 255.0;
+    return srgb_to_linear(straight_srgb);
+}
+
 fn explicit_packed_paint_linear(content: SceneContentGpuValue) -> vec4<f32> {
     return packed_rgba8_linear(content.variant);
 }
@@ -583,18 +718,355 @@ fn glyph_uv(input: SceneVertexOutput, entry: GlyphAtlasGpuEntry) -> vec2<f32> {
     return mix(entry.visible_uv.xy, entry.visible_uv.zw, atlas_local);
 }
 
-@fragment
-fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
-    let centered = input.uv - vec2<f32>(0.5);
-    let distance = length(centered);
-    let edge_width = fwidth(distance);
-    let coverage = 1.0 - smoothstep(0.5 - edge_width, 0.5 + edge_width, distance);
-    let output = premultiply_scene_color(
-        palette_linear(input),
+fn analytic_premultiply(
+    straight_linear: vec4<f32>,
+    coverage: f32,
+    opacity: f32,
+    saturation: f32,
+) -> vec4<f32> {
+    let alpha = straight_linear.a * clamp(coverage, 0.0, 1.0) * opacity;
+    let rgb = apply_saturation(straight_linear.rgb, saturation);
+    return vec4<f32>(rgb * alpha, alpha);
+}
+
+fn circle_coverage(distance: f32, radius: f32) -> f32 {
+    let edge = max(fwidth(distance), 0.0001);
+    return 1.0 - smoothstep(radius - edge, radius + edge, distance);
+}
+
+fn fs_room_aperture(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+) -> vec4<f32> {
+    let center = analytic.payload[0].xy;
+    let radius = analytic.payload[0].z;
+    let feather = analytic.payload[0].w;
+    if (radius <= 0.0 || feather < 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let distance = length(input.point_position - center);
+    let edge = max(feather, fwidth(distance));
+    let coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance);
+    let radial = smoothstep(0.0, radius, distance);
+    let core = packed_rgb8_linear(content.payload[0].x);
+    let rim = packed_rgb8_linear(content.payload[0].y);
+    let straight = vec4<f32>(mix(core, rim, radial), 1.0);
+    return analytic_premultiply(straight, coverage, input.opacity, input.saturation);
+}
+
+fn fs_floor_projection(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+) -> vec4<f32> {
+    let center = analytic.payload[0].xy;
+    let radii = analytic.payload[0].zw;
+    let softness = analytic.payload[1].x;
+    if (min(radii.x, radii.y) <= 0.0 || softness < 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let normalized = (input.point_position - center) / radii;
+    let radial = length(normalized);
+    let edge = max(fwidth(radial), 0.0001);
+    let coverage = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, radial);
+    let normalized_softness = clamp(softness / min(radii.x, radii.y), 0.0, 1.0);
+    let paint_mix = smoothstep(1.0 - normalized_softness, 1.0, radial);
+    let inner = packed_rgba8_linear(content.payload[0].x);
+    let outer = packed_rgba8_linear(content.payload[0].y);
+    return analytic_premultiply(
+        mix(inner, outer, paint_mix),
         coverage,
         input.opacity,
         input.saturation,
     );
+}
+
+fn fs_status_tone(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+) -> vec4<f32> {
+    // Authored thickness reserves conservative edge padding around this
+    // intentionally filled status disc; it is not a stroke width in scene v2.
+    let center = analytic.payload[0].xy;
+    let radius = analytic.payload[0].z;
+    let tone = analytic.payload[1].x;
+    if (radius <= 0.0 || (tone != 1.0 && tone != 2.0)) {
+        return vec4<f32>(0.0);
+    }
+    let packed = select(content.payload[0].x, content.payload[0].y, tone == 2.0);
+    let coverage = circle_coverage(length(input.point_position - center), radius);
+    return analytic_premultiply(
+        packed_rgba8_linear(packed),
+        coverage,
+        input.opacity,
+        input.saturation,
+    );
+}
+
+fn fs_mood_rings(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+) -> vec4<f32> {
+    let center = analytic.payload[0].xy;
+    let max_radius = analytic.payload[0].z;
+    let frame_ring_count = analytic.payload[0].w;
+    let feather = analytic.payload[1].x;
+    let content_ring_count = f32(content.payload[0].y);
+    if (max_radius <= 0.0
+        || feather < 0.0
+        || frame_ring_count < 1.0
+        || frame_ring_count != content_ring_count) {
+        return vec4<f32>(0.0);
+    }
+    let distance = length(input.point_position - center);
+    let per_ring_alpha = f32(content.payload[0].z) / 255.0;
+    let linear_rgb = apply_saturation(
+        packed_rgb8_linear(content.payload[0].x),
+        input.saturation,
+    );
+    var composed = vec4<f32>(0.0);
+    // The content contract caps this role at eight nested discs. Compose each
+    // disc separately so every internal boundary receives authored feathering
+    // and derivative AA instead of a hard integer-alpha step.
+    for (var ring = 0u; ring < 8u; ring = ring + 1u) {
+        if (f32(ring) < frame_ring_count) {
+            let radius = max_radius * f32(ring + 1u) / frame_ring_count;
+            let edge = max(feather, fwidth(distance));
+            let coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance);
+            let alpha = per_ring_alpha * coverage * input.opacity;
+            let layer = vec4<f32>(linear_rgb * alpha, alpha);
+            composed = over_premultiplied(layer, composed);
+        }
+    }
+    return composed;
+}
+
+fn normalized_degrees(value: f32) -> f32 {
+    return value - floor(value / 360.0) * 360.0;
+}
+
+fn round_arc_coverage(
+    point: vec2<f32>,
+    center: vec2<f32>,
+    radius: f32,
+    stroke_width: f32,
+    start_degrees: f32,
+    sweep_degrees: f32,
+) -> f32 {
+    if (radius <= 0.0 || stroke_width <= 0.0 || sweep_degrees <= 0.0) {
+        return 0.0;
+    }
+    let local = point - center;
+    let angle = normalized_degrees(degrees(atan2(local.y, local.x)));
+    let start = normalized_degrees(start_degrees);
+    let delta = normalized_degrees(angle - start);
+    let half_width = 0.5 * stroke_width;
+    let radial_distance = abs(length(local) - radius);
+    let edge = max(fwidth(radial_distance), 0.0001);
+    let body = select(
+        0.0,
+        1.0 - smoothstep(half_width - edge, half_width + edge, radial_distance),
+        delta <= sweep_degrees,
+    );
+    let start_radians = radians(start);
+    let end_radians = radians(start + sweep_degrees);
+    let start_point = center + radius * vec2<f32>(cos(start_radians), sin(start_radians));
+    let end_point = center + radius * vec2<f32>(cos(end_radians), sin(end_radians));
+    let start_cap = circle_coverage(length(point - start_point), half_width);
+    let end_cap = circle_coverage(length(point - end_point), half_width);
+    return max(body, max(start_cap, end_cap));
+}
+
+fn over_premultiplied(top: vec4<f32>, bottom: vec4<f32>) -> vec4<f32> {
+    return top + bottom * (1.0 - top.a);
+}
+
+fn gauge_lane_geometry(
+    analytic: AnalyticFrameGpuValue,
+    lane: u32,
+) -> vec4<f32> {
+    switch lane {
+        case 0u: {
+            return vec4<f32>(
+                analytic.payload[0].z,
+                analytic.payload[0].w,
+                analytic.payload[1].x,
+                analytic.payload[1].y,
+            );
+        }
+        case 1u: {
+            return vec4<f32>(
+                analytic.payload[1].z,
+                analytic.payload[1].w,
+                analytic.payload[2].x,
+                analytic.payload[2].y,
+            );
+        }
+        case 2u: {
+            return vec4<f32>(
+                analytic.payload[2].z,
+                analytic.payload[2].w,
+                analytic.payload[3].x,
+                analytic.payload[3].y,
+            );
+        }
+        default: { return vec4<f32>(0.0); }
+    }
+}
+
+fn gauge_arc_color(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+    lane: u32,
+    fraction: f32,
+) -> vec4<f32> {
+    let center = analytic.payload[0].xy;
+    let geometry = gauge_lane_geometry(analytic, lane);
+    let radius = geometry.x;
+    let width = geometry.y;
+    let start = geometry.z;
+    let sweep = geometry.w;
+    let track_coverage = round_arc_coverage(
+        input.point_position, center, radius, width, start, sweep,
+    );
+    let fill_coverage = round_arc_coverage(
+        input.point_position,
+        center,
+        radius,
+        width,
+        start,
+        sweep * clamp(fraction, 0.0, 1.0),
+    );
+    let track = analytic_premultiply(
+        packed_rgba8_linear(content.payload[lane / 2u][(lane % 2u) * 2u]),
+        track_coverage,
+        input.opacity,
+        input.saturation,
+    );
+    let fill = analytic_premultiply(
+        packed_rgba8_linear(content.payload[lane / 2u][(lane % 2u) * 2u + 1u]),
+        fill_coverage,
+        input.opacity,
+        input.saturation,
+    );
+    return over_premultiplied(fill, track);
+}
+
+fn fs_gauges(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+) -> vec4<f32> {
+    if ((analytic.flags & 0x00011100u) != 0x00011100u) {
+        return vec4<f32>(0.0);
+    }
+    // The packed order is xp, daily, daily-overage, pace. Geometry lane order
+    // remains xp, daily, pace.
+    let xp = gauge_arc_color(input, content, analytic, 0u, frame_buffer.globals.gauges.x);
+    let daily = gauge_arc_color(input, content, analytic, 1u, frame_buffer.globals.gauges.y);
+    let pace = gauge_arc_color(input, content, analytic, 2u, frame_buffer.globals.gauges.w);
+    let daily_geometry = gauge_lane_geometry(analytic, 1u);
+    let overage_coverage = round_arc_coverage(
+        input.point_position,
+        analytic.payload[0].xy,
+        daily_geometry.x,
+        daily_geometry.y,
+        daily_geometry.z,
+        daily_geometry.w * clamp(frame_buffer.globals.gauges.z, 0.0, 1.0),
+    );
+    let overage = analytic_premultiply(
+        packed_rgba8_linear(content.payload[1].z),
+        overage_coverage,
+        input.opacity,
+        input.saturation,
+    );
+    return over_premultiplied(pace, over_premultiplied(overage, over_premultiplied(daily, xp)));
+}
+
+fn fs_trouble(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+) -> vec4<f32> {
+    // Authored thickness reserves conservative edge padding around this
+    // intentionally filled trouble disc; it is not a stroke width in scene v2.
+    let radius = analytic.payload[0].z;
+    if (radius <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let coverage = circle_coverage(
+        length(input.point_position - analytic.payload[0].xy),
+        radius,
+    );
+    return analytic_premultiply(
+        packed_rgba8_linear(content.payload[0].x),
+        coverage,
+        input.opacity,
+        input.saturation,
+    );
+}
+
+fn fs_dim(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+    analytic: AnalyticFrameGpuValue,
+) -> vec4<f32> {
+    let aperture = frame_buffer.analytics[0u];
+    let aperture_content = scene_content_buffer.analytics[0u];
+    if (!valid_analytic_role(0u, aperture, aperture_content)) {
+        return vec4<f32>(0.0);
+    }
+    let aperture_radius = aperture.payload[0].z;
+    let aperture_feather = aperture.payload[0].w;
+    if (aperture_radius <= 0.0 || aperture_feather < 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let aperture_distance = length(input.point_position - aperture.payload[0].xy);
+    let aperture_edge = max(aperture_feather, fwidth(aperture_distance));
+    let aperture_coverage = 1.0 - smoothstep(
+        aperture_radius - aperture_edge,
+        aperture_radius + aperture_edge,
+        aperture_distance,
+    );
+    let rect_coverage = select(0.0, 1.0,
+        analytic.rect_points.z > 0.0 && analytic.rect_points.w > 0.0);
+    let straight = vec4<f32>(
+        packed_rgb8_linear(content.payload[0].x),
+        1.0,
+    );
+    return analytic_premultiply(
+        straight,
+        rect_coverage * aperture_coverage,
+        input.opacity,
+        input.saturation,
+    );
+}
+
+@fragment
+fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
+    if (input.analytic_id >= 16u) {
+        discard;
+    }
+    let analytic = frame_buffer.analytics[input.analytic_id];
+    let content = scene_content_buffer.analytics[input.analytic_id];
+    if (!valid_analytic_role(input.analytic_id, analytic, content)) {
+        discard;
+    }
+    var output = vec4<f32>(0.0);
+    switch input.analytic_id {
+        case 0u: { output = fs_room_aperture(input, content, analytic); }
+        case 2u: { output = fs_floor_projection(input, content, analytic); }
+        case 3u: { output = fs_status_tone(input, content, analytic); }
+        case 4u: { output = fs_mood_rings(input, content, analytic); }
+        case 5u: { output = fs_gauges(input, content, analytic); }
+        case 6u: { output = fs_trouble(input, content, analytic); }
+        case 7u: { output = fs_dim(input, content, analytic); }
+        default: { discard; }
+    }
     if (output.a <= 0.0) {
         discard;
     }
@@ -644,6 +1116,48 @@ fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
     return output;
+}
+
+@fragment
+fn fs_wall_shadow_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
+    if (input.analytic_id != 1u
+        || input.content_index == NONE_U32
+        || input.content_index >= 462u) {
+        discard;
+    }
+    let analytic = frame_buffer.analytics[input.analytic_id];
+    let content = scene_content_buffer.analytics[input.analytic_id];
+    if (!valid_analytic_role(input.analytic_id, analytic, content)) {
+        discard;
+    }
+    let glyph = scene_content_buffer.values[input.content_index];
+    if (glyph.glyph_entry_index == NONE_U32
+        || glyph.glyph_entry_index >= arrayLength(&glyph_entry_buffer.values)) {
+        discard;
+    }
+    let entry = glyph_entry_buffer.values[glyph.glyph_entry_index];
+    if ((entry.flags & GLYPH_FLAG_VISIBLE) == 0u) {
+        discard;
+    }
+    // The wall role always samples crisp atlas AA coverage. Native atlas color
+    // and pet palette roles are irrelevant; packed wall softness is reserved
+    // and deliberately not consumed by this mask slice.
+    let uv = glyph_uv(input, entry);
+    var coverage: f32;
+    if ((entry.flags & GLYPH_FLAG_COLOR) != 0u) {
+        // Native color contributes alpha coverage only; sampled RGB remains
+        // irrelevant to the authored multiply paint.
+        coverage = textureSampleLevel(color_texture, atlas_sampler, uv, 0.0).a;
+    } else {
+        coverage = textureSampleLevel(coverage_texture, atlas_sampler, uv, 0.0).r;
+    }
+    let authored_opacity = f32(content.payload[0].y) / 255.0;
+    let alpha = coverage * authored_opacity * input.opacity;
+    if (alpha <= 0.0) {
+        discard;
+    }
+    let linear_rgb = packed_rgb8_linear(content.payload[0].x);
+    return vec4<f32>(linear_rgb * alpha, alpha);
 }
 
 struct HudVertexOutput {

@@ -102,6 +102,261 @@ pub(super) struct SceneDrawRecord {
     pub(super) authored_order: u32,
 }
 
+/// Closed draw-to-pipeline classification for the companion scene v2 ABI.
+/// Every axis is checked because a plausible fallback can silently turn a
+/// multiply mask into ordinary color, or route private HUD geometry through a
+/// scene draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScenePipelineClass {
+    WorldOpaqueAnalytic,
+    WorldSourceOverAnalytic,
+    WorldSourceOverGlyph,
+    WorldMultiplyAnalytic,
+    WorldMultiplyGlyphMask,
+    WorldAdditiveGlyph,
+    /// Materialized to keep the pipeline family complete. Scene v2 authors no
+    /// additive analytic primitive, so the selector never returns this class.
+    WorldAdditiveAnalyticReserved,
+    ChromeAnalytic,
+    SealedHudHook,
+}
+
+fn scene_pipeline_class(
+    primitive: PrimitiveGpuValue,
+    draw: &SceneDrawRecord,
+) -> Option<ScenePipelineClass> {
+    use ScenePipelineClass::*;
+
+    let (expected_source, expected_instance_count) = expected_draw_source(primitive)?;
+    if draw.source != expected_source || draw.instance_range != (0..expected_instance_count) {
+        return None;
+    }
+
+    let analytic_axes = primitive.primitive_kind == ANALYTIC_PRIMITIVE_TAG
+        && primitive.resource_kind == 3
+        && primitive.instance_group == 0
+        && primitive.instance_base == NONE_U32;
+    if analytic_axes
+        && primitive.material_kind == 2
+        && primitive.blend == 1
+        && primitive.depth == 1
+        && primitive.space == 1
+        && primitive.binding_index == 0
+        && draw.source == PrimitiveSource::Analytic
+    {
+        return Some(WorldOpaqueAnalytic);
+    }
+    // Wall shadow is intentionally checked before ordinary analytics. Its
+    // primitive kind is analytic, but its draw source is the pet glyph mask.
+    if analytic_axes
+        && primitive.material_kind == 4
+        && primitive.blend == 4
+        && primitive.depth == 2
+        && primitive.space == 1
+        && primitive.binding_index == 1
+        && draw.source == PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask)
+    {
+        return Some(WorldMultiplyGlyphMask);
+    }
+    if analytic_axes
+        && primitive.material_kind == 4
+        && primitive.blend == 4
+        && primitive.depth == 2
+        && primitive.space == 1
+        && primitive.binding_index == 2
+        && draw.source == PrimitiveSource::Analytic
+    {
+        return Some(WorldMultiplyAnalytic);
+    }
+    if analytic_axes
+        && primitive.material_kind == 2
+        && primitive.blend == 3
+        && primitive.depth == 2
+        && primitive.space == 1
+        && primitive.binding_index == 4
+        && draw.source == PrimitiveSource::Analytic
+    {
+        return Some(WorldSourceOverAnalytic);
+    }
+    if analytic_axes
+        && primitive.material_kind == 6
+        && primitive.blend == 3
+        && primitive.depth == 3
+        && primitive.space == 2
+        && matches!(primitive.binding_index, 3 | 5 | 6 | 7)
+        && draw.source == PrimitiveSource::Analytic
+    {
+        return Some(ChromeAnalytic);
+    }
+
+    let glyph_resource = matches!(primitive.resource_kind, 1 | 2);
+    let source_over_glyph = match draw.source {
+        PrimitiveSource::Instances(InstanceSource::PetBody) => {
+            primitive.primitive_kind == INSTANCE_QUAD_PRIMITIVE_TAG
+                && primitive.instance_group == 1
+                && primitive.binding_index == 0
+        }
+        PrimitiveSource::Instances(InstanceSource::RoomGlyphs) => {
+            primitive.primitive_kind == INSTANCE_QUAD_PRIMITIVE_TAG
+                && primitive.instance_group == 4
+                && primitive.binding_index == 0
+        }
+        PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot }) => {
+            primitive.primitive_kind == INSTANCE_QUAD_PRIMITIVE_TAG
+                && primitive.instance_group == 3
+                && primitive.binding_index == slot
+        }
+        PrimitiveSource::Instances(InstanceSource::TankCells { slot, layer }) => {
+            let expected_group = match layer {
+                crate::presentation::companion_scene::scene::InstanceLayer::Behind => 5,
+                crate::presentation::companion_scene::scene::InstanceLayer::Foreground => 6,
+            };
+            primitive.primitive_kind == INSTANCE_QUAD_PRIMITIVE_TAG
+                && primitive.instance_group == expected_group
+                && primitive.binding_index == slot
+        }
+        _ => false,
+    };
+    if source_over_glyph
+        && glyph_resource
+        && primitive.material_kind == 1
+        && primitive.blend == 3
+        && primitive.depth == 2
+        && primitive.space == 1
+    {
+        return Some(WorldSourceOverGlyph);
+    }
+    let additive_source_matches = matches!(
+        draw.source,
+        PrimitiveSource::Instances(InstanceSource::PetParticles)
+            if primitive.instance_group == 2 && primitive.binding_index == 0
+    ) || matches!(
+        draw.source,
+        PrimitiveSource::Instances(InstanceSource::Ambient)
+            if primitive.instance_group == 7 && primitive.binding_index == 0
+    );
+    if primitive.primitive_kind == INSTANCE_QUAD_PRIMITIVE_TAG
+        && glyph_resource
+        && primitive.material_kind == 5
+        && primitive.blend == 5
+        && primitive.depth == 2
+        && primitive.space == 1
+        && additive_source_matches
+    {
+        return Some(WorldAdditiveGlyph);
+    }
+    if primitive.primitive_kind == INSTANCE_QUAD_PRIMITIVE_TAG
+        && glyph_resource
+        && primitive.material_kind == 6
+        && primitive.blend == 3
+        && primitive.depth == 3
+        && primitive.space == 2
+        && primitive.instance_group == 8
+        && primitive.binding_index == 0
+        && draw.source == PrimitiveSource::Instances(InstanceSource::Hud)
+    {
+        return Some(SealedHudHook);
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneBlendContract {
+    SourceOver,
+    Multiply,
+    Additive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScenePipelineContract {
+    vertex_entry: &'static str,
+    fragment_entry: &'static str,
+    blend: Option<SceneBlendContract>,
+    depth_write_enabled: Option<bool>,
+}
+
+const fn scene_pipeline_contract(class: ScenePipelineClass) -> ScenePipelineContract {
+    use ScenePipelineClass::*;
+    match class {
+        WorldOpaqueAnalytic => ScenePipelineContract {
+            vertex_entry: "vs_world_analytic",
+            fragment_entry: "fs_analytic",
+            blend: None,
+            depth_write_enabled: Some(true),
+        },
+        WorldSourceOverAnalytic => ScenePipelineContract {
+            vertex_entry: "vs_world_analytic",
+            fragment_entry: "fs_analytic",
+            blend: Some(SceneBlendContract::SourceOver),
+            depth_write_enabled: Some(false),
+        },
+        WorldSourceOverGlyph => ScenePipelineContract {
+            vertex_entry: "vs_world_glyph",
+            fragment_entry: "fs_glyph",
+            blend: Some(SceneBlendContract::SourceOver),
+            depth_write_enabled: Some(false),
+        },
+        WorldMultiplyAnalytic => ScenePipelineContract {
+            vertex_entry: "vs_world_analytic",
+            fragment_entry: "fs_analytic",
+            blend: Some(SceneBlendContract::Multiply),
+            depth_write_enabled: Some(false),
+        },
+        WorldMultiplyGlyphMask => ScenePipelineContract {
+            vertex_entry: "vs_world_glyph",
+            fragment_entry: "fs_wall_shadow_glyph",
+            blend: Some(SceneBlendContract::Multiply),
+            depth_write_enabled: Some(false),
+        },
+        WorldAdditiveGlyph => ScenePipelineContract {
+            vertex_entry: "vs_world_glyph",
+            fragment_entry: "fs_glyph",
+            blend: Some(SceneBlendContract::Additive),
+            depth_write_enabled: Some(false),
+        },
+        WorldAdditiveAnalyticReserved => ScenePipelineContract {
+            vertex_entry: "vs_world_analytic",
+            fragment_entry: "fs_analytic",
+            blend: Some(SceneBlendContract::Additive),
+            depth_write_enabled: Some(false),
+        },
+        ChromeAnalytic => ScenePipelineContract {
+            vertex_entry: "vs_screen_analytic",
+            fragment_entry: "fs_analytic",
+            blend: Some(SceneBlendContract::SourceOver),
+            depth_write_enabled: None,
+        },
+        SealedHudHook => ScenePipelineContract {
+            vertex_entry: "vs_hud",
+            fragment_entry: "fs_hud",
+            blend: Some(SceneBlendContract::SourceOver),
+            depth_write_enabled: None,
+        },
+    }
+}
+
+const fn scene_blend_state(contract: SceneBlendContract) -> wgpu::BlendState {
+    let alpha = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    };
+    let color = match contract {
+        SceneBlendContract::SourceOver => alpha,
+        SceneBlendContract::Multiply => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        SceneBlendContract::Additive => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    wgpu::BlendState { color, alpha }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScenePhaseTable {
     pub(super) opaque_cutout: Vec<u32>,
@@ -1049,7 +1304,7 @@ impl SceneGpuSharedFacts {
     pub(super) const EXPECTED: Self = Self {
         bind_group_layouts: 4,
         samplers: 1,
-        pipelines: 7,
+        pipelines: 10,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -1188,16 +1443,16 @@ fn create_in_gpu_error_scopes<T>(
     }
 }
 
-/// The exact six base pipelines owned by Task 9C. This is deliberately not a
-/// render-selection matrix: Task 9.5 reclassifies soft glyph/static/particle
-/// semantics before any draw, and Task 11 adds ordered multiply/additive
-/// variants.
+/// Persistent handles for the closed companion scene v2 pipeline matrix.
 pub(super) struct SceneBasePipelines {
     pub(super) world_opaque_analytic: wgpu::RenderPipeline,
     pub(super) world_source_over_analytic: wgpu::RenderPipeline,
     pub(super) world_source_over_glyph: wgpu::RenderPipeline,
+    pub(super) world_multiply_analytic: wgpu::RenderPipeline,
+    pub(super) world_multiply_glyph_mask: wgpu::RenderPipeline,
+    pub(super) world_additive_glyph: wgpu::RenderPipeline,
+    pub(super) world_additive_analytic_reserved: wgpu::RenderPipeline,
     pub(super) chrome_analytic: wgpu::RenderPipeline,
-    pub(super) chrome_glyph: wgpu::RenderPipeline,
     pub(super) chrome_hud: wgpu::RenderPipeline,
     pub(super) final_surface: wgpu::RenderPipeline,
 }
@@ -1386,18 +1641,6 @@ fn create_scene_base_pipelines(
         ],
         immediate_size: 0,
     });
-    let source_over = Some(wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-    });
     let scene_pipeline = |label: &'static str,
                           vertex_entry: &'static str,
                           fragment_entry: &'static str,
@@ -1435,47 +1678,55 @@ fn create_scene_base_pipelines(
             cache: None,
         })
     };
-    let world_opaque_analytic = scene_pipeline(
+    let pipeline_for_class = |label, class| {
+        let contract = scene_pipeline_contract(class);
+        scene_pipeline(
+            label,
+            contract.vertex_entry,
+            contract.fragment_entry,
+            contract.blend.map(scene_blend_state),
+            contract.depth_write_enabled,
+        )
+    };
+    let world_opaque_analytic = pipeline_for_class(
         "glorp-scene-world-opaque-analytic",
-        "vs_world",
-        "fs_analytic",
-        None,
-        Some(true),
+        ScenePipelineClass::WorldOpaqueAnalytic,
     );
-    let world_source_over_analytic = scene_pipeline(
+    let world_source_over_analytic = pipeline_for_class(
         "glorp-scene-world-source-over-analytic",
-        "vs_world",
-        "fs_analytic",
-        source_over,
-        Some(false),
+        ScenePipelineClass::WorldSourceOverAnalytic,
     );
-    let world_source_over_glyph = scene_pipeline(
+    let world_source_over_glyph = pipeline_for_class(
         "glorp-scene-world-source-over-glyph",
-        "vs_world_glyph",
-        "fs_glyph",
-        source_over,
-        Some(false),
+        ScenePipelineClass::WorldSourceOverGlyph,
     );
-    let chrome_analytic = scene_pipeline(
+    let world_multiply_analytic = pipeline_for_class(
+        "glorp-scene-world-multiply-analytic",
+        ScenePipelineClass::WorldMultiplyAnalytic,
+    );
+    let world_multiply_glyph_mask = pipeline_for_class(
+        "glorp-scene-world-multiply-glyph-mask",
+        ScenePipelineClass::WorldMultiplyGlyphMask,
+    );
+    let world_additive_glyph = pipeline_for_class(
+        "glorp-scene-world-additive-glyph",
+        ScenePipelineClass::WorldAdditiveGlyph,
+    );
+    let world_additive_analytic_reserved = pipeline_for_class(
+        "glorp-scene-world-additive-analytic-reserved",
+        ScenePipelineClass::WorldAdditiveAnalyticReserved,
+    );
+    let chrome_analytic = pipeline_for_class(
         "glorp-scene-chrome-analytic",
-        "vs_screen",
-        "fs_analytic",
-        source_over,
-        None,
+        ScenePipelineClass::ChromeAnalytic,
     );
-    let chrome_glyph = scene_pipeline(
-        "glorp-scene-chrome-glyph",
-        "vs_screen",
-        "fs_glyph",
-        source_over,
-        None,
-    );
+    let hud_contract = scene_pipeline_contract(ScenePipelineClass::SealedHudHook);
     let chrome_hud = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("glorp-scene-chrome-hud"),
         layout: Some(&hud_pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: Some("vs_hud"),
+            entry_point: Some(hud_contract.vertex_entry),
             compilation_options: Default::default(),
             buffers: &[],
         },
@@ -1484,11 +1735,11 @@ fn create_scene_base_pipelines(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_hud"),
+            entry_point: Some(hud_contract.fragment_entry),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: SceneTextureContract::INTERMEDIATE,
-                blend: source_over,
+                blend: hud_contract.blend.map(scene_blend_state),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -1524,8 +1775,11 @@ fn create_scene_base_pipelines(
         world_opaque_analytic,
         world_source_over_analytic,
         world_source_over_glyph,
+        world_multiply_analytic,
+        world_multiply_glyph_mask,
+        world_additive_glyph,
+        world_additive_analytic_reserved,
         chrome_analytic,
-        chrome_glyph,
         chrome_hud,
         final_surface,
     }
@@ -2335,9 +2589,9 @@ pub(super) fn scene_unpremultiply_final(color: [f32; 4]) -> [f32; 4] {
 mod tests {
     use super::*;
     use crate::presentation::companion_scene::scene::{
-        AnalyticSemantic, AuthoredGlyph, ContentDelta, FrameDelta, InstanceGroupBinding,
-        InstanceLayer, MaterialKind, PetArtFilter, PetPaletteRole, PrimitiveBinding, PrimitiveKind,
-        ResourceKind, SceneFixture,
+        AnalyticGeometry, AnalyticSemantic, AuthoredGlyph, ContentDelta, FrameDelta,
+        InstanceGroupBinding, InstanceLayer, MaterialKind, PetArtFilter, PetPaletteRole,
+        PrimitiveBinding, PrimitiveKind, ResourceKind, SceneFixture,
     };
 
     /// CPU-side reference vectors for the family-aware WGSL glyph placement
@@ -2694,6 +2948,499 @@ mod tests {
             scene_unpremultiply_final([0.20, 0.10, 0.05, 0.25]),
             [0.80, 0.40, 0.20, 0.25]
         );
+    }
+
+    #[allow(clippy::too_many_arguments)] // Compact axis table fixture for selector tests.
+    fn pipeline_primitive(
+        primitive_kind: u32,
+        material_kind: u32,
+        resource_kind: u32,
+        blend: u32,
+        depth: u32,
+        space: u32,
+        instance_group: u32,
+        binding_index: u32,
+    ) -> PrimitiveGpuValue {
+        PrimitiveGpuValue {
+            node_index: 0,
+            material_index: 0,
+            aux_node_index: NONE_U32,
+            primitive_kind,
+            material_kind,
+            resource_kind,
+            blend,
+            depth,
+            space,
+            instance_group,
+            instance_base: match instance_group {
+                0 => NONE_U32,
+                3 => binding_index * 9,
+                5 | 6 => binding_index * 8,
+                _ => 0,
+            },
+            binding_index,
+            authored_order: 0,
+            content_base: 0,
+            frame_base: binding_index,
+            aux_content_base: NONE_U32,
+        }
+    }
+
+    fn pipeline_draw(source: PrimitiveSource) -> SceneDrawRecord {
+        let instance_count = match source {
+            PrimitiveSource::None => 0,
+            PrimitiveSource::StaticAtlas | PrimitiveSource::Analytic => 1,
+            PrimitiveSource::Instances(InstanceSource::PetBody)
+            | PrimitiveSource::Instances(InstanceSource::PetParticles)
+            | PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask) => 130,
+            PrimitiveSource::Instances(InstanceSource::RoomGlyphs) => 32,
+            PrimitiveSource::Instances(InstanceSource::PropGlyphs { .. }) => 9,
+            PrimitiveSource::Instances(InstanceSource::TankCells { .. }) => 8,
+            PrimitiveSource::Instances(InstanceSource::Ambient) => 64,
+            PrimitiveSource::Instances(InstanceSource::Hud) => 0,
+        };
+        SceneDrawRecord {
+            index_range: 0..6,
+            instance_range: 0..instance_count,
+            source,
+            authored_order: 0,
+        }
+    }
+
+    fn sealed_hud_draw() -> SceneDrawRecord {
+        pipeline_draw(PrimitiveSource::Instances(InstanceSource::Hud))
+    }
+
+    #[test]
+    fn typed_pipeline_selector_is_exhaustive_for_the_production_v2_matrix() {
+        use InstanceSource::*;
+        use ScenePipelineClass::*;
+
+        let cases = [
+            (
+                pipeline_primitive(2, 2, 3, 1, 1, 1, 0, 0),
+                pipeline_draw(PrimitiveSource::Analytic),
+                WorldOpaqueAnalytic,
+            ),
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 4, 0),
+                pipeline_draw(PrimitiveSource::Instances(RoomGlyphs)),
+                WorldSourceOverGlyph,
+            ),
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 1, 0),
+                pipeline_draw(PrimitiveSource::Instances(PetBody)),
+                WorldSourceOverGlyph,
+            ),
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 3, 2),
+                pipeline_draw(PrimitiveSource::Instances(PropGlyphs { slot: 2 })),
+                WorldSourceOverGlyph,
+            ),
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 5, 1),
+                pipeline_draw(PrimitiveSource::Instances(TankCells {
+                    slot: 1,
+                    layer: InstanceLayer::Behind,
+                })),
+                WorldSourceOverGlyph,
+            ),
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 6, 1),
+                pipeline_draw(PrimitiveSource::Instances(TankCells {
+                    slot: 1,
+                    layer: InstanceLayer::Foreground,
+                })),
+                WorldSourceOverGlyph,
+            ),
+            (
+                pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2),
+                pipeline_draw(PrimitiveSource::Analytic),
+                WorldMultiplyAnalytic,
+            ),
+            (
+                pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 1),
+                pipeline_draw(PrimitiveSource::Instances(WallShadowGlyphMask)),
+                WorldMultiplyGlyphMask,
+            ),
+            (
+                pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 4),
+                pipeline_draw(PrimitiveSource::Analytic),
+                WorldSourceOverAnalytic,
+            ),
+            (
+                pipeline_primitive(4, 5, 1, 5, 2, 1, 7, 0),
+                pipeline_draw(PrimitiveSource::Instances(Ambient)),
+                WorldAdditiveGlyph,
+            ),
+            (
+                pipeline_primitive(4, 5, 1, 5, 2, 1, 2, 0),
+                pipeline_draw(PrimitiveSource::Instances(PetParticles)),
+                WorldAdditiveGlyph,
+            ),
+            (
+                pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 3),
+                pipeline_draw(PrimitiveSource::Analytic),
+                ChromeAnalytic,
+            ),
+            (
+                pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 5),
+                pipeline_draw(PrimitiveSource::Analytic),
+                ChromeAnalytic,
+            ),
+            (
+                pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 6),
+                pipeline_draw(PrimitiveSource::Analytic),
+                ChromeAnalytic,
+            ),
+            (
+                pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 7),
+                pipeline_draw(PrimitiveSource::Analytic),
+                ChromeAnalytic,
+            ),
+            (
+                pipeline_primitive(4, 6, 1, 3, 3, 2, 8, 0),
+                sealed_hud_draw(),
+                SealedHudHook,
+            ),
+        ];
+        for (primitive, draw, expected) in &cases {
+            assert_eq!(scene_pipeline_class(*primitive, draw), Some(*expected));
+        }
+        assert!(!cases
+            .iter()
+            .any(|(_, _, expected)| { *expected == WorldAdditiveAnalyticReserved }));
+    }
+
+    #[test]
+    fn pipeline_selector_fails_closed_on_axis_and_source_mutations() {
+        let primitive = pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2);
+        let draw = pipeline_draw(PrimitiveSource::Analytic);
+        assert_eq!(
+            scene_pipeline_class(primitive, &draw),
+            Some(ScenePipelineClass::WorldMultiplyAnalytic)
+        );
+        for mutate in [
+            |value: &mut PrimitiveGpuValue| value.primitive_kind = 4,
+            |value: &mut PrimitiveGpuValue| value.material_kind = 2,
+            |value: &mut PrimitiveGpuValue| value.resource_kind = 1,
+            |value: &mut PrimitiveGpuValue| value.blend = 3,
+            |value: &mut PrimitiveGpuValue| value.depth = 1,
+            |value: &mut PrimitiveGpuValue| value.space = 2,
+            |value: &mut PrimitiveGpuValue| value.instance_group = 1,
+            |value: &mut PrimitiveGpuValue| value.binding_index = 1,
+        ] {
+            let mut changed = primitive;
+            mutate(&mut changed);
+            assert_eq!(scene_pipeline_class(changed, &draw), None);
+        }
+        assert_eq!(
+            scene_pipeline_class(
+                primitive,
+                &pipeline_draw(PrimitiveSource::Instances(
+                    InstanceSource::WallShadowGlyphMask,
+                )),
+            ),
+            None,
+        );
+        let wall = pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 1);
+        assert_eq!(
+            scene_pipeline_class(wall, &pipeline_draw(PrimitiveSource::Analytic)),
+            None
+        );
+
+        let reserved = pipeline_primitive(2, 5, 3, 5, 2, 1, 0, 4);
+        assert_eq!(
+            scene_pipeline_class(reserved, &pipeline_draw(PrimitiveSource::Analytic)),
+            None,
+            "v2 cannot select the reserved additive-analytic handle",
+        );
+
+        for (primitive, source) in [
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 3, 2),
+                PrimitiveSource::Instances(InstanceSource::PetBody),
+            ),
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 3, 2),
+                PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 1 }),
+            ),
+            (
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 5, 1),
+                PrimitiveSource::Instances(InstanceSource::TankCells {
+                    slot: 1,
+                    layer: InstanceLayer::Foreground,
+                }),
+            ),
+            (
+                pipeline_primitive(4, 5, 1, 5, 2, 1, 7, 0),
+                PrimitiveSource::Instances(InstanceSource::PetParticles),
+            ),
+        ] {
+            assert_eq!(
+                scene_pipeline_class(primitive, &pipeline_draw(source)),
+                None
+            );
+        }
+        let mut nonsealed_hud = pipeline_draw(PrimitiveSource::Instances(InstanceSource::Hud));
+        nonsealed_hud.instance_range = 0..1;
+        assert_eq!(
+            scene_pipeline_class(pipeline_primitive(4, 6, 1, 3, 3, 2, 8, 0), &nonsealed_hud,),
+            None,
+            "HUD must remain the sealed zero-instance hook",
+        );
+        assert_eq!(
+            scene_pipeline_class(
+                pipeline_primitive(1, 1, 1, 3, 2, 1, 0, 0),
+                &pipeline_draw(PrimitiveSource::StaticAtlas),
+            ),
+            None,
+            "v2 has no typed static-atlas recipe",
+        );
+
+        let mut identity_only = primitive;
+        identity_only.node_index = 47;
+        identity_only.material_index = 29;
+        identity_only.authored_order = 101;
+        let mut identity_draw = draw;
+        identity_draw.authored_order = 101;
+        identity_draw.index_range = 300..306;
+        assert_eq!(
+            scene_pipeline_class(identity_only, &identity_draw),
+            Some(ScenePipelineClass::WorldMultiplyAnalytic),
+            "pipeline selection is semantic and does not depend on aliases or dense ids",
+        );
+    }
+
+    #[test]
+    fn premultiplied_blend_contracts_match_closed_scene_equations() {
+        let component = |src_factor, dst_factor| wgpu::BlendComponent {
+            src_factor,
+            dst_factor,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let alpha = component(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(
+            scene_blend_state(SceneBlendContract::SourceOver),
+            wgpu::BlendState { color: alpha, alpha },
+        );
+        assert_eq!(
+            scene_blend_state(SceneBlendContract::Multiply),
+            wgpu::BlendState {
+                color: component(wgpu::BlendFactor::Dst, wgpu::BlendFactor::OneMinusSrcAlpha,),
+                alpha,
+            },
+        );
+        assert_eq!(
+            scene_blend_state(SceneBlendContract::Additive),
+            wgpu::BlendState {
+                color: component(wgpu::BlendFactor::One, wgpu::BlendFactor::One),
+                alpha,
+            },
+        );
+    }
+
+    #[test]
+    fn pipeline_contracts_lock_entrypoints_blend_and_depth_behavior() {
+        use ScenePipelineClass::*;
+        let cases = [
+            (
+                WorldOpaqueAnalytic,
+                "vs_world_analytic",
+                "fs_analytic",
+                None,
+                Some(true),
+            ),
+            (
+                WorldSourceOverAnalytic,
+                "vs_world_analytic",
+                "fs_analytic",
+                Some(SceneBlendContract::SourceOver),
+                Some(false),
+            ),
+            (
+                WorldSourceOverGlyph,
+                "vs_world_glyph",
+                "fs_glyph",
+                Some(SceneBlendContract::SourceOver),
+                Some(false),
+            ),
+            (
+                WorldMultiplyAnalytic,
+                "vs_world_analytic",
+                "fs_analytic",
+                Some(SceneBlendContract::Multiply),
+                Some(false),
+            ),
+            (
+                WorldMultiplyGlyphMask,
+                "vs_world_glyph",
+                "fs_wall_shadow_glyph",
+                Some(SceneBlendContract::Multiply),
+                Some(false),
+            ),
+            (
+                WorldAdditiveGlyph,
+                "vs_world_glyph",
+                "fs_glyph",
+                Some(SceneBlendContract::Additive),
+                Some(false),
+            ),
+            (
+                WorldAdditiveAnalyticReserved,
+                "vs_world_analytic",
+                "fs_analytic",
+                Some(SceneBlendContract::Additive),
+                Some(false),
+            ),
+            (
+                ChromeAnalytic,
+                "vs_screen_analytic",
+                "fs_analytic",
+                Some(SceneBlendContract::SourceOver),
+                None,
+            ),
+            (
+                SealedHudHook,
+                "vs_hud",
+                "fs_hud",
+                Some(SceneBlendContract::SourceOver),
+                None,
+            ),
+        ];
+        for (class, vertex_entry, fragment_entry, blend, depth_write_enabled) in cases {
+            assert_eq!(
+                scene_pipeline_contract(class),
+                ScenePipelineContract {
+                    vertex_entry,
+                    fragment_entry,
+                    blend,
+                    depth_write_enabled,
+                },
+            );
+        }
+        let production = include_str!("render.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(!production.contains("chrome_glyph"));
+    }
+
+    #[test]
+    fn analytic_shader_contract_is_closed_and_wall_mask_ignores_native_color() {
+        for required in [
+            "fn vs_world_analytic(",
+            "fn vs_screen_analytic(",
+            "frame_buffer.analytics[primitive.binding_index]",
+            "analytic.rect_points.xy\n        + input.local_position.xy * analytic.rect_points.zw",
+            "fn valid_analytic_role(",
+            "fn fs_room_aperture(",
+            "fn fs_floor_projection(",
+            "fn fs_status_tone(",
+            "fn fs_mood_rings(",
+            "fn fs_gauges(",
+            "fn fs_trouble(",
+            "fn fs_dim(",
+            "fn fs_wall_shadow_glyph(",
+        ] {
+            assert!(SCENE_SHADER_SOURCE.contains(required), "missing {required}");
+        }
+        let wall = SCENE_SHADER_SOURCE
+            .split("fn fs_wall_shadow_glyph(")
+            .nth(1)
+            .unwrap()
+            .split("@fragment")
+            .next()
+            .unwrap();
+        assert!(wall.contains("coverage_texture"));
+        assert!(wall.contains("content.payload[0].y"));
+        assert!(wall.contains("color_texture"));
+        assert!(wall.contains(").a"));
+        assert!(!wall.contains(".rgb"));
+        assert!(!wall.contains("palette_linear"));
+        assert!(!wall.contains("analytic.payload[0].w"));
+
+        let dim = SCENE_SHADER_SOURCE
+            .split("fn fs_dim(")
+            .nth(1)
+            .unwrap()
+            .split("@fragment")
+            .next()
+            .unwrap();
+        assert!(
+            !dim.contains("dim_amount"),
+            "node opacity already owns dim amount"
+        );
+        assert!(dim.contains("1.0,"));
+        for aperture_contract in [
+            "let aperture = frame_buffer.analytics[0u];",
+            "let aperture_content = scene_content_buffer.analytics[0u];",
+            "valid_analytic_role(0u, aperture, aperture_content)",
+            "input.point_position - aperture.payload[0].xy",
+            "aperture.payload[0].z",
+            "aperture.payload[0].w",
+        ] {
+            assert!(
+                dim.contains(aperture_contract),
+                "dim aperture: {aperture_contract}"
+            );
+        }
+
+        let mood = SCENE_SHADER_SOURCE
+            .split("fn fs_mood_rings(")
+            .nth(1)
+            .unwrap()
+            .split("fn normalized_degrees(")
+            .next()
+            .unwrap();
+        assert!(mood.contains("ring < 8u"));
+        assert!(mood.contains("smoothstep(radius - edge, radius + edge, distance)"));
+        assert!(!mood.contains("ceil("));
+    }
+
+    #[test]
+    fn gauge_frame_flat_pack_matches_wgsl_vec4_reconstruction() {
+        let fixture = SceneFixture::valid();
+        let gauge = fixture.frame.analytic_slots[5].value.unwrap();
+        let AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } = gauge.geometry
+        else {
+            panic!("gauge role geometry");
+        };
+        let expected = [
+            center_points[0],
+            center_points[1],
+            xp.radius_points,
+            xp.stroke_width_points,
+            xp.track_start_degrees,
+            xp.track_sweep_degrees,
+            daily.radius_points,
+            daily.stroke_width_points,
+            daily.track_start_degrees,
+            daily.track_sweep_degrees,
+            pace.radius_points,
+            pace.stroke_width_points,
+            pace.track_start_degrees,
+            pace.track_sweep_degrees,
+        ];
+        let candidate = compile_fixture(&fixture);
+        let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
+        let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
+        let record = PackedMirrorLayout::frame_offset(FrameMirrorFamily::Analytics)
+            + 5 * std::mem::size_of::<super::super::compiler::AnalyticFrameGpuValue>();
+        let payload = &upload.frame_bytes[record + 32..record + 32 + 16 * 4];
+        let actual = payload
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(&actual[..expected.len()], &expected);
+        for reconstruction in [
+            "analytic.payload[0].z,\n                analytic.payload[0].w,\n                analytic.payload[1].x,\n                analytic.payload[1].y",
+            "analytic.payload[1].z,\n                analytic.payload[1].w,\n                analytic.payload[2].x,\n                analytic.payload[2].y",
+            "analytic.payload[2].z,\n                analytic.payload[2].w,\n                analytic.payload[3].x,\n                analytic.payload[3].y",
+        ] {
+            assert!(SCENE_SHADER_SOURCE.contains(reconstruction));
+        }
+        assert!(!SCENE_SHADER_SOURCE.contains("analytic.payload[4]"));
     }
 
     fn two_weight_atlas(scalar: char) -> super::super::resources::PreparedSceneAtlas {
@@ -3734,8 +4481,6 @@ mod tests {
             "clip.z =",
             "return 300u;",
             "frame_buffer.values[primitive.frame_base + input.instance_index] // prop",
-            "analytic.rect_points.xy",
-            "analytic.payload[0].w", // wall softness is intentionally deferred
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -3753,23 +4498,19 @@ mod tests {
 
     #[test]
     fn analytic_fragment_discards_zero_coverage_before_depth_can_be_written() {
-        let analytic = SCENE_SHADER_SOURCE
-            .split("fn fs_analytic(")
+        let aperture = SCENE_SHADER_SOURCE
+            .split("fn fs_room_aperture(")
             .nth(1)
-            .expect("analytic fragment entry point exists")
-            .split("@fragment")
+            .expect("room analytic role exists")
+            .split("fn fs_floor_projection(")
             .next()
-            .expect("analytic fragment has a bounded body");
-        let coverage = analytic
-            .find("let coverage = 1.0 - smoothstep(")
-            .expect("analytic edge coverage is computed");
-        let output = analytic
-            .find("let output = premultiply_scene_color(")
-            .expect("coverage contributes to analytic output");
-        let discard = analytic
-            .find("if (output.a <= 0.0) {\n        discard;\n    }")
-            .expect("zero-coverage output is discarded");
-        assert!(coverage < output && output < discard);
+            .expect("room role has a bounded body");
+        let coverage = aperture.find("let coverage = 1.0 - smoothstep(").unwrap();
+        let output = aperture.find("return analytic_premultiply(").unwrap();
+        assert!(coverage < output, "coverage contributes before role output");
+
+        let entry = SCENE_SHADER_SOURCE.split("fn fs_analytic(").nth(1).unwrap();
+        assert!(entry.contains("if (output.a <= 0.0) {\n        discard;\n    }"));
     }
 
     #[test]
@@ -3782,8 +4523,8 @@ mod tests {
             .next()
             .expect("analytic fragment has a bounded body");
         let compute = analytic
-            .find("let output = premultiply_scene_color(")
-            .expect("analytic output is computed once");
+            .find("var output = vec4<f32>(0.0);")
+            .expect("analytic output starts fail-closed");
         let discard = analytic
             .find("if (output.a <= 0.0) {\n        discard;\n    }")
             .expect("zero-alpha analytic output is discarded");
@@ -3797,7 +4538,7 @@ mod tests {
     fn gpu_resource_accounting_is_exact_and_not_a_live_global_metric() {
         assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 4);
         assert_eq!(SceneGpuSharedFacts::EXPECTED.samplers, 1);
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 7);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 10);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 10);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.textures, 2);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.texture_views, 2);
@@ -3810,7 +4551,7 @@ mod tests {
             SceneGpuSharedFacts::EXPECTED.persistent_owned_handles()
                 + GpuSceneCandidateFacts::EXPECTED.persistent_owned_handles()
                 + SceneTargetFacts::EXPECTED.persistent_owned_handles(),
-            35,
+            38,
         );
     }
 
