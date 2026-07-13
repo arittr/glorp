@@ -98,6 +98,49 @@ pub(super) struct ContentGpuValue {
     variant: u32,
 }
 
+/// Narrow semantic projection used by the scene upload translator. The legacy
+/// mirror remains unchanged; the translator replaces only `glyph_scalar` in its
+/// distinct upload ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ContentUploadValue {
+    pub(super) kind: u32,
+    pub(super) glyph_scalar: u32,
+    pub(super) slot: u32,
+    pub(super) subslot: u32,
+    pub(super) signed_data: [i32; 2],
+    pub(super) flags: u32,
+    pub(super) variant: u32,
+}
+
+impl From<ContentGpuValue> for ContentUploadValue {
+    fn from(value: ContentGpuValue) -> Self {
+        Self {
+            kind: value.kind,
+            glyph_scalar: value.glyph_scalar,
+            slot: value.slot,
+            subslot: value.subslot,
+            signed_data: value.signed_data,
+            flags: value.flags,
+            variant: value.variant,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ContentUploadValue {
+    pub(super) fn fixture(glyph_scalar: u32, flags: u32) -> Self {
+        Self {
+            kind: 1,
+            glyph_scalar,
+            slot: 0,
+            subslot: 0,
+            signed_data: [0; 2],
+            flags,
+            variant: 0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 /// GPU-facing fixed frame-slot upload ABI.
@@ -404,6 +447,48 @@ pub(super) struct CpuSceneCandidate {
     last_node_resolves: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PrimitiveUploadSource {
+    pub(super) node_index: u32,
+    pub(super) material_index: u32,
+    pub(super) resource_index: u32,
+    pub(super) primitive_kind: u32,
+    pub(super) material_kind: u32,
+    pub(super) resource_kind: u32,
+    pub(super) blend: u32,
+    pub(super) depth: u32,
+    pub(super) space: u32,
+    pub(super) instance_group: u32,
+    pub(super) instance_base: u32,
+    pub(super) first_index: u32,
+    pub(super) index_count: u32,
+}
+
+pub(super) struct ContentUploadSources<'a> {
+    pub(super) globals: &'a [u8],
+    pub(super) pet: &'a [ContentGpuValue],
+    pub(super) prop_glyphs: &'a [ContentGpuValue],
+    pub(super) tank_glyphs: &'a [ContentGpuValue],
+    pub(super) ambient: &'a [ContentGpuValue],
+    pub(super) hud: &'a [ContentGpuValue],
+}
+
+pub(super) struct FrameUploadSources<'a> {
+    pub(super) globals: &'a [u8],
+    pub(super) nodes: &'a [u8],
+    pub(super) props: &'a [u8],
+    pub(super) tank_cells: &'a [u8],
+    pub(super) ambient: &'a [u8],
+    pub(super) hud: &'a [u8],
+    pub(super) lights: &'a [u8],
+}
+
+pub(super) struct PhaseUploadSources<'a> {
+    pub(super) opaque_cutout: &'a [u32],
+    pub(super) world_blended_unsorted: &'a [u32],
+    pub(super) chrome_authored: &'a [u32],
+}
+
 struct PreparedMirrorDelta {
     dirty: SceneDirtySpans,
     content_globals: Option<ContentGlobalsGpuValue>,
@@ -464,6 +549,90 @@ pub(super) enum CompileError {
 }
 
 impl CpuSceneCandidate {
+    pub(super) fn primitive_count(&self) -> usize {
+        self.primitives.len()
+    }
+
+    pub(super) fn primitive_upload_source(&self, index: usize) -> Option<PrimitiveUploadSource> {
+        let primitive = *self.primitives.get(index)?;
+        let material_kind = self
+            .materials
+            .get(usize::try_from(primitive.material_dense_index).ok()?)?
+            .kind;
+        let resource_kind = if primitive.resource_dense_index == NONE_U32 {
+            0
+        } else {
+            self.resources
+                .get(usize::try_from(primitive.resource_dense_index).ok()?)?
+                .kind
+        };
+        let instance_base = match primitive.instance_group {
+            1 | 7 | 8 => 0,
+            3 => primitive.instance_slot.checked_mul(
+                u32::try_from(MAX_PROP_GLYPHS_PER_SLOT).expect("prop glyph capacity fits in u32"),
+            )?,
+            5 | 6 => primitive.instance_slot.checked_mul(
+                u32::try_from(MAX_TANK_GLYPHS_PER_SLOT).expect("tank glyph capacity fits in u32"),
+            )?,
+            0 | 2 => NONE_U32,
+            _ => return None,
+        };
+        Some(PrimitiveUploadSource {
+            node_index: primitive.node_dense_index,
+            material_index: primitive.material_dense_index,
+            resource_index: primitive.resource_dense_index,
+            primitive_kind: primitive.primitive_kind,
+            material_kind,
+            resource_kind,
+            blend: primitive.blend,
+            depth: primitive.depth,
+            space: primitive.space,
+            instance_group: primitive.instance_group,
+            instance_base,
+            first_index: primitive.first_index,
+            index_count: primitive.index_count,
+        })
+    }
+
+    pub(super) fn vertex_bytes(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.vertices)
+    }
+
+    pub(super) fn index_bytes(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.indices)
+    }
+
+    pub(super) fn content_upload_sources(&self) -> ContentUploadSources<'_> {
+        ContentUploadSources {
+            globals: bytemuck::cast_slice(self.content.globals.as_slice()),
+            pet: self.content.pet.as_slice(),
+            prop_glyphs: self.content.prop_glyphs.as_slice(),
+            tank_glyphs: self.content.tank_glyphs.as_slice(),
+            ambient: self.content.ambient.as_slice(),
+            hud: self.content.hud.as_slice(),
+        }
+    }
+
+    pub(super) fn frame_upload_sources(&self) -> FrameUploadSources<'_> {
+        FrameUploadSources {
+            globals: bytemuck::cast_slice(self.frame.globals.as_slice()),
+            nodes: bytemuck::cast_slice(self.frame.nodes.as_slice()),
+            props: bytemuck::cast_slice(self.frame.props.as_slice()),
+            tank_cells: bytemuck::cast_slice(self.frame.tank_cells.as_slice()),
+            ambient: bytemuck::cast_slice(self.frame.ambient.as_slice()),
+            hud: bytemuck::cast_slice(self.frame.hud.as_slice()),
+            lights: bytemuck::cast_slice(self.frame.lights.as_slice()),
+        }
+    }
+
+    pub(super) fn phase_upload_sources(&self) -> PhaseUploadSources<'_> {
+        PhaseUploadSources {
+            opaque_cutout: &self.phases.opaque_cutout,
+            world_blended_unsorted: &self.phases.world_blended_unsorted,
+            chrome_authored: &self.phases.chrome_authored,
+        }
+    }
+
     #[allow(dead_code)] // Task 9 routes reconciler deltas through this paired transaction.
     pub(super) fn apply_deltas(
         &mut self,
@@ -2086,6 +2255,57 @@ fn ambient_kind_tag(value: AmbientContentKind) -> u32 {
         AmbientContentKind::Weather => 4,
         AmbientContentKind::MoodAura => 5,
     }
+}
+
+#[cfg(test)]
+pub(super) fn compile_fixture_for_render_test(
+    fixture: &crate::presentation::companion_scene::scene::SceneFixture,
+) -> CpuSceneCandidate {
+    let accepted = crate::presentation::companion_scene::validate::validate_full_generation(
+        &fixture.template,
+        &fixture.content,
+        &fixture.frame,
+    )
+    .unwrap();
+    compile_cpu_parts(
+        crate::presentation::companion_scene::SceneGenerationKey {
+            device: crate::presentation::companion_scene::DeviceEpoch(1),
+            layout: crate::presentation::companion_scene::LayoutGeneration(2),
+            resources: crate::presentation::companion_scene::ResourceGeneration(3),
+        },
+        crate::presentation::companion_scene::AppliedRevisions::new(4, 5),
+        &fixture.template,
+        &fixture.content,
+        &fixture.frame,
+        accepted,
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
+pub(super) fn compile_static_fixture_for_render_test(
+    fixture: &crate::presentation::companion_scene::scene::SceneFixture,
+) -> CpuSceneCandidate {
+    let accepted_fixture = crate::presentation::companion_scene::scene::SceneFixture::valid();
+    let accepted = crate::presentation::companion_scene::validate::validate_full_generation(
+        &accepted_fixture.template,
+        &accepted_fixture.content,
+        &accepted_fixture.frame,
+    )
+    .unwrap();
+    compile_cpu_parts(
+        crate::presentation::companion_scene::SceneGenerationKey {
+            device: crate::presentation::companion_scene::DeviceEpoch(1),
+            layout: crate::presentation::companion_scene::LayoutGeneration(2),
+            resources: crate::presentation::companion_scene::ResourceGeneration(3),
+        },
+        crate::presentation::companion_scene::AppliedRevisions::new(4, 5),
+        &fixture.template,
+        &fixture.content,
+        &fixture.frame,
+        accepted,
+    )
+    .unwrap()
 }
 
 #[cfg(test)]
