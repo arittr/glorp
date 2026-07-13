@@ -1920,8 +1920,9 @@ pub(super) fn scene_unpremultiply_final(color: [f32; 4]) -> [f32; 4] {
 mod tests {
     use super::*;
     use crate::presentation::companion_scene::scene::{
-        ContentDelta, FrameDelta, InstanceLayer, MaterialKind, PetPaletteRole, PrimitiveKind,
-        ResourceKind, SceneFixture,
+        AnalyticSemantic, ContentDelta, FrameDelta, InstanceGroupBinding, InstanceLayer,
+        MaterialKind, PetArtFilter, PetPaletteRole, PrimitiveBinding, PrimitiveKind, ResourceKind,
+        SceneFixture,
     };
 
     fn surface_capabilities() -> wgpu::SurfaceCapabilities {
@@ -2409,29 +2410,27 @@ mod tests {
 
     #[test]
     fn primitive_dispatch_flattens_instance_bases_and_locks_exact_ranges() {
-        use crate::presentation::companion_scene::scene::InstanceGroupBinding;
-
         let cases = [
             (
-                Some(InstanceGroupBinding::PetBody),
+                InstanceGroupBinding::PetArt(PetArtFilter::Body),
                 0,
                 PrimitiveSource::Instances(InstanceSource::PetBody),
                 0..130,
             ),
             (
-                Some(InstanceGroupBinding::PetParticles),
+                InstanceGroupBinding::PetArt(PetArtFilter::Particles),
                 u32::MAX,
                 PrimitiveSource::Instances(InstanceSource::PetParticles),
                 0..0,
             ),
             (
-                Some(InstanceGroupBinding::PropGlyphs(4)),
+                InstanceGroupBinding::PropGlyphs(4),
                 4 * 9,
                 PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 4 }),
                 0..9,
             ),
             (
-                Some(InstanceGroupBinding::TankCells { slot: 1, layer: InstanceLayer::Behind }),
+                InstanceGroupBinding::TankCells { slot: 1, layer: InstanceLayer::Behind },
                 8,
                 PrimitiveSource::Instances(InstanceSource::TankCells {
                     slot: 1,
@@ -2440,10 +2439,10 @@ mod tests {
                 0..8,
             ),
             (
-                Some(InstanceGroupBinding::TankCells {
+                InstanceGroupBinding::TankCells {
                     slot: 1,
                     layer: InstanceLayer::Foreground,
-                }),
+                },
                 8,
                 PrimitiveSource::Instances(InstanceSource::TankCells {
                     slot: 1,
@@ -2452,13 +2451,13 @@ mod tests {
                 0..8,
             ),
             (
-                Some(InstanceGroupBinding::Ambient),
+                InstanceGroupBinding::Ambient,
                 0,
                 PrimitiveSource::Instances(InstanceSource::Ambient),
                 0..64,
             ),
             (
-                Some(InstanceGroupBinding::Hud),
+                InstanceGroupBinding::Hud,
                 0,
                 PrimitiveSource::Instances(InstanceSource::Hud),
                 0..24,
@@ -2468,7 +2467,7 @@ mod tests {
         for (binding, expected_base, expected_source, expected_instances) in cases {
             let mut fixture = SceneFixture::valid();
             fixture.template.primitives[0].kind = PrimitiveKind::InstanceQuad;
-            fixture.template.primitives[0].instance_group = binding;
+            fixture.template.primitives[0].binding = PrimitiveBinding::Instances(binding);
             let candidate =
                 super::super::compiler::compile_static_fixture_for_render_test(&fixture);
             let upload = prepare_scene_upload(&candidate, &two_weight_atlas('^')).unwrap();
@@ -2489,6 +2488,8 @@ mod tests {
 
         let mut analytic_fixture = SceneFixture::valid();
         analytic_fixture.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
+        analytic_fixture.template.primitives[0].binding =
+            PrimitiveBinding::Analytic(AnalyticSemantic::RoomBackground.id());
         analytic_fixture.template.materials[0].kind = MaterialKind::UnlitAnalytic;
         analytic_fixture.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         let analytic_candidate =
@@ -3081,8 +3082,8 @@ mod tests {
             };
 
         for (binding, expected_instances) in [
-            (InstanceGroupBinding::PetBody, 130),
-            (InstanceGroupBinding::PetParticles, 0),
+            (InstanceGroupBinding::PetArt(PetArtFilter::Body), 130),
+            (InstanceGroupBinding::PetArt(PetArtFilter::Particles), 0),
             (InstanceGroupBinding::PropGlyphs(2), 9),
             (
                 InstanceGroupBinding::TankCells {
@@ -3103,7 +3104,7 @@ mod tests {
         ] {
             let mut fixture = SceneFixture::valid();
             fixture.template.primitives[0].kind = PrimitiveKind::InstanceQuad;
-            fixture.template.primitives[0].instance_group = Some(binding);
+            fixture.template.primitives[0].binding = PrimitiveBinding::Instances(binding);
             let (upload, atlas) = prepare(&fixture);
             validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();
             assert_eq!(upload.draws[0].instance_range, 0..expected_instances);
@@ -3129,10 +3130,15 @@ mod tests {
         for kind in [PrimitiveKind::AtlasQuad, PrimitiveKind::AnalyticShape] {
             let mut fixture = SceneFixture::valid();
             fixture.template.primitives[0].kind = kind;
-            fixture.template.primitives[0].instance_group = None;
             if kind == PrimitiveKind::AnalyticShape {
+                fixture.template.primitives[0].binding =
+                    PrimitiveBinding::Analytic(AnalyticSemantic::RoomBackground.id());
                 fixture.template.materials[0].kind = MaterialKind::UnlitAnalytic;
                 fixture.template.resources[0].kind = ResourceKind::AnalyticGeometry;
+            } else {
+                fixture.template.primitives[0].binding = PrimitiveBinding::StaticAtlas(
+                    crate::presentation::companion_scene::scene::StaticAtlasRecipeId(0),
+                );
             }
             let (upload, atlas) = prepare(&fixture);
             validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();

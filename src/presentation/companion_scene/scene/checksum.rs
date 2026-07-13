@@ -199,6 +199,8 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
         template.capacities.max_blended_draws,
         template.capacities.max_lights,
         template.capacities.max_attachments,
+        template.capacities.max_static_atlas_recipes,
+        template.capacities.max_analytic_params,
     ] {
         hash.usize(value);
     }
@@ -269,8 +271,34 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
         hash.u8(depth_behavior_tag(primitive.depth));
         hash.u16(primitive.authored_order);
         hash.u8(primitive_space_tag(primitive.space));
-        encode_instance_binding(&mut hash, primitive.instance_group);
+        encode_primitive_binding(&mut hash, primitive.binding);
         encode_bounds(&mut hash, primitive.local_geometry)?;
+    }
+    hash.usize(template.static_atlas_recipes.len());
+    for slot in &template.static_atlas_recipes {
+        hash.u8(slot.id.0);
+        match slot.recipe {
+            Some(recipe) => {
+                hash.u8(1);
+                hash.u8(static_atlas_semantic_tag(recipe.semantic));
+                hash.u32(recipe.source.0);
+                encode_bounds(&mut hash, recipe.local_bounds)?;
+            }
+            None => hash.u8(0),
+        }
+    }
+    hash.usize(template.analytic_templates.len());
+    for slot in &template.analytic_templates {
+        hash.u8(slot.id.0);
+        match slot.value {
+            Some(value) => {
+                hash.u8(1);
+                hash.u8(analytic_semantic_tag(value.semantic));
+                hash.u8(analytic_shape_tag(value.shape));
+                encode_bounds(&mut hash, value.normalized_local_bounds)?;
+            }
+            None => hash.u8(0),
+        }
     }
     let mut attachments = template.attachments.iter().collect::<Vec<_>>();
     attachments.sort_by(|left, right| left.alias.cmp(&right.alias));
@@ -526,22 +554,53 @@ fn encode_points(hash: &mut Fnv1a64, points: [f32; 2]) -> Result<(), SceneGenera
     }
     Ok(())
 }
-fn encode_instance_binding(hash: &mut Fnv1a64, binding: Option<InstanceGroupBinding>) {
+fn static_atlas_semantic_tag(value: StaticAtlasSemantic) -> u8 {
+    match value {
+        StaticAtlasSemantic::DecorativeSprite => 1,
+    }
+}
+fn analytic_semantic_tag(value: AnalyticSemantic) -> u8 {
+    value.id().0 + 1
+}
+fn analytic_shape_tag(value: AnalyticShape) -> u8 {
+    match value {
+        AnalyticShape::ApertureRadial => 1,
+        AnalyticShape::PetSilhouette => 2,
+        AnalyticShape::RadialEllipse => 3,
+        AnalyticShape::StatusBeacon => 4,
+        AnalyticShape::PetAura => 5,
+        AnalyticShape::PerimeterGaugeSet => 6,
+        AnalyticShape::TroubleBeacon => 7,
+        AnalyticShape::SurfaceOverlay => 8,
+    }
+}
+fn encode_primitive_binding(hash: &mut Fnv1a64, binding: PrimitiveBinding) {
     match binding {
-        None => hash.u8(0),
-        Some(InstanceGroupBinding::PetBody) => hash.u8(1),
-        Some(InstanceGroupBinding::PetParticles) => hash.u8(2),
-        Some(InstanceGroupBinding::PropGlyphs(slot)) => {
-            hash.u8(3);
+        PrimitiveBinding::ShallowCard => hash.u8(0),
+        PrimitiveBinding::Analytic(id) => {
+            hash.u8(1);
+            hash.u8(id.0);
+        }
+        PrimitiveBinding::StaticAtlas(id) => {
+            hash.u8(2);
+            hash.u8(id.0);
+        }
+        PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs) => hash.u8(3),
+        PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body)) => hash.u8(4),
+        PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Particles)) => {
+            hash.u8(5)
+        }
+        PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(slot)) => {
+            hash.u8(6);
             hash.u8(slot);
         }
-        Some(InstanceGroupBinding::TankCells { slot, layer }) => {
-            hash.u8(4);
+        PrimitiveBinding::Instances(InstanceGroupBinding::TankCells { slot, layer }) => {
+            hash.u8(7);
             hash.u8(slot);
             hash.u8(instance_layer_tag(layer));
         }
-        Some(InstanceGroupBinding::Ambient) => hash.u8(5),
-        Some(InstanceGroupBinding::Hud) => hash.u8(6),
+        PrimitiveBinding::Instances(InstanceGroupBinding::Ambient) => hash.u8(8),
+        PrimitiveBinding::Instances(InstanceGroupBinding::Hud) => hash.u8(9),
     }
 }
 fn encode_prop_content(hash: &mut Fnv1a64, value: PropSemanticContent) {

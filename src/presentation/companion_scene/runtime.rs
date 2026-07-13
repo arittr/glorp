@@ -156,6 +156,7 @@ impl FrameChangeMask {
     pub(crate) const DIM: Self = Self(1 << 7);
     pub(crate) const LIGHTS: Self = Self(1 << 8);
     pub(crate) const ROOM_GLYPHS: Self = Self(1 << 9);
+    pub(crate) const TROUBLE_VISIBILITY: Self = Self(1 << 10);
 
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -545,6 +546,11 @@ pub(crate) fn classify_snapshot_changes(
     if canonical_ambient_frames_changed(previous, newest) {
         changes.frame.insert(FrameChangeMask::AMBIENT_INSTANCES);
     }
+    if super::canonical_activity_pulse_state(previous)
+        != super::canonical_activity_pulse_state(newest)
+    {
+        changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
+    }
     if previous.content.hud_glyphs != newest.content.hud_glyphs {
         changes.semantic.insert(SemanticChangeMask::HUD);
     }
@@ -569,7 +575,7 @@ pub(crate) fn classify_snapshot_changes(
         changes.frame.insert(FrameChangeMask::PROP_TRANSFORMS);
     }
     if previous.frame.helper_trouble != newest.frame.helper_trouble {
-        changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
+        changes.frame.insert(FrameChangeMask::TROUBLE_VISIBILITY);
     }
     if previous.frame.gauges != newest.frame.gauges {
         changes.frame.insert(FrameChangeMask::GAUGES);
@@ -1395,7 +1401,7 @@ impl CaptureLease<'_> {
             snapshot.frame.helper_trouble,
             snapshot.frame.asleep,
             snapshot.frame.dim_amount > 0.0,
-            snapshot.content.activity_pulse_age_ms.is_some(),
+            super::canonical_activity_pulse_state(snapshot).0,
         )
     }
 
@@ -3014,6 +3020,22 @@ mod tests {
                 }),
             ),
             (
+                "activity status",
+                Box::new(|s| {
+                    s.content.ambient_semantics[3] = AmbientSemanticSnapshot {
+                        slot: 3,
+                        kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
+                        glyph: Some('\u{25cc}'),
+                    };
+                    s.frame.ambient_instances[3] = AmbientFrameSnapshot {
+                        slot: 3,
+                        visible: true,
+                        position_points: [40.0, 50.0],
+                        opacity: 0.6,
+                    };
+                }),
+            ),
+            (
                 "hud",
                 Box::new(|s| {
                     s.content.hud_glyphs[0] = HudGlyphSnapshot { slot: 0, glyph: Some('R') };
@@ -3080,13 +3102,78 @@ mod tests {
 
         let pet_motion = classify(|s| s.frame.pet_depth += 0.1);
         assert!(pet_motion.frame().contains(FrameChangeMask::PET_TRANSFORM));
-        let status = classify(|s| s.frame.helper_trouble = true);
+        let trouble = classify(|s| s.frame.helper_trouble = true);
+        assert!(trouble
+            .frame()
+            .contains(FrameChangeMask::TROUBLE_VISIBILITY));
+        assert!(!trouble.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
+
+        let status = classify(|s| {
+            s.content.ambient_semantics[0] = AmbientSemanticSnapshot {
+                slot: 0,
+                kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
+                glyph: Some('\u{25cc}'),
+            };
+            s.frame.ambient_instances[0] = AmbientFrameSnapshot {
+                slot: 0,
+                visible: true,
+                position_points: [20.0, 30.0],
+                opacity: 0.75,
+            };
+        });
         assert!(status.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
 
         assert!(SemanticChangeMask::AMBIENT.is_named());
         assert!(FrameChangeMask::CAMERA.is_named());
         assert!(FrameChangeMask::LIGHTS.is_named());
         assert!(ResourceChangeMask::AMBIENT_AUTHORED.is_named());
+    }
+
+    #[test]
+    fn status_classification_uses_only_the_canonical_activity_tuple() {
+        let mut active = (*snapshot()).clone();
+        active.content.ambient_semantics[3] = AmbientSemanticSnapshot {
+            slot: 3,
+            kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
+            glyph: Some('\u{25cc}'),
+        };
+        active.frame.ambient_instances[3] = AmbientFrameSnapshot {
+            slot: 3,
+            visible: true,
+            position_points: [40.0, 50.0],
+            opacity: 0.6,
+        };
+
+        let mut moved = active.clone();
+        moved.frame.ambient_instances[3].position_points[0] += 1.0;
+        let changes = classify_snapshot_changes(&active, &moved);
+        assert!(changes.frame().contains(FrameChangeMask::AMBIENT_INSTANCES));
+        assert!(!changes.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
+
+        let mut faded = active.clone();
+        faded.frame.ambient_instances[3].opacity = 0.4;
+        let changes = classify_snapshot_changes(&active, &faded);
+        assert!(changes.frame().contains(FrameChangeMask::AMBIENT_INSTANCES));
+        assert!(changes.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
+
+        let mut hidden = active.clone();
+        hidden.frame.ambient_instances[3].visible = false;
+        assert_eq!(
+            super::super::canonical_activity_pulse_state(&hidden),
+            (false, 0.0)
+        );
+        let mut hidden_opacity_changed = hidden.clone();
+        hidden_opacity_changed.frame.ambient_instances[3].opacity = 0.2;
+        let changes = classify_snapshot_changes(&hidden, &hidden_opacity_changed);
+        assert!(changes.frame().contains(FrameChangeMask::AMBIENT_INSTANCES));
+        assert!(!changes.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
+
+        let mut raw_age_only = active.clone();
+        raw_age_only.content.activity_pulse_age_ms = None;
+        assert_eq!(
+            classify_snapshot_changes(&active, &raw_age_only),
+            SnapshotChangeSet::NONE
+        );
     }
 
     #[test]
@@ -4883,7 +4970,7 @@ mod tests {
         );
         assert_eq!(
             lease.logical_state_alias(),
-            super::super::contract::CompanionCaptureStateAlias::Active
+            super::super::contract::CompanionCaptureStateAlias::Normal
         );
     }
 

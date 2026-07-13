@@ -6,11 +6,12 @@ use super::buffers::{ByteSpan, DirtySpanSet, FixedPodMirror, MirrorError};
 use crate::presentation::companion_scene::scene::{
     is_world_blended, AmbientContentKind, AttachmentInstanceBinding, AttachmentMode, Bounds3,
     ContentDelta, DepthBehavior, FrameDelta, InstanceGroupBinding, InstanceLayer, MaterialKind,
-    MoodContentKind, NodeId, PetPaletteRole, PrimitiveKind, PrimitiveSpace, ResourceKind,
-    SceneContent, SceneFrame, SceneGenerationData, SceneTemplate, WeatherContentKind, WorldBlend,
-    MAX_AMBIENT_INSTANCES, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS, MAX_HUD_GLYPH_SLOTS, MAX_LIGHTS,
-    MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT, MAX_ROUND_TANK_INHABITANTS, MAX_SCENE_NODES,
-    MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT, MAX_VISIBLE_PROPS,
+    MoodContentKind, NodeId, PetArtFilter, PetPaletteRole, PrimitiveBinding, PrimitiveKind,
+    PrimitiveSpace, ResourceKind, SceneContent, SceneFrame, SceneGenerationData, SceneTemplate,
+    WeatherContentKind, WorldBlend, MAX_AMBIENT_INSTANCES, MAX_ATTACHMENTS, MAX_BLENDED_DRAWS,
+    MAX_HUD_GLYPH_SLOTS, MAX_LIGHTS, MAX_PET_ART_SLOTS, MAX_PROP_GLYPHS_PER_SLOT,
+    MAX_ROUND_TANK_INHABITANTS, MAX_SCENE_NODES, MAX_STATIC_PRIMITIVES, MAX_TANK_GLYPHS_PER_SLOT,
+    MAX_VISIBLE_PROPS,
 };
 
 const NONE_U32: u32 = u32::MAX;
@@ -418,6 +419,7 @@ pub(super) enum MirrorDeltaError {
     GenerationMismatch,
     PairMismatch,
     StaleBase,
+    UnsupportedDelta,
     InvalidRevisionAdvance,
     Validation(crate::presentation::companion_scene::validate::SceneValidationError),
     Compile(CompileError),
@@ -652,6 +654,9 @@ impl CpuSceneCandidate {
         }
         if content_delta.from != self.source_revisions {
             return Err(MirrorDeltaError::StaleBase);
+        }
+        if !content_delta.room_glyph_slots.is_empty() || !frame_delta.room_glyph_slots.is_empty() {
+            return Err(MirrorDeltaError::UnsupportedDelta);
         }
         if content_delta.to.semantic < content_delta.from.semantic
             || content_delta.to.frame < content_delta.from.frame
@@ -1427,7 +1432,7 @@ fn compile_cpu_parts(
             material_dense_index,
             first_vertex,
         );
-        let (instance_group, instance_slot) = instance_group_tags(primitive.instance_group);
+        let (instance_group, instance_slot) = instance_group_tags(primitive.binding);
         primitives.push(CpuPrimitiveDescriptor {
             node_id: primitive.node.0,
             node_dense_index,
@@ -1614,8 +1619,10 @@ fn compile_attachment_descriptors(
                                 .iter()
                                 .enumerate()
                                 .filter(|(_, primitive)| {
-                                    primitive.instance_group
-                                        == Some(InstanceGroupBinding::PropGlyphs(slot))
+                                    primitive.binding
+                                        == PrimitiveBinding::Instances(
+                                            InstanceGroupBinding::PropGlyphs(slot),
+                                        )
                                 });
                         let (source_primitive, primitive) = matches
                             .next()
@@ -2191,17 +2198,22 @@ fn space_tag(value: PrimitiveSpace) -> u32 {
     }
 }
 
-fn instance_group_tags(value: Option<InstanceGroupBinding>) -> (u32, u32) {
+fn instance_group_tags(value: PrimitiveBinding) -> (u32, u32) {
     match value {
-        None => (0, NONE_U32),
-        Some(InstanceGroupBinding::PetBody) => (1, 0),
-        Some(InstanceGroupBinding::PetParticles) => (2, 0),
-        Some(InstanceGroupBinding::PropGlyphs(slot)) => (3, u32::from(slot)),
-        Some(InstanceGroupBinding::TankCells { slot, layer }) => {
+        PrimitiveBinding::ShallowCard
+        | PrimitiveBinding::Analytic(_)
+        | PrimitiveBinding::StaticAtlas(_) => (0, NONE_U32),
+        PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs) => (0, NONE_U32),
+        PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body)) => (1, 0),
+        PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Particles)) => {
+            (2, 0)
+        }
+        PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(slot)) => (3, u32::from(slot)),
+        PrimitiveBinding::Instances(InstanceGroupBinding::TankCells { slot, layer }) => {
             (4 + instance_layer_tag(layer), u32::from(slot))
         }
-        Some(InstanceGroupBinding::Ambient) => (7, 0),
-        Some(InstanceGroupBinding::Hud) => (8, 0),
+        PrimitiveBinding::Instances(InstanceGroupBinding::Ambient) => (7, 0),
+        PrimitiveBinding::Instances(InstanceGroupBinding::Hud) => (8, 0),
     }
 }
 
@@ -2873,7 +2885,8 @@ mod tests {
     #[test]
     fn attachment_tables_preserve_binding_source_and_local_transform() {
         let mut fixture = SceneFixture::valid();
-        fixture.template.primitives[0].instance_group = Some(InstanceGroupBinding::PropGlyphs(4));
+        fixture.template.primitives[0].binding =
+            PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(4));
         fixture.template.attachments[0].instance_binding =
             Some(AttachmentInstanceBinding::PropGlyphs(4));
         fixture.template.attachments[0].mode = AttachmentMode::SnapshotWorldOnSpawn;
@@ -3057,6 +3070,40 @@ mod tests {
             Err(MirrorDeltaError::Validation(_))
         ));
         assert_eq!(candidate, before);
+    }
+
+    #[test]
+    fn room_glyph_deltas_are_unsupported_and_leave_candidate_unchanged() {
+        let mut candidate = compile_fixture(&SceneFixture::valid());
+
+        for case in ["content", "frame", "paired"] {
+            let before = candidate.clone();
+            let (mut content, mut frame) = paired_deltas(
+                &candidate,
+                crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+            );
+            if matches!(case, "content" | "paired") {
+                let mut slot = candidate.logical_content.room_glyph_slots[0];
+                slot.glyph = Some(AuthoredGlyph::new('\u{25c7}').unwrap());
+                slot.color_srgb8 = Some([10, 20, 30]);
+                content.room_glyph_slots.push(slot);
+            }
+            if matches!(case, "frame" | "paired") {
+                let mut slot = candidate.accepted.frame().frame().room_glyph_slots[0];
+                slot.visible = true;
+                slot.grid_cell = [1, 2];
+                slot.position_points = [12.0, 24.0];
+                slot.opacity = 0.75;
+                frame.room_glyph_slots.push(slot);
+            }
+
+            assert_eq!(
+                candidate.apply_deltas(&content, &frame),
+                Err(MirrorDeltaError::UnsupportedDelta),
+                "{case}"
+            );
+            assert_eq!(candidate, before, "{case}");
+        }
     }
 
     #[test]

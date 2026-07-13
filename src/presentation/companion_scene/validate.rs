@@ -178,9 +178,12 @@ pub fn validate_template(
     validate_nodes(template)?;
     validate_materials(template)?;
     validate_resources(template)?;
+    validate_static_atlas_recipes(&template.static_atlas_recipes)?;
+    validate_analytic_templates(&template.analytic_templates)?;
     validate_attachments(template)?;
     validate_hierarchy(template)?;
     validate_primitives(template)?;
+    validate_companion_instance_sources(template)?;
     let node_dense_indices = template
         .nodes
         .iter()
@@ -823,6 +826,50 @@ fn validate_resources(template: &SceneTemplate) -> Result<(), SceneValidationErr
     Ok(())
 }
 
+fn validate_static_atlas_recipes(
+    slots: &[StaticAtlasRecipeSlot],
+) -> Result<(), SceneValidationError> {
+    if slots.len() != MAX_STATIC_ATLAS_RECIPES
+        || slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.id.0) != index)
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    for slot in slots {
+        if let Some(recipe) = slot.recipe {
+            validate_bounds(recipe.local_bounds)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_analytic_templates(slots: &[AnalyticTemplateSlot]) -> Result<(), SceneValidationError> {
+    let unit_bounds = Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] };
+    if slots.len() != MAX_ANALYTIC_PARAMS {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    for (index, slot) in slots.iter().enumerate() {
+        if usize::from(slot.id.0) != index {
+            return Err(SceneValidationError::DuplicateSlot);
+        }
+        match (index, slot.value) {
+            (0..=7, Some(value))
+                if value.semantic == AnalyticSemantic::ALL[index]
+                    && value.semantic.id() == slot.id
+                    && value.shape == value.semantic.shape()
+                    && value.normalized_local_bounds == unit_bounds =>
+            {
+                validate_bounds(value.normalized_local_bounds)?;
+            }
+            (8.., None) => {}
+            _ => return Err(SceneValidationError::NonCanonicalEmptySlot),
+        }
+    }
+    Ok(())
+}
+
 fn validate_attachments(template: &SceneTemplate) -> Result<(), SceneValidationError> {
     let node_ids = template
         .nodes
@@ -853,7 +900,8 @@ fn validate_attachments(template: &SceneTemplate) -> Result<(), SceneValidationE
                 .primitives
                 .iter()
                 .filter(|primitive| {
-                    primitive.instance_group == Some(InstanceGroupBinding::PropGlyphs(slot))
+                    primitive.binding
+                        == PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(slot))
                 })
                 .map(|primitive| primitive.node);
             let source = sources
@@ -932,6 +980,7 @@ fn validate_primitives(template: &SceneTemplate) -> Result<(), SceneValidationEr
         .map(|resource| (resource.id, resource.kind))
         .collect::<HashMap<_, _>>();
     let mut authored_orders = HashSet::new();
+    let mut instance_bindings = Vec::new();
     for primitive in &template.primitives {
         if !node_ids.contains(&primitive.node) {
             return Err(SceneValidationError::DanglingNodeReference);
@@ -961,31 +1010,204 @@ fn validate_primitives(template: &SceneTemplate) -> Result<(), SceneValidationEr
         if !authored_orders.insert(primitive.authored_order) {
             return Err(SceneValidationError::DuplicateAuthoredOrder);
         }
-        let binding_matches = match (primitive.kind, primitive.instance_group) {
-            (PrimitiveKind::InstanceQuad, Some(InstanceGroupBinding::PropGlyphs(slot))) => {
-                usize::from(slot) < MAX_VISIBLE_PROPS
+        let binding_matches = match (primitive.kind, primitive.binding) {
+            (PrimitiveKind::InstanceQuad, PrimitiveBinding::Instances(binding)) => {
+                let slot_in_bounds = match binding {
+                    InstanceGroupBinding::PropGlyphs(slot) => usize::from(slot) < MAX_VISIBLE_PROPS,
+                    InstanceGroupBinding::TankCells { slot, .. } => {
+                        usize::from(slot) < MAX_ROUND_TANK_INHABITANTS
+                    }
+                    _ => true,
+                };
+                slot_in_bounds && instance_binding_semantics_match(binding, material, primitive)
             }
-            (PrimitiveKind::InstanceQuad, Some(InstanceGroupBinding::TankCells { slot, .. })) => {
-                usize::from(slot) < MAX_ROUND_TANK_INHABITANTS
+            (PrimitiveKind::InstanceQuad, PrimitiveBinding::ShallowCard) => false,
+            (PrimitiveKind::AnalyticShape, PrimitiveBinding::Analytic(id)) => {
+                usize::from(id.0) < MAX_ANALYTIC_PARAMS
+                    && template.analytic_templates[usize::from(id.0)]
+                        .value
+                        .is_some_and(|value| {
+                            analytic_binding_semantics_match(value.semantic, material, primitive)
+                        })
             }
-            (
-                PrimitiveKind::InstanceQuad,
-                Some(
-                    InstanceGroupBinding::PetBody
-                    | InstanceGroupBinding::PetParticles
-                    | InstanceGroupBinding::Ambient
-                    | InstanceGroupBinding::Hud,
-                ),
-            ) => true,
-            (PrimitiveKind::InstanceQuad, None) => false,
-            (_, None) => true,
-            (_, Some(_)) => false,
+            (PrimitiveKind::AtlasQuad, PrimitiveBinding::StaticAtlas(id)) => {
+                usize::from(id.0) < MAX_STATIC_ATLAS_RECIPES
+                    && template.static_atlas_recipes[usize::from(id.0)]
+                        .recipe
+                        .is_some()
+            }
+            (PrimitiveKind::ShallowCard, PrimitiveBinding::ShallowCard) => true,
+            (_, _) => false,
         };
         let space_matches = match material {
             MaterialKind::ScreenChrome => primitive.space == PrimitiveSpace::Screen,
             _ => primitive.space == PrimitiveSpace::World,
         };
         if !binding_matches || !space_matches {
+            return Err(SceneValidationError::InvalidPrimitiveBinding);
+        }
+        if let PrimitiveBinding::Instances(binding) = primitive.binding {
+            if instance_bindings.contains(&binding) {
+                return Err(SceneValidationError::InvalidPrimitiveBinding);
+            }
+            instance_bindings.push(binding);
+        }
+    }
+    Ok(())
+}
+
+fn instance_binding_semantics_match(
+    binding: InstanceGroupBinding,
+    material: MaterialKind,
+    primitive: &PrimitiveTemplate,
+) -> bool {
+    let (expected_material, expected_blend, expected_depth, expected_space) = match binding {
+        InstanceGroupBinding::PetArt(PetArtFilter::Particles) | InstanceGroupBinding::Ambient => (
+            MaterialKind::AdditiveGlow,
+            WorldBlend::Additive,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveSpace::World,
+        ),
+        InstanceGroupBinding::Hud => (
+            MaterialKind::ScreenChrome,
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::ScreenNoDepth,
+            PrimitiveSpace::Screen,
+        ),
+        InstanceGroupBinding::RoomGlyphs
+        | InstanceGroupBinding::PetArt(PetArtFilter::Body)
+        | InstanceGroupBinding::PropGlyphs(_)
+        | InstanceGroupBinding::TankCells { .. } => (
+            MaterialKind::UnlitGlyphSprite,
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveSpace::World,
+        ),
+    };
+    material == expected_material
+        && primitive.blend == expected_blend
+        && primitive.depth == expected_depth
+        && primitive.space == expected_space
+}
+
+fn analytic_binding_semantics_match(
+    semantic: AnalyticSemantic,
+    material: MaterialKind,
+    primitive: &PrimitiveTemplate,
+) -> bool {
+    let (expected_material, expected_blend, expected_depth, expected_space) = match semantic {
+        AnalyticSemantic::RoomBackground => (
+            MaterialKind::UnlitAnalytic,
+            WorldBlend::Opaque,
+            DepthBehavior::WorldWrite,
+            PrimitiveSpace::World,
+        ),
+        AnalyticSemantic::WallShadow | AnalyticSemantic::FloorProjection => (
+            MaterialKind::MultiplyShadow,
+            WorldBlend::Multiply,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveSpace::World,
+        ),
+        AnalyticSemantic::MoodAura => (
+            MaterialKind::UnlitAnalytic,
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveSpace::World,
+        ),
+        AnalyticSemantic::StatusHalo
+        | AnalyticSemantic::Gauges
+        | AnalyticSemantic::Trouble
+        | AnalyticSemantic::Dim => (
+            MaterialKind::ScreenChrome,
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::ScreenNoDepth,
+            PrimitiveSpace::Screen,
+        ),
+    };
+    material == expected_material
+        && primitive.blend == expected_blend
+        && primitive.depth == expected_depth
+        && primitive.space == expected_space
+}
+
+fn validate_companion_instance_sources(
+    template: &SceneTemplate,
+) -> Result<(), SceneValidationError> {
+    if !template
+        .nodes
+        .iter()
+        .any(|node| node.alias.as_str() == "world.room.glyphs")
+    {
+        return Ok(());
+    }
+    let expected = [
+        (
+            "world.room.glyphs",
+            PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs),
+        ),
+        (
+            "pet.body",
+            PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body)),
+        ),
+        (
+            "pet.particles",
+            PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Particles)),
+        ),
+    ];
+    let mut resources = [None; 3];
+    for (expected_index, (alias, binding)) in expected.into_iter().enumerate() {
+        let node = template
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == alias)
+            .ok_or(SceneValidationError::InvalidPrimitiveBinding)?;
+        let mut matches = template
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.binding == binding);
+        let primitive = matches
+            .next()
+            .ok_or(SceneValidationError::InvalidPrimitiveBinding)?;
+        if matches.next().is_some() || primitive.node != node.id {
+            return Err(SceneValidationError::InvalidPrimitiveBinding);
+        }
+        resources[expected_index] = primitive.resource;
+    }
+    if resources[1].is_none() || resources[1] != resources[2] {
+        return Err(SceneValidationError::InvalidPrimitiveBinding);
+    }
+    if template
+        .static_atlas_recipes
+        .iter()
+        .any(|slot| slot.recipe.is_some())
+    {
+        return Err(SceneValidationError::InvalidPrimitiveBinding);
+    }
+    let analytic_owners = [
+        ("world.room.background", AnalyticSemantic::RoomBackground),
+        ("pet.shadow.wall", AnalyticSemantic::WallShadow),
+        ("pet.projection.floor", AnalyticSemantic::FloorProjection),
+        ("chrome.status", AnalyticSemantic::StatusHalo),
+        ("pet.aura.mood", AnalyticSemantic::MoodAura),
+        ("chrome.gauges", AnalyticSemantic::Gauges),
+        ("chrome.trouble", AnalyticSemantic::Trouble),
+        ("chrome.dim", AnalyticSemantic::Dim),
+    ];
+    for (alias, semantic) in analytic_owners {
+        let node = template
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == alias)
+            .ok_or(SceneValidationError::InvalidPrimitiveBinding)?;
+        let binding = PrimitiveBinding::Analytic(semantic.id());
+        let mut matches = template
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.binding == binding);
+        let primitive = matches
+            .next()
+            .ok_or(SceneValidationError::InvalidPrimitiveBinding)?;
+        if matches.next().is_some() || primitive.node != node.id {
             return Err(SceneValidationError::InvalidPrimitiveBinding);
         }
     }
@@ -1814,6 +2036,177 @@ mod tests {
         );
     }
 
+    fn instance_template(binding: InstanceGroupBinding) -> SceneTemplate {
+        let mut template = SceneFixture::valid().template;
+        let primitive = &mut template.primitives[0];
+        primitive.kind = PrimitiveKind::InstanceQuad;
+        primitive.binding = PrimitiveBinding::Instances(binding);
+        primitive.space = PrimitiveSpace::World;
+        primitive.depth = DepthBehavior::WorldReadOnly;
+        match binding {
+            InstanceGroupBinding::PetArt(PetArtFilter::Particles)
+            | InstanceGroupBinding::Ambient => {
+                template.materials[0].kind = MaterialKind::AdditiveGlow;
+                primitive.blend = WorldBlend::Additive;
+            }
+            InstanceGroupBinding::Hud => {
+                template.materials[0].kind = MaterialKind::ScreenChrome;
+                primitive.blend = WorldBlend::PremultipliedAlpha;
+                primitive.depth = DepthBehavior::ScreenNoDepth;
+                primitive.space = PrimitiveSpace::Screen;
+            }
+            _ => {
+                template.materials[0].kind = MaterialKind::UnlitGlyphSprite;
+                primitive.blend = WorldBlend::PremultipliedAlpha;
+            }
+        }
+        template
+    }
+
+    fn analytic_template(semantic: AnalyticSemantic) -> SceneTemplate {
+        let mut template = SceneFixture::valid().template;
+        let primitive = &mut template.primitives[0];
+        primitive.kind = PrimitiveKind::AnalyticShape;
+        primitive.binding = PrimitiveBinding::Analytic(semantic.id());
+        template.resources[0].kind = ResourceKind::AnalyticGeometry;
+        match semantic {
+            AnalyticSemantic::RoomBackground => {
+                template.materials[0].kind = MaterialKind::UnlitAnalytic;
+                primitive.blend = WorldBlend::Opaque;
+                primitive.depth = DepthBehavior::WorldWrite;
+                primitive.space = PrimitiveSpace::World;
+            }
+            AnalyticSemantic::WallShadow | AnalyticSemantic::FloorProjection => {
+                template.materials[0].kind = MaterialKind::MultiplyShadow;
+                primitive.blend = WorldBlend::Multiply;
+                primitive.depth = DepthBehavior::WorldReadOnly;
+                primitive.space = PrimitiveSpace::World;
+            }
+            AnalyticSemantic::MoodAura => {
+                template.materials[0].kind = MaterialKind::UnlitAnalytic;
+                primitive.blend = WorldBlend::PremultipliedAlpha;
+                primitive.depth = DepthBehavior::WorldReadOnly;
+                primitive.space = PrimitiveSpace::World;
+            }
+            AnalyticSemantic::StatusHalo
+            | AnalyticSemantic::Gauges
+            | AnalyticSemantic::Trouble
+            | AnalyticSemantic::Dim => {
+                template.materials[0].kind = MaterialKind::ScreenChrome;
+                primitive.blend = WorldBlend::PremultipliedAlpha;
+                primitive.depth = DepthBehavior::ScreenNoDepth;
+                primitive.space = PrimitiveSpace::Screen;
+            }
+        }
+        template
+    }
+
+    #[test]
+    fn instance_bindings_require_exact_semantics_and_unique_sources() {
+        let bindings = [
+            InstanceGroupBinding::RoomGlyphs,
+            InstanceGroupBinding::PetArt(PetArtFilter::Body),
+            InstanceGroupBinding::PetArt(PetArtFilter::Particles),
+            InstanceGroupBinding::PropGlyphs(2),
+            InstanceGroupBinding::TankCells { slot: 1, layer: InstanceLayer::Behind },
+            InstanceGroupBinding::TankCells {
+                slot: 1,
+                layer: InstanceLayer::Foreground,
+            },
+            InstanceGroupBinding::Ambient,
+            InstanceGroupBinding::Hud,
+        ];
+
+        for binding in bindings {
+            let template = instance_template(binding);
+            assert!(validate_template(&template).is_ok(), "{binding:?}");
+
+            let mut duplicate = template.clone();
+            let mut primitive = duplicate.primitives[0].clone();
+            primitive.authored_order = 1;
+            duplicate.primitives.push(primitive);
+            assert_eq!(
+                validate_template(&duplicate),
+                Err(SceneValidationError::InvalidPrimitiveBinding),
+                "{binding:?}"
+            );
+
+            let mut wrong_blend = template;
+            wrong_blend.primitives[0].blend = match binding {
+                InstanceGroupBinding::PetArt(PetArtFilter::Particles)
+                | InstanceGroupBinding::Ambient => WorldBlend::PremultipliedAlpha,
+                _ => WorldBlend::Additive,
+            };
+            assert!(validate_template(&wrong_blend).is_err(), "{binding:?}");
+        }
+
+        let mut distinct_props = instance_template(InstanceGroupBinding::PropGlyphs(0));
+        let mut second_prop = distinct_props.primitives[0].clone();
+        second_prop.binding = PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(1));
+        second_prop.authored_order = 1;
+        distinct_props.primitives.push(second_prop);
+        assert!(validate_template(&distinct_props).is_ok());
+
+        let mut distinct_tank_layers = instance_template(InstanceGroupBinding::TankCells {
+            slot: 0,
+            layer: InstanceLayer::Behind,
+        });
+        let mut foreground = distinct_tank_layers.primitives[0].clone();
+        foreground.binding = PrimitiveBinding::Instances(InstanceGroupBinding::TankCells {
+            slot: 0,
+            layer: InstanceLayer::Foreground,
+        });
+        foreground.authored_order = 1;
+        distinct_tank_layers.primitives.push(foreground);
+        assert!(validate_template(&distinct_tank_layers).is_ok());
+    }
+
+    #[test]
+    fn analytic_template_bounds_are_exactly_unit_normalized() {
+        let mut template = SceneFixture::valid().template;
+        template.analytic_templates[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .normalized_local_bounds
+            .max[0] = 2.0;
+        assert_eq!(
+            validate_template(&template),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
+        );
+    }
+
+    #[test]
+    fn analytic_bindings_require_their_exact_semantic_render_state() {
+        for semantic in AnalyticSemantic::ALL {
+            let template = analytic_template(semantic);
+            assert!(validate_template(&template).is_ok(), "{semantic:?}");
+
+            let alternate = match semantic {
+                AnalyticSemantic::RoomBackground => AnalyticSemantic::WallShadow,
+                AnalyticSemantic::WallShadow | AnalyticSemantic::FloorProjection => {
+                    AnalyticSemantic::MoodAura
+                }
+                AnalyticSemantic::MoodAura
+                | AnalyticSemantic::StatusHalo
+                | AnalyticSemantic::Gauges
+                | AnalyticSemantic::Trouble
+                | AnalyticSemantic::Dim => AnalyticSemantic::WallShadow,
+            };
+            let alternate = analytic_template(alternate);
+            let mut wrong = template;
+            wrong.materials[0].kind = alternate.materials[0].kind;
+            wrong.primitives[0].blend = alternate.primitives[0].blend;
+            wrong.primitives[0].depth = alternate.primitives[0].depth;
+            wrong.primitives[0].space = alternate.primitives[0].space;
+            assert_eq!(
+                validate_template(&wrong),
+                Err(SceneValidationError::InvalidPrimitiveBinding),
+                "{semantic:?}"
+            );
+        }
+    }
+
     #[test]
     fn full_validation_rejects_non_finite_cues_and_zero_quaternions() {
         let mut template = SceneFixture::valid().template;
@@ -2018,7 +2411,8 @@ mod tests {
         );
 
         let mut template = SceneFixture::valid().template;
-        template.primitives[0].instance_group = Some(InstanceGroupBinding::PropGlyphs(0));
+        template.primitives[0].binding =
+            PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(0));
         template.attachments[0].instance_binding = Some(AttachmentInstanceBinding::PropGlyphs(0));
         template.attachments[0].owner = template.nodes[0].id;
         assert_eq!(
@@ -2031,7 +2425,10 @@ mod tests {
     fn attachment_instance_binding_rejects_canonical_empty_prop_slot() {
         let mut fixture = SceneFixture::valid();
         fixture.template.primitives[0].kind = PrimitiveKind::InstanceQuad;
-        fixture.template.primitives[0].instance_group = Some(InstanceGroupBinding::PropGlyphs(0));
+        fixture.template.primitives[0].binding =
+            PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(0));
+        fixture.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+        fixture.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
         fixture.template.attachments[0].instance_binding =
             Some(AttachmentInstanceBinding::PropGlyphs(0));
         assert_eq!(

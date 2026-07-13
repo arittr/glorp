@@ -453,6 +453,24 @@ pub struct AmbientFrameSnapshot {
     pub opacity: f32,
 }
 
+pub(crate) fn canonical_activity_pulse_state(snapshot: &CompanionSceneSnapshot) -> (bool, f32) {
+    let Some(semantic) = snapshot
+        .content
+        .ambient_semantics
+        .iter()
+        .find(|semantic| semantic.kind == Some(AmbientSemanticKindSnapshot::ActivityPulse))
+    else {
+        return (false, 0.0);
+    };
+    snapshot
+        .frame
+        .ambient_instances
+        .iter()
+        .find(|frame| frame.slot == semantic.slot)
+        .filter(|frame| frame.visible)
+        .map_or((false, 0.0), |frame| (true, frame.opacity))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct HudFrameSnapshot {
     pub slot: u8,

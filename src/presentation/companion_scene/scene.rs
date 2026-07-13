@@ -17,6 +17,8 @@ pub const MAX_ATTACHMENTS: usize = 32;
 pub const MAX_PROP_GLYPHS_PER_SLOT: usize = 9;
 pub const MAX_TANK_GLYPHS_PER_SLOT: usize = 8;
 pub const MAX_HUD_GLYPH_SLOTS: usize = 24;
+pub const MAX_STATIC_ATLAS_RECIPES: usize = 8;
+pub const MAX_ANALYTIC_PARAMS: usize = 16;
 pub const LIT_CARD_SCALE_TOLERANCE: f32 = 1.0e-5;
 pub const MIN_LIT_CARD_WORLD_SCALE: f64 = 1.0e-6;
 // V1 emits SDR, but these bounds leave ample headroom for authored HDR-like
@@ -92,6 +94,15 @@ semantic_id!(NodeId);
 semantic_id!(AttachmentId);
 semantic_id!(MaterialId);
 semantic_id!(ResourceId);
+semantic_id!(StaticAtlasSourceKey);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct StaticAtlasRecipeId(pub u8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct AnalyticParamId(pub u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -440,7 +451,7 @@ pub struct PrimitiveTemplate {
     pub resource: Option<ResourceId>,
     pub blend: WorldBlend,
     pub depth: DepthBehavior,
-    pub instance_group: Option<InstanceGroupBinding>,
+    pub binding: PrimitiveBinding,
     pub authored_order: u16,
     pub local_geometry: Bounds3,
     pub space: PrimitiveSpace,
@@ -463,12 +474,37 @@ pub enum InstanceLayer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstanceGroupBinding {
-    PetBody,
-    PetParticles,
+    RoomGlyphs,
+    PetArt(PetArtFilter),
     PropGlyphs(u8),
     TankCells { slot: u8, layer: InstanceLayer },
     Ambient,
     Hud,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PetArtFilter {
+    Body,
+    Particles,
+}
+
+impl PetArtFilter {
+    pub const fn includes(self, role: PetPaletteRole) -> bool {
+        match self {
+            Self::Body => !matches!(role, PetPaletteRole::Particle),
+            Self::Particles => matches!(role, PetPaletteRole::Particle),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrimitiveBinding {
+    ShallowCard,
+    Instances(InstanceGroupBinding),
+    Analytic(AnalyticParamId),
+    StaticAtlas(StaticAtlasRecipeId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -514,7 +550,8 @@ pub fn resolve_attachment_world(
                 .primitives
                 .iter()
                 .filter(|primitive| {
-                    primitive.instance_group == Some(InstanceGroupBinding::PropGlyphs(slot))
+                    primitive.binding
+                        == PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(slot))
                 })
                 .map(|primitive| primitive.node);
             let source = matches
@@ -601,6 +638,8 @@ pub struct SceneCapacities {
     pub max_blended_draws: usize,
     pub max_lights: usize,
     pub max_attachments: usize,
+    pub max_static_atlas_recipes: usize,
+    pub max_analytic_params: usize,
 }
 
 impl SceneCapacities {
@@ -615,7 +654,126 @@ impl SceneCapacities {
         max_blended_draws: MAX_BLENDED_DRAWS,
         max_lights: MAX_LIGHTS,
         max_attachments: MAX_ATTACHMENTS,
+        max_static_atlas_recipes: MAX_STATIC_ATLAS_RECIPES,
+        max_analytic_params: MAX_ANALYTIC_PARAMS,
     };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StaticAtlasSemantic {
+    DecorativeSprite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct StaticAtlasRecipe {
+    pub semantic: StaticAtlasSemantic,
+    pub source: StaticAtlasSourceKey,
+    pub local_bounds: Bounds3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct StaticAtlasRecipeSlot {
+    pub id: StaticAtlasRecipeId,
+    pub recipe: Option<StaticAtlasRecipe>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnalyticSemantic {
+    RoomBackground,
+    WallShadow,
+    FloorProjection,
+    StatusHalo,
+    MoodAura,
+    Gauges,
+    Trouble,
+    Dim,
+}
+
+impl AnalyticSemantic {
+    pub const ALL: [Self; 8] = [
+        Self::RoomBackground,
+        Self::WallShadow,
+        Self::FloorProjection,
+        Self::StatusHalo,
+        Self::MoodAura,
+        Self::Gauges,
+        Self::Trouble,
+        Self::Dim,
+    ];
+
+    pub const fn id(self) -> AnalyticParamId {
+        AnalyticParamId(match self {
+            Self::RoomBackground => 0,
+            Self::WallShadow => 1,
+            Self::FloorProjection => 2,
+            Self::StatusHalo => 3,
+            Self::MoodAura => 4,
+            Self::Gauges => 5,
+            Self::Trouble => 6,
+            Self::Dim => 7,
+        })
+    }
+
+    pub const fn shape(self) -> AnalyticShape {
+        match self {
+            Self::RoomBackground => AnalyticShape::ApertureRadial,
+            Self::WallShadow => AnalyticShape::PetSilhouette,
+            Self::FloorProjection => AnalyticShape::RadialEllipse,
+            Self::StatusHalo => AnalyticShape::StatusBeacon,
+            Self::MoodAura => AnalyticShape::PetAura,
+            Self::Gauges => AnalyticShape::PerimeterGaugeSet,
+            Self::Trouble => AnalyticShape::TroubleBeacon,
+            Self::Dim => AnalyticShape::SurfaceOverlay,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnalyticShape {
+    ApertureRadial,
+    PetSilhouette,
+    RadialEllipse,
+    StatusBeacon,
+    PetAura,
+    PerimeterGaugeSet,
+    TroubleBeacon,
+    SurfaceOverlay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct AnalyticTemplate {
+    pub semantic: AnalyticSemantic,
+    pub shape: AnalyticShape,
+    /// Canonical normalized local geometry. Dynamic point-space placement is
+    /// deliberately owned by the later analytic frame contract.
+    pub normalized_local_bounds: Bounds3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct AnalyticTemplateSlot {
+    pub id: AnalyticParamId,
+    pub value: Option<AnalyticTemplate>,
+}
+
+fn empty_static_atlas_recipe_slots() -> Vec<StaticAtlasRecipeSlot> {
+    (0..MAX_STATIC_ATLAS_RECIPES)
+        .map(|slot| StaticAtlasRecipeSlot {
+            id: StaticAtlasRecipeId(slot as u8),
+            recipe: None,
+        })
+        .collect()
+}
+
+fn empty_analytic_template_slots() -> Vec<AnalyticTemplateSlot> {
+    (0..MAX_ANALYTIC_PARAMS)
+        .map(|slot| AnalyticTemplateSlot {
+            id: AnalyticParamId(slot as u8),
+            value: None,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -629,6 +787,8 @@ pub struct SceneTemplate {
     pub materials: Vec<MaterialTemplate>,
     pub resources: Vec<ResourceTemplate>,
     pub attachments: Vec<AttachmentTemplate>,
+    pub static_atlas_recipes: Vec<StaticAtlasRecipeSlot>,
+    pub analytic_templates: Vec<AnalyticTemplateSlot>,
     pub privacy: PrivacyProjection,
     pub generation_checksum: u64,
 }
@@ -1203,8 +1363,15 @@ impl SceneFixture {
         let material = MaterialId::from_alias(&material_alias);
         let resource_alias = alias("resource.pet-glyph-atlas");
         let resource = ResourceId::from_alias(&resource_alias);
+        let atlas_source = StaticAtlasSourceKey::from_alias(&resource_alias);
         let attachment_alias = alias("pet.body.bubble-origin");
         let camera = OrthographicCamera::new(360.0, 360.0, -2.0, 2.0).unwrap();
+        let mut static_atlas_recipes = empty_static_atlas_recipe_slots();
+        static_atlas_recipes[0].recipe = Some(StaticAtlasRecipe {
+            semantic: StaticAtlasSemantic::DecorativeSprite,
+            source: atlas_source,
+            local_bounds: Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] },
+        });
         Self {
             template: SceneTemplate {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -1243,7 +1410,7 @@ impl SceneFixture {
                     resource: Some(resource),
                     blend: WorldBlend::AlphaCutout,
                     depth: DepthBehavior::WorldWrite,
-                    instance_group: None,
+                    binding: PrimitiveBinding::StaticAtlas(StaticAtlasRecipeId(0)),
                     authored_order: 0,
                     local_geometry: Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] },
                     space: PrimitiveSpace::World,
@@ -1266,6 +1433,11 @@ impl SceneFixture {
                     mode: AttachmentMode::Follow,
                     instance_binding: None,
                 }],
+                static_atlas_recipes,
+                analytic_templates: compiler::build_analytic_templates(Bounds3 {
+                    min: [0.0; 3],
+                    max: [1.0, 1.0, 0.0],
+                }),
                 privacy: PrivacyProjection::for_surface(
                     crate::presentation::privacy::PresentationSurface::RoundCompanion,
                 ),
@@ -1327,6 +1499,7 @@ impl SceneFixture {
         let mut template = Self::valid().template;
         template.materials[0].kind = MaterialKind::LitShallowCard;
         template.primitives[0].kind = PrimitiveKind::ShallowCard;
+        template.primitives[0].binding = PrimitiveBinding::ShallowCard;
         template.resources[0].kind = ResourceKind::ShallowCardGeometry;
         template.primitives[0].blend = WorldBlend::Opaque;
         template
@@ -1582,14 +1755,14 @@ mod tests {
             resource: Some(ResourceId(3)),
             blend: WorldBlend::AlphaCutout,
             depth: DepthBehavior::WorldWrite,
-            instance_group: Some(InstanceGroupBinding::PropGlyphs(4)),
+            binding: PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(4)),
             authored_order: 17,
             local_geometry: Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] },
             space: PrimitiveSpace::World,
         };
         assert_eq!(
-            primitive.instance_group,
-            Some(InstanceGroupBinding::PropGlyphs(4))
+            primitive.binding,
+            PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(4))
         );
         assert_eq!(primitive.authored_order, 17);
         assert_eq!(primitive.space, PrimitiveSpace::World);
@@ -2054,7 +2227,7 @@ mod tests {
     }
 
     #[test]
-    fn pet_body_and_particles_use_distinct_instance_groups() {
+    fn pet_body_and_particles_share_slots_with_complementary_filters() {
         let built =
             build_scene_generation(&snapshot_for(Species::Fuzz, Stage::S3), generation_key(1))
                 .unwrap();
@@ -2062,10 +2235,28 @@ mod tests {
             .template
             .primitives
             .iter()
-            .filter_map(|primitive| primitive.instance_group)
+            .filter_map(|primitive| match primitive.binding {
+                PrimitiveBinding::Instances(binding) => Some(binding),
+                _ => None,
+            })
             .collect::<Vec<_>>();
-        assert!(bindings.contains(&InstanceGroupBinding::PetBody));
-        assert!(bindings.contains(&InstanceGroupBinding::PetParticles));
+        assert!(bindings.contains(&InstanceGroupBinding::PetArt(PetArtFilter::Body)));
+        assert!(bindings.contains(&InstanceGroupBinding::PetArt(PetArtFilter::Particles)));
+        for role in [
+            PetPaletteRole::Body,
+            PetPaletteRole::BodyGlow,
+            PetPaletteRole::Eye,
+            PetPaletteRole::Mouth,
+            PetPaletteRole::Accent,
+            PetPaletteRole::Pattern,
+            PetPaletteRole::Particle,
+            PetPaletteRole::Corruption,
+        ] {
+            assert_ne!(
+                PetArtFilter::Body.includes(role),
+                PetArtFilter::Particles.includes(role)
+            );
+        }
     }
 
     #[test]
@@ -2184,7 +2375,10 @@ mod tests {
             .template
             .primitives
             .iter()
-            .find(|primitive| primitive.instance_group == Some(InstanceGroupBinding::PropGlyphs(0)))
+            .find(|primitive| {
+                primitive.binding
+                    == PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(0))
+            })
             .unwrap()
             .node;
 
@@ -2320,7 +2514,7 @@ mod tests {
         );
         assert_eq!(
             nodes["pet.projection.floor"].base_transform.translation[2],
-            -1.20
+            -1.70
         );
         assert_eq!(built.frame.gauges, [0.0, 0.125, 0.375, 0.75]);
         let mut orders = built
@@ -2654,6 +2848,310 @@ mod tests {
             PetPaletteRole::Particle,
             PetPaletteRole::Corruption,
         ];
+    }
+
+    #[test]
+    fn retained_scene_v2_has_typed_sources_and_fixed_semantic_tables() {
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+
+        assert_eq!(MAX_STATIC_ATLAS_RECIPES, 8);
+        assert_eq!(MAX_ANALYTIC_PARAMS, 16);
+        assert_eq!(
+            built.template.static_atlas_recipes.len(),
+            MAX_STATIC_ATLAS_RECIPES
+        );
+        assert!(built
+            .template
+            .static_atlas_recipes
+            .iter()
+            .all(|slot| slot.recipe.is_none()));
+
+        let expected = [
+            AnalyticSemantic::RoomBackground,
+            AnalyticSemantic::WallShadow,
+            AnalyticSemantic::FloorProjection,
+            AnalyticSemantic::StatusHalo,
+            AnalyticSemantic::MoodAura,
+            AnalyticSemantic::Gauges,
+            AnalyticSemantic::Trouble,
+            AnalyticSemantic::Dim,
+        ];
+        assert_eq!(built.template.analytic_templates.len(), MAX_ANALYTIC_PARAMS);
+        for (slot, semantic) in expected.into_iter().enumerate() {
+            let id = AnalyticParamId(slot as u8);
+            assert_eq!(built.template.analytic_templates[slot].id, id);
+            assert_eq!(
+                built.template.analytic_templates[slot]
+                    .value
+                    .as_ref()
+                    .map(|value| value.semantic),
+                Some(semantic)
+            );
+        }
+        assert!(built.template.analytic_templates[8..]
+            .iter()
+            .all(|slot| slot.value.is_none()));
+
+        let primitive = |alias: &str| {
+            let node = NodeId::from_alias(&CanonicalAlias::new(alias).unwrap());
+            built
+                .template
+                .primitives
+                .iter()
+                .find(|primitive| primitive.node == node)
+                .unwrap()
+        };
+        assert_eq!(
+            primitive("world.room.glyphs").binding,
+            PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs)
+        );
+        assert_eq!(
+            primitive("pet.body").binding,
+            PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body))
+        );
+        assert_eq!(
+            primitive("pet.particles").binding,
+            PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Particles))
+        );
+        assert_eq!(
+            primitive("world.room.glyphs").blend,
+            WorldBlend::PremultipliedAlpha
+        );
+        assert_eq!(
+            primitive("world.room.glyphs").depth,
+            DepthBehavior::WorldReadOnly
+        );
+        assert_eq!(primitive("pet.body").blend, WorldBlend::PremultipliedAlpha);
+        assert_eq!(primitive("pet.body").depth, DepthBehavior::WorldReadOnly);
+        assert_eq!(
+            primitive("pet.projection.floor").blend,
+            WorldBlend::Multiply
+        );
+        let status = primitive("chrome.status");
+        assert_eq!(status.blend, WorldBlend::PremultipliedAlpha);
+        assert_eq!(status.depth, DepthBehavior::ScreenNoDepth);
+        assert_eq!(status.space, PrimitiveSpace::Screen);
+        assert_eq!(
+            built
+                .template
+                .materials
+                .iter()
+                .find(|material| material.id == status.material)
+                .unwrap()
+                .kind,
+            MaterialKind::ScreenChrome
+        );
+        let status_node = built
+            .template
+            .nodes
+            .iter()
+            .find(|node| node.id == status.node)
+            .unwrap();
+        assert_eq!(
+            status_node.parent,
+            Some(NodeId::from_alias(
+                &CanonicalAlias::new("chrome.screen").unwrap()
+            ))
+        );
+
+        let mood = primitive("pet.aura.mood");
+        assert_eq!(mood.blend, WorldBlend::PremultipliedAlpha);
+        assert_eq!(mood.depth, DepthBehavior::WorldReadOnly);
+        assert_eq!(mood.space, PrimitiveSpace::World);
+        assert_eq!(
+            built
+                .template
+                .materials
+                .iter()
+                .find(|material| material.id == mood.material)
+                .unwrap()
+                .kind,
+            MaterialKind::UnlitAnalytic
+        );
+
+        let order = |alias: &str| primitive(alias).authored_order;
+        assert!(order("world.room.glyphs") < order("pet.projection.floor"));
+        assert!(order("pet.projection.floor") < order("world.ambient"));
+        assert!(order("world.ambient") < order("pet.shadow.wall"));
+        assert!(order("pet.shadow.wall") < order("pet.body"));
+        let chrome_orders = [
+            order("chrome.gauges"),
+            order("chrome.status"),
+            order("chrome.trouble"),
+            order("chrome.hud"),
+            order("chrome.dim"),
+        ];
+        assert!(chrome_orders.windows(2).all(|pair| pair[0] + 1 == pair[1]));
+
+        let wall_order = order("pet.shadow.wall");
+        let ambient_order = order("world.ambient");
+        for primitive in &built.template.primitives {
+            match primitive.binding {
+                PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(slot)) => {
+                    let depth = snapshot
+                        .topology
+                        .visible_props
+                        .iter()
+                        .find(|prop| prop.stable_order == slot)
+                        .unwrap()
+                        .authored_depth;
+                    if depth == super::super::AuthoredDepthSnapshot::Foreground {
+                        assert!(primitive.authored_order > order("pet.body"));
+                    } else {
+                        assert!(primitive.authored_order > ambient_order);
+                        assert!(primitive.authored_order < wall_order);
+                    }
+                }
+                PrimitiveBinding::Instances(InstanceGroupBinding::TankCells {
+                    layer: InstanceLayer::Behind,
+                    ..
+                }) => {
+                    assert!(primitive.authored_order > ambient_order);
+                    assert!(primitive.authored_order < wall_order);
+                }
+                PrimitiveBinding::Instances(InstanceGroupBinding::TankCells {
+                    layer: InstanceLayer::Foreground,
+                    ..
+                }) => assert!(primitive.authored_order > order("pet.body")),
+                _ => {}
+            }
+        }
+        assert!(!built
+            .template
+            .primitives
+            .iter()
+            .any(|primitive| { matches!(primitive.binding, PrimitiveBinding::StaticAtlas(_)) }));
+    }
+
+    #[test]
+    fn neutral_template_checksum_covers_fixed_semantic_tables() {
+        let checksum = |template: &SceneTemplate| checksum::checksum_template(template).unwrap();
+        let baseline = SceneFixture::valid().template;
+        let expected = checksum(&baseline);
+
+        let assert_changed = |mutate: fn(&mut SceneTemplate)| {
+            let mut changed = baseline.clone();
+            mutate(&mut changed);
+            assert_ne!(checksum(&changed), expected);
+        };
+
+        assert_changed(|template| template.static_atlas_recipes[0].id = StaticAtlasRecipeId(7));
+        assert_changed(|template| template.static_atlas_recipes[0].recipe = None);
+        assert_changed(|template| {
+            template.static_atlas_recipes[0]
+                .recipe
+                .as_mut()
+                .unwrap()
+                .source
+                .0 ^= 1;
+        });
+        assert_changed(|template| {
+            template.static_atlas_recipes[0]
+                .recipe
+                .as_mut()
+                .unwrap()
+                .local_bounds
+                .max[0] = 0.5;
+        });
+
+        assert_changed(|template| template.analytic_templates[0].id = AnalyticParamId(15));
+        assert_changed(|template| template.analytic_templates[0].value = None);
+        assert_changed(|template| {
+            template.analytic_templates[0]
+                .value
+                .as_mut()
+                .unwrap()
+                .semantic = AnalyticSemantic::MoodAura;
+        });
+        assert_changed(|template| {
+            template.analytic_templates[0].value.as_mut().unwrap().shape =
+                AnalyticShape::SurfaceOverlay;
+        });
+        assert_changed(|template| {
+            template.analytic_templates[0]
+                .value
+                .as_mut()
+                .unwrap()
+                .normalized_local_bounds
+                .max[1] = 0.5;
+        });
+    }
+
+    #[test]
+    fn typed_source_validation_rejects_missing_duplicate_and_dangling_bindings() {
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let template = build_scene_generation(&snapshot, generation_key(1))
+            .unwrap()
+            .template;
+
+        let mut missing_room = template.clone();
+        let room = missing_room
+            .primitives
+            .iter_mut()
+            .find(|primitive| {
+                primitive.binding == PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs)
+            })
+            .unwrap();
+        room.binding = PrimitiveBinding::Instances(InstanceGroupBinding::Ambient);
+        assert_eq!(
+            super::super::validate::validate_template(&missing_room),
+            Err(super::super::validate::SceneValidationError::InvalidPrimitiveBinding)
+        );
+
+        let mut duplicate_body = template.clone();
+        let mut body = duplicate_body
+            .primitives
+            .iter()
+            .find(|primitive| {
+                primitive.binding
+                    == PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body))
+            })
+            .unwrap()
+            .clone();
+        body.authored_order = duplicate_body.primitives.len() as u16;
+        duplicate_body.primitives.push(body);
+        assert_eq!(
+            super::super::validate::validate_template(&duplicate_body),
+            Err(super::super::validate::SceneValidationError::InvalidPrimitiveBinding)
+        );
+
+        let mut dangling_analytic = template.clone();
+        dangling_analytic
+            .primitives
+            .iter_mut()
+            .find(|primitive| {
+                primitive.binding == PrimitiveBinding::Analytic(AnalyticSemantic::StatusHalo.id())
+            })
+            .unwrap()
+            .binding = PrimitiveBinding::Analytic(AnalyticParamId(15));
+        assert_eq!(
+            super::super::validate::validate_template(&dangling_analytic),
+            Err(super::super::validate::SceneValidationError::InvalidPrimitiveBinding)
+        );
+
+        let mut nonempty_static_recipe = template.clone();
+        let source = CanonicalAlias::new("sprite.future-decoration").unwrap();
+        nonempty_static_recipe.static_atlas_recipes[0].recipe = Some(StaticAtlasRecipe {
+            semantic: StaticAtlasSemantic::DecorativeSprite,
+            source: StaticAtlasSourceKey::from_alias(&source),
+            local_bounds: Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] },
+        });
+        assert_eq!(
+            super::super::validate::validate_template(&nonempty_static_recipe),
+            Err(super::super::validate::SceneValidationError::InvalidPrimitiveBinding)
+        );
+
+        let mut mismatched_shape = template;
+        mismatched_shape.analytic_templates[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .shape = AnalyticShape::SurfaceOverlay;
+        assert_eq!(
+            super::super::validate::validate_template(&mismatched_shape),
+            Err(super::super::validate::SceneValidationError::NonCanonicalEmptySlot)
+        );
     }
 
     #[test]

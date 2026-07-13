@@ -222,12 +222,9 @@ impl SceneGenerationData {
         if frame_mask.contains(
             crate::presentation::companion_scene::runtime::FrameChangeMask::STATUS_VISIBILITY,
         ) {
-            for name in [
-                "pet.body",
-                "pet.particles",
-                "pet.halo.status",
-                "chrome.trouble",
-            ] {
+            let (status_visible, status_opacity) =
+                super::super::canonical_activity_pulse_state(snapshot);
+            for name in ["pet.body", "pet.particles", "chrome.status"] {
                 let node_id = self
                     .template
                     .nodes
@@ -245,14 +242,11 @@ impl SceneGenerationData {
                 match name {
                     "pet.body" => node.opacity = if snapshot.frame.asleep { 0.65 } else { 1.0 },
                     "pet.particles" => node.visible = !snapshot.frame.asleep,
-                    _ => {
-                        node.visible = snapshot.frame.helper_trouble;
-                        node.opacity = if snapshot.frame.helper_trouble {
-                            1.0
-                        } else {
-                            0.0
-                        };
+                    "chrome.status" => {
+                        node.visible = status_visible;
+                        node.opacity = status_opacity;
                     }
+                    _ => unreachable!("closed status node set"),
                 }
                 frame.nodes.push(node);
             }
@@ -274,6 +268,31 @@ impl SceneGenerationData {
                     opacity: if occupied { source.opacity } else { 0.0 },
                 });
             }
+        }
+        if frame_mask.contains(
+            crate::presentation::companion_scene::runtime::FrameChangeMask::TROUBLE_VISIBILITY,
+        ) {
+            let node_id = self
+                .template
+                .nodes
+                .iter()
+                .find(|node| node.alias.as_str() == "chrome.trouble")
+                .map(|node| node.id)
+                .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+            let mut node = self
+                .frame
+                .nodes
+                .iter()
+                .find(|node| node.node == node_id)
+                .copied()
+                .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+            node.visible = snapshot.frame.helper_trouble;
+            node.opacity = if snapshot.frame.helper_trouble {
+                1.0
+            } else {
+                0.0
+            };
+            frame.nodes.push(node);
         }
         if frame_mask
             .contains(crate::presentation::companion_scene::runtime::FrameChangeMask::GAUGES)
@@ -527,20 +546,18 @@ fn pet_transform(
     let y = snapshot.frame.pet_anchor_points[1]
         + snapshot.frame.breath_offset_y_points
         + snapshot.frame.bob_offset_y_points;
-    let mut transform = Transform3::from_snapshot_xy_depth(
-        [
-            snapshot.frame.pet_anchor_points[0],
-            y,
-            snapshot.frame.pet_depth,
-        ],
-        snapshot.topology.layout.height_points,
-    );
-    transform.scale[0] = f32::from(snapshot.frame.facing);
-    transform.pivot = [
-        f32::from(crate::presentation::companion_scene::PET_LATTICE_WIDTH) * 0.5,
-        f32::from(crate::presentation::companion_scene::PET_LATTICE_HEIGHT) * 0.5,
-        0.0,
+    let cell = snapshot.topology.glyph_grid.cell_extent_points;
+    let pet_extent = [
+        f32::from(crate::presentation::companion_scene::PET_LATTICE_WIDTH) * cell[0],
+        f32::from(crate::presentation::companion_scene::PET_LATTICE_HEIGHT) * cell[1],
     ];
+    let mut transform = Transform3::translated([
+        snapshot.frame.pet_anchor_points[0],
+        snapshot.topology.layout.height_points - y - pet_extent[1],
+        snapshot.frame.pet_depth,
+    ]);
+    transform.scale[0] = f32::from(snapshot.frame.facing);
+    transform.pivot = [pet_extent[0] * 0.5, pet_extent[1] * 0.5, 0.0];
     transform
 }
 
@@ -935,14 +952,13 @@ fn build_template(
         ("world.far", Some("scene.root"), 0.0),
         ("world.room.background", Some("world.far"), -1.90),
         ("world.room.glyphs", Some("world.far"), -1.75),
-        ("world.ambient", Some("world.far"), -1.75),
+        ("pet.projection.floor", Some("world.far"), -1.70),
+        ("world.ambient", Some("world.far"), -1.65),
         ("world.behind", Some("scene.root"), 0.0),
         ("world.props.behind", Some("world.behind"), 0.0),
         ("world.tank.behind", Some("world.behind"), 0.0),
         ("pet.shadow.wall", Some("world.behind"), -1.30),
-        ("pet.projection.floor", Some("world.behind"), -1.20),
         ("pet", Some("scene.root"), 0.0),
-        ("pet.halo.status", Some("pet"), 0.0),
         ("pet.aura.mood", Some("pet"), 0.0),
         ("pet.body", Some("pet"), 0.0),
         ("pet.particles", Some("pet"), 0.0),
@@ -951,8 +967,9 @@ fn build_template(
         ("world.tank.foreground", Some("world.foreground"), 0.0),
         ("chrome.screen", Some("scene.root"), 0.0),
         ("chrome.gauges", Some("chrome.screen"), 0.0),
-        ("chrome.hud", Some("chrome.screen"), 0.0),
+        ("chrome.status", Some("chrome.screen"), 0.0),
         ("chrome.trouble", Some("chrome.screen"), 0.0),
+        ("chrome.hud", Some("chrome.screen"), 0.0),
         ("chrome.dim", Some("chrome.screen"), 0.0),
     ] {
         add_node(name.to_owned(), parent, z, scene_bounds)?;
@@ -1086,7 +1103,7 @@ fn build_template(
                     resource: &str,
                     blend: WorldBlend,
                     depth: DepthBehavior,
-                    binding: Option<InstanceGroupBinding>,
+                    binding: PrimitiveBinding,
                     space: PrimitiveSpace|
      -> Result<(), SceneGenerationError> {
         primitives.push(PrimitiveTemplate {
@@ -1096,7 +1113,7 @@ fn build_template(
             resource: Some(resource_id(resource)?),
             blend,
             depth,
-            instance_group: binding,
+            binding,
             authored_order: order,
             local_geometry: unit_bounds,
             space,
@@ -1113,17 +1130,27 @@ fn build_template(
         "resource.analytic-geometry",
         WorldBlend::Opaque,
         DepthBehavior::WorldWrite,
-        None,
+        PrimitiveBinding::Analytic(AnalyticSemantic::RoomBackground.id()),
         PrimitiveSpace::World,
     )?;
     push(
         "world.room.glyphs",
-        PrimitiveKind::AtlasQuad,
+        PrimitiveKind::InstanceQuad,
         "material.unlit-glyph",
         &room_resource,
-        WorldBlend::AlphaCutout,
-        DepthBehavior::WorldWrite,
-        None,
+        WorldBlend::PremultipliedAlpha,
+        DepthBehavior::WorldReadOnly,
+        PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs),
+        PrimitiveSpace::World,
+    )?;
+    push(
+        "pet.projection.floor",
+        PrimitiveKind::AnalyticShape,
+        "material.multiply-shadow",
+        "resource.analytic-geometry",
+        WorldBlend::Multiply,
+        DepthBehavior::WorldReadOnly,
+        PrimitiveBinding::Analytic(AnalyticSemantic::FloorProjection.id()),
         PrimitiveSpace::World,
     )?;
     push(
@@ -1133,9 +1160,39 @@ fn build_template(
         &room_resource,
         WorldBlend::Additive,
         DepthBehavior::WorldReadOnly,
-        Some(InstanceGroupBinding::Ambient),
+        PrimitiveBinding::Instances(InstanceGroupBinding::Ambient),
         PrimitiveSpace::World,
     )?;
+    for prop in snapshot.topology.visible_props.iter().filter(|prop| {
+        prop.authored_depth
+            != crate::presentation::companion_scene::AuthoredDepthSnapshot::Foreground
+    }) {
+        push(
+            &format!("world.prop.{}", prop.catalog_id),
+            PrimitiveKind::InstanceQuad,
+            "material.unlit-glyph",
+            "resource.prop-glyph-atlas",
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(prop.stable_order)),
+            PrimitiveSpace::World,
+        )?;
+    }
+    for tank in &snapshot.topology.visible_tank_inhabitants {
+        push(
+            &format!("world.tank.{}.behind", tank.catalog_id),
+            PrimitiveKind::InstanceQuad,
+            "material.unlit-glyph",
+            "resource.tank-glyph-atlas",
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveBinding::Instances(InstanceGroupBinding::TankCells {
+                slot: tank.stable_order,
+                layer: InstanceLayer::Behind,
+            }),
+            PrimitiveSpace::World,
+        )?;
+    }
     push(
         "pet.shadow.wall",
         PrimitiveKind::AnalyticShape,
@@ -1143,37 +1200,17 @@ fn build_template(
         "resource.analytic-geometry",
         WorldBlend::Multiply,
         DepthBehavior::WorldReadOnly,
-        None,
-        PrimitiveSpace::World,
-    )?;
-    push(
-        "pet.projection.floor",
-        PrimitiveKind::AnalyticShape,
-        "material.unlit-analytic",
-        "resource.analytic-geometry",
-        WorldBlend::PremultipliedAlpha,
-        DepthBehavior::WorldReadOnly,
-        None,
-        PrimitiveSpace::World,
-    )?;
-    push(
-        "pet.halo.status",
-        PrimitiveKind::AnalyticShape,
-        "material.additive-glow",
-        "resource.analytic-geometry",
-        WorldBlend::Additive,
-        DepthBehavior::WorldReadOnly,
-        None,
+        PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id()),
         PrimitiveSpace::World,
     )?;
     push(
         "pet.aura.mood",
         PrimitiveKind::AnalyticShape,
-        "material.additive-glow",
+        "material.unlit-analytic",
         "resource.analytic-geometry",
-        WorldBlend::Additive,
+        WorldBlend::PremultipliedAlpha,
         DepthBehavior::WorldReadOnly,
-        None,
+        PrimitiveBinding::Analytic(AnalyticSemantic::MoodAura.id()),
         PrimitiveSpace::World,
     )?;
     let pet_resource = format!(
@@ -1186,9 +1223,9 @@ fn build_template(
         PrimitiveKind::InstanceQuad,
         "material.unlit-glyph",
         &pet_resource,
-        WorldBlend::AlphaCutout,
-        DepthBehavior::WorldWrite,
-        Some(InstanceGroupBinding::PetBody),
+        WorldBlend::PremultipliedAlpha,
+        DepthBehavior::WorldReadOnly,
+        PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body)),
         PrimitiveSpace::World,
     )?;
     push(
@@ -1198,39 +1235,38 @@ fn build_template(
         &pet_resource,
         WorldBlend::Additive,
         DepthBehavior::WorldReadOnly,
-        Some(InstanceGroupBinding::PetParticles),
+        PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Particles)),
         PrimitiveSpace::World,
     )?;
-    for prop in &snapshot.topology.visible_props {
+    for prop in snapshot.topology.visible_props.iter().filter(|prop| {
+        prop.authored_depth
+            == crate::presentation::companion_scene::AuthoredDepthSnapshot::Foreground
+    }) {
         push(
             &format!("world.prop.{}", prop.catalog_id),
             PrimitiveKind::InstanceQuad,
             "material.unlit-glyph",
             "resource.prop-glyph-atlas",
-            WorldBlend::AlphaCutout,
-            DepthBehavior::WorldWrite,
-            Some(InstanceGroupBinding::PropGlyphs(prop.stable_order)),
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveBinding::Instances(InstanceGroupBinding::PropGlyphs(prop.stable_order)),
             PrimitiveSpace::World,
         )?;
     }
     for tank in &snapshot.topology.visible_tank_inhabitants {
-        for layer in [InstanceLayer::Behind, InstanceLayer::Foreground] {
-            let lane = match layer {
-                InstanceLayer::Behind => "behind",
-                InstanceLayer::Foreground => "foreground",
-            };
-            let tank_node = format!("world.tank.{}.{lane}", tank.catalog_id);
-            push(
-                &tank_node,
-                PrimitiveKind::InstanceQuad,
-                "material.unlit-glyph",
-                "resource.tank-glyph-atlas",
-                WorldBlend::AlphaCutout,
-                DepthBehavior::WorldWrite,
-                Some(InstanceGroupBinding::TankCells { slot: tank.stable_order, layer }),
-                PrimitiveSpace::World,
-            )?;
-        }
+        push(
+            &format!("world.tank.{}.foreground", tank.catalog_id),
+            PrimitiveKind::InstanceQuad,
+            "material.unlit-glyph",
+            "resource.tank-glyph-atlas",
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveBinding::Instances(InstanceGroupBinding::TankCells {
+                slot: tank.stable_order,
+                layer: InstanceLayer::Foreground,
+            }),
+            PrimitiveSpace::World,
+        )?;
     }
     push(
         "chrome.gauges",
@@ -1239,17 +1275,17 @@ fn build_template(
         "resource.analytic-geometry",
         WorldBlend::PremultipliedAlpha,
         DepthBehavior::ScreenNoDepth,
-        None,
+        PrimitiveBinding::Analytic(AnalyticSemantic::Gauges.id()),
         PrimitiveSpace::Screen,
     )?;
     push(
-        "chrome.hud",
-        PrimitiveKind::InstanceQuad,
+        "chrome.status",
+        PrimitiveKind::AnalyticShape,
         "material.screen-chrome",
-        "resource.hud-glyph-atlas",
+        "resource.analytic-geometry",
         WorldBlend::PremultipliedAlpha,
         DepthBehavior::ScreenNoDepth,
-        Some(InstanceGroupBinding::Hud),
+        PrimitiveBinding::Analytic(AnalyticSemantic::StatusHalo.id()),
         PrimitiveSpace::Screen,
     )?;
     push(
@@ -1259,7 +1295,17 @@ fn build_template(
         "resource.analytic-geometry",
         WorldBlend::PremultipliedAlpha,
         DepthBehavior::ScreenNoDepth,
-        None,
+        PrimitiveBinding::Analytic(AnalyticSemantic::Trouble.id()),
+        PrimitiveSpace::Screen,
+    )?;
+    push(
+        "chrome.hud",
+        PrimitiveKind::InstanceQuad,
+        "material.screen-chrome",
+        "resource.hud-glyph-atlas",
+        WorldBlend::PremultipliedAlpha,
+        DepthBehavior::ScreenNoDepth,
+        PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
         PrimitiveSpace::Screen,
     )?;
     push(
@@ -1269,7 +1315,7 @@ fn build_template(
         "resource.analytic-geometry",
         WorldBlend::PremultipliedAlpha,
         DepthBehavior::ScreenNoDepth,
-        None,
+        PrimitiveBinding::Analytic(AnalyticSemantic::Dim.id()),
         PrimitiveSpace::Screen,
     )?;
 
@@ -1310,6 +1356,8 @@ fn build_template(
         materials,
         resources,
         attachments,
+        static_atlas_recipes: empty_static_atlas_recipe_slots(),
+        analytic_templates: build_analytic_templates(unit_bounds),
         privacy: snapshot.privacy,
         generation_checksum: 0,
     })
@@ -1471,6 +1519,19 @@ fn build_content(
             .map_err(|_| SceneGenerationError::InvalidGlyph)?;
     }
     Ok(content)
+}
+
+pub(super) fn build_analytic_templates(bounds: Bounds3) -> Vec<AnalyticTemplateSlot> {
+    let mut slots = empty_analytic_template_slots();
+    for semantic in AnalyticSemantic::ALL {
+        let id = semantic.id();
+        slots[usize::from(id.0)].value = Some(AnalyticTemplate {
+            semantic,
+            shape: semantic.shape(),
+            normalized_local_bounds: bounds,
+        });
+    }
+    slots
 }
 
 fn pet_role(value: &str) -> Option<PetPaletteRole> {
@@ -1735,23 +1796,7 @@ fn build_frame(
         }
         Ok(())
     };
-    let y = snapshot.frame.pet_anchor_points[1]
-        + snapshot.frame.breath_offset_y_points
-        + snapshot.frame.bob_offset_y_points;
-    let mut pet_transform = Transform3::from_snapshot_xy_depth(
-        [
-            snapshot.frame.pet_anchor_points[0],
-            y,
-            snapshot.frame.pet_depth,
-        ],
-        layout.height_points,
-    );
-    pet_transform.scale[0] = f32::from(snapshot.frame.facing);
-    pet_transform.pivot = [
-        f32::from(crate::presentation::companion_scene::PET_LATTICE_WIDTH) * 0.5,
-        f32::from(crate::presentation::companion_scene::PET_LATTICE_HEIGHT) * 0.5,
-        0.0,
-    ];
+    let pet_transform = pet_transform(snapshot);
     set_node(&mut frame, "pet", Some(pet_transform), None, None)?;
     set_node(
         &mut frame,
@@ -1767,16 +1812,13 @@ fn build_frame(
         Some(!snapshot.frame.asleep),
         None,
     )?;
+    let (status_visible, status_opacity) = super::super::canonical_activity_pulse_state(snapshot);
     set_node(
         &mut frame,
-        "pet.halo.status",
+        "chrome.status",
         None,
-        Some(snapshot.frame.helper_trouble),
-        Some(if snapshot.frame.helper_trouble {
-            1.0
-        } else {
-            0.0
-        }),
+        Some(status_visible),
+        Some(status_opacity),
     )?;
     set_node(
         &mut frame,
@@ -1895,13 +1937,7 @@ fn build_frame(
             opacity: if occupied { source.opacity } else { 0.0 },
         };
     }
-    frame.gauges = snapshot.frame.gauges.map(|gauge| match gauge {
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Empty => 0.0,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Low => 0.125,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Medium => 0.375,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::High => 0.75,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Full => 1.0,
-    });
+    frame.gauges = snapshot.frame.gauges.map(gauge_value);
     frame.dim_amount = snapshot.frame.dim_amount;
     frame.lights.clear();
     Ok(frame)
