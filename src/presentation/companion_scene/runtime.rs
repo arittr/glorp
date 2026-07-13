@@ -1059,7 +1059,7 @@ pub(crate) struct GenerationRequest {
 }
 
 impl GenerationRequest {
-    const fn identity(&self) -> RequestIdentity {
+    pub(crate) const fn identity(&self) -> RequestIdentity {
         RequestIdentity {
             request_id: self.request_id,
             key: self.key,
@@ -1311,6 +1311,32 @@ pub(crate) enum CandidateRebaseError {
     Projection(super::scene::SceneDeltaApplyError),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CandidateRebase {
+    identity: RequestIdentity,
+    version: SceneVersion,
+    content: super::scene::ContentDelta,
+    frame: super::scene::FrameDelta,
+}
+
+impl CandidateRebase {
+    pub(crate) const fn identity(&self) -> RequestIdentity {
+        self.identity
+    }
+
+    pub(crate) const fn version(&self) -> SceneVersion {
+        self.version
+    }
+
+    pub(crate) const fn content(&self) -> &super::scene::ContentDelta {
+        &self.content
+    }
+
+    pub(crate) const fn frame(&self) -> &super::scene::FrameDelta {
+        &self.frame
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ActivationAttemptId(pub u64);
 
@@ -1321,6 +1347,20 @@ pub(crate) struct ActivationAttempt {
     key: SceneGenerationKey,
     surface: SurfaceEpoch,
     applied: AppliedRevisions,
+}
+
+impl ActivationAttempt {
+    pub(crate) const fn request_id(self) -> RequestId {
+        self.request_id
+    }
+
+    pub(crate) const fn key(self) -> SceneGenerationKey {
+        self.key
+    }
+
+    pub(crate) const fn surface(self) -> SurfaceEpoch {
+        self.surface
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1459,28 +1499,10 @@ pub(crate) struct CompanionSceneRuntimeState {
 }
 
 impl CompanionSceneRuntimeState {
-    pub(crate) fn with_active(snapshot: Arc<CompanionSceneSnapshot>) -> Result<Self, RuntimeError> {
-        let reconciler = CompanionSceneReconciler::new(Arc::clone(&snapshot))?;
-        let generation = SceneGenerationKey {
-            device: DeviceEpoch(1),
-            layout: LayoutGeneration(1),
-            resources: ResourceGeneration(1),
-        };
-        let compiled = super::scene::build_scene_generation_owned(
-            Arc::clone(&snapshot),
-            generation,
-            AppliedRevisions::new(1, 1),
-        )
-        .map_err(|_| RuntimeError::SnapshotRejected(SnapshotRejection::InvalidValue))?;
+    pub(crate) fn cold_start(snapshot: Arc<CompanionSceneSnapshot>) -> Result<Self, RuntimeError> {
+        let reconciler = CompanionSceneReconciler::new(snapshot)?;
         Ok(Self {
-            active: Some(ActiveGeneration {
-                version: SceneVersion {
-                    generation,
-                    surface: SurfaceEpoch(1),
-                    applied: AppliedRevisions::new(1, 1),
-                },
-                generation: compiled,
-            }),
+            active: None,
             pending: None,
             worker: WorkerState::Idle,
             visibility: RuntimeVisibility::Visible,
@@ -1494,6 +1516,30 @@ impl CompanionSceneRuntimeState {
             recovery: RecoveryState::Operational,
             lifecycle: RuntimeLifecycle::Running,
         })
+    }
+
+    pub(crate) fn with_active(snapshot: Arc<CompanionSceneSnapshot>) -> Result<Self, RuntimeError> {
+        let mut runtime = Self::cold_start(Arc::clone(&snapshot))?;
+        let generation = SceneGenerationKey {
+            device: DeviceEpoch(1),
+            layout: LayoutGeneration(1),
+            resources: ResourceGeneration(1),
+        };
+        let compiled = super::scene::build_scene_generation_owned(
+            Arc::clone(&snapshot),
+            generation,
+            AppliedRevisions::new(1, 1),
+        )
+        .map_err(|_| RuntimeError::SnapshotRejected(SnapshotRejection::InvalidValue))?;
+        runtime.active = Some(ActiveGeneration {
+            version: SceneVersion {
+                generation,
+                surface: SurfaceEpoch(1),
+                applied: AppliedRevisions::new(1, 1),
+            },
+            generation: compiled,
+        });
+        Ok(runtime)
     }
 
     pub(crate) fn snapshot(&self) -> &Arc<CompanionSceneSnapshot> {
@@ -1838,6 +1884,25 @@ impl CompanionSceneRuntimeState {
         effects
     }
 
+    pub(crate) fn reject_worker_candidate(&mut self, identity: RequestIdentity) -> RuntimeEffects {
+        if self.worker == WorkerState::Cancelling(identity.request_id) {
+            return self.acknowledge_worker_cancelled(identity.request_id);
+        }
+        let mut effects = RuntimeEffects::new(RuntimeDisposition::DroppedStale);
+        if self.lifecycle == RuntimeLifecycle::Shutdown
+            || self.worker != WorkerState::Running(identity.request_id)
+            || self.pending.as_ref().is_none_or(|pending| {
+                pending.identity != identity || !matches!(pending.phase, PendingPhase::Preparing)
+            })
+        {
+            return effects;
+        }
+        self.worker = WorkerState::Idle;
+        self.pending = None;
+        effects.disposition = RuntimeDisposition::CandidateDropped(identity.request_id);
+        effects
+    }
+
     pub(crate) fn complete_candidate(
         &mut self,
         candidate: AcceptedGenerationCandidate,
@@ -1873,7 +1938,9 @@ impl CompanionSceneRuntimeState {
         effects
     }
 
-    pub(crate) fn rebase_ready_candidate(&mut self) -> Result<(), CandidateRebaseError> {
+    pub(crate) fn rebase_ready_candidate(
+        &mut self,
+    ) -> Result<CandidateRebase, CandidateRebaseError> {
         let Some(pending) = &mut self.pending else {
             return Err(CandidateRebaseError::DroppedStale);
         };
@@ -1893,7 +1960,16 @@ impl CompanionSceneRuntimeState {
             .map_err(CandidateRebaseError::Projection)?;
         pending.accepted_snapshot = Arc::clone(&pending.desired_snapshot);
         candidate.applied = pending.desired_source;
-        Ok(())
+        Ok(CandidateRebase {
+            identity: pending.identity,
+            version: SceneVersion {
+                generation: candidate.key,
+                surface: pending.desired_surface,
+                applied: candidate.applied,
+            },
+            content: candidate.generation.delta_scratch.content.clone(),
+            frame: candidate.generation.delta_scratch.frame.clone(),
+        })
     }
 
     pub(crate) fn begin_activation(&mut self) -> Result<ActivationAttempt, ActivationStartError> {
@@ -2069,6 +2145,7 @@ impl CompanionSceneRuntimeState {
             }
             ActivationAttemptOutcome::CandidateRejected(_) => {
                 let dropped = candidate.request_id;
+                let retained_active = self.active.is_some();
                 self.pending = None;
                 effects.drop_candidate = Some(DropCandidate { request_id: dropped });
                 if let RecoveryState::Recovering { requirement, device, surface, .. } =
@@ -2076,7 +2153,11 @@ impl CompanionSceneRuntimeState {
                 {
                     self.recovery = RecoveryState::AwaitingRetry { requirement, device, surface };
                 }
-                ActivationTransition::CandidateDestroyedRetainingActive
+                if retained_active {
+                    ActivationTransition::CandidateDestroyedRetainingActive
+                } else {
+                    ActivationTransition::HostFallbackPending
+                }
             }
             ActivationAttemptOutcome::PresentedClean { surface }
                 if commit_eligible

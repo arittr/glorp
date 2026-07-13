@@ -4041,6 +4041,97 @@ impl SceneRenderer {
         )
     }
 
+    /// Encodes one activation candidate through the persistent scene targets
+    /// and the final straight-alpha surface pass. The caller owns submission
+    /// and presentation so its progress ladder can distinguish every boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_candidate_to_surface(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
+        surface_view: &wgpu::TextureView,
+    ) -> Result<wgpu::CommandBuffer, SceneRenderError> {
+        if self.device_epoch != shared.device_epoch {
+            return Err(SceneRenderError::RendererDeviceEpochMismatch {
+                renderer: self.device_epoch,
+                shared: shared.device_epoch,
+            });
+        }
+        self.validate_actual_identity(device, queue, shared, candidate)?;
+        let binding = bind_scene_render_request(shared, candidate, request)
+            .map_err(SceneRenderError::Request)?;
+        self.targets
+            .ensure(device, shared, binding.target_key)
+            .map_err(SceneRenderError::Target)?;
+        let targets = self
+            .targets
+            .current()
+            .expect("successful target ensure installs the requested target");
+
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let encoded = (|| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glorp-scene-activation-encoder"),
+            });
+            encode_scene_world(&mut encoder, targets, shared, candidate);
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-activation-chrome-prefix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.prefix,
+            );
+            encode_sensitive_hud_hook(
+                &mut encoder,
+                &mut self.staging_belt,
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                prepared_hud,
+            )?;
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-activation-chrome-suffix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.suffix,
+            );
+            encode_aperture_composite(&mut encoder, targets, shared, candidate);
+            encode_final_surface(&mut encoder, surface_view, targets, shared);
+            self.staging_belt.finish();
+            Ok::<_, super::hud::HudGpuStagingError>(encoder.finish())
+        })();
+
+        let validation_error = pollster::block_on(validation.pop()).map(sanitize_gpu_error);
+        let out_of_memory_error = pollster::block_on(out_of_memory.pop()).map(sanitize_gpu_error);
+        let internal_error = pollster::block_on(internal.pop()).map(sanitize_gpu_error);
+        if let Some(category) =
+            select_scoped_gpu_error(validation_error, out_of_memory_error, internal_error)
+        {
+            self.reset_staging_belt(device);
+            return Err(SceneRenderError::Gpu(category));
+        }
+        match encoded {
+            Ok(command) => Ok(command),
+            Err(error) => {
+                self.reset_staging_belt(device);
+                Err(SceneRenderError::Hud(error))
+            }
+        }
+    }
+
+    pub(super) fn recall_uploads(&mut self) {
+        self.staging_belt.recall();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_offscreen_with_delta(
         &mut self,
@@ -4631,6 +4722,30 @@ fn encode_aperture_composite(
     pass.set_pipeline(&shared.pipelines.aperture_composite);
     pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
     pass.set_bind_group(2, &targets.aperture_bind_group, &[]);
+    pass.draw(0..3, 0..1);
+}
+
+fn encode_final_surface(
+    encoder: &mut wgpu::CommandEncoder,
+    surface_view: &wgpu::TextureView,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-final-surface"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: surface_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_pipeline(&shared.pipelines.final_surface);
+    pass.set_bind_group(2, &targets.final_bind_group, &[]);
     pass.draw(0..3, 0..1);
 }
 
@@ -8975,6 +9090,109 @@ mod tests {
             )
             .unwrap();
         assert_eq!(renderer.cache_and_submission_events_for_test(), (3, 2, 4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_candidate_surface_encoder_runs_intermediate_and_final_surface_pass() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let live_text = crate::round::hud::companion_hud_text(12.0, Some(0.1), 34.0);
+        let prepared_hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_sensitive(
+                &super::super::hud::SealedHudFrame::from_live(&live_text).unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+        let [width, height] = request.physical_extent_pixels;
+        let final_target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glorp-scene-final-surface-test-target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let final_view = final_target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+        let command = renderer
+            .encode_candidate_to_surface(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request,
+                &prepared_hud,
+                &final_view,
+            )
+            .unwrap();
+        let submission = queue.submit([command]);
+        renderer.recall_uploads();
+
+        let bytes_per_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glorp-scene-final-surface-test-readback"),
+            size: u64::from(bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut copy = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glorp-scene-final-surface-test-copy"),
+        });
+        copy.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &final_target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let copy_submission = queue.submit([copy.finish()]);
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(copy_submission),
+                timeout: None,
+            })
+            .unwrap();
+        let mapped = readback.slice(..).get_mapped_range().unwrap();
+        assert!(
+            mapped.chunks_exact(4).any(|pixel| pixel[3] != 0),
+            "the final-surface pass must produce at least one visible pixel"
+        );
+        drop(mapped);
+        readback.unmap();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .unwrap();
     }
 
     #[cfg(target_os = "macos")]

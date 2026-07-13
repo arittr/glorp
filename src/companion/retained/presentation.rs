@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -68,6 +69,8 @@ pub(crate) enum RetainedFailureCategory {
     AtlasUnavailable,
     FontUnavailable,
     RasterWorkerUnavailable,
+    #[allow(dead_code)] // Produced by the Task 12 host path once Task 14 routes it live.
+    SceneCandidateEncode,
     UnsupportedRaster,
     SurfaceLost,
     SurfaceValidation,
@@ -105,6 +108,7 @@ impl RetainedFailureCategory {
             Self::AtlasUnavailable => "retained-atlas-unavailable",
             Self::FontUnavailable => "retained-font-unavailable",
             Self::RasterWorkerUnavailable => "retained-raster-worker-unavailable",
+            Self::SceneCandidateEncode => "retained-scene-candidate-encode",
             Self::UnsupportedRaster => "retained-unsupported-raster",
             Self::SurfaceLost => "retained-surface-lost",
             Self::SurfaceValidation => "retained-surface-validation",
@@ -203,27 +207,85 @@ impl FrameProgress {
 /// categories; the main thread drains the [`Receiver`] before treating any
 /// present as a success.
 pub(crate) struct GpuErrorMailbox {
-    sender: Sender<RetainedFailureCategory>,
-    receiver: Receiver<RetainedFailureCategory>,
+    sender: Sender<GpuErrorEvent>,
+    receiver: Receiver<GpuErrorEvent>,
+    deferred: RefCell<Vec<GpuErrorEvent>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GpuErrorEvent {
+    device: crate::presentation::companion_scene::DeviceEpoch,
+    category: RetainedFailureCategory,
+}
+
+#[derive(Clone)]
+pub(super) struct DeviceGpuErrorSender {
+    device: crate::presentation::companion_scene::DeviceEpoch,
+    sender: Sender<GpuErrorEvent>,
+}
+
+impl DeviceGpuErrorSender {
+    pub(super) fn send(&self, category: RetainedFailureCategory) -> Result<(), ()> {
+        self.sender
+            .send(GpuErrorEvent { device: self.device, category })
+            .map_err(|_| ())
+    }
 }
 
 impl GpuErrorMailbox {
     pub(crate) fn new() -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            deferred: RefCell::new(Vec::new()),
+        }
     }
 
     /// A cloned sender for the wgpu error callback. The callback captures
     /// nothing else, keeping it free of live state and dynamic formatting.
-    pub(super) fn sender(&self) -> Sender<RetainedFailureCategory> {
-        self.sender.clone()
+    pub(super) fn sender_for(
+        &self,
+        device: crate::presentation::companion_scene::DeviceEpoch,
+    ) -> DeviceGpuErrorSender {
+        DeviceGpuErrorSender { device, sender: self.sender.clone() }
     }
 
     /// Drains every queued fault, returning the most recent category if any.
     pub(super) fn drain(&self) -> Option<RetainedFailureCategory> {
         let mut latest = None;
-        while let Ok(category) = self.receiver.try_recv() {
-            latest = Some(category);
+        for event in self.deferred.borrow_mut().drain(..) {
+            latest = Some(event.category);
+        }
+        while let Ok(event) = self.receiver.try_recv() {
+            latest = Some(event.category);
+        }
+        latest
+    }
+
+    /// Drains queued callbacks and returns only the latest fault emitted by the
+    /// requested device generation. Late callbacks from retired devices are
+    /// discarded so they cannot poison a successor activation.
+    #[allow(dead_code)] // Device-correlated drain is called by the dormant Task 12 host path.
+    pub(super) fn drain_for(
+        &self,
+        device: crate::presentation::companion_scene::DeviceEpoch,
+    ) -> Option<RetainedFailureCategory> {
+        let mut latest = None;
+        self.deferred.borrow_mut().retain(|event| {
+            if event.device == device {
+                latest = Some(event.category);
+                false
+            } else {
+                event.device > device
+            }
+        });
+        while let Ok(event) = self.receiver.try_recv() {
+            if event.device == device {
+                latest = Some(event.category);
+            } else if event.device > device {
+                self.deferred.borrow_mut().push(event);
+            }
         }
         latest
     }
@@ -279,7 +341,7 @@ mod tests {
     fn mailbox_drains_the_latest_fault_and_then_reports_empty() {
         let mailbox = GpuErrorMailbox::new();
         assert_eq!(mailbox.drain(), None);
-        let sender = mailbox.sender();
+        let sender = mailbox.sender_for(crate::presentation::companion_scene::DeviceEpoch(1));
         sender
             .send(RetainedFailureCategory::DeviceOutOfMemory)
             .unwrap();
@@ -291,5 +353,26 @@ mod tests {
             Some(RetainedFailureCategory::DeviceValidation)
         );
         assert_eq!(mailbox.drain(), None);
+    }
+
+    #[test]
+    fn device_scoped_mailbox_discards_retired_callbacks_but_preserves_successors() {
+        use crate::presentation::companion_scene::DeviceEpoch;
+
+        let mailbox = GpuErrorMailbox::new();
+        mailbox
+            .sender_for(DeviceEpoch(2))
+            .send(RetainedFailureCategory::DeviceValidation)
+            .unwrap();
+        assert_eq!(mailbox.drain_for(DeviceEpoch(1)), None);
+        assert_eq!(
+            mailbox.drain_for(DeviceEpoch(2)),
+            Some(RetainedFailureCategory::DeviceValidation)
+        );
+        mailbox
+            .sender_for(DeviceEpoch(1))
+            .send(RetainedFailureCategory::DeviceInternal)
+            .unwrap();
+        assert_eq!(mailbox.drain_for(DeviceEpoch(2)), None);
     }
 }

@@ -325,7 +325,7 @@ fn active_hold_then_raster_worker_service_run_before_current_frame_preparation()
 fn host_owned_worker_validates_completed_resources_before_atomic_publish() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = read(&root.join("src/companion/retained/host.rs"));
-    assert!(text.contains("raster_worker: RasterWorker"));
+    assert!(text.contains("scene_build_worker: SceneBuildWorker"));
     let start = text
         .find("    fn advance_resource_preparation(\n        &mut self,")
         .expect("retained resource preparation method exists");
@@ -399,6 +399,51 @@ fn production_and_evidence_paths_never_use_monolithic_appkit_atlas_compile() {
         );
         assert!(!production.contains("CompiledRetainedResourcesPreparation"));
     }
+}
+
+#[test]
+fn scene_generation_service_timing_excludes_render_owner_materialization() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let host = read(&root.join("src/companion/retained/host.rs"));
+    let start = host
+        .find("    pub(in crate::companion) fn advance_scene_generation(")
+        .expect("scene generation service entrypoint exists");
+    let tail = &host[start..];
+    let end = tail
+        .find("\n    #[allow(dead_code)] // Production entrypoint")
+        .expect("the next dormant scene entrypoint bounds the method");
+    let body = &tail[..end];
+    let poll = body
+        .find("self.host.advance_scene_generation()")
+        .expect("the UI service polls once");
+    let service_metric = body
+        .find("record_generation_service_ui_us")
+        .expect("the bounded service slice is recorded");
+    let materialize = body
+        .find("self.host.materialize_scene_candidate()")
+        .expect("GPU materialization is a separate render-owner phase");
+    assert!(poll < service_metric && service_metric < materialize);
+}
+
+#[test]
+fn scene_surface_switch_occurs_only_after_activation_can_start() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let host = read(&root.join("src/companion/retained/host.rs"));
+    let start = host
+        .find("    pub(super) fn activate_candidate(")
+        .expect("scene activation transaction exists");
+    let tail = &host[start..];
+    let end = tail
+        .find("\n    #[allow(dead_code)] // Reached through the dormant Task 12 entrypoint above.\n    fn finish_scene_activation")
+        .expect("activation finisher bounds the transaction");
+    let body = &tail[..end];
+    let begin = body
+        .find("let attempt = match generations.begin_activation()")
+        .expect("runtime authority starts the candidate");
+    let configure = body
+        .find("self.surface.configure(&self.device, &scene_config)")
+        .expect("the host switches to the scene surface");
+    assert!(begin < configure);
 }
 
 #[test]

@@ -3296,6 +3296,13 @@ pub(super) fn compile_projected_full_scene_for_render_test(
 }
 
 #[cfg(test)]
+pub(super) fn projected_full_scene_snapshot_for_render_test(
+    frame_index: usize,
+) -> crate::presentation::companion_scene::CompanionSceneSnapshot {
+    project_full_scene_snapshot(&lifetime_watch_fixture(), frame_index)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::presentation::companion_scene::scene::{

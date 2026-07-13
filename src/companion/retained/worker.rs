@@ -9,9 +9,16 @@ use block2::RcBlock;
 use objc2::rc::autoreleasepool;
 use objc2_foundation::NSThread;
 
-use super::resources::CompiledRetainedResourcesPreparation;
-use super::resources::{CompiledRetainedResources, GlyphRepertoireManifest};
+use super::compiler::{compile_cpu_generation, CpuSceneCandidate};
+use super::resources::{
+    CompiledRetainedResources, CompiledRetainedResourcesPreparation, GlyphRepertoireManifest,
+    PreparedSceneAtlas,
+};
 use super::RetainedFailureCategory;
+use crate::presentation::companion_scene::runtime::{
+    AcceptedGenerationCandidate, GenerationRequest, RequestIdentity,
+};
+use crate::round::smooth::CompanionContentIdentity;
 
 pub(super) struct RasterJob {
     pub(super) job_id: u64,
@@ -59,6 +66,61 @@ pub(super) enum RasterReply {
         job_id: u64,
         timing: RasterWorkerTiming,
     },
+}
+
+#[derive(Debug)]
+pub(super) struct SceneBuildJob {
+    request: GenerationRequest,
+    backing_scale: f64,
+}
+
+impl SceneBuildJob {
+    pub(super) const fn identity(&self) -> RequestIdentity {
+        self.request.identity()
+    }
+}
+
+pub(super) enum SceneBuildReply {
+    Raster(RasterReply),
+    SceneCompleted(Box<CpuSceneBuildCandidate>),
+    SceneCancelled {
+        identity: RequestIdentity,
+        timing: RasterWorkerTiming,
+    },
+    SceneFailed {
+        identity: RequestIdentity,
+        failure: SceneBuildFailure,
+        timing: RasterWorkerTiming,
+    },
+}
+
+pub(super) struct CpuSceneBuildCandidate {
+    pub(super) identity: RequestIdentity,
+    pub(super) accepted: AcceptedGenerationCandidate,
+    pub(super) cpu: CpuSceneCandidate,
+    pub(super) atlas: PreparedSceneAtlas,
+    pub(super) timing: RasterWorkerTiming,
+}
+
+impl SceneBuildReply {
+    fn job_id(&self) -> u64 {
+        match self {
+            Self::Raster(reply) => reply.job_id(),
+            Self::SceneCompleted(candidate) => candidate.identity.request_id().0,
+            Self::SceneCancelled { identity, .. } | Self::SceneFailed { identity, .. } => {
+                identity.request_id().0
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneBuildFailure {
+    Generation,
+    CpuCompile,
+    AtlasPreparation(RetainedFailureCategory),
+    AtlasConversion,
+    IdentityMismatch,
 }
 
 impl RasterReply {
@@ -139,6 +201,7 @@ pub(super) enum RasterCancellationError {
 
 enum RasterCommand {
     Compile(RasterJob),
+    CompileScene(SceneBuildJob),
     #[cfg(test)]
     Panic {
         job_id: u64,
@@ -155,27 +218,42 @@ enum WorkerExit {
 
 struct WorkerThreadState {
     commands: Receiver<RasterCommand>,
-    replies: SyncSender<RasterReply>,
+    replies: SyncSender<SceneBuildReply>,
     started: SyncSender<RasterWorkerThreadIdentity>,
     done: SyncSender<WorkerExit>,
     cancel_epoch: Arc<AtomicU64>,
     exited: Arc<AtomicBool>,
 }
 
-pub(super) struct RasterWorker {
+pub(super) struct CpuCandidateMailbox {
+    replies: Receiver<SceneBuildReply>,
+}
+
+impl CpuCandidateMailbox {
+    fn try_recv(&self) -> Result<Option<SceneBuildReply>, RasterWorkerDisconnected> {
+        match self.replies.try_recv() {
+            Ok(reply) => Ok(Some(reply)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(RasterWorkerDisconnected::ReplyMailbox),
+        }
+    }
+}
+
+pub(super) struct SceneBuildWorker {
     commands: Option<SyncSender<RasterCommand>>,
-    replies: Receiver<RasterReply>,
+    mailbox: CpuCandidateMailbox,
     done: Receiver<WorkerExit>,
     cancel_epoch: Arc<AtomicU64>,
     identity: RasterWorkerThreadIdentity,
     in_flight: Option<u64>,
     last_accepted_job_id: u64,
+    last_accepted_scene_request_id: u64,
     latest_epoch: u64,
     #[cfg(test)]
     exited: Arc<AtomicBool>,
 }
 
-impl RasterWorker {
+impl SceneBuildWorker {
     pub(super) fn launch() -> Result<Self, RasterWorkerLaunchError> {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
@@ -225,12 +303,13 @@ impl RasterWorker {
         }
         Ok(Self {
             commands: Some(command_tx),
-            replies: reply_rx,
+            mailbox: CpuCandidateMailbox { replies: reply_rx },
             done: done_rx,
             cancel_epoch,
             identity,
             in_flight: None,
             last_accepted_job_id: 0,
+            last_accepted_scene_request_id: 0,
             latest_epoch: 0,
             #[cfg(test)]
             exited,
@@ -241,15 +320,15 @@ impl RasterWorker {
         self.identity
     }
 
+    pub(super) const fn is_busy(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
     pub(super) fn try_submit(&mut self, job: RasterJob) -> Result<(), RasterSubmitError> {
-        if job.job_id == 0
-            || job.job_id == u64::MAX
-            || job.job_id <= self.last_accepted_job_id
-            || job.job_id < self.latest_epoch
-        {
+        if job.job_id == 0 || job.job_id == u64::MAX || job.job_id <= self.last_accepted_job_id {
             return Err(RasterSubmitError::Stale(job));
         }
-        if job.job_id > self.latest_epoch {
+        if self.in_flight.is_none() || job.job_id > self.latest_epoch {
             self.latest_epoch = job.job_id;
             self.cancel_epoch.store(job.job_id, Ordering::Release);
         }
@@ -279,6 +358,10 @@ impl RasterWorker {
             ) => {
                 unreachable!("try_submit only sends compile commands")
             }
+            Err(
+                TrySendError::Full(RasterCommand::CompileScene(_))
+                | TrySendError::Disconnected(RasterCommand::CompileScene(_)),
+            ) => unreachable!("try_submit only sends raster compile commands"),
             #[cfg(test)]
             Err(
                 TrySendError::Full(RasterCommand::Panic { .. })
@@ -286,6 +369,43 @@ impl RasterWorker {
             ) => {
                 unreachable!("try_submit only sends compile commands")
             }
+        }
+    }
+
+    pub(super) fn try_submit_scene(
+        &mut self,
+        request: GenerationRequest,
+        backing_scale: f64,
+    ) -> Result<(), SceneBuildJob> {
+        let job = SceneBuildJob { request, backing_scale };
+        let job_id = job.request.request_id().0;
+        if job_id == 0
+            || job_id == u64::MAX
+            || job_id <= self.last_accepted_scene_request_id
+            || !backing_scale.is_finite()
+            || backing_scale <= 0.0
+            || self.in_flight.is_some()
+        {
+            return Err(job);
+        }
+        if self.in_flight.is_none() || job_id > self.latest_epoch {
+            self.latest_epoch = job_id;
+            self.cancel_epoch.store(job_id, Ordering::Release);
+        }
+        let Some(commands) = &self.commands else {
+            return Err(job);
+        };
+        match commands.try_send(RasterCommand::CompileScene(job)) {
+            Ok(()) => {
+                self.in_flight = Some(job_id);
+                self.last_accepted_scene_request_id = job_id;
+                Ok(())
+            }
+            Err(
+                TrySendError::Full(RasterCommand::CompileScene(job))
+                | TrySendError::Disconnected(RasterCommand::CompileScene(job)),
+            ) => Err(job),
+            Err(_) => unreachable!("try_submit_scene only sends scene compile commands"),
         }
     }
 
@@ -317,14 +437,29 @@ impl RasterWorker {
     }
 
     pub(super) fn try_recv(&mut self) -> Result<Option<RasterReply>, RasterWorkerDisconnected> {
-        match self.replies.try_recv() {
-            Ok(reply) => {
+        match self.try_recv_build()? {
+            Some(SceneBuildReply::Raster(reply)) => {
                 if self.in_flight == Some(reply.job_id()) {
                     self.in_flight = None;
                 }
                 Ok(Some(reply))
             }
-            Err(TryRecvError::Empty) => match self.done.try_recv() {
+            Some(_) => Err(RasterWorkerDisconnected::ReplyMailbox),
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn try_recv_build(
+        &mut self,
+    ) -> Result<Option<SceneBuildReply>, RasterWorkerDisconnected> {
+        match self.mailbox.try_recv()? {
+            Some(reply) => {
+                if self.in_flight == Some(reply.job_id()) {
+                    self.in_flight = None;
+                }
+                Ok(Some(reply))
+            }
+            None => match self.done.try_recv() {
                 Ok(WorkerExit::Panicked) => Err(RasterWorkerDisconnected::Panicked),
                 Ok(WorkerExit::ReplyDisconnected) => Err(RasterWorkerDisconnected::ReplyMailbox),
                 Ok(WorkerExit::Shutdown) => Err(RasterWorkerDisconnected::Stopped),
@@ -334,12 +469,11 @@ impl RasterWorker {
                 }
                 Err(TryRecvError::Disconnected) => Ok(None),
             },
-            Err(TryRecvError::Disconnected) => Err(RasterWorkerDisconnected::ReplyMailbox),
         }
     }
 }
 
-impl Drop for RasterWorker {
+impl Drop for SceneBuildWorker {
     fn drop(&mut self) {
         self.latest_epoch = self.latest_epoch.saturating_add(1);
         self.cancel_epoch
@@ -380,28 +514,59 @@ fn run_worker(state: WorkerThreadState) -> WorkerExit {
                 }));
                 (
                     job_id,
-                    compiled.map_err(|payload| (payload, started_at, attempts)),
+                    compiled
+                        .map(SceneBuildReply::Raster)
+                        .map_err(|payload| (payload, started_at, attempts, None)),
+                )
+            }
+            RasterCommand::CompileScene(job) => {
+                let job_id = job.request.request_id().0;
+                let request_identity = job.request.identity();
+                let started_at = Instant::now();
+                let mut attempts = RasterAttemptCounts::default();
+                let compiled = catch_unwind(AssertUnwindSafe(|| {
+                    compile_scene_job(
+                        job,
+                        state.cancel_epoch.as_ref(),
+                        started_at,
+                        &mut attempts,
+                        identity.is_main_thread,
+                    )
+                }));
+                (
+                    job_id,
+                    compiled
+                        .map_err(|payload| (payload, started_at, attempts, Some(request_identity))),
                 )
             }
             #[cfg(test)]
             RasterCommand::Panic { job_id } => {
                 let started_at = Instant::now();
-                let panicked = catch_unwind(AssertUnwindSafe(|| -> RasterReply {
+                let panicked = catch_unwind(AssertUnwindSafe(|| -> SceneBuildReply {
                     panic!("injected raster worker panic")
                 }));
                 let panicked = panicked
-                    .map_err(|payload| (payload, started_at, RasterAttemptCounts::default()));
+                    .map_err(|payload| (payload, started_at, RasterAttemptCounts::default(), None));
                 (job_id, panicked)
             }
             RasterCommand::Shutdown => return WorkerExit::Shutdown,
         };
         let (reply, panicked) = match compiled {
             Ok(reply) => (reply, false),
-            Err((_, started_at, attempts)) => (
-                RasterReply::WorkerPanicked {
-                    job_id,
-                    timing: RasterWorkerTiming::since(started_at, attempts),
-                },
+            Err((_, started_at, attempts, scene_identity)) => (
+                scene_identity.map_or_else(
+                    || {
+                        SceneBuildReply::Raster(RasterReply::WorkerPanicked {
+                            job_id,
+                            timing: RasterWorkerTiming::since(started_at, attempts),
+                        })
+                    },
+                    |identity| SceneBuildReply::SceneFailed {
+                        identity,
+                        failure: SceneBuildFailure::Generation,
+                        timing: RasterWorkerTiming::since(started_at, attempts),
+                    },
+                ),
                 true,
             ),
         };
@@ -429,6 +594,133 @@ fn compile_job(
         is_main_thread,
         &mut |_| {},
     )
+}
+
+fn compile_scene_job(
+    job: SceneBuildJob,
+    cancel_epoch: &AtomicU64,
+    started_at: Instant,
+    attempts: &mut RasterAttemptCounts,
+    is_main_thread: bool,
+) -> SceneBuildReply {
+    let identity = job.request.identity();
+    let cancelled = |attempts: RasterAttemptCounts| SceneBuildReply::SceneCancelled {
+        identity,
+        timing: RasterWorkerTiming::since(started_at, attempts),
+    };
+    let is_cancelled = || cancel_epoch.load(Ordering::Acquire) != identity.request_id().0;
+    if is_cancelled() {
+        return cancelled(*attempts);
+    }
+
+    let generation = match job.request.build_scene_generation() {
+        Ok(generation) => generation,
+        Err(_) => {
+            return SceneBuildReply::SceneFailed {
+                identity,
+                failure: SceneBuildFailure::Generation,
+                timing: RasterWorkerTiming::since(started_at, *attempts),
+            }
+        }
+    };
+    if is_cancelled() {
+        return cancelled(*attempts);
+    }
+
+    let cpu = match compile_cpu_generation(&generation) {
+        Ok(cpu) => cpu,
+        Err(_) => {
+            return SceneBuildReply::SceneFailed {
+                identity,
+                failure: SceneBuildFailure::CpuCompile,
+                timing: RasterWorkerTiming::since(started_at, *attempts),
+            }
+        }
+    };
+    if is_cancelled() {
+        return cancelled(*attempts);
+    }
+
+    let manifest = GlyphRepertoireManifest::for_active_pet(
+        CompanionContentIdentity::for_pet(job.request.snapshot().topology.pet.species),
+        job.backing_scale,
+    );
+    let mut preparation = match CompiledRetainedResourcesPreparation::new(&manifest) {
+        Ok(preparation) => preparation,
+        Err(category) => {
+            return SceneBuildReply::SceneFailed {
+                identity,
+                failure: SceneBuildFailure::AtlasPreparation(category),
+                timing: RasterWorkerTiming::since(started_at, *attempts),
+            }
+        }
+    };
+    loop {
+        if is_cancelled() {
+            return cancelled(*attempts);
+        }
+        attempts.raster_calls = attempts.raster_calls.saturating_add(1);
+        if is_main_thread {
+            attempts.main_thread_raster_calls = attempts.main_thread_raster_calls.saturating_add(1);
+        }
+        match preparation.advance_one() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(category) => {
+                return SceneBuildReply::SceneFailed {
+                    identity,
+                    failure: SceneBuildFailure::AtlasPreparation(category),
+                    timing: RasterWorkerTiming::since(started_at, *attempts),
+                }
+            }
+        }
+    }
+    if is_cancelled() {
+        return cancelled(*attempts);
+    }
+    let resources = match preparation.finish() {
+        Ok(resources) => resources,
+        Err(category) => {
+            return SceneBuildReply::SceneFailed {
+                identity,
+                failure: SceneBuildFailure::AtlasPreparation(category),
+                timing: RasterWorkerTiming::since(started_at, *attempts),
+            }
+        }
+    };
+    let atlas = match PreparedSceneAtlas::from_compiled_for_generation(
+        resources.atlas(),
+        identity.key().resources,
+    ) {
+        Ok(atlas) => atlas,
+        Err(_) => {
+            return SceneBuildReply::SceneFailed {
+                identity,
+                failure: SceneBuildFailure::AtlasConversion,
+                timing: RasterWorkerTiming::since(started_at, *attempts),
+            }
+        }
+    };
+    if is_cancelled() {
+        return cancelled(*attempts);
+    }
+    let accepted = match job.request.accept_generation(generation) {
+        Ok(accepted) => accepted,
+        Err(_) => {
+            return SceneBuildReply::SceneFailed {
+                identity,
+                failure: SceneBuildFailure::IdentityMismatch,
+                timing: RasterWorkerTiming::since(started_at, *attempts),
+            }
+        }
+    };
+    SceneBuildReply::SceneCompleted(Box::new(CpuSceneBuildCandidate {
+        identity,
+        accepted,
+        cpu,
+        atlas,
+        timing: RasterWorkerTiming::since(started_at, *attempts),
+    }))
 }
 
 fn compile_job_with_checkpoint(
@@ -520,7 +812,7 @@ mod tests {
 
     use super::{
         compile_job_with_checkpoint, RasterAttemptCounts, RasterJob, RasterReply,
-        RasterSubmitError, RasterWorker,
+        RasterSubmitError, SceneBuildReply, SceneBuildWorker,
     };
     use crate::companion::retained::resources::{
         CompiledRetainedResources, GlyphAtlasEntry, GlyphRepertoireManifest,
@@ -549,13 +841,27 @@ mod tests {
         manifest(Species::Crystal, 2.0)
     }
 
-    fn wait_for_reply(worker: &mut RasterWorker) -> RasterReply {
+    fn wait_for_reply(worker: &mut SceneBuildWorker) -> RasterReply {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             match worker.try_recv().expect("worker remains connected") {
                 Some(reply) => return reply,
                 None if Instant::now() < deadline => std::thread::yield_now(),
                 None => panic!("timed out waiting for raster worker"),
+            }
+        }
+    }
+
+    fn wait_for_scene_reply(worker: &mut SceneBuildWorker) -> SceneBuildReply {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match worker
+                .try_recv_build()
+                .expect("scene build worker remains connected")
+            {
+                Some(reply) => return reply,
+                None if Instant::now() < deadline => std::thread::yield_now(),
+                None => panic!("timed out waiting for scene build worker"),
             }
         }
     }
@@ -603,9 +909,89 @@ mod tests {
     }
 
     #[test]
+    fn scene_worker_returns_request_keyed_cpu_candidate_and_atlas_off_main_thread() {
+        let _guard = worker_test_guard();
+        let snapshot = std::sync::Arc::new(
+            crate::companion::retained::compiler::projected_full_scene_snapshot_for_render_test(0),
+        );
+        let mut runtime =
+            crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState::with_active(
+                snapshot,
+            )
+            .unwrap();
+        let mut effects = runtime
+            .invalidate_resources(
+                crate::presentation::companion_scene::runtime::ResourceInvalidation::MaterialContract,
+            )
+            .unwrap();
+        let request = effects
+            .take_start_worker()
+            .expect("resource invalidation starts one immutable scene request");
+        let expected = (request.request_id(), request.key(), request.source());
+
+        let mut worker = SceneBuildWorker::launch().expect("scene build worker launches");
+        worker
+            .try_submit_scene(request, 2.0)
+            .expect("idle physical worker accepts one scene request");
+        let reply = wait_for_scene_reply(&mut worker);
+        let SceneBuildReply::SceneCompleted(candidate) = reply else {
+            panic!("scene worker did not complete the generation");
+        };
+        assert_eq!(
+            (
+                candidate.identity.request_id(),
+                candidate.identity.key(),
+                candidate.identity.source()
+            ),
+            expected
+        );
+        assert_eq!(candidate.cpu.generation_key, expected.1);
+        assert_eq!(candidate.cpu.source_revisions, expected.2);
+        assert_eq!(candidate.atlas.resource_generation, expected.1.resources);
+        assert!(candidate.timing.active_compile > Duration::ZERO);
+        assert_eq!(candidate.timing.main_thread_raster_calls, 0);
+    }
+
+    #[test]
+    fn completed_legacy_job_cannot_cancel_a_lower_numbered_scene_request() {
+        let _guard = worker_test_guard();
+        let mut worker = SceneBuildWorker::launch().expect("scene build worker launches");
+        worker
+            .try_submit(RasterJob::new(100, crystal_manifest()))
+            .expect("idle worker accepts the legacy job");
+        assert!(matches!(
+            wait_for_reply(&mut worker),
+            RasterReply::Completed { .. }
+        ));
+
+        let snapshot = std::sync::Arc::new(
+            crate::companion::retained::compiler::projected_full_scene_snapshot_for_render_test(0),
+        );
+        let mut runtime =
+            crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState::with_active(
+                snapshot,
+            )
+            .unwrap();
+        let mut effects = runtime
+            .invalidate_resources(
+                crate::presentation::companion_scene::runtime::ResourceInvalidation::MaterialContract,
+            )
+            .unwrap();
+        let request = effects.take_start_worker().unwrap();
+        assert!(request.request_id().0 < 100);
+        worker
+            .try_submit_scene(request, 2.0)
+            .expect("an idle worker starts a new cancellation domain");
+        assert!(matches!(
+            wait_for_scene_reply(&mut worker),
+            SceneBuildReply::SceneCompleted(_)
+        ));
+    }
+
+    #[test]
     fn worker_runs_off_main_with_cocoa_multithreading_enabled() {
         let _guard = worker_test_guard();
-        let worker = RasterWorker::launch().expect("NSThread worker launches");
+        let worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         let identity = worker.thread_identity();
         assert!(!identity.is_main_thread);
         assert!(identity.cocoa_multithreaded);
@@ -615,7 +1001,7 @@ mod tests {
     #[test]
     fn worker_atlas_matches_synchronous_compile_for_all_species_and_scales() {
         let _guard = worker_test_guard();
-        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        let mut worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         let mut job_id = 1;
         for species in Species::all() {
             for backing_scale in [1.0, 2.0] {
@@ -641,7 +1027,7 @@ mod tests {
     #[test]
     fn completed_reply_carries_worker_owned_active_compile_time() {
         let _guard = worker_test_guard();
-        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        let mut worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         worker
             .try_submit(RasterJob::new(1, crystal_manifest()))
             .expect("idle worker accepts one job");
@@ -656,7 +1042,7 @@ mod tests {
     #[test]
     fn busy_worker_leaves_latest_job_owned_by_submitter() {
         let _guard = worker_test_guard();
-        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        let mut worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         worker
             .try_submit(RasterJob::new(1, crystal_manifest()))
             .expect("idle worker accepts one job");
@@ -687,7 +1073,7 @@ mod tests {
     #[test]
     fn cancellation_epoch_cancels_an_in_flight_compile() {
         let _guard = worker_test_guard();
-        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        let mut worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         worker
             .try_submit(RasterJob::new(1, crystal_manifest()))
             .expect("idle worker accepts one job");
@@ -735,7 +1121,7 @@ mod tests {
     #[test]
     fn worker_panic_has_a_distinct_terminal_reply() {
         let _guard = worker_test_guard();
-        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        let mut worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         worker.panic_for_test(1);
         assert!(matches!(
             wait_for_reply(&mut worker),
@@ -746,7 +1132,7 @@ mod tests {
     #[test]
     fn typed_font_failure_does_not_terminate_worker() {
         let _guard = worker_test_guard();
-        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        let mut worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         worker
             .try_submit(RasterJob::with_unavailable_font_for_test(
                 1,
@@ -774,7 +1160,7 @@ mod tests {
     #[test]
     fn drop_during_compile_is_nonblocking_and_worker_disconnect_is_bounded() {
         let _guard = worker_test_guard();
-        let mut worker = RasterWorker::launch().expect("NSThread worker launches");
+        let mut worker = SceneBuildWorker::launch().expect("NSThread worker launches");
         let exited = worker.exit_probe();
         worker
             .try_submit(RasterJob::new(1, crystal_manifest()))

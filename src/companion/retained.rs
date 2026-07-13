@@ -55,7 +55,8 @@ use resources::{
     CompiledGlyphAtlas, CompiledRetainedResources, FragmentGlyphMode, GlyphAtlasEntry, GlyphKey,
     GlyphRepertoireManifest, RetainedResourceCounters, RETAINED_ATLAS_POINT_SIZE,
 };
-use worker::{RasterJob, RasterReply, RasterSubmitError, RasterWorker};
+use worker::CpuSceneBuildCandidate;
+use worker::{RasterJob, RasterReply, RasterSubmitError, SceneBuildWorker};
 
 use crate::round::smooth::CompanionContentIdentity;
 
@@ -237,6 +238,473 @@ struct ResourcePreparationController {
     latest_pending: Option<ResourcePreparationRequest>,
     hidden_desired: Option<ResourcePreparationKey>,
     worker_unavailable: bool,
+}
+
+#[allow(dead_code)] // Owned by the Task 12 host seam; live reads begin with Task 14 routing.
+struct ReadyGpuCandidate {
+    identity: crate::presentation::companion_scene::runtime::RequestIdentity,
+    version: crate::presentation::companion_scene::SceneVersion,
+    cpu: compiler::CpuSceneCandidate,
+    gpu: render::GpuSceneCandidate,
+    atlas: resources::PreparedSceneAtlas,
+}
+
+#[allow(dead_code)] // Owned by the Task 12 host seam; live reads begin with Task 14 routing.
+struct ActiveSceneGeneration {
+    version: crate::presentation::companion_scene::SceneVersion,
+    cpu: compiler::CpuSceneCandidate,
+    gpu: render::GpuSceneCandidate,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Surfaced by the dormant Task 12 host scene service until Task 14 routing.
+enum SceneCandidatePreparationError {
+    MissingCpuCandidate,
+    StaleCandidate,
+    Rebase(crate::presentation::companion_scene::runtime::CandidateRebaseError),
+    CpuDelta(compiler::MirrorDeltaError),
+    Upload(render::SceneUploadError),
+    Gpu(render::SceneGpuError),
+}
+
+impl std::fmt::Display for SceneCandidatePreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingCpuCandidate => formatter.write_str("no CPU scene candidate is ready"),
+            Self::StaleCandidate => formatter.write_str("the CPU scene candidate is stale"),
+            Self::Rebase(error) => write!(formatter, "scene candidate rebase failed: {error:?}"),
+            Self::CpuDelta(error) => {
+                write!(formatter, "scene candidate mirror update failed: {error:?}")
+            }
+            Self::Upload(error) => write!(formatter, "scene upload preparation failed: {error:?}"),
+            Self::Gpu(error) => write!(formatter, "scene GPU materialization failed: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for SceneCandidatePreparationError {}
+
+#[allow(dead_code)] // Concrete host coordinator is intentionally not called by ui_tick until Task 14.
+struct RetainedSceneGenerationState {
+    runtime: crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState,
+    cpu_candidate: Option<Box<CpuReadySceneCandidate>>,
+    ready_candidate: Option<ReadyGpuCandidate>,
+    active: Option<ActiveSceneGeneration>,
+    #[cfg(test)]
+    gpu_materializations: u64,
+}
+
+#[allow(dead_code)] // Held only by the dormant Task 12 host coordinator until Task 14 routing.
+struct CpuReadySceneCandidate {
+    identity: crate::presentation::companion_scene::runtime::RequestIdentity,
+    cpu: compiler::CpuSceneCandidate,
+    atlas: resources::PreparedSceneAtlas,
+}
+
+#[allow(dead_code)] // Host-owned production seam; installed by the Task 14 live route.
+pub(in crate::companion) struct RetainedSceneActivation {
+    generations: RetainedSceneGenerationState,
+    shared: render::SceneGpuShared,
+    renderer: render::SceneRenderer,
+}
+
+#[allow(dead_code)] // Exercised by Task 12 tests; production calls begin with Task 14 routing.
+impl RetainedSceneGenerationState {
+    fn new(
+        runtime: crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState,
+    ) -> Self {
+        Self {
+            runtime,
+            cpu_candidate: None,
+            ready_candidate: None,
+            active: None,
+            #[cfg(test)]
+            gpu_materializations: 0,
+        }
+    }
+
+    fn invalidate_resources(
+        &mut self,
+        invalidation: crate::presentation::companion_scene::runtime::ResourceInvalidation,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::RuntimeEffects,
+        crate::presentation::companion_scene::runtime::RuntimeError,
+    > {
+        self.runtime.invalidate_resources(invalidation)
+    }
+
+    fn accept_worker_candidate(
+        &mut self,
+        candidate: Box<CpuSceneBuildCandidate>,
+    ) -> crate::presentation::companion_scene::runtime::RuntimeEffects {
+        let CpuSceneBuildCandidate {
+            identity,
+            accepted,
+            cpu,
+            atlas,
+            timing: _,
+        } = *candidate;
+        let current = self.runtime.pending_request_identity() == Some(identity);
+        let effects = self.runtime.complete_candidate(accepted);
+        if current
+            && effects.disposition()
+                == crate::presentation::companion_scene::runtime::RuntimeDisposition::CandidateReady(
+                    identity.request_id(),
+                )
+        {
+            self.cpu_candidate = Some(Box::new(CpuReadySceneCandidate { identity, cpu, atlas }));
+        }
+        effects
+    }
+
+    fn pending_identity(
+        &self,
+    ) -> Option<crate::presentation::companion_scene::runtime::RequestIdentity> {
+        self.runtime.pending_request_identity()
+    }
+
+    fn materialize_ready_candidate(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &render::SceneGpuShared,
+    ) -> Result<(), SceneCandidatePreparationError> {
+        let candidate = self
+            .cpu_candidate
+            .take()
+            .ok_or(SceneCandidatePreparationError::MissingCpuCandidate)?;
+        let CpuReadySceneCandidate { identity, mut cpu, atlas } = *candidate;
+        if self.runtime.pending_request_identity() != Some(identity) {
+            return Err(SceneCandidatePreparationError::StaleCandidate);
+        }
+        let rebase = self
+            .runtime
+            .rebase_ready_candidate()
+            .map_err(SceneCandidatePreparationError::Rebase)?;
+        if rebase.identity() != identity {
+            return Err(SceneCandidatePreparationError::StaleCandidate);
+        }
+        let prepared = cpu
+            .prepare_deltas(rebase.content(), rebase.frame())
+            .map_err(SceneCandidatePreparationError::CpuDelta)?;
+        cpu.commit_prepared(prepared);
+        let upload = render::prepare_scene_upload(&cpu, &atlas)
+            .map_err(SceneCandidatePreparationError::Upload)?;
+        let gpu = render::materialize_gpu_candidate(device, queue, shared, &upload, &atlas)
+            .map_err(SceneCandidatePreparationError::Gpu)?;
+        self.ready_candidate = Some(ReadyGpuCandidate {
+            identity,
+            version: rebase.version(),
+            cpu,
+            gpu,
+            atlas,
+        });
+        #[cfg(test)]
+        {
+            self.gpu_materializations = self.gpu_materializations.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn rebase_materialized_candidate(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &render::SceneGpuShared,
+    ) -> Result<(), SceneCandidatePreparationError> {
+        let mut candidate = self
+            .ready_candidate
+            .take()
+            .ok_or(SceneCandidatePreparationError::MissingCpuCandidate)?;
+        if self.runtime.pending_request_identity() != Some(candidate.identity) {
+            return Err(SceneCandidatePreparationError::StaleCandidate);
+        }
+        let rebase = self
+            .runtime
+            .rebase_ready_candidate()
+            .map_err(SceneCandidatePreparationError::Rebase)?;
+        if rebase.identity() != candidate.identity {
+            return Err(SceneCandidatePreparationError::StaleCandidate);
+        }
+        let prepared = candidate
+            .cpu
+            .prepare_deltas(rebase.content(), rebase.frame())
+            .map_err(SceneCandidatePreparationError::CpuDelta)?;
+        candidate.cpu.commit_prepared(prepared);
+        let upload = render::prepare_scene_upload(&candidate.cpu, &candidate.atlas)
+            .map_err(SceneCandidatePreparationError::Upload)?;
+        candidate.gpu =
+            render::materialize_gpu_candidate(device, queue, shared, &upload, &candidate.atlas)
+                .map_err(SceneCandidatePreparationError::Gpu)?;
+        candidate.version = rebase.version();
+        self.ready_candidate = Some(candidate);
+        #[cfg(test)]
+        {
+            self.gpu_materializations = self.gpu_materializations.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn begin_activation(
+        &mut self,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::ActivationAttempt,
+        crate::presentation::companion_scene::runtime::ActivationStartError,
+    > {
+        use crate::presentation::companion_scene::runtime::ActivationStartError;
+
+        if self.ready_candidate.is_none() {
+            return Err(ActivationStartError::NoReadyCandidate);
+        }
+        self.runtime.begin_activation()
+    }
+
+    fn finish_candidate_activation(
+        &mut self,
+        attempt: crate::presentation::companion_scene::runtime::ActivationAttempt,
+        progress: FrameProgress,
+        immediate_errors: &GpuErrorMailbox,
+    ) -> crate::presentation::companion_scene::runtime::RuntimeEffects {
+        use crate::presentation::companion_scene::runtime::{
+            ActivationAttemptOutcome, ActivationTransition, EpochFailure, RuntimeDisposition,
+        };
+
+        let outcome = activation_outcome(attempt, &progress, immediate_errors);
+        let effects = self.runtime.finish_activation(attempt, outcome);
+        match effects.disposition() {
+            RuntimeDisposition::Activation(ActivationTransition::Committed) => {
+                let candidate = self
+                    .ready_candidate
+                    .take()
+                    .expect("committed runtime activation must own a GPU-ready candidate");
+                debug_assert_eq!(candidate.identity.request_id(), attempt.request_id());
+                debug_assert_eq!(candidate.identity.key(), attempt.key());
+                self.active = Some(ActiveSceneGeneration {
+                    version: candidate.version,
+                    cpu: candidate.cpu,
+                    gpu: candidate.gpu,
+                });
+            }
+            RuntimeDisposition::Activation(ActivationTransition::RetryLater) => {}
+            RuntimeDisposition::Activation(
+                ActivationTransition::CandidateDestroyedRetainingActive
+                | ActivationTransition::DroppedStale,
+            ) => {
+                self.drop_ready_candidate_for(attempt);
+            }
+            RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending) => {
+                self.drop_ready_candidate_for(attempt);
+                if matches!(
+                    outcome,
+                    ActivationAttemptOutcome::Fatal(
+                        EpochFailure::DeviceLost
+                            | EpochFailure::Internal
+                            | EpochFailure::OutOfMemory
+                            | EpochFailure::UncertainPostSubmit
+                            | EpochFailure::ImmediateGpuError
+                            | EpochFailure::DelayedGpuError
+                    )
+                ) {
+                    self.active = None;
+                }
+            }
+            _ => {}
+        }
+        effects
+    }
+
+    fn observe_delayed_gpu_error(
+        &mut self,
+        mailbox: &GpuErrorMailbox,
+    ) -> Option<crate::presentation::companion_scene::runtime::RuntimeEffects> {
+        let device = self.active.as_ref()?.version.generation.device;
+        match mailbox.drain_for(device)? {
+            RetainedFailureCategory::DeviceOutOfMemory
+            | RetainedFailureCategory::DeviceValidation
+            | RetainedFailureCategory::DeviceInternal => {
+                let effects = self.runtime.observe_delayed_gpu_error(device);
+                self.cpu_candidate = None;
+                self.ready_candidate = None;
+                self.active = None;
+                Some(effects)
+            }
+            _ => None,
+        }
+    }
+
+    fn reject_materialization_failure(
+        &mut self,
+        error: &SceneCandidatePreparationError,
+    ) -> crate::presentation::companion_scene::runtime::RuntimeEffects {
+        use crate::presentation::companion_scene::runtime::{
+            ActivationAttemptOutcome, CandidateFailure, EpochFailure,
+        };
+
+        let device = self
+            .runtime
+            .pending_request_identity()
+            .map(|identity| identity.key().device)
+            .or_else(|| {
+                self.active
+                    .as_ref()
+                    .map(|active| active.version.generation.device)
+            })
+            .expect("materialization failure belongs to a pending or active device generation");
+        let Ok(attempt) = self.runtime.begin_activation() else {
+            self.cpu_candidate = None;
+            self.ready_candidate = None;
+            self.active = None;
+            return self.runtime.observe_delayed_gpu_error(device);
+        };
+        let outcome = match error {
+            SceneCandidatePreparationError::Gpu(render::SceneGpuError::Gpu(
+                render::ScopedGpuErrorCategory::OutOfMemory,
+            )) => ActivationAttemptOutcome::Fatal(EpochFailure::OutOfMemory),
+            SceneCandidatePreparationError::Gpu(render::SceneGpuError::Gpu(
+                render::ScopedGpuErrorCategory::Internal,
+            )) => ActivationAttemptOutcome::Fatal(EpochFailure::Internal),
+            SceneCandidatePreparationError::Gpu(_) => {
+                ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource)
+            }
+            _ => ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Validation),
+        };
+        let effects = self.runtime.finish_activation(attempt, outcome);
+        self.cpu_candidate = None;
+        self.ready_candidate = None;
+        if matches!(outcome, ActivationAttemptOutcome::Fatal(_)) {
+            self.active = None;
+        }
+        effects
+    }
+
+    fn drop_ready_candidate_for(
+        &mut self,
+        attempt: crate::presentation::companion_scene::runtime::ActivationAttempt,
+    ) {
+        if self.ready_candidate.as_ref().is_some_and(|candidate| {
+            candidate.identity.request_id() == attempt.request_id()
+                && candidate.identity.key() == attempt.key()
+        }) {
+            self.ready_candidate = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn active_checksum(&self) -> Option<u64> {
+        self.active.as_ref().map(|generation| {
+            debug_assert_eq!(generation.version.generation, generation.gpu.generation_key);
+            debug_assert_eq!(
+                generation.cpu.static_checksum,
+                generation.gpu.static_checksum
+            );
+            generation.gpu.static_checksum
+        })
+    }
+
+    #[cfg(test)]
+    const fn gpu_materialization_count(&self) -> u64 {
+        self.gpu_materializations
+    }
+
+    const fn has_cpu_candidate(&self) -> bool {
+        self.cpu_candidate.is_some()
+    }
+}
+
+#[allow(dead_code)] // Called by the dormant Task 12 host activation seam until Task 14.
+fn activation_outcome(
+    attempt: crate::presentation::companion_scene::runtime::ActivationAttempt,
+    progress: &FrameProgress,
+    immediate_errors: &GpuErrorMailbox,
+) -> crate::presentation::companion_scene::runtime::ActivationAttemptOutcome {
+    use crate::presentation::companion_scene::runtime::{
+        AcquireDeferral, ActivationAttemptOutcome, CandidateFailure,
+    };
+
+    if let Some(failure) = immediate_errors.drain_for(attempt.key().device) {
+        return failure_activation_outcome(failure);
+    }
+    match progress.disposition() {
+        Some(FrameDisposition::SurfacePresentCalled)
+            if progress.observed(FrameMilestone::Prepared)
+                && progress.observed(FrameMilestone::Encoded)
+                && progress.observed(FrameMilestone::Submitted)
+                && progress.observed(FrameMilestone::SurfacePresentCalled) =>
+        {
+            ActivationAttemptOutcome::PresentedClean { surface: attempt.surface() }
+        }
+        Some(FrameDisposition::Skipped(SkipReason::Outdated)) => {
+            ActivationAttemptOutcome::Deferred(AcquireDeferral::OutdatedReconfigured)
+        }
+        Some(FrameDisposition::Skipped(SkipReason::Timeout)) => {
+            ActivationAttemptOutcome::Deferred(AcquireDeferral::Timeout)
+        }
+        Some(FrameDisposition::Skipped(SkipReason::Occluded)) => {
+            ActivationAttemptOutcome::Deferred(AcquireDeferral::Occluded)
+        }
+        Some(FrameDisposition::Skipped(SkipReason::ResourcePreparation)) => {
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource)
+        }
+        Some(FrameDisposition::Failed(failure))
+        | Some(FrameDisposition::FallbackPending(failure))
+        | Some(FrameDisposition::FallbackPainted(failure)) => failure_activation_outcome(failure),
+        Some(FrameDisposition::Captured) | Some(FrameDisposition::SurfacePresentCalled) | None => {
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::PreSubmitEncode)
+        }
+    }
+}
+
+#[allow(dead_code)] // Called by the dormant Task 12 host activation seam until Task 14.
+fn failure_activation_outcome(
+    failure: RetainedFailureCategory,
+) -> crate::presentation::companion_scene::runtime::ActivationAttemptOutcome {
+    use crate::presentation::companion_scene::runtime::{
+        ActivationAttemptOutcome, CandidateFailure, EpochFailure,
+    };
+
+    match failure {
+        RetainedFailureCategory::SceneCandidateEncode => {
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::PreSubmitEncode)
+        }
+        RetainedFailureCategory::AtlasUnavailable
+        | RetainedFailureCategory::FontUnavailable
+        | RetainedFailureCategory::RasterWorkerUnavailable
+        | RetainedFailureCategory::SurfaceUnavailable
+        | RetainedFailureCategory::AdapterUnavailable
+        | RetainedFailureCategory::DeviceUnavailable
+        | RetainedFailureCategory::SurfaceCreate => {
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource)
+        }
+        RetainedFailureCategory::SurfaceLost => {
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceLost)
+        }
+        RetainedFailureCategory::SurfaceValidation => {
+            ActivationAttemptOutcome::Fatal(EpochFailure::SurfaceValidation)
+        }
+        RetainedFailureCategory::DeviceOutOfMemory => {
+            ActivationAttemptOutcome::Fatal(EpochFailure::OutOfMemory)
+        }
+        RetainedFailureCategory::DeviceValidation => {
+            ActivationAttemptOutcome::Fatal(EpochFailure::ImmediateGpuError)
+        }
+        RetainedFailureCategory::DeviceInternal => {
+            ActivationAttemptOutcome::Fatal(EpochFailure::Internal)
+        }
+        RetainedFailureCategory::UnsupportedRaster
+        | RetainedFailureCategory::CaptureUnsupportedVariant
+        | RetainedFailureCategory::CapturePollTimeout
+        | RetainedFailureCategory::CaptureMapFailed
+        | RetainedFailureCategory::CaptureBufferTooShort
+        | RetainedFailureCategory::LifetimeGpuPoll
+        | RetainedFailureCategory::LifetimeRssUnavailable
+        | RetainedFailureCategory::LifetimeFramePreparation => {
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Validation)
+        }
+        #[cfg(feature = "dev-preview")]
+        RetainedFailureCategory::CaptureWriteFailed => {
+            ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Validation)
+        }
+    }
 }
 
 impl ResourcePreparationController {
@@ -1563,8 +2031,9 @@ mod tests {
         LayerActivationState, LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
         PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationController,
         ResourcePreparationKey, ResourcePreparationTick, RetainedFailureCategory,
-        RetainedResourceCounters, SmoothBlendMode, FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE,
-        INSTANCE_RING_LEN, INSTANCE_STRIDE, RETAINED_ATLAS_POINT_SIZE,
+        RetainedResourceCounters, RetainedSceneGenerationState, SmoothBlendMode,
+        FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE, INSTANCE_RING_LEN, INSTANCE_STRIDE,
+        RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -1578,6 +2047,346 @@ mod tests {
 
     fn preparation_key(species: Species, scale: f64) -> ResourcePreparationKey {
         ResourcePreparationKey::new(CompanionContentIdentity::for_pet(species), scale)
+    }
+
+    #[test]
+    fn stale_scene_worker_reply_is_rejected_before_gpu_materialization() {
+        use super::worker::{SceneBuildReply, SceneBuildWorker};
+        use crate::presentation::companion_scene::runtime::{
+            CompanionSceneRuntimeState, ResourceInvalidation,
+        };
+        use std::time::{Duration, Instant};
+
+        let snapshot =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(0));
+        let runtime = CompanionSceneRuntimeState::cold_start(snapshot).unwrap();
+        let mut generations = RetainedSceneGenerationState::new(runtime);
+        let mut first = generations
+            .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
+            .unwrap();
+        let old = first.take_start_worker().unwrap();
+        let old_id = old.request_id();
+        let mut worker = SceneBuildWorker::launch().unwrap();
+        worker.try_submit_scene(old, 2.0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let old = loop {
+            match worker.try_recv_build().unwrap() {
+                Some(SceneBuildReply::SceneCompleted(candidate)) => break candidate,
+                Some(_) => panic!("old scene request did not complete"),
+                None if Instant::now() < deadline => std::thread::yield_now(),
+                None => panic!("old scene request timed out"),
+            }
+        };
+
+        let mut superseding = generations
+            .invalidate_resources(ResourceInvalidation::MaterialContract)
+            .unwrap();
+        assert_eq!(
+            superseding.take_cancel_worker().unwrap().request_id(),
+            old_id
+        );
+        let mut stale = generations.accept_worker_candidate(old);
+        assert_eq!(generations.gpu_materialization_count(), 0);
+        assert!(!generations.has_cpu_candidate());
+        let newest = stale
+            .take_start_worker()
+            .expect("stale completion releases the coalesced newest request");
+        worker.try_submit_scene(newest, 2.0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let newest = loop {
+            match worker.try_recv_build().unwrap() {
+                Some(SceneBuildReply::SceneCompleted(candidate)) => break candidate,
+                Some(_) => panic!("newest scene request did not complete"),
+                None if Instant::now() < deadline => std::thread::yield_now(),
+                None => panic!("newest scene request timed out"),
+            }
+        };
+        generations.accept_worker_candidate(newest);
+
+        let (device, queue) = native_device();
+        let shared = super::render::SceneGpuShared::create(
+            &device,
+            generations.pending_identity().unwrap().key().device,
+        )
+        .unwrap();
+        generations
+            .materialize_ready_candidate(&device, &queue, &shared)
+            .unwrap();
+        assert_eq!(generations.gpu_materialization_count(), 1);
+    }
+
+    #[test]
+    fn failed_candidate_first_present_retains_external_active_generation() {
+        use crate::companion::retained::{
+            FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox,
+        };
+        use crate::presentation::companion_scene::runtime::{
+            ActivationTransition, ResourceInvalidation, RuntimeDisposition,
+        };
+
+        let (mut generations, device, queue, shared) = ready_scene_generation();
+        let first_attempt = generations.begin_activation().unwrap();
+        let mut first_present = FrameProgress::new(1, first_attempt.key().resources.0);
+        first_present.mark(FrameMilestone::Prepared).unwrap();
+        first_present.mark(FrameMilestone::Encoded).unwrap();
+        first_present.mark(FrameMilestone::Submitted).unwrap();
+        first_present
+            .finish(FrameDisposition::SurfacePresentCalled)
+            .unwrap();
+        let committed = generations.finish_candidate_activation(
+            first_attempt,
+            first_present,
+            &GpuErrorMailbox::new(),
+        );
+        assert_eq!(
+            committed.disposition(),
+            RuntimeDisposition::Activation(ActivationTransition::Committed)
+        );
+        let previous = generations.active_checksum().unwrap();
+
+        let next = generations
+            .invalidate_resources(ResourceInvalidation::MaterialContract)
+            .unwrap();
+        complete_scene_request(&mut generations, next, 2.0);
+        generations
+            .materialize_ready_candidate(&device, &queue, &shared)
+            .unwrap();
+        let attempt = generations.begin_activation().unwrap();
+        let mut failed = FrameProgress::new(2, attempt.key().resources.0);
+        failed.mark(FrameMilestone::Prepared).unwrap();
+        failed
+            .finish(FrameDisposition::Failed(
+                RetainedFailureCategory::SceneCandidateEncode,
+            ))
+            .unwrap();
+        let effects =
+            generations.finish_candidate_activation(attempt, failed, &GpuErrorMailbox::new());
+        assert_eq!(
+            effects.disposition(),
+            RuntimeDisposition::Activation(ActivationTransition::CandidateDestroyedRetainingActive)
+        );
+        assert_eq!(generations.active_checksum(), Some(previous));
+    }
+
+    #[test]
+    fn first_candidate_encode_failure_falls_back_without_external_active() {
+        use crate::companion::retained::{
+            FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox,
+        };
+        use crate::presentation::companion_scene::runtime::{
+            ActivationTransition, CompanionSceneRuntimeState, ResourceInvalidation,
+            RuntimeDisposition,
+        };
+
+        let snapshot =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(0));
+        let runtime = CompanionSceneRuntimeState::cold_start(snapshot).unwrap();
+        let mut generations = RetainedSceneGenerationState::new(runtime);
+        let request = generations
+            .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
+            .unwrap();
+        complete_scene_request(&mut generations, request, 2.0);
+        let (device, queue) = native_device();
+        let shared = super::render::SceneGpuShared::create(
+            &device,
+            generations.pending_identity().unwrap().key().device,
+        )
+        .unwrap();
+        generations
+            .materialize_ready_candidate(&device, &queue, &shared)
+            .unwrap();
+
+        let attempt = generations.begin_activation().unwrap();
+        let mut failed = FrameProgress::new(1, attempt.key().resources.0);
+        failed.mark(FrameMilestone::Prepared).unwrap();
+        failed
+            .finish(FrameDisposition::Failed(
+                RetainedFailureCategory::SceneCandidateEncode,
+            ))
+            .unwrap();
+        let effects =
+            generations.finish_candidate_activation(attempt, failed, &GpuErrorMailbox::new());
+        assert_eq!(
+            effects.disposition(),
+            RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending)
+        );
+        assert_eq!(generations.active_checksum(), None);
+    }
+
+    #[test]
+    fn delayed_gpu_error_invalidates_matching_device_epoch_and_falls_back() {
+        use crate::companion::retained::{
+            FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox,
+        };
+        use crate::presentation::companion_scene::runtime::{
+            ActivationTransition, RuntimeDisposition,
+        };
+
+        let (mut generations, _device, _queue, _shared) = ready_scene_generation();
+        let attempt = generations.begin_activation().unwrap();
+        let mut first_present = FrameProgress::new(1, attempt.key().resources.0);
+        first_present.mark(FrameMilestone::Prepared).unwrap();
+        first_present.mark(FrameMilestone::Encoded).unwrap();
+        first_present.mark(FrameMilestone::Submitted).unwrap();
+        first_present
+            .finish(FrameDisposition::SurfacePresentCalled)
+            .unwrap();
+        generations.finish_candidate_activation(attempt, first_present, &GpuErrorMailbox::new());
+        assert!(generations.active_checksum().is_some());
+
+        let mailbox = GpuErrorMailbox::new();
+        mailbox
+            .sender_for(attempt.key().device)
+            .send(RetainedFailureCategory::DeviceValidation)
+            .unwrap();
+        let effects = generations
+            .observe_delayed_gpu_error(&mailbox)
+            .expect("the matching device fault is observed");
+        assert_eq!(
+            effects.disposition(),
+            RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending)
+        );
+        assert_eq!(generations.active_checksum(), None);
+    }
+
+    #[test]
+    fn materialization_failure_rejects_candidate_and_retains_external_active_generation() {
+        use crate::companion::retained::{
+            FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox,
+            SceneCandidatePreparationError,
+        };
+        use crate::presentation::companion_scene::runtime::{
+            ActivationTransition, ResourceInvalidation, RuntimeDisposition,
+        };
+
+        let (mut generations, _device, _queue, _shared) = ready_scene_generation();
+        let attempt = generations.begin_activation().unwrap();
+        let mut presented = FrameProgress::new(1, attempt.key().resources.0);
+        presented.mark(FrameMilestone::Prepared).unwrap();
+        presented.mark(FrameMilestone::Encoded).unwrap();
+        presented.mark(FrameMilestone::Submitted).unwrap();
+        presented
+            .finish(FrameDisposition::SurfacePresentCalled)
+            .unwrap();
+        generations.finish_candidate_activation(attempt, presented, &GpuErrorMailbox::new());
+        let previous = generations.active_checksum().unwrap();
+
+        let next = generations
+            .invalidate_resources(ResourceInvalidation::MaterialContract)
+            .unwrap();
+        complete_scene_request(&mut generations, next, 2.0);
+        let effects =
+            generations.reject_materialization_failure(&SceneCandidatePreparationError::Upload(
+                super::render::SceneUploadError::MirrorSizeMismatch,
+            ));
+        assert_eq!(
+            effects.disposition(),
+            RuntimeDisposition::Activation(ActivationTransition::CandidateDestroyedRetainingActive)
+        );
+        assert_eq!(generations.active_checksum(), Some(previous));
+    }
+
+    #[test]
+    fn compatible_update_after_gpu_materialization_rebases_the_ready_candidate() {
+        use crate::presentation::companion_scene::runtime::{
+            ActivationStartError, RuntimeDisposition,
+        };
+
+        let (mut generations, device, queue, shared) = ready_scene_generation();
+        let newer =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(1));
+        let prepared = generations.runtime.prepare_snapshot(newer).unwrap();
+        let mut effects = generations.runtime.commit_prepared(prepared).unwrap();
+        assert!(matches!(
+            effects.disposition(),
+            RuntimeDisposition::SnapshotCommitted(_)
+        ));
+        assert!(effects.take_start_worker().is_none());
+        assert_eq!(
+            generations.begin_activation(),
+            Err(ActivationStartError::CandidateNeedsRebase)
+        );
+
+        generations
+            .rebase_materialized_candidate(&device, &queue, &shared)
+            .unwrap();
+        let desired = generations.runtime.pending_desired_source().unwrap();
+        let candidate = generations.ready_candidate.as_ref().unwrap();
+        assert_eq!(candidate.version.applied, desired);
+        assert_eq!(candidate.cpu.source_revisions, desired);
+        assert_eq!(candidate.gpu.source_revisions, desired);
+        assert!(generations.begin_activation().is_ok());
+    }
+
+    fn ready_scene_generation() -> (
+        RetainedSceneGenerationState,
+        wgpu::Device,
+        wgpu::Queue,
+        super::render::SceneGpuShared,
+    ) {
+        use crate::presentation::companion_scene::runtime::{
+            CompanionSceneRuntimeState, ResourceInvalidation,
+        };
+        let snapshot =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(0));
+        let runtime = CompanionSceneRuntimeState::cold_start(snapshot).unwrap();
+        let mut generations = RetainedSceneGenerationState::new(runtime);
+        let request = generations
+            .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
+            .unwrap();
+        complete_scene_request(&mut generations, request, 2.0);
+        let (device, queue) = native_device();
+        let shared = super::render::SceneGpuShared::create(
+            &device,
+            generations.pending_identity().unwrap().key().device,
+        )
+        .unwrap();
+        generations
+            .materialize_ready_candidate(&device, &queue, &shared)
+            .unwrap();
+        (generations, device, queue, shared)
+    }
+
+    fn complete_scene_request(
+        generations: &mut RetainedSceneGenerationState,
+        mut effects: crate::presentation::companion_scene::runtime::RuntimeEffects,
+        backing_scale: f64,
+    ) {
+        use super::worker::{SceneBuildReply, SceneBuildWorker};
+        use std::time::{Duration, Instant};
+        let request = effects.take_start_worker().unwrap();
+        let mut worker = SceneBuildWorker::launch().unwrap();
+        worker.try_submit_scene(request, backing_scale).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match worker.try_recv_build().unwrap() {
+                Some(SceneBuildReply::SceneCompleted(candidate)) => {
+                    generations.accept_worker_candidate(candidate);
+                    return;
+                }
+                Some(_) => panic!("scene request did not complete"),
+                None if Instant::now() < deadline => std::thread::yield_now(),
+                None => panic!("scene request timed out"),
+            }
+        }
+    }
+
+    fn native_device() -> (wgpu::Device, wgpu::Queue) {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::METAL;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .unwrap();
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("glorp-scene-lifecycle-test-device"),
+            ..Default::default()
+        }))
+        .unwrap()
     }
 
     #[test]
