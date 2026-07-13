@@ -280,12 +280,16 @@ fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     let distance = length(centered);
     let edge_width = fwidth(distance);
     let coverage = 1.0 - smoothstep(0.5 - edge_width, 0.5 + edge_width, distance);
-    return premultiply_scene_color(
+    let output = premultiply_scene_color(
         palette_linear(input),
         coverage,
         input.opacity,
         input.saturation,
     );
+    if (output.a <= 0.0) {
+        discard;
+    }
+    return output;
 }
 
 @fragment

@@ -694,6 +694,10 @@ pub(super) struct PreparedSceneAtlasEntry {
 #[derive(Debug)]
 #[allow(dead_code)] // CPU-only handoff remains independent of GPU ownership.
 pub(super) struct PreparedSceneAtlas {
+    /// Presentation identity this atlas was prepared for. The render owner
+    /// rejects a CPU upload carrying a different resource generation before it
+    /// opens GPU error scopes or allocates any candidate objects.
+    pub(super) resource_generation: crate::presentation::companion_scene::ResourceGeneration,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) coverage_r8: Vec<u8>,
@@ -724,8 +728,21 @@ pub(super) enum GlyphAtlasResolveError {
 
 #[allow(dead_code)] // Pure conversion is exercised before GPU materialization.
 impl PreparedSceneAtlas {
+    /// Test/capacity convenience. Production handoff uses
+    /// [`Self::from_compiled_for_generation`] so resource identity is explicit.
+    #[cfg(test)]
     pub(super) fn from_compiled(
         compiled: &CompiledGlyphAtlas,
+    ) -> std::result::Result<Self, PreparedSceneAtlasError> {
+        Self::from_compiled_for_generation(
+            compiled,
+            crate::presentation::companion_scene::ResourceGeneration(0),
+        )
+    }
+
+    pub(super) fn from_compiled_for_generation(
+        compiled: &CompiledGlyphAtlas,
+        resource_generation: crate::presentation::companion_scene::ResourceGeneration,
     ) -> std::result::Result<Self, PreparedSceneAtlasError> {
         let pixel_count = usize::try_from(compiled.width)
             .ok()
@@ -798,6 +815,7 @@ impl PreparedSceneAtlas {
         }
 
         Ok(Self {
+            resource_generation,
             width: compiled.width,
             height: compiled.height,
             coverage_r8,
@@ -1801,6 +1819,29 @@ mod prepared_scene_atlas_tests {
         assert_eq!(
             pixel(&prepared.straight_color_rgba_srgb, 6, 5, 0),
             [255, 127, 1, 255]
+        );
+    }
+
+    #[test]
+    fn prepared_scene_atlas_carries_the_presentation_resource_generation() {
+        let generation = crate::presentation::companion_scene::ResourceGeneration(42);
+        let source = atlas(
+            1,
+            1,
+            vec![255, 255, 255, 255],
+            [(
+                GlyphKey::new("^", false),
+                entry(GlyphEntryKind::Mask, [0, 0], [1, 1], 0.0),
+            )],
+        );
+        let production =
+            PreparedSceneAtlas::from_compiled_for_generation(&source, generation).unwrap();
+        assert_eq!(production.resource_generation, generation);
+        assert_eq!(
+            PreparedSceneAtlas::from_compiled(&source)
+                .unwrap()
+                .resource_generation,
+            crate::presentation::companion_scene::ResourceGeneration(0),
         );
     }
 

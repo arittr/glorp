@@ -8,6 +8,7 @@ use super::compiler::{
 use super::resources::{GlyphAtlasResolveError, GlyphEntryKind, GlyphKey, PreparedSceneAtlas};
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
+use wgpu::util::DeviceExt;
 
 const NONE_U32: u32 = u32::MAX;
 const SHALLOW_CARD_PRIMITIVE_TAG: u32 = 3;
@@ -308,43 +309,44 @@ fn prepare_draw_record(source: PrimitiveUploadSource) -> Option<SceneDrawRecord>
 }
 
 fn instance_source_and_count(source: PrimitiveUploadSource) -> Option<(InstanceSource, u32)> {
+    instance_source_and_count_from_tags(source.instance_group, source.instance_base)
+}
+
+fn instance_source_and_count_from_tags(
+    instance_group: u32,
+    instance_base: u32,
+) -> Option<(InstanceSource, u32)> {
     use crate::presentation::companion_scene::scene::{
         InstanceLayer, MAX_AMBIENT_INSTANCES, MAX_HUD_GLYPH_SLOTS, MAX_PET_ART_SLOTS,
-        MAX_PROP_GLYPHS_PER_SLOT, MAX_TANK_GLYPHS_PER_SLOT,
+        MAX_PROP_GLYPHS_PER_SLOT, MAX_ROUND_TANK_INHABITANTS, MAX_TANK_GLYPHS_PER_SLOT,
+        MAX_VISIBLE_PROPS,
     };
 
     let count = |value: usize| u32::try_from(value).expect("scene capacity fits in u32");
-    match source.instance_group {
-        1 => Some((InstanceSource::PetBody, count(MAX_PET_ART_SLOTS))),
+    match instance_group {
+        1 if instance_base == 0 => Some((InstanceSource::PetBody, count(MAX_PET_ART_SLOTS))),
         // Task 9.5 owns the filtered particle stream; until then this source is
         // typed but deliberately has no drawable instance or content range.
-        2 if source.instance_base == NONE_U32 => Some((InstanceSource::PetParticles, 0)),
+        2 if instance_base == NONE_U32 => Some((InstanceSource::PetParticles, 0)),
         3 => {
             let width = count(MAX_PROP_GLYPHS_PER_SLOT);
-            source.instance_base.is_multiple_of(width).then_some((
-                InstanceSource::PropGlyphs { slot: source.instance_base / width },
-                width,
-            ))
+            let slot = instance_base.checked_div(width)?;
+            (instance_base.is_multiple_of(width) && slot < count(MAX_VISIBLE_PROPS))
+                .then_some((InstanceSource::PropGlyphs { slot }, width))
         }
         5 | 6 => {
             let width = count(MAX_TANK_GLYPHS_PER_SLOT);
-            let layer = if source.instance_group == 5 {
+            let slot = instance_base.checked_div(width)?;
+            let layer = if instance_group == 5 {
                 InstanceLayer::Behind
             } else {
                 InstanceLayer::Foreground
             };
-            source.instance_base.is_multiple_of(width).then_some((
-                InstanceSource::TankCells {
-                    slot: source.instance_base / width,
-                    layer,
-                },
-                width,
-            ))
+            (instance_base.is_multiple_of(width) && slot < count(MAX_ROUND_TANK_INHABITANTS))
+                .then_some((InstanceSource::TankCells { slot, layer }, width))
         }
-        7 if source.instance_base == 0 => {
-            Some((InstanceSource::Ambient, count(MAX_AMBIENT_INSTANCES)))
-        }
-        8 if source.instance_base == 0 => Some((InstanceSource::Hud, count(MAX_HUD_GLYPH_SLOTS))),
+        7 if instance_base == 0 => Some((InstanceSource::Ambient, count(MAX_AMBIENT_INSTANCES))),
+        8 if instance_base == 0 => Some((InstanceSource::Hud, count(MAX_HUD_GLYPH_SLOTS))),
         _ => None,
     }
 }
@@ -790,6 +792,1103 @@ fn translate_span(
     })
 }
 
+/// Exact persistent handles retained after shared construction. Shader modules
+/// and pipeline layouts are transient construction objects and intentionally do
+/// not appear in this owned-handle inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SceneGpuSharedFacts {
+    pub(super) bind_group_layouts: u8,
+    pub(super) samplers: u8,
+    pub(super) pipelines: u8,
+}
+
+impl SceneGpuSharedFacts {
+    pub(super) const EXPECTED: Self = Self {
+        bind_group_layouts: 3,
+        samplers: 1,
+        pipelines: 6,
+    };
+
+    pub(super) const fn persistent_owned_handles(self) -> u8 {
+        self.bind_group_layouts + self.samplers + self.pipelines
+    }
+}
+
+/// Exact persistent candidate handles and one-time upload events. Uploads are
+/// events, not owned handles, so they are excluded from
+/// [`Self::persistent_owned_handles`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GpuSceneCandidateFacts {
+    pub(super) buffers: u8,
+    pub(super) textures: u8,
+    pub(super) texture_views: u8,
+    pub(super) bind_groups: u8,
+    pub(super) static_uploads: u8,
+}
+
+impl GpuSceneCandidateFacts {
+    pub(super) const EXPECTED: Self = Self {
+        buffers: 8,
+        textures: 2,
+        texture_views: 2,
+        bind_groups: 2,
+        static_uploads: 10,
+    };
+
+    pub(super) const fn persistent_owned_handles(self) -> u8 {
+        self.buffers + self.textures + self.texture_views + self.bind_groups
+    }
+}
+
+pub(super) struct SceneBufferUsages;
+
+impl SceneBufferUsages {
+    pub(super) const VERTEX: wgpu::BufferUsages = wgpu::BufferUsages::VERTEX;
+    pub(super) const INDEX: wgpu::BufferUsages = wgpu::BufferUsages::INDEX;
+    pub(super) const NODE: wgpu::BufferUsages =
+        wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST);
+    pub(super) const CONTENT_GLOBALS: wgpu::BufferUsages = Self::NODE;
+    pub(super) const FRAME: wgpu::BufferUsages = Self::NODE;
+    pub(super) const PRIMITIVE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE;
+    pub(super) const SCENE_CONTENT: wgpu::BufferUsages = Self::NODE;
+    pub(super) const GLYPH_ENTRY: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SceneTargetFacts {
+    pub(super) textures: u8,
+    pub(super) texture_views: u8,
+    pub(super) bind_groups: u8,
+}
+
+impl SceneTargetFacts {
+    pub(super) const EXPECTED: Self = Self {
+        textures: 2,
+        texture_views: 2,
+        bind_groups: 1,
+    };
+
+    pub(super) const fn persistent_owned_handles(self) -> u8 {
+        self.textures + self.texture_views + self.bind_groups
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScopedGpuErrorCategory {
+    Validation,
+    Internal,
+    OutOfMemory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneTargetKeyError {
+    Extent,
+    Formats,
+    SampleCount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneGpuError {
+    AtlasGenerationMismatch {
+        upload: crate::presentation::companion_scene::ResourceGeneration,
+        atlas: crate::presentation::companion_scene::ResourceGeneration,
+    },
+    DeviceEpochMismatch {
+        shared: crate::presentation::companion_scene::DeviceEpoch,
+        requested: crate::presentation::companion_scene::DeviceEpoch,
+    },
+    InvalidAtlas,
+    InvalidUpload,
+    InvalidTargetKey(SceneTargetKeyError),
+    Gpu(ScopedGpuErrorCategory),
+}
+
+fn sanitize_gpu_error(error: wgpu::Error) -> ScopedGpuErrorCategory {
+    match error {
+        wgpu::Error::Validation { .. } => ScopedGpuErrorCategory::Validation,
+        wgpu::Error::Internal { .. } => ScopedGpuErrorCategory::Internal,
+        wgpu::Error::OutOfMemory { .. } => ScopedGpuErrorCategory::OutOfMemory,
+    }
+}
+
+fn select_scoped_gpu_error(
+    validation: Option<ScopedGpuErrorCategory>,
+    out_of_memory: Option<ScopedGpuErrorCategory>,
+    internal: Option<ScopedGpuErrorCategory>,
+) -> Option<ScopedGpuErrorCategory> {
+    out_of_memory.or(internal).or(validation)
+}
+
+/// Opens the required nested scopes and explicitly pops all of them in reverse
+/// order on this caller/render-owner thread. Only the typed category escapes;
+/// backend descriptions are dropped with the original `wgpu::Error` values.
+fn create_in_gpu_error_scopes<T>(
+    device: &wgpu::Device,
+    create: impl FnOnce() -> T,
+) -> Result<T, SceneGpuError> {
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let value = create();
+
+    let validation_result = validation.pop();
+    let out_of_memory_result = out_of_memory.pop();
+    let internal_result = internal.pop();
+    let validation_error = pollster::block_on(validation_result).map(sanitize_gpu_error);
+    let out_of_memory_error = pollster::block_on(out_of_memory_result).map(sanitize_gpu_error);
+    let internal_error = pollster::block_on(internal_result).map(sanitize_gpu_error);
+    match select_scoped_gpu_error(validation_error, out_of_memory_error, internal_error) {
+        Some(category) => Err(SceneGpuError::Gpu(category)),
+        None => Ok(value),
+    }
+}
+
+/// The exact six base pipelines owned by Task 9C. This is deliberately not a
+/// render-selection matrix: Task 9.5 reclassifies soft glyph/static/particle
+/// semantics before any draw, and Task 11 adds ordered multiply/additive
+/// variants.
+pub(super) struct SceneBasePipelines {
+    pub(super) world_opaque_analytic: wgpu::RenderPipeline,
+    pub(super) world_source_over_analytic: wgpu::RenderPipeline,
+    pub(super) world_source_over_glyph: wgpu::RenderPipeline,
+    pub(super) chrome_analytic: wgpu::RenderPipeline,
+    pub(super) chrome_glyph: wgpu::RenderPipeline,
+    pub(super) final_surface: wgpu::RenderPipeline,
+}
+
+/// Device-epoch shared handles. The render owner supplies `Device`/`Queue` to
+/// operations; neither is retained here.
+pub(super) struct SceneGpuShared {
+    pub(super) device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    pub(super) scene_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) atlas_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) final_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) linear_sampler: wgpu::Sampler,
+    pub(super) pipelines: SceneBasePipelines,
+}
+
+impl SceneGpuShared {
+    pub(super) fn create(
+        device: &wgpu::Device,
+        device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    ) -> Result<Self, SceneGpuError> {
+        create_in_gpu_error_scopes(device, || Self::create_unscoped(device, device_epoch))
+    }
+
+    fn create_unscoped(
+        device: &wgpu::Device,
+        device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    ) -> Self {
+        let scene_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glorp-scene-storage-layout"),
+                entries: &(0..6)
+                    .map(|binding| wgpu::BindGroupLayoutEntry {
+                        binding,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    })
+                    .collect::<Vec<_>>(),
+            });
+        let atlas_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glorp-scene-atlas-layout"),
+                entries: &[
+                    filterable_texture_layout_entry(0),
+                    filterable_texture_layout_entry(1),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let final_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glorp-scene-final-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                }],
+            });
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("glorp-scene-linear-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let pipelines = create_scene_base_pipelines(
+            device,
+            &scene_bind_group_layout,
+            &atlas_bind_group_layout,
+            &final_bind_group_layout,
+        );
+        Self {
+            device_epoch,
+            scene_bind_group_layout,
+            atlas_bind_group_layout,
+            final_bind_group_layout,
+            linear_sampler,
+            pipelines,
+        }
+    }
+
+    pub(super) const fn facts(&self) -> SceneGpuSharedFacts {
+        SceneGpuSharedFacts::EXPECTED
+    }
+}
+
+fn filterable_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn create_scene_base_pipelines(
+    device: &wgpu::Device,
+    scene_layout: &wgpu::BindGroupLayout,
+    atlas_layout: &wgpu::BindGroupLayout,
+    final_layout: &wgpu::BindGroupLayout,
+) -> SceneBasePipelines {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x3,
+        1 => Float32x2,
+        2 => Float32x3,
+        3 => Uint32,
+        4 => Uint32
+    ];
+    let vertex_layout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<super::compiler::StaticVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRIBUTES,
+    };
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("glorp-scene-base-shader"),
+        source: wgpu::ShaderSource::Wgsl(SCENE_SHADER_SOURCE.into()),
+    });
+    let scene_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("glorp-scene-base-pipeline-layout"),
+        bind_group_layouts: &[Some(scene_layout), Some(atlas_layout)],
+        immediate_size: 0,
+    });
+    // `scene.wgsl` declares the final texture at group 2. Preserve all three
+    // slots even though the final entry points consume only group 2.
+    let final_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("glorp-scene-final-pipeline-layout"),
+        bind_group_layouts: &[None, None, Some(final_layout)],
+        immediate_size: 0,
+    });
+    let source_over = Some(wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    });
+    let scene_pipeline = |label: &'static str,
+                          vertex_entry: &'static str,
+                          fragment_entry: &'static str,
+                          blend: Option<wgpu::BlendState>,
+                          depth_write_enabled: Option<bool>| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&scene_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some(vertex_entry),
+                compilation_options: Default::default(),
+                buffers: &[Some(vertex_layout.clone())],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: depth_write_enabled.map(|depth_write_enabled| wgpu::DepthStencilState {
+                format: SceneTextureContract::DEPTH,
+                depth_write_enabled: Some(depth_write_enabled),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(fragment_entry),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SceneTextureContract::INTERMEDIATE,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    let world_opaque_analytic = scene_pipeline(
+        "glorp-scene-world-opaque-analytic",
+        "vs_world",
+        "fs_analytic",
+        None,
+        Some(true),
+    );
+    let world_source_over_analytic = scene_pipeline(
+        "glorp-scene-world-source-over-analytic",
+        "vs_world",
+        "fs_analytic",
+        source_over,
+        Some(false),
+    );
+    let world_source_over_glyph = scene_pipeline(
+        "glorp-scene-world-source-over-glyph",
+        "vs_world",
+        "fs_glyph",
+        source_over,
+        Some(false),
+    );
+    let chrome_analytic = scene_pipeline(
+        "glorp-scene-chrome-analytic",
+        "vs_screen",
+        "fs_analytic",
+        source_over,
+        None,
+    );
+    let chrome_glyph = scene_pipeline(
+        "glorp-scene-chrome-glyph",
+        "vs_screen",
+        "fs_glyph",
+        source_over,
+        None,
+    );
+    let final_surface = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("glorp-scene-final-surface"),
+        layout: Some(&final_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_final"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_final"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    SceneBasePipelines {
+        world_opaque_analytic,
+        world_source_over_analytic,
+        world_source_over_glyph,
+        chrome_analytic,
+        chrome_glyph,
+        final_surface,
+    }
+}
+
+pub(super) struct GpuSceneCandidate {
+    pub(super) vertex_buffer: wgpu::Buffer,
+    pub(super) index_buffer: wgpu::Buffer,
+    pub(super) node_buffer: wgpu::Buffer,
+    pub(super) content_globals_buffer: wgpu::Buffer,
+    pub(super) frame_buffer: wgpu::Buffer,
+    pub(super) primitive_buffer: wgpu::Buffer,
+    pub(super) scene_content_buffer: wgpu::Buffer,
+    pub(super) glyph_entry_buffer: wgpu::Buffer,
+    pub(super) coverage_texture: wgpu::Texture,
+    pub(super) coverage_view: wgpu::TextureView,
+    pub(super) color_texture: wgpu::Texture,
+    pub(super) color_view: wgpu::TextureView,
+    pub(super) scene_bind_group: wgpu::BindGroup,
+    pub(super) atlas_bind_group: wgpu::BindGroup,
+    pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+    pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
+    pub(super) static_checksum: u64,
+    pub(super) draws: Vec<SceneDrawRecord>,
+    pub(super) phases: ScenePhaseTable,
+}
+
+impl GpuSceneCandidate {
+    pub(super) const fn facts(&self) -> GpuSceneCandidateFacts {
+        GpuSceneCandidateFacts::EXPECTED
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneUploadPhase {
+    OpaqueCutout,
+    WorldBlended,
+    Chrome,
+}
+
+fn expected_draw_source(primitive: PrimitiveGpuValue) -> Option<(PrimitiveSource, u32)> {
+    if primitive.resource_index == NONE_U32 {
+        return None;
+    }
+    match primitive.primitive_kind {
+        ATLAS_QUAD_PRIMITIVE_TAG
+            if matches!(primitive.resource_kind, 1 | 2)
+                && primitive.instance_group == 0
+                && primitive.instance_base == NONE_U32 =>
+        {
+            Some((PrimitiveSource::StaticAtlas, 1))
+        }
+        ANALYTIC_PRIMITIVE_TAG
+            if primitive.resource_kind == 3
+                && primitive.instance_group == 0
+                && primitive.instance_base == NONE_U32 =>
+        {
+            Some((PrimitiveSource::Analytic, 1))
+        }
+        INSTANCE_QUAD_PRIMITIVE_TAG if matches!(primitive.resource_kind, 1 | 2) => {
+            let (source, count) = instance_source_and_count_from_tags(
+                primitive.instance_group,
+                primitive.instance_base,
+            )?;
+            Some((PrimitiveSource::Instances(source), count))
+        }
+        _ => None,
+    }
+}
+
+fn expected_upload_phase(primitive: PrimitiveGpuValue) -> Option<SceneUploadPhase> {
+    let material_matches_primitive = match primitive.material_kind {
+        1 => matches!(
+            primitive.primitive_kind,
+            ATLAS_QUAD_PRIMITIVE_TAG | INSTANCE_QUAD_PRIMITIVE_TAG
+        ),
+        2 => primitive.primitive_kind == ANALYTIC_PRIMITIVE_TAG,
+        4..=6 => matches!(
+            primitive.primitive_kind,
+            ATLAS_QUAD_PRIMITIVE_TAG | ANALYTIC_PRIMITIVE_TAG | INSTANCE_QUAD_PRIMITIVE_TAG
+        ),
+        _ => false,
+    };
+    if !material_matches_primitive {
+        return None;
+    }
+    if primitive.material_kind == 6 {
+        return (primitive.blend == 3 && primitive.depth == 3 && primitive.space == 2)
+            .then_some(SceneUploadPhase::Chrome);
+    }
+    if primitive.space != 1
+        || (primitive.material_kind == 4 && primitive.blend != 4)
+        || (primitive.material_kind == 5 && primitive.blend != 5)
+    {
+        return None;
+    }
+    match primitive.blend {
+        1 | 2 if primitive.depth == 1 => Some(SceneUploadPhase::OpaqueCutout),
+        3..=5 if primitive.depth == 2 => Some(SceneUploadPhase::WorldBlended),
+        _ => None,
+    }
+}
+
+pub(super) fn materialize_gpu_candidate(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    shared: &SceneGpuShared,
+    upload: &PreparedSceneUpload,
+    atlas: &PreparedSceneAtlas,
+) -> Result<GpuSceneCandidate, SceneGpuError> {
+    validate_gpu_candidate_preflight(shared, upload, atlas)?;
+
+    create_in_gpu_error_scopes(device, || {
+        let vertex_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-vertices",
+            &upload.vertex_bytes,
+            SceneBufferUsages::VERTEX,
+        );
+        let index_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-indices",
+            &upload.index_bytes,
+            SceneBufferUsages::INDEX,
+        );
+        let node_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-nodes",
+            &upload.node_bytes,
+            SceneBufferUsages::NODE,
+        );
+        let content_globals_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-content-globals",
+            &upload.content_globals_bytes,
+            SceneBufferUsages::CONTENT_GLOBALS,
+        );
+        let frame_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-frame",
+            &upload.frame_bytes,
+            SceneBufferUsages::FRAME,
+        );
+        let primitive_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-primitives",
+            bytemuck::cast_slice(&upload.primitives),
+            SceneBufferUsages::PRIMITIVE,
+        );
+        let scene_content_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-content",
+            &upload.scene_content_bytes,
+            SceneBufferUsages::SCENE_CONTENT,
+        );
+        let glyph_entry_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-glyph-entries",
+            bytemuck::cast_slice(&upload.glyph_entries),
+            SceneBufferUsages::GLYPH_ENTRY,
+        );
+        let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glorp-scene-storage-bind-group"),
+            layout: &shared.scene_bind_group_layout,
+            entries: &[
+                buffer_bind_group_entry(0, &node_buffer),
+                buffer_bind_group_entry(1, &content_globals_buffer),
+                buffer_bind_group_entry(2, &frame_buffer),
+                buffer_bind_group_entry(3, &primitive_buffer),
+                buffer_bind_group_entry(4, &scene_content_buffer),
+                buffer_bind_group_entry(5, &glyph_entry_buffer),
+            ],
+        });
+        let atlas_extent = wgpu::Extent3d {
+            width: atlas.width,
+            height: atlas.height,
+            depth_or_array_layers: 1,
+        };
+        let coverage_texture = create_atlas_texture(
+            device,
+            "glorp-scene-coverage-atlas",
+            atlas_extent,
+            SceneTextureContract::COVERAGE,
+        );
+        let coverage_view = coverage_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &coverage_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &atlas.coverage_r8,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas.width),
+                rows_per_image: Some(atlas.height),
+            },
+            atlas_extent,
+        );
+        let color_texture = create_atlas_texture(
+            device,
+            "glorp-scene-color-atlas",
+            atlas_extent,
+            SceneTextureContract::COLOR,
+        );
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &color_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &atlas.straight_color_rgba_srgb,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas.width * 4),
+                rows_per_image: Some(atlas.height),
+            },
+            atlas_extent,
+        );
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glorp-scene-atlas-bind-group"),
+            layout: &shared.atlas_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&coverage_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shared.linear_sampler),
+                },
+            ],
+        });
+        GpuSceneCandidate {
+            vertex_buffer,
+            index_buffer,
+            node_buffer,
+            content_globals_buffer,
+            frame_buffer,
+            primitive_buffer,
+            scene_content_buffer,
+            glyph_entry_buffer,
+            coverage_texture,
+            coverage_view,
+            color_texture,
+            color_view,
+            scene_bind_group,
+            atlas_bind_group,
+            generation_key: upload.generation_key,
+            source_revisions: upload.source_revisions,
+            static_checksum: upload.static_checksum,
+            draws: upload.draws.clone(),
+            phases: upload.phases.clone(),
+        }
+    })
+}
+
+fn validate_gpu_candidate_preflight(
+    shared: &SceneGpuShared,
+    upload: &PreparedSceneUpload,
+    atlas: &PreparedSceneAtlas,
+) -> Result<(), SceneGpuError> {
+    if atlas.resource_generation != upload.generation_key.resources {
+        return Err(SceneGpuError::AtlasGenerationMismatch {
+            upload: upload.generation_key.resources,
+            atlas: atlas.resource_generation,
+        });
+    }
+    if shared.device_epoch != upload.generation_key.device {
+        return Err(SceneGpuError::DeviceEpochMismatch {
+            shared: shared.device_epoch,
+            requested: upload.generation_key.device,
+        });
+    }
+    let primitive_count = upload.primitives.len();
+    if primitive_count == 0
+        || primitive_count > crate::presentation::companion_scene::scene::MAX_STATIC_PRIMITIVES
+    {
+        return Err(SceneGpuError::InvalidUpload);
+    }
+    let pixel_count = usize::try_from(atlas.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(atlas.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(SceneGpuError::InvalidAtlas)?;
+    if pixel_count == 0
+        || atlas.coverage_r8.len() != pixel_count
+        || atlas.straight_color_rgba_srgb.len() != pixel_count.saturating_mul(4)
+    {
+        return Err(SceneGpuError::InvalidAtlas);
+    }
+    let expected_vertices = primitive_count
+        .checked_mul(4)
+        .and_then(|count| count.checked_mul(std::mem::size_of::<super::compiler::StaticVertex>()));
+    let expected_indices = primitive_count
+        .checked_mul(6)
+        .and_then(|count| count.checked_mul(std::mem::size_of::<super::compiler::StaticIndex>()));
+    if upload.node_bytes.len() != PackedMirrorLayout::NODE_BYTES
+        || upload.content_globals_bytes.len() != PackedMirrorLayout::CONTENT_GLOBALS_BYTES
+        || upload.frame_bytes.len() != PackedMirrorLayout::FRAME_BYTES
+        || upload.scene_content_bytes.len() != PackedMirrorLayout::SCENE_CONTENT_BYTES
+        || Some(upload.vertex_bytes.len()) != expected_vertices
+        || Some(upload.index_bytes.len()) != expected_indices
+        || upload.draws.len() != primitive_count
+        || upload.glyph_entries.is_empty()
+        || upload.glyph_entries.len() != atlas.entries.len()
+    {
+        return Err(SceneGpuError::InvalidUpload);
+    }
+    if upload.primitives.iter().any(|primitive| {
+        primitive.node_index as usize >= super::compiler::CpuMirrorShape::NODE_COUNT
+    }) {
+        return Err(SceneGpuError::InvalidUpload);
+    }
+    let vertex_stride = std::mem::size_of::<super::compiler::StaticVertex>();
+    for (primitive_index, vertices) in upload
+        .vertex_bytes
+        .chunks_exact(vertex_stride * 4)
+        .enumerate()
+    {
+        let expected_primitive =
+            u32::try_from(primitive_index).map_err(|_| SceneGpuError::InvalidUpload)?;
+        let expected_material = upload.primitives[primitive_index].material_index;
+        for vertex in vertices.chunks_exact(vertex_stride) {
+            let embedded_primitive =
+                u32::from_ne_bytes(vertex[32..36].try_into().expect("vertex primitive index"));
+            let embedded_material =
+                u32::from_ne_bytes(vertex[36..40].try_into().expect("vertex material index"));
+            if embedded_primitive != expected_primitive || embedded_material != expected_material {
+                return Err(SceneGpuError::InvalidUpload);
+            }
+        }
+    }
+    let indices = upload
+        .index_bytes
+        .chunks_exact(std::mem::size_of::<super::compiler::StaticIndex>())
+        .map(|bytes| u32::from_ne_bytes(bytes.try_into().expect("four-byte index chunk")))
+        .collect::<Vec<_>>();
+    for (primitive_index, (primitive, draw)) in
+        upload.primitives.iter().zip(&upload.draws).enumerate()
+    {
+        let Some(first_index) = primitive_index
+            .checked_mul(6)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return Err(SceneGpuError::InvalidUpload);
+        };
+        let Some(index_end) = first_index.checked_add(6) else {
+            return Err(SceneGpuError::InvalidUpload);
+        };
+        let Some(first_vertex) = primitive_index
+            .checked_mul(4)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return Err(SceneGpuError::InvalidUpload);
+        };
+        let Some(vertex_end) = first_vertex.checked_add(4) else {
+            return Err(SceneGpuError::InvalidUpload);
+        };
+        let Some((expected_source, expected_instances)) = expected_draw_source(*primitive) else {
+            return Err(SceneGpuError::InvalidUpload);
+        };
+        if draw.index_range != (first_index..index_end)
+            || draw.instance_range != (0..expected_instances)
+            || draw.source != expected_source
+            || indices[first_index as usize..index_end as usize]
+                .iter()
+                .any(|index| !(first_vertex..vertex_end).contains(index))
+        {
+            return Err(SceneGpuError::InvalidUpload);
+        }
+    }
+    let glyph_count =
+        u32::try_from(upload.glyph_entries.len()).map_err(|_| SceneGpuError::InvalidUpload)?;
+    if upload.scene_content_bytes.chunks_exact(32).any(|record| {
+        let glyph = u32::from_ne_bytes(record[4..8].try_into().expect("four-byte glyph id"));
+        glyph != NONE_U32 && glyph >= glyph_count
+    }) {
+        return Err(SceneGpuError::InvalidUpload);
+    }
+    let expected_phases = upload
+        .primitives
+        .iter()
+        .copied()
+        .map(expected_upload_phase)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(SceneGpuError::InvalidUpload)?;
+    let mut classified = vec![false; primitive_count];
+    for (phase, primitive_indices) in [
+        (SceneUploadPhase::OpaqueCutout, &upload.phases.opaque_cutout),
+        (
+            SceneUploadPhase::WorldBlended,
+            &upload.phases.world_blended_unsorted,
+        ),
+        (SceneUploadPhase::Chrome, &upload.phases.chrome_authored),
+    ] {
+        for primitive_index in primitive_indices {
+            let Some(index) = usize::try_from(*primitive_index).ok() else {
+                return Err(SceneGpuError::InvalidUpload);
+            };
+            let Some(seen) = classified.get_mut(index) else {
+                return Err(SceneGpuError::InvalidUpload);
+            };
+            if *seen || expected_phases[index] != phase {
+                return Err(SceneGpuError::InvalidUpload);
+            }
+            *seen = true;
+        }
+    }
+    if classified.contains(&false) {
+        return Err(SceneGpuError::InvalidUpload);
+    }
+    Ok(())
+}
+
+fn create_initial_buffer(
+    device: &wgpu::Device,
+    label: &'static str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents,
+        usage,
+    })
+}
+
+fn buffer_bind_group_entry<'a>(binding: u32, buffer: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
+}
+
+fn create_atlas_texture(
+    device: &wgpu::Device,
+    label: &'static str,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct SceneTargetKey {
+    pub(super) device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    pub(super) surface_epoch: crate::presentation::companion_scene::SurfaceEpoch,
+    pub(super) extent: wgpu::Extent3d,
+    pub(super) surface_format: wgpu::TextureFormat,
+    pub(super) intermediate_format: wgpu::TextureFormat,
+    pub(super) depth_format: wgpu::TextureFormat,
+    pub(super) sample_count: u32,
+}
+
+impl SceneTargetKey {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+        surface_epoch: crate::presentation::companion_scene::SurfaceEpoch,
+        extent: wgpu::Extent3d,
+        surface_format: wgpu::TextureFormat,
+        intermediate_format: wgpu::TextureFormat,
+        depth_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Result<Self, SceneTargetKeyError> {
+        let key = Self {
+            device_epoch,
+            surface_epoch,
+            extent,
+            surface_format,
+            intermediate_format,
+            depth_format,
+            sample_count,
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
+    fn validate(self) -> Result<(), SceneTargetKeyError> {
+        if self.extent.width == 0
+            || self.extent.height == 0
+            || self.extent.depth_or_array_layers != 1
+        {
+            return Err(SceneTargetKeyError::Extent);
+        }
+        if self.surface_format != wgpu::TextureFormat::Bgra8UnormSrgb
+            || self.intermediate_format != SceneTextureContract::INTERMEDIATE
+            || self.depth_format != SceneTextureContract::DEPTH
+        {
+            return Err(SceneTargetKeyError::Formats);
+        }
+        if self.sample_count != SceneTextureContract::SAMPLE_COUNT {
+            return Err(SceneTargetKeyError::SampleCount);
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct SceneTargets {
+    pub(super) key: SceneTargetKey,
+    pub(super) intermediate_texture: wgpu::Texture,
+    pub(super) intermediate_view: wgpu::TextureView,
+    pub(super) depth_texture: wgpu::Texture,
+    pub(super) depth_view: wgpu::TextureView,
+    pub(super) final_bind_group: wgpu::BindGroup,
+}
+
+impl SceneTargets {
+    pub(super) const fn facts(&self) -> SceneTargetFacts {
+        SceneTargetFacts::EXPECTED
+    }
+
+    fn create(
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        key: SceneTargetKey,
+        fault: SceneTargetTestFault,
+    ) -> Result<Self, SceneGpuError> {
+        key.validate().map_err(SceneGpuError::InvalidTargetKey)?;
+        if shared.device_epoch != key.device_epoch {
+            return Err(SceneGpuError::DeviceEpochMismatch {
+                shared: shared.device_epoch,
+                requested: key.device_epoch,
+            });
+        }
+        create_in_gpu_error_scopes(device, || {
+            let intermediate_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("glorp-scene-intermediate"),
+                size: key.extent,
+                mip_level_count: 1,
+                sample_count: key.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: key.intermediate_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let intermediate_view =
+                intermediate_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("glorp-scene-depth"),
+                size: key.extent,
+                mip_level_count: 1,
+                sample_count: key.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: key.depth_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let final_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("glorp-scene-final-bind-group"),
+                layout: &shared.final_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&intermediate_view),
+                }],
+            });
+            if fault == SceneTargetTestFault::ValidationAfterAllocation {
+                let _invalid = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("glorp-scene-test-invalid-final-bind-group"),
+                    layout: &shared.final_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                    }],
+                });
+            }
+            Self {
+                key,
+                intermediate_texture,
+                intermediate_view,
+                depth_texture,
+                depth_view,
+                final_bind_group,
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneTargetTestFault {
+    None,
+    ValidationAfterAllocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneTargetUpdate {
+    Reused,
+    Created,
+}
+
+#[derive(Default)]
+pub(super) struct SceneTargetCache {
+    current: Option<SceneTargets>,
+    creation_events: u64,
+}
+
+impl SceneTargetCache {
+    pub(super) fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        key: SceneTargetKey,
+    ) -> Result<SceneTargetUpdate, SceneGpuError> {
+        self.ensure_with_fault(device, shared, key, SceneTargetTestFault::None)
+    }
+
+    #[cfg(test)]
+    fn ensure_with_test_fault(
+        &mut self,
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        key: SceneTargetKey,
+        fault: SceneTargetTestFault,
+    ) -> Result<SceneTargetUpdate, SceneGpuError> {
+        self.ensure_with_fault(device, shared, key, fault)
+    }
+
+    fn ensure_with_fault(
+        &mut self,
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        key: SceneTargetKey,
+        fault: SceneTargetTestFault,
+    ) -> Result<SceneTargetUpdate, SceneGpuError> {
+        key.validate().map_err(SceneGpuError::InvalidTargetKey)?;
+        if shared.device_epoch != key.device_epoch {
+            return Err(SceneGpuError::DeviceEpochMismatch {
+                shared: shared.device_epoch,
+                requested: key.device_epoch,
+            });
+        }
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|targets| targets.key == key)
+        {
+            return Ok(SceneTargetUpdate::Reused);
+        }
+        let replacement = SceneTargets::create(device, shared, key, fault)?;
+        self.current = Some(replacement);
+        self.creation_events = self.creation_events.saturating_add(1);
+        Ok(SceneTargetUpdate::Created)
+    }
+
+    pub(super) const fn current(&self) -> Option<&SceneTargets> {
+        self.current.as_ref()
+    }
+
+    pub(super) const fn creation_events(&self) -> u64 {
+        self.creation_events
+    }
+}
+
 /// IEC 61966-2-1 sRGB electro-optical transfer for scene-owned color math.
 pub(super) fn scene_srgb_to_linear(value: f32) -> f32 {
     if value <= 0.04045 {
@@ -1095,6 +2194,16 @@ mod tests {
     }
 
     fn two_weight_atlas(scalar: char) -> super::super::resources::PreparedSceneAtlas {
+        two_weight_atlas_for(
+            scalar,
+            crate::presentation::companion_scene::ResourceGeneration(0),
+        )
+    }
+
+    fn two_weight_atlas_for(
+        scalar: char,
+        resource_generation: crate::presentation::companion_scene::ResourceGeneration,
+    ) -> super::super::resources::PreparedSceneAtlas {
         use super::super::resources::{
             AtlasCell, CompiledGlyphAtlas, GlyphAtlasEntry, GlyphEntryKind, GlyphKey,
             PreparedSceneAtlas,
@@ -1115,12 +2224,15 @@ mod tests {
                 )
             })
             .collect();
-        PreparedSceneAtlas::from_compiled(&CompiledGlyphAtlas {
-            width: 2,
-            height: 1,
-            rgba: vec![0; 8],
-            entries,
-        })
+        PreparedSceneAtlas::from_compiled_for_generation(
+            &CompiledGlyphAtlas {
+                width: 2,
+                height: 1,
+                rgba: vec![0; 8],
+                entries,
+            },
+            resource_generation,
+        )
         .unwrap()
     }
 
@@ -1562,5 +2674,695 @@ mod tests {
         )
         .validate(&module)
         .expect("scene WGSL validates");
+    }
+
+    #[test]
+    fn analytic_fragment_discards_zero_coverage_before_depth_can_be_written() {
+        let analytic = SCENE_SHADER_SOURCE
+            .split("fn fs_analytic(")
+            .nth(1)
+            .expect("analytic fragment entry point exists")
+            .split("@fragment")
+            .next()
+            .expect("analytic fragment has a bounded body");
+        let coverage = analytic
+            .find("let coverage = 1.0 - smoothstep(")
+            .expect("analytic edge coverage is computed");
+        let output = analytic
+            .find("let output = premultiply_scene_color(")
+            .expect("coverage contributes to analytic output");
+        let discard = analytic
+            .find("if (output.a <= 0.0) {\n        discard;\n    }")
+            .expect("zero-coverage output is discarded");
+        assert!(coverage < output && output < discard);
+    }
+
+    #[test]
+    fn analytic_fragment_discards_zero_alpha_output_before_returning() {
+        let analytic = SCENE_SHADER_SOURCE
+            .split("fn fs_analytic(")
+            .nth(1)
+            .expect("analytic fragment entry point exists")
+            .split("@fragment")
+            .next()
+            .expect("analytic fragment has a bounded body");
+        let compute = analytic
+            .find("let output = premultiply_scene_color(")
+            .expect("analytic output is computed once");
+        let discard = analytic
+            .find("if (output.a <= 0.0) {\n        discard;\n    }")
+            .expect("zero-alpha analytic output is discarded");
+        let returned = analytic
+            .find("return output;")
+            .expect("validated analytic output is returned");
+        assert!(compute < discard && discard < returned);
+    }
+
+    #[test]
+    fn gpu_resource_accounting_is_exact_and_not_a_live_global_metric() {
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 3);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.samplers, 1);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 6);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 8);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.textures, 2);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.texture_views, 2);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.bind_groups, 2);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.static_uploads, 10);
+        assert_eq!(SceneTargetFacts::EXPECTED.textures, 2);
+        assert_eq!(SceneTargetFacts::EXPECTED.texture_views, 2);
+        assert_eq!(SceneTargetFacts::EXPECTED.bind_groups, 1);
+        assert_eq!(
+            SceneGpuSharedFacts::EXPECTED.persistent_owned_handles()
+                + GpuSceneCandidateFacts::EXPECTED.persistent_owned_handles()
+                + SceneTargetFacts::EXPECTED.persistent_owned_handles(),
+            29,
+        );
+    }
+
+    #[test]
+    fn candidate_buffer_usages_preserve_immutable_and_dirty_span_contracts() {
+        assert_eq!(SceneBufferUsages::VERTEX, wgpu::BufferUsages::VERTEX);
+        assert_eq!(SceneBufferUsages::INDEX, wgpu::BufferUsages::INDEX);
+        assert_eq!(SceneBufferUsages::PRIMITIVE, wgpu::BufferUsages::STORAGE);
+        assert_eq!(SceneBufferUsages::GLYPH_ENTRY, wgpu::BufferUsages::STORAGE);
+        for usage in [
+            SceneBufferUsages::NODE,
+            SceneBufferUsages::CONTENT_GLOBALS,
+            SceneBufferUsages::FRAME,
+            SceneBufferUsages::SCENE_CONTENT,
+        ] {
+            assert_eq!(
+                usage,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+        }
+    }
+
+    #[test]
+    fn final_pipeline_layout_preserves_only_the_group_two_binding_slot() {
+        let production = include_str!("render.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("render production source precedes tests");
+        assert!(production.contains("bind_group_layouts: &[None, None, Some(final_layout)]"));
+        assert!(!production.contains(
+            "bind_group_layouts: &[Some(scene_layout), Some(atlas_layout), Some(final_layout)]"
+        ));
+    }
+
+    #[test]
+    fn gpu_error_category_priority_is_oom_then_internal_then_validation() {
+        assert_eq!(
+            select_scoped_gpu_error(
+                Some(ScopedGpuErrorCategory::Validation),
+                Some(ScopedGpuErrorCategory::OutOfMemory),
+                Some(ScopedGpuErrorCategory::Internal),
+            ),
+            Some(ScopedGpuErrorCategory::OutOfMemory),
+        );
+        assert_eq!(
+            select_scoped_gpu_error(
+                Some(ScopedGpuErrorCategory::Validation),
+                None,
+                Some(ScopedGpuErrorCategory::Internal),
+            ),
+            Some(ScopedGpuErrorCategory::Internal),
+        );
+        assert_eq!(
+            select_scoped_gpu_error(Some(ScopedGpuErrorCategory::Validation), None, None),
+            Some(ScopedGpuErrorCategory::Validation),
+        );
+        assert_eq!(std::mem::size_of::<ScopedGpuErrorCategory>(), 1);
+    }
+
+    #[test]
+    fn target_key_rejects_non_2d_extent_wrong_formats_and_multisampling() {
+        let valid = SceneTargetKey::new(
+            crate::presentation::companion_scene::DeviceEpoch(4),
+            crate::presentation::companion_scene::SurfaceEpoch(9),
+            wgpu::Extent3d {
+                width: 260,
+                height: 260,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Depth24Plus,
+            1,
+        )
+        .unwrap();
+        assert_eq!(valid.extent.width, 260);
+
+        for extent in [
+            wgpu::Extent3d {
+                width: 0,
+                height: 260,
+                depth_or_array_layers: 1,
+            },
+            wgpu::Extent3d {
+                width: 260,
+                height: 0,
+                depth_or_array_layers: 1,
+            },
+            wgpu::Extent3d {
+                width: 260,
+                height: 260,
+                depth_or_array_layers: 0,
+            },
+            wgpu::Extent3d {
+                width: 260,
+                height: 260,
+                depth_or_array_layers: 2,
+            },
+        ] {
+            assert_eq!(
+                SceneTargetKey::new(
+                    valid.device_epoch,
+                    valid.surface_epoch,
+                    extent,
+                    valid.surface_format,
+                    valid.intermediate_format,
+                    valid.depth_format,
+                    valid.sample_count,
+                ),
+                Err(SceneTargetKeyError::Extent),
+            );
+        }
+        assert_eq!(
+            SceneTargetKey::new(
+                valid.device_epoch,
+                valid.surface_epoch,
+                valid.extent,
+                valid.surface_format,
+                valid.intermediate_format,
+                valid.depth_format,
+                4,
+            ),
+            Err(SceneTargetKeyError::SampleCount),
+        );
+        assert_eq!(
+            SceneTargetKey::new(
+                valid.device_epoch,
+                valid.surface_epoch,
+                valid.extent,
+                wgpu::TextureFormat::Bgra8Unorm,
+                valid.intermediate_format,
+                valid.depth_format,
+                valid.sample_count,
+            ),
+            Err(SceneTargetKeyError::Formats),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_device() -> (wgpu::Device, wgpu::Queue) {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::METAL;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .expect("a surfaceless Metal adapter is available");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("glorp-scene-resource-test-device"),
+            ..Default::default()
+        }))
+        .expect("a surfaceless Metal device is available")
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_shared_and_candidate_materialization_validate_without_a_surface() {
+        let (device, queue) = native_device();
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let upload = prepare_scene_upload(
+            &candidate,
+            &two_weight_atlas_for('^', candidate.generation_key.resources),
+        )
+        .unwrap();
+        let atlas = two_weight_atlas_for('^', upload.generation_key.resources);
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        assert_eq!(shared.facts(), SceneGpuSharedFacts::EXPECTED);
+
+        let gpu = materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        assert_eq!(gpu.facts(), GpuSceneCandidateFacts::EXPECTED);
+        assert_eq!(gpu.generation_key, upload.generation_key);
+        assert_eq!(gpu.source_revisions, upload.source_revisions);
+        assert_eq!(gpu.static_checksum, upload.static_checksum);
+        assert_eq!(gpu.draws, upload.draws);
+        assert_eq!(gpu.phases, upload.phases);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_candidate_rejects_atlas_and_device_epoch_mismatch_before_allocation() {
+        let (device, queue) = native_device();
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
+        let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let wrong_atlas = two_weight_atlas_for(
+            '^',
+            crate::presentation::companion_scene::ResourceGeneration(
+                upload.generation_key.resources.0 + 1,
+            ),
+        );
+        assert!(matches!(
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &wrong_atlas),
+            Err(SceneGpuError::AtlasGenerationMismatch { .. })
+        ));
+
+        let wrong_shared = SceneGpuShared::create(
+            &device,
+            crate::presentation::companion_scene::DeviceEpoch(upload.generation_key.device.0 + 1),
+        )
+        .unwrap();
+        assert!(matches!(
+            materialize_gpu_candidate(&device, &queue, &wrong_shared, &upload, &atlas),
+            Err(SceneGpuError::DeviceEpochMismatch { .. })
+        ));
+
+        let mut empty_upload = upload.clone();
+        empty_upload.vertex_bytes.clear();
+        assert!(matches!(
+            materialize_gpu_candidate(&device, &queue, &shared, &empty_upload, &atlas),
+            Err(SceneGpuError::InvalidUpload),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_preflight_rejects_nonzero_malformed_upload_abi_before_gpu_scopes() {
+        let (device, _queue) = native_device();
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
+        let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        assert_eq!(
+            validate_gpu_candidate_preflight(&shared, &upload, &atlas),
+            Ok(()),
+        );
+        let assert_invalid = |candidate: PreparedSceneUpload| {
+            assert_eq!(
+                validate_gpu_candidate_preflight(&shared, &candidate, &atlas),
+                Err(SceneGpuError::InvalidUpload),
+            );
+        };
+
+        let mut malformed = upload.clone();
+        malformed.node_bytes.extend_from_slice(&[0; 4]);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.content_globals_bytes.truncate(140);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.frame_bytes.extend_from_slice(&[0; 4]);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.scene_content_bytes.truncate(10_364);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.vertex_bytes.push(0);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed
+            .vertex_bytes
+            .truncate(malformed.vertex_bytes.len() - 40);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.index_bytes.push(0);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed
+            .index_bytes
+            .truncate(malformed.index_bytes.len() - 4);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.primitives.push(malformed.primitives[0]);
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.draws.push(malformed.draws[0].clone());
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        malformed.draws[0].index_range.end = u32::MAX;
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        let phase = [
+            &mut malformed.phases.opaque_cutout,
+            &mut malformed.phases.world_blended_unsorted,
+            &mut malformed.phases.chrome_authored,
+        ]
+        .into_iter()
+        .find(|phase| !phase.is_empty())
+        .expect("valid upload has a classified primitive");
+        phase[0] = u32::MAX;
+        assert_invalid(malformed);
+
+        let mut malformed = upload.clone();
+        let phase = [
+            &mut malformed.phases.opaque_cutout,
+            &mut malformed.phases.world_blended_unsorted,
+            &mut malformed.phases.chrome_authored,
+        ]
+        .into_iter()
+        .find(|phase| !phase.is_empty())
+        .expect("valid upload has a classified primitive");
+        phase.push(phase[0]);
+        assert_invalid(malformed);
+
+        let mut malformed = upload;
+        malformed.glyph_entries.pop();
+        assert!(!malformed.glyph_entries.is_empty());
+        assert_invalid(malformed);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_preflight_rejects_draw_instance_index_glyph_and_phase_mismatches() {
+        use crate::presentation::companion_scene::scene::{
+            DepthBehavior, InstanceGroupBinding, MaterialKind, PrimitiveKind, PrimitiveSpace,
+            ResourceKind, WorldBlend,
+        };
+
+        let (device, _queue) = native_device();
+        let shared = SceneGpuShared::create(
+            &device,
+            crate::presentation::companion_scene::DeviceEpoch(1),
+        )
+        .unwrap();
+        let prepare = |fixture: &SceneFixture| {
+            let candidate = super::super::compiler::compile_static_fixture_for_render_test(fixture);
+            let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
+            let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
+            (upload, atlas)
+        };
+        let assert_invalid =
+            |candidate: &PreparedSceneUpload,
+             atlas: &super::super::resources::PreparedSceneAtlas| {
+                assert_eq!(
+                    validate_gpu_candidate_preflight(&shared, candidate, atlas),
+                    Err(SceneGpuError::InvalidUpload),
+                );
+            };
+
+        for (binding, expected_instances) in [
+            (InstanceGroupBinding::PetBody, 130),
+            (InstanceGroupBinding::PetParticles, 0),
+            (InstanceGroupBinding::PropGlyphs(2), 9),
+            (
+                InstanceGroupBinding::TankCells {
+                    slot: 1,
+                    layer: crate::presentation::companion_scene::scene::InstanceLayer::Behind,
+                },
+                8,
+            ),
+            (
+                InstanceGroupBinding::TankCells {
+                    slot: 1,
+                    layer: crate::presentation::companion_scene::scene::InstanceLayer::Foreground,
+                },
+                8,
+            ),
+            (InstanceGroupBinding::Ambient, 64),
+            (InstanceGroupBinding::Hud, 24),
+        ] {
+            let mut fixture = SceneFixture::valid();
+            fixture.template.primitives[0].kind = PrimitiveKind::InstanceQuad;
+            fixture.template.primitives[0].instance_group = Some(binding);
+            let (upload, atlas) = prepare(&fixture);
+            validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();
+            assert_eq!(upload.draws[0].instance_range, 0..expected_instances);
+
+            let mut malformed = upload.clone();
+            malformed.draws[0].instance_range = 0..expected_instances.saturating_add(1);
+            assert_invalid(&malformed, &atlas);
+
+            let mut malformed = upload.clone();
+            malformed.draws[0].source = PrimitiveSource::Analytic;
+            assert_invalid(&malformed, &atlas);
+
+            let mut malformed = upload;
+            malformed.primitives[0].instance_base =
+                if malformed.primitives[0].instance_base == NONE_U32 {
+                    0
+                } else {
+                    NONE_U32
+                };
+            assert_invalid(&malformed, &atlas);
+        }
+
+        for kind in [PrimitiveKind::AtlasQuad, PrimitiveKind::AnalyticShape] {
+            let mut fixture = SceneFixture::valid();
+            fixture.template.primitives[0].kind = kind;
+            fixture.template.primitives[0].instance_group = None;
+            if kind == PrimitiveKind::AnalyticShape {
+                fixture.template.materials[0].kind = MaterialKind::UnlitAnalytic;
+                fixture.template.resources[0].kind = ResourceKind::AnalyticGeometry;
+            }
+            let (upload, atlas) = prepare(&fixture);
+            validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();
+
+            let mut malformed = upload.clone();
+            malformed.draws[0].instance_range = 0..2;
+            assert_invalid(&malformed, &atlas);
+
+            let mut malformed = upload.clone();
+            malformed.draws[0].source = match kind {
+                PrimitiveKind::AtlasQuad => PrimitiveSource::Analytic,
+                PrimitiveKind::AnalyticShape => PrimitiveSource::StaticAtlas,
+                _ => unreachable!(),
+            };
+            assert_invalid(&malformed, &atlas);
+
+            let mut malformed = upload;
+            malformed.primitives[0].instance_group = 1;
+            malformed.primitives[0].instance_base = 0;
+            assert_invalid(&malformed, &atlas);
+        }
+
+        let mut two = SceneFixture::valid();
+        let mut second = two.template.primitives[0].clone();
+        second.authored_order = second.authored_order.saturating_add(1);
+        two.template.primitives.push(second);
+        let (upload, atlas) = prepare(&two);
+        validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();
+
+        let mut malformed = upload.clone();
+        malformed.draws[1].index_range = 0..6;
+        assert_invalid(&malformed, &atlas);
+
+        let mut malformed = upload.clone();
+        malformed.index_bytes[24..28].copy_from_slice(&0_u32.to_ne_bytes());
+        assert_invalid(&malformed, &atlas);
+
+        let mut malformed = upload.clone();
+        let glyph_count = u32::try_from(malformed.glyph_entries.len()).unwrap();
+        malformed.scene_content_bytes[4..8].copy_from_slice(&glyph_count.to_ne_bytes());
+        assert_invalid(&malformed, &atlas);
+
+        for phase in [0_u8, 1, 2] {
+            let mut fixture = SceneFixture::valid();
+            match phase {
+                0 => {}
+                1 => {
+                    fixture.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+                    fixture.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
+                }
+                2 => {
+                    fixture.template.materials[0].kind = MaterialKind::ScreenChrome;
+                    fixture.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+                    fixture.template.primitives[0].depth = DepthBehavior::ScreenNoDepth;
+                    fixture.template.primitives[0].space = PrimitiveSpace::Screen;
+                }
+                _ => unreachable!(),
+            }
+            let (upload, atlas) = prepare(&fixture);
+            validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();
+
+            let mut wrong_phase = upload.clone();
+            wrong_phase.phases.opaque_cutout.clear();
+            wrong_phase.phases.world_blended_unsorted.clear();
+            wrong_phase.phases.chrome_authored.clear();
+            match phase {
+                0 => wrong_phase.phases.world_blended_unsorted.push(0),
+                1 => wrong_phase.phases.chrome_authored.push(0),
+                2 => wrong_phase.phases.opaque_cutout.push(0),
+                _ => unreachable!(),
+            }
+            assert_invalid(&wrong_phase, &atlas);
+
+            let mut incompatible = upload;
+            match phase {
+                0 => incompatible.primitives[0].space = 2,
+                1 => incompatible.primitives[0].depth = 1,
+                2 => incompatible.primitives[0].blend = 1,
+                _ => unreachable!(),
+            }
+            assert_invalid(&incompatible, &atlas);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_preflight_rejects_capacity_node_vertex_and_resource_corruption() {
+        let (device, _queue) = native_device();
+        let candidate = compile_fixture(&SceneFixture::valid());
+        let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
+        let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();
+        let assert_invalid = |candidate: &PreparedSceneUpload| {
+            assert_eq!(
+                validate_gpu_candidate_preflight(&shared, candidate, &atlas),
+                Err(SceneGpuError::InvalidUpload),
+            );
+        };
+
+        let mut malformed = upload.clone();
+        malformed.primitives = vec![
+            malformed.primitives[0];
+            crate::presentation::companion_scene::scene::MAX_STATIC_PRIMITIVES
+                + 1
+        ];
+        assert_invalid(&malformed);
+
+        let mut malformed = upload.clone();
+        malformed.primitives[0].node_index =
+            u32::try_from(super::super::compiler::CpuMirrorShape::NODE_COUNT).unwrap();
+        assert_invalid(&malformed);
+
+        let mut malformed = upload.clone();
+        malformed.vertex_bytes[32..36].copy_from_slice(&1_u32.to_ne_bytes());
+        assert_invalid(&malformed);
+
+        let mut malformed = upload.clone();
+        let wrong_material = malformed.primitives[0].material_index.saturating_add(1);
+        malformed.vertex_bytes[36..40].copy_from_slice(&wrong_material.to_ne_bytes());
+        assert_invalid(&malformed);
+
+        let mut malformed = upload.clone();
+        malformed.primitives[0].resource_kind = 3;
+        assert_invalid(&malformed);
+
+        let mut malformed = upload;
+        malformed.primitives[0].resource_index = NONE_U32;
+        assert_invalid(&malformed);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_target_cache_reuses_replaces_and_retains_on_scoped_failure() {
+        let (device, queue) = native_device();
+        let cpu_candidate = compile_fixture(&SceneFixture::valid());
+        let atlas = two_weight_atlas_for('^', cpu_candidate.generation_key.resources);
+        let upload = prepare_scene_upload(&cpu_candidate, &atlas).unwrap();
+        let device_epoch = upload.generation_key.device;
+        let shared = SceneGpuShared::create(&device, device_epoch).unwrap();
+        let gpu_candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let candidate_generation = gpu_candidate.generation_key;
+        let candidate_facts = gpu_candidate.facts();
+        let key = SceneTargetKey::new(
+            device_epoch,
+            crate::presentation::companion_scene::SurfaceEpoch(10),
+            wgpu::Extent3d {
+                width: 260,
+                height: 260,
+                depth_or_array_layers: 1,
+            },
+            SceneTextureContract::INTERMEDIATE,
+            SceneTextureContract::INTERMEDIATE,
+            SceneTextureContract::DEPTH,
+            SceneTextureContract::SAMPLE_COUNT,
+        )
+        .unwrap();
+        let mut cache = SceneTargetCache::default();
+        assert_eq!(
+            cache.ensure(&device, &shared, key).unwrap(),
+            SceneTargetUpdate::Created
+        );
+        assert_eq!(cache.creation_events(), 1);
+        assert_eq!(cache.current().unwrap().facts(), SceneTargetFacts::EXPECTED);
+        assert_eq!(
+            cache.ensure(&device, &shared, key).unwrap(),
+            SceneTargetUpdate::Reused
+        );
+        assert_eq!(cache.creation_events(), 1);
+
+        let replacement_key = SceneTargetKey::new(
+            key.device_epoch,
+            crate::presentation::companion_scene::SurfaceEpoch(key.surface_epoch.0 + 1),
+            wgpu::Extent3d {
+                width: 360,
+                height: 360,
+                depth_or_array_layers: 1,
+            },
+            key.surface_format,
+            key.intermediate_format,
+            key.depth_format,
+            key.sample_count,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.ensure(&device, &shared, replacement_key).unwrap(),
+            SceneTargetUpdate::Created,
+        );
+        assert_eq!(cache.creation_events(), 2);
+        assert_eq!(cache.current().unwrap().key, replacement_key);
+        assert_eq!(gpu_candidate.generation_key, candidate_generation);
+        assert_eq!(gpu_candidate.facts(), candidate_facts);
+        assert_eq!(shared.facts(), SceneGpuSharedFacts::EXPECTED);
+
+        let failed_key = SceneTargetKey::new(
+            replacement_key.device_epoch,
+            crate::presentation::companion_scene::SurfaceEpoch(replacement_key.surface_epoch.0 + 1),
+            wgpu::Extent3d {
+                width: 480,
+                height: 480,
+                depth_or_array_layers: 1,
+            },
+            replacement_key.surface_format,
+            replacement_key.intermediate_format,
+            replacement_key.depth_format,
+            replacement_key.sample_count,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.ensure_with_test_fault(
+                &device,
+                &shared,
+                failed_key,
+                SceneTargetTestFault::ValidationAfterAllocation,
+            ),
+            Err(SceneGpuError::Gpu(ScopedGpuErrorCategory::Validation)),
+        );
+        assert_eq!(cache.creation_events(), 2);
+        assert_eq!(cache.current().unwrap().key, replacement_key);
+
+        let malformed_key = SceneTargetKey { sample_count: 4, ..failed_key };
+        assert_eq!(
+            cache.ensure(&device, &shared, malformed_key),
+            Err(SceneGpuError::InvalidTargetKey(
+                SceneTargetKeyError::SampleCount,
+            )),
+        );
+        assert_eq!(cache.creation_events(), 2);
+        assert_eq!(cache.current().unwrap().key, replacement_key);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 }
