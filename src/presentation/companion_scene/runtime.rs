@@ -786,6 +786,8 @@ pub(crate) fn validate_snapshot(
             || topology.stable_order != content.stable_order
             || usize::from(topology.stable_order) != index
             || usize::from(topology.stable_order) >= super::MAX_VISIBLE_PROPS
+            || content.bloom_active.is_some()
+                != crate::game::habitat::habitat_prop_supports_bloom(content.catalog_id)
         {
             return Err(SnapshotRejection::InconsistentIdentity);
         }

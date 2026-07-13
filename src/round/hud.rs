@@ -21,29 +21,35 @@ pub struct GrowthRing {
     pub track_sweep_deg: f64,
 }
 
-pub const COMPANION_GAUGE_GAP_DEG: f64 = 70.0;
+pub const COMPANION_GAUGE_GAP_DEG: f64 =
+    crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES;
 
 /// The colour the companion tank's depth falloff lifts its opaque core toward.
 /// Backend-neutral: both the AppKit dithered-bitmap path and the retained shader
 /// derive the core tint from this one constant so the two never diverge.
-pub const TANK_DEPTH_TINT: RoundColor = RoundColor(0.10, 0.11, 0.20, 1.0);
+pub const TANK_DEPTH_TINT: RoundColor = RoundColor(
+    crate::presentation::companion_effects::TANK_DEPTH_TINT_SRGB[0],
+    crate::presentation::companion_effects::TANK_DEPTH_TINT_SRGB[1],
+    crate::presentation::companion_effects::TANK_DEPTH_TINT_SRGB[2],
+    1.0,
+);
 
 /// How much of [`TANK_DEPTH_TINT`] reaches the core. Tuned against the shipping
 /// round accessory panel, which lifts blacks and eats subtle deltas: the falloff
 /// has to survive that tone curve, not merely read on a calibrated Mac display.
-pub const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
+pub const TANK_CORE_TINT_WEIGHT: f32 =
+    crate::presentation::companion_effects::TANK_CORE_TINT_WEIGHT;
 
 /// The opaque core colour the tank falloff runs out from: `background` lifted
 /// toward [`TANK_DEPTH_TINT`] by [`TANK_CORE_TINT_WEIGHT`], alpha preserved. Both
 /// backends consume this identical value so the depth core never diverges.
 pub fn tank_core_color(background: RoundColor) -> RoundColor {
-    let mix = |base: f32, tint: f32| base + (tint - base) * TANK_CORE_TINT_WEIGHT;
-    RoundColor(
-        mix(background.0, TANK_DEPTH_TINT.0),
-        mix(background.1, TANK_DEPTH_TINT.1),
-        mix(background.2, TANK_DEPTH_TINT.2),
-        background.3,
-    )
+    let color = crate::presentation::companion_effects::tank_core_srgb([
+        background.0,
+        background.1,
+        background.2,
+    ]);
+    RoundColor(color[0], color[1], color[2], background.3)
 }
 
 /// Deterministic per-pixel tank dither in `[-1.5, 1.5]` output levels. A smooth
@@ -147,48 +153,41 @@ pub fn perimeter_gauge_layout(
     aperture_radius: f64,
     gap_deg: f64,
 ) -> PerimeterGaugeLayout {
-    let outer_inset_px = 3.0_f64.max(aperture_radius * 0.012);
-    let xp_width = (aperture_radius * 0.050).clamp(6.0, 16.0);
-    let daily_width = (aperture_radius * 0.040).clamp(5.0, 13.0);
-    let pace_width = (aperture_radius * 0.034).clamp(4.0, 11.0);
-    let lane_gap = (aperture_radius * 0.010).clamp(1.5, 4.0);
-
-    let xp_radius = aperture_radius - outer_inset_px - xp_width / 2.0;
-    let daily_radius = xp_radius - xp_width / 2.0 - lane_gap - daily_width / 2.0;
-    let pace_radius = daily_radius - daily_width / 2.0 - lane_gap - pace_width / 2.0;
+    let layout =
+        crate::presentation::companion_effects::perimeter_gauge_layout(aperture_radius, gap_deg);
+    let lane = |value: crate::presentation::companion_effects::GaugeLaneLayout| GaugeLane {
+        ring: GrowthRing {
+            cx,
+            cy,
+            radius: value.radius,
+            track_start_deg: value.track_start_degrees,
+            track_sweep_deg: value.track_sweep_degrees,
+        },
+        stroke_width: value.stroke_width,
+        cap: LineCap::Round,
+    };
 
     PerimeterGaugeLayout {
-        xp: GaugeLane {
-            ring: growth_ring_layout(cx, cy, xp_radius, gap_deg),
-            stroke_width: xp_width,
-            cap: LineCap::Round,
-        },
-        daily: GaugeLane {
-            ring: growth_ring_layout(cx, cy, daily_radius, gap_deg),
-            stroke_width: daily_width,
-            cap: LineCap::Round,
-        },
-        pace: GaugeLane {
-            ring: growth_ring_layout(cx, cy, pace_radius, gap_deg),
-            stroke_width: pace_width,
-            cap: LineCap::Round,
-        },
+        xp: lane(layout.xp),
+        daily: lane(layout.daily),
+        pace: lane(layout.pace),
     }
 }
 
 pub fn perimeter_gauge_colors() -> PerimeterGaugeColors {
+    let color = |value: [f32; 4]| RoundColor(value[0], value[1], value[2], value[3]);
     PerimeterGaugeColors {
         xp: GaugeLaneColors {
-            track: RoundColor(0.71, 0.71, 0.78, 0.16),
-            fill: RoundColor(0.61, 0.48, 0.88, 0.90),
+            track: color(crate::presentation::companion_effects::GAUGE_XP_TRACK_SRGBA),
+            fill: color(crate::presentation::companion_effects::GAUGE_XP_FILL_SRGBA),
         },
         daily: GaugeLaneColors {
-            track: RoundColor(0.47, 0.63, 0.43, 0.12),
-            fill: RoundColor(0.50, 0.74, 0.56, 0.76),
+            track: color(crate::presentation::companion_effects::GAUGE_DAILY_TRACK_SRGBA),
+            fill: color(crate::presentation::companion_effects::GAUGE_DAILY_FILL_SRGBA),
         },
         pace: GaugeLaneColors {
-            track: RoundColor(0.96, 0.68, 0.31, 0.13),
-            fill: RoundColor(0.98, 0.67, 0.27, 0.86),
+            track: color(crate::presentation::companion_effects::GAUGE_PACE_TRACK_SRGBA),
+            fill: color(crate::presentation::companion_effects::GAUGE_PACE_FILL_SRGBA),
         },
     }
 }
@@ -336,15 +335,22 @@ pub fn prepare_hud_layout(
 /// applies its own translucency. Sad and Sleepy are deliberately distinct hues
 /// (different needs: happiness<35 vs energy<20). Starting palette — tuned on device.
 pub fn mood_aura_color(mood: Mood) -> RoundColor {
-    match mood {
-        Mood::Content => RoundColor(0.25, 0.71, 0.60, 1.0), // teal
-        Mood::Happy => RoundColor(0.82, 0.45, 0.62, 1.0),   // warm pink
-        Mood::Ecstatic => RoundColor(0.95, 0.40, 0.70, 1.0), // bright magenta-pink
-        Mood::Hungry => RoundColor(0.85, 0.62, 0.30, 1.0),  // amber
-        Mood::Sad => RoundColor(0.40, 0.50, 0.78, 1.0),     // muted blue
-        Mood::Sleepy => RoundColor(0.55, 0.50, 0.80, 1.0),  // indigo/violet
-        Mood::Wilted => RoundColor(0.45, 0.40, 0.48, 1.0),  // dim grey-mauve
-    }
+    let color = match mood {
+        Mood::Content => crate::presentation::companion_effects::MOOD_CONTENT_SRGBA,
+        Mood::Happy => crate::presentation::companion_effects::MOOD_HAPPY_SRGBA,
+        Mood::Ecstatic => crate::presentation::companion_effects::MOOD_ECSTATIC_SRGBA,
+        Mood::Hungry => crate::presentation::companion_effects::MOOD_HUNGRY_SRGBA,
+        Mood::Sad => crate::presentation::companion_effects::MOOD_SAD_SRGBA,
+        Mood::Sleepy => crate::presentation::companion_effects::MOOD_SLEEPY_SRGBA,
+        Mood::Wilted => crate::presentation::companion_effects::MOOD_WILTED_SRGBA,
+    };
+    RoundColor(color[0], color[1], color[2], color[3])
+}
+
+/// Outer radius of the companion's eight-ring mood aura. The radius follows
+/// transformed pet width, so depth changes scale the aura exactly once.
+pub fn mood_aura_radius(transformed_pet_width: f64) -> f64 {
+    crate::presentation::companion_effects::mood_aura_radius(transformed_pet_width)
 }
 
 pub fn rate_direction_color(direction: crate::tui::view_model::RateDirection) -> RoundColor {
@@ -521,7 +527,8 @@ pub(crate) fn pack_companion_hud_glyphs(
 }
 
 pub fn daily_overage_color() -> RoundColor {
-    RoundColor(0.72, 0.95, 0.34, 0.95)
+    let value = crate::presentation::companion_effects::GAUGE_DAILY_OVERAGE_SRGBA;
+    RoundColor(value[0], value[1], value[2], value[3])
 }
 
 pub fn daily_overage_marker_arc(ring: &GrowthRing, marker_fraction: f64) -> Option<(f64, f64)> {

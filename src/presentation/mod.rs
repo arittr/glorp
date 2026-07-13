@@ -1,4 +1,5 @@
 pub mod color_ops;
+pub(crate) mod companion_effects;
 pub mod companion_scene;
 pub mod draw_list;
 pub mod effect;

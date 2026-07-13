@@ -42,13 +42,7 @@ impl std::fmt::Display for SmoothDepthError {
 impl std::error::Error for SmoothDepthError {}
 
 pub const fn depth_lifecycle_scale(asleep: bool, calm: bool) -> f32 {
-    if asleep {
-        0.25
-    } else if calm {
-        0.5
-    } else {
-        1.0
-    }
+    crate::presentation::companion_effects::depth_lifecycle_scale(asleep, calm)
 }
 
 pub fn resolve_smooth_depth(
@@ -62,7 +56,8 @@ pub fn resolve_smooth_depth(
         return Err(SmoothDepthError::InvalidLifecycleScale);
     }
 
-    let effective_z = raw_z.clamp(-1.0, 1.0) * lifecycle_scale;
+    let effective_z =
+        crate::presentation::companion_effects::effective_depth(raw_z, lifecycle_scale);
     // The neutral plane renders the art at exactly 1.0 for Classic parity, so the
     // asymmetric excursion is mapped piecewise around it: a shallow back half and
     // a slightly deeper front half.

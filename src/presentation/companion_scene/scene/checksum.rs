@@ -399,6 +399,40 @@ pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGener
             None => hash.u8(0),
         }
     }
+    for slot in &content.prop_paint_slots {
+        hash.u8(slot.slot);
+        for paint in slot.paints {
+            match paint {
+                Some(paint) => {
+                    hash.u8(1);
+                    encode_rgb(&mut hash, paint.color_srgb8);
+                }
+                None => hash.u8(0),
+            }
+        }
+    }
+    for slot in &content.ambient_paint_slots {
+        hash.u8(slot.slot);
+        match slot.paint {
+            Some(paint) => {
+                hash.u8(1);
+                encode_rgb(&mut hash, paint.color_srgb8);
+            }
+            None => hash.u8(0),
+        }
+    }
+    for slot in &content.analytic_slots {
+        hash.u8(slot.id.0);
+        match slot.value {
+            Some(value) => {
+                hash.u8(1);
+                hash.u8(analytic_semantic_tag(value.semantic));
+                hash.u8(analytic_shape_tag(value.shape));
+                encode_analytic_paint(&mut hash, value.paint);
+            }
+            None => hash.u8(0),
+        }
+    }
     Ok(hash.finish())
 }
 
@@ -506,6 +540,22 @@ fn checksum_frame_with_projection(
         hash.f32(slot.opacity)
             .map_err(|_| SceneGenerationError::NonFinite)?;
     }
+    for slot in &frame.analytic_slots {
+        hash.u8(slot.id.0);
+        match slot.value {
+            Some(value) => {
+                hash.u8(1);
+                hash.u8(analytic_semantic_tag(value.semantic));
+                hash.u8(analytic_shape_tag(value.shape));
+                for component in value.rect_points {
+                    hash.f32(component)
+                        .map_err(|_| SceneGenerationError::NonFinite)?;
+                }
+                encode_analytic_geometry(&mut hash, value.geometry)?;
+            }
+            None => hash.u8(0),
+        }
+    }
     match capture_privacy {
         Some(privacy) => {
             for gauge in privacy.gauges() {
@@ -596,6 +646,169 @@ fn encode_points(hash: &mut Fnv1a64, points: [f32; 2]) -> Result<(), SceneGenera
     for value in points {
         hash.f32(value)
             .map_err(|_| SceneGenerationError::NonFinite)?;
+    }
+    Ok(())
+}
+fn encode_rgb(hash: &mut Fnv1a64, color: [u8; 3]) {
+    for channel in color {
+        hash.u8(channel);
+    }
+}
+fn encode_rgba(hash: &mut Fnv1a64, color: [u8; 4]) {
+    for channel in color {
+        hash.u8(channel);
+    }
+}
+fn encode_analytic_paint(hash: &mut Fnv1a64, paint: AnalyticPaint) {
+    match paint {
+        AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 } => {
+            hash.u8(1);
+            encode_rgb(hash, core_srgb8);
+            encode_rgb(hash, rim_srgb8);
+        }
+        AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 } => {
+            hash.u8(2);
+            encode_rgb(hash, color_srgb8);
+            hash.u8(opacity_u8);
+        }
+        AnalyticPaint::FloorShadowMultiplyRadial { inner_srgba8, outer_srgba8 } => {
+            hash.u8(3);
+            encode_rgba(hash, inner_srgba8);
+            encode_rgba(hash, outer_srgba8);
+        }
+        AnalyticPaint::StatusBeacon { active_srgba8, calm_srgba8 } => {
+            hash.u8(4);
+            encode_rgba(hash, active_srgba8);
+            encode_rgba(hash, calm_srgba8);
+        }
+        AnalyticPaint::MoodAuraRings {
+            color_srgb8,
+            ring_count,
+            per_ring_alpha_u8,
+        } => {
+            hash.u8(5);
+            encode_rgb(hash, color_srgb8);
+            hash.u8(ring_count);
+            hash.u8(per_ring_alpha_u8);
+        }
+        AnalyticPaint::PerimeterGaugeSet { xp, daily, pace, daily_overage_srgba8 } => {
+            hash.u8(6);
+            for lane in [xp, daily, pace] {
+                encode_rgba(hash, lane.track_srgba8);
+                encode_rgba(hash, lane.fill_srgba8);
+            }
+            encode_rgba(hash, daily_overage_srgba8);
+        }
+        AnalyticPaint::TroubleBeacon { color_srgba8 } => {
+            hash.u8(7);
+            encode_rgba(hash, color_srgba8);
+        }
+        AnalyticPaint::DimOverlay { color_srgb8 } => {
+            hash.u8(8);
+            encode_rgb(hash, color_srgb8);
+        }
+    }
+}
+fn encode_analytic_geometry(
+    hash: &mut Fnv1a64,
+    geometry: AnalyticGeometry,
+) -> Result<(), SceneGenerationError> {
+    match geometry {
+        AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points,
+        } => {
+            hash.u8(1);
+            encode_points(hash, center_points)?;
+            hash.f32(radius_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+            hash.f32(feather_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+        }
+        AnalyticGeometry::PetSilhouette {
+            mask: AnalyticMaskSource::PetBody,
+            offset_points,
+            softness_points,
+        } => {
+            hash.u8(2);
+            hash.u8(1);
+            encode_points(hash, offset_points)?;
+            hash.f32(softness_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+        }
+        AnalyticGeometry::RadialEllipse {
+            center_points,
+            radii_points,
+            softness_points,
+        } => {
+            hash.u8(3);
+            encode_points(hash, center_points)?;
+            encode_points(hash, radii_points)?;
+            hash.f32(softness_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+        }
+        AnalyticGeometry::StatusBeacon {
+            center_points,
+            radius_points,
+            thickness_points,
+            tone,
+        } => {
+            hash.u8(4);
+            encode_points(hash, center_points)?;
+            hash.f32(radius_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+            hash.f32(thickness_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+            hash.u8(match tone {
+                StatusBeaconTone::Active => 1,
+                StatusBeaconTone::Calm => 2,
+            });
+        }
+        AnalyticGeometry::PetAura {
+            center_points,
+            max_radius_points,
+            ring_count,
+            feather_points,
+        } => {
+            hash.u8(5);
+            encode_points(hash, center_points)?;
+            hash.f32(max_radius_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+            hash.u8(ring_count);
+            hash.f32(feather_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+        }
+        AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
+            hash.u8(6);
+            encode_points(hash, center_points)?;
+            for lane in [xp, daily, pace] {
+                hash.f32(lane.radius_points)
+                    .map_err(|_| SceneGenerationError::NonFinite)?;
+                hash.f32(lane.stroke_width_points)
+                    .map_err(|_| SceneGenerationError::NonFinite)?;
+                hash.f32(lane.track_start_degrees)
+                    .map_err(|_| SceneGenerationError::NonFinite)?;
+                hash.f32(lane.track_sweep_degrees)
+                    .map_err(|_| SceneGenerationError::NonFinite)?;
+                hash.u8(match lane.cap {
+                    GaugeLineCap::Round => 1,
+                });
+            }
+        }
+        AnalyticGeometry::TroubleBeacon {
+            center_points,
+            radius_points,
+            thickness_points,
+        } => {
+            hash.u8(7);
+            encode_points(hash, center_points)?;
+            hash.f32(radius_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+            hash.f32(thickness_points)
+                .map_err(|_| SceneGenerationError::NonFinite)?;
+        }
+        AnalyticGeometry::SurfaceOverlay => hash.u8(8),
     }
     Ok(())
 }

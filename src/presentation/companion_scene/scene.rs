@@ -19,6 +19,10 @@ pub const MAX_PROP_GLYPHS_PER_SLOT: usize = 9;
 pub const MAX_TANK_GLYPHS_PER_SLOT: usize = 8;
 pub const MAX_STATIC_ATLAS_RECIPES: usize = 8;
 pub const MAX_ANALYTIC_PARAMS: usize = 16;
+/// Forward renderer-neutral paint for the closed ambient mote family. The
+/// legacy companion currently emits no visible motes, but future neutral
+/// projections must use this source rather than borrowing a TUI color.
+pub const AMBIENT_MOTE_COLOR_SRGB8: [u8; 3] = [0xb8, 0xd4, 0xec];
 pub const LIT_CARD_SCALE_TOLERANCE: f32 = 1.0e-5;
 pub const MIN_LIT_CARD_WORLD_SCALE: f64 = 1.0e-6;
 // V1 emits SDR, but these bounds leave ample headroom for authored HDR-like
@@ -921,6 +925,187 @@ pub struct AmbientContentSlot {
     pub glyph: Option<AuthoredGlyph>,
 }
 
+/// Renderer-neutral glyph paint. Keeping this as a closed sRGB source makes
+/// the retained GPU mirror independent of both terminal colors and shader
+/// implementation details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct GlyphPaintSource {
+    pub color_srgb8: [u8; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PropGlyphPaintSlot {
+    pub slot: u8,
+    pub paints: [Option<GlyphPaintSource>; MAX_PROP_GLYPHS_PER_SLOT],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct AmbientGlyphPaintSlot {
+    pub slot: u8,
+    pub paint: Option<GlyphPaintSource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct GaugeLanePaint {
+    pub track_srgba8: [u8; 4],
+    pub fill_srgba8: [u8; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnalyticPaint {
+    ApertureDepth {
+        core_srgb8: [u8; 3],
+        rim_srgb8: [u8; 3],
+    },
+    PetShadowMultiply {
+        color_srgb8: [u8; 3],
+        opacity_u8: u8,
+    },
+    FloorShadowMultiplyRadial {
+        inner_srgba8: [u8; 4],
+        outer_srgba8: [u8; 4],
+    },
+    StatusBeacon {
+        active_srgba8: [u8; 4],
+        calm_srgba8: [u8; 4],
+    },
+    MoodAuraRings {
+        color_srgb8: [u8; 3],
+        ring_count: u8,
+        per_ring_alpha_u8: u8,
+    },
+    PerimeterGaugeSet {
+        xp: GaugeLanePaint,
+        daily: GaugeLanePaint,
+        pace: GaugeLanePaint,
+        daily_overage_srgba8: [u8; 4],
+    },
+    TroubleBeacon {
+        color_srgba8: [u8; 4],
+    },
+    DimOverlay {
+        color_srgb8: [u8; 3],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct AnalyticContent {
+    pub semantic: AnalyticSemantic,
+    pub shape: AnalyticShape,
+    pub paint: AnalyticPaint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct AnalyticContentSlot {
+    pub id: AnalyticParamId,
+    pub value: Option<AnalyticContent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyticMaskSource {
+    PetBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusBeaconTone {
+    Active,
+    Calm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaugeLineCap {
+    Round,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct GaugeLaneGeometry {
+    pub radius_points: f32,
+    pub stroke_width_points: f32,
+    pub track_start_degrees: f32,
+    pub track_sweep_degrees: f32,
+    pub cap: GaugeLineCap,
+}
+
+/// Closed geometry payloads for the eight companion analytic roles. Exact
+/// gauges, activity opacity, and dim amount remain in their existing private
+/// frame fields; these records only describe renderer-neutral geometry.
+#[derive(Clone, Copy, PartialEq)]
+pub enum AnalyticGeometry {
+    ApertureRadial {
+        center_points: [f32; 2],
+        radius_points: f32,
+        feather_points: f32,
+    },
+    PetSilhouette {
+        mask: AnalyticMaskSource,
+        offset_points: [f32; 2],
+        softness_points: f32,
+    },
+    RadialEllipse {
+        center_points: [f32; 2],
+        radii_points: [f32; 2],
+        softness_points: f32,
+    },
+    StatusBeacon {
+        center_points: [f32; 2],
+        radius_points: f32,
+        thickness_points: f32,
+        tone: StatusBeaconTone,
+    },
+    PetAura {
+        center_points: [f32; 2],
+        max_radius_points: f32,
+        ring_count: u8,
+        feather_points: f32,
+    },
+    PerimeterGaugeSet {
+        center_points: [f32; 2],
+        xp: GaugeLaneGeometry,
+        daily: GaugeLaneGeometry,
+        pace: GaugeLaneGeometry,
+    },
+    TroubleBeacon {
+        center_points: [f32; 2],
+        radius_points: f32,
+        thickness_points: f32,
+    },
+    SurfaceOverlay,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct AnalyticFrame {
+    pub semantic: AnalyticSemantic,
+    pub shape: AnalyticShape,
+    /// Y-up point-space `[x, y, width, height]` bounds.
+    pub rect_points: [f32; 4],
+    pub geometry: AnalyticGeometry,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct AnalyticFrameSlot {
+    pub id: AnalyticParamId,
+    pub value: Option<AnalyticFrame>,
+}
+
+fn empty_analytic_content_slots() -> Vec<AnalyticContentSlot> {
+    (0..MAX_ANALYTIC_PARAMS)
+        .map(|slot| AnalyticContentSlot {
+            id: AnalyticParamId(slot as u8),
+            value: None,
+        })
+        .collect()
+}
+
+fn empty_analytic_frame_slots() -> Vec<AnalyticFrameSlot> {
+    (0..MAX_ANALYTIC_PARAMS)
+        .map(|slot| AnalyticFrameSlot {
+            id: AnalyticParamId(slot as u8),
+            value: None,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneContent {
     pub schema_version: u16,
@@ -934,6 +1119,9 @@ pub struct SceneContent {
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
+    pub prop_paint_slots: Vec<PropGlyphPaintSlot>,
+    pub ambient_paint_slots: Vec<AmbientGlyphPaintSlot>,
+    pub analytic_slots: Vec<AnalyticContentSlot>,
 }
 
 const fn zero_generation_key() -> super::SceneGenerationKey {
@@ -980,6 +1168,16 @@ impl SceneContent {
                     glyph: None,
                 })
                 .collect(),
+            prop_paint_slots: (0..MAX_VISIBLE_PROPS)
+                .map(|slot| PropGlyphPaintSlot {
+                    slot: slot as u8,
+                    paints: [None; MAX_PROP_GLYPHS_PER_SLOT],
+                })
+                .collect(),
+            ambient_paint_slots: (0..MAX_AMBIENT_INSTANCES)
+                .map(|slot| AmbientGlyphPaintSlot { slot: slot as u8, paint: None })
+                .collect(),
+            analytic_slots: empty_analytic_content_slots(),
         }
     }
 }
@@ -1063,6 +1261,7 @@ pub struct SceneFrame {
     pub prop_slots: Vec<PropFrameSlot>,
     pub tank_slots: Vec<TankFrameSlot>,
     pub ambient_slots: Vec<AmbientFrameSlot>,
+    pub analytic_slots: Vec<AnalyticFrameSlot>,
     pub gauges: [f32; 4],
     pub dim_amount: f32,
     pub lights: Vec<LightFrame>,
@@ -1115,6 +1314,7 @@ impl SceneFrame {
                     opacity: 0.0,
                 })
                 .collect(),
+            analytic_slots: empty_analytic_frame_slots(),
             gauges: [0.0; 4],
             dim_amount: 0.0,
             lights: Vec::new(),
@@ -1172,6 +1372,7 @@ impl fmt::Debug for SceneFrame {
             .field("prop_slot_count", &self.prop_slots.len())
             .field("tank_slot_count", &self.tank_slots.len())
             .field("ambient_slot_count", &self.ambient_slots.len())
+            .field("analytic_slot_count", &self.analytic_slots.len())
             .field("gauges", &"<redacted>")
             .field("dim_amount", &"<redacted>")
             .field("light_count", &self.lights.len())
@@ -1195,6 +1396,9 @@ pub struct ContentDelta {
     pub prop_slots: Vec<PropContentSlot>,
     pub tank_slots: Vec<TankContentSlot>,
     pub ambient_slots: Vec<AmbientContentSlot>,
+    pub prop_paint_slots: Vec<PropGlyphPaintSlot>,
+    pub ambient_paint_slots: Vec<AmbientGlyphPaintSlot>,
+    pub analytic_slots: Vec<AnalyticContentSlot>,
 }
 
 impl ContentDelta {
@@ -1214,6 +1418,9 @@ impl ContentDelta {
             prop_slots: Vec::new(),
             tank_slots: Vec::new(),
             ambient_slots: Vec::new(),
+            prop_paint_slots: Vec::new(),
+            ambient_paint_slots: Vec::new(),
+            analytic_slots: Vec::new(),
         }
     }
 }
@@ -1231,6 +1438,7 @@ pub struct FrameDelta {
     pub prop_slots: Vec<PropFrameSlot>,
     pub tank_slots: Vec<TankFrameSlot>,
     pub ambient_slots: Vec<AmbientFrameSlot>,
+    pub analytic_slots: Vec<AnalyticFrameSlot>,
     pub gauges: Option<[f32; 4]>,
     pub dim_amount: Option<f32>,
     pub lights: Vec<(u8, LightFrame)>,
@@ -1248,6 +1456,7 @@ impl fmt::Debug for FrameDelta {
             .field("prop_slot_count", &self.prop_slots.len())
             .field("tank_slot_count", &self.tank_slots.len())
             .field("ambient_slot_count", &self.ambient_slots.len())
+            .field("analytic_slot_count", &self.analytic_slots.len())
             .field("gauges", &self.gauges.map(|_| "<redacted>"))
             .field("dim_amount", &self.dim_amount.map(|_| "<redacted>"))
             .field("light_count", &self.lights.len())
@@ -1269,6 +1478,7 @@ impl FrameDelta {
             prop_slots: Vec::new(),
             tank_slots: Vec::new(),
             ambient_slots: Vec::new(),
+            analytic_slots: Vec::new(),
             gauges: None,
             dim_amount: None,
             lights: Vec::new(),
@@ -1343,6 +1553,9 @@ impl SceneDeltaScratch {
                 prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
                 tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
                 ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
+                prop_paint_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
+                ambient_paint_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
+                analytic_slots: Vec::with_capacity(MAX_ANALYTIC_PARAMS),
             },
             frame: FrameDelta {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -1356,6 +1569,7 @@ impl SceneDeltaScratch {
                 prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
                 tank_slots: Vec::with_capacity(MAX_ROUND_TANK_INHABITANTS),
                 ambient_slots: Vec::with_capacity(MAX_AMBIENT_INSTANCES),
+                analytic_slots: Vec::with_capacity(MAX_ANALYTIC_PARAMS),
                 gauges: None,
                 dim_amount: None,
                 lights: Vec::with_capacity(MAX_LIGHTS),
@@ -1500,6 +1714,9 @@ impl SceneFixture {
                 prop_slots: SceneContent::empty_v2().prop_slots,
                 tank_slots: SceneContent::empty_v2().tank_slots,
                 ambient_slots: SceneContent::empty_v2().ambient_slots,
+                prop_paint_slots: SceneContent::empty_v2().prop_paint_slots,
+                ambient_paint_slots: SceneContent::empty_v2().ambient_paint_slots,
+                analytic_slots: compiler::build_analytic_content(&SceneContent::empty_v2()),
             },
             frame: SceneFrame {
                 schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
@@ -1523,6 +1740,7 @@ impl SceneFixture {
                 prop_slots: SceneFrame::empty_v2(camera).prop_slots,
                 tank_slots: SceneFrame::empty_v2(camera).tank_slots,
                 ambient_slots: SceneFrame::empty_v2(camera).ambient_slots,
+                analytic_slots: compiler::fixture_analytic_frame_slots(camera),
                 gauges: [0.0; 4],
                 dim_amount: 0.0,
                 lights: vec![],
@@ -1734,6 +1952,21 @@ mod tests {
     #[test]
     fn repaired_mirrors_have_canonical_empty_slots_and_fixed_frame_storage() {
         let content = SceneContent::empty_v2();
+        assert_eq!(content.analytic_slots.len(), MAX_ANALYTIC_PARAMS);
+        assert!(content
+            .analytic_slots
+            .iter()
+            .all(|slot| slot.value.is_none()));
+        assert_eq!(content.prop_paint_slots.len(), MAX_VISIBLE_PROPS);
+        assert!(content
+            .prop_paint_slots
+            .iter()
+            .all(|slot| slot.paints.iter().all(Option::is_none)));
+        assert_eq!(content.ambient_paint_slots.len(), MAX_AMBIENT_INSTANCES);
+        assert!(content
+            .ambient_paint_slots
+            .iter()
+            .all(|slot| slot.paint.is_none()));
         assert_eq!(content.pet_art_slots.len(), MAX_PET_ART_SLOTS);
         assert_eq!(content.room_glyph_slots.len(), MAX_ROOM_GLYPH_SLOTS);
         assert_eq!(content.prop_slots.len(), MAX_VISIBLE_PROPS);
@@ -1748,6 +1981,8 @@ mod tests {
             .all(|slot| slot.glyph.is_none()));
 
         let frame = SceneFrame::empty_v2(OrthographicCamera::new(360.0, 360.0, -2.0, 2.0).unwrap());
+        assert_eq!(frame.analytic_slots.len(), MAX_ANALYTIC_PARAMS);
+        assert!(frame.analytic_slots.iter().all(|slot| slot.value.is_none()));
         assert_eq!(frame.prop_slots.len(), MAX_VISIBLE_PROPS);
         assert_eq!(frame.room_glyph_slots.len(), MAX_ROOM_GLYPH_SLOTS);
         assert_eq!(frame.tank_slots.len(), MAX_ROUND_TANK_INHABITANTS);
@@ -1926,6 +2161,35 @@ mod tests {
                     .iter()
                     .enumerate()
                     .all(|(index, slot)| usize::from(slot.slot) == index));
+                let pet_node = built
+                    .template
+                    .nodes
+                    .iter()
+                    .find(|node| node.alias.as_str() == "pet")
+                    .unwrap();
+                let pet_transform = built
+                    .frame
+                    .nodes
+                    .iter()
+                    .find(|node| node.node == pet_node.id)
+                    .unwrap()
+                    .local_transform;
+                let (body_center, body_radii) =
+                    super::compiler::pet_body_world_geometry(&snapshot, pet_transform).unwrap();
+                let aura = built.frame.analytic_slots[4].value.unwrap();
+                assert!(
+                    aura.geometry
+                        == AnalyticGeometry::PetAura {
+                            center_points: body_center,
+                            max_radius_points:
+                                crate::presentation::companion_effects::mood_aura_radius(f64::from(
+                                    body_radii[0] * 2.0
+                                ),) as f32,
+                            ring_count: 8,
+                            feather_points: 4.0,
+                        },
+                    "{species:?} {stage:?}"
+                );
             }
         }
     }
@@ -1935,6 +2199,7 @@ mod tests {
         let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
         let mut built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
         let capacities = built.delta_capacities();
+        let storage_pointers = built.delta_storage_pointers();
 
         let mut facing = snapshot.clone();
         facing.frame.facing *= -1;
@@ -1951,6 +2216,7 @@ mod tests {
         assert!(deltas.content.pet_art_slots.is_empty());
         assert_eq!(deltas.frame.nodes.len(), 1);
         assert_eq!(built.delta_capacities(), capacities);
+        assert_eq!(built.delta_storage_pointers(), storage_pointers);
 
         let mut raw_clock = snapshot.clone();
         raw_clock.frame.elapsed_ms += 1;
@@ -1967,6 +2233,7 @@ mod tests {
         assert!(deltas.content.pet_art_slots.is_empty());
         assert!(deltas.frame.nodes.is_empty());
         assert_eq!(built.delta_capacities(), capacities);
+        assert_eq!(built.delta_storage_pointers(), storage_pointers);
 
         let mut mood = snapshot.clone();
         mood.content.mood = Mood::Happy;
@@ -1986,6 +2253,7 @@ mod tests {
             "mood/weather changes must not republish ambient slots"
         );
         assert_eq!(built.delta_capacities(), capacities);
+        assert_eq!(built.delta_storage_pointers(), storage_pointers);
     }
 
     #[test]
@@ -2288,6 +2556,24 @@ mod tests {
             origin_points: [180.0, 280.0],
         }];
         let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+        let base = crate::game::habitat::catalog_prop_by_str(
+            crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+        )
+        .unwrap()
+        .color;
+        let expected = [base.0, base.1, base.2];
+        for (glyph, paint) in built.content().prop_slots[0]
+            .content
+            .unwrap()
+            .glyphs
+            .into_iter()
+            .zip(built.content().prop_paint_slots[0].paints)
+        {
+            assert_eq!(
+                paint.map(|paint| paint.color_srgb8),
+                glyph.glyph.map(|_| expected)
+            );
+        }
         assert_eq!(built.template.attachments.len(), 1);
         let attachment = &built.template.attachments[0];
         let owner = built
@@ -2340,6 +2626,262 @@ mod tests {
             resolved.transform_point3([0.0; 3]),
             [185.0, 82.25, -1.6, 1.0],
         );
+    }
+
+    #[test]
+    fn occupied_ambient_motes_use_the_forward_neutral_paint_source() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.content.ambient_semantics[0].kind =
+            Some(super::super::AmbientSemanticKindSnapshot::Mote);
+        snapshot.content.ambient_semantics[0].glyph = Some('◇');
+        let built = build_scene_generation(&snapshot, generation_key(42)).unwrap();
+        assert_eq!(
+            built.content().ambient_paint_slots[0].paint,
+            Some(GlyphPaintSource { color_srgb8: AMBIENT_MOTE_COLOR_SRGB8 })
+        );
+        assert!(built.content().ambient_paint_slots[1..]
+            .iter()
+            .all(|slot| slot.paint.is_none()));
+    }
+
+    #[test]
+    fn blooming_prop_uses_closed_blossom_override_without_recoloring_other_cells() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
+            catalog_id: crate::game::habitat::HEAVY_SESSION_PLANTER,
+            stable_order: 0,
+            zone: super::super::PropZoneSnapshot::FloorMid,
+            authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+        }];
+        snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::HEAVY_SESSION_PLANTER,
+            stable_order: 0,
+            kind: super::super::PropAnimationKindSnapshot::Animated,
+            sprite_phase: None,
+            twinkle_active: None,
+            motion_phase: None,
+            chest_lid_open: None,
+            bloom_active: Some(true),
+            origin_points: [180.0, 280.0],
+        }];
+        let built = build_scene_generation(&snapshot, generation_key(44)).unwrap();
+        let content = built.content().prop_slots[0].content.unwrap();
+        let paints = built.content().prop_paint_slots[0].paints;
+        let spec =
+            crate::game::habitat::catalog_prop_by_str(crate::game::habitat::HEAVY_SESSION_PLANTER)
+                .unwrap();
+        let base = [spec.color.0, spec.color.1, spec.color.2];
+        assert!(content
+            .glyphs
+            .into_iter()
+            .zip(paints)
+            .any(
+                |(glyph, paint)| glyph.glyph.is_some_and(|glyph| glyph.as_char() == '*')
+                    && paint.is_some_and(|paint| paint.color_srgb8 == [0xe8, 0x84, 0xbc])
+            ));
+        assert!(content
+            .glyphs
+            .into_iter()
+            .zip(paints)
+            .any(
+                |(glyph, paint)| glyph.glyph.is_some_and(|glyph| glyph.as_char() != '*')
+                    && paint.is_some_and(|paint| paint.color_srgb8 == base)
+            ));
+    }
+
+    #[test]
+    fn bloom_paint_is_catalog_capability_bound() {
+        let bloom_ids = [
+            crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+            crate::game::habitat::TOKEN_HANGING_VINE_25M,
+            crate::game::habitat::HEAVY_SESSION_PLANTER,
+            crate::game::habitat::TOKEN_REEDS_5M,
+        ];
+        for catalog_id in bloom_ids {
+            for bloom_active in [false, true] {
+                let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+                snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
+                    catalog_id,
+                    stable_order: 0,
+                    zone: super::super::PropZoneSnapshot::FloorMid,
+                    authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+                }];
+                snapshot.content.prop_animation_states =
+                    vec![super::super::PropAnimationSnapshot {
+                        catalog_id,
+                        stable_order: 0,
+                        kind: super::super::PropAnimationKindSnapshot::Animated,
+                        sprite_phase: Some(0),
+                        twinkle_active: None,
+                        motion_phase: None,
+                        chest_lid_open: None,
+                        bloom_active: Some(bloom_active),
+                        origin_points: [180.0, 280.0],
+                    }];
+                let built = build_scene_generation(&snapshot, generation_key(45)).unwrap();
+                let content = built.content().prop_slots[0].content.unwrap();
+                let paints = built.content().prop_paint_slots[0].paints;
+                let spec = crate::game::habitat::catalog_prop_by_str(catalog_id).unwrap();
+                let base = [spec.color.0, spec.color.1, spec.color.2];
+                let mut saw_blossom = false;
+                for (glyph, paint) in content.glyphs.into_iter().zip(paints) {
+                    let Some(glyph) = glyph.glyph else {
+                        assert!(paint.is_none());
+                        continue;
+                    };
+                    let expected = if bloom_active && glyph.as_char() == '*' {
+                        saw_blossom = true;
+                        [0xe8, 0x84, 0xbc]
+                    } else {
+                        base
+                    };
+                    assert_eq!(paint.unwrap().color_srgb8, expected, "{catalog_id}");
+                }
+                assert_eq!(saw_blossom, bloom_active, "{catalog_id}");
+            }
+        }
+
+        for catalog_id in [
+            crate::game::habitat::TOKEN_BONSAI_100M,
+            crate::game::habitat::TOKEN_CONSTELLATION_250M,
+        ] {
+            let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+            snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
+                catalog_id,
+                stable_order: 0,
+                zone: super::super::PropZoneSnapshot::FloorMid,
+                authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            }];
+            snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+                catalog_id,
+                stable_order: 0,
+                kind: super::super::PropAnimationKindSnapshot::Animated,
+                sprite_phase: Some(0),
+                twinkle_active: None,
+                motion_phase: None,
+                chest_lid_open: None,
+                bloom_active: Some(true),
+                origin_points: [180.0, 280.0],
+            }];
+            assert_eq!(
+                build_scene_generation(&snapshot, generation_key(46)),
+                Err(SceneGenerationError::SnapshotRejected(
+                    super::super::runtime::SnapshotRejection::InconsistentIdentity,
+                )),
+                "{catalog_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytic_and_glyph_paint_fields_hash_in_their_owned_domains() {
+        let fixture = SceneFixture::valid();
+        let content_checksum = checksum::checksum_content(&fixture.content).unwrap();
+        let frame_checksum = checksum::checksum_frame(&fixture.template, &fixture.frame).unwrap();
+
+        let mut changed_content = fixture.content.clone();
+        changed_content.analytic_slots[4]
+            .value
+            .as_mut()
+            .unwrap()
+            .paint = AnalyticPaint::MoodAuraRings {
+            color_srgb8: [1, 2, 3],
+            ring_count: 8,
+            per_ring_alpha_u8: 13,
+        };
+        assert_ne!(
+            checksum::checksum_content(&changed_content).unwrap(),
+            content_checksum
+        );
+        assert_eq!(
+            checksum::checksum_frame(&fixture.template, &fixture.frame).unwrap(),
+            frame_checksum
+        );
+
+        let mut changed_frame = fixture.frame.clone();
+        changed_frame.analytic_slots[2]
+            .value
+            .as_mut()
+            .unwrap()
+            .rect_points[0] += 1.0;
+        assert_ne!(
+            checksum::checksum_frame(&fixture.template, &changed_frame).unwrap(),
+            frame_checksum
+        );
+        assert_eq!(
+            checksum::checksum_content(&fixture.content).unwrap(),
+            content_checksum
+        );
+    }
+
+    #[test]
+    fn exact_activity_gauges_and_dim_remain_same_generation_frame_deltas() {
+        let initial = Arc::new(snapshot_with_private_frame(0.1, 0.0));
+        let mut built = build_scene_generation_owned(
+            Arc::clone(&initial),
+            generation_key(43),
+            super::super::AppliedRevisions::new(0, 0),
+        )
+        .unwrap();
+        let template_checksum = built.template().generation_checksum;
+        let content_checksum = built.content_checksum();
+
+        let mut changed = (*initial).clone();
+        changed.frame.activity_recent = true;
+        changed.frame.activity_opacity = 0.333_333_34;
+        changed.frame.gauge_fractions = [0.125, 0.25, 0.5, 0.875];
+        changed.frame.gauge_levels = [
+            super::super::GaugeLevelSnapshot::Low,
+            super::super::GaugeLevelSnapshot::Medium,
+            super::super::GaugeLevelSnapshot::High,
+            super::super::GaugeLevelSnapshot::High,
+        ];
+        changed.frame.dimmed = true;
+        changed.frame.dim_amount = 0.456_789;
+        let changed = Arc::new(changed);
+        let changes = super::super::runtime::classify_snapshot_changes(&initial, &changed);
+        assert!(!changes.requires_generation());
+        let status = built
+            .template()
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == "chrome.status")
+            .unwrap()
+            .id;
+        let delta = built
+            .project_snapshot_changes(
+                &changed,
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(0, 1),
+            )
+            .unwrap();
+        assert!(delta.content.analytic_slots.is_empty());
+        assert_eq!(delta.frame.gauges, Some([0.125, 0.25, 0.5, 0.875]));
+        assert_eq!(delta.frame.dim_amount, Some(0.456_789));
+        assert_eq!(
+            delta
+                .frame
+                .nodes
+                .iter()
+                .find(|node| node.node == status)
+                .unwrap()
+                .opacity,
+            0.333_333_34
+        );
+
+        built
+            .apply_compatible_snapshot(
+                changed,
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(0, 1),
+            )
+            .unwrap();
+        assert_eq!(built.template().generation_checksum, template_checksum);
+        assert_eq!(built.content_checksum(), content_checksum);
+        assert_eq!(built.frame().gauges, [0.125, 0.25, 0.5, 0.875]);
+        assert_eq!(built.frame().dim_amount, 0.456_789);
     }
 
     #[test]
@@ -2550,7 +3092,7 @@ mod tests {
             let mut desired = (*initial).clone();
             let resolved = crate::round::depth::resolve_smooth_depth(
                 raw_depth,
-                crate::round::depth::depth_lifecycle_scale(false, true),
+                crate::round::depth::depth_lifecycle_scale(false, false),
             )
             .unwrap();
             desired.content.day_phase = super::super::CompanionDayPhase::Dusk;
@@ -2562,9 +3104,9 @@ mod tests {
                 opacity: resolved.atmosphere,
                 saturation: 1.0,
             };
-            desired.frame.calm = true;
-            desired.frame.dimmed = true;
-            desired.frame.dim_amount = 0.35;
+            desired.frame.calm = false;
+            desired.frame.dimmed = false;
+            desired.frame.dim_amount = 0.0;
             desired.frame.gauge_fractions = [0.123_456_79, 0.432_109, 0.765_432_1, 1.0];
             desired.frame.gauge_levels = desired
                 .frame
@@ -2669,6 +3211,8 @@ mod tests {
                 let pet = node_frame("pet");
                 let body = node_frame("pet.body");
                 let particles = node_frame("pet.particles");
+                let wall = node_frame("pet.shadow.wall");
+                let floor = node_frame("pet.projection.floor");
                 let cell = snapshot.topology.glyph_grid.cell_extent_points;
                 let extent = [
                     f32::from(super::super::PET_LATTICE_WIDTH) * cell[0],
@@ -2709,8 +3253,152 @@ mod tests {
                     particles.opacity, resolved.atmosphere,
                     "{lifecycle} at depth {raw_depth}"
                 );
+                let wall_cue = crate::presentation::companion_effects::wall_shadow_depth_cue(
+                    resolved.effective_z,
+                );
+                assert_eq!(wall.opacity, wall_cue.strength);
+                assert!(
+                    generation.frame.analytic_slots[1].value.unwrap().geometry
+                        == AnalyticGeometry::PetSilhouette {
+                            mask: AnalyticMaskSource::PetBody,
+                            offset_points: [
+                                wall_cue.detach_cells * cell[0],
+                                -wall_cue.detach_cells * cell[1],
+                            ],
+                            softness_points: (cell[0].min(cell[1]) * 0.35).max(1.0),
+                        }
+                );
+
+                let pet_center = [
+                    pet.local_transform.translation[0] + pet.local_transform.pivot[0],
+                    pet.local_transform.translation[1] + pet.local_transform.pivot[1],
+                ];
+                let projection = crate::presentation::companion_effects::floor_projection_metrics(
+                    snapshot.topology.layout.width_points,
+                    snapshot.topology.layout.height_points,
+                    snapshot.topology.layout.height_points * 0.76,
+                    snapshot.topology.layout.height_points,
+                    pet_center[0],
+                    resolved.effective_z,
+                )
+                .unwrap();
+                assert_eq!(floor.opacity, f32::from(projection.alpha) / 235.0);
+                assert!(
+                    generation.frame.analytic_slots[2].value.unwrap().geometry
+                        == AnalyticGeometry::RadialEllipse {
+                            center_points: [
+                                projection.center_x,
+                                snapshot.topology.layout.height_points - projection.center_y,
+                            ],
+                            radii_points: [projection.radius_x, projection.radius_y],
+                            softness_points: projection.radius_y,
+                        }
+                );
+
+                let (body_center, body_radii) =
+                    super::compiler::pet_body_world_geometry(&snapshot, pet.local_transform)
+                        .unwrap();
+                assert!(body_radii[0] < extent[0] * resolved.scale * 0.5);
+                let aura_radius = crate::presentation::companion_effects::mood_aura_radius(
+                    f64::from(body_radii[0] * 2.0),
+                ) as f32;
+                assert!(
+                    generation.frame.analytic_slots[4].value.unwrap().geometry
+                        == AnalyticGeometry::PetAura {
+                            center_points: body_center,
+                            max_radius_points: aura_radius,
+                            ring_count: 8,
+                            feather_points: 4.0,
+                        }
+                );
+
+                let aura_node = generation
+                    .template
+                    .nodes
+                    .iter()
+                    .find(|node| node.alias.as_str() == "pet.aura.mood")
+                    .unwrap();
+                let root = generation
+                    .template
+                    .nodes
+                    .iter()
+                    .find(|node| node.alias.as_str() == "scene.root")
+                    .unwrap();
+                assert_eq!(aura_node.parent, Some(root.id));
+                let status_tone = match generation.frame.analytic_slots[3].value.unwrap().geometry {
+                    AnalyticGeometry::StatusBeacon { tone, .. } => tone,
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    status_tone,
+                    if calm || asleep {
+                        StatusBeaconTone::Calm
+                    } else {
+                        StatusBeaconTone::Active
+                    }
+                );
             }
         }
+    }
+
+    #[test]
+    fn floor_projection_ignores_pet_breath_and_bob() {
+        let baseline = snapshot_for(Species::Fuzz, Stage::S3);
+        let mut moved = baseline.clone();
+        moved.frame.breath_offset_y_points += 7.25;
+        moved.frame.bob_offset_y_points -= 3.5;
+
+        let baseline = build_scene_generation(&baseline, generation_key(1)).unwrap();
+        let moved = build_scene_generation(&moved, generation_key(1)).unwrap();
+        assert!(baseline.frame.analytic_slots[2] == moved.frame.analytic_slots[2]);
+        assert!(baseline.frame.analytic_slots[4] != moved.frame.analytic_slots[4]);
+    }
+
+    #[test]
+    fn aura_uses_tight_asymmetric_body_bounds_not_particle_lattice_bounds() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.content.pet_lines =
+            vec!["             ".to_owned(); usize::from(super::super::PET_LATTICE_HEIGHT)];
+        snapshot.content.pet_lines[3].replace_range(2..3, "^");
+        snapshot.content.pet_roles = vec![super::super::PetRoleSpanSnapshot {
+            line_index: 3,
+            start_char: 2,
+            end_char: 3,
+            role: "body",
+        }];
+        let built = build_scene_generation(&snapshot, generation_key(49)).unwrap();
+        let pet_node = built
+            .template
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == "pet")
+            .unwrap();
+        let transform = built
+            .frame
+            .nodes
+            .iter()
+            .find(|node| node.node == pet_node.id)
+            .unwrap()
+            .local_transform;
+        let cell = snapshot.topology.glyph_grid.cell_extent_points;
+        let local_center = [
+            2.5 * cell[0],
+            (f32::from(super::super::PET_LATTICE_HEIGHT) - 3.5) * cell[1],
+            0.0,
+        ];
+        let expected = transform.matrix().unwrap().transform_point3(local_center);
+        let expected_radius = crate::presentation::companion_effects::mood_aura_radius(f64::from(
+            cell[0] * transform.scale[0].abs(),
+        )) as f32;
+        assert!(
+            built.frame.analytic_slots[4].value.unwrap().geometry
+                == AnalyticGeometry::PetAura {
+                    center_points: [expected[0], expected[1]],
+                    max_radius_points: expected_radius,
+                    ring_count: 8,
+                    feather_points: 4.0,
+                }
+        );
     }
 
     #[test]
@@ -2763,7 +3451,8 @@ mod tests {
                 motion_phase: Some(0),
                 chest_lid_open: (prop.catalog_id == crate::game::habitat::TOKEN_TREASURE_CHEST_2M)
                     .then_some(false),
-                bloom_active: None,
+                bloom_active: crate::game::habitat::habitat_prop_supports_bloom(prop.catalog_id)
+                    .then_some(false),
                 origin_points: [20.0 + f32::from(prop.stable_order) * 24.0, 280.0],
             })
             .collect();
@@ -3216,6 +3905,165 @@ mod tests {
             .primitives
             .iter()
             .any(|primitive| { matches!(primitive.binding, PrimitiveBinding::StaticAtlas(_)) }));
+    }
+
+    #[test]
+    fn production_projection_closes_all_eight_analytic_roles_with_y_up_geometry() {
+        let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let built = build_scene_generation(&snapshot, generation_key(41)).unwrap();
+
+        assert_eq!(built.content().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
+        assert_eq!(built.frame().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
+        for (index, semantic) in AnalyticSemantic::ALL.into_iter().enumerate() {
+            let content = built.content().analytic_slots[index].value.unwrap();
+            let frame = built.frame().analytic_slots[index].value.unwrap();
+            assert_eq!(content.semantic, semantic);
+            assert_eq!(content.shape, semantic.shape());
+            assert_eq!(frame.semantic, semantic);
+            assert_eq!(frame.shape, semantic.shape());
+            assert!(frame.rect_points.into_iter().all(f32::is_finite));
+            assert!(frame.rect_points[2] > 0.0 && frame.rect_points[3] > 0.0);
+        }
+        assert!(built.content().analytic_slots[8..]
+            .iter()
+            .all(|slot| slot.value.is_none()));
+        assert!(built.frame().analytic_slots[8..]
+            .iter()
+            .all(|slot| slot.value.is_none()));
+
+        let room = built.frame().analytic_slots[0].value.unwrap();
+        assert_eq!(room.rect_points, [0.0, 0.0, 360.0, 360.0]);
+        assert!(matches!(
+            room.geometry,
+            AnalyticGeometry::ApertureRadial {
+                center_points: [179.5, 179.5],
+                radius_points: 179.0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            built.frame().analytic_slots[1].value.unwrap().geometry,
+            AnalyticGeometry::PetSilhouette { mask: AnalyticMaskSource::PetBody, .. }
+        ));
+        assert!(matches!(
+            built.content().analytic_slots[5].value.unwrap().paint,
+            AnalyticPaint::PerimeterGaugeSet { .. }
+        ));
+    }
+
+    #[test]
+    fn analytic_gauges_use_canonical_named_layout_and_paint_on_non_square_views() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.topology.layout.width_points = 420.0;
+        snapshot.topology.glyph_grid.cell_extent_points[0] =
+            420.0 / f32::from(snapshot.topology.glyph_grid.columns);
+        let built = build_scene_generation(&snapshot, generation_key(47)).unwrap();
+
+        let frame = built.frame().analytic_slots[5].value.unwrap();
+        let expected = crate::presentation::companion_effects::perimeter_gauge_layout(
+            179.0,
+            crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+        );
+        let actual = match frame.geometry {
+            AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
+                assert_eq!(center_points, [209.5, 179.5]);
+                [xp, daily, pace]
+            }
+            _ => panic!("gauge semantic must carry gauge geometry"),
+        };
+        for (actual, expected) in
+            actual
+                .into_iter()
+                .zip([expected.xp, expected.daily, expected.pace])
+        {
+            assert_eq!(actual.radius_points, expected.radius as f32);
+            assert_eq!(actual.stroke_width_points, expected.stroke_width as f32);
+            assert_eq!(
+                actual.track_start_degrees,
+                expected.track_start_degrees as f32
+            );
+            assert_eq!(
+                actual.track_sweep_degrees,
+                expected.track_sweep_degrees as f32
+            );
+            assert_eq!(actual.cap, GaugeLineCap::Round);
+        }
+
+        let to_srgba8 = crate::presentation::companion_effects::srgba8;
+        assert_eq!(
+            built.content().analytic_slots[5].value.unwrap().paint,
+            AnalyticPaint::PerimeterGaugeSet {
+                xp: GaugeLanePaint {
+                    track_srgba8: to_srgba8(
+                        crate::presentation::companion_effects::GAUGE_XP_TRACK_SRGBA,
+                    ),
+                    fill_srgba8: to_srgba8(
+                        crate::presentation::companion_effects::GAUGE_XP_FILL_SRGBA,
+                    ),
+                },
+                daily: GaugeLanePaint {
+                    track_srgba8: to_srgba8(
+                        crate::presentation::companion_effects::GAUGE_DAILY_TRACK_SRGBA,
+                    ),
+                    fill_srgba8: to_srgba8(
+                        crate::presentation::companion_effects::GAUGE_DAILY_FILL_SRGBA,
+                    ),
+                },
+                pace: GaugeLanePaint {
+                    track_srgba8: to_srgba8(
+                        crate::presentation::companion_effects::GAUGE_PACE_TRACK_SRGBA,
+                    ),
+                    fill_srgba8: to_srgba8(
+                        crate::presentation::companion_effects::GAUGE_PACE_FILL_SRGBA,
+                    ),
+                },
+                daily_overage_srgba8: to_srgba8(
+                    crate::presentation::companion_effects::GAUGE_DAILY_OVERAGE_SRGBA,
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn analytic_room_and_floor_paint_use_shared_biome_phase_authority() {
+        for biome in [
+            "starter",
+            "botanical",
+            "technical",
+            "celestial",
+            "artifact",
+            "cozy",
+        ] {
+            for (phase, scale) in [
+                (super::super::CompanionDayPhase::Dawn, 0.85),
+                (super::super::CompanionDayPhase::Day, 1.0),
+                (super::super::CompanionDayPhase::Dusk, 0.8),
+                (super::super::CompanionDayPhase::Night, 0.6),
+            ] {
+                let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+                snapshot.topology.room.primary_biome = biome;
+                snapshot.content.day_phase = phase;
+                let built = build_scene_generation(&snapshot, generation_key(48)).unwrap();
+                let (core_srgb8, rim_srgb8) =
+                    crate::presentation::companion_effects::tank_background_paint_srgb8(
+                        biome, scale,
+                    );
+                assert_eq!(
+                    built.content().analytic_slots[0].value.unwrap().paint,
+                    AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 },
+                    "{biome} {phase:?}"
+                );
+                let shadow = crate::presentation::companion_effects::bed_shadow_srgb8(biome);
+                assert_eq!(
+                    built.content().analytic_slots[2].value.unwrap().paint,
+                    AnalyticPaint::FloorShadowMultiplyRadial {
+                        inner_srgba8: [shadow[0], shadow[1], shadow[2], 235],
+                        outer_srgba8: [shadow[0], shadow[1], shadow[2], 0],
+                    },
+                    "{biome} {phase:?}"
+                );
+            }
+        }
     }
 
     #[test]

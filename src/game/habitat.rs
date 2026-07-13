@@ -101,6 +101,13 @@ pub struct HabitatPropSpec {
 pub const TOKEN_PEBBLE_25K: &str = "token_pebble_25k";
 pub const TOKEN_SHELL_100K: &str = "token_shell_100k";
 pub const TOKEN_MOSS_TUFT_250K: &str = "token_moss_tuft_250k";
+
+pub fn habitat_prop_supports_bloom(id: &str) -> bool {
+    matches!(
+        id,
+        TOKEN_MOSS_TUFT_250K | TOKEN_HANGING_VINE_25M | HEAVY_SESSION_PLANTER | TOKEN_REEDS_5M
+    )
+}
 pub const TOKEN_SPARK_500K: &str = "token_spark_500k";
 pub const TOKEN_FRIENDLY_CLOUD_750K: &str = "token_friendly_cloud_750k";
 pub const TOKEN_SHARD_1M: &str = "token_shard_1m";

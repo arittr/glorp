@@ -26,23 +26,24 @@ pub struct RoundColor(pub f32, pub f32, pub f32, pub f32);
 
 /// V1 round companion palette. These colors are tuned for the truecolor
 /// round aperture and should be kept in sync with the preview lab fixtures.
-const HALO_CALM_COLOR: RoundColor = RoundColor(0.36, 0.40, 0.55, 0.8);
-const HALO_ACTIVE_COLOR: RoundColor = RoundColor(0.94, 0.65, 0.28, 0.9);
-const TROUBLE_GLYPH_COLOR: RoundColor = RoundColor(0.92, 0.30, 0.25, 0.95);
-
-/// A dark, biome-tinted background for the companion aperture — keeps the pet
-/// dominant (all channels stay low) while giving each place its own cast.
-pub(crate) fn biome_background_color(tag: crate::tui::room::RoomBiomeTag) -> RoundColor {
-    use crate::tui::room::RoomBiomeTag;
-    match tag {
-        RoomBiomeTag::Starter => RoundColor(0.08, 0.09, 0.10, 1.0),
-        RoomBiomeTag::Botanical => RoundColor(0.07, 0.11, 0.08, 1.0),
-        RoomBiomeTag::Technical => RoundColor(0.07, 0.09, 0.13, 1.0),
-        RoomBiomeTag::Celestial => RoundColor(0.08, 0.08, 0.14, 1.0),
-        RoomBiomeTag::Artifact => RoundColor(0.12, 0.10, 0.07, 1.0),
-        RoomBiomeTag::Cozy => RoundColor(0.13, 0.09, 0.08, 1.0),
-    }
-}
+const HALO_CALM_COLOR: RoundColor = RoundColor(
+    crate::presentation::companion_effects::STATUS_CALM_SRGBA[0],
+    crate::presentation::companion_effects::STATUS_CALM_SRGBA[1],
+    crate::presentation::companion_effects::STATUS_CALM_SRGBA[2],
+    crate::presentation::companion_effects::STATUS_CALM_SRGBA[3],
+);
+const HALO_ACTIVE_COLOR: RoundColor = RoundColor(
+    crate::presentation::companion_effects::STATUS_ACTIVE_SRGBA[0],
+    crate::presentation::companion_effects::STATUS_ACTIVE_SRGBA[1],
+    crate::presentation::companion_effects::STATUS_ACTIVE_SRGBA[2],
+    crate::presentation::companion_effects::STATUS_ACTIVE_SRGBA[3],
+);
+const TROUBLE_GLYPH_COLOR: RoundColor = RoundColor(
+    crate::presentation::companion_effects::TROUBLE_SRGBA[0],
+    crate::presentation::companion_effects::TROUBLE_SRGBA[1],
+    crate::presentation::companion_effects::TROUBLE_SRGBA[2],
+    crate::presentation::companion_effects::TROUBLE_SRGBA[3],
+);
 
 /// Biome background scaled down by day-phase so night reads darker.
 pub(crate) fn phase_dim_background(
@@ -50,14 +51,27 @@ pub(crate) fn phase_dim_background(
     phase: crate::tui::day::DayPhase,
 ) -> RoundColor {
     use crate::tui::day::DayPhase;
-    let base = biome_background_color(tag);
     let k = match phase {
         DayPhase::Day => 1.0,
         DayPhase::Dawn => 0.85,
         DayPhase::Dusk => 0.8,
         DayPhase::Night => 0.6,
     };
-    RoundColor(base.0 * k, base.1 * k, base.2 * k, base.3)
+    let color =
+        crate::presentation::companion_effects::phase_dim_background_srgb(biome_alias(tag), k);
+    RoundColor(color[0], color[1], color[2], 1.0)
+}
+
+fn biome_alias(tag: crate::tui::room::RoomBiomeTag) -> &'static str {
+    use crate::tui::room::RoomBiomeTag;
+    match tag {
+        RoomBiomeTag::Starter => "starter",
+        RoomBiomeTag::Botanical => "botanical",
+        RoomBiomeTag::Technical => "technical",
+        RoomBiomeTag::Celestial => "celestial",
+        RoomBiomeTag::Artifact => "artifact",
+        RoomBiomeTag::Cozy => "cozy",
+    }
 }
 
 pub fn build_draw_commands(
@@ -110,9 +124,10 @@ mod tests {
 
     #[test]
     fn background_is_biome_tinted() {
+        use crate::tui::day::DayPhase;
         use crate::tui::room::RoomBiomeTag;
-        let botanical = biome_background_color(RoomBiomeTag::Botanical);
-        let technical = biome_background_color(RoomBiomeTag::Technical);
+        let botanical = phase_dim_background(RoomBiomeTag::Botanical, DayPhase::Day);
+        let technical = phase_dim_background(RoomBiomeTag::Technical, DayPhase::Day);
         assert_ne!(botanical, technical);
         // Stays dark (each rgb channel <= 0.22) so the pet pops.
         assert!(botanical.0 <= 0.22 && botanical.1 <= 0.22 && botanical.2 <= 0.22);

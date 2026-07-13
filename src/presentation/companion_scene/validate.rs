@@ -239,6 +239,14 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
         &content.tank_slots,
         &content.ambient_slots,
     )?;
+    validate_analytic_content_slots(&content.analytic_slots, true)?;
+    validate_paint_slots(
+        &content.prop_slots,
+        &content.prop_paint_slots,
+        &content.ambient_slots,
+        &content.ambient_paint_slots,
+        true,
+    )?;
     if content
         .pet_art_slots
         .iter()
@@ -261,6 +269,16 @@ pub fn validate_content(content: &SceneContent) -> Result<(), SceneValidationErr
             .any(|(index, slot)| usize::from(slot.slot) != index)
         || content
             .ambient_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || content
+            .prop_paint_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+        || content
+            .ambient_paint_slots
             .iter()
             .enumerate()
             .any(|(index, slot)| usize::from(slot.slot) != index)
@@ -291,6 +309,7 @@ pub fn validate_frame(
     canonical.prop_slots.sort_by_key(|slot| slot.slot);
     canonical.tank_slots.sort_by_key(|slot| slot.slot);
     canonical.ambient_slots.sort_by_key(|slot| slot.slot);
+    canonical.analytic_slots.sort_by_key(|slot| slot.id);
     Ok(AcceptedSceneFrame {
         frame: canonical,
         template_identity: Arc::clone(&accepted_template.identity),
@@ -318,10 +337,12 @@ fn validate_frame_against_template(
         || frame.room_glyph_slots.len() != MAX_ROOM_GLYPH_SLOTS
         || frame.tank_slots.len() != MAX_ROUND_TANK_INHABITANTS
         || frame.ambient_slots.len() != MAX_AMBIENT_INSTANCES
+        || frame.analytic_slots.len() != MAX_ANALYTIC_PARAMS
     {
         return Err(SceneValidationError::FixedSlotCountMismatch);
     }
     validate_instance_frame_slots(frame)?;
+    validate_analytic_frame_slots(&frame.analytic_slots, true, frame.camera)?;
     if frame
         .prop_slots
         .iter()
@@ -384,6 +405,31 @@ pub fn validate_content_delta(delta: &ContentDelta) -> Result<(), SceneValidatio
         &delta.prop_slots,
         &delta.tank_slots,
         &delta.ambient_slots,
+    )?;
+    validate_analytic_content_slots(&delta.analytic_slots, false)?;
+    if delta.prop_slots.len() != delta.prop_paint_slots.len()
+        || delta.prop_slots.iter().any(|content| {
+            !delta
+                .prop_paint_slots
+                .iter()
+                .any(|paint| paint.slot == content.slot)
+        })
+        || delta.ambient_slots.len() != delta.ambient_paint_slots.len()
+        || delta.ambient_slots.iter().any(|content| {
+            !delta
+                .ambient_paint_slots
+                .iter()
+                .any(|paint| paint.slot == content.slot)
+        })
+    {
+        return Err(SceneValidationError::NonCanonicalEmptySlot);
+    }
+    validate_paint_slots(
+        &delta.prop_slots,
+        &delta.prop_paint_slots,
+        &delta.ambient_slots,
+        &delta.ambient_paint_slots,
+        false,
     )
 }
 
@@ -490,6 +536,24 @@ pub(crate) fn validate_content_frame_delta(
             return Err(SceneValidationError::NonCanonicalEmptySlot);
         }
     }
+    validate_delta_paint_overlays(current_content, content_delta)?;
+    for slot in 0..MAX_ANALYTIC_PARAMS {
+        let content = content_delta
+            .analytic_slots
+            .iter()
+            .find(|changed| usize::from(changed.id.0) == slot)
+            .unwrap_or(&current_content.analytic_slots[slot]);
+        let frame = frame_delta
+            .analytic_slots
+            .iter()
+            .find(|changed| usize::from(changed.id.0) == slot)
+            .unwrap_or(&current_frame.analytic_slots[slot]);
+        if content.value.map(|value| (value.semantic, value.shape))
+            != frame.value.map(|value| (value.semantic, value.shape))
+        {
+            return Err(SceneValidationError::InvalidFrameValue);
+        }
+    }
     Ok(())
 }
 
@@ -519,6 +583,7 @@ pub fn validate_frame_delta(
         validate_camera(camera)?;
     }
     let effective_camera = delta.camera.unwrap_or(current_frame.frame.camera);
+    validate_analytic_frame_slots(&delta.analytic_slots, false, effective_camera)?;
     validate_room_frame_grid(
         (0..MAX_ROOM_GLYPH_SLOTS).map(|slot| {
             delta
@@ -626,6 +691,9 @@ pub fn validate_frame_delta(
     }
     for changed in &delta.ambient_slots {
         current_frame.frame.ambient_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.analytic_slots {
+        current_frame.frame.analytic_slots[usize::from(changed.id.0)] = *changed;
     }
     Ok(FrameDeltaValidation {
         node_slots_checked: delta.nodes.len(),
@@ -1450,6 +1518,507 @@ fn validate_content_slots(
     )
 }
 
+fn validate_analytic_content_slots(
+    slots: &[AnalyticContentSlot],
+    full_table: bool,
+) -> Result<(), SceneValidationError> {
+    if full_table && slots.len() != MAX_ANALYTIC_PARAMS {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    validate_unique_slots(
+        slots.iter().map(|slot| usize::from(slot.id.0)),
+        MAX_ANALYTIC_PARAMS,
+        SceneValidationError::InvalidContentValue,
+    )?;
+    for slot in slots {
+        let index = usize::from(slot.id.0);
+        match (index, slot.value) {
+            (0..=7, Some(value))
+                if value.semantic == AnalyticSemantic::ALL[index]
+                    && value.shape == value.semantic.shape() =>
+            {
+                validate_analytic_paint(value.semantic, value.paint)?;
+            }
+            (8.., None) => {}
+            _ => return Err(SceneValidationError::InvalidContentValue),
+        }
+    }
+    if full_table
+        && slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.id.0) != index)
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    Ok(())
+}
+
+fn validate_analytic_paint(
+    semantic: AnalyticSemantic,
+    paint: AnalyticPaint,
+) -> Result<(), SceneValidationError> {
+    let rgba = |color: [u8; 4]| color[3] > 0;
+    let valid = match (semantic, paint) {
+        (
+            AnalyticSemantic::RoomBackground,
+            AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 },
+        ) => {
+            let _ = (core_srgb8, rim_srgb8);
+            true
+        }
+        (
+            AnalyticSemantic::WallShadow,
+            AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 },
+        ) => {
+            let _ = color_srgb8;
+            opacity_u8 > 0
+        }
+        (
+            AnalyticSemantic::FloorProjection,
+            AnalyticPaint::FloorShadowMultiplyRadial { inner_srgba8, outer_srgba8 },
+        ) => rgba(inner_srgba8) && outer_srgba8[3] == 0,
+        (
+            AnalyticSemantic::StatusHalo,
+            AnalyticPaint::StatusBeacon { active_srgba8, calm_srgba8 },
+        ) => rgba(active_srgba8) && rgba(calm_srgba8),
+        (
+            AnalyticSemantic::MoodAura,
+            AnalyticPaint::MoodAuraRings {
+                color_srgb8,
+                ring_count: 8,
+                per_ring_alpha_u8,
+            },
+        ) => {
+            let _ = color_srgb8;
+            per_ring_alpha_u8 > 0
+        }
+        (
+            AnalyticSemantic::Gauges,
+            AnalyticPaint::PerimeterGaugeSet { xp, daily, pace, daily_overage_srgba8 },
+        ) => {
+            [xp, daily, pace]
+                .into_iter()
+                .all(|lane| rgba(lane.track_srgba8) && rgba(lane.fill_srgba8))
+                && rgba(daily_overage_srgba8)
+        }
+        (AnalyticSemantic::Trouble, AnalyticPaint::TroubleBeacon { color_srgba8 }) => {
+            rgba(color_srgba8)
+        }
+        (AnalyticSemantic::Dim, AnalyticPaint::DimOverlay { color_srgb8 }) => {
+            let _ = color_srgb8;
+            true
+        }
+        _ => false,
+    };
+    valid
+        .then_some(())
+        .ok_or(SceneValidationError::InvalidContentValue)
+}
+
+fn validate_paint_slots(
+    props: &[PropContentSlot],
+    prop_paints: &[PropGlyphPaintSlot],
+    ambient: &[AmbientContentSlot],
+    ambient_paints: &[AmbientGlyphPaintSlot],
+    full_table: bool,
+) -> Result<(), SceneValidationError> {
+    if full_table
+        && (prop_paints.len() != MAX_VISIBLE_PROPS || ambient_paints.len() != MAX_AMBIENT_INSTANCES)
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    validate_unique_slots(
+        prop_paints.iter().map(|slot| usize::from(slot.slot)),
+        MAX_VISIBLE_PROPS,
+        SceneValidationError::PropSlotOutOfBounds,
+    )?;
+    validate_unique_slots(
+        ambient_paints.iter().map(|slot| usize::from(slot.slot)),
+        MAX_AMBIENT_INSTANCES,
+        SceneValidationError::AmbientSlotOutOfBounds,
+    )?;
+    for paint in prop_paints {
+        if let Some(content) = props
+            .iter()
+            .find(|content| content.slot == paint.slot)
+            .and_then(|content| content.content)
+        {
+            if content
+                .glyphs
+                .into_iter()
+                .zip(paint.paints)
+                .any(|(glyph, paint)| glyph.glyph.is_some() != paint.is_some())
+            {
+                return Err(SceneValidationError::NonCanonicalEmptySlot);
+            }
+        } else if full_table && paint.paints.into_iter().any(|paint| paint.is_some()) {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    for paint in ambient_paints {
+        if let Some(content) = ambient.iter().find(|content| content.slot == paint.slot) {
+            if content.kind.is_some() != paint.paint.is_some() {
+                return Err(SceneValidationError::NonCanonicalEmptySlot);
+            }
+        } else if full_table && paint.paint.is_some() {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    Ok(())
+}
+
+fn validate_delta_paint_overlays(
+    current: &SceneContent,
+    delta: &ContentDelta,
+) -> Result<(), SceneValidationError> {
+    for slot in 0..MAX_VISIBLE_PROPS {
+        let content = delta
+            .prop_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current.prop_slots[slot]);
+        let paints = delta
+            .prop_paint_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current.prop_paint_slots[slot]);
+        let glyphs = content.content.map(|content| content.glyphs).unwrap_or(
+            [PropGlyphContent { glyph: None, local_cell: [0; 2] }; MAX_PROP_GLYPHS_PER_SLOT],
+        );
+        if glyphs
+            .into_iter()
+            .zip(paints.paints)
+            .any(|(glyph, paint)| glyph.glyph.is_some() != paint.is_some())
+        {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    for slot in 0..MAX_AMBIENT_INSTANCES {
+        let content = delta
+            .ambient_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current.ambient_slots[slot]);
+        let paint = delta
+            .ambient_paint_slots
+            .iter()
+            .find(|changed| usize::from(changed.slot) == slot)
+            .unwrap_or(&current.ambient_paint_slots[slot]);
+        if content.kind.is_some() != paint.paint.is_some() {
+            return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    Ok(())
+}
+
+fn validate_analytic_frame_slots(
+    slots: &[AnalyticFrameSlot],
+    full_table: bool,
+    camera: OrthographicCamera,
+) -> Result<(), SceneValidationError> {
+    if full_table && slots.len() != MAX_ANALYTIC_PARAMS {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    validate_unique_slots(
+        slots.iter().map(|slot| usize::from(slot.id.0)),
+        MAX_ANALYTIC_PARAMS,
+        SceneValidationError::InvalidFrameValue,
+    )?;
+    for slot in slots {
+        let index = usize::from(slot.id.0);
+        match (index, slot.value) {
+            (0..=7, Some(value))
+                if value.semantic == AnalyticSemantic::ALL[index]
+                    && value.shape == value.semantic.shape() =>
+            {
+                validate_analytic_frame(value, camera)?;
+            }
+            (8.., None) => {}
+            _ => return Err(SceneValidationError::InvalidFrameValue),
+        }
+    }
+    if full_table
+        && slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.id.0) != index)
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    Ok(())
+}
+
+fn validate_analytic_frame(
+    value: AnalyticFrame,
+    camera: OrthographicCamera,
+) -> Result<(), SceneValidationError> {
+    if !value.rect_points.iter().all(|value| value.is_finite()) {
+        return Err(SceneValidationError::NonFiniteFrameValue);
+    }
+    if value.rect_points[2] <= 0.0 || value.rect_points[3] <= 0.0 {
+        return Err(SceneValidationError::InvalidFrameValue);
+    }
+    let spatial_limit = camera.width_points.max(camera.height_points) * 4.0 + 64.0;
+    if value
+        .rect_points
+        .into_iter()
+        .any(|component| component.abs() > spatial_limit)
+    {
+        return Err(SceneValidationError::InvalidFrameValue);
+    }
+    let finite2 = |values: [f32; 2]| values.into_iter().all(f32::is_finite);
+    let positive2 =
+        |values: [f32; 2]| finite2(values) && values.into_iter().all(|value| value > 0.0);
+    let geometry_finite = match value.geometry {
+        AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points,
+        }
+        | AnalyticGeometry::StatusBeacon {
+            center_points,
+            radius_points,
+            thickness_points: feather_points,
+            ..
+        }
+        | AnalyticGeometry::TroubleBeacon {
+            center_points,
+            radius_points,
+            thickness_points: feather_points,
+        } => finite2(center_points) && radius_points.is_finite() && feather_points.is_finite(),
+        AnalyticGeometry::PetSilhouette { offset_points, softness_points, .. } => {
+            finite2(offset_points) && softness_points.is_finite()
+        }
+        AnalyticGeometry::RadialEllipse {
+            center_points,
+            radii_points,
+            softness_points,
+        } => finite2(center_points) && finite2(radii_points) && softness_points.is_finite(),
+        AnalyticGeometry::PetAura {
+            center_points,
+            max_radius_points,
+            feather_points,
+            ..
+        } => finite2(center_points) && max_radius_points.is_finite() && feather_points.is_finite(),
+        AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
+            finite2(center_points)
+                && [xp, daily, pace].into_iter().all(|lane| {
+                    lane.radius_points.is_finite()
+                        && lane.stroke_width_points.is_finite()
+                        && lane.track_start_degrees.is_finite()
+                        && lane.track_sweep_degrees.is_finite()
+                })
+        }
+        AnalyticGeometry::SurfaceOverlay => true,
+    };
+    if !geometry_finite {
+        return Err(SceneValidationError::NonFiniteFrameValue);
+    }
+    let bounded2 = |values: [f32; 2]| {
+        values
+            .into_iter()
+            .all(|component| component.abs() <= spatial_limit)
+    };
+    let geometry_bounded = match value.geometry {
+        AnalyticGeometry::ApertureRadial {
+            center_points,
+            radius_points,
+            feather_points,
+        }
+        | AnalyticGeometry::StatusBeacon {
+            center_points,
+            radius_points,
+            thickness_points: feather_points,
+            ..
+        }
+        | AnalyticGeometry::TroubleBeacon {
+            center_points,
+            radius_points,
+            thickness_points: feather_points,
+        } => {
+            bounded2(center_points)
+                && radius_points.abs() <= spatial_limit
+                && feather_points.abs() <= spatial_limit
+        }
+        AnalyticGeometry::PetSilhouette { offset_points, softness_points, .. } => {
+            bounded2(offset_points) && softness_points.abs() <= spatial_limit
+        }
+        AnalyticGeometry::RadialEllipse {
+            center_points,
+            radii_points,
+            softness_points,
+        } => {
+            bounded2(center_points)
+                && bounded2(radii_points)
+                && softness_points.abs() <= spatial_limit
+        }
+        AnalyticGeometry::PetAura {
+            center_points,
+            max_radius_points,
+            feather_points,
+            ..
+        } => {
+            bounded2(center_points)
+                && max_radius_points.abs() <= spatial_limit
+                && feather_points.abs() <= spatial_limit
+        }
+        AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
+            bounded2(center_points)
+                && [xp, daily, pace].into_iter().all(|lane| {
+                    lane.radius_points.abs() <= spatial_limit
+                        && lane.stroke_width_points.abs() <= spatial_limit
+                        && lane.track_start_degrees.abs() <= 360.0
+                        && lane.track_sweep_degrees.abs() <= 360.0
+                })
+        }
+        AnalyticGeometry::SurfaceOverlay => true,
+    };
+    if !geometry_bounded {
+        return Err(SceneValidationError::InvalidFrameValue);
+    }
+    let full_camera_rect = [0.0, 0.0, camera.width_points, camera.height_points];
+    let centered_rect = |center: [f32; 2], radii: [f32; 2]| {
+        [
+            center[0] - radii[0],
+            center[1] - radii[1],
+            radii[0] * 2.0,
+            radii[1] * 2.0,
+        ]
+    };
+    let valid = match (value.semantic, value.geometry) {
+        (
+            AnalyticSemantic::RoomBackground,
+            AnalyticGeometry::ApertureRadial {
+                center_points,
+                radius_points,
+                feather_points,
+            },
+        ) => {
+            finite2(center_points)
+                && value.rect_points == full_camera_rect
+                && center_points
+                    == [
+                        (camera.width_points - 1.0) * 0.5,
+                        (camera.height_points - 1.0) * 0.5,
+                    ]
+                && radius_points.is_finite()
+                && radius_points > 0.0
+                && radius_points == camera.width_points.min(camera.height_points) * 0.5 - 1.0
+                && feather_points.is_finite()
+                && feather_points >= 0.0
+        }
+        (
+            AnalyticSemantic::WallShadow,
+            AnalyticGeometry::PetSilhouette {
+                mask: AnalyticMaskSource::PetBody,
+                offset_points,
+                softness_points,
+            },
+        ) => {
+            finite2(offset_points)
+                && softness_points.is_finite()
+                && softness_points >= 0.0
+                && value.rect_points[2] > offset_points[0].abs() + softness_points * 2.0
+                && value.rect_points[3] > offset_points[1].abs() + softness_points * 2.0
+        }
+        (
+            AnalyticSemantic::FloorProjection,
+            AnalyticGeometry::RadialEllipse {
+                center_points,
+                radii_points,
+                softness_points,
+            },
+        ) => {
+            finite2(center_points)
+                && positive2(radii_points)
+                && value.rect_points == centered_rect(center_points, radii_points)
+                && softness_points.is_finite()
+                && softness_points >= 0.0
+        }
+        (
+            AnalyticSemantic::StatusHalo,
+            AnalyticGeometry::StatusBeacon {
+                center_points,
+                radius_points,
+                thickness_points,
+                ..
+            },
+        )
+        | (
+            AnalyticSemantic::Trouble,
+            AnalyticGeometry::TroubleBeacon {
+                center_points,
+                radius_points,
+                thickness_points,
+            },
+        ) => {
+            finite2(center_points)
+                && radius_points.is_finite()
+                && radius_points > 0.0
+                && thickness_points.is_finite()
+                && thickness_points > 0.0
+                && value.rect_points
+                    == centered_rect(center_points, [radius_points + thickness_points; 2])
+        }
+        (
+            AnalyticSemantic::MoodAura,
+            AnalyticGeometry::PetAura {
+                center_points,
+                max_radius_points,
+                ring_count: 8,
+                feather_points,
+            },
+        ) => {
+            finite2(center_points)
+                && max_radius_points.is_finite()
+                && max_radius_points > 0.0
+                && value.rect_points == centered_rect(center_points, [max_radius_points; 2])
+                && feather_points.is_finite()
+                && feather_points >= 0.0
+        }
+        (
+            AnalyticSemantic::Gauges,
+            AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace },
+        ) => {
+            let expected_center = [
+                value.rect_points[0] + (value.rect_points[2] - 1.0) * 0.5,
+                value.rect_points[1] + (value.rect_points[3] - 1.0) * 0.5,
+            ];
+            let aperture_radius = value.rect_points[2].min(value.rect_points[3]) * 0.5 - 1.0;
+            let expected = crate::presentation::companion_effects::perimeter_gauge_layout(
+                f64::from(aperture_radius),
+                crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+            );
+            let lane_matches = |actual: GaugeLaneGeometry,
+                                expected: crate::presentation::companion_effects::GaugeLaneLayout| {
+                actual.radius_points > 0.0
+                    && actual.stroke_width_points > 0.0
+                    && actual.stroke_width_points < actual.radius_points
+                    && actual.radius_points == expected.radius as f32
+                    && actual.stroke_width_points == expected.stroke_width as f32
+                    && actual.track_start_degrees == expected.track_start_degrees as f32
+                    && actual.track_sweep_degrees == expected.track_sweep_degrees as f32
+                    && actual.cap == GaugeLineCap::Round
+            };
+            finite2(center_points)
+                && value.rect_points == full_camera_rect
+                && center_points == expected_center
+                && aperture_radius > 0.0
+                && lane_matches(xp, expected.xp)
+                && lane_matches(daily, expected.daily)
+                && lane_matches(pace, expected.pace)
+        }
+        (AnalyticSemantic::Dim, AnalyticGeometry::SurfaceOverlay) => {
+            value.rect_points == full_camera_rect
+        }
+        _ => false,
+    };
+    valid
+        .then_some(())
+        .ok_or(SceneValidationError::InvalidFrameValue)
+}
+
 fn validate_instance_frame_slots(frame: &SceneFrame) -> Result<(), SceneValidationError> {
     validate_unique_slots(
         frame
@@ -1553,6 +2122,13 @@ fn validate_content_frame_canonical(
             && (frame.visible || !zero2(frame.position_points) || frame.opacity.to_bits() != 0)
         {
             return Err(SceneValidationError::NonCanonicalEmptySlot);
+        }
+    }
+    for (content, frame) in content.analytic_slots.iter().zip(&frame.analytic_slots) {
+        if content.value.map(|value| (value.semantic, value.shape))
+            != frame.value.map(|value| (value.semantic, value.shape))
+        {
+            return Err(SceneValidationError::InvalidFrameValue);
         }
     }
     Ok(())
@@ -1760,6 +2336,316 @@ fn validate_unit_interval(value: f32) -> Result<(), SceneValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analytic_and_glyph_paint_contracts_reject_mismatches_and_nonfinite_geometry() {
+        let mut fixture = SceneFixture::valid();
+        fixture.content.analytic_slots[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .paint = AnalyticPaint::DimOverlay { color_srgb8: [0; 3] };
+        assert_eq!(
+            validate_content(&fixture.content),
+            Err(SceneValidationError::InvalidContentValue)
+        );
+
+        let mut fixture = SceneFixture::valid();
+        let room = fixture.frame.analytic_slots[0].value.as_mut().unwrap();
+        room.geometry = AnalyticGeometry::ApertureRadial {
+            center_points: [f32::NAN, 180.0],
+            radius_points: 179.0,
+            feather_points: 1.0,
+        };
+        assert_eq!(
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame)
+                .map(|_| ()),
+            Err(SceneValidationError::NonFiniteFrameValue)
+        );
+
+        let mut fixture = SceneFixture::valid();
+        fixture.content.prop_slots[0].content = Some(PropSemanticContent {
+            sprite_phase: None,
+            twinkle_active: None,
+            lid_open: None,
+            bloom_active: None,
+            glyphs: std::array::from_fn(|index| PropGlyphContent {
+                glyph: (index == 0).then(|| AuthoredGlyph::new('◆').unwrap()),
+                local_cell: [0; 2],
+            }),
+        });
+        assert_eq!(
+            validate_content(&fixture.content),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
+        );
+    }
+
+    #[test]
+    fn analytic_geometry_rejects_finite_extremes_in_full_and_atomic_delta_paths() {
+        type Mutation = fn(&mut AnalyticFrame, f32);
+        let mutations: &[(usize, Mutation)] = &[
+            (0, |value, extreme| value.rect_points[0] = extreme),
+            (0, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::ApertureRadial { center_points, .. } => {
+                    center_points[0] = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (0, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::ApertureRadial { radius_points, .. } => *radius_points = extreme,
+                _ => unreachable!(),
+            }),
+            (0, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::ApertureRadial { feather_points, .. } => {
+                    *feather_points = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (1, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PetSilhouette { offset_points, .. } => offset_points[1] = extreme,
+                _ => unreachable!(),
+            }),
+            (1, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PetSilhouette { softness_points, .. } => {
+                    *softness_points = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (2, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::RadialEllipse { center_points, .. } => center_points[1] = extreme,
+                _ => unreachable!(),
+            }),
+            (2, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::RadialEllipse { radii_points, .. } => radii_points[0] = extreme,
+                _ => unreachable!(),
+            }),
+            (2, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::RadialEllipse { softness_points, .. } => {
+                    *softness_points = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (3, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::StatusBeacon { center_points, .. } => center_points[0] = extreme,
+                _ => unreachable!(),
+            }),
+            (3, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::StatusBeacon { radius_points, .. } => *radius_points = extreme,
+                _ => unreachable!(),
+            }),
+            (3, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::StatusBeacon { thickness_points, .. } => {
+                    *thickness_points = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (4, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PetAura { center_points, .. } => center_points[1] = extreme,
+                _ => unreachable!(),
+            }),
+            (4, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PetAura { max_radius_points, .. } => *max_radius_points = extreme,
+                _ => unreachable!(),
+            }),
+            (4, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PetAura { feather_points, .. } => *feather_points = extreme,
+                _ => unreachable!(),
+            }),
+            (5, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PerimeterGaugeSet { center_points, .. } => {
+                    center_points[0] = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (5, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PerimeterGaugeSet { xp, .. } => xp.radius_points = extreme,
+                _ => unreachable!(),
+            }),
+            (5, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PerimeterGaugeSet { daily, .. } => {
+                    daily.stroke_width_points = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (5, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PerimeterGaugeSet { pace, .. } => {
+                    pace.track_start_degrees = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (5, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::PerimeterGaugeSet { pace, .. } => {
+                    pace.track_sweep_degrees = extreme
+                }
+                _ => unreachable!(),
+            }),
+            (6, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::TroubleBeacon { center_points, .. } => center_points[0] = extreme,
+                _ => unreachable!(),
+            }),
+            (6, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::TroubleBeacon { radius_points, .. } => *radius_points = extreme,
+                _ => unreachable!(),
+            }),
+            (6, |value, extreme| match &mut value.geometry {
+                AnalyticGeometry::TroubleBeacon { thickness_points, .. } => {
+                    *thickness_points = extreme
+                }
+                _ => unreachable!(),
+            }),
+        ];
+
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+        for extreme in [f32::MAX, -f32::MAX] {
+            for &(slot, mutate) in mutations {
+                let mut frame = fixture.frame.clone();
+                mutate(frame.analytic_slots[slot].value.as_mut().unwrap(), extreme);
+                assert_eq!(
+                    validate_full_generation(&fixture.template, &fixture.content, &frame)
+                        .map(|_| ()),
+                    Err(SceneValidationError::InvalidFrameValue),
+                    "slot {slot} extreme {extreme}"
+                );
+
+                let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
+                let before = current.frame().clone();
+                let mut delta = FrameDelta::empty();
+                delta.analytic_slots.push(frame.analytic_slots[slot]);
+                assert_eq!(
+                    validate_frame_delta(&delta, &accepted, &mut current),
+                    Err(SceneValidationError::InvalidFrameValue),
+                    "delta slot {slot} extreme {extreme}"
+                );
+                assert_eq!(current.frame(), &before);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_analytic_delta_is_atomic() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+        let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
+        let before = current.frame().clone();
+        let mut delta = FrameDelta::empty();
+        let mut changed = fixture.frame.analytic_slots[5];
+        let invalid_lane = GaugeLaneGeometry {
+            radius_points: 170.0,
+            stroke_width_points: 6.0,
+            track_start_degrees: 305.0,
+            track_sweep_degrees: 180.0,
+            cap: GaugeLineCap::Round,
+        };
+        changed.value.as_mut().unwrap().geometry = AnalyticGeometry::PerimeterGaugeSet {
+            center_points: [180.0; 2],
+            xp: invalid_lane,
+            daily: invalid_lane,
+            pace: invalid_lane,
+        };
+        delta.analytic_slots.push(changed);
+        assert_eq!(
+            validate_frame_delta(&delta, &accepted, &mut current),
+            Err(SceneValidationError::InvalidFrameValue)
+        );
+        assert_eq!(current.frame(), &before);
+    }
+
+    #[test]
+    fn gauge_lanes_reject_collapsed_and_swapped_named_geometry() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+        for swap in [false, true] {
+            let mut changed = fixture.frame.analytic_slots[5];
+            let value = changed.value.as_mut().unwrap();
+            let AnalyticGeometry::PerimeterGaugeSet { xp, daily, pace, .. } = &mut value.geometry
+            else {
+                unreachable!()
+            };
+            if swap {
+                std::mem::swap(xp, pace);
+            } else {
+                daily.radius_points = xp.radius_points;
+            }
+
+            let mut full = fixture.frame.clone();
+            full.analytic_slots[5] = changed;
+            assert_eq!(
+                validate_full_generation(&fixture.template, &fixture.content, &full).map(|_| ()),
+                Err(SceneValidationError::InvalidFrameValue)
+            );
+
+            let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
+            let before = current.frame().clone();
+            let mut delta = FrameDelta::empty();
+            delta.analytic_slots.push(changed);
+            assert_eq!(
+                validate_frame_delta(&delta, &accepted, &mut current),
+                Err(SceneValidationError::InvalidFrameValue)
+            );
+            assert_eq!(current.frame(), &before);
+        }
+
+        let tiny_camera = OrthographicCamera::new(4.0, 4.0, -2.0, 2.0).unwrap();
+        let tiny_layout = crate::presentation::companion_effects::perimeter_gauge_layout(
+            1.0,
+            crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+        );
+        let lane =
+            |value: crate::presentation::companion_effects::GaugeLaneLayout| GaugeLaneGeometry {
+                radius_points: value.radius as f32,
+                stroke_width_points: value.stroke_width as f32,
+                track_start_degrees: value.track_start_degrees as f32,
+                track_sweep_degrees: value.track_sweep_degrees as f32,
+                cap: GaugeLineCap::Round,
+            };
+        assert_eq!(
+            validate_analytic_frame(
+                AnalyticFrame {
+                    semantic: AnalyticSemantic::Gauges,
+                    shape: AnalyticShape::PerimeterGaugeSet,
+                    rect_points: [0.0, 0.0, 4.0, 4.0],
+                    geometry: AnalyticGeometry::PerimeterGaugeSet {
+                        center_points: [1.5, 1.5],
+                        xp: lane(tiny_layout.xp),
+                        daily: lane(tiny_layout.daily),
+                        pace: lane(tiny_layout.pace),
+                    },
+                },
+                tiny_camera,
+            ),
+            Err(SceneValidationError::InvalidFrameValue)
+        );
+    }
+
+    #[test]
+    fn analytic_rectangles_must_match_their_geometry_in_full_and_delta_paths() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+        for slot in [0_usize, 2, 3, 4, 5, 6, 7] {
+            let mut changed = fixture.frame.analytic_slots[slot];
+            changed.value.as_mut().unwrap().rect_points[2] *= 0.5;
+
+            let mut full = fixture.frame.clone();
+            full.analytic_slots[slot] = changed;
+            assert_eq!(
+                validate_full_generation(&fixture.template, &fixture.content, &full).map(|_| ()),
+                Err(SceneValidationError::InvalidFrameValue),
+                "full slot {slot}"
+            );
+
+            let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
+            let before = current.frame().clone();
+            let mut delta = FrameDelta::empty();
+            delta.analytic_slots.push(changed);
+            assert_eq!(
+                validate_frame_delta(&delta, &accepted, &mut current),
+                Err(SceneValidationError::InvalidFrameValue),
+                "delta slot {slot}"
+            );
+            assert_eq!(current.frame(), &before);
+        }
+    }
 
     #[test]
     fn duplicate_ids_and_capacity_overflow_are_rejected() {
@@ -2486,6 +3372,25 @@ mod tests {
 
     #[test]
     fn content_delta_rejects_adversarial_slot_values() {
+        let mut missing_paint = ContentDelta::empty();
+        missing_paint.prop_slots.push(PropContentSlot {
+            slot: 0,
+            content: Some(PropSemanticContent {
+                sprite_phase: Some(1),
+                twinkle_active: None,
+                lid_open: None,
+                bloom_active: None,
+                glyphs: std::array::from_fn(|index| PropGlyphContent {
+                    glyph: (index == 0).then(|| AuthoredGlyph::new('*').unwrap()),
+                    local_cell: [0; 2],
+                }),
+            }),
+        });
+        assert_eq!(
+            validate_content_delta(&missing_paint),
+            Err(SceneValidationError::NonCanonicalEmptySlot)
+        );
+
         let mut delta = ContentDelta::empty();
         delta.pet_art_slots.push(PetArtSlot {
             slot: 0,
@@ -2517,6 +3422,14 @@ mod tests {
             slot: 0,
             kind: Some(AmbientContentKind::Mote),
             glyph: Some(AuthoredGlyph::new('✦').unwrap()),
+        });
+        delta.prop_paint_slots.push(PropGlyphPaintSlot {
+            slot: 0,
+            paints: [None; MAX_PROP_GLYPHS_PER_SLOT],
+        });
+        delta.ambient_paint_slots.push(AmbientGlyphPaintSlot {
+            slot: 0,
+            paint: Some(GlyphPaintSource { color_srgb8: [1, 2, 3] }),
         });
         assert_eq!(validate_content_delta(&delta), Ok(()));
         delta

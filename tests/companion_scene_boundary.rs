@@ -44,6 +44,10 @@ const FORBIDDEN_NEUTRAL_DEPENDENCIES: &[&str] = &[
 const NEUTRAL_DEPENDENCY_MANIFEST: &[(&str, &str)] = &[
     ("src/round/motion.rs", "crate::round::motion"),
     (
+        "src/presentation/companion_effects.rs",
+        "crate::presentation::companion_effects",
+    ),
+    (
         "src/presentation/gauge_values.rs",
         "crate::presentation::gauge_values",
     ),

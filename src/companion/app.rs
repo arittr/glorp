@@ -30,9 +30,10 @@ use crate::presentation::smooth::{
 };
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
-    daily_overage_marker_fraction, perimeter_gauge_colors, perimeter_gauge_layout,
-    prepare_hud_layout, prepared_perimeter_gauge_arcs, tank_background_sample, tank_core_color,
-    CompanionHudText, GaugeFractions, HudLineMetrics, LineCap, COMPANION_GAUGE_GAP_DEG,
+    daily_overage_marker_fraction, mood_aura_radius, perimeter_gauge_colors,
+    perimeter_gauge_layout, prepare_hud_layout, prepared_perimeter_gauge_arcs,
+    tank_background_sample, tank_core_color, CompanionHudText, GaugeFractions, HudLineMetrics,
+    LineCap, COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
@@ -2369,7 +2370,7 @@ fn draw_mood_aura(frame: &PreparedCompanionFrame, metrics: &CompanionGridMetrics
 
     let cxp = metrics.origin_x + pet_center_col * metrics.cell_w;
     let cyp = metrics.origin_y - (pet_center_row + 1.0) * metrics.cell_h;
-    let max_r = pet_width_cells * metrics.cell_w * 0.95;
+    let max_r = mood_aura_radius(pet_width_cells * metrics.cell_w);
     const AURA_RINGS: usize = 8;
     unsafe {
         for i in 0..AURA_RINGS {

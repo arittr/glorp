@@ -218,13 +218,7 @@ const PLANT_BLOOM_DAYS: i64 = 3;
 /// Living plants that mature and flower with age (unlike static trophies such as
 /// the geode or chest, which look the same forever).
 fn is_plant(id: &str) -> bool {
-    matches!(
-        id,
-        "token_moss_tuft_250k"
-            | "token_hanging_vine_25m"
-            | "heavy_session_planter"
-            | "token_reeds_5m"
-    )
+    crate::game::habitat::habitat_prop_supports_bloom(id)
 }
 
 /// A plant blooms once it has been in the habitat long enough — so the tank grows

@@ -480,13 +480,7 @@ fn project_prop_animation_states(
 }
 
 fn is_blooming_prop(catalog_id: &str) -> bool {
-    matches!(
-        catalog_id,
-        crate::game::habitat::TOKEN_MOSS_TUFT_250K
-            | crate::game::habitat::TOKEN_HANGING_VINE_25M
-            | crate::game::habitat::HEAVY_SESSION_PLANTER
-            | crate::game::habitat::TOKEN_REEDS_5M
-    )
+    crate::game::habitat::habitat_prop_supports_bloom(catalog_id)
 }
 
 fn project_tank_animation_states(
@@ -803,6 +797,8 @@ impl From<HabitatPetLayer> for AuthoredDepthSnapshot {
 }
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::game::evolution::Stage;
     use crate::game::metabolism::Mood;
     use crate::pet::generation::{generate_pet, Species};
@@ -812,7 +808,7 @@ mod tests {
         CompanionSceneProjectionInput, CompanionSceneSnapshot, GaugeLevelSnapshot,
         PropAnimationSnapshot, PET_LATTICE_HEIGHT, PET_LATTICE_WIDTH,
     };
-    use crate::tui::view_model::WatchViewModel;
+    use crate::tui::view_model::{SourceStatus, WatchViewModel};
     use time::macros::datetime;
 
     fn fixture_with_real_pet_art() -> WatchViewModel {
@@ -825,6 +821,26 @@ mod tests {
         );
         vm.pet_render.generated_species = Species::Fuzz;
         vm.pet_render.stage = Stage::S3;
+        vm.pet_art = rendered.lines;
+        vm.pet_spans = rendered.spans;
+        vm
+    }
+
+    fn lifetime_watch_fixture() -> WatchViewModel {
+        let day = time::macros::date!(2026 - 07 - 11);
+        let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, day);
+        vm.habitat.earned_props = WatchViewModel::fixture_with_habitat_props()
+            .habitat
+            .earned_props;
+        let rendered = render_pet(
+            &generate_pet("neutral-analytic-production-lifetime").with_species(Species::Fuzz),
+            Stage::S3,
+            Mood::Content,
+            AnimationFrame::default(),
+        );
+        vm.pet_render.generated_species = Species::Fuzz;
+        vm.pet_render.stage = Stage::S3;
+        vm.pet_render.mood = Mood::Content;
         vm.pet_art = rendered.lines;
         vm.pet_spans = rendered.spans;
         vm
@@ -845,6 +861,140 @@ mod tests {
                 crate::round::scene::current_round_motion_clearance(18),
             ),
         )
+    }
+
+    #[test]
+    fn three_hundred_real_projections_close_neutral_analytic_and_paint_tables() {
+        use crate::presentation::companion_scene::scene::{
+            build_scene_generation, build_scene_generation_owned, AnalyticSemantic,
+            PropGlyphContent, MAX_ANALYTIC_PARAMS, MAX_PROP_GLYPHS_PER_SLOT,
+        };
+        use crate::presentation::companion_scene::{
+            AppliedRevisions, DeviceEpoch, FrameRevision, LayoutGeneration, ResourceGeneration,
+            SceneGenerationKey, SemanticRevision,
+        };
+
+        let fixture = lifetime_watch_fixture();
+        let key = SceneGenerationKey {
+            device: DeviceEpoch(90),
+            layout: LayoutGeneration(91),
+            resources: ResourceGeneration(92),
+        };
+        let snapshot_at = |frame_index: usize| {
+            let mut vm = fixture.clone();
+            vm.pet_render.mood = if (frame_index / 25).is_multiple_of(2) {
+                Mood::Content
+            } else {
+                Mood::Happy
+            };
+            vm.day_context.asleep = (frame_index / 40) % 2 == 1;
+            vm.life_profile.calm_mode = (frame_index / 30) % 2 == 1;
+            vm.progress.fraction = (frame_index % 101) as f32 / 100.0;
+            vm.source_health[0].status = if (frame_index / 45).is_multiple_of(2) {
+                SourceStatus::Ready
+            } else {
+                SourceStatus::Diagnostic
+            };
+            let wall_time = datetime!(2026-07-11 12:00:55 UTC)
+                + time::Duration::seconds(i64::try_from(frame_index).unwrap());
+            vm.last_feed_pulse_at = (frame_index % 20 < 10).then_some(
+                wall_time
+                    - time::Duration::milliseconds(i64::try_from(frame_index % 10).unwrap() * 150),
+            );
+            CompanionSceneSnapshot::project_with_input(
+                &vm,
+                CompanionSceneProjectionInput::round(
+                    CompanionProjectionClock::new(
+                        wall_time,
+                        u64::try_from(frame_index).unwrap() * 33,
+                    ),
+                    CompanionLogicalLayout::round(360.0, 360.0),
+                    44,
+                    18,
+                    crate::round::scene::current_round_motion_clearance(18),
+                ),
+            )
+            .unwrap()
+        };
+
+        let initial = Arc::new(snapshot_at(0));
+        let mut revisions = AppliedRevisions::new(0, 0);
+        let mut built = build_scene_generation_owned(Arc::clone(&initial), key, revisions).unwrap();
+        let template_checksum = built.template().generation_checksum;
+        let capacities = built.delta_capacities();
+        let storage_pointers = built.delta_storage_pointers();
+        let mut previous = initial;
+
+        for frame_index in 0_usize..300 {
+            let newest = if frame_index == 0 {
+                Arc::clone(&previous)
+            } else {
+                Arc::new(snapshot_at(frame_index))
+            };
+            if frame_index != 0 {
+                let changes =
+                    crate::presentation::companion_scene::runtime::classify_snapshot_changes(
+                        &previous, &newest,
+                    );
+                assert!(!changes.requires_generation(), "frame {frame_index}");
+                let next = AppliedRevisions {
+                    semantic: SemanticRevision(
+                        revisions.semantic.0
+                            + u64::from(
+                                changes.semantic()
+                                    != crate::presentation::companion_scene::runtime::SemanticChangeMask::NONE,
+                            ),
+                    ),
+                    frame: FrameRevision(
+                        revisions.frame.0
+                            + u64::from(
+                                changes.frame()
+                                    != crate::presentation::companion_scene::runtime::FrameChangeMask::NONE,
+                            ),
+                    ),
+                };
+                built
+                    .apply_compatible_snapshot(Arc::clone(&newest), changes, revisions, next)
+                    .unwrap();
+                revisions = next;
+                previous = Arc::clone(&newest);
+            }
+
+            let fresh = build_scene_generation(&newest, key).unwrap();
+            assert_eq!(built.template().generation_checksum, template_checksum);
+            assert_eq!(built.template(), fresh.template(), "frame {frame_index}");
+            assert_eq!(built.content(), fresh.content(), "frame {frame_index}");
+            assert_eq!(built.frame(), fresh.frame(), "frame {frame_index}");
+            assert_eq!(built.content_checksum(), fresh.content_checksum());
+            assert_eq!(built.frame_checksum(), fresh.frame_checksum());
+            assert_eq!(built.delta_capacities(), capacities);
+            assert_eq!(built.delta_storage_pointers(), storage_pointers);
+            assert_eq!(built.content().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
+            assert_eq!(built.frame().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
+            assert!(
+                built.content().analytic_slots[..AnalyticSemantic::ALL.len()]
+                    .iter()
+                    .all(|slot| slot.value.is_some())
+            );
+            assert!(built.frame().analytic_slots[..AnalyticSemantic::ALL.len()]
+                .iter()
+                .all(|slot| slot.value.is_some()));
+            for (content, paint) in built
+                .content()
+                .prop_slots
+                .iter()
+                .zip(&built.content().prop_paint_slots)
+            {
+                let glyphs = content.content.map(|content| content.glyphs).unwrap_or(
+                    [PropGlyphContent { glyph: None, local_cell: [0; 2] };
+                        MAX_PROP_GLYPHS_PER_SLOT],
+                );
+                assert!(glyphs
+                    .into_iter()
+                    .zip(paint.paints)
+                    .all(|(glyph, paint)| glyph.glyph.is_some() == paint.is_some()));
+            }
+        }
     }
 
     fn prop_animation_state<'a>(

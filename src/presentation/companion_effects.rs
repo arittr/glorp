@@ -1,0 +1,234 @@
+//! Renderer-neutral companion effect geometry and paint constants.
+//!
+//! Both companion presentation paths consume these pure contracts so depth
+//! cues cannot drift or reverse the neutral scene dependency direction.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct WallShadowDepthCue {
+    pub detach_cells: f32,
+    pub strength: f32,
+}
+
+const WALL_SHADOW_DETACH_FAR: f32 = 0.35;
+const WALL_SHADOW_DETACH_NEAR: f32 = 2.4;
+const WALL_SHADOW_STRENGTH_FAR: f32 = 1.0;
+const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.6;
+
+pub(crate) const fn depth_lifecycle_scale(asleep: bool, calm: bool) -> f32 {
+    if asleep {
+        0.25
+    } else if calm {
+        0.5
+    } else {
+        1.0
+    }
+}
+
+pub(crate) fn effective_depth(raw_z: f32, lifecycle_scale: f32) -> f32 {
+    raw_z.clamp(-1.0, 1.0) * lifecycle_scale.clamp(0.0, 1.0)
+}
+
+pub(crate) fn wall_shadow_depth_cue(effective_z: f32) -> WallShadowDepthCue {
+    let depth01 = ((effective_z + 1.0) * 0.5).clamp(0.0, 1.0);
+    WallShadowDepthCue {
+        detach_cells: lerp(WALL_SHADOW_DETACH_FAR, WALL_SHADOW_DETACH_NEAR, depth01),
+        strength: lerp(WALL_SHADOW_STRENGTH_FAR, WALL_SHADOW_STRENGTH_NEAR, depth01),
+    }
+}
+
+const PROJECTION_ALPHA_FAR: f32 = 165.0;
+const PROJECTION_ALPHA_NEAR: f32 = 235.0;
+const PROJECTION_BAND_FAR: f32 = 0.10;
+const PROJECTION_BAND_NEAR: f32 = 0.45;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FloorProjectionMetrics {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub radius_x: f32,
+    pub radius_y: f32,
+    pub alpha: u8,
+}
+
+/// Canonical depth-only floor projection. Coordinates are Y-down in the
+/// caller's logical units; Y-up consumers flip only the returned center Y.
+pub(crate) fn floor_projection_metrics(
+    width: f32,
+    height: f32,
+    horizon_y: f32,
+    near_edge_y: f32,
+    pet_center_x: f32,
+    effective_z: f32,
+) -> Option<FloorProjectionMetrics> {
+    if !width.is_finite()
+        || !height.is_finite()
+        || !horizon_y.is_finite()
+        || !near_edge_y.is_finite()
+        || !pet_center_x.is_finite()
+        || !effective_z.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return None;
+    }
+    let bed_height = near_edge_y - horizon_y;
+    if !bed_height.is_finite() || bed_height <= 0.0 {
+        return None;
+    }
+
+    let depth01 = ((effective_z + 1.0) * 0.5).clamp(0.0, 1.0);
+    let center_y = lerp(
+        horizon_y + PROJECTION_BAND_FAR * bed_height,
+        horizon_y + PROJECTION_BAND_NEAR * bed_height,
+        depth01,
+    );
+    let radius_x = lerp(0.07 * width, 0.13 * width, depth01);
+    let radius_y = lerp(0.016 * height, 0.04 * height, depth01);
+    if !center_y.is_finite()
+        || !radius_x.is_finite()
+        || radius_x <= 0.0
+        || !radius_y.is_finite()
+        || radius_y <= 0.0
+    {
+        return None;
+    }
+
+    Some(FloorProjectionMetrics {
+        center_x: pet_center_x.clamp(radius_x, (width - radius_x).max(radius_x)),
+        center_y,
+        radius_x,
+        radius_y,
+        alpha: lerp(PROJECTION_ALPHA_FAR, PROJECTION_ALPHA_NEAR, depth01)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+    })
+}
+
+pub(crate) fn bed_primary_srgb8(primary_biome: &str) -> [u8; 3] {
+    match primary_biome {
+        "botanical" => [63, 111, 102],
+        "technical" => [70, 91, 125],
+        "celestial" => [89, 75, 125],
+        "artifact" => [108, 83, 102],
+        "cozy" => [105, 78, 106],
+        _ => [72, 83, 108],
+    }
+}
+
+pub(crate) fn bed_shadow_srgb8(primary_biome: &str) -> [u8; 3] {
+    bed_primary_srgb8(primary_biome).map(|channel| channel / 3 + 30)
+}
+
+pub(crate) const TANK_DEPTH_TINT_SRGB: [f32; 3] = [0.10, 0.11, 0.20];
+pub(crate) const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
+
+pub(crate) fn biome_background_srgb(primary_biome: &str) -> [f32; 3] {
+    match primary_biome {
+        "botanical" => [0.07, 0.11, 0.08],
+        "technical" => [0.07, 0.09, 0.13],
+        "celestial" => [0.08, 0.08, 0.14],
+        "artifact" => [0.12, 0.10, 0.07],
+        "cozy" => [0.13, 0.09, 0.08],
+        _ => [0.08, 0.09, 0.10],
+    }
+}
+
+pub(crate) fn phase_dim_background_srgb(primary_biome: &str, phase_scale: f32) -> [f32; 3] {
+    biome_background_srgb(primary_biome).map(|channel| channel * phase_scale)
+}
+
+pub(crate) fn tank_core_srgb(background: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|index| {
+        background[index]
+            + (TANK_DEPTH_TINT_SRGB[index] - background[index]) * TANK_CORE_TINT_WEIGHT
+    })
+}
+
+pub(crate) fn tank_background_paint_srgb8(
+    primary_biome: &str,
+    phase_scale: f32,
+) -> ([u8; 3], [u8; 3]) {
+    let rim = phase_dim_background_srgb(primary_biome, phase_scale);
+    (srgb8(tank_core_srgb(rim)), srgb8(rim))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GaugeLaneLayout {
+    pub radius: f64,
+    pub stroke_width: f64,
+    pub track_start_degrees: f64,
+    pub track_sweep_degrees: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PerimeterGaugeLayout {
+    pub xp: GaugeLaneLayout,
+    pub daily: GaugeLaneLayout,
+    pub pace: GaugeLaneLayout,
+}
+
+pub(crate) const COMPANION_GAUGE_GAP_DEGREES: f64 = 70.0;
+
+pub(crate) fn perimeter_gauge_layout(
+    aperture_radius: f64,
+    gap_degrees: f64,
+) -> PerimeterGaugeLayout {
+    let gap = gap_degrees.clamp(0.0, 180.0);
+    let track_start_degrees = 270.0 + gap / 2.0;
+    let track_sweep_degrees = 360.0 - gap;
+    let outer_inset = 3.0_f64.max(aperture_radius * 0.012);
+    let xp_width = (aperture_radius * 0.050).clamp(6.0, 16.0);
+    let daily_width = (aperture_radius * 0.040).clamp(5.0, 13.0);
+    let pace_width = (aperture_radius * 0.034).clamp(4.0, 11.0);
+    let lane_gap = (aperture_radius * 0.010).clamp(1.5, 4.0);
+    let xp_radius = aperture_radius - outer_inset - xp_width / 2.0;
+    let daily_radius = xp_radius - xp_width / 2.0 - lane_gap - daily_width / 2.0;
+    let pace_radius = daily_radius - daily_width / 2.0 - lane_gap - pace_width / 2.0;
+    let lane = |radius, stroke_width| GaugeLaneLayout {
+        radius,
+        stroke_width,
+        track_start_degrees,
+        track_sweep_degrees,
+    };
+    PerimeterGaugeLayout {
+        xp: lane(xp_radius, xp_width),
+        daily: lane(daily_radius, daily_width),
+        pace: lane(pace_radius, pace_width),
+    }
+}
+
+pub(crate) const GAUGE_XP_TRACK_SRGBA: [f32; 4] = [0.71, 0.71, 0.78, 0.16];
+pub(crate) const GAUGE_XP_FILL_SRGBA: [f32; 4] = [0.61, 0.48, 0.88, 0.90];
+pub(crate) const GAUGE_DAILY_TRACK_SRGBA: [f32; 4] = [0.47, 0.63, 0.43, 0.12];
+pub(crate) const GAUGE_DAILY_FILL_SRGBA: [f32; 4] = [0.50, 0.74, 0.56, 0.76];
+pub(crate) const GAUGE_PACE_TRACK_SRGBA: [f32; 4] = [0.96, 0.68, 0.31, 0.13];
+pub(crate) const GAUGE_PACE_FILL_SRGBA: [f32; 4] = [0.98, 0.67, 0.27, 0.86];
+pub(crate) const GAUGE_DAILY_OVERAGE_SRGBA: [f32; 4] = [0.72, 0.95, 0.34, 0.95];
+pub(crate) const STATUS_CALM_SRGBA: [f32; 4] = [0.36, 0.40, 0.55, 0.80];
+pub(crate) const STATUS_ACTIVE_SRGBA: [f32; 4] = [0.94, 0.65, 0.28, 0.90];
+pub(crate) const TROUBLE_SRGBA: [f32; 4] = [0.92, 0.30, 0.25, 0.95];
+pub(crate) const WALL_SHADOW_SRGB8: [u8; 3] = [118, 114, 142];
+pub(crate) const MOOD_AURA_RING_ALPHA_U8: u8 = 13;
+pub(crate) const MOOD_CONTENT_SRGBA: [f32; 4] = [0.25, 0.71, 0.60, 1.0];
+pub(crate) const MOOD_HAPPY_SRGBA: [f32; 4] = [0.82, 0.45, 0.62, 1.0];
+pub(crate) const MOOD_ECSTATIC_SRGBA: [f32; 4] = [0.95, 0.40, 0.70, 1.0];
+pub(crate) const MOOD_HUNGRY_SRGBA: [f32; 4] = [0.85, 0.62, 0.30, 1.0];
+pub(crate) const MOOD_SAD_SRGBA: [f32; 4] = [0.40, 0.50, 0.78, 1.0];
+pub(crate) const MOOD_SLEEPY_SRGBA: [f32; 4] = [0.55, 0.50, 0.80, 1.0];
+pub(crate) const MOOD_WILTED_SRGBA: [f32; 4] = [0.45, 0.40, 0.48, 1.0];
+
+pub(crate) fn srgba8(color: [f32; 4]) -> [u8; 4] {
+    color.map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
+pub(crate) fn srgb8(color: [f32; 3]) -> [u8; 3] {
+    color.map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
+pub(crate) fn mood_aura_radius(transformed_pet_width: f64) -> f64 {
+    transformed_pet_width.max(0.0) * 0.95
+}
+
+fn lerp(from: f32, to: f32, t: f32) -> f32 {
+    from + (to - from) * t
+}

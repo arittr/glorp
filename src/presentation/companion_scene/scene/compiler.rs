@@ -3,19 +3,44 @@ use super::*;
 
 impl SceneGenerationData {
     #[cfg(test)]
-    pub(super) fn delta_capacities(&self) -> [usize; 11] {
+    pub(crate) fn delta_capacities(&self) -> [usize; 15] {
         [
             self.delta_scratch.content.pet_art_slots.capacity(),
             self.delta_scratch.content.room_glyph_slots.capacity(),
             self.delta_scratch.content.prop_slots.capacity(),
             self.delta_scratch.content.tank_slots.capacity(),
             self.delta_scratch.content.ambient_slots.capacity(),
+            self.delta_scratch.content.prop_paint_slots.capacity(),
+            self.delta_scratch.content.ambient_paint_slots.capacity(),
+            self.delta_scratch.content.analytic_slots.capacity(),
             self.delta_scratch.frame.nodes.capacity(),
             self.delta_scratch.frame.room_glyph_slots.capacity(),
             self.delta_scratch.frame.prop_slots.capacity(),
             self.delta_scratch.frame.tank_slots.capacity(),
             self.delta_scratch.frame.ambient_slots.capacity(),
+            self.delta_scratch.frame.analytic_slots.capacity(),
             self.delta_scratch.frame.lights.capacity(),
+        ]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delta_storage_pointers(&self) -> [usize; 15] {
+        [
+            self.delta_scratch.content.pet_art_slots.as_ptr() as usize,
+            self.delta_scratch.content.room_glyph_slots.as_ptr() as usize,
+            self.delta_scratch.content.prop_slots.as_ptr() as usize,
+            self.delta_scratch.content.tank_slots.as_ptr() as usize,
+            self.delta_scratch.content.ambient_slots.as_ptr() as usize,
+            self.delta_scratch.content.prop_paint_slots.as_ptr() as usize,
+            self.delta_scratch.content.ambient_paint_slots.as_ptr() as usize,
+            self.delta_scratch.content.analytic_slots.as_ptr() as usize,
+            self.delta_scratch.frame.nodes.as_ptr() as usize,
+            self.delta_scratch.frame.room_glyph_slots.as_ptr() as usize,
+            self.delta_scratch.frame.prop_slots.as_ptr() as usize,
+            self.delta_scratch.frame.tank_slots.as_ptr() as usize,
+            self.delta_scratch.frame.ambient_slots.as_ptr() as usize,
+            self.delta_scratch.frame.analytic_slots.as_ptr() as usize,
+            self.delta_scratch.frame.lights.as_ptr() as usize,
         ]
     }
 
@@ -41,6 +66,9 @@ impl SceneGenerationData {
         content.prop_slots.clear();
         content.tank_slots.clear();
         content.ambient_slots.clear();
+        content.prop_paint_slots.clear();
+        content.ambient_paint_slots.clear();
+        content.analytic_slots.clear();
         let frame = &mut self.delta_scratch.frame;
         frame.generation_key = self.generation_key;
         frame.from = from;
@@ -51,6 +79,7 @@ impl SceneGenerationData {
         frame.prop_slots.clear();
         frame.tank_slots.clear();
         frame.ambient_slots.clear();
+        frame.analytic_slots.clear();
         frame.gauges = None;
         frame.dim_amount = None;
         frame.lights.clear();
@@ -87,6 +116,16 @@ impl SceneGenerationData {
             content.day_phase = Some(snapshot.content.day_phase);
         }
         if semantic
+            .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::PALETTE)
+            || semantic.contains(
+                crate::presentation::companion_scene::runtime::SemanticChangeMask::MOOD_WEATHER,
+            )
+            || semantic
+                .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::TANK)
+        {
+            project_analytic_content_for_snapshot(snapshot, &mut content.analytic_slots);
+        }
+        if semantic
             .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::PET_ART)
         {
             project_pet_delta(snapshot, &mut content.pet_art_slots)?;
@@ -100,6 +139,7 @@ impl SceneGenerationData {
             .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::PROP)
         {
             project_prop_delta(snapshot, &mut content.prop_slots)?;
+            project_prop_paint_delta(snapshot, &mut content.prop_paint_slots)?;
         }
         if semantic
             .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::TANK)
@@ -124,6 +164,7 @@ impl SceneGenerationData {
                         .map_err(|_| SceneGenerationError::InvalidGlyph)?,
                 });
             }
+            project_ambient_paint_delta(snapshot, &mut content.ambient_paint_slots);
         }
         let frame_mask = changes.frame();
         if frame_mask
@@ -160,6 +201,16 @@ impl SceneGenerationData {
                 local_transform: pet_transform(snapshot),
                 ..node
             });
+            if snapshot.frame.pet_depth != self.source_snapshot.frame.pet_depth
+                || snapshot.frame.pet_depth_cue != self.source_snapshot.frame.pet_depth_cue
+            {
+                project_depth_effect_node_deltas(
+                    snapshot,
+                    &self.template,
+                    &self.frame,
+                    &mut frame.nodes,
+                )?;
+            }
             if snapshot.frame.pet_depth_cue != self.source_snapshot.frame.pet_depth_cue
                 && !frame_mask.contains(
                     crate::presentation::companion_scene::runtime::FrameChangeMask::STATUS_VISIBILITY,
@@ -297,6 +348,9 @@ impl SceneGenerationData {
             node.visible = snapshot.frame.dim_amount > 0.0;
             node.opacity = snapshot.frame.dim_amount;
             frame.nodes.push(node);
+        }
+        if frame_mask != crate::presentation::companion_scene::runtime::FrameChangeMask::NONE {
+            project_analytic_frame_slots(snapshot, &mut frame.analytic_slots)?;
         }
         crate::presentation::companion_scene::validate::validate_content_delta(content)?;
         Ok(&self.delta_scratch)
@@ -562,6 +616,34 @@ fn pet_body_opacity(
     lifecycle_opacity * snapshot.frame.pet_depth_cue.opacity
 }
 
+fn resolved_effective_depth(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+) -> f32 {
+    crate::presentation::companion_effects::effective_depth(
+        snapshot.frame.pet_depth,
+        crate::presentation::companion_effects::depth_lifecycle_scale(
+            snapshot.frame.asleep,
+            snapshot.frame.calm,
+        ),
+    )
+}
+
+fn floor_projection_opacity(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+) -> f32 {
+    let layout = snapshot.topology.layout;
+    let metrics = crate::presentation::companion_effects::floor_projection_metrics(
+        layout.width_points,
+        layout.height_points,
+        layout.height_points * 0.76,
+        layout.height_points,
+        snapshot.frame.pet_anchor_points[0],
+        resolved_effective_depth(snapshot),
+    )
+    .expect("validated companion snapshot produces floor projection metrics");
+    f32::from(metrics.alpha) / 235.0
+}
+
 fn project_pet_attached_node_deltas(
     snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
     template: &SceneTemplate,
@@ -586,6 +668,38 @@ fn project_pet_attached_node_deltas(
             "pet.particles" => snapshot.frame.pet_depth_cue.opacity,
             _ => unreachable!("closed pet-attached node set"),
         };
+        output.push(node);
+    }
+    Ok(())
+}
+
+fn project_depth_effect_node_deltas(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    template: &SceneTemplate,
+    current_frame: &SceneFrame,
+    output: &mut Vec<NodeFrameState>,
+) -> Result<(), SceneGenerationError> {
+    let wall_opacity = crate::presentation::companion_effects::wall_shadow_depth_cue(
+        resolved_effective_depth(snapshot),
+    )
+    .strength;
+    for (name, opacity) in [
+        ("pet.shadow.wall", wall_opacity),
+        ("pet.projection.floor", floor_projection_opacity(snapshot)),
+    ] {
+        let node_id = template
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == name)
+            .map(|node| node.id)
+            .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+        let mut node = current_frame
+            .nodes
+            .iter()
+            .find(|node| node.node == node_id)
+            .copied()
+            .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+        node.opacity = opacity;
         output.push(node);
     }
     Ok(())
@@ -701,6 +815,15 @@ fn apply_content_delta(content: &mut SceneContent, delta: &ContentDelta) {
     for changed in &delta.ambient_slots {
         content.ambient_slots[usize::from(changed.slot)] = *changed;
     }
+    for changed in &delta.prop_paint_slots {
+        content.prop_paint_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.ambient_paint_slots {
+        content.ambient_paint_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.analytic_slots {
+        content.analytic_slots[usize::from(changed.id.0)] = *changed;
+    }
 }
 
 #[allow(dead_code)] // Used only after the Task 3 validator accepts the exact delta.
@@ -728,6 +851,9 @@ fn apply_frame_delta_unchecked(frame: &mut SceneFrame, delta: &FrameDelta) {
     }
     for changed in &delta.ambient_slots {
         frame.ambient_slots[usize::from(changed.slot)] = *changed;
+    }
+    for changed in &delta.analytic_slots {
+        frame.analytic_slots[usize::from(changed.id.0)] = *changed;
     }
     if let Some(gauges) = delta.gauges {
         frame.gauges = gauges;
@@ -973,7 +1099,9 @@ fn build_template(
         ("world.tank.behind", Some("world.behind"), 0.0),
         ("pet.shadow.wall", Some("world.behind"), -1.30),
         ("pet", Some("scene.root"), 0.0),
-        ("pet.aura.mood", Some("pet"), 0.0),
+        // Aura geometry is already resolved into absolute world point-space.
+        // Keeping it under the pet would apply the pet transform twice.
+        ("pet.aura.mood", Some("scene.root"), 0.0),
         ("pet.body", Some("pet"), 0.0),
         ("pet.particles", Some("pet"), 0.0),
         ("world.foreground", Some("scene.root"), 0.0),
@@ -1394,17 +1522,10 @@ fn build_content(
         palette.particle,
         palette.corruption,
     ];
-    content.mood = match snapshot.content.mood {
-        crate::game::metabolism::Mood::Happy => MoodContentKind::Happy,
-        crate::game::metabolism::Mood::Ecstatic => MoodContentKind::Ecstatic,
-        crate::game::metabolism::Mood::Content => MoodContentKind::Content,
-        crate::game::metabolism::Mood::Hungry => MoodContentKind::Hungry,
-        crate::game::metabolism::Mood::Sad => MoodContentKind::Sad,
-        crate::game::metabolism::Mood::Sleepy => MoodContentKind::Sleepy,
-        crate::game::metabolism::Mood::Wilted => MoodContentKind::Wilted,
-    };
+    content.mood = mood_content(snapshot.content.mood);
     content.weather = weather_content(snapshot.content.room_weather)?;
     content.day_phase = snapshot.content.day_phase;
+    project_analytic_content_for_snapshot(snapshot, &mut content.analytic_slots);
     let mut occupied_roles = [false; MAX_PET_ART_SLOTS];
     for span in &snapshot.content.pet_roles {
         if span.line_index >= crate::presentation::companion_scene::PET_LATTICE_HEIGHT
@@ -1469,6 +1590,12 @@ fn build_content(
                 bloom_active: semantic.bloom_active,
                 glyphs,
             });
+        content.prop_paint_slots[usize::from(topology.stable_order)] = prop_paint_slot(
+            topology.catalog_id,
+            topology.stable_order,
+            semantic.bloom_active == Some(true),
+            glyphs,
+        )?;
     }
     for (topology, semantic) in snapshot
         .topology
@@ -1497,6 +1624,9 @@ fn build_content(
             .map(AuthoredGlyph::new)
             .transpose()
             .map_err(|_| SceneGenerationError::InvalidGlyph)?;
+        content.ambient_paint_slots[slot].paint = semantic
+            .kind
+            .map(|_| GlyphPaintSource { color_srgb8: AMBIENT_MOTE_COLOR_SRGB8 });
     }
     Ok(content)
 }
@@ -1512,6 +1642,560 @@ pub(super) fn build_analytic_templates(bounds: Bounds3) -> Vec<AnalyticTemplateS
         });
     }
     slots
+}
+
+fn analytic_paint(
+    semantic: AnalyticSemantic,
+    mood: MoodContentKind,
+    day_phase: super::super::CompanionDayPhase,
+    biome: &str,
+) -> AnalyticPaint {
+    let phase_scale = match day_phase {
+        super::super::CompanionDayPhase::Dawn => 0.85,
+        super::super::CompanionDayPhase::Day => 1.0,
+        super::super::CompanionDayPhase::Dusk => 0.8,
+        super::super::CompanionDayPhase::Night => 0.6,
+    };
+    match semantic {
+        AnalyticSemantic::RoomBackground => {
+            let (core, rim) = crate::presentation::companion_effects::tank_background_paint_srgb8(
+                biome,
+                phase_scale,
+            );
+            AnalyticPaint::ApertureDepth { core_srgb8: core, rim_srgb8: rim }
+        }
+        AnalyticSemantic::WallShadow => AnalyticPaint::PetShadowMultiply {
+            color_srgb8: crate::presentation::companion_effects::WALL_SHADOW_SRGB8,
+            opacity_u8: 255,
+        },
+        AnalyticSemantic::FloorProjection => AnalyticPaint::FloorShadowMultiplyRadial {
+            inner_srgba8: {
+                let color = crate::presentation::companion_effects::bed_shadow_srgb8(biome);
+                [color[0], color[1], color[2], 235]
+            },
+            outer_srgba8: {
+                let color = crate::presentation::companion_effects::bed_shadow_srgb8(biome);
+                [color[0], color[1], color[2], 0]
+            },
+        },
+        AnalyticSemantic::StatusHalo => AnalyticPaint::StatusBeacon {
+            active_srgba8: crate::presentation::companion_effects::srgba8(
+                crate::presentation::companion_effects::STATUS_ACTIVE_SRGBA,
+            ),
+            calm_srgba8: crate::presentation::companion_effects::srgba8(
+                crate::presentation::companion_effects::STATUS_CALM_SRGBA,
+            ),
+        },
+        AnalyticSemantic::MoodAura => {
+            let color = match mood {
+                MoodContentKind::Content => {
+                    crate::presentation::companion_effects::MOOD_CONTENT_SRGBA
+                }
+                MoodContentKind::Happy => crate::presentation::companion_effects::MOOD_HAPPY_SRGBA,
+                MoodContentKind::Ecstatic => {
+                    crate::presentation::companion_effects::MOOD_ECSTATIC_SRGBA
+                }
+                MoodContentKind::Hungry => {
+                    crate::presentation::companion_effects::MOOD_HUNGRY_SRGBA
+                }
+                MoodContentKind::Sad => crate::presentation::companion_effects::MOOD_SAD_SRGBA,
+                MoodContentKind::Sleepy => {
+                    crate::presentation::companion_effects::MOOD_SLEEPY_SRGBA
+                }
+                MoodContentKind::Wilted => {
+                    crate::presentation::companion_effects::MOOD_WILTED_SRGBA
+                }
+            };
+            AnalyticPaint::MoodAuraRings {
+                color_srgb8: crate::presentation::companion_effects::srgb8([
+                    color[0], color[1], color[2],
+                ]),
+                ring_count: 8,
+                per_ring_alpha_u8: crate::presentation::companion_effects::MOOD_AURA_RING_ALPHA_U8,
+            }
+        }
+        AnalyticSemantic::Trouble => AnalyticPaint::TroubleBeacon {
+            color_srgba8: crate::presentation::companion_effects::srgba8(
+                crate::presentation::companion_effects::TROUBLE_SRGBA,
+            ),
+        },
+        AnalyticSemantic::Dim => AnalyticPaint::DimOverlay { color_srgb8: [13, 15, 26] },
+        AnalyticSemantic::Gauges => unreachable!("gauges use the closed gauge paint set"),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn build_analytic_content(content: &SceneContent) -> Vec<AnalyticContentSlot> {
+    let mut slots = Vec::with_capacity(MAX_ANALYTIC_PARAMS);
+    project_analytic_content_with_biome(content.mood, content.day_phase, "starter", &mut slots);
+    slots
+}
+
+fn project_analytic_content_for_snapshot(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    output: &mut Vec<AnalyticContentSlot>,
+) {
+    project_analytic_content_with_biome(
+        mood_content(snapshot.content.mood),
+        snapshot.content.day_phase,
+        snapshot.topology.room.primary_biome,
+        output,
+    );
+}
+
+fn project_analytic_content_with_biome(
+    mood: MoodContentKind,
+    day_phase: super::super::CompanionDayPhase,
+    biome: &str,
+    slots: &mut Vec<AnalyticContentSlot>,
+) {
+    slots.clear();
+    slots.extend((0..MAX_ANALYTIC_PARAMS).map(|slot| AnalyticContentSlot {
+        id: AnalyticParamId(slot as u8),
+        value: None,
+    }));
+    for semantic in AnalyticSemantic::ALL {
+        let paint = if semantic == AnalyticSemantic::Gauges {
+            AnalyticPaint::PerimeterGaugeSet {
+                xp: GaugeLanePaint {
+                    track_srgba8: crate::presentation::companion_effects::srgba8(
+                        crate::presentation::companion_effects::GAUGE_XP_TRACK_SRGBA,
+                    ),
+                    fill_srgba8: crate::presentation::companion_effects::srgba8(
+                        crate::presentation::companion_effects::GAUGE_XP_FILL_SRGBA,
+                    ),
+                },
+                daily: GaugeLanePaint {
+                    track_srgba8: crate::presentation::companion_effects::srgba8(
+                        crate::presentation::companion_effects::GAUGE_DAILY_TRACK_SRGBA,
+                    ),
+                    fill_srgba8: crate::presentation::companion_effects::srgba8(
+                        crate::presentation::companion_effects::GAUGE_DAILY_FILL_SRGBA,
+                    ),
+                },
+                pace: GaugeLanePaint {
+                    track_srgba8: crate::presentation::companion_effects::srgba8(
+                        crate::presentation::companion_effects::GAUGE_PACE_TRACK_SRGBA,
+                    ),
+                    fill_srgba8: crate::presentation::companion_effects::srgba8(
+                        crate::presentation::companion_effects::GAUGE_PACE_FILL_SRGBA,
+                    ),
+                },
+                daily_overage_srgba8: crate::presentation::companion_effects::srgba8(
+                    crate::presentation::companion_effects::GAUGE_DAILY_OVERAGE_SRGBA,
+                ),
+            }
+        } else {
+            analytic_paint(semantic, mood, day_phase, biome)
+        };
+        let id = semantic.id();
+        slots[usize::from(id.0)].value =
+            Some(AnalyticContent { semantic, shape: semantic.shape(), paint });
+    }
+}
+
+fn mood_content(mood: crate::game::metabolism::Mood) -> MoodContentKind {
+    match mood {
+        crate::game::metabolism::Mood::Happy => MoodContentKind::Happy,
+        crate::game::metabolism::Mood::Ecstatic => MoodContentKind::Ecstatic,
+        crate::game::metabolism::Mood::Content => MoodContentKind::Content,
+        crate::game::metabolism::Mood::Hungry => MoodContentKind::Hungry,
+        crate::game::metabolism::Mood::Sad => MoodContentKind::Sad,
+        crate::game::metabolism::Mood::Sleepy => MoodContentKind::Sleepy,
+        crate::game::metabolism::Mood::Wilted => MoodContentKind::Wilted,
+    }
+}
+
+fn prop_paint_slot(
+    catalog_id: &str,
+    slot: u8,
+    bloom_active: bool,
+    glyphs: [PropGlyphContent; MAX_PROP_GLYPHS_PER_SLOT],
+) -> Result<PropGlyphPaintSlot, SceneGenerationError> {
+    let spec = crate::game::habitat::catalog_prop_by_str(catalog_id)
+        .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+    let base = [spec.color.0, spec.color.1, spec.color.2];
+    let blossom_override =
+        bloom_active && crate::game::habitat::habitat_prop_supports_bloom(catalog_id);
+    let paints = glyphs.map(|glyph| {
+        glyph.glyph.map(|glyph| GlyphPaintSource {
+            color_srgb8: if blossom_override && glyph.as_char() == '*' {
+                [0xe8, 0x84, 0xbc]
+            } else {
+                base
+            },
+        })
+    });
+    Ok(PropGlyphPaintSlot { slot, paints })
+}
+
+fn project_prop_paint_delta(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    output: &mut Vec<PropGlyphPaintSlot>,
+) -> Result<(), SceneGenerationError> {
+    for (topology, semantic) in snapshot
+        .topology
+        .visible_props
+        .iter()
+        .zip(&snapshot.content.prop_animation_states)
+    {
+        let glyphs = prop_glyphs(
+            topology.catalog_id,
+            snapshot.topology.pet.species,
+            semantic.sprite_phase,
+            semantic.twinkle_active,
+            semantic.chest_lid_open,
+            semantic.bloom_active,
+        )?;
+        output.push(prop_paint_slot(
+            topology.catalog_id,
+            topology.stable_order,
+            semantic.bloom_active == Some(true),
+            glyphs,
+        )?);
+    }
+    Ok(())
+}
+
+fn project_ambient_paint_delta(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    output: &mut Vec<AmbientGlyphPaintSlot>,
+) {
+    output.extend(snapshot.content.ambient_semantics.iter().map(|source| {
+        AmbientGlyphPaintSlot {
+            slot: source.slot,
+            paint: source
+                .kind
+                .map(|_| GlyphPaintSource { color_srgb8: AMBIENT_MOTE_COLOR_SRGB8 }),
+        }
+    }));
+}
+
+#[derive(Clone, Copy)]
+struct PetAnalyticGeometry {
+    frame_center: [f32; 2],
+    body_center: [f32; 2],
+    body_radii: [f32; 2],
+}
+
+fn project_analytic_frame_slots_for_geometry(
+    camera: OrthographicCamera,
+    pet: PetAnalyticGeometry,
+    cell_extent_points: [f32; 2],
+    effective_z: f32,
+    status_tone: StatusBeaconTone,
+    slots: &mut Vec<AnalyticFrameSlot>,
+) {
+    slots.clear();
+    slots.extend((0..MAX_ANALYTIC_PARAMS).map(|slot| AnalyticFrameSlot {
+        id: AnalyticParamId(slot as u8),
+        value: None,
+    }));
+    let center = [
+        (camera.width_points - 1.0) * 0.5,
+        (camera.height_points - 1.0) * 0.5,
+    ];
+    let radius = camera.width_points.min(camera.height_points) * 0.5 - 1.0;
+    let room = [0.0, 0.0, camera.width_points, camera.height_points];
+    let pet_rect = [
+        pet.body_center[0] - pet.body_radii[0],
+        pet.body_center[1] - pet.body_radii[1],
+        pet.body_radii[0] * 2.0,
+        pet.body_radii[1] * 2.0,
+    ];
+    let wall_cue = crate::presentation::companion_effects::wall_shadow_depth_cue(effective_z);
+    let wall_offset = [
+        wall_cue.detach_cells * cell_extent_points[0],
+        -wall_cue.detach_cells * cell_extent_points[1],
+    ];
+    let wall_softness = (cell_extent_points[0].min(cell_extent_points[1]) * 0.35).max(1.0);
+    let wall_rect = [
+        pet_rect[0] + wall_offset[0].min(0.0) - wall_softness,
+        pet_rect[1] + wall_offset[1].min(0.0) - wall_softness,
+        pet_rect[2] + wall_offset[0].abs() + wall_softness * 2.0,
+        pet_rect[3] + wall_offset[1].abs() + wall_softness * 2.0,
+    ];
+    let floor = crate::presentation::companion_effects::floor_projection_metrics(
+        camera.width_points,
+        camera.height_points,
+        camera.height_points * 0.76,
+        camera.height_points,
+        pet.frame_center[0],
+        effective_z,
+    )
+    .expect("validated companion layout and depth produce floor geometry");
+    let floor_center = [floor.center_x, camera.height_points - floor.center_y];
+    let floor_rect = [
+        floor_center[0] - floor.radius_x,
+        floor_center[1] - floor.radius_y,
+        floor.radius_x * 2.0,
+        floor.radius_y * 2.0,
+    ];
+    let aura_radius = crate::presentation::companion_effects::mood_aura_radius(f64::from(
+        pet.body_radii[0] * 2.0,
+    )) as f32;
+    let values = [
+        AnalyticFrame {
+            semantic: AnalyticSemantic::RoomBackground,
+            shape: AnalyticShape::ApertureRadial,
+            rect_points: room,
+            geometry: AnalyticGeometry::ApertureRadial {
+                center_points: center,
+                radius_points: radius,
+                feather_points: 1.0,
+            },
+        },
+        AnalyticFrame {
+            semantic: AnalyticSemantic::WallShadow,
+            shape: AnalyticShape::PetSilhouette,
+            rect_points: wall_rect,
+            geometry: AnalyticGeometry::PetSilhouette {
+                mask: AnalyticMaskSource::PetBody,
+                offset_points: wall_offset,
+                softness_points: wall_softness,
+            },
+        },
+        AnalyticFrame {
+            semantic: AnalyticSemantic::FloorProjection,
+            shape: AnalyticShape::RadialEllipse,
+            rect_points: floor_rect,
+            geometry: AnalyticGeometry::RadialEllipse {
+                center_points: floor_center,
+                radii_points: [floor.radius_x, floor.radius_y],
+                softness_points: floor.radius_y,
+            },
+        },
+        AnalyticFrame {
+            semantic: AnalyticSemantic::StatusHalo,
+            shape: AnalyticShape::StatusBeacon,
+            rect_points: [center[0] - 2.0, center[1] + radius - 2.0, 4.0, 4.0],
+            geometry: AnalyticGeometry::StatusBeacon {
+                center_points: [center[0], center[1] + radius],
+                radius_points: 1.0,
+                thickness_points: 1.0,
+                tone: status_tone,
+            },
+        },
+        AnalyticFrame {
+            semantic: AnalyticSemantic::MoodAura,
+            shape: AnalyticShape::PetAura,
+            rect_points: [
+                pet.body_center[0] - aura_radius,
+                pet.body_center[1] - aura_radius,
+                aura_radius * 2.0,
+                aura_radius * 2.0,
+            ],
+            geometry: AnalyticGeometry::PetAura {
+                center_points: pet.body_center,
+                max_radius_points: aura_radius,
+                ring_count: 8,
+                feather_points: 4.0,
+            },
+        },
+        {
+            let layout = crate::presentation::companion_effects::perimeter_gauge_layout(
+                f64::from(radius),
+                crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+            );
+            let lane =
+                |lane: crate::presentation::companion_effects::GaugeLaneLayout| GaugeLaneGeometry {
+                    radius_points: lane.radius as f32,
+                    stroke_width_points: lane.stroke_width as f32,
+                    track_start_degrees: lane.track_start_degrees as f32,
+                    track_sweep_degrees: lane.track_sweep_degrees as f32,
+                    cap: GaugeLineCap::Round,
+                };
+            AnalyticFrame {
+                semantic: AnalyticSemantic::Gauges,
+                shape: AnalyticShape::PerimeterGaugeSet,
+                rect_points: room,
+                geometry: AnalyticGeometry::PerimeterGaugeSet {
+                    center_points: center,
+                    xp: lane(layout.xp),
+                    daily: lane(layout.daily),
+                    pace: lane(layout.pace),
+                },
+            }
+        },
+        AnalyticFrame {
+            semantic: AnalyticSemantic::Trouble,
+            shape: AnalyticShape::TroubleBeacon,
+            rect_points: [
+                center[0] - radius * 0.66 - 2.0,
+                center[1] + radius * 0.66 - 2.0,
+                4.0,
+                4.0,
+            ],
+            geometry: AnalyticGeometry::TroubleBeacon {
+                center_points: [center[0] - radius * 0.66, center[1] + radius * 0.66],
+                radius_points: 1.0,
+                thickness_points: 1.0,
+            },
+        },
+        AnalyticFrame {
+            semantic: AnalyticSemantic::Dim,
+            shape: AnalyticShape::SurfaceOverlay,
+            rect_points: room,
+            geometry: AnalyticGeometry::SurfaceOverlay,
+        },
+    ];
+    for value in values {
+        let id = value.semantic.id();
+        slots[usize::from(id.0)].value = Some(value);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fixture_analytic_frame_slots(camera: OrthographicCamera) -> Vec<AnalyticFrameSlot> {
+    let mut slots = Vec::with_capacity(MAX_ANALYTIC_PARAMS);
+    project_analytic_frame_slots_for_geometry(
+        camera,
+        PetAnalyticGeometry {
+            frame_center: [180.0, 180.0],
+            body_center: [180.0, 180.0],
+            body_radii: [39.0, 60.0],
+        },
+        [8.0, 20.0],
+        0.0,
+        StatusBeaconTone::Calm,
+        &mut slots,
+    );
+    slots
+}
+
+fn project_analytic_frame_slots(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    output: &mut Vec<AnalyticFrameSlot>,
+) -> Result<(), SceneGenerationError> {
+    let layout = snapshot.topology.layout;
+    let camera = OrthographicCamera::new(layout.width_points, layout.height_points, -2.0, 2.0)
+        .expect("validated companion layout produces an orthographic camera");
+    let transform = pet_transform(snapshot);
+    let cell = snapshot.topology.glyph_grid.cell_extent_points;
+    let frame_center = [
+        transform.translation[0] + transform.pivot[0],
+        transform.translation[1] + transform.pivot[1],
+    ];
+    let (body_center, body_radii) = pet_body_world_geometry(snapshot, transform)?;
+    let effective_depth = resolved_effective_depth(snapshot);
+    project_analytic_frame_slots_for_geometry(
+        camera,
+        PetAnalyticGeometry { frame_center, body_center, body_radii },
+        cell,
+        effective_depth,
+        if snapshot.frame.calm {
+            StatusBeaconTone::Calm
+        } else {
+            StatusBeaconTone::Active
+        },
+        output,
+    );
+    Ok(())
+}
+
+pub(super) fn pet_body_world_geometry(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    transform: Transform3,
+) -> Result<([f32; 2], [f32; 2]), SceneGenerationError> {
+    let mut roles = [PetPaletteRole::Body; MAX_PET_ART_SLOTS];
+    let mut assigned = [false; MAX_PET_ART_SLOTS];
+    let mut min_declared_body_column = None::<usize>;
+    let mut min_declared_body_row = None::<usize>;
+    let mut max_declared_body_column = None::<usize>;
+    let mut max_declared_body_row = None::<usize>;
+    for span in &snapshot.content.pet_roles {
+        let role = pet_role(span.role).ok_or(SceneGenerationError::InvalidPetRole)?;
+        for column in span.start_char..span.end_char {
+            let index = usize::from(
+                span.line_index * crate::presentation::companion_scene::PET_LATTICE_WIDTH + column,
+            );
+            if index >= MAX_PET_ART_SLOTS || assigned[index] {
+                return Err(SceneGenerationError::OverlappingPetRole);
+            }
+            assigned[index] = true;
+            roles[index] = role;
+            if PetArtFilter::Body.includes(role) {
+                let column = usize::from(column);
+                let row = usize::from(span.line_index);
+                min_declared_body_column =
+                    Some(min_declared_body_column.map_or(column, |current| current.min(column)));
+                min_declared_body_row =
+                    Some(min_declared_body_row.map_or(row, |current| current.min(row)));
+                max_declared_body_column =
+                    Some(max_declared_body_column.map_or(column, |current| current.max(column)));
+                max_declared_body_row =
+                    Some(max_declared_body_row.map_or(row, |current| current.max(row)));
+            }
+        }
+    }
+
+    let mut min_body_column = None::<usize>;
+    let mut min_body_row = None::<usize>;
+    let mut max_body_column = None::<usize>;
+    let mut max_body_row = None::<usize>;
+    for (row, line) in snapshot.content.pet_lines.iter().enumerate() {
+        for (column, glyph) in line.chars().enumerate() {
+            let index =
+                row * usize::from(crate::presentation::companion_scene::PET_LATTICE_WIDTH) + column;
+            if glyph != ' ' && PetArtFilter::Body.includes(roles[index]) {
+                min_body_column =
+                    Some(min_body_column.map_or(column, |current| current.min(column)));
+                min_body_row = Some(min_body_row.map_or(row, |current| current.min(row)));
+                max_body_column =
+                    Some(max_body_column.map_or(column, |current| current.max(column)));
+                max_body_row = Some(max_body_row.map_or(row, |current| current.max(row)));
+            }
+        }
+    }
+    let min_body_column = min_body_column
+        .or(min_declared_body_column)
+        .ok_or(SceneGenerationError::InvalidPetRole)?;
+    let min_body_row = min_body_row
+        .or(min_declared_body_row)
+        .ok_or(SceneGenerationError::InvalidPetRole)?;
+    let max_body_column = max_body_column
+        .or(max_declared_body_column)
+        .ok_or(SceneGenerationError::InvalidPetRole)?;
+    let max_body_row = max_body_row
+        .or(max_declared_body_row)
+        .ok_or(SceneGenerationError::InvalidPetRole)?;
+    let cell = snapshot.topology.glyph_grid.cell_extent_points;
+    let lattice_height = f32::from(crate::presentation::companion_scene::PET_LATTICE_HEIGHT);
+    let local_min = [
+        min_body_column as f32 * cell[0],
+        (lattice_height - (max_body_row + 1) as f32) * cell[1],
+    ];
+    let local_max = [
+        (max_body_column + 1) as f32 * cell[0],
+        (lattice_height - min_body_row as f32) * cell[1],
+    ];
+    let matrix = transform
+        .matrix()
+        .map_err(|_| SceneGenerationError::NonFinite)?;
+    let corners = [
+        [local_min[0], local_min[1], 0.0],
+        [local_max[0], local_min[1], 0.0],
+        [local_min[0], local_max[1], 0.0],
+        [local_max[0], local_max[1], 0.0],
+    ];
+    let first = matrix.transform_point3(corners[0]);
+    let mut min = [first[0], first[1]];
+    let mut max = min;
+    for corner in corners.into_iter().skip(1) {
+        let point = matrix.transform_point3(corner);
+        min[0] = min[0].min(point[0]);
+        min[1] = min[1].min(point[1]);
+        max[0] = max[0].max(point[0]);
+        max[1] = max[1].max(point[1]);
+    }
+    let radii = [(max[0] - min[0]) * 0.5, (max[1] - min[1]) * 0.5];
+    if !radii
+        .into_iter()
+        .all(|radius| radius.is_finite() && radius > 0.0)
+    {
+        return Err(SceneGenerationError::NonFinite);
+    }
+    Ok(([(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5], radii))
 }
 
 fn pet_role(value: &str) -> Option<PetPaletteRole> {
@@ -1792,6 +2476,23 @@ fn build_frame(
         Some(!snapshot.frame.asleep),
         Some(snapshot.frame.pet_depth_cue.opacity),
     )?;
+    let effective_depth = resolved_effective_depth(snapshot);
+    set_node(
+        &mut frame,
+        "pet.shadow.wall",
+        None,
+        None,
+        Some(
+            crate::presentation::companion_effects::wall_shadow_depth_cue(effective_depth).strength,
+        ),
+    )?;
+    set_node(
+        &mut frame,
+        "pet.projection.floor",
+        None,
+        None,
+        Some(floor_projection_opacity(snapshot)),
+    )?;
     let (status_visible, status_opacity) = super::super::canonical_activity_status(snapshot);
     set_node(
         &mut frame,
@@ -1902,6 +2603,7 @@ fn build_frame(
     }
     frame.gauges = snapshot.frame.gauge_fractions;
     frame.dim_amount = snapshot.frame.dim_amount;
+    project_analytic_frame_slots(snapshot, &mut frame.analytic_slots)?;
     frame.lights.clear();
     Ok(frame)
 }

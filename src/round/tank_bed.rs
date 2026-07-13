@@ -31,17 +31,6 @@ const BED_LIFT: f32 = 0.45;
 const BED_FLECK_PRIMARY_ALPHA: u8 = 88;
 const BED_FLECK_SECONDARY_ALPHA: u8 = 80;
 
-/// Core alpha of the pet's floor projection at the far and near planes. The rim
-/// always fades to nothing, so these can run strong without a hard edge.
-const PROJECTION_ALPHA_FAR: f32 = 165.0;
-const PROJECTION_ALPHA_NEAR: f32 = 235.0;
-
-/// The projection's travel band on the bed, as fractions of the bed's depth below
-/// the horizon. The lower bed sits under the bottom vignette and the HUD reserve,
-/// where a shadow cannot read, so the band is collapsed into the upper half.
-const PROJECTION_BAND_FAR: f32 = 0.10;
-const PROJECTION_BAND_NEAR: f32 = 0.45;
-
 pub fn smooth_tank_bed_geometry(
     viewport: CompanionViewport,
     biome: RoomBiome,
@@ -107,7 +96,7 @@ pub fn smooth_tank_bed_geometry(
         shapes,
         horizon_y,
         near_edge_y: height,
-        shadow: bed_shadow(primary),
+        shadow: bed_shadow(biome.primary),
     })
 }
 
@@ -125,40 +114,23 @@ pub fn smooth_floor_projection_shape(
     }
     let width = f32::from(viewport.grid_cols);
     let height = f32::from(viewport.grid_rows);
-    let bed_height = bed.near_edge_y - bed.horizon_y;
-    if !bed_height.is_finite() || bed_height <= 0.0 {
-        return None;
-    }
-
-    let t = (depth.effective_z + 1.0) * 0.5;
-    let center_y = lerp(
-        bed.horizon_y + PROJECTION_BAND_FAR * bed_height,
-        bed.horizon_y + PROJECTION_BAND_NEAR * bed_height,
-        t,
-    );
-    let radius_x = lerp(0.07 * width, 0.13 * width, t);
-    let radius_y = lerp(0.016 * height, 0.04 * height, t);
-    if !radius_x.is_finite() || radius_x <= 0.0 || !radius_y.is_finite() || radius_y <= 0.0 {
-        return None;
-    }
-    if !center_y.is_finite() {
-        return None;
-    }
-
-    // Keep the whole ellipse inside the aperture's horizontal span.
-    let center_x = pet_center_x.clamp(radius_x, (width - radius_x).max(radius_x));
-    let alpha = lerp(PROJECTION_ALPHA_FAR, PROJECTION_ALPHA_NEAR, t)
-        .round()
-        .clamp(0.0, 255.0) as u8;
+    let metrics = crate::presentation::companion_effects::floor_projection_metrics(
+        width,
+        height,
+        bed.horizon_y,
+        bed.near_edge_y,
+        pet_center_x,
+        depth.effective_z,
+    )?;
 
     let bounds = SmoothBounds {
         min: SmoothPoint {
-            x: center_x - radius_x,
-            y: center_y - radius_y,
+            x: metrics.center_x - metrics.radius_x,
+            y: metrics.center_y - metrics.radius_y,
         },
         max: SmoothPoint {
-            x: center_x + radius_x,
-            y: center_y + radius_y,
+            x: metrics.center_x + metrics.radius_x,
+            y: metrics.center_y + metrics.radius_y,
         },
     };
     if !bounds_are_finite(bounds) {
@@ -168,7 +140,7 @@ pub fn smooth_floor_projection_shape(
     Some(ellipse(
         bounds,
         SmoothFill::RadialGradient {
-            inner: with_alpha(bed.shadow, alpha),
+            inner: with_alpha(bed.shadow, metrics.alpha),
             outer: with_alpha(bed.shadow, 0),
         },
     ))
@@ -181,20 +153,12 @@ fn bounds_are_finite(bounds: SmoothBounds) -> bool {
         && bounds.max.y.is_finite()
 }
 
-fn lerp(from: f32, to: f32, t: f32) -> f32 {
-    from + (to - from) * t
-}
-
 /// The projection's multiply factor: darkens the floor beneath it to roughly
 /// forty percent at the core, keeping the biome primary's hue so the shade reads
 /// as the bed's own colour in shadow.
-fn bed_shadow(primary: SmoothRgba8) -> SmoothRgba8 {
-    SmoothRgba8 {
-        r: primary.r / 3 + 30,
-        g: primary.g / 3 + 30,
-        b: primary.b / 3 + 30,
-        a: 255,
-    }
+fn bed_shadow(primary: RoomBiomeTag) -> SmoothRgba8 {
+    let [r, g, b] = crate::presentation::companion_effects::bed_shadow_srgb8(biome_alias(primary));
+    SmoothRgba8 { r, g, b, a: 255 }
 }
 
 fn ellipse(bounds: SmoothBounds, fill: SmoothFill) -> SmoothShape {
@@ -216,13 +180,18 @@ fn bed_colors(biome: RoomBiome) -> (SmoothRgba8, SmoothRgba8) {
 }
 
 fn color_for_biome(biome: RoomBiomeTag) -> SmoothRgba8 {
+    let [r, g, b] = crate::presentation::companion_effects::bed_primary_srgb8(biome_alias(biome));
+    SmoothRgba8 { r, g, b, a: 255 }
+}
+
+fn biome_alias(biome: RoomBiomeTag) -> &'static str {
     match biome {
-        RoomBiomeTag::Starter => SmoothRgba8 { r: 72, g: 83, b: 108, a: 255 },
-        RoomBiomeTag::Botanical => SmoothRgba8 { r: 63, g: 111, b: 102, a: 255 },
-        RoomBiomeTag::Technical => SmoothRgba8 { r: 70, g: 91, b: 125, a: 255 },
-        RoomBiomeTag::Celestial => SmoothRgba8 { r: 89, g: 75, b: 125, a: 255 },
-        RoomBiomeTag::Artifact => SmoothRgba8 { r: 108, g: 83, b: 102, a: 255 },
-        RoomBiomeTag::Cozy => SmoothRgba8 { r: 105, g: 78, b: 106, a: 255 },
+        RoomBiomeTag::Starter => "starter",
+        RoomBiomeTag::Botanical => "botanical",
+        RoomBiomeTag::Technical => "technical",
+        RoomBiomeTag::Celestial => "celestial",
+        RoomBiomeTag::Artifact => "artifact",
+        RoomBiomeTag::Cozy => "cozy",
     }
 }
 
