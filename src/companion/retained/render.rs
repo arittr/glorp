@@ -6516,6 +6516,634 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn native_production_scene_renders_complete_fuzz_s3_inventory_with_redacted_hud() {
+        use crate::pet::generation::Species;
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let (device, queue) = native_device();
+        let cpu = super::super::compiler::compile_projected_full_scene_for_render_test(0);
+        let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+            CompanionContentIdentity::for_pet(Species::Fuzz),
+            2.0,
+        );
+        let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+            .expect("the active Fuzz repertoire compiles");
+        let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+            resources.atlas(),
+            cpu.generation_key.resources,
+        )
+        .expect("the active Fuzz atlas prepares for the projected scene generation");
+        let upload = prepare_scene_upload(&cpu, &atlas).expect("production scene upload prepares");
+
+        assert_eq!(cpu.logical_viewport_points(), [360.0, 360.0]);
+        assert_eq!(upload.primitives.len(), 19);
+        assert_eq!(upload.draws.len(), 19);
+        assert_eq!(upload.phases.opaque_cutout.len(), 1);
+        assert_eq!(upload.phases.world_blended_unsorted.len(), 13);
+        assert_eq!(upload.phases.chrome_authored.len(), 5);
+        assert_eq!(
+            upload
+                .draws
+                .iter()
+                .map(|draw| draw.authored_order)
+                .collect::<Vec<_>>(),
+            (0..19).collect::<Vec<_>>(),
+        );
+
+        let classified = upload
+            .primitives
+            .iter()
+            .copied()
+            .zip(&upload.draws)
+            .map(|(primitive, draw)| {
+                scene_pipeline_class(primitive, draw)
+                    .expect("every production draw has one closed pipeline class")
+            })
+            .collect::<Vec<_>>();
+        let ordered_schedule = upload
+            .primitives
+            .iter()
+            .zip(&upload.draws)
+            .zip(&classified)
+            .enumerate()
+            .map(|(index, ((primitive, draw), pipeline))| {
+                let primitive_index = u32::try_from(index).unwrap();
+                let phase = if upload.phases.opaque_cutout.contains(&primitive_index) {
+                    SceneDrawPhase::Opaque
+                } else if upload
+                    .phases
+                    .world_blended_unsorted
+                    .contains(&primitive_index)
+                {
+                    SceneDrawPhase::WorldBlended
+                } else {
+                    assert!(upload.phases.chrome_authored.contains(&primitive_index));
+                    SceneDrawPhase::Chrome
+                };
+                (
+                    primitive_index,
+                    phase,
+                    *pipeline,
+                    draw.source,
+                    primitive.binding_index,
+                    draw.authored_order,
+                )
+            })
+            .collect::<Vec<_>>();
+        use crate::presentation::companion_scene::scene::InstanceLayer;
+        assert_eq!(
+            ordered_schedule,
+            vec![
+                (
+                    0,
+                    SceneDrawPhase::Opaque,
+                    ScenePipelineClass::WorldOpaqueAnalytic,
+                    PrimitiveSource::Analytic,
+                    0,
+                    0
+                ),
+                (
+                    1,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::RoomGlyphs),
+                    0,
+                    1
+                ),
+                (
+                    2,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldMultiplyAnalytic,
+                    PrimitiveSource::Analytic,
+                    2,
+                    2
+                ),
+                (
+                    3,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldAdditiveGlyph,
+                    PrimitiveSource::Instances(InstanceSource::Ambient),
+                    0,
+                    3
+                ),
+                (
+                    4,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 0 }),
+                    0,
+                    4
+                ),
+                (
+                    5,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 1 }),
+                    1,
+                    5
+                ),
+                (
+                    6,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::TankCells {
+                        slot: 0,
+                        layer: InstanceLayer::Behind
+                    }),
+                    0,
+                    6
+                ),
+                (
+                    7,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::TankCells {
+                        slot: 1,
+                        layer: InstanceLayer::Behind
+                    }),
+                    1,
+                    7
+                ),
+                (
+                    8,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldMultiplyGlyphMask,
+                    PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
+                    1,
+                    8
+                ),
+                (
+                    9,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverAnalytic,
+                    PrimitiveSource::Analytic,
+                    4,
+                    9
+                ),
+                (
+                    10,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::PetBody),
+                    0,
+                    10
+                ),
+                (
+                    11,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldAdditiveGlyph,
+                    PrimitiveSource::Instances(InstanceSource::PetParticles),
+                    0,
+                    11
+                ),
+                (
+                    12,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::TankCells {
+                        slot: 0,
+                        layer: InstanceLayer::Foreground
+                    }),
+                    0,
+                    12
+                ),
+                (
+                    13,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverGlyph,
+                    PrimitiveSource::Instances(InstanceSource::TankCells {
+                        slot: 1,
+                        layer: InstanceLayer::Foreground
+                    }),
+                    1,
+                    13
+                ),
+                (
+                    14,
+                    SceneDrawPhase::Chrome,
+                    ScenePipelineClass::ChromeAnalytic,
+                    PrimitiveSource::Analytic,
+                    5,
+                    14
+                ),
+                (
+                    15,
+                    SceneDrawPhase::Chrome,
+                    ScenePipelineClass::ChromeAnalytic,
+                    PrimitiveSource::Analytic,
+                    3,
+                    15
+                ),
+                (
+                    16,
+                    SceneDrawPhase::Chrome,
+                    ScenePipelineClass::ChromeAnalytic,
+                    PrimitiveSource::Analytic,
+                    6,
+                    16
+                ),
+                (
+                    17,
+                    SceneDrawPhase::Chrome,
+                    ScenePipelineClass::SealedHudHook,
+                    PrimitiveSource::Instances(InstanceSource::Hud),
+                    0,
+                    17
+                ),
+                (
+                    18,
+                    SceneDrawPhase::Chrome,
+                    ScenePipelineClass::ChromeAnalytic,
+                    PrimitiveSource::Analytic,
+                    7,
+                    18
+                ),
+            ],
+        );
+        let class_count = |class| classified.iter().filter(|actual| **actual == class).count();
+        assert_eq!(class_count(ScenePipelineClass::WorldOpaqueAnalytic), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldSourceOverAnalytic), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyph), 8);
+        assert_eq!(class_count(ScenePipelineClass::WorldMultiplyAnalytic), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldMultiplyGlyphMask), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldAdditiveGlyph), 2);
+        assert_eq!(class_count(ScenePipelineClass::ChromeAnalytic), 4);
+        assert_eq!(class_count(ScenePipelineClass::SealedHudHook), 1);
+        assert_eq!(
+            class_count(ScenePipelineClass::WorldAdditiveAnalyticReserved),
+            0,
+        );
+        let bindings_for = |class| {
+            upload
+                .primitives
+                .iter()
+                .zip(&classified)
+                .filter_map(|(primitive, actual)| {
+                    (*actual == class).then_some(primitive.binding_index)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bindings_for(ScenePipelineClass::WorldOpaqueAnalytic), [0],);
+        assert_eq!(
+            bindings_for(ScenePipelineClass::WorldSourceOverAnalytic),
+            [4],
+        );
+        assert_eq!(bindings_for(ScenePipelineClass::WorldMultiplyAnalytic), [2],);
+        assert_eq!(
+            bindings_for(ScenePipelineClass::WorldMultiplyGlyphMask),
+            [1],
+        );
+        assert_eq!(bindings_for(ScenePipelineClass::WorldAdditiveGlyph), [0, 0],);
+        assert_eq!(
+            bindings_for(ScenePipelineClass::ChromeAnalytic),
+            [5, 3, 6, 7],
+        );
+        assert_eq!(bindings_for(ScenePipelineClass::SealedHudHook), [0]);
+
+        let source_count = |source| {
+            upload
+                .draws
+                .iter()
+                .filter(|draw| draw.source == source)
+                .count()
+        };
+        assert_eq!(source_count(PrimitiveSource::Analytic), 7);
+        assert_eq!(
+            source_count(PrimitiveSource::Instances(InstanceSource::RoomGlyphs)),
+            1,
+        );
+        assert_eq!(
+            source_count(PrimitiveSource::Instances(InstanceSource::PetBody)),
+            1,
+        );
+        assert_eq!(
+            source_count(PrimitiveSource::Instances(InstanceSource::PetParticles)),
+            1,
+        );
+        assert_eq!(
+            source_count(PrimitiveSource::Instances(InstanceSource::Ambient)),
+            1,
+        );
+        assert_eq!(
+            source_count(PrimitiveSource::Instances(
+                InstanceSource::WallShadowGlyphMask,
+            )),
+            1,
+        );
+        assert_eq!(
+            source_count(PrimitiveSource::Instances(InstanceSource::Hud)),
+            1,
+        );
+        assert_eq!(
+            upload
+                .draws
+                .iter()
+                .filter(|draw| matches!(
+                    draw.source,
+                    PrimitiveSource::Instances(InstanceSource::PropGlyphs { .. })
+                ))
+                .count(),
+            2,
+        );
+        assert_eq!(
+            upload
+                .draws
+                .iter()
+                .filter(|draw| matches!(
+                    draw.source,
+                    PrimitiveSource::Instances(InstanceSource::TankCells { .. })
+                ))
+                .count(),
+            4,
+        );
+        assert_eq!(
+            upload
+                .draws
+                .iter()
+                .filter_map(|draw| match draw.source {
+                    PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot }) => Some(slot),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [0, 1],
+        );
+        assert_eq!(
+            upload
+                .draws
+                .iter()
+                .filter_map(|draw| match draw.source {
+                    PrimitiveSource::Instances(InstanceSource::TankCells { slot, layer }) => {
+                        Some((slot, layer))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                (0, InstanceLayer::Behind),
+                (1, InstanceLayer::Behind),
+                (0, InstanceLayer::Foreground),
+                (1, InstanceLayer::Foreground),
+            ],
+        );
+        assert!(upload.draws.iter().all(|draw| !matches!(
+            draw.source,
+            PrimitiveSource::None | PrimitiveSource::StaticAtlas
+        )));
+
+        let content = cpu.content_upload_sources();
+        let has_glyph = |slots: &[super::super::compiler::ContentGpuValue]| {
+            slots
+                .iter()
+                .copied()
+                .map(super::super::compiler::ContentUploadValue::from)
+                .any(|slot| slot.glyph_scalar != NONE_U32)
+        };
+        assert!(has_glyph(content.pet));
+        assert!(has_glyph(content.pet_particles));
+        assert!(has_glyph(content.room_glyphs));
+        for (slot, glyphs) in content
+            .prop_glyphs
+            .chunks_exact(crate::presentation::companion_scene::scene::MAX_PROP_GLYPHS_PER_SLOT)
+            .take(2)
+            .enumerate()
+        {
+            assert!(has_glyph(glyphs), "empty production prop slot {slot}");
+        }
+        for (slot, glyphs) in content
+            .tank_glyphs
+            .chunks_exact(crate::presentation::companion_scene::scene::MAX_TANK_GLYPHS_PER_SLOT)
+            .take(2)
+            .enumerate()
+        {
+            assert!(has_glyph(glyphs), "empty production tank slot {slot}");
+        }
+        assert!(content
+            .ambient
+            .iter()
+            .copied()
+            .map(super::super::compiler::ContentUploadValue::from)
+            .all(|slot| slot.glyph_scalar == NONE_U32));
+
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        assert_eq!(
+            candidate
+                .draw_plan
+                .opaque
+                .iter()
+                .map(|draw| draw.primitive_index)
+                .collect::<Vec<_>>(),
+            [0],
+        );
+        assert_eq!(
+            candidate
+                .draw_plan
+                .world_blended_unsorted
+                .iter()
+                .map(|draw| draw.primitive_index)
+                .collect::<Vec<_>>(),
+            (1..=13).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            candidate
+                .draw_plan
+                .chrome
+                .prefix
+                .iter()
+                .map(|draw| draw.primitive_index)
+                .collect::<Vec<_>>(),
+            [14, 15, 16],
+        );
+        assert_eq!(candidate.draw_plan.chrome.hud.primitive_index, 17);
+        assert_eq!(candidate.draw_plan.chrome.suffix[0].primitive_index, 18);
+
+        let prepared_hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            2.0,
+        );
+        let mut renderer = SceneRenderer::new(&device, &shared);
+        let outcome = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &prepared_hud,
+            )
+            .expect("the production-derived scene renders without fallback");
+        let staged = candidate.hud.staging_facts_for_test();
+        assert_eq!(staged.sensitive_copies, 0);
+        assert_eq!(staged.redacted_copies, 1);
+        assert_eq!(staged.copied_bytes, super::super::hud::HUD_GPU_BUFFER_BYTES);
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 1));
+
+        assert_eq!(outcome.version, request.version);
+        assert_eq!(outcome.physical_extent_pixels, [720, 720]);
+        assert_eq!(outcome.rgba.len(), 720 * 720 * 4);
+        let pixel = |x: u32, y: u32| -> [u8; 4] {
+            let offset = ((y * 720 + x) * 4) as usize;
+            outcome.rgba[offset..offset + 4].try_into().unwrap()
+        };
+        for corner in [(0, 0), (719, 0), (0, 719), (719, 719)] {
+            assert_eq!(pixel(corner.0, corner.1), [0, 0, 0, 0], "corner={corner:?}");
+        }
+        for room_probe in [(180, 360), (540, 360)] {
+            assert_eq!(
+                pixel(room_probe.0, room_probe.1),
+                [20, 24, 37, 255],
+                "room_probe={room_probe:?}",
+            );
+        }
+        let pet_center = pixel(360, 360);
+        assert_eq!(pet_center[3], 255);
+        assert_ne!(pet_center, [20, 24, 37, 255]);
+        let nontransparent = outcome
+            .rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] != 0)
+            .count();
+        assert!(nontransparent > 350_000, "nontransparent={nontransparent}");
+
+        let baseline_plan = candidate.draw_plan.clone();
+        let suppress = |plan: &mut SceneDrawPlan, primitive_index: u32| {
+            let mut found = false;
+            for draw in plan
+                .opaque
+                .iter_mut()
+                .chain(plan.world_blended_unsorted.iter_mut())
+                .chain(plan.chrome.prefix.iter_mut())
+                .chain(plan.chrome.suffix.iter_mut())
+            {
+                if draw.primitive_index == primitive_index {
+                    draw.instance_range = 0..0;
+                    found = true;
+                }
+            }
+            assert!(found, "missing planned primitive {primitive_index}");
+        };
+        let active_layer_omissions: &[(&str, &[u32])] = &[
+            ("room background", &[0]),
+            ("room glyphs", &[1]),
+            ("floor multiply", &[2]),
+            ("wall shadow", &[8]),
+            ("aura", &[9]),
+            ("tank inhabitant 0", &[6, 12]),
+            ("tank inhabitant 1", &[7, 13]),
+            ("pet body", &[10]),
+            ("prop 0", &[4]),
+            ("prop 1", &[5]),
+            ("pet particles", &[11]),
+            ("gauges", &[14]),
+            ("status", &[15]),
+        ];
+        for (label, primitive_indices) in active_layer_omissions {
+            candidate.draw_plan = baseline_plan.clone();
+            for primitive_index in *primitive_indices {
+                suppress(&mut candidate.draw_plan, *primitive_index);
+            }
+            let without_layer = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &prepared_hud,
+                )
+                .unwrap_or_else(|error| panic!("{label} omission render failed: {error:?}"));
+            assert!(
+                without_layer.rgba != outcome.rgba,
+                "active production layer was inert: {label}",
+            );
+        }
+        candidate.draw_plan = baseline_plan;
+
+        let zero_hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            upload.generation_key.resources,
+        );
+        let without_hud = renderer
+            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &zero_hud)
+            .expect("zeroed redacted HUD renders");
+        assert!(without_hud.rgba != outcome.rgba, "redacted HUD was inert");
+        let final_staging = candidate.hud.staging_facts_for_test();
+        assert_eq!(final_staging.sensitive_copies, 0);
+        assert_eq!(final_staging.redacted_copies, 15);
+        assert_eq!(
+            final_staging.copied_bytes,
+            15 * super::super::hud::HUD_GPU_BUFFER_BYTES,
+        );
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 15));
+
+        // The normal production frame intentionally has no trouble or dim
+        // contribution. A second unmodified production projection activates
+        // both states and proves their real GPU paths independently.
+        let dimmed_cpu = super::super::compiler::compile_projected_full_scene_for_render_test(45);
+        let dimmed_upload = prepare_scene_upload(&dimmed_cpu, &atlas).unwrap();
+        assert_eq!(dimmed_upload.primitives, upload.primitives);
+        assert_eq!(dimmed_upload.draws, upload.draws);
+        assert_eq!(dimmed_upload.phases, upload.phases);
+        let mut dimmed_candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &dimmed_upload, &atlas).unwrap();
+        let dimmed_request = render_request_fixture(
+            dimmed_candidate.generation_key,
+            dimmed_candidate.source_revisions,
+            dimmed_candidate.logical_viewport_points,
+            2.0,
+        );
+        let dimmed_baseline = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut dimmed_candidate,
+                dimmed_request.clone(),
+                &prepared_hud,
+            )
+            .expect("dimmed production frame renders");
+        let dimmed_plan = dimmed_candidate.draw_plan.clone();
+        for (label, primitive_index) in [("trouble", 16), ("dim", 18)] {
+            dimmed_candidate.draw_plan = dimmed_plan.clone();
+            suppress(&mut dimmed_candidate.draw_plan, primitive_index);
+            let without_layer = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut dimmed_candidate,
+                    dimmed_request.clone(),
+                    &prepared_hud,
+                )
+                .unwrap_or_else(|error| panic!("dimmed {label} omission render failed: {error:?}"));
+            assert!(
+                without_layer.rgba != dimmed_baseline.rgba,
+                "active dimmed production layer was inert: {label}",
+            );
+        }
+        dimmed_candidate.draw_plan = dimmed_plan;
+        let dimmed_staging = dimmed_candidate.hud.staging_facts_for_test();
+        assert_eq!(dimmed_staging.sensitive_copies, 0);
+        assert_eq!(dimmed_staging.redacted_copies, 3);
+        assert_eq!(
+            dimmed_staging.copied_bytes,
+            3 * super::super::hud::HUD_GPU_BUFFER_BYTES,
+        );
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 18));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn native_offscreen_preflight_rejects_request_and_hud_before_staging_or_submission() {
         let (device, queue) = native_device();
         let cpu = compile_fixture(&canonical_materialization_fixture());

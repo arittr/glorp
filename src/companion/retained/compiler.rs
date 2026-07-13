@@ -2719,6 +2719,128 @@ pub(super) fn compile_static_fixture_for_render_test(
 }
 
 #[cfg(test)]
+fn lifetime_watch_fixture() -> crate::tui::view_model::WatchViewModel {
+    let day = time::macros::date!(2026 - 07 - 12);
+    let mut vm =
+        crate::tui::view_model::WatchViewModel::fixture_with_tank_inhabitants_for_age(120, day);
+    vm.habitat.earned_props = crate::tui::view_model::WatchViewModel::fixture_with_habitat_props()
+        .habitat
+        .earned_props;
+    let pet = crate::pet::generation::generate_pet("retained-cpu-lifetime")
+        .with_species(crate::pet::generation::Species::Fuzz);
+    let rendered = crate::pet::render::render_pet(
+        &pet,
+        crate::game::evolution::Stage::S3,
+        crate::game::metabolism::Mood::Content,
+        crate::pet::render::AnimationFrame::default(),
+    );
+    vm.pet_render.seed = pet.seed;
+    vm.pet_render.generated_species = crate::pet::generation::Species::Fuzz;
+    vm.pet_render.stage = crate::game::evolution::Stage::S3;
+    vm.pet_render.mood = crate::game::metabolism::Mood::Content;
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+    vm
+}
+
+#[cfg(test)]
+fn project_full_scene_snapshot(
+    base: &crate::tui::view_model::WatchViewModel,
+    frame_index: usize,
+) -> crate::presentation::companion_scene::CompanionSceneSnapshot {
+    let mut vm = base.clone();
+    vm.pet_render.mood = if (frame_index / 25).is_multiple_of(2) {
+        crate::game::metabolism::Mood::Content
+    } else {
+        crate::game::metabolism::Mood::Happy
+    };
+    vm.day_context.asleep = (frame_index / 40) % 2 == 1;
+    vm.life_profile.calm_mode = (frame_index / 30) % 2 == 1;
+    vm.progress.fraction = (frame_index % 101) as f32 / 100.0;
+    vm.source_health[0].status = if (frame_index / 45).is_multiple_of(2) {
+        crate::tui::view_model::SourceStatus::Ready
+    } else {
+        crate::tui::view_model::SourceStatus::Diagnostic
+    };
+    let wall_time = time::macros::datetime!(2026-07-11 12:00:55 UTC)
+        + time::Duration::seconds(i64::try_from(frame_index).unwrap());
+    vm.last_feed_pulse_at = (frame_index % 20 < 10).then_some(
+        wall_time - time::Duration::milliseconds(i64::try_from(frame_index % 10).unwrap() * 150),
+    );
+    crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input(
+        &vm,
+        crate::presentation::companion_scene::CompanionSceneProjectionInput::round(
+            crate::presentation::companion_scene::CompanionProjectionClock::new(
+                wall_time,
+                u64::try_from(frame_index).unwrap() * 33,
+            ),
+            crate::presentation::companion_scene::CompanionLogicalLayout::round(360.0, 360.0),
+            44,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        ),
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
+fn project_lifetime_snapshot(
+    base: &crate::tui::view_model::WatchViewModel,
+    frame_index: usize,
+) -> crate::presentation::companion_scene::CompanionSceneSnapshot {
+    let mut snapshot = project_full_scene_snapshot(base, frame_index);
+    let semantic_phase = u8::try_from((frame_index / 20) % 2).unwrap();
+    for prop in &mut snapshot.content.prop_animation_states {
+        if prop.sprite_phase.is_some() {
+            prop.sprite_phase = Some(semantic_phase);
+        }
+        if prop.twinkle_active.is_some() {
+            prop.twinkle_active = Some(semantic_phase != 0);
+        }
+    }
+    for tank in &mut snapshot.content.tank_animation_states {
+        tank.sprite_variant = semantic_phase;
+    }
+    snapshot
+}
+
+/// Builds one complete test candidate through the real companion projection,
+/// neutral scene generation, and CPU compiler path. This is deliberately a
+/// test-only sibling seam: production activation continues to own its versions.
+#[cfg(test)]
+pub(super) fn compile_projected_full_scene_for_render_test(
+    frame_index: usize,
+) -> CpuSceneCandidate {
+    let snapshot = std::sync::Arc::new(project_full_scene_snapshot(
+        &lifetime_watch_fixture(),
+        frame_index,
+    ));
+    assert_eq!(
+        snapshot.topology.pet.species,
+        crate::pet::generation::Species::Fuzz,
+    );
+    assert_eq!(
+        snapshot.topology.pet.stage,
+        crate::game::evolution::Stage::S3,
+    );
+    assert_eq!(snapshot.topology.visible_props.len(), 2);
+    assert_eq!(snapshot.content.prop_animation_states.len(), 2);
+    assert_eq!(snapshot.topology.visible_tank_inhabitants.len(), 2);
+    assert_eq!(snapshot.content.tank_animation_states.len(), 2);
+    let generation = crate::presentation::companion_scene::scene::build_scene_generation_owned(
+        snapshot,
+        crate::presentation::companion_scene::SceneGenerationKey {
+            device: crate::presentation::companion_scene::DeviceEpoch(7),
+            layout: crate::presentation::companion_scene::LayoutGeneration(8),
+            resources: crate::presentation::companion_scene::ResourceGeneration(9),
+        },
+        crate::presentation::companion_scene::AppliedRevisions::new(10, 20),
+    )
+    .expect("production-derived test scene builds");
+    compile_cpu_generation(&generation).expect("production-derived test scene compiles")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::presentation::companion_scene::scene::{
@@ -2950,85 +3072,6 @@ mod tests {
         assert_eq!(actual.static_vecs, expected.static_vecs);
         assert_eq!(actual.fixed_mirrors, expected.fixed_mirrors);
         assert_eq!(actual.logical_vecs, expected.logical_vecs);
-    }
-
-    fn lifetime_watch_fixture() -> crate::tui::view_model::WatchViewModel {
-        let day = time::macros::date!(2026 - 07 - 11);
-        let mut vm =
-            crate::tui::view_model::WatchViewModel::fixture_with_tank_inhabitants_for_age(120, day);
-        vm.habitat.earned_props =
-            crate::tui::view_model::WatchViewModel::fixture_with_habitat_props()
-                .habitat
-                .earned_props;
-        let rendered = crate::pet::render::render_pet(
-            &crate::pet::generation::generate_pet("retained-cpu-lifetime")
-                .with_species(crate::pet::generation::Species::Fuzz),
-            crate::game::evolution::Stage::S3,
-            crate::game::metabolism::Mood::Content,
-            crate::pet::render::AnimationFrame::default(),
-        );
-        vm.pet_render.generated_species = crate::pet::generation::Species::Fuzz;
-        vm.pet_render.stage = crate::game::evolution::Stage::S3;
-        vm.pet_render.mood = crate::game::metabolism::Mood::Content;
-        vm.pet_art = rendered.lines;
-        vm.pet_spans = rendered.spans;
-        vm
-    }
-
-    fn project_lifetime_snapshot(
-        base: &crate::tui::view_model::WatchViewModel,
-        frame_index: usize,
-    ) -> crate::presentation::companion_scene::CompanionSceneSnapshot {
-        let mut vm = base.clone();
-        vm.pet_render.mood = if (frame_index / 25).is_multiple_of(2) {
-            crate::game::metabolism::Mood::Content
-        } else {
-            crate::game::metabolism::Mood::Happy
-        };
-        vm.day_context.asleep = (frame_index / 40) % 2 == 1;
-        vm.life_profile.calm_mode = (frame_index / 30) % 2 == 1;
-        vm.progress.fraction = (frame_index % 101) as f32 / 100.0;
-        vm.source_health[0].status = if (frame_index / 45).is_multiple_of(2) {
-            crate::tui::view_model::SourceStatus::Ready
-        } else {
-            crate::tui::view_model::SourceStatus::Diagnostic
-        };
-        let wall_time = time::macros::datetime!(2026-07-11 12:00:55 UTC)
-            + time::Duration::seconds(i64::try_from(frame_index).unwrap());
-        vm.last_feed_pulse_at = (frame_index % 20 < 10).then_some(
-            wall_time
-                - time::Duration::milliseconds(i64::try_from(frame_index % 10).unwrap() * 150),
-        );
-        let mut snapshot =
-            crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input(
-                &vm,
-                crate::presentation::companion_scene::CompanionSceneProjectionInput::round(
-                    crate::presentation::companion_scene::CompanionProjectionClock::new(
-                        wall_time,
-                        u64::try_from(frame_index).unwrap() * 33,
-                    ),
-                    crate::presentation::companion_scene::CompanionLogicalLayout::round(
-                        360.0, 360.0,
-                    ),
-                    44,
-                    18,
-                    crate::round::scene::current_round_motion_clearance(18),
-                ),
-            )
-            .unwrap();
-        let semantic_phase = u8::try_from((frame_index / 20) % 2).unwrap();
-        for prop in &mut snapshot.content.prop_animation_states {
-            if prop.sprite_phase.is_some() {
-                prop.sprite_phase = Some(semantic_phase);
-            }
-            if prop.twinkle_active.is_some() {
-                prop.twinkle_active = Some(semantic_phase != 0);
-            }
-        }
-        for tank in &mut snapshot.content.tank_animation_states {
-            tank.sprite_variant = semantic_phase;
-        }
-        snapshot
     }
 
     #[test]
