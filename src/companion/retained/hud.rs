@@ -527,6 +527,19 @@ impl GpuHudResources {
         }
         Ok(())
     }
+
+    /// Pure validation used by capture before it creates an encoder or reserves
+    /// staging-belt space. The encode path repeats this check so the sealed HUD
+    /// upload remains fail-closed even when called independently.
+    pub(super) fn validate_redacted_capture(
+        &self,
+        prepared: &CaptureSafePreparedHudFrame,
+    ) -> Result<(), HudGpuStagingError> {
+        validate_staging_generation(
+            self.prepared_atlas.resource_identity,
+            prepared.resource_generation,
+        )
+    }
 }
 
 impl fmt::Debug for GpuHudResources {

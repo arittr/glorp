@@ -8,6 +8,8 @@ use super::compiler::{
 use super::resources::{GlyphAtlasResolveError, GlyphEntryKind, GlyphKey, PreparedSceneAtlas};
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
+use std::sync::mpsc;
+use std::time::Duration;
 use wgpu::util::DeviceExt;
 
 const NONE_U32: u32 = u32::MAX;
@@ -3077,6 +3079,437 @@ impl SceneTargetCache {
     }
 }
 
+const SCENE_STAGING_BELT_CHUNK_BYTES: wgpu::BufferAddress = 64 * 1024;
+const SCENE_READBACK_TIMEOUT: Duration = Duration::from_secs(5);
+const SCENE_MAP_CALLBACK_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Successful output from one synthetic offscreen scene render. This is the
+/// renderer's canonical top-left, straight-alpha RGBA capture seam; it does not
+/// imply that a host surface was activated or presented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SceneRenderOutcome {
+    pub(super) version: crate::presentation::companion_scene::SceneVersion,
+    pub(super) physical_extent_pixels: [u32; 2],
+    pub(super) rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneRenderError {
+    RendererDeviceEpochMismatch {
+        renderer: crate::presentation::companion_scene::DeviceEpoch,
+        shared: crate::presentation::companion_scene::DeviceEpoch,
+    },
+    Request(SceneRenderRequestError),
+    Hud(super::hud::HudGpuStagingError),
+    Target(SceneGpuError),
+    Readback(super::capture::SceneReadbackError),
+    Gpu(ScopedGpuErrorCategory),
+    PollTimeout,
+    PollWrongSubmissionIndex,
+    MapFailed,
+    MappedRangeFailed,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SceneRenderTestFault {
+    #[default]
+    None,
+    ScopedValidationAfterHudWrite,
+    PollTimeout,
+    PollWrongSubmissionIndex,
+    MapCallbackCancelled,
+    MappedRangeFailure,
+    NormalizeShortBuffer,
+}
+
+/// Persistent offscreen execution state for scene-v2. Device and queue remain
+/// host-owned; only size/generation-keyed targets, the readback buffer, and one
+/// fixed-size upload belt are retained here.
+pub(super) struct SceneRenderer {
+    device_epoch: crate::presentation::companion_scene::DeviceEpoch,
+    targets: SceneTargetCache,
+    readback: super::capture::SceneReadbackCache,
+    staging_belt: wgpu::util::StagingBelt,
+    #[cfg(test)]
+    submission_events: u64,
+    #[cfg(test)]
+    test_fault: SceneRenderTestFault,
+}
+
+impl SceneRenderer {
+    pub(super) fn new(device: &wgpu::Device, shared: &SceneGpuShared) -> Self {
+        Self {
+            device_epoch: shared.device_epoch,
+            targets: SceneTargetCache::default(),
+            readback: super::capture::SceneReadbackCache::default(),
+            staging_belt: wgpu::util::StagingBelt::new(
+                device.clone(),
+                SCENE_STAGING_BELT_CHUNK_BYTES,
+            ),
+            #[cfg(test)]
+            submission_events: 0,
+            #[cfg(test)]
+            test_fault: SceneRenderTestFault::None,
+        }
+    }
+
+    /// Renders the frozen candidate without touching a host surface. All
+    /// request, sealed-HUD, and readback geometry checks run before an encoder
+    /// exists or the staging belt is written.
+    pub(super) fn render_offscreen(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::CaptureSafePreparedHudFrame,
+    ) -> Result<SceneRenderOutcome, SceneRenderError> {
+        if self.device_epoch != shared.device_epoch {
+            return Err(SceneRenderError::RendererDeviceEpochMismatch {
+                renderer: self.device_epoch,
+                shared: shared.device_epoch,
+            });
+        }
+        let binding = bind_scene_render_request(shared, candidate, request)
+            .map_err(SceneRenderError::Request)?;
+        candidate
+            .hud
+            .validate_redacted_capture(prepared_hud)
+            .map_err(SceneRenderError::Hud)?;
+        let readback_key = super::capture::SceneReadbackKey::new(
+            binding.target_key.device_epoch,
+            binding.request.physical_extent_pixels,
+        );
+        // Derive the exact copy layout before either cache can allocate.
+        super::capture::SceneReadbackLayout::checked(
+            readback_key.physical_extent_pixels[0],
+            readback_key.physical_extent_pixels[1],
+            readback_key.intermediate_format,
+            Some(device.limits().max_buffer_size),
+        )
+        .map_err(SceneRenderError::Readback)?;
+
+        self.targets
+            .ensure(device, shared, binding.target_key)
+            .map_err(SceneRenderError::Target)?;
+        self.readback
+            .ensure(device, shared, readback_key)
+            .map_err(SceneRenderError::Readback)?;
+        let targets = self
+            .targets
+            .current()
+            .expect("successful target ensure installs the requested target");
+        let readback = self
+            .readback
+            .current()
+            .expect("successful readback ensure installs the requested buffer");
+
+        #[cfg(test)]
+        let test_fault = std::mem::take(&mut self.test_fault);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let submission_result = (|| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glorp-scene-offscreen-encoder"),
+            });
+            encode_scene_world(&mut encoder, targets, shared, candidate);
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-chrome-prefix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.prefix,
+            );
+            // This is the only HUD draw in the general scene schedule. The hook
+            // rechecks generation immediately before its one fixed upload.
+            encode_redacted_hud_hook(
+                &mut encoder,
+                &mut self.staging_belt,
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                prepared_hud,
+            )?;
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-chrome-suffix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.suffix,
+            );
+            encode_aperture_composite(&mut encoder, targets, shared, candidate);
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &targets.intermediate_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback.buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(readback.layout.aligned_bytes_per_row()),
+                        rows_per_image: Some(readback.layout.height()),
+                    },
+                },
+                binding.target_key.extent,
+            );
+            #[cfg(test)]
+            if test_fault == SceneRenderTestFault::ScopedValidationAfterHudWrite {
+                // The immutable node buffer intentionally lacks COPY_SRC. This
+                // deterministic command is captured by the validation scope
+                // after the HUD belt has reserved and written its chunk.
+                encoder.copy_buffer_to_buffer(
+                    &candidate.node_buffer,
+                    0,
+                    &candidate.frame_buffer,
+                    0,
+                    wgpu::COPY_BUFFER_ALIGNMENT,
+                );
+            }
+            self.staging_belt.finish();
+            let submission = queue.submit([encoder.finish()]);
+            #[cfg(test)]
+            {
+                self.submission_events = self.submission_events.saturating_add(1);
+            }
+            self.staging_belt.recall();
+            Ok::<_, super::hud::HudGpuStagingError>(submission)
+        })();
+
+        let validation_error = pollster::block_on(validation.pop()).map(sanitize_gpu_error);
+        let out_of_memory_error = pollster::block_on(out_of_memory.pop()).map(sanitize_gpu_error);
+        let internal_error = pollster::block_on(internal.pop()).map(sanitize_gpu_error);
+        if let Some(category) =
+            select_scoped_gpu_error(validation_error, out_of_memory_error, internal_error)
+        {
+            // A belt whose transfer participated in a failed encoder/submission
+            // is never reused. Dropping it cancels outstanding remaps; the next
+            // call starts from one clean fixed-size chunk arena.
+            self.reset_staging_belt(device);
+            return Err(SceneRenderError::Gpu(category));
+        }
+        let submission = submission_result.map_err(SceneRenderError::Hud)?;
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        readback
+            .buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        let map_guard = SceneReadbackMapGuard::new(&readback.buffer);
+        #[cfg(test)]
+        match test_fault {
+            SceneRenderTestFault::PollTimeout => return Err(SceneRenderError::PollTimeout),
+            SceneRenderTestFault::PollWrongSubmissionIndex => {
+                return Err(SceneRenderError::PollWrongSubmissionIndex);
+            }
+            SceneRenderTestFault::MapCallbackCancelled => {
+                return Err(SceneRenderError::MapFailed);
+            }
+            _ => {}
+        }
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(SCENE_READBACK_TIMEOUT),
+            })
+            .map_err(scene_poll_error)?;
+        receiver
+            .recv_timeout(SCENE_MAP_CALLBACK_TIMEOUT)
+            .map_err(|_| SceneRenderError::MapFailed)?
+            .map_err(|_| SceneRenderError::MapFailed)?;
+        #[cfg(test)]
+        if test_fault == SceneRenderTestFault::MappedRangeFailure {
+            return Err(SceneRenderError::MappedRangeFailed);
+        }
+        let mapped = readback
+            .buffer
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|_| SceneRenderError::MappedRangeFailed)?;
+        #[cfg(test)]
+        let normalize_source = if test_fault == SceneRenderTestFault::NormalizeShortBuffer {
+            &mapped[..mapped.len().saturating_sub(1)]
+        } else {
+            &mapped
+        };
+        #[cfg(not(test))]
+        let normalize_source = &mapped;
+        let rgba = super::capture::normalize_scene_readback(normalize_source, readback.layout)
+            .map_err(SceneRenderError::Readback)?;
+        drop(mapped);
+        drop(map_guard);
+
+        Ok(SceneRenderOutcome {
+            version: binding.request.version,
+            physical_extent_pixels: binding.request.physical_extent_pixels,
+            rgba,
+        })
+    }
+
+    #[cfg(test)]
+    const fn cache_and_submission_events_for_test(&self) -> (u64, u64, u64) {
+        (
+            self.targets.creation_events(),
+            self.readback.creation_events(),
+            self.submission_events,
+        )
+    }
+
+    fn reset_staging_belt(&mut self, device: &wgpu::Device) {
+        self.staging_belt =
+            wgpu::util::StagingBelt::new(device.clone(), SCENE_STAGING_BELT_CHUNK_BYTES);
+    }
+
+    #[cfg(test)]
+    fn inject_test_fault(&mut self, fault: SceneRenderTestFault) {
+        assert_eq!(self.test_fault, SceneRenderTestFault::None);
+        self.test_fault = fault;
+    }
+}
+
+fn scene_poll_error(error: wgpu::PollError) -> SceneRenderError {
+    match error {
+        wgpu::PollError::Timeout => SceneRenderError::PollTimeout,
+        wgpu::PollError::WrongSubmissionIndex(_, _) => SceneRenderError::PollWrongSubmissionIndex,
+    }
+}
+
+struct SceneReadbackMapGuard<'buffer> {
+    buffer: &'buffer wgpu::Buffer,
+}
+
+impl<'buffer> SceneReadbackMapGuard<'buffer> {
+    const fn new(buffer: &'buffer wgpu::Buffer) -> Self {
+        Self { buffer }
+    }
+}
+
+impl Drop for SceneReadbackMapGuard<'_> {
+    fn drop(&mut self) {
+        // Also cancels a pending map on timeout/failure, returning the cached
+        // buffer to a reusable unmapped state.
+        self.buffer.unmap();
+    }
+}
+
+fn encode_scene_world(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-world"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.raw_scene_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    bind_scene_geometry(&mut pass, candidate);
+    for draw in candidate
+        .draw_plan
+        .opaque
+        .iter()
+        .chain(candidate.draw_plan.world_blended_unsorted.iter())
+    {
+        encode_planned_draw(&mut pass, shared, draw);
+    }
+}
+
+fn encode_scene_draws_without_depth<const N: usize>(
+    encoder: &mut wgpu::CommandEncoder,
+    label: &'static str,
+    target: &wgpu::TextureView,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+    draws: &[ScenePlannedDraw; N],
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    bind_scene_geometry(&mut pass, candidate);
+    for draw in draws {
+        encode_planned_draw(&mut pass, shared, draw);
+    }
+}
+
+fn bind_scene_geometry<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    candidate: &'pass GpuSceneCandidate,
+) {
+    pass.set_vertex_buffer(0, candidate.vertex_buffer.slice(..));
+    pass.set_index_buffer(candidate.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
+    pass.set_bind_group(1, &candidate.atlas_bind_group, &[]);
+}
+
+fn encode_planned_draw<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    shared: &'pass SceneGpuShared,
+    draw: &ScenePlannedDraw,
+) {
+    pass.set_pipeline(shared.pipelines.for_class(draw.pipeline));
+    pass.draw_indexed(draw.index_range.clone(), 0, draw.instance_range.clone());
+}
+
+fn encode_aperture_composite(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-aperture-composite"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.intermediate_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_pipeline(&shared.pipelines.aperture_composite);
+    pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
+    pass.set_bind_group(2, &targets.aperture_bind_group, &[]);
+    pass.draw(0..3, 0..1);
+}
+
 /// IEC 61966-2-1 sRGB electro-optical transfer for scene-owned color math.
 pub(super) fn scene_srgb_to_linear(value: f32) -> f32 {
     if value <= 0.04045 {
@@ -4379,6 +4812,11 @@ mod tests {
                 6,
             ),
         ];
+        // Keep the synthetic GPU fixture observable through its final dim pass:
+        // binding dim to the fractional-opacity child prevents it from hiding
+        // every preceding world, chrome, and HUD contribution.
+        fixture.template.primitives[6].node = fixture.template.nodes[1].id;
+        fixture.frame.nodes[1].opacity = 0.25;
         for slot in &mut fixture.template.static_atlas_recipes {
             slot.recipe = None;
         }
@@ -5378,6 +5816,41 @@ mod tests {
 
         let entry = SCENE_SHADER_SOURCE.split("fn fs_analytic(").nth(1).unwrap();
         assert!(entry.contains("if (output.a <= 0.0) {\n        discard;\n    }"));
+
+        let final_vertex = SCENE_SHADER_SOURCE
+            .split("fn vs_final(")
+            .nth(1)
+            .unwrap()
+            .split("@fragment")
+            .next()
+            .unwrap();
+        assert!(final_vertex.contains("vertex_index & 1u) * 4 - 1"));
+        assert!(final_vertex.contains("vertex_index & 2u) * 2 - 1"));
+        let oversized_triangle = (0..3_u32)
+            .map(|index| (((index & 1) as i32 * 4 - 1), ((index & 2) as i32 * 2 - 1)))
+            .collect::<Vec<_>>();
+        assert_eq!(oversized_triangle, [(-1, -1), (3, -1), (-1, 3)]);
+
+        let rust_source = include_str!("render.rs");
+        let aperture_encoder = rust_source
+            .split("fn encode_aperture_composite(")
+            .nth(1)
+            .unwrap()
+            .split("/// IEC 61966-2-1")
+            .next()
+            .unwrap();
+        assert!(aperture_encoder.contains("pass.draw(0..3, 0..1);"));
+        assert!(!aperture_encoder.contains("pass.draw(0..6"));
+
+        let world_encoder = rust_source
+            .split("fn encode_scene_world(")
+            .nth(1)
+            .unwrap()
+            .split("fn encode_scene_draws_without_depth")
+            .next()
+            .unwrap();
+        assert!(world_encoder.contains("load: wgpu::LoadOp::Clear(1.0)"));
+        assert!(world_encoder.contains("store: wgpu::StoreOp::Discard"));
     }
 
     #[test]
@@ -5935,6 +6408,515 @@ mod tests {
         assert_eq!(binding.target_key.extent.width, 720);
         assert_eq!(binding.target_key.extent.height, 720);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_synthetic_offscreen_renderer_captures_pixels_and_reuses_keyed_resources() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let prepared_hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let initial_staging = candidate.hud.staging_facts_for_test();
+        let mut renderer = SceneRenderer::new(&device, &shared);
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+
+        let outcome = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &prepared_hud,
+            )
+            .unwrap();
+        assert_eq!(outcome.version, request.version);
+        assert_eq!(
+            outcome.physical_extent_pixels,
+            request.physical_extent_pixels
+        );
+        let [width, height] = outcome.physical_extent_pixels;
+        assert_eq!(outcome.rgba.len(), (width * height * 4) as usize);
+        assert_eq!(&outcome.rgba[..4], &[0, 0, 0, 0]);
+        let center = (((height / 2) * width + width / 2) * 4) as usize;
+        let center_pixel: [u8; 4] = outcome.rgba[center..center + 4].try_into().unwrap();
+        for (actual, expected) in center_pixel.into_iter().zip([21, 23, 34, 255]) {
+            assert!(
+                actual.abs_diff(expected) <= 2,
+                "synthetic center pixel actual={center_pixel:?}"
+            );
+        }
+        let staged = candidate.hud.staging_facts_for_test();
+        assert_eq!(staged.sensitive_copies, initial_staging.sensitive_copies);
+        assert_eq!(staged.redacted_copies, initial_staging.redacted_copies + 1);
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 1));
+
+        renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &prepared_hud,
+            )
+            .unwrap();
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 2));
+
+        let mut new_surface = request.clone();
+        new_surface.version.surface =
+            crate::presentation::companion_scene::SurfaceEpoch(new_surface.version.surface.0 + 1);
+        renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                new_surface,
+                &prepared_hud,
+            )
+            .unwrap();
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (2, 1, 3));
+
+        let resized = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            0.5,
+        );
+        renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                resized,
+                &prepared_hud,
+            )
+            .unwrap();
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (3, 2, 4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_offscreen_preflight_rejects_request_and_hud_before_staging_or_submission() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let valid_hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let mut renderer = SceneRenderer::new(&device, &shared);
+        let mut malformed = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+        malformed.backing_scale = f64::NAN;
+        let staging = candidate.hud.staging_facts_for_test();
+        assert_eq!(
+            renderer.render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                malformed,
+                &valid_hud,
+            ),
+            Err(SceneRenderError::Request(
+                SceneRenderRequestError::InvalidBackingScale
+            )),
+        );
+        assert_eq!(candidate.hud.staging_facts_for_test(), staging);
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (0, 0, 0));
+
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+        let wrong_hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            crate::presentation::companion_scene::ResourceGeneration(
+                upload.generation_key.resources.0 + 1,
+            ),
+        );
+        assert_eq!(
+            renderer.render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request,
+                &wrong_hud,
+            ),
+            Err(SceneRenderError::Hud(
+                super::super::hud::HudGpuStagingError::ResourceGenerationMismatch
+            )),
+        );
+        assert_eq!(candidate.hud.staging_facts_for_test(), staging);
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (0, 0, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_renderer_is_device_epoch_bound_before_cache_encoder_or_staging_work() {
+        let (device_a, queue_a) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload_a = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared_a = SceneGpuShared::create(&device_a, upload_a.generation_key.device).unwrap();
+        let mut candidate_a =
+            materialize_gpu_candidate(&device_a, &queue_a, &shared_a, &upload_a, &atlas).unwrap();
+        let hud_a = candidate_a
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload_a.generation_key.resources),
+            )
+            .unwrap();
+        let request_a = render_request_fixture(
+            candidate_a.generation_key,
+            candidate_a.source_revisions,
+            candidate_a.logical_viewport_points,
+            1.0,
+        );
+        let mut old_renderer = SceneRenderer::new(&device_a, &shared_a);
+        old_renderer
+            .render_offscreen(
+                &device_a,
+                &queue_a,
+                &shared_a,
+                &mut candidate_a,
+                request_a,
+                &hud_a,
+            )
+            .unwrap();
+        assert_eq!(
+            old_renderer.cache_and_submission_events_for_test(),
+            (1, 1, 1)
+        );
+
+        let (device_b, queue_b) = native_device();
+        let mut upload_b = upload_a.clone();
+        upload_b.generation_key.device =
+            crate::presentation::companion_scene::DeviceEpoch(upload_a.generation_key.device.0 + 1);
+        let shared_b = SceneGpuShared::create(&device_b, upload_b.generation_key.device).unwrap();
+        let mut candidate_b =
+            materialize_gpu_candidate(&device_b, &queue_b, &shared_b, &upload_b, &atlas).unwrap();
+        let hud_b = candidate_b
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload_b.generation_key.resources),
+            )
+            .unwrap();
+        let request_b = render_request_fixture(
+            candidate_b.generation_key,
+            candidate_b.source_revisions,
+            candidate_b.logical_viewport_points,
+            1.0,
+        );
+        let staging_before = candidate_b.hud.staging_facts_for_test();
+        assert_eq!(
+            old_renderer.render_offscreen(
+                &device_b,
+                &queue_b,
+                &shared_b,
+                &mut candidate_b,
+                request_b.clone(),
+                &hud_b,
+            ),
+            Err(SceneRenderError::RendererDeviceEpochMismatch {
+                renderer: shared_a.device_epoch,
+                shared: shared_b.device_epoch,
+            }),
+        );
+        assert_eq!(
+            old_renderer.cache_and_submission_events_for_test(),
+            (1, 1, 1)
+        );
+        assert_eq!(candidate_b.hud.staging_facts_for_test(), staging_before);
+
+        let mut new_renderer = SceneRenderer::new(&device_b, &shared_b);
+        let outcome = new_renderer
+            .render_offscreen(
+                &device_b,
+                &queue_b,
+                &shared_b,
+                &mut candidate_b,
+                request_b.clone(),
+                &hud_b,
+            )
+            .unwrap();
+        assert_eq!(outcome.version, request_b.version);
+        assert_eq!(
+            new_renderer.cache_and_submission_events_for_test(),
+            (1, 1, 1)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_scoped_encode_failure_resets_the_belt_and_same_renderer_recovers() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+        let mut renderer = SceneRenderer::new(&device, &shared);
+        renderer.inject_test_fault(SceneRenderTestFault::ScopedValidationAfterHudWrite);
+        assert_eq!(
+            renderer.render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            ),
+            Err(SceneRenderError::Gpu(ScopedGpuErrorCategory::Validation)),
+        );
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 1));
+        let recovered = renderer
+            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .unwrap();
+        assert_eq!(recovered.rgba.len(), 360 * 360 * 4);
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 2));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_post_submit_failures_unmap_and_recover_with_both_caches_reused() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+        let mut renderer = SceneRenderer::new(&device, &shared);
+
+        for (fault, expected) in [
+            (
+                SceneRenderTestFault::PollTimeout,
+                SceneRenderError::PollTimeout,
+            ),
+            (
+                SceneRenderTestFault::PollWrongSubmissionIndex,
+                SceneRenderError::PollWrongSubmissionIndex,
+            ),
+            (
+                SceneRenderTestFault::MapCallbackCancelled,
+                SceneRenderError::MapFailed,
+            ),
+            (
+                SceneRenderTestFault::MappedRangeFailure,
+                SceneRenderError::MappedRangeFailed,
+            ),
+            (
+                SceneRenderTestFault::NormalizeShortBuffer,
+                SceneRenderError::Readback(
+                    super::super::capture::SceneReadbackError::SourceBufferTooShort,
+                ),
+            ),
+        ] {
+            renderer.inject_test_fault(fault);
+            assert_eq!(
+                renderer.render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &hud,
+                ),
+                Err(expected),
+                "fault={fault:?}",
+            );
+            let before_recovery = renderer.cache_and_submission_events_for_test();
+            assert_eq!((before_recovery.0, before_recovery.1), (1, 1));
+            let recovered = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &hud,
+                )
+                .unwrap();
+            assert_eq!(recovered.version, request.version);
+            let after_recovery = renderer.cache_and_submission_events_for_test();
+            assert_eq!((after_recovery.0, after_recovery.1), (1, 1));
+            assert_eq!(after_recovery.2, before_recovery.2 + 1);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_synthetic_full_pass_changes_when_each_major_stage_is_omitted() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(upload.generation_key.resources),
+            )
+            .unwrap();
+        let zero_hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            upload.generation_key.resources,
+        );
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+        let mut renderer = SceneRenderer::new(&device, &shared);
+        let baseline_plan = candidate.draw_plan.clone();
+        let baseline = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            )
+            .unwrap();
+
+        candidate
+            .draw_plan
+            .world_blended_unsorted
+            .retain(|draw| draw.pipeline != ScenePipelineClass::WorldMultiplyAnalytic);
+        assert_eq!(
+            baseline_plan.world_blended_unsorted.len(),
+            candidate.draw_plan.world_blended_unsorted.len() + 1,
+        );
+        let without_floor = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            )
+            .unwrap();
+        candidate.draw_plan = baseline_plan.clone();
+        assert!(
+            without_floor.rgba != baseline.rgba,
+            "floor omission was inert"
+        );
+        assert_eq!(candidate.draw_plan, baseline_plan);
+
+        for draw in &mut candidate.draw_plan.chrome.prefix {
+            draw.instance_range = 0..0;
+        }
+        let without_chrome_prefix = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            )
+            .unwrap();
+        candidate.draw_plan = baseline_plan.clone();
+        assert!(
+            without_chrome_prefix.rgba != baseline.rgba,
+            "chrome-prefix omission was inert"
+        );
+        assert_eq!(candidate.draw_plan, baseline_plan);
+
+        let without_hud = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &zero_hud,
+            )
+            .unwrap();
+        assert!(without_hud.rgba != baseline.rgba, "HUD omission was inert");
+        assert_eq!(candidate.draw_plan, baseline_plan);
+
+        candidate.draw_plan.chrome.suffix[0].instance_range = 0..0;
+        let without_dim = renderer
+            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .unwrap();
+        candidate.draw_plan = baseline_plan.clone();
+        assert!(without_dim.rgba != baseline.rgba, "dim omission was inert");
+        assert_eq!(candidate.draw_plan, baseline_plan);
     }
 
     #[cfg(target_os = "macos")]
