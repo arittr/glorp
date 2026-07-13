@@ -548,9 +548,7 @@ pub(crate) fn classify_snapshot_changes(
     if canonical_ambient_frames_changed(previous, newest) {
         changes.frame.insert(FrameChangeMask::AMBIENT_INSTANCES);
     }
-    if super::canonical_activity_pulse_state(previous)
-        != super::canonical_activity_pulse_state(newest)
-    {
+    if super::canonical_activity_status(previous) != super::canonical_activity_status(newest) {
         changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
     }
     if previous.content.hud_glyphs != newest.content.hud_glyphs {
@@ -641,6 +639,7 @@ pub(crate) fn validate_snapshot(
         || !snapshot.frame.pet_depth_cue.y_offset_points_up.is_finite()
         || !snapshot.frame.pet_depth_cue.opacity.is_finite()
         || !snapshot.frame.pet_depth_cue.saturation.is_finite()
+        || !snapshot.frame.activity_opacity.is_finite()
         || !snapshot
             .frame
             .gauge_fractions
@@ -686,6 +685,7 @@ pub(crate) fn validate_snapshot(
         || snapshot.frame.pet_depth_cue.scale <= 0.0
         || !(0.0..=1.0).contains(&snapshot.frame.pet_depth_cue.opacity)
         || !(0.0..=1.0).contains(&snapshot.frame.pet_depth_cue.saturation)
+        || !(0.0..=1.0).contains(&snapshot.frame.activity_opacity)
         || snapshot
             .frame
             .gauge_fractions
@@ -748,7 +748,13 @@ pub(crate) fn validate_snapshot(
     if snapshot.frame.dimmed != (snapshot.frame.dim_amount > 0.0) {
         return Err(SnapshotRejection::InconsistentIdentity);
     }
+    if !snapshot.frame.activity_recent && snapshot.frame.activity_opacity != 0.0 {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
     if snapshot.frame.asleep && !snapshot.frame.calm {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
+    if snapshot.frame.asleep && snapshot.frame.activity_recent {
         return Err(SnapshotRejection::InconsistentIdentity);
     }
     let resolved_depth = crate::round::depth::resolve_smooth_depth(
@@ -903,6 +909,24 @@ pub(crate) fn validate_snapshot(
     for slot in &snapshot.content.ambient_semantics {
         if slot.kind.is_some() != slot.glyph.is_some() {
             return Err(SnapshotRejection::InvalidValue);
+        }
+    }
+    for (semantic, frame) in snapshot
+        .content
+        .ambient_semantics
+        .iter()
+        .zip(&snapshot.frame.ambient_instances)
+    {
+        if semantic.kind.is_none()
+            && semantic.glyph.is_none()
+            && (frame.visible
+                || frame
+                    .position_points
+                    .iter()
+                    .any(|value| value.to_bits() != 0)
+                || frame.opacity.to_bits() != 0)
+        {
+            return Err(SnapshotRejection::InconsistentIdentity);
         }
     }
     Ok(())
@@ -1460,7 +1484,7 @@ impl CaptureLease<'_> {
             snapshot.frame.helper_trouble,
             snapshot.frame.asleep,
             snapshot.frame.dimmed,
-            super::canonical_activity_pulse_state(snapshot).0,
+            super::canonical_activity_status(snapshot).0,
         )
     }
 
@@ -2567,7 +2591,6 @@ mod tests {
                 hud_glyphs: (0..24)
                     .map(|slot| HudGlyphSnapshot { slot, glyph: None })
                     .collect(),
-                activity_pulse_age_ms: Some(100),
             },
             frame: FrameSnapshot {
                 elapsed_ms: 1_000,
@@ -2585,6 +2608,8 @@ mod tests {
                 asleep: false,
                 calm: false,
                 helper_trouble: false,
+                activity_recent: false,
+                activity_opacity: 0.0,
                 gauge_levels: [GaugeLevelSnapshot::Medium; 4],
                 gauge_fractions: [0.375; 4],
                 dimmed: false,
@@ -2875,14 +2900,10 @@ mod tests {
             .hud_instances[0]
             .position_points[0] +=
             1.0);
-        assert_class!(activity_age, ChangeFamilies::NONE, |s| s
-            .content
-            .activity_pulse_age_ms =
-            Some(101));
-        assert_class!(activity_activation, ChangeFamilies::NONE, |s| s
-            .content
-            .activity_pulse_age_ms =
-            None);
+        assert_class!(activity_status, frame, |s| {
+            s.frame.activity_recent = true;
+            s.frame.activity_opacity = 0.75;
+        });
 
         assert_class!(pet_anchor, frame, |s| s.frame.pet_anchor_points[0] += 1.0);
         assert_class!(room_glyph_frame, frame, |s| s.frame.room_glyphs.push(
@@ -2990,16 +3011,8 @@ mod tests {
                 }),
             ),
             (
-                "activity age",
-                Box::new(|s| s.content.activity_pulse_age_ms = None),
-            ),
-            (
                 "hud lines",
                 Box::new(|s| s.frame.hud_lines[0] = "ignored".to_owned()),
-            ),
-            (
-                "empty ambient frame",
-                Box::new(|s| s.frame.ambient_instances[0].position_points[0] += 1.0),
             ),
             (
                 "empty hud frame",
@@ -3123,17 +3136,8 @@ mod tests {
             (
                 "activity status",
                 Box::new(|s| {
-                    s.content.ambient_semantics[3] = AmbientSemanticSnapshot {
-                        slot: 3,
-                        kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
-                        glyph: Some('\u{25cc}'),
-                    };
-                    s.frame.ambient_instances[3] = AmbientFrameSnapshot {
-                        slot: 3,
-                        visible: true,
-                        position_points: [40.0, 50.0],
-                        opacity: 0.6,
-                    };
+                    s.frame.activity_recent = true;
+                    s.frame.activity_opacity = 0.6;
                 }),
             ),
             (
@@ -3226,17 +3230,8 @@ mod tests {
         assert!(!trouble.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
 
         let status = classify(|s| {
-            s.content.ambient_semantics[0] = AmbientSemanticSnapshot {
-                slot: 0,
-                kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
-                glyph: Some('\u{25cc}'),
-            };
-            s.frame.ambient_instances[0] = AmbientFrameSnapshot {
-                slot: 0,
-                visible: true,
-                position_points: [20.0, 30.0],
-                opacity: 0.75,
-            };
+            s.frame.activity_recent = true;
+            s.frame.activity_opacity = 0.75;
         });
         assert!(status.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
 
@@ -3249,48 +3244,46 @@ mod tests {
     #[test]
     fn status_classification_uses_only_the_canonical_activity_tuple() {
         let mut active = (*snapshot()).clone();
-        active.content.ambient_semantics[3] = AmbientSemanticSnapshot {
-            slot: 3,
-            kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
-            glyph: Some('\u{25cc}'),
-        };
-        active.frame.ambient_instances[3] = AmbientFrameSnapshot {
-            slot: 3,
-            visible: true,
-            position_points: [40.0, 50.0],
-            opacity: 0.6,
-        };
+        active.frame.activity_recent = true;
+        active.frame.activity_opacity = 0.6;
 
         let mut moved = active.clone();
-        moved.frame.ambient_instances[3].position_points[0] += 1.0;
+        moved.content.ambient_semantics.reverse();
+        moved.frame.ambient_instances.rotate_left(3);
         let changes = classify_snapshot_changes(&active, &moved);
-        assert!(changes.frame().contains(FrameChangeMask::AMBIENT_INSTANCES));
         assert!(!changes.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
+        assert_eq!(super::super::canonical_activity_status(&moved), (true, 0.6));
 
         let mut faded = active.clone();
-        faded.frame.ambient_instances[3].opacity = 0.4;
+        faded.frame.activity_opacity = 0.4;
         let changes = classify_snapshot_changes(&active, &faded);
-        assert!(changes.frame().contains(FrameChangeMask::AMBIENT_INSTANCES));
+        assert!(!changes.frame().contains(FrameChangeMask::AMBIENT_INSTANCES));
         assert!(changes.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
 
         let mut hidden = active.clone();
-        hidden.frame.ambient_instances[3].visible = false;
+        hidden.frame.activity_recent = false;
+        hidden.frame.activity_opacity = 0.0;
         assert_eq!(
-            super::super::canonical_activity_pulse_state(&hidden),
+            super::super::canonical_activity_status(&hidden),
             (false, 0.0)
         );
-        let mut hidden_opacity_changed = hidden.clone();
-        hidden_opacity_changed.frame.ambient_instances[3].opacity = 0.2;
-        let changes = classify_snapshot_changes(&hidden, &hidden_opacity_changed);
+        let mut ambient_active = hidden.clone();
+        ambient_active.content.ambient_semantics[3] = AmbientSemanticSnapshot {
+            slot: 3,
+            kind: Some(AmbientSemanticKindSnapshot::Mote),
+            glyph: Some('·'),
+        };
+        ambient_active.frame.ambient_instances[3] = AmbientFrameSnapshot {
+            slot: 3,
+            visible: true,
+            position_points: [40.0, 50.0],
+            opacity: 0.2,
+        };
+        let mut ambient_opacity_changed = ambient_active.clone();
+        ambient_opacity_changed.frame.ambient_instances[3].opacity = 0.4;
+        let changes = classify_snapshot_changes(&ambient_active, &ambient_opacity_changed);
         assert!(changes.frame().contains(FrameChangeMask::AMBIENT_INSTANCES));
         assert!(!changes.frame().contains(FrameChangeMask::STATUS_VISIBILITY));
-
-        let mut raw_age_only = active.clone();
-        raw_age_only.content.activity_pulse_age_ms = None;
-        assert_eq!(
-            classify_snapshot_changes(&active, &raw_age_only),
-            SnapshotChangeSet::NONE
-        );
     }
 
     #[test]
@@ -4344,6 +4337,104 @@ mod tests {
     }
 
     #[test]
+    fn activity_status_requires_a_private_bounded_coherent_fade() {
+        let base = snapshot();
+
+        let mut non_finite = (*base).clone();
+        non_finite.frame.activity_opacity = f32::NAN;
+        assert_eq!(
+            validate_snapshot(&non_finite),
+            Err(SnapshotRejection::NonFinite)
+        );
+
+        let mut out_of_range = (*base).clone();
+        out_of_range.frame.activity_recent = true;
+        out_of_range.frame.activity_opacity = 1.01;
+        assert_eq!(
+            validate_snapshot(&out_of_range),
+            Err(SnapshotRejection::InvalidValue)
+        );
+
+        let mut inconsistent = (*base).clone();
+        inconsistent.frame.activity_opacity = 0.25;
+        assert_eq!(
+            validate_snapshot(&inconsistent),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+
+        let mut recent = (*base).clone();
+        recent.frame.activity_recent = true;
+        recent.frame.activity_opacity = 0.25;
+        assert_eq!(validate_snapshot(&recent), Ok(()));
+
+        recent.frame.activity_opacity = 0.0;
+        assert_eq!(validate_snapshot(&recent), Ok(()));
+    }
+
+    #[test]
+    fn empty_ambient_semantic_rejects_a_visible_frame() {
+        let mut invalid = (*snapshot()).clone();
+        invalid.frame.ambient_instances[0].visible = true;
+        assert_eq!(
+            validate_snapshot(&invalid),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+    }
+
+    #[test]
+    fn empty_ambient_semantic_rejects_a_positioned_frame() {
+        let mut invalid = (*snapshot()).clone();
+        invalid.frame.ambient_instances[0].position_points = [1.0, 0.0];
+        assert_eq!(
+            validate_snapshot(&invalid),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+    }
+
+    #[test]
+    fn empty_ambient_semantic_rejects_a_nonzero_opacity_frame() {
+        let mut invalid = (*snapshot()).clone();
+        invalid.frame.ambient_instances[0].opacity = 0.1;
+        assert_eq!(
+            validate_snapshot(&invalid),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+    }
+
+    #[test]
+    fn empty_ambient_semantic_rejects_negative_zero_frame_state() {
+        let base = snapshot();
+        let mut invalid = (*base).clone();
+        invalid.frame.ambient_instances[0].position_points[0] = -0.0;
+        assert_eq!(
+            validate_snapshot(&invalid),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+
+        let mut invalid = (*base).clone();
+        invalid.frame.ambient_instances[0].opacity = -0.0;
+        assert_eq!(
+            validate_snapshot(&invalid),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+    }
+
+    #[test]
+    fn asleep_snapshot_rejects_recent_activity_even_at_zero_opacity() {
+        let mut invalid = (*snapshot()).clone();
+        invalid.frame.asleep = true;
+        invalid.frame.calm = true;
+        invalid.frame.activity_recent = true;
+        invalid.frame.activity_opacity = 0.0;
+        let depth = invalid.frame.pet_depth;
+        set_pet_depth(&mut invalid, depth);
+        assert_eq!(
+            validate_snapshot(&invalid),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+    }
+
+    #[test]
     fn every_owned_counter_overflow_is_typed_and_non_mutating() {
         let mut layout_runtime = runtime();
         let initial = layout_runtime.active_version().unwrap();
@@ -5211,6 +5302,80 @@ mod tests {
         let (not_dimmed, _, not_dimmed_artifact_json, _) = identity_for(0.31, 0.0);
         assert_ne!(first, not_dimmed);
         assert_ne!(first_artifact_json, not_dimmed_artifact_json);
+    }
+
+    #[test]
+    fn capture_identity_quantizes_private_activity_fade_but_preserves_live_frame() {
+        fn capture_for_status(
+            recent: bool,
+            opacity: f32,
+        ) -> (
+            super::super::contract::CaptureSourceIdentity,
+            u64,
+            String,
+            super::super::contract::CompanionCaptureStateAlias,
+            f32,
+        ) {
+            let mut source = (*snapshot()).clone();
+            source.frame.activity_recent = recent;
+            source.frame.activity_opacity = opacity;
+            let runtime = CompanionSceneRuntimeState::with_active(Arc::new(source)).unwrap();
+            let lease = runtime.capture_lease().unwrap();
+            let status_id = lease
+                .template()
+                .nodes
+                .iter()
+                .find(|node| node.alias.as_str() == "chrome.status")
+                .expect("status node")
+                .id;
+            let live_opacity = lease
+                .frame()
+                .nodes
+                .iter()
+                .find(|node| node.node == status_id)
+                .expect("status frame")
+                .opacity;
+            let artifacts = super::super::contract::SceneArtifacts::try_from_parts(
+                lease.template(),
+                lease.content(),
+                lease.frame(),
+            )
+            .unwrap();
+            (
+                lease.source_identity(),
+                lease.frame_checksum(),
+                serde_json::to_string(&artifacts).unwrap(),
+                lease.logical_state_alias(),
+                live_opacity,
+            )
+        }
+
+        let first = capture_for_status(true, 0.2);
+        let second = capture_for_status(true, 0.8);
+        assert_ne!(
+            first.1, second.1,
+            "live frame identity must preserve exact fade"
+        );
+        assert_eq!((first.4, second.4), (0.2, 0.8));
+        assert_eq!(
+            first.0, second.0,
+            "capture checksum must quantize exact fade"
+        );
+        assert_eq!(first.2, second.2, "artifact JSON must quantize exact fade");
+        assert_eq!(first.3, second.3);
+        assert_eq!(
+            first.3,
+            super::super::contract::CompanionCaptureStateAlias::Active
+        );
+
+        let quiet = capture_for_status(false, 0.0);
+        assert_ne!(first.0, quiet.0);
+        assert_ne!(first.2, quiet.2);
+        assert_ne!(first.3, quiet.3);
+        assert_eq!(
+            quiet.3,
+            super::super::contract::CompanionCaptureStateAlias::Normal
+        );
     }
 
     #[test]

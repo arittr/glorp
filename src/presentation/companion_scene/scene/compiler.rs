@@ -112,19 +112,14 @@ impl SceneGenerationData {
         }
         if semantic
             .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::AMBIENT)
-            || semantic.contains(
-                crate::presentation::companion_scene::runtime::SemanticChangeMask::MOOD_WEATHER,
-            )
         {
             for source in &snapshot.content.ambient_semantics {
                 content.ambient_slots.push(AmbientContentSlot {
                     slot: source.slot,
                     kind: source.kind.map(|kind| match kind {
-                        crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Weather => AmbientContentKind::Weather,
-                        crate::presentation::companion_scene::AmbientSemanticKindSnapshot::ActivityPulse => {
-                            AmbientContentKind::ActivityPulse
+                        crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Mote => {
+                            AmbientContentKind::Mote
                         }
-                        crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Mote => AmbientContentKind::Mote,
                     }),
                     glyph: source
                         .glyph
@@ -237,7 +232,7 @@ impl SceneGenerationData {
             crate::presentation::companion_scene::runtime::FrameChangeMask::STATUS_VISIBILITY,
         ) {
             let (status_visible, status_opacity) =
-                super::super::canonical_activity_pulse_state(snapshot);
+                super::super::canonical_activity_status(snapshot);
             for name in ["pet.body", "pet.particles", "chrome.status"] {
                 let node_id = self
                     .template
@@ -1541,12 +1536,6 @@ fn build_content(
             AuthoredGlyph::new(glyph).map_err(|_| SceneGenerationError::InvalidGlyph)?;
         }
         content.ambient_slots[slot].kind = semantic.kind.map(|kind| match kind {
-            crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Weather => {
-                AmbientContentKind::Weather
-            }
-            crate::presentation::companion_scene::AmbientSemanticKindSnapshot::ActivityPulse => {
-                AmbientContentKind::ActivityPulse
-            }
             crate::presentation::companion_scene::AmbientSemanticKindSnapshot::Mote => {
                 AmbientContentKind::Mote
             }
@@ -1862,7 +1851,7 @@ fn build_frame(
         Some(!snapshot.frame.asleep),
         Some(snapshot.frame.pet_depth_cue.opacity),
     )?;
-    let (status_visible, status_opacity) = super::super::canonical_activity_pulse_state(snapshot);
+    let (status_visible, status_opacity) = super::super::canonical_activity_status(snapshot);
     set_node(
         &mut frame,
         "chrome.status",

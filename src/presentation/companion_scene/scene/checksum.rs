@@ -147,8 +147,6 @@ fn pet_palette_role_tag(value: PetPaletteRole) -> u8 {
 fn ambient_content_tag(value: AmbientContentKind) -> u8 {
     match value {
         AmbientContentKind::Mote => 1,
-        AmbientContentKind::ActivityPulse => 2,
-        AmbientContentKind::Weather => 3,
     }
 }
 

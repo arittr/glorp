@@ -291,7 +291,6 @@ pub struct ContentSnapshot {
     pub tank_animation_states: Vec<TankAnimationSnapshot>,
     pub ambient_semantics: Vec<AmbientSemanticSnapshot>,
     pub hud_glyphs: Vec<HudGlyphSnapshot>,
-    pub activity_pulse_age_ms: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -353,8 +352,6 @@ pub struct TankCellSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AmbientSemanticKindSnapshot {
-    Weather,
-    ActivityPulse,
     Mote,
 }
 
@@ -437,6 +434,12 @@ pub struct FrameSnapshot {
     pub asleep: bool,
     pub calm: bool,
     pub helper_trouble: bool,
+    /// Privacy-safe recent-activity state used by serialized snapshots.
+    pub activity_recent: bool,
+    /// Exact renderer fade. Feed timing must not cross the serialization or
+    /// Debug boundary.
+    #[serde(skip)]
+    pub activity_opacity: f32,
     /// The privacy-safe projection used by serialized snapshots.
     pub gauge_levels: [GaugeLevelSnapshot; 4],
     /// Exact renderer input. Live ratios must not cross the serialization or
@@ -469,6 +472,8 @@ impl std::fmt::Debug for FrameSnapshot {
             .field("asleep", &self.asleep)
             .field("calm", &self.calm)
             .field("helper_trouble", &self.helper_trouble)
+            .field("activity_recent", &self.activity_recent)
+            .field("activity_opacity", &"<redacted>")
             .field("gauge_levels", &self.gauge_levels)
             .field("gauge_fractions", &"<redacted>")
             .field("dimmed", &self.dimmed)
@@ -524,22 +529,12 @@ pub struct AmbientFrameSnapshot {
     pub opacity: f32,
 }
 
-pub(crate) fn canonical_activity_pulse_state(snapshot: &CompanionSceneSnapshot) -> (bool, f32) {
-    let Some(semantic) = snapshot
-        .content
-        .ambient_semantics
-        .iter()
-        .find(|semantic| semantic.kind == Some(AmbientSemanticKindSnapshot::ActivityPulse))
-    else {
-        return (false, 0.0);
-    };
-    snapshot
-        .frame
-        .ambient_instances
-        .iter()
-        .find(|frame| frame.slot == semantic.slot)
-        .filter(|frame| frame.visible)
-        .map_or((false, 0.0), |frame| (true, frame.opacity))
+pub(crate) fn canonical_activity_status(snapshot: &CompanionSceneSnapshot) -> (bool, f32) {
+    if snapshot.frame.activity_recent {
+        (true, snapshot.frame.activity_opacity)
+    } else {
+        (false, 0.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]

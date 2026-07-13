@@ -2584,7 +2584,7 @@ mod tests {
         });
         delta.ambient_slots.push(AmbientContentSlot {
             slot: 0,
-            kind: Some(AmbientContentKind::ActivityPulse),
+            kind: Some(AmbientContentKind::Mote),
             glyph: Some(AuthoredGlyph::new('✦').unwrap()),
         });
         assert_eq!(validate_content_delta(&delta), Ok(()));

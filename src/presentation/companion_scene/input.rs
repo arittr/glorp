@@ -1,14 +1,14 @@
 use super::{
-    AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
-    AuthoredDepthSnapshot, CompanionDayPhase, CompanionSceneProjectionError,
-    CompanionSceneProjectionInput, CompanionSceneSnapshot, ContentSnapshot, DepthCue,
-    FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot, HudGlyphSnapshot, PaletteSnapshot,
-    PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
-    PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
-    TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot,
-    TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
-    COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS,
-    MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
+    AmbientFrameSnapshot, AmbientSemanticSnapshot, AuthoredDepthSnapshot, CompanionDayPhase,
+    CompanionSceneProjectionError, CompanionSceneProjectionInput, CompanionSceneSnapshot,
+    ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot,
+    HudGlyphSnapshot, PaletteSnapshot, PetLatticeSnapshot, PetRoleSpanSnapshot,
+    PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot, PropTopologySnapshot,
+    PropZoneSnapshot, RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot,
+    TankCellSnapshot, TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
+    TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
+    MAX_VISIBLE_PROPS, MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS,
+    PET_LATTICE_WIDTH,
 };
 use crate::game::habitat::{HabitatPetLayer, HabitatPropZone, TankLifeRouteFamily};
 use crate::pet::palette::{body_glow, ResolvedPalette, Rgb};
@@ -51,6 +51,12 @@ impl SemanticActivityPulse {
 
     pub(crate) const fn is_quiet(self) -> bool {
         matches!(self, Self::Quiet)
+    }
+
+    pub(crate) fn opacity(self) -> f32 {
+        self.age_ms()
+            .map(|age| 1.0 - f32::from(age).min(2_000.0) / 2_000.0)
+            .unwrap_or(0.0)
     }
 }
 
@@ -195,8 +201,7 @@ impl CompanionSceneSnapshot {
         let tank_animation_states =
             project_tank_animation_states(vm, &visible_tank_inhabitants, input, motion);
         let hud = crate::round::hud::review_capture_hud_text();
-        let (ambient_semantics, ambient_instances) =
-            project_ambient_slots(activity_pulse, room_profile.room_weather, layout);
+        let (ambient_semantics, ambient_instances) = project_ambient_slots();
         let (room_glyphs, room_glyph_frames) =
             project_room_glyphs(&room_profile, vm, motion, input, cell_extent_points)?;
         let (hud_glyphs, hud_instances) = project_hud_slots(&hud, layout);
@@ -250,7 +255,6 @@ impl CompanionSceneSnapshot {
                 tank_animation_states,
                 ambient_semantics,
                 hud_glyphs,
-                activity_pulse_age_ms: activity_pulse.age_ms(),
             },
             frame: FrameSnapshot {
                 elapsed_ms,
@@ -270,6 +274,8 @@ impl CompanionSceneSnapshot {
                 asleep,
                 calm,
                 helper_trouble: helper_health == SemanticHelperHealth::Trouble,
+                activity_recent: !activity_pulse.is_quiet(),
+                activity_opacity: activity_pulse.opacity(),
                 gauge_levels: gauge_fractions
                     .map(|value| GaugeLevelSnapshot::from_fraction(f64::from(value))),
                 gauge_fractions,
@@ -686,61 +692,20 @@ fn project_room_glyphs(
     Ok((content, frame))
 }
 
-fn project_ambient_slots(
-    activity: SemanticActivityPulse,
-    weather: RoomWeatherLayer,
-    layout: super::CompanionLogicalLayout,
-) -> (Vec<AmbientSemanticSnapshot>, Vec<AmbientFrameSnapshot>) {
-    let weather_glyph = match weather {
-        RoomWeatherLayer::Clear => None,
-        RoomWeatherLayer::CacheMist => Some('~'),
-        RoomWeatherLayer::OutputSparks => Some('✦'),
-        RoomWeatherLayer::ReasoningPulse => Some('◌'),
-        RoomWeatherLayer::Mixed => Some('·'),
-    };
-    let mut semantics = (0..super::scene::MAX_AMBIENT_INSTANCES)
+fn project_ambient_slots() -> (Vec<AmbientSemanticSnapshot>, Vec<AmbientFrameSnapshot>) {
+    let semantics = (0..super::scene::MAX_AMBIENT_INSTANCES)
         .map(|slot| AmbientSemanticSnapshot {
             slot: slot as u8,
             kind: None,
             glyph: None,
         })
         .collect::<Vec<_>>();
-    if let Some(glyph) = weather_glyph {
-        semantics[0] = AmbientSemanticSnapshot {
-            slot: 0,
-            kind: Some(AmbientSemanticKindSnapshot::Weather),
-            glyph: Some(glyph),
-        };
-    }
-    if activity.age_ms().is_some() {
-        semantics[1] = AmbientSemanticSnapshot {
-            slot: 1,
-            kind: Some(AmbientSemanticKindSnapshot::ActivityPulse),
-            glyph: Some('✦'),
-        };
-    }
-    let age_opacity = activity
-        .age_ms()
-        .map(|age| 1.0 - f32::from(age).min(2_000.0) / 2_000.0)
-        .unwrap_or(0.0);
     let frames = (0..super::scene::MAX_AMBIENT_INSTANCES)
-        .map(|slot| {
-            let visible = semantics[slot].kind.is_some();
-            let opacity = match slot {
-                1 => age_opacity,
-                _ if visible => 1.0,
-                _ => 0.0,
-            };
-            AmbientFrameSnapshot {
-                slot: slot as u8,
-                visible,
-                position_points: match slot {
-                    0 => [layout.width_points * 0.25, layout.height_points * 0.22],
-                    1 => [layout.width_points * 0.5, layout.height_points * 0.18],
-                    _ => [0.0; 2],
-                },
-                opacity,
-            }
+        .map(|slot| AmbientFrameSnapshot {
+            slot: slot as u8,
+            visible: false,
+            position_points: [0.0; 2],
+            opacity: 0.0,
         })
         .collect();
     (semantics, frames)
@@ -1715,6 +1680,140 @@ mod tests {
             serde_json::to_string(&clear.topology).unwrap(),
             serde_json::to_string(&sparks.topology).unwrap()
         );
+    }
+
+    #[test]
+    fn room_weather_and_recent_activity_use_independent_canonical_sources() {
+        let now = datetime!(2026-07-11 12:00 UTC);
+        let layout = CompanionLogicalLayout::round(360.0, 360.0);
+        let weather_cases = [
+            (crate::tui::life::WorkWeather::Clear, "clear"),
+            (crate::tui::life::WorkWeather::CacheMist, "cache-mist"),
+            (crate::tui::life::WorkWeather::OutputSparks, "output-sparks"),
+            (
+                crate::tui::life::WorkWeather::ReasoningPulse,
+                "reasoning-pulse",
+            ),
+            (crate::tui::life::WorkWeather::Mixed, "mixed"),
+        ];
+
+        for (weather, alias) in weather_cases {
+            let mut vm = fixture_with_real_pet_art();
+            vm.life_profile.work_weather = weather;
+            vm.last_feed_pulse_at = Some(now - time::Duration::milliseconds(617));
+            let snapshot = project_snapshot(&vm, now, layout).expect("weather projection");
+
+            assert_eq!(snapshot.content.room_weather, alias);
+            assert_eq!(
+                super::derive_room_profile(&vm, now).room_weather,
+                weather.into()
+            );
+            let profile = super::derive_room_profile(&vm, now);
+            let projection_input = CompanionSceneProjectionInput::round(
+                CompanionProjectionClock::new(now, 0),
+                layout,
+                44,
+                18,
+                crate::round::scene::current_round_motion_clearance(18),
+            );
+            let roam_motion = crate::round::motion::companion_roam_motion();
+            let motion = crate::round::motion::project_round_companion_motion_with_options(
+                super::companion_motion_input(&vm, now, &roam_motion),
+                now,
+                0,
+                projection_input.motion_viewport(),
+                &roam_motion,
+                crate::round::motion::RoundMotionProjectionOptions { depth_override: None },
+            );
+            let authoritative = crate::tui::room::companion_room_glyphs_for(
+                &profile,
+                crate::tui::room::CompanionRoomProjectionInput {
+                    pet_art: &vm.pet_art,
+                    speech_visible: vm.current_speech.is_some(),
+                    day_phase: vm.day_context.day_phase,
+                    columns: 44,
+                    rows: 18,
+                    classic_pet_top_left: motion.classic_top_left_cells,
+                    pet_frame_extent: [PET_LATTICE_WIDTH, PET_LATTICE_HEIGHT],
+                    facing: motion.facing,
+                    now,
+                },
+            )
+            .expect("authoritative room projection");
+            assert!(!authoritative.is_empty());
+            assert_eq!(snapshot.content.room_glyphs.len(), authoritative.len());
+            for ((content, frame), expected) in snapshot
+                .content
+                .room_glyphs
+                .iter()
+                .zip(&snapshot.frame.room_glyphs)
+                .zip(authoritative)
+            {
+                assert_eq!(content.glyph, expected.glyph);
+                assert_eq!(content.color_srgb8, expected.color_rgb);
+                assert_eq!(frame.grid_cell, [expected.col, expected.row]);
+            }
+
+            assert_eq!(
+                snapshot.content.ambient_semantics.len(),
+                super::super::scene::MAX_AMBIENT_INSTANCES
+            );
+            assert_eq!(
+                snapshot.frame.ambient_instances.len(),
+                super::super::scene::MAX_AMBIENT_INSTANCES
+            );
+            for (slot, (semantic, frame)) in snapshot
+                .content
+                .ambient_semantics
+                .iter()
+                .zip(&snapshot.frame.ambient_instances)
+                .enumerate()
+            {
+                assert_eq!(usize::from(semantic.slot), slot);
+                assert_eq!(usize::from(frame.slot), slot);
+                assert_eq!(semantic.kind, None);
+                assert_eq!(semantic.glyph, None);
+                assert!(!frame.visible);
+                assert_eq!(frame.position_points, [0.0; 2]);
+                assert_eq!(frame.opacity, 0.0);
+            }
+
+            let expected_opacity = 1.0 - 617.0 / 2_000.0;
+            assert_eq!(
+                super::super::canonical_activity_status(&snapshot),
+                (true, expected_opacity)
+            );
+
+            let mut unrelated_ambient = snapshot.clone();
+            unrelated_ambient.content.ambient_semantics.reverse();
+            unrelated_ambient.content.ambient_semantics.truncate(1);
+            unrelated_ambient.frame.ambient_instances.rotate_left(7);
+            unrelated_ambient.frame.ambient_instances.truncate(3);
+            assert_eq!(
+                super::super::canonical_activity_status(&unrelated_ambient),
+                (true, expected_opacity),
+                "ambient order and count must not own chrome status"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_status_serialization_and_debug_redact_the_exact_fade() {
+        let now = datetime!(2026-07-11 12:00 UTC);
+        let mut vm = fixture_with_real_pet_art();
+        vm.last_feed_pulse_at = Some(now - time::Duration::milliseconds(617));
+        let snapshot = project_snapshot(&vm, now, CompanionLogicalLayout::round(360.0, 360.0))
+            .expect("recent activity projection");
+        let exact_opacity = 1.0 - 617.0 / 2_000.0;
+        let exact_opacity = serde_json::to_string(&exact_opacity).unwrap();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let debug = format!("{snapshot:?}");
+
+        assert!(json.contains("\"activity_recent\":true"));
+        assert!(!json.contains("activity_pulse_age_ms"));
+        assert!(!json.contains(&exact_opacity));
+        assert!(!debug.contains("activity_pulse_age_ms"));
+        assert!(!debug.contains(&exact_opacity));
     }
 
     #[test]

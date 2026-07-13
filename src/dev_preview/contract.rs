@@ -873,10 +873,14 @@ impl PreviewActivityArtifact {
     }
 
     fn from_round(scene: &RoundSceneModel) -> Self {
+        let recent_activity = match scene.halo.activity_pulse {
+            crate::round::model::RoundActivityPulse::Quiet => "quiet",
+            crate::round::model::RoundActivityPulse::Recent { .. } => "recent",
+        };
         Self {
             source_diversity: format!("{:?}", scene.halo.source_diversity),
             helper_health: format!("{:?}", scene.halo.helper_health).to_lowercase(),
-            recent_activity: format!("{:?}", scene.halo.activity_pulse).to_lowercase(),
+            recent_activity: recent_activity.to_string(),
             vitals: BTreeMap::from([
                 (
                     "fed".to_string(),
@@ -1160,6 +1164,22 @@ mod tests {
         assert_eq!(artifact.room.dialect_status, None);
         assert!(artifact.room.prop_landmarks.is_empty());
         assert_eq!(artifact.targets, BTreeMap::new());
+    }
+
+    #[test]
+    fn round_scene_contract_redacts_exact_recent_activity_age() {
+        let now = datetime!(2026-06-13 18:00 UTC);
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.last_feed_pulse_at = Some(now - time::Duration::milliseconds(617));
+        let scene = derive_round_scene_model(&vm, now);
+
+        let artifact =
+            PreviewSceneArtifact::from_round_scene("round-activity-privacy", &scene, now);
+        let json = serde_json::to_string(&artifact).expect("serialize round preview artifact");
+
+        assert_eq!(artifact.activity.recent_activity, "recent");
+        assert!(!json.contains("age_ms"));
+        assert!(!json.contains("617"));
     }
 
     #[test]

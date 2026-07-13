@@ -2311,8 +2311,6 @@ fn weather_tag(value: WeatherContentKind) -> u32 {
 fn ambient_kind_tag(value: AmbientContentKind) -> u32 {
     match value {
         AmbientContentKind::Mote => 1,
-        AmbientContentKind::ActivityPulse => 2,
-        AmbientContentKind::Weather => 3,
     }
 }
 
@@ -2910,7 +2908,7 @@ mod tests {
         fixture.content.mood = MoodContentKind::Happy;
         fixture.content.weather = WeatherContentKind::Mixed;
         fixture.content.pet_art_slots[0].palette_role = PetPaletteRole::Eye;
-        fixture.content.ambient_slots[2].kind = Some(AmbientContentKind::Weather);
+        fixture.content.ambient_slots[2].kind = Some(AmbientContentKind::Mote);
         fixture.content.ambient_slots[2].glyph = Some(AuthoredGlyph::new('☁').unwrap());
         fixture.content.hud_slots[1].glyph = Some(AuthoredGlyph::new('7').unwrap());
 
@@ -2958,7 +2956,7 @@ mod tests {
             compiled.content.ambient.as_slice()[2].glyph_scalar,
             u32::from('☁')
         );
-        assert_eq!(compiled.content.ambient.as_slice()[2].variant, 3);
+        assert_eq!(compiled.content.ambient.as_slice()[2].variant, 1);
         assert_eq!(
             compiled.content.hud.as_slice()[1].glyph_scalar,
             u32::from('7')
@@ -2990,10 +2988,8 @@ mod tests {
     }
 
     #[test]
-    fn ambient_kind_tags_are_the_closed_v2_abi() {
+    fn ambient_kind_tag_is_the_closed_forward_only_v2_abi() {
         assert_eq!(ambient_kind_tag(AmbientContentKind::Mote), 1);
-        assert_eq!(ambient_kind_tag(AmbientContentKind::ActivityPulse), 2);
-        assert_eq!(ambient_kind_tag(AmbientContentKind::Weather), 3);
     }
 
     #[test]
@@ -3275,7 +3271,7 @@ mod tests {
         content.ambient_slots.push(
             crate::presentation::companion_scene::scene::AmbientContentSlot {
                 slot: 2,
-                kind: Some(AmbientContentKind::Weather),
+                kind: Some(AmbientContentKind::Mote),
                 glyph: Some(AuthoredGlyph::new('☁').unwrap()),
             },
         );

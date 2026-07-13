@@ -841,8 +841,6 @@ pub enum PetPaletteRole {
 #[serde(rename_all = "kebab-case")]
 pub enum AmbientContentKind {
     Mote,
-    ActivityPulse,
-    Weather,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1180,10 +1178,10 @@ impl CaptureFramePrivacyProjection {
         visible: bool,
         opacity: f32,
     ) -> (bool, f32) {
-        if canonical_alias == "chrome.dim" {
-            (self.dimmed, if self.dimmed { 1.0 } else { 0.0 })
-        } else {
-            (visible, opacity)
+        match canonical_alias {
+            "chrome.dim" => (self.dimmed, if self.dimmed { 1.0 } else { 0.0 }),
+            "chrome.status" => (visible, if visible { 1.0 } else { 0.0 }),
+            _ => (visible, opacity),
         }
     }
 }
@@ -1729,7 +1727,6 @@ mod tests {
                     })
                     .collect(),
                 hud_glyphs,
-                activity_pulse_age_ms: None,
             },
             frame: super::super::FrameSnapshot {
                 elapsed_ms: 1_000,
@@ -1742,6 +1739,8 @@ mod tests {
                 asleep: false,
                 calm: false,
                 helper_trouble: false,
+                activity_recent: false,
+                activity_opacity: 0.0,
                 gauge_levels: [super::super::GaugeLevelSnapshot::Empty; 4],
                 gauge_fractions: [0.0; 4],
                 dimmed: false,
@@ -1751,9 +1750,9 @@ mod tests {
                 ambient_instances: (0..MAX_AMBIENT_INSTANCES)
                     .map(|slot| super::super::AmbientFrameSnapshot {
                         slot: slot as u8,
-                        visible: slot == 0,
-                        position_points: if slot == 0 { [180.0, 180.0] } else { [0.0; 2] },
-                        opacity: if slot == 0 { 1.0 } else { 0.0 },
+                        visible: false,
+                        position_points: [0.0; 2],
+                        opacity: 0.0,
                     })
                     .collect(),
                 hud_instances: (0..MAX_HUD_GLYPH_SLOTS)
@@ -1909,7 +1908,7 @@ mod tests {
 
         let mut changed = snapshot.clone();
         changed.content.ambient_semantics[0].kind =
-            Some(super::super::AmbientSemanticKindSnapshot::Weather);
+            Some(super::super::AmbientSemanticKindSnapshot::Mote);
         changed.content.ambient_semantics[0].glyph = Some('◇');
         let changed = build_scene_generation(&changed, generation_key(1)).unwrap();
         assert_ne!(first.content_checksum, changed.content_checksum);
@@ -2042,6 +2041,25 @@ mod tests {
             .unwrap();
         assert!(deltas.content.pet_art_slots.is_empty());
         assert!(deltas.frame.nodes.is_empty());
+        assert_eq!(built.delta_capacities(), capacities);
+
+        let mut mood = snapshot.clone();
+        mood.content.mood = Mood::Happy;
+        let mood = std::sync::Arc::new(mood);
+        let changes = super::super::runtime::classify_snapshot_changes(&snapshot, &mood);
+        let deltas = built
+            .project_snapshot_changes(
+                &mood,
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(1, 0),
+            )
+            .unwrap();
+        assert_eq!(deltas.content.mood, Some(MoodContentKind::Happy));
+        assert!(
+            deltas.content.ambient_slots.is_empty(),
+            "mood/weather changes must not republish ambient slots"
+        );
         assert_eq!(built.delta_capacities(), capacities);
     }
 
